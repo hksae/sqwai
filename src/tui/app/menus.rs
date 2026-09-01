@@ -481,6 +481,7 @@ impl App {
                 self.cfg.save().ok();
                 let on = self.cfg.ui.typewriter;
                 self.status(&format!("typewriter: {}", on_off(on)), StatusKind::Ok);
+                self.build_menu_rows();
             }
             MenuAction::ToggleHttpLog => {
                 self.cfg.ui.http_log = !self.cfg.ui.http_log;
@@ -488,6 +489,7 @@ impl App {
                 crate::providers::set_http_log(self.cfg.ui.http_log);
                 let on = self.cfg.ui.http_log;
                 self.status(&format!("http debug log: {}", on_off(on)), StatusKind::Ok);
+                self.build_menu_rows();
             }
             MenuAction::CycleModelThinking => {
                 let all = ThinkingLevel::ALL;
@@ -501,6 +503,7 @@ impl App {
                     m.thinking = next;
                 }
                 self.cfg.save().ok();
+                self.build_menu_rows();
             }
             MenuAction::CycleDefaultThinking => {
                 let all = ThinkingLevel::ALL;
@@ -510,6 +513,7 @@ impl App {
                     .unwrap_or(0);
                 self.cfg.default_thinking = all[(cur + 1) % all.len()];
                 self.cfg.save().ok();
+                self.build_menu_rows();
             }
             MenuAction::ToggleMode => {
                 self.mode = self.mode.toggle();

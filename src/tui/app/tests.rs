@@ -467,6 +467,29 @@ mod tests {
     }
 
     #[test]
+    fn debug_enter_updates_visible_value() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::Debug);
+        let idx = app
+            .menu_rows
+            .iter()
+            .position(|(_, action)| matches!(action, MenuAction::ToggleHttpLog))
+            .expect("http debug row");
+        app.menu_sel = idx;
+        let before = app.cfg.ui.http_log;
+        app.menu_activate();
+        assert_eq!(app.cfg.ui.http_log, !before);
+        assert!(matches!(app.menu_rows[idx].1, MenuAction::ToggleHttpLog));
+        let rendered: String = app.menu_rows[idx]
+            .0
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(rendered.contains(if !before { "on" } else { "off" }));
+    }
+
+    #[test]
     fn error_status_shows_in_bar() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.status("provider boom", StatusKind::Err);
