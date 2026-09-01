@@ -388,6 +388,19 @@ async fn ask_user(
         .unwrap_or_default();
     let multiple = call.args["multiple"].as_bool().unwrap_or(false);
     let allow_free = call.args["allow_free"].as_bool().unwrap_or(true);
+
+    // Small and open models often emit ask_user with no arguments at all.
+    // An empty popup is useless to the user, so refuse the call and hand the
+    // model the exact shape to retry with instead of blocking on the UI.
+    if question.is_empty() {
+        return tools::Outcome::err(
+            "ask_user rejected: 'question' is empty. Call it again with a non-empty question, \
+             e.g. {\"question\": \"Which web framework should I use?\", \"options\": \
+             [{\"label\": \"FastAPI\"}, {\"label\": \"Flask\"}], \"multiple\": false, \
+             \"allow_free\": true}.",
+        );
+    }
+
     if tx
         .send(AgentEvent::AskUser {
             id,

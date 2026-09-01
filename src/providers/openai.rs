@@ -141,6 +141,9 @@ impl Provider for OpenAiProvider {
                         "parameters": t.parameters,
                     },
                 })).collect::<Vec<_>>());
+                // explicit auto nudges small local models (ollama) into
+                // emitting structured tool_calls instead of plain-text JSON
+                body["tool_choice"] = json!("auto");
             }
 
             let mut r = this.http.post(&url);
