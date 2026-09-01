@@ -280,10 +280,13 @@ impl App {
             self.poll_agent();
             // typewriter: reveal queued answer text gradually, catching up when
             // the queue grows faster than the reveal speed
-            if self.streaming && !self.pending_reveal.is_empty() {
+            if !self.pending_reveal.is_empty() {
                 let step = if self.cfg.ui.typewriter {
                     let queued = self.pending_reveal.chars().count();
-                    (queued / 8).clamp(2, 48)
+                    // Reveal at a steady pace while the provider streams. The
+                    // old queue-based catch-up could dump the whole answer in
+                    // one tick when a chunk arrived faster than the TUI.
+                    if queued > 96 { 12 } else { 2 }
                 } else {
                     usize::MAX
                 };
@@ -614,11 +617,32 @@ impl App {
             .unwrap_or(self.pending_reveal.len());
         let chunk: String = self.pending_reveal.drain(..end).collect();
         self.assistant_buf.push_str(&chunk);
+        // Keep the live assistant segment in sync with the reveal queue.
+        // Without this, the buffer only became visible at finish_turn(), which
+        // made a healthy local model look frozen until the full response ended.
+        if let Some(pos) = self
+            .segments
+            .iter()
+            .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
+        {
+            if let Some(Segment::Assistant { text, .. }) = self.segments.get_mut(pos) {
+                text.push_str(&chunk);
+            }
+        }
         !chunk.is_empty()
     }
 
     fn poll_agent(&mut self) {
+        // Do not drain an entire buffered response in one 50 ms tick. Keeping
+        // a small event budget lets the reveal queue and spinner repaint even
+        // when a local model delivers several chunks back-to-back.
+        const MAX_EVENTS_PER_TICK: usize = 8;
+        let mut processed = 0;
         loop {
+            if processed >= MAX_EVENTS_PER_TICK {
+                return;
+            }
+            processed += 1;
             let ev = match self.agent.as_mut() {
                 Some(handle) => match handle.rx.try_recv() {
                     Ok(ev) => ev,

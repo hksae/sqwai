@@ -479,13 +479,31 @@ mod tests {
     fn typewriter_reveals_gradually_and_drains() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.pending_reveal = "Hello".into();
+        app.segments.push(Segment::Assistant {
+            text: String::new(),
+            live: true,
+        });
         assert!(app.reveal_chars(2));
         assert_eq!(app.assistant_buf, "He");
+        assert_eq!(live_assistant_text(&app), "He");
         assert!(app.reveal_chars(2));
         assert_eq!(app.assistant_buf, "Hell");
+        assert_eq!(live_assistant_text(&app), "Hell");
         assert!(app.reveal_chars(usize::MAX));
         assert_eq!(app.assistant_buf, "Hello");
+        assert_eq!(live_assistant_text(&app), "Hello");
         assert!(!app.reveal_chars(10), "empty queue must report no progress");
+    }
+
+    fn live_assistant_text(app: &App) -> String {
+        app.segments
+            .iter()
+            .rev()
+            .find_map(|s| match s {
+                Segment::Assistant { text, live: true } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
     #[test]
