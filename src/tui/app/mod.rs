@@ -710,14 +710,23 @@ impl App {
                     self.dirty = true;
                 }
                 AgentEvent::ToolStart { name, summary } => {
-                    self.segments.push(Segment::Tool {
+                    let tool = Segment::Tool {
                         name,
                         args: summary,
                         ok: None,
                         output: String::new(),
                         diff: None,
                         expanded: false,
-                    });
+                    };
+                    // The model may stream a short preamble before emitting
+                    // its tool call. Keep tool activity above the live answer
+                    // so the chat reads in execution order: tool -> result -> answer.
+                    let pos = self
+                        .segments
+                        .iter()
+                        .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
+                        .unwrap_or(self.segments.len());
+                    self.segments.insert(pos, tool);
                     self.dirty = true;
                 }
                 AgentEvent::ToolNotice {
@@ -745,14 +754,22 @@ impl App {
                                 *dslot = diff;
                             }
                         }
-                        None => self.segments.push(Segment::Tool {
-                            name,
-                            args: String::new(),
-                            ok: Some(ok),
-                            output: summary,
-                            diff,
-                            expanded: false,
-                        }),
+                        None => {
+                            let tool = Segment::Tool {
+                                name,
+                                args: String::new(),
+                                ok: Some(ok),
+                                output: summary,
+                                diff,
+                                expanded: false,
+                            };
+                            let pos = self
+                                .segments
+                                .iter()
+                                .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
+                                .unwrap_or(self.segments.len());
+                            self.segments.insert(pos, tool);
+                        },
                     }
                     self.dirty = true;
                 }
