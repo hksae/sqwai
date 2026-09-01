@@ -1,0 +1,35 @@
+[package]
+name = "sqwai"
+version = "0.1.0"
+edition = "2024"
+description = "TUI coding agent"
+
+[dependencies]
+anyhow = "1"
+arboard = "3"
+async-stream = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+crossterm = "0.28"
+directories = "6"
+eventsource-stream = "0.2"
+futures = "0.3"
+globset = "0.4"
+ignore = "0.4"
+tree-sitter = "0.26"
+tree-sitter-bash = "0.25"
+git2 = "0.21"
+ratatui = "0.29"
+regex = "1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+similar = "2"
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+toml = "0.9"
+tui-textarea = "0.7"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.release]
+lto = true

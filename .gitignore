@@ -1,0 +1,32 @@
+# === sqwai — что НЕ коммитим ===
+
+# Rust: артефакты сборки
+/target
+**/*.rs.bk
+
+# документация проекта (не нужна в истории)
+/DESIGN.md
+
+# приватное состояние агента (память сессий и т.п.)
+.workbuddy-ai/
+
+# логи и временные выгрузки
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+*.rs.bk
+
+# редакторы / IDE
+.vscode/
+.idea/
+*.iml
+*.sublime-*
+
+# OS-мусор
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
