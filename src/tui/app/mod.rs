@@ -771,6 +771,13 @@ impl App {
                 } => {
                     if !self.retry_notified {
                         self.retry_notified = true;
+                        // the full text of the first failure goes into the chat:
+                        // the status bar below keeps only a truncated indicator,
+                        // while here it stays readable and copyable (click to copy)
+                        self.segments.push(Segment::Status {
+                            text: format!("request failed — retrying with backoff: {error}"),
+                            kind: StatusKind::Err,
+                        });
                         if self.prev_turn_ok {
                             crate::agent::notify::windows_toast(
                                 "sqwai",

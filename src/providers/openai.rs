@@ -160,7 +160,7 @@ impl Provider for OpenAiProvider {
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
                 super::log_http(&format!("POST {url} -> {status}: {body}"));
-                yield Err(anyhow!("provider returned {status}: {}", truncate(&body, 500)));
+                yield Err(anyhow!("provider returned {status}: {}", truncate(&body, 2000)));
                 return;
             }
 

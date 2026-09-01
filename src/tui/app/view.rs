@@ -182,6 +182,21 @@ impl App {
 
     pub(super) fn click(&mut self, abs_row: usize) {
         if let Some(Some(seg_idx)) = self.cache_rowseg.get(abs_row) {
+            // clicking an error line copies its full text to the clipboard
+            let err_text = match self.segments.get(*seg_idx) {
+                Some(Segment::Status {
+                    text,
+                    kind: StatusKind::Err,
+                }) => Some(text.clone()),
+                _ => None,
+            };
+            if let Some(text) = err_text {
+                match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+                    Ok(()) => self.status("error text copied to clipboard", StatusKind::Info),
+                    Err(e) => self.status(&format!("copy failed: {e}"), StatusKind::Err),
+                }
+                return;
+            }
             let toggle = match self.segments.get(*seg_idx) {
                 Some(Segment::Thinking { expanded, .. }) => Some(!*expanded),
                 // a finished tool row reveals its full output or diff
