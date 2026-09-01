@@ -346,27 +346,27 @@ impl App {
                     ]),
                 };
                 out.push((head, Some(idx)));
-                // the one-line result under the header
-                if let Some(res) = output.lines().next() {
-                    if !res.trim().is_empty() {
-                        let st = match ok {
-                            Some(false) => Theme::err(),
-                            _ => Theme::dim(),
-                        };
-                        out.push((
-                            Line::from(vec![Span::styled(
-                                format!("    {}", truncate_chars(res, 90)),
-                                st,
-                            )]),
-                            Some(idx),
-                        ));
-                    }
-                }
                 if *expanded {
                     let body = diff.clone().unwrap_or_else(|| output.clone());
                     const MAX_ROWS: usize = 40;
                     let rows: Vec<&str> = body.lines().collect();
                     let shown = &rows[..rows.len().min(MAX_ROWS)];
+                    let border = Style::new().fg(Theme::DIM()).bg(Theme::BG());
+                    let inner_w = w.saturating_sub(8).max(8) as usize;
+                    let width = shown
+                        .iter()
+                        .map(|line| line.chars().count())
+                        .max()
+                        .unwrap_or(0)
+                        .min(inner_w)
+                        .max(8);
+                    out.push((
+                        Line::from(vec![Span::styled(
+                            format!("    ╭{}╮", "─".repeat(width + 2)),
+                            border,
+                        )]),
+                        Some(idx),
+                    ));
                     for l in shown {
                         let st = if l.starts_with('+') && !l.starts_with("+++") {
                             Theme::ok()
@@ -377,23 +377,34 @@ impl App {
                         } else {
                             Theme::dim()
                         };
+                        let line = truncate_chars(l, width);
                         out.push((
-                            Line::from(vec![Span::styled(
-                                format!("    {}", truncate_chars(l, 120)),
-                                st,
-                            )]),
+                            Line::from(vec![
+                                Span::styled("    │ ", border),
+                                Span::styled(format!("{line:<width$}"), st),
+                                Span::styled(" │", border),
+                            ]),
                             Some(idx),
                         ));
                     }
                     if rows.len() > MAX_ROWS {
+                        let more = format!("… {} more lines", rows.len() - MAX_ROWS);
                         out.push((
-                            Line::from(vec![Span::styled(
-                                format!("    … {} more lines", rows.len() - MAX_ROWS),
-                                Theme::dim(),
-                            )]),
+                            Line::from(vec![
+                                Span::styled("    │ ", border),
+                                Span::styled(format!("{:<width$}", truncate_chars(&more, width)), Theme::dim()),
+                                Span::styled(" │", border),
+                            ]),
                             Some(idx),
                         ));
                     }
+                    out.push((
+                        Line::from(vec![Span::styled(
+                            format!("    ╰{}╯", "─".repeat(width + 2)),
+                            border,
+                        )]),
+                        Some(idx),
+                    ));
                 }
             }
             Segment::Status { text, kind } => {
