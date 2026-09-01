@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 /// gather everything about the machine/project that helps the model act
 /// correctly; every probe fails silently
 pub fn environment_block() -> String {
-    let mut s = String::from("# Environment\n");
+    let mut s = String::from("<runtime_context>\n<environment>\n");
 
     s.push_str(&format!(
         "\nOS: {} {} ({})\n",
@@ -27,26 +27,45 @@ pub fn environment_block() -> String {
     let cwd = std::env::current_dir().unwrap_or_default();
     s.push_str(&format!("Working directory: {}\n", cwd.display()));
 
+    s.push_str("</environment>\n\n");
     s.push_str(&git_info());
     s.push_str(&tree_block(&cwd));
-    s.push_str(&toolchains());
+    s.push_str("</runtime_context>\n");
     s
 }
 
 fn windows_version() -> String {
     #[cfg(windows)]
     {
-        // modern Windows reports the real version only inside a manifest;
-        // `ver` still works
-        if let Some(v) = capture("cmd", &["/C", "ver"], 1500) {
-            return v.lines().last().unwrap_or("windows").trim().to_string();
+        let key = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+        let product = capture("reg", &["query", key, "/v", "ProductName"], 1500);
+        let build = capture("reg", &["query", key, "/v", "CurrentBuildNumber"], 1500)
+            .and_then(|v| value_from_reg(&v, "CurrentBuildNumber"))
+            .and_then(|v| v.parse::<u32>().ok());
+        if let Some(product) = product.and_then(|v| value_from_reg(&v, "ProductName")) {
+            // Windows 11 keeps the legacy ProductName value "Windows 10".
+            if build.is_some_and(|n| n >= 22_000) {
+                return product.replacen("Windows 10", "Windows 11", 1);
+            }
+            return product;
         }
-        "windows".into()
+        "Windows".into()
     }
     #[cfg(not(windows))]
     {
         String::new()
     }
+}
+
+fn value_from_reg(output: &str, value_name: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix(value_name)
+            .map(str::trim)
+            .and_then(|rest| rest.strip_prefix("REG_"))
+            .and_then(|rest| rest.split_once(' '))
+            .map(|(_, value)| value.trim().to_string())
+    })
 }
 
 fn git_info() -> String {
@@ -111,6 +130,7 @@ fn tree_block(cwd: &std::path::Path) -> String {
     s
 }
 
+#[allow(dead_code)]
 fn toolchains() -> String {
     let mut parts: Vec<String> = Vec::new();
     for (name, prog, args) in [

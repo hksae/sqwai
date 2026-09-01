@@ -12,11 +12,12 @@ use tokio::sync::mpsc;
 
 use crate::config::ThinkingLevel;
 use crate::providers::{
-    ChatRequest, Message, Role, SharedProvider, StreamEvent, ToolCallReq, Usage,
+    ChatRequest, Message, RequestBreakdown, Role, SharedProvider, StreamEvent, ToolCallReq, Usage,
 };
 
 use crate::agent::tools::{self, ToolCtx};
 use crate::agent::{checkpoints, safety};
+use crate::plan;
 
 #[derive(Debug, Clone)]
 pub struct AskOption {
@@ -38,6 +39,8 @@ pub struct AgentOutcome {
     pub messages: Vec<Message>,
     /// current to-do list written via todowrite
     pub todos: Vec<String>,
+    /// checklist derived from the durable project plan
+    pub plan_todos: Vec<String>,
     /// (sha, label) checkpoints created by this run's mutations
     pub journal: Vec<(String, String)>,
 }
@@ -47,8 +50,13 @@ pub enum AgentEvent {
     TextDelta(String),
     ThinkingDelta(String),
     Usage(Usage),
+    ResponseId(String),
+    RequestBreakdown(RequestBreakdown),
     /// a tool just started: name + short arguments, spinner in the TUI
-    ToolStart { name: String, summary: String },
+    ToolStart {
+        name: String,
+        summary: String,
+    },
     /// a tool finished (ok=True/False); carries the unified diff for mutations
     ToolNotice {
         name: String,
@@ -71,7 +79,9 @@ pub enum AgentEvent {
         reason: String,
     },
     /// a shadow git checkpoint was taken before a mutation (design §6, §10)
-    Checkpoint { label: String },
+    Checkpoint {
+        label: String,
+    },
     /// the agent revised the visible to-do list
     Todos(Vec<String>),
     Retry {
@@ -113,6 +123,10 @@ pub struct AgentInput {
     pub blocked_patterns: Vec<String>,
     /// PLAN mode: read-only tools only, mutations are refused (design §5)
     pub plan_mode: bool,
+    /// model context limit used to enforce the plan size budget
+    pub context_limit: u64,
+    /// Whether this request may use agent tools.
+    pub enable_tools: bool,
 }
 
 const RETRY_WINDOW: Duration = Duration::from_secs(3600);
@@ -160,28 +174,53 @@ async fn run_agent(
         root,
         blocked_patterns,
         plan_mode,
+        context_limit,
+        enable_tools,
     } = input;
 
     let mut ctx = ToolCtx::new(&root);
     let mut todos: Vec<String> = Vec::new();
+    let mut plan_todos: Vec<String> = plan::load(&root)
+        .as_deref()
+        .map(plan::todo_items)
+        .unwrap_or_default();
     let mut always_allow: Vec<String> = Vec::new();
     let mut next_id: u64 = 0;
 
-    let tools: Vec<crate::providers::ToolSpec> = tools::tool_specs();
-
+    let tools: Vec<crate::providers::ToolSpec> = if enable_tools {
+        tools::tool_specs()
+    } else {
+        Vec::new()
+    };
     // The very first turn should not already contain tool results when
     // resuming a pure text history, but replaying tool turns stored in the
     // session could; we keep messages as passed — providers handle them.
 
     loop {
-        // one complete streaming turn
-        let turn = match run_turn(&provider, &ChatRequest {
+        let breakdown = RequestBreakdown::from_request(&ChatRequest {
             model_id: model_id.clone(),
             messages: messages.clone(),
             thinking,
             max_tokens,
             tools: tools.clone(),
-        }, &tx, &mut ctl).await {
+        });
+        let _ = tx.send(AgentEvent::RequestBreakdown(breakdown)).await;
+
+        // one complete streaming turn
+        let turn = match run_turn(
+            &provider,
+            &ChatRequest {
+                model_id: model_id.clone(),
+                messages: messages.clone(),
+                thinking,
+                max_tokens,
+                tools: tools.clone(),
+            },
+            &tx,
+            &mut ctl,
+        )
+        .await
+        {
             Ok(t) => t,
             Err(e) => {
                 let _ = tx.send(AgentEvent::Completed(Err(e))).await;
@@ -196,9 +235,7 @@ async fn run_agent(
         }
 
         // assistant requested tools; record the call(s)
-        messages.push(
-            Message::new(Role::Assistant, turn.text).with_tool_calls(turn.calls.clone()),
-        );
+        messages.push(Message::new(Role::Assistant, turn.text).with_tool_calls(turn.calls.clone()));
 
         // execute each call, feeding results back into the conversation
         for call in &turn.calls {
@@ -212,45 +249,57 @@ async fn run_agent(
                 })
                 .await;
 
-            let outcome = if plan_mode && tools::is_mutating(&call.name) {
-                tools::Outcome::err(format!(
-                    "PLAN mode is read-only: '{}' is not allowed. Explore first, then ask the \
+            let outcome =
+                if plan_mode && tools::is_mutating(&call.name) && call.name != "plan_update" {
+                    tools::Outcome::err(format!(
+                        "PLAN mode is read-only: '{}' is not allowed. Explore first, then ask the \
                      user to switch to ACT (Tab) before changing anything.",
-                    call.name
-                ))
-            } else {
-                match call.name.as_str() {
-                    "ask_user" => ask_user(&call, &tx, &mut ctl, &mut next_id).await,
-                    "bash" => {
-                        bash_call(
-                            call,
-                            &mut ctx,
-                            &tx,
-                            &mut ctl,
-                            &mut always_allow,
-                            &blocked_patterns,
-                            &mut next_id,
-                        )
-                        .await
+                        call.name
+                    ))
+                } else {
+                    match call.name.as_str() {
+                        "ask_user" => ask_user(&call, &tx, &mut ctl, &mut next_id).await,
+                        "bash" => {
+                            bash_call(
+                                call,
+                                &mut ctx,
+                                &tx,
+                                &mut ctl,
+                                &mut always_allow,
+                                &blocked_patterns,
+                                &mut next_id,
+                            )
+                            .await
+                        }
+                        "todowrite" => {
+                            let items: Vec<String> = call.args["todos"]
+                                .as_array()
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            todos = items.clone();
+                            let _ = tx.send(AgentEvent::Todos(items.clone())).await;
+                            tools::Outcome::ok(format!("to-do saved ({} items)", items.len()))
+                        }
+                        "plan_update" => {
+                            let mut args = call.args.clone();
+                            args["context_limit"] = serde_json::json!(context_limit);
+                            let outcome = tools::execute(&mut ctx, "plan_update", &args);
+                            if outcome.ok {
+                                if let Some(saved) = plan::load(&root) {
+                                    plan_todos = plan::todo_items(&saved);
+                                    todos = plan_todos.clone();
+                                    let _ = tx.send(AgentEvent::Todos(todos.clone())).await;
+                                }
+                            }
+                            outcome
+                        }
+                        other => tools::execute(&mut ctx, other, &call.args),
                     }
-                    "todowrite" => {
-                        let items: Vec<String> = call.args["todos"]
-                            .as_array()
-                            .map(|a| {
-                                a.iter()
-                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        todos = items.clone();
-                        let _ = tx
-                            .send(AgentEvent::Todos(items.clone()))
-                            .await;
-                        tools::Outcome::ok(format!("to-do saved ({} items)", items.len()))
-                    }
-                    other => tools::execute(&mut ctx, other, &call.args),
-                }
-            };
+                };
 
             let _ = tx
                 .send(AgentEvent::ToolNotice {
@@ -264,7 +313,9 @@ async fn run_agent(
             if let Some((_, label)) = ctx.journal.last() {
                 if ctx.journal.len() > journal_mark {
                     let _ = tx
-                        .send(AgentEvent::Checkpoint { label: label.clone() })
+                        .send(AgentEvent::Checkpoint {
+                            label: label.clone(),
+                        })
                         .await;
                 }
             }
@@ -277,6 +328,7 @@ async fn run_agent(
             messages,
             todos,
             journal: ctx.journal,
+            plan_todos,
         })))
         .await;
 }
@@ -324,6 +376,9 @@ async fn run_turn(
                     if tx.send(AgentEvent::Usage(u)).await.is_err() {
                         return Err("tui closed".into());
                     }
+                }
+                Ok(StreamEvent::ResponseId(id)) => {
+                    let _ = tx.send(AgentEvent::ResponseId(id)).await;
                 }
                 Ok(StreamEvent::ToolCall(tc)) => calls.push(tc),
                 Err(e) => failed = Some(format!("{e:#}")),
@@ -379,9 +434,7 @@ async fn ask_user(
             a.iter()
                 .map(|o| AskOption {
                     label: o["label"].as_str().unwrap_or("").to_string(),
-                    description: o["description"]
-                        .as_str()
-                        .map(|s| s.to_string()),
+                    description: o["description"].as_str().map(|s| s.to_string()),
                 })
                 .collect()
         })
@@ -417,7 +470,7 @@ async fn ask_user(
     loop {
         match ctl.recv().await {
             Some(ControlMsg::AskAnswer { id: aid, text }) if aid == id => {
-                return tools::Outcome::ok(text)
+                return tools::Outcome::ok(text);
             }
             Some(_) => continue,
             None => return tools::Outcome::err("agent cancelled while asking"),
@@ -439,7 +492,9 @@ async fn bash_call(
 
     // 0. hard block from config — no questions
     for pat in blocked {
-        let Ok(re) = regex::Regex::new(pat) else { continue };
+        let Ok(re) = regex::Regex::new(pat) else {
+            continue;
+        };
         if re.is_match(&command) || re.is_match(&lower) {
             return tools::Outcome::err(format!(
                 "command blocked by [safety].blocked_patterns '{pat}'"
@@ -471,7 +526,7 @@ async fn bash_call(
             let decision = loop {
                 match ctl.recv().await {
                     Some(ControlMsg::ApprovalAnswer { id: aid, decision }) if aid == id => {
-                        break decision
+                        break decision;
                     }
                     Some(_) => continue,
                     None => return tools::Outcome::err("agent cancelled awaiting approval"),
@@ -479,21 +534,15 @@ async fn bash_call(
             };
             match decision {
                 ApprovalDecision::Deny => {
-                    return tools::Outcome::err(format!(
-                        "command denied by user ({reason})"
-                    ))
+                    return tools::Outcome::err(format!("command denied by user ({reason})"));
                 }
                 ApprovalDecision::AlwaysSession => always_allow.push(command.clone()),
                 ApprovalDecision::RunOnce => {}
             }
         }
         // checkpoint before a dangerous (approved) command
-        if let Ok(sha) = checkpoints::snapshot(
-            &ctx.root,
-            &format!("bash(approved) {command}"),
-        ) {
-            ctx.journal
-                .push((sha, format!("bash {command}")));
+        if let Ok(sha) = checkpoints::snapshot(&ctx.root, &format!("bash(approved) {command}")) {
+            ctx.journal.push((sha, format!("bash {command}")));
         }
     }
 

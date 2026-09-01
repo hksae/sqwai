@@ -8,11 +8,33 @@
 pub mod env;
 
 pub fn system_prompt() -> String {
-    let builtin = builtin_prompt();
-    let mut prompt = compose(&builtin, project_agents().as_deref());
-    prompt.push_str("\n\n");
-    prompt.push_str(&env::environment_block());
+    system_prompt_for(true)
+}
+
+pub fn system_prompt_for(with_tools: bool) -> String {
+    let builtin = if with_tools {
+        builtin_prompt()
+    } else {
+        concise_prompt()
+    };
+    let agents = if with_tools { project_agents() } else { None };
+    let mut prompt = compose(&builtin, agents.as_deref());
+    if with_tools {
+        prompt.push_str("\n\n");
+        prompt.push_str(&env::environment_block());
+        if let Ok(root) = std::env::current_dir()
+            && let Some(plan) = crate::plan::load(&root)
+        {
+            prompt.push_str("\n\n<durable_plan>\n");
+            prompt.push_str(&plan);
+            prompt.push_str("</durable_plan>");
+        }
+    }
     prompt
+}
+
+fn concise_prompt() -> String {
+    "You are an AI coding agent hosted inside the sqwai CLI application. Reply in the user's language. For trivial requests, answer directly and briefly. Do not claim to use tools or inspect files unless the request requires it.".into()
 }
 
 fn builtin_prompt() -> String {

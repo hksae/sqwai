@@ -1,5 +1,6 @@
 mod agent;
 mod config;
+mod plan;
 mod prompts;
 mod providers;
 mod session;
@@ -67,7 +68,9 @@ async fn run(cfg: config::Config, resume_id: Option<String>) -> Result<()> {
     };
 
     let terminal = init_terminal()?;
-    let res = tui::app::App::new(cfg, session, startup)?.run(terminal).await;
+    let res = tui::app::App::new(cfg, session, startup)?
+        .run(terminal)
+        .await;
     restore_terminal()?;
     res
 }

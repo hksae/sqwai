@@ -89,11 +89,72 @@ pub struct Usage {
     pub cached_tokens: Option<u64>,
 }
 
+/// Approximate request composition for diagnostics. This is intentionally
+/// provider-neutral: exact tokenization still belongs to the provider.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RequestBreakdown {
+    pub system_bytes: u64,
+    pub history_bytes: u64,
+    pub user_bytes: u64,
+    pub tool_schema_bytes: u64,
+    pub total_bytes: u64,
+}
+
+impl RequestBreakdown {
+    pub fn from_request(req: &ChatRequest) -> Self {
+        let mut out = Self::default();
+        for message in &req.messages {
+            let bytes = message.content.len() as u64
+                + message
+                    .tool_calls
+                    .iter()
+                    .map(|call| call.name.len() as u64 + call.args.to_string().len() as u64)
+                    .sum::<u64>();
+            match message.role {
+                Role::System => out.system_bytes += bytes,
+                Role::User => out.user_bytes += bytes,
+                Role::Assistant | Role::Tool => out.history_bytes += bytes,
+            }
+        }
+        out.tool_schema_bytes = req
+            .tools
+            .iter()
+            .map(|tool| {
+                (tool.name.len() + tool.description.len()) as u64
+                    + tool.parameters.to_string().len() as u64
+            })
+            .sum();
+        out.total_bytes =
+            out.system_bytes + out.history_bytes + out.user_bytes + out.tool_schema_bytes;
+        out
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderCapabilities {
+    /// The provider accepts a documented server-side conversation reference.
+    pub server_conversation: bool,
+    /// The provider accepts a documented previous-response reference.
+    pub previous_response: bool,
+    /// The provider supports explicit prompt-cache controls.
+    pub prompt_cache: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextTransport {
+    Stateless,
+    ServerConversation,
+    PreviousResponse,
+    PromptCached,
+}
+
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     Text(String),
     Reasoning(String),
     Usage(Usage),
+    /// Provider-native response identifier, when the protocol exposes one.
+    ResponseId(String),
     /// the model finished a request to run a tool (arguments are complete)
     ToolCall(ToolCallReq),
 }
@@ -114,6 +175,10 @@ pub struct ChatRequest {
 
 pub trait Provider: Send + Sync {
     fn stream_chat(&self, req: ChatRequest) -> BoxStream<'static, StreamResult>;
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
 }
 
 pub type SharedProvider = Arc<dyn Provider>;

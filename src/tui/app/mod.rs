@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, BorderType, Borders};
 use tui_textarea::TextArea;
 
 use crate::agent::loop_task::{
-    AgentEvent, AgentHandle, AgentOutcome, ControlMsg, ApprovalDecision, spawn_agent,
+    AgentEvent, AgentHandle, AgentOutcome, ApprovalDecision, ControlMsg, spawn_agent,
 };
 use crate::config::{Config, ModelConfig, ThinkingLevel};
 use crate::providers::{self, Message as PMessage, Role, SharedProvider};
@@ -67,6 +67,10 @@ pub struct App {
     provider: SharedProvider,
     session: Session,
     hl: Highlighter,
+    /// Stable system context captured once when the application starts.
+    system_prompt_cache: String,
+    /// Whether the current prompt still needs the full tool-oriented context.
+    context_bootstrap_pending: bool,
 
     input: TextArea<'static>,
     segments: Vec<Segment>,
@@ -174,6 +178,8 @@ impl App {
             provider,
             session,
             hl: Highlighter::new(),
+            system_prompt_cache: String::new(),
+            context_bootstrap_pending: true,
             cfg,
             segments: Vec::new(),
             streaming: false,
@@ -227,6 +233,8 @@ impl App {
         if !startup {
             app.load_history_segments();
         }
+        app.system_prompt_cache = app.system_prompt();
+        app.context_bootstrap_pending = true;
         Ok(app)
     }
 
@@ -365,10 +373,22 @@ impl App {
             return;
         }
         self.segments.push(Segment::User(text.clone()));
-        self.session.push(Role::User, text);
+        self.session.push(Role::User, &text);
 
-        let mut msgs: Vec<PMessage> = vec![PMessage::new(Role::System, self.system_prompt())];
-        msgs.extend(self.session.messages.iter().cloned());
+        let with_tools = self.context_bootstrap_pending || !Self::is_trivial_request(&text);
+        let prompt = if with_tools {
+            self.system_prompt_cache.clone()
+        } else {
+            crate::prompts::system_prompt_for(false)
+        };
+        let mut msgs: Vec<PMessage> = vec![PMessage::new(Role::System, prompt)];
+        msgs.extend(
+            self.session
+                .messages
+                .iter()
+                .filter(|m| m.role != Role::System)
+                .cloned(),
+        );
         let root = std::env::current_dir().unwrap_or_default();
         let input = crate::agent::loop_task::AgentInput {
             provider: self.provider.clone(),
@@ -383,7 +403,10 @@ impl App {
             root,
             blocked_patterns: self.cfg.safety.blocked_patterns.clone(),
             plan_mode: self.mode == Mode::Plan,
+            context_limit: self.session.context_limit,
+            enable_tools: with_tools,
         };
+        self.context_bootstrap_pending = false;
         self.agent = Some(spawn_agent(input));
         self.streaming = true;
         self.aborted = false;
@@ -406,7 +429,13 @@ impl App {
         self.dirty = true;
     }
 
-    // ---------- providers / models menu ----------
+    fn is_trivial_request(text: &str) -> bool {
+        let t = text.trim().to_lowercase();
+        matches!(
+            t.as_str(),
+            "привет" | "привет!" | "hello" | "hi" | "2 + 2" | "2+2"
+        )
+    }
 
     fn apply_session(&mut self, mut s: Session) {
         self.startup = false;
@@ -428,7 +457,9 @@ impl App {
             }
             self.model_cfg = mc;
         }
+        self.context_bootstrap_pending = true;
         self.session = s;
+        self.session.messages.retain(|m| m.role != Role::System);
         self.segments.clear();
         self.seg_cache.clear();
         self.load_history_segments();
@@ -460,6 +491,7 @@ impl App {
         }
         let ctx = self.session.context_limit;
         self.session = Session::new(self.cfg.default_model.clone(), ctx);
+        self.context_bootstrap_pending = true;
         self.segments.clear();
         self.seg_cache.clear();
         self.follow = true;
@@ -492,6 +524,8 @@ impl App {
             Ok(p) => {
                 self.model_cfg = mc;
                 self.provider = p;
+                self.context_bootstrap_pending = true;
+                self.session.last_response_id = None;
                 self.session.model_key = key.to_string();
                 self.session.context_limit = self.model_cfg.context;
                 self.cfg.default_model = key.to_string();
@@ -570,6 +604,31 @@ impl App {
                 provider: self.model_cfg.provider.clone(),
             }),
             "/exit" | "/quit" | "/q" => self.quit = true,
+            "/compact" => {
+                if self.streaming {
+                    self.status(
+                        "busy: esc stops the current generation first",
+                        StatusKind::Warn,
+                    );
+                } else {
+                    let root = std::env::current_dir().unwrap_or_default();
+                    match crate::plan::load(&root) {
+                        Some(plan) => {
+                            self.session.messages.retain(|m| m.role != Role::System);
+                            self.todos = crate::plan::todo_items(&plan);
+                            self.session.todos = self.todos.clone();
+                            self.session.save().ok();
+                            self.status(
+                                "context compacted around the current plan",
+                                StatusKind::Ok,
+                            );
+                        }
+                        None => {
+                            self.status("no plan found — use plan_update first", StatusKind::Warn)
+                        }
+                    }
+                }
+            }
             "/undo" => {
                 if self.streaming {
                     self.status(
@@ -719,6 +778,20 @@ impl App {
                     self.session.add_usage(&u);
                     self.dirty = true;
                 }
+                AgentEvent::ResponseId(id) => {
+                    self.session.last_response_id = Some(id);
+                    self.dirty = true;
+                }
+                AgentEvent::RequestBreakdown(b) => {
+                    crate::providers::log_http(&format!(
+                        "request breakdown: system={}B history={}B user={}B tools={}B total={}B",
+                        b.system_bytes,
+                        b.history_bytes,
+                        b.user_bytes,
+                        b.tool_schema_bytes,
+                        b.total_bytes,
+                    ));
+                }
                 AgentEvent::ToolStart { name, summary } => {
                     let tool = Segment::Tool {
                         name,
@@ -746,10 +819,9 @@ impl App {
                     diff,
                 } => {
                     // close the row opened by ToolStart; fall back to a new one
-                    let hit = self
-                        .segments
-                        .iter()
-                        .rposition(|s| matches!(s, Segment::Tool { name: n, ok: None, .. } if *n == name));
+                    let hit = self.segments.iter().rposition(
+                        |s| matches!(s, Segment::Tool { name: n, ok: None, .. } if *n == name),
+                    );
                     match hit {
                         Some(i) => {
                             if let Some(Segment::Tool {
@@ -779,7 +851,7 @@ impl App {
                                 .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
                                 .unwrap_or(self.segments.len());
                             self.segments.insert(pos, tool);
-                        },
+                        }
                     }
                     self.dirty = true;
                 }
@@ -811,8 +883,16 @@ impl App {
                     });
                     self.dirty = true;
                 }
-                AgentEvent::Approval { id, command, reason } => {
-                    self.open_menu(Menu::Approval { id, command, reason });
+                AgentEvent::Approval {
+                    id,
+                    command,
+                    reason,
+                } => {
+                    self.open_menu(Menu::Approval {
+                        id,
+                        command,
+                        reason,
+                    });
                     self.dirty = true;
                 }
                 AgentEvent::Retry {
@@ -856,8 +936,15 @@ impl App {
     /// agent finished with a full outcome (final answer + tool turns)
     fn finish_turn_ok(&mut self, outcome: AgentOutcome) {
         // the agent owns the authoritative conversation; persist it whole
-        self.session.messages = outcome.messages;
+        self.session.messages = outcome
+            .messages
+            .into_iter()
+            .filter(|m| m.role != Role::System)
+            .collect();
         self.todos = outcome.todos;
+        if !outcome.plan_todos.is_empty() {
+            self.todos = outcome.plan_todos;
+        }
         // carry the to-do list onto the session so it survives the next save
         self.session.todos = self.todos.clone();
         self.session.checkpoints.extend(outcome.journal);

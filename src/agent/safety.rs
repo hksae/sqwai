@@ -182,7 +182,15 @@ fn in_project_scope(_lower: &str) -> bool {
 
 /// command heads that are shells/interpreters: piping into these runs code
 const INTERPRETERS: &[&str] = &[
-    "sh", "bash", "dash", "zsh", "fish", "ksh", "pwsh", "powershell", "cmd",
+    "sh",
+    "bash",
+    "dash",
+    "zsh",
+    "fish",
+    "ksh",
+    "pwsh",
+    "powershell",
+    "cmd",
 ];
 
 /// command heads that are dangerous by name regardless of context
@@ -242,7 +250,10 @@ fn is_critical_path(path: &str) -> bool {
 
 fn ast_classify(cmd: &str) -> Verdict {
     let mut parser = Parser::new();
-    if parser.set_language(&tree_sitter_bash::LANGUAGE.into()).is_err() {
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+    {
         // parse failure: rely on the heuristic layer alone
         return Verdict::Safe;
     }
@@ -267,25 +278,18 @@ fn walk(tree: &Tree, src: &str) -> Verdict {
             "command" => {
                 if let Some((head, words, elev)) = command_parts(&node, src) {
                     // find -delete / find -exec
-                    if head == "find"
-                        && words.iter().any(|w| w == "-delete" || w == "-exec")
-                    {
+                    if head == "find" && words.iter().any(|w| w == "-delete" || w == "-exec") {
                         return Verdict::NeedsApproval(
                             "find -delete/-exec (bulk file destruction)",
                         );
                     }
                     // dangerous head by name
                     if DANGEROUS_HEADS.contains(&head.as_str()) {
-                        return Verdict::NeedsApproval(
-                            "dangerous command name (disk/system)",
-                        );
+                        return Verdict::NeedsApproval("dangerous command name (disk/system)");
                     }
                     // elevation prefix wrapping a destructive/recursive action
-                    if elev && words.iter().any(|w| w == "rm" || w.starts_with("rm-r"))
-                    {
-                        return Verdict::NeedsApproval(
-                            "elevated destructive command",
-                        );
+                    if elev && words.iter().any(|w| w == "rm" || w.starts_with("rm-r")) {
+                        return Verdict::NeedsApproval("elevated destructive command");
                     }
                     // recursive delete through elevation or xargs
                     if (elev || head == "xargs")
@@ -298,12 +302,11 @@ fn walk(tree: &Tree, src: &str) -> Verdict {
             }
             "command_name" => {
                 // a command_substitution used as the command head = dynamic code
-                if node.child(0).is_some_and(|c| {
-                    c.kind() == "command_substitution"
-                }) {
-                    return Verdict::NeedsApproval(
-                        "command substitution as command head",
-                    );
+                if node
+                    .child(0)
+                    .is_some_and(|c| c.kind() == "command_substitution")
+                {
+                    return Verdict::NeedsApproval("command substitution as command head");
                 }
             }
             "file_redirect" => {
@@ -314,9 +317,7 @@ fn walk(tree: &Tree, src: &str) -> Verdict {
                         let operator = node.utf8_text(src_bytes).unwrap_or("");
                         // `>` / `>>` truncate-overwrite; `<` is input (fine)
                         if operator.contains('>') && is_critical_path(text) {
-                            return Verdict::NeedsApproval(
-                                "redirect overwrites a critical path",
-                            );
+                            return Verdict::NeedsApproval("redirect overwrites a critical path");
                         }
                     }
                 }

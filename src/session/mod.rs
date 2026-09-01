@@ -33,6 +33,9 @@ pub struct Session {
     /// title snapshot of the parent, survives parent deletion
     #[serde(default)]
     pub forked_from_title: Option<String>,
+    /// last provider-native response id, scoped by model/provider in future
+    #[serde(default)]
+    pub last_response_id: Option<String>,
     /// (sha, label) undo journal: one entry per mutating agent action
     #[serde(default)]
     pub checkpoints: Vec<(String, String)>,
@@ -57,6 +60,7 @@ impl Session {
             pinned: false,
             forked_from_id: None,
             forked_from_title: None,
+            last_response_id: None,
             checkpoints: Vec::new(),
             todos: Vec::new(),
         }
@@ -80,6 +84,7 @@ impl Session {
         }
         f.forked_from_id = Some(self.id.to_string());
         f.forked_from_title = Some(self.title.clone());
+        f.last_response_id = None;
         f
     }
 
@@ -122,8 +127,11 @@ impl Session {
             *self.usage.cached_tokens.get_or_insert(0) += c;
         }
         // Provider prompt_tokens describes the current request context. Do not
-        // use the cumulative billing counter as the live context meter.
-        self.context_tokens = u.prompt_tokens;
+        // use the cumulative billing counter as the live context meter. Some
+        // providers emit a second usage event for output with zero input.
+        if u.prompt_tokens > 0 {
+            self.context_tokens = u.prompt_tokens;
+        }
     }
 
     /// tokens occupying the latest provider request context

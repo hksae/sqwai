@@ -85,9 +85,7 @@ pub fn restore(root: &Path, sha: &str) -> Result<()> {
     // area intact; no remove_untracked, so files created after the snapshot
     // survive.
     let mut cb = git2::build::CheckoutBuilder::new();
-    cb.force()
-        .update_index(false)
-        .disable_filters(true);
+    cb.force().update_index(false).disable_filters(true);
     repo.checkout_tree(&snap_tree.into_object(), Some(&mut cb))
         .context("checkout snapshot into worktree")?;
     Ok(())

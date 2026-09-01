@@ -26,7 +26,7 @@ pub(super) const COMMANDS: &[(&str, &str)] = &[
     ("/models", "models of current provider"),
     ("/plan", "switch to plan mode"),
     ("/act", "switch to act mode"),
-    ("/compact", "compact context (soon)"),
+    ("/compact", "compact context around the current plan"),
     ("/undo [n]", "revert last change, or the last n changes"),
     ("/init", "create AGENTS.md (project rules for the agent)"),
     ("/themes", "browse color themes"),
@@ -1126,9 +1126,10 @@ impl App {
             } => {
                 if !options.is_empty() {
                     self.menu_rows.push(row(
-                        Line::from(vec![
-                            Span::styled(format!(" {question}"), Theme::accent_bold()),
-                        ]),
+                        Line::from(vec![Span::styled(
+                            format!(" {question}"),
+                            Theme::accent_bold(),
+                        )]),
                         MenuAction::None,
                     ));
                 }
@@ -1143,10 +1144,7 @@ impl App {
                         " "
                     };
                     let mut spans = vec![
-                        Span::styled(
-                            format!("{checked}{}. ", i + 1),
-                            Theme::accent(),
-                        ),
+                        Span::styled(format!("{checked}{}. ", i + 1), Theme::accent()),
                         Span::styled(format!("{label}"), Theme::base()),
                     ];
                     if let Some(d) = desc {
@@ -1162,11 +1160,7 @@ impl App {
                     ));
                 }
                 if multiple {
-                    let n = self
-                        .ask_picked
-                        .iter()
-                        .filter(|v| **v)
-                        .count();
+                    let n = self.ask_picked.iter().filter(|v| **v).count();
                     self.menu_rows.push(row(
                         Line::from(vec![Span::styled(
                             format!(" confirm ({n} selected)",),
@@ -1190,23 +1184,25 @@ impl App {
                     "enter: choose · esc: skip".into()
                 });
             }
-            Menu::Approval { command, reason, .. } => {
+            Menu::Approval {
+                command, reason, ..
+            } => {
                 self.menu_rows.push(row(
-                    Line::from(vec![
-                        Span::styled(" The agent wants to run:", Theme::WARN()),
-                    ]),
+                    Line::from(vec![Span::styled(
+                        " The agent wants to run:",
+                        Theme::WARN(),
+                    )]),
                     MenuAction::None,
                 ));
                 self.menu_rows.push(row(
-                    Line::from(vec![
-                        Span::styled(format!("  {command}"), Theme::base()),
-                    ]),
+                    Line::from(vec![Span::styled(format!("  {command}"), Theme::base())]),
                     MenuAction::None,
                 ));
                 self.menu_rows.push(row(
-                    Line::from(vec![
-                        Span::styled(format!("  reason: {reason}"), Theme::dim()),
-                    ]),
+                    Line::from(vec![Span::styled(
+                        format!("  reason: {reason}"),
+                        Theme::dim(),
+                    )]),
                     MenuAction::None,
                 ));
                 self.menu_rows.push(row(
@@ -1224,10 +1220,7 @@ impl App {
                     MenuAction::None,
                 ));
                 self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        " d: deny".to_string(),
-                        Theme::ERR(),
-                    )]),
+                    Line::from(vec![Span::styled(" d: deny".to_string(), Theme::ERR())]),
                     MenuAction::None,
                 ));
             }
@@ -1237,7 +1230,10 @@ impl App {
             | Menu::AskFree { .. } => {}
             Menu::Todo => {
                 self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(" agent to-do list", Theme::accent_bold())]),
+                    Line::from(vec![Span::styled(
+                        " agent to-do list",
+                        Theme::accent_bold(),
+                    )]),
                     MenuAction::None,
                 ));
                 if self.todos.is_empty() {
@@ -1281,7 +1277,7 @@ fn session_row(s: &Session, is_current: bool, framed: bool) -> (Line<'static>, M
         "{} · {} · {} tok",
         fmt_date(s.last_activity()),
         truncate_chars(&s.model_key, 14),
-        fmt_k(s.used_tokens())
+        fmt_k(s.context_tokens_used())
     );
     if let Some(parent) = &s.forked_from_title {
         dim.push_str(&format!(" · from '{}'", truncate_chars(parent, 20)));

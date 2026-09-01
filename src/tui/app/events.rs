@@ -25,6 +25,21 @@ impl App {
             Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
         };
         while let Ok(ev) = ev_rx.try_recv() {
+            if self.startup && self.menu_stack.is_empty() {
+                if let Event::Key(k) = ev {
+                    if k.kind == KeyEventKind::Press && k.modifiers.is_empty() {
+                        match k.code {
+                            KeyCode::Char('q') => self.quit = true,
+                            KeyCode::Char('n') => {
+                                self.start_new_session();
+                            }
+                            KeyCode::Enter => self.open_menu(Menu::Sessions),
+                            _ => {}
+                        }
+                    }
+                }
+                continue;
+            }
             match ev {
                 Event::Key(k) => {
                     if k.kind != KeyEventKind::Press {
@@ -78,7 +93,9 @@ impl App {
                         KeyCode::Char('n') if self.startup && self.menu_stack.is_empty() => {
                             self.start_new_session();
                         }
-                        KeyCode::Enter if !ctrl && !shift && self.startup && self.menu_stack.is_empty() => {
+                        KeyCode::Enter
+                            if !ctrl && !shift && self.startup && self.menu_stack.is_empty() =>
+                        {
                             self.open_menu(Menu::Sessions)
                         }
                         KeyCode::Enter if !ctrl && !shift && self.menu_stack.is_empty() => {

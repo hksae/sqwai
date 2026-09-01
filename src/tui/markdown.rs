@@ -555,9 +555,6 @@ pub fn wrap_tagged(
                 cells.push((span.style, c));
             }
         }
-        // A rendered line must never exceed the available terminal width;
-        // otherwise ratatui can leave the clipped tail visible during scroll.
-        cells.truncate(width);
         if cells.is_empty() {
             rows.push(Line::from(vec![Span::styled(String::new(), Theme::base())]));
             tags.push(tag);
@@ -652,15 +649,28 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn headings_render_marker_and_emphasis() {
         let hl = Highlighter::new();
         let lines = render("# Каталог\nописание\n# Дополнительный пример", 80, &hl);
         assert_eq!(lines.len(), 3);
-        let first: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        let first: String = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
         assert_eq!(first, "Каталог");
-        assert!(lines[0].spans.iter().any(|s| s.style.add_modifier.contains(Modifier::BOLD)));
-        assert!(lines[0].spans.iter().any(|s| s.style.add_modifier.contains(Modifier::UNDERLINED)));
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::BOLD))
+        );
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::UNDERLINED))
+        );
     }
 
     #[test]

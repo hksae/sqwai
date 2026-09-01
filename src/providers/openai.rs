@@ -109,6 +109,10 @@ impl PartialCall {
 }
 
 impl Provider for OpenAiProvider {
+    fn capabilities(&self) -> super::ProviderCapabilities {
+        super::ProviderCapabilities::default()
+    }
+
     fn stream_chat(&self, req: ChatRequest) -> BoxStream<'static, StreamResult> {
         let this = self.clone();
         stream! {
@@ -176,6 +180,9 @@ impl Provider for OpenAiProvider {
                             Ok(v) => v,
                             Err(_) => continue,
                         };
+                        if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
+                            yield Ok(StreamEvent::ResponseId(id.to_string()));
+                        }
                         if let Some(u) = Self::map_usage(&v) { yield Ok(StreamEvent::Usage(u)); }
                         let choice = &v["choices"][0];
                         let Some(delta) = choice.get("delta") else { continue };

@@ -8,6 +8,7 @@
 mod exec;
 mod fs;
 
+use crate::plan;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -243,6 +244,24 @@ long-running commands.",
             }),
         },
         ToolDef {
+            name: "plan_update",
+            kind: Kind::Mutating,
+            description: "Replace the hidden project plan. Keep it compact and structured with Task, Status, Steps, Decisions & Gotchas, Files touched, and Next immediate action.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"},
+                    "status": {"type": "string"},
+                    "steps": {"type": "array", "items": {"type": "string"}},
+                    "decisions": {"type": "array", "items": {"type": "string"}},
+                    "files": {"type": "array", "items": {"type": "string"}},
+                    "next_action": {"type": "string"},
+                    "context_limit": {"type": "integer", "description": "model context limit in tokens"}
+                },
+                "required": ["task", "status", "steps", "next_action"]
+            }),
+        },
+        ToolDef {
             name: "todowrite",
             kind: Kind::ReadOnly,
             description: "Record a visible, user-facing to-do list. Call with a full replacement \
@@ -383,15 +402,26 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             args["timeout"].as_u64(),
             args["background"].as_bool().unwrap_or(false),
         ),
-        // the loop normally intercepts these two; keep a sane fallback so a
+        "plan_update" => {
+            let content = plan::from_fields(args);
+            match plan::update(
+                &ctx.root,
+                &content,
+                args["context_limit"].as_u64().unwrap_or(32_000),
+            ) {
+                Ok(saved) => Outcome::ok(format!(
+                    "plan updated ({} checklist items)",
+                    plan::todo_items(&saved).len()
+                )),
+                Err(e) => Outcome::err(format!("plan update rejected: {e:#}")),
+            }
+        }
         // direct dispatch never answers "unknown tool"
         "todowrite" => Outcome::ok(format!(
             "to-do list updated ({} items)",
             args["todos"].as_array().map(|a| a.len()).unwrap_or(0)
         )),
-        "ask_user" => {
-            Outcome::err("ask_user is served by the agent loop, not by the dispatcher")
-        }
+        "ask_user" => Outcome::err("ask_user is served by the agent loop, not by the dispatcher"),
         other => Outcome::err(format!("unknown tool '{other}'")),
     }
 }

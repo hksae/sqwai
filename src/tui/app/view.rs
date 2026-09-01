@@ -57,14 +57,16 @@ pub(super) enum BlockKind {
 
 /// User message rendered inside a rounded pink outline.
 fn user_box(text: &str, w: u16, hl: &Highlighter) -> Vec<Line<'static>> {
-    let inner_w = w.saturating_sub(6).clamp(8, 100);
-    let inner = render(text, inner_w, hl);
-    let iw = inner
-        .iter()
-        .map(|l| line_text(l).chars().count())
+    let max_inner = w.saturating_sub(6).clamp(8, 100) as usize;
+    let natural = text
+        .lines()
+        .map(|line| line.chars().count())
         .max()
         .unwrap_or(0)
-        .clamp(3, inner_w as usize);
+        .clamp(8, max_inner);
+    let inner_w = natural as u16;
+    let inner = render(text, inner_w, hl);
+    let iw = inner_w as usize;
     let b = Theme::border_focused();
     let mut out = Vec::with_capacity(inner.len() + 2);
     let edge = |lft: &str, mid: String, rgt: &str| {
@@ -183,6 +185,13 @@ impl App {
 
     pub(super) fn click(&mut self, abs_row: usize) {
         if let Some(Some(seg_idx)) = self.cache_rowseg.get(abs_row) {
+            if let Some(text) = self.code_at_row(*seg_idx, abs_row) {
+                match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+                    Ok(()) => self.status("code copied to clipboard", StatusKind::Info),
+                    Err(e) => self.status(&format!("copy failed: {e}"), StatusKind::Err),
+                }
+                return;
+            }
             // clicking an error line copies its full text to the clipboard
             let err_text = match self.segments.get(*seg_idx) {
                 Some(Segment::Status {
@@ -201,7 +210,11 @@ impl App {
             let toggle = match self.segments.get(*seg_idx) {
                 Some(Segment::Thinking { expanded, .. }) => Some(!*expanded),
                 // a finished tool row reveals its full output or diff
-                Some(Segment::Tool { ok: Some(_), expanded, .. }) => Some(!*expanded),
+                Some(Segment::Tool {
+                    ok: Some(_),
+                    expanded,
+                    ..
+                }) => Some(!*expanded),
                 _ => None,
             };
             if let Some(v) = toggle {
@@ -213,6 +226,32 @@ impl App {
                 self.dirty = true;
             }
         }
+    }
+
+    fn code_at_row(&self, seg_idx: usize, abs_row: usize) -> Option<String> {
+        let rendered = line_text(self.cache_lines.get(abs_row)?);
+        if !rendered.trim_start().starts_with('│') && !rendered.contains("│ ") {
+            return None;
+        }
+        let Segment::Assistant { text, .. } = self.segments.get(seg_idx)? else {
+            return None;
+        };
+        let mut blocks = Vec::new();
+        let mut in_code = false;
+        let mut current = String::new();
+        for line in text.lines() {
+            if line.trim_start().starts_with("```") {
+                if in_code {
+                    blocks.push(current.trim_end_matches('\n').to_string());
+                    current.clear();
+                }
+                in_code = !in_code;
+            } else if in_code {
+                current.push_str(line);
+                current.push('\n');
+            }
+        }
+        blocks.into_iter().next()
     }
 
     pub(super) fn copy_selection(&mut self, sel: &Selection) {
@@ -231,10 +270,15 @@ impl App {
             } else {
                 chars.len()
             };
+            let mut line: String = chars[start..end].iter().collect();
+            line = line
+                .trim_start_matches([' ', '│', '╭', '╰', '─'])
+                .trim_end_matches([' ', '│', '╮', '╯', '─'])
+                .to_string();
             if !out.is_empty() {
                 out.push('\n');
             }
-            out.extend(&chars[start..end]);
+            out.push_str(&line);
         }
         match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(out)) {
             Ok(()) => {}
@@ -261,7 +305,7 @@ impl App {
                 diff,
                 expanded,
             } => {
-                        let mut k = name.chars().count()
+                let mut k = name.chars().count()
                     + args.chars().count()
                     + output.chars().count()
                     + diff.as_ref().map(|d| d.chars().count() * 3).unwrap_or(0)
@@ -385,7 +429,10 @@ impl App {
                         out.push((
                             Line::from(vec![
                                 Span::styled("    │ ", border),
-                                Span::styled(format!("{:<width$}", truncate_chars(&more, width)), Theme::dim()),
+                                Span::styled(
+                                    format!("{:<width$}", truncate_chars(&more, width)),
+                                    Theme::dim(),
+                                ),
                                 Span::styled(" │", border),
                             ]),
                             Some(idx),
@@ -494,7 +541,10 @@ impl App {
             let logo = "                         _\n ___  __ ___      ____ _(_)\n/ __|/ _` \\ \\ /\\ / / _` | |\n\\__ \\ (_| |\\ V  V / (_| | |\n|___/\\__, | \\_/\\_/ \\__,_|_|\n        |_|";
             logical.clear();
             for line in logo.lines() {
-                logical.push((Line::from(Span::styled(line.to_string(), Theme::accent_bold())), None));
+                logical.push((
+                    Line::from(Span::styled(line.to_string(), Theme::accent_bold())),
+                    None,
+                ));
             }
         }
         let (lines, rowseg) = wrap_tagged(logical, w);
@@ -544,9 +594,11 @@ impl App {
 
         if self.startup && self.menu_stack.is_empty() {
             let logo = "                         _\n ___  __ ___      ____ _(_)\n/ __|/ _` \\ \\ /\\ / / _` | |\n\\__ \\ (_| |\\ V  V / (_| | |\n|___/\\__, | \\_/\\_/ \\__,_|_|\n        |_|";
-            let logo_widget = Paragraph::new(logo.lines().map(|line| {
-                Line::from(Span::styled(line.to_string(), Theme::accent_bold()))
-            }).collect::<Vec<_>>())
+            let logo_widget = Paragraph::new(
+                logo.lines()
+                    .map(|line| Line::from(Span::styled(line.to_string(), Theme::accent_bold())))
+                    .collect::<Vec<_>>(),
+            )
             .style(Theme::base());
             f.render_widget(logo_widget, chat);
             f.render_widget(self.header_line(), layout[0]);
@@ -896,7 +948,7 @@ impl App {
         ];
         if let Some(c) = self.session.usage.cached_tokens {
             let cp = if context_used > 0 {
-                c.saturating_mul(100) / context_used
+                c.saturating_mul(100).min(context_used) / context_used
             } else {
                 0
             };

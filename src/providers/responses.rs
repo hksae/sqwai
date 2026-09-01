@@ -78,6 +78,13 @@ impl ResponsesProvider {
 }
 
 impl Provider for ResponsesProvider {
+    fn capabilities(&self) -> super::ProviderCapabilities {
+        super::ProviderCapabilities {
+            previous_response: true,
+            ..Default::default()
+        }
+    }
+
     fn stream_chat(&self, req: ChatRequest) -> BoxStream<'static, StreamResult> {
         let this = self.clone();
         stream! {
@@ -113,6 +120,10 @@ impl Provider for ResponsesProvider {
                             Ok(v) => v,
                             Err(_) => continue,
                         };
+                        let response_id = v.pointer("/response/id").and_then(|x| x.as_str());
+                        if let Some(id) = response_id {
+                            yield Ok(StreamEvent::ResponseId(id.to_string()));
+                        }
                         match ev.event.as_str() {
                             "response.output_text.delta" => {
                                 if let Some(t) = v.get("delta").and_then(|x| x.as_str()) {

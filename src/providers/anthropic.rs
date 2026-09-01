@@ -159,6 +159,13 @@ impl AnthropicProvider {
 }
 
 impl Provider for AnthropicProvider {
+    fn capabilities(&self) -> super::ProviderCapabilities {
+        super::ProviderCapabilities {
+            prompt_cache: true,
+            ..Default::default()
+        }
+    }
+
     fn stream_chat(&self, req: ChatRequest) -> BoxStream<'static, StreamResult> {
         let this = self.clone();
         stream! {
@@ -201,6 +208,9 @@ impl Provider for AnthropicProvider {
                         };
                         match ev.event.as_str() {
                             "message_start" => {
+                                if let Some(id) = v.pointer("/message/id").and_then(|x| x.as_str()) {
+                                    yield Ok(StreamEvent::ResponseId(id.to_string()));
+                                }
                                 let inp = v.pointer("/message/usage/input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
                                 let cached = v.pointer("/message/usage/cache_read_input_tokens").and_then(|x| x.as_u64());
                                 yield Ok(StreamEvent::Usage(super::Usage {
