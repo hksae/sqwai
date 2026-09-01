@@ -877,10 +877,12 @@ impl App {
                             || s.model_key.to_lowercase().contains(&q)
                     })
                     .collect();
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(" + new session", Theme::ACCENT_SOFT())]),
-                    MenuAction::NewSession,
-                ));
+                if !self.startup {
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled(" + new session", Theme::ACCENT_SOFT())]),
+                        MenuAction::NewSession,
+                    ));
+                }
                 let cur_id = self.session.id.to_string();
                 let pinned: Vec<&Session> = visible.iter().filter(|s| s.pinned).copied().collect();
                 if !pinned.is_empty() {

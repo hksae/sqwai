@@ -261,7 +261,7 @@ impl App {
                 diff,
                 expanded,
             } => {
-                let mut k = name.chars().count()
+                        let mut k = name.chars().count()
                     + args.chars().count()
                     + output.chars().count()
                     + diff.as_ref().map(|d| d.chars().count() * 3).unwrap_or(0)
@@ -314,17 +314,13 @@ impl App {
             }
             Segment::Tool {
                 name,
-                args,
+                args: _,
                 ok,
                 output,
                 diff,
                 expanded,
             } => {
-                let prefix = if args.is_empty() {
-                    format!("{name}")
-                } else {
-                    format!("{name} {}", truncate_chars(args, 60))
-                };
+                let prefix = name.clone();
                 let head = match ok {
                     None => Line::from(vec![
                         Span::styled(
@@ -351,15 +347,12 @@ impl App {
                     const MAX_ROWS: usize = 40;
                     let rows: Vec<&str> = body.lines().collect();
                     let shown = &rows[..rows.len().min(MAX_ROWS)];
-                    let border = Style::new().fg(Theme::DIM()).bg(Theme::BG());
+                    let border = Theme::border_dim();
                     let inner_w = w.saturating_sub(8).max(8) as usize;
-                    let width = shown
-                        .iter()
-                        .map(|line| line.chars().count())
-                        .max()
-                        .unwrap_or(0)
-                        .min(inner_w)
-                        .max(8);
+                    // Keep the box width stable. Deriving it from the longest
+                    // line makes the border itself wrap when the chat width
+                    // changes, which leaves visibly shifted corners behind.
+                    let width = inner_w.max(8);
                     out.push((
                         Line::from(vec![Span::styled(
                             format!("    ╭{}╮", "─".repeat(width + 2)),
@@ -497,6 +490,13 @@ impl App {
         }
         self.seg_cache.truncate(self.segments.len());
 
+        if self.segments.is_empty() {
+            let logo = "                         _\n ___  __ ___      ____ _(_)\n/ __|/ _` \\ \\ /\\ / / _` | |\n\\__ \\ (_| |\\ V  V / (_| | |\n|___/\\__, | \\_/\\_/ \\__,_|_|\n        |_|";
+            logical.clear();
+            for line in logo.lines() {
+                logical.push((Line::from(Span::styled(line.to_string(), Theme::accent_bold())), None));
+            }
+        }
         let (lines, rowseg) = wrap_tagged(logical, w);
         self.cache_lines = lines;
         self.cache_rowseg = rowseg;
@@ -541,6 +541,23 @@ impl App {
         self.last_chat = chat;
 
         f.render_widget(Block::new().style(Theme::base()), area);
+
+        if self.startup && self.menu_stack.is_empty() {
+            let logo = "                         _\n ___  __ ___      ____ _(_)\n/ __|/ _` \\ \\ /\\ / / _` | |\n\\__ \\ (_| |\\ V  V / (_| | |\n|___/\\__, | \\_/\\_/ \\__,_|_|\n        |_|";
+            let logo_widget = Paragraph::new(logo.lines().map(|line| {
+                Line::from(Span::styled(line.to_string(), Theme::accent_bold()))
+            }).collect::<Vec<_>>())
+            .style(Theme::base());
+            f.render_widget(logo_widget, chat);
+            f.render_widget(self.header_line(), layout[0]);
+            let hints = Paragraph::new(Line::from(vec![Span::styled(
+                " enter sessions · n new session · q quit",
+                Theme::dim(),
+            )]))
+            .style(Theme::base());
+            f.render_widget(hints, layout[3]);
+            return;
+        }
 
         let top = self.chat_top(chat.height);
         let sel = self.sel;
@@ -850,6 +867,13 @@ impl App {
     }
 
     pub(super) fn header_line(&self) -> Paragraph<'static> {
+        if self.segments.is_empty() {
+            return Paragraph::new(Line::from(vec![
+                Span::styled(" sqwai", Theme::accent_bold()),
+                Span::styled(" · v0.1.0", Theme::dim()),
+            ]))
+            .style(Theme::base());
+        }
         let context_used = self.session.context_tokens_used();
         let pct = self.session.context_percent() as u64;
         let tok = fmt_k(context_used);

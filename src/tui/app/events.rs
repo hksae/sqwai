@@ -72,6 +72,15 @@ impl App {
                                 }
                             }
                         }
+                        KeyCode::Char('q') if self.startup && self.menu_stack.is_empty() => {
+                            self.quit = true;
+                        }
+                        KeyCode::Char('n') if self.startup && self.menu_stack.is_empty() => {
+                            self.start_new_session();
+                        }
+                        KeyCode::Enter if !ctrl && !shift && self.startup && self.menu_stack.is_empty() => {
+                            self.open_menu(Menu::Sessions)
+                        }
                         KeyCode::Enter if !ctrl && !shift && self.menu_stack.is_empty() => {
                             self.submit()
                         }

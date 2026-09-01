@@ -225,6 +225,19 @@ impl Theme {
         Style::new().fg(Self::WARN()).bg(Self::BG())
     }
 
+    /// Slightly quieter border used only around fenced code blocks.
+    pub fn code_border() -> Color {
+        fn mix(a: u8, b: u8) -> u8 {
+            ((a as u16 * 3 + b as u16) / 4) as u8
+        }
+        match (cur().border_dim, cur().bg) {
+            (Color::Rgb(r, g, b), Color::Rgb(br, bg, bb)) => {
+                Color::Rgb(mix(r, br), mix(g, bg), mix(b, bb))
+            }
+            (border, _) => border,
+        }
+    }
+
     /// table separators / horizontal rules
     pub fn rule_color() -> Color {
         cur().border_dim

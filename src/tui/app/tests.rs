@@ -79,7 +79,7 @@ mod tests {
             ui: Default::default(),
         };
         let session = Session::new("m".into(), 1000);
-        App::new(cfg, session).unwrap()
+        App::new(cfg, session, false).unwrap()
     }
 
     #[tokio::test]
@@ -165,7 +165,7 @@ mod tests {
             safety: Default::default(),
             ui: Default::default(),
         };
-        let mut app = App::new(cfg, Session::new("m".into(), 1_000_000)).unwrap();
+        let mut app = App::new(cfg, Session::new("m".into(), 1_000_000), false).unwrap();
         app.input = App::fresh_input("say hi in 3 words".into());
         app.submit();
         let mut waited = 0u32;

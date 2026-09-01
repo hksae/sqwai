@@ -84,6 +84,8 @@ pub struct App {
     thinking_open: bool,
     thinking_idx: Option<usize>,
     mode: Mode,
+    /// true while showing the no-session startup screen
+    startup: bool,
     /// last request error, shown in the status bar until the next action
     bar_error: Option<String>,
     /// previous turn ended successfully — gates retry notifications
@@ -149,7 +151,7 @@ impl App {
         crate::prompts::system_prompt()
     }
 
-    pub fn new(cfg: Config, session: Session) -> Result<Self> {
+    pub fn new(cfg: Config, session: Session, startup: bool) -> Result<Self> {
         let model_key = session.model_key.clone();
         let model_cfg = cfg
             .models
@@ -184,6 +186,7 @@ impl App {
             thinking_open: false,
             thinking_idx: None,
             mode: Mode::Act,
+            startup,
             bar_error: None,
             prev_turn_ok: false,
             retry_notified: true, // no toast for the very first turn
@@ -221,7 +224,9 @@ impl App {
             dragging: false,
             sel: None,
         };
-        app.load_history_segments();
+        if !startup {
+            app.load_history_segments();
+        }
         Ok(app)
     }
 
@@ -404,6 +409,7 @@ impl App {
     // ---------- providers / models menu ----------
 
     fn apply_session(&mut self, mut s: Session) {
+        self.startup = false;
         // persist the session we are leaving
         self.session.save().ok();
         // resolve the session's model against the current config
@@ -444,6 +450,7 @@ impl App {
     }
 
     fn start_new_session(&mut self) -> bool {
+        self.startup = false;
         if self.streaming {
             self.status(
                 "busy: esc stops the current generation first",

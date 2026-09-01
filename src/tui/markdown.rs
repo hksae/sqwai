@@ -390,7 +390,8 @@ fn emit_code(
         .max()
         .unwrap_or(0)
         .clamp(8, max_w);
-    let b = Style::new().fg(Theme::ACCENT_SOFT());
+    // Code frame is intentionally a little quieter than the accent text.
+    let b = Style::new().fg(Theme::code_border()).bg(Theme::BG());
 
     // top border with the language embedded: ╭─ rust ────╮
     let lang_txt = match lang {
@@ -447,8 +448,12 @@ fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
             .bg(Theme::BG())
             .add_modifier(Modifier::BOLD),
     };
-    let mut spans = inline(rest, style);
-    spans.insert(0, Span::styled("# ".to_string(), Theme::dim()));
+    let heading_style = style
+        .add_modifier(Modifier::BOLD)
+        .add_modifier(Modifier::UNDERLINED);
+    let spans = inline(rest, heading_style);
+    // The Markdown marker is syntax, not content: do not print it in the
+    // terminal. The heading style itself provides the visual distinction.
     Some(spans)
 }
 
@@ -550,6 +555,9 @@ pub fn wrap_tagged(
                 cells.push((span.style, c));
             }
         }
+        // A rendered line must never exceed the available terminal width;
+        // otherwise ratatui can leave the clipped tail visible during scroll.
+        cells.truncate(width);
         if cells.is_empty() {
             rows.push(Line::from(vec![Span::styled(String::new(), Theme::base())]));
             tags.push(tag);
@@ -641,6 +649,18 @@ mod tests {
             .map(|s| s.content.to_string())
             .collect();
         assert!(body.contains("fn main"), "{body:?}");
+    }
+
+    #[test]
+    #[test]
+    fn headings_render_marker_and_emphasis() {
+        let hl = Highlighter::new();
+        let lines = render("# Каталог\nописание\n# Дополнительный пример", 80, &hl);
+        assert_eq!(lines.len(), 3);
+        let first: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(first, "Каталог");
+        assert!(lines[0].spans.iter().any(|s| s.style.add_modifier.contains(Modifier::BOLD)));
+        assert!(lines[0].spans.iter().any(|s| s.style.add_modifier.contains(Modifier::UNDERLINED)));
     }
 
     #[test]
