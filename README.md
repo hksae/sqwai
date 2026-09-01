@@ -157,4 +157,4 @@ The project is being developed in phases:
 
 ## License
 
-Licensed under the [MIT License](LICENSE).
+Licensed under the [Apache License 2.0](LICENSE).
