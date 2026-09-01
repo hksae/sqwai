@@ -8,6 +8,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use std::hash::{Hash, Hasher};
 use tui_textarea::TextArea;
 
 use crate::agent::loop_task::AgentEvent;
@@ -419,6 +420,14 @@ impl App {
         let mut in_group = false; // inside one "agent" turn
         let mut last_block = BlockKind::None;
 
+        // seg_cache is positional: inserting/removing a segment shifts every
+        // later entry. Detect that structural change before reusing any cache,
+        // otherwise old tool lines can appear under the wrong segment.
+        let layout: Vec<u64> = self.segments.iter().map(segment_layout_key).collect();
+        if layout != self.seg_layout {
+            self.seg_cache.clear();
+            self.seg_layout = layout;
+        }
         self.seg_cache.resize(self.segments.len(), None);
 
         for idx in 0..self.segments.len() {
@@ -942,6 +951,27 @@ impl App {
 
         spans
     }
+}
+
+fn segment_layout_key(seg: &Segment) -> u64 {
+    // Include the stable identifying text, but not the live spinner/text body;
+    // normal content changes are handled by seg_key, while insertions/removals
+    // must invalidate the entire positional cache.
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::mem::discriminant(seg).hash(&mut h);
+    match seg {
+        Segment::User(text) | Segment::Assistant { text, .. } => text.hash(&mut h),
+        Segment::Thinking { .. } => {}
+        Segment::Tool { name, args, .. } => {
+            name.hash(&mut h);
+            args.hash(&mut h);
+        }
+        Segment::Status { text, kind } => {
+            text.hash(&mut h);
+            std::mem::discriminant(kind).hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 pub(super) fn blank() -> Line<'static> {

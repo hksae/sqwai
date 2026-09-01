@@ -106,8 +106,10 @@ pub struct App {
     cache_lines: Vec<Line<'static>>,
     cache_rowseg: Vec<Option<usize>>,
     last_chat: Rect,
-    /// per-segment render cache: (text char count at render time, content lines)
+    /// per-segment render cache: (content key at render time, content lines)
     seg_cache: Vec<Option<(usize, Vec<(Line<'static>, Option<usize>)>)>>,
+    /// stable order/identity of segments used to invalidate positional caches
+    seg_layout: Vec<u64>,
 
     // command popup
     hover: Option<usize>,
@@ -197,6 +199,7 @@ impl App {
             cache_rowseg: Vec::new(),
             last_chat: Rect::default(),
             seg_cache: Vec::new(),
+            seg_layout: Vec::new(),
             hover: None,
             popup_dismiss: false,
             popup_scroll: 0,
