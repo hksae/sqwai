@@ -18,6 +18,10 @@ pub struct Session {
     /// tokens estimated from message length when the provider sent no usage
     #[serde(default)]
     pub estimated_tokens: u64,
+    /// prompt size of the latest provider request (current context occupancy)
+    ///; separate from cumulative usage used for billing/statistics
+    #[serde(default)]
+    pub context_tokens: u64,
     /// time of the latest user/agent message; drives ordering in the sessions menu
     #[serde(default)]
     pub last_message_at: Option<DateTime<Utc>>,
@@ -48,6 +52,7 @@ impl Session {
             messages: Vec::new(),
             usage: Usage::default(),
             estimated_tokens: 0,
+            context_tokens: 0,
             last_message_at: None,
             pinned: false,
             forked_from_id: None,
@@ -116,9 +121,23 @@ impl Session {
         if let Some(c) = u.cached_tokens {
             *self.usage.cached_tokens.get_or_insert(0) += c;
         }
+        // Provider prompt_tokens describes the current request context. Do not
+        // use the cumulative billing counter as the live context meter.
+        self.context_tokens = u.prompt_tokens;
     }
 
-    /// best-effort total token count for the context meter
+    /// tokens occupying the latest provider request context
+    pub fn context_tokens_used(&self) -> u64 {
+        if self.context_tokens > 0 {
+            self.context_tokens
+        } else if self.usage.prompt_tokens == 0 {
+            self.estimated_tokens
+        } else {
+            0
+        }
+    }
+
+    /// cumulative usage, useful for billing/statistics
     pub fn used_tokens(&self) -> u64 {
         let reported = self.usage.prompt_tokens + self.usage.completion_tokens;
         if reported > 0 {
@@ -132,7 +151,7 @@ impl Session {
         if self.context_limit == 0 {
             return 0.0;
         }
-        ((self.used_tokens() as f64 / self.context_limit as f64) * 100.0).clamp(0.0, 100.0)
+        ((self.context_tokens_used() as f64 / self.context_limit as f64) * 100.0).clamp(0.0, 100.0)
     }
 
     pub fn save(&self) -> Result<()> {
@@ -238,10 +257,24 @@ mod tests {
         let mut s = Session::new("m".into(), 1000);
         s.push(Role::User, "hello");
         assert!(s.context_percent() < 1.0);
-        s.usage.prompt_tokens = 500;
-        s.usage.completion_tokens = 600;
-        assert_eq!(s.context_percent(), 100.0);
+        s.add_usage(&Usage {
+            prompt_tokens: 500,
+            completion_tokens: 600,
+            cached_tokens: None,
+        });
+        assert_eq!(s.context_tokens_used(), 500);
+        assert_eq!(s.context_percent(), 50.0);
         assert_eq!(s.used_tokens(), 1100);
+
+        // A later request reports its own prompt size; the context meter must
+        // follow it instead of accumulating every previous prompt.
+        s.add_usage(&Usage {
+            prompt_tokens: 36_267,
+            completion_tokens: 10,
+            cached_tokens: None,
+        });
+        assert_eq!(s.context_tokens_used(), 36_267);
+        assert_eq!(s.context_percent(), 100.0);
     }
 
     #[test]

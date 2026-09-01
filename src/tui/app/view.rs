@@ -839,9 +839,9 @@ impl App {
     }
 
     pub(super) fn header_line(&self) -> Paragraph<'static> {
-        let used = self.session.used_tokens();
+        let context_used = self.session.context_tokens_used();
         let pct = self.session.context_percent() as u64;
-        let tok = fmt_k(used);
+        let tok = fmt_k(context_used);
         let mut spans = vec![
             Span::styled(" sqwai", Theme::accent_bold()),
             Span::styled(
@@ -860,7 +860,11 @@ impl App {
             Span::styled(format!(" · {tok} tok / {pct}% ctx"), Theme::accent()),
         ];
         if let Some(c) = self.session.usage.cached_tokens {
-            let cp = if used > 0 { c * 100 / used.max(1) } else { 0 };
+            let cp = if context_used > 0 {
+                c * 100 / context_used.max(1)
+            } else {
+                0
+            };
             spans.push(Span::styled(format!(" · cache {cp}%"), Theme::dim()));
         }
         // cost meter: enabled later from the settings menu ([ui] show_cost)
