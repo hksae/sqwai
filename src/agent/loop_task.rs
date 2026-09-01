@@ -127,6 +127,8 @@ pub struct AgentInput {
     pub context_limit: u64,
     /// Whether this request may use agent tools.
     pub enable_tools: bool,
+    /// Optional provider-native continuation from the previous completed turn.
+    pub previous_response_id: Option<String>,
 }
 
 const RETRY_WINDOW: Duration = Duration::from_secs(3600);
@@ -142,6 +144,36 @@ fn backoff(attempt: u32) -> Duration {
         _ => 60,
     };
     Duration::from_secs(secs)
+}
+
+fn request_messages(
+    messages: &[Message],
+    previous_response_id: Option<&str>,
+    transport: crate::providers::ContextTransport,
+) -> Vec<Message> {
+    if previous_response_id.is_none()
+        || transport != crate::providers::ContextTransport::PreviousResponse
+    {
+        return messages.to_vec();
+    }
+
+    // Responses continuation already owns the previous conversation on the
+    // provider. Re-send instructions plus only the current user turn; sending
+    // the entire local transcript would duplicate the remote history.
+    let mut current = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::User)
+        .cloned()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut out = messages
+        .iter()
+        .filter(|m| m.role == Role::System)
+        .cloned()
+        .collect::<Vec<_>>();
+    out.append(&mut current);
+    out
 }
 
 struct TurnOutcome {
@@ -176,6 +208,7 @@ async fn run_agent(
         plan_mode,
         context_limit,
         enable_tools,
+        previous_response_id,
     } = input;
 
     let mut ctx = ToolCtx::new(&root);
@@ -196,13 +229,23 @@ async fn run_agent(
     // resuming a pure text history, but replaying tool turns stored in the
     // session could; we keep messages as passed — providers handle them.
 
+    let transport = if previous_response_id.is_some() && provider.capabilities().previous_response {
+        crate::providers::ContextTransport::PreviousResponse
+    } else {
+        crate::providers::ContextTransport::Stateless
+    };
+
     loop {
+        let request_messages =
+            request_messages(&messages, previous_response_id.as_deref(), transport);
         let breakdown = RequestBreakdown::from_request(&ChatRequest {
             model_id: model_id.clone(),
-            messages: messages.clone(),
+            messages: request_messages.clone(),
             thinking,
             max_tokens,
             tools: tools.clone(),
+            previous_response_id: previous_response_id.clone(),
+            context_transport: transport,
         });
         let _ = tx.send(AgentEvent::RequestBreakdown(breakdown)).await;
 
@@ -211,10 +254,16 @@ async fn run_agent(
             &provider,
             &ChatRequest {
                 model_id: model_id.clone(),
-                messages: messages.clone(),
+                messages: request_messages,
                 thinking,
                 max_tokens,
                 tools: tools.clone(),
+                previous_response_id: previous_response_id.clone(),
+                context_transport: if previous_response_id.is_some() {
+                    crate::providers::ContextTransport::PreviousResponse
+                } else {
+                    crate::providers::ContextTransport::Stateless
+                },
             },
             &tx,
             &mut ctl,

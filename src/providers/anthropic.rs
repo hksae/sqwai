@@ -316,6 +316,8 @@ mod tests {
             thinking: Some(ThinkingLevel::High),
             max_tokens: None,
             tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
         };
         let b = build_body(&req, 8192);
         assert_eq!(b["model"], "claude-x");
@@ -333,6 +335,8 @@ mod tests {
             thinking: None,
             max_tokens: None,
             tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
         };
         let b = build_body(&req, 8192);
         assert!(b.get("thinking").is_none());
@@ -358,6 +362,8 @@ mod tests {
                 description: "list dir".into(),
                 parameters: json!({"type": "object", "properties": {}}),
             }],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
         };
         let b = build_body(&req, 8192);
 
@@ -404,6 +410,8 @@ mod tests {
             thinking: None,
             max_tokens: None,
             tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
         };
         let b = build_body(&req, 1024);
         let msgs = b["messages"].as_array().unwrap();

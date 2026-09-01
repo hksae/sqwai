@@ -51,6 +51,9 @@ pub fn build_body(req: &ChatRequest) -> Value {
     if let Some(e) = req.thinking.and_then(effort) {
         body["reasoning"] = json!({"effort": e});
     }
+    if let Some(id) = &req.previous_response_id {
+        body["previous_response_id"] = json!(id);
+    }
     body
 }
 
@@ -194,6 +197,8 @@ mod tests {
             thinking: Some(ThinkingLevel::Medium),
             max_tokens: None,
             tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
         };
         let b = build_body(&req);
         assert_eq!(b["model"], "gpt-x");

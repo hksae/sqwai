@@ -148,6 +148,12 @@ pub enum ContextTransport {
     PromptCached,
 }
 
+impl Default for ContextTransport {
+    fn default() -> Self {
+        Self::Stateless
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     Text(String),
@@ -171,6 +177,10 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     /// tools available to the model this turn
     pub tools: Vec<ToolSpec>,
+    /// Optional documented continuation reference. Providers must opt in.
+    pub previous_response_id: Option<String>,
+    /// Selected transport for this request; defaults to stateless.
+    pub context_transport: ContextTransport,
 }
 
 pub trait Provider: Send + Sync {

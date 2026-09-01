@@ -405,6 +405,13 @@ impl App {
             plan_mode: self.mode == Mode::Plan,
             context_limit: self.session.context_limit,
             enable_tools: with_tools,
+            previous_response_id: if !self.context_bootstrap_pending
+                && self.provider.capabilities().previous_response
+            {
+                self.session.last_response_id.clone()
+            } else {
+                None
+            },
         };
         self.context_bootstrap_pending = false;
         self.agent = Some(spawn_agent(input));

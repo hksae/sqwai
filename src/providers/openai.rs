@@ -117,7 +117,14 @@ impl Provider for OpenAiProvider {
         let this = self.clone();
         stream! {
             let url = format!("{}/chat/completions", this.base_url.trim_end_matches('/'));
-            let msgs: Vec<Value> = req.messages.iter().map(Self::message_json).collect();
+            let req_messages = if req.previous_response_id.is_some() {
+                // Chat Completions has no standard continuation field. Keep
+                // sending the complete transcript for compatible gateways.
+                &req.messages
+            } else {
+                &req.messages
+            };
+            let msgs: Vec<Value> = req_messages.iter().map(Self::message_json).collect();
             let mut body = json!({
                 "model": req.model_id,
                 "messages": msgs,
@@ -279,6 +286,8 @@ mod tests {
                 description: "list directory".into(),
                 parameters: json!({"type":"object","properties":{"path":{"type":"string"}}}),
             }],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
         };
         let msgs: Vec<Value> = req
             .messages
