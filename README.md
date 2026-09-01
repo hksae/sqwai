@@ -157,4 +157,4 @@ The project is being developed in phases:
 
 ## License
 
-License: TBD.
+Licensed under the [MIT License](LICENSE).

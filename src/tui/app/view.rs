@@ -896,7 +896,7 @@ impl App {
         ];
         if let Some(c) = self.session.usage.cached_tokens {
             let cp = if context_used > 0 {
-                c * 100 / context_used.max(1)
+                c.saturating_mul(100) / context_used
             } else {
                 0
             };
