@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 
 pub enum Connection {
     Stdio(Arc<Mutex<RunningService<RoleClient, ()>>>),
+    Http(Arc<Mutex<RunningService<RoleClient, ()>>>),
 }
 
 pub struct Registry {
@@ -28,11 +29,8 @@ impl Registry {
                 crate::config::McpTransport::Stdio { command, args, env } => {
                     connect_stdio(command, args, env).await?
                 }
-                crate::config::McpTransport::Http { .. } => {
-                    bail!(
-                        "MCP server '{}' uses HTTP, which is not supported yet",
-                        server.name
-                    )
+                crate::config::McpTransport::Http { url, headers } => {
+                    connect_http(url, headers).await?
                 }
             };
             let discovered = list_tools(&connection).await?;
@@ -63,7 +61,7 @@ impl Registry {
         };
         let args = arguments.as_object().cloned().unwrap_or_default();
         let response = match connection {
-            Connection::Stdio(client) => {
+            Connection::Stdio(client) | Connection::Http(client) => {
                 client
                     .lock()
                     .await
@@ -109,9 +107,29 @@ pub async fn connect_stdio(
     ))))
 }
 
+pub async fn connect_http(
+    url: &str,
+    headers: &std::collections::BTreeMap<String, String>,
+) -> Result<Connection> {
+    use http::{HeaderName, HeaderValue};
+    use rmcp::transport::StreamableHttpClientTransport;
+    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+    let mut config = StreamableHttpClientTransportConfig::with_uri(url.to_string());
+    for (name, value) in headers {
+        config
+            .custom_headers
+            .insert(HeaderName::try_from(name)?, HeaderValue::try_from(value)?);
+    }
+    let transport = StreamableHttpClientTransport::from_config(config);
+    Ok(Connection::Http(Arc::new(Mutex::new(
+        ().serve(transport).await?,
+    ))))
+}
 pub async fn list_tools(connection: &Connection) -> Result<Vec<Tool>> {
     match connection {
-        Connection::Stdio(client) => Ok(client.lock().await.list_all_tools().await?),
+        Connection::Stdio(client) | Connection::Http(client) => {
+            Ok(client.lock().await.list_all_tools().await?)
+        }
     }
 }
 

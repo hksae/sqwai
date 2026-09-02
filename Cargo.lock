@@ -2023,6 +2023,7 @@ dependencies = [
  "futures",
  "git2",
  "globset",
+ "http",
  "ignore",
  "ratatui",
  "regex",
