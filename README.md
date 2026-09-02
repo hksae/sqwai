@@ -14,8 +14,12 @@ sqwai runs an AI coding agent directly inside your project directory. It connect
 - Save, resume, switch, fork, rename, pin, and delete sessions.
 - Create git checkpoints before changes and undo recent changes.
 - Provider abstraction for Anthropic, OpenAI-compatible APIs, and OpenAI Responses.
-- MCP and LSP integration points.
-- Project instructions through `AGENTS.md`.
+- MCP client support for stdio and streamable HTTP transports, with tool discovery and namespaced tool calls.
+- LSP client foundation for initialization, file synchronization, and queued diagnostics.
+- Compatible Skills loader with frontmatter, project overrides, configured directories, and prompt injection.
+- Category-based settings hub with reusable Appearance, Themes, Providers, MCP, LSP, and Skills sections.
+- Animated themes: `lava`, `gum`, `bloom`, and `neon`.
+- Static themes including `white`, with direct RGB animation for endpoint-controlled color transitions.
 - Markdown rendering with fenced-code highlighting, tables, headings, and inline styles.
 - Safety approval flow for potentially dangerous commands.
 - Multiple color themes and configurable thinking levels.
@@ -29,7 +33,7 @@ sqwai runs an AI coding agent directly inside your project directory. It connect
 ## Build from source
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/hksae/sqwai
 cd sqwai
 cargo build --release
 ```
@@ -64,6 +68,20 @@ Configure a provider, model, endpoint, and API key environment variable in that 
 
 If a project contains `AGENTS.md`, sqwai loads it as project-specific instructions for the agent. Use `/init` to create a starter file.
 
+Use `/settings` as the main category hub. Existing shortcuts such as `/providers`, `/models`, `/themes`, and `/debug` remain available. The `Appearance` section reuses the existing Themes menu instead of creating a second theme picker.
+
+### MCP
+
+MCP servers are configured under the `mcp` section. Enabled stdio and streamable HTTP servers are connected asynchronously at the start of an agent turn. Their tools are discovered and exposed to the model with names such as `mcp__github__list_issues`. Stdio servers support command arguments and environment variables; HTTP servers support custom headers.
+
+### LSP
+
+LSP server definitions are configured under `lsp`. The client supports JSON-RPC framing, initialization, `didOpen`, `didChange`, `didSave`, and queued `textDocument/publishDiagnostics` notifications. Runtime integration with file mutation events is still being completed.
+
+### Skills
+
+Skills use the compatible `SKILL.md` format with frontmatter fields such as `name`, `description`, and `triggers`. Skills can be loaded from configured directories, the user skills directory, and `.sqwai/skills` in the project. Later project-specific definitions override earlier definitions, and loaded skills are added to the agent's stable prompt.
+
 ## Run
 
 ```bash
@@ -76,61 +94,11 @@ A normal launch opens the startup screen without creating an empty session. To r
 sqwai --resume <session-id>
 ```
 
-## Startup screen
-
-```text
-Enter  open sessions
-n      create a new session
-q      quit
-```
-
-If there are no saved sessions, Enter opens an empty sessions menu. Press `n` to start working immediately.
-
-## Chat controls
-
-```text
-Enter       send the current message
-Tab         switch between Plan and Act
-Esc         stop generation or close the active menu
-Ctrl+S      open sessions
-Ctrl+T      open the todo panel
-```
-
-Click a completed tool call to expand its output or diff. Drag across chat content to copy a selection.
-
-## Commands
-
-```text
-/help              commands, symbols, and keybindings
-/new               start a new session
-/sessions          open the sessions menu
-/fork              fork the current session
-/providers         open providers and models
-/models            list models for the current provider
-/plan              switch to Plan mode
-/act               switch to Act mode
-/undo [n]          revert the last change or last n changes
-/init              create AGENTS.md
-/themes            browse color themes
-/debug             open runtime settings
-/exit              quit sqwai
-```
-
 ## Safety and undo
 
 Potentially dangerous shell commands can require explicit approval. File changes are checkpointed through git when possible, allowing recent changes to be reverted with `/undo`.
 
 Review commands and diffs before accepting them. Keep credentials in environment variables or local configuration that is excluded from version control.
-
-## Architecture
-
-The main execution flow is:
-
-```text
-provider -> agent loop -> tools -> TUI
-```
-
-The source tree is organized into configuration, providers, agent execution, tools, sessions, planning, undo, graph, and TUI modules.
 
 ## Development
 
