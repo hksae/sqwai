@@ -712,25 +712,15 @@ impl App {
                 };
                 for (i, t) in crate::tui::theme::THEMES.iter().enumerate() {
                     let mark = if i == cur { " *" } else { "" };
-                    // the name glows in its own accent color
+                    // the name glows in its own accent color (no swatch square)
                     self.menu_rows.push(row(
-                        Line::from(vec![
-                            Span::styled(
-                                "  ██".to_string(),
-                                Style::new().fg(t.p.accent).bg(Theme::BG()),
-                            ),
-                            Span::styled(
-                                "██ ".to_string(),
-                                Style::new().fg(t.p.accent_soft).bg(Theme::BG()),
-                            ),
-                            Span::styled(
-                                format!("{}{mark}", t.name),
-                                Style::new()
-                                    .fg(t.p.accent)
-                                    .bg(Theme::BG())
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                        ]),
+                        Line::from(vec![Span::styled(
+                            format!("  {}{mark}", t.name),
+                            Style::new()
+                                .fg(t.p.accent)
+                                .bg(Theme::BG())
+                                .add_modifier(Modifier::BOLD),
+                        )]),
                         MenuAction::SetTheme(i),
                     ));
                 }
@@ -740,19 +730,15 @@ impl App {
                 for (i, t) in crate::tui::theme::ANIMATED_THEMES.iter().enumerate() {
                     let mark = if cur_anim == Some(i) { " *" } else { "" };
                     let p0 = crate::tui::theme::anim_palette_at(i, tick);
-                    let p1 = crate::tui::theme::anim_palette_at(i, tick.wrapping_add(40));
+                    // the name glows in the live animated accent (no swatch square)
                     self.menu_rows.push(row(
-                        Line::from(vec![
-                            Span::styled("  ██", Style::new().fg(p0.accent).bg(Theme::BG())),
-                            Span::styled("██ ", Style::new().fg(p1.accent).bg(Theme::BG())),
-                            Span::styled(
-                                format!("{}{mark}", t.name),
-                                Style::new()
-                                    .fg(p0.accent)
-                                    .bg(Theme::BG())
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                        ]),
+                        Line::from(vec![Span::styled(
+                            format!("  {}{mark}", t.name),
+                            Style::new()
+                                .fg(p0.accent)
+                                .bg(Theme::BG())
+                                .add_modifier(Modifier::BOLD),
+                        )]),
                         MenuAction::SetAnimTheme(i),
                     ));
                 }

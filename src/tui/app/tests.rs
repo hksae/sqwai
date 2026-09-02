@@ -639,21 +639,21 @@ mod tests {
     fn themes_menu_applies_and_stays_open() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.open_menu(Menu::Themes);
-        // 20 static + 6 animated themes, listed back-to-back (no header/separator)
+        // 21 static + 4 animated themes, listed back-to-back (no header/separator)
         let total = crate::tui::theme::THEMES.len() + crate::tui::theme::ANIMATED_THEMES.len();
         assert_eq!(app.menu_rows.len(), total, "all palettes listed");
-        // every theme row carries its own colored swatch (2 blocks)
-        let mut swatches = 0;
-        for r in &app.menu_rows {
-            if r.0.spans.iter().any(|s| s.content.contains("██")) {
-                swatches += 1;
-            }
+        // every theme row carries its own name (swatch squares were removed)
+        let rows: Vec<String> = app
+            .menu_rows
+            .iter()
+            .map(|r| r.0.spans.iter().map(|s| s.content.as_ref().to_string()).collect::<String>())
+            .collect();
+        for t in crate::tui::theme::THEMES.iter() {
+            assert!(rows.iter().any(|n| n.contains(t.name)), "static theme {} listed", t.name);
         }
-        assert_eq!(
-            swatches,
-            crate::tui::theme::THEMES.len() + crate::tui::theme::ANIMATED_THEMES.len(),
-            "every theme row has a swatch"
-        );
+        for t in crate::tui::theme::ANIMATED_THEMES.iter() {
+            assert!(rows.iter().any(|n| n.contains(t.name)), "animated theme {} listed", t.name);
+        }
         app.run_action(MenuAction::SetTheme(5));
         assert_eq!(crate::tui::theme::theme_index(), 5);
         assert_eq!(app.cfg.ui.theme, 5, "choice persisted");
