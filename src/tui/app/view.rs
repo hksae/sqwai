@@ -291,7 +291,7 @@ impl App {
 
     /// cache key for a segment's rendered content; changing it forces a repaint
     pub(super) fn seg_key(&self, seg: &Segment) -> usize {
-        match seg {
+        let base = match seg {
             Segment::User(t) => t.chars().count(),
             Segment::Assistant { text, .. } => text.chars().count(),
             Segment::Thinking { text, expanded, .. } => {
@@ -319,6 +319,15 @@ impl App {
                 k
             }
             Segment::Status { .. } => 0,
+        };
+        // an animated theme shifts its palette every frame, so baked-in
+        // frame/border/background colors must be re-rendered too — fold the
+        // tick into the key. Segments only re-highlight while an anim theme
+        // is active; static themes keep the cheap content-only key.
+        if crate::tui::theme::anim_theme_index().is_some() {
+            base.wrapping_mul(31).wrapping_add(crate::tui::theme::anim_tick() as usize)
+        } else {
+            base
         }
     }
 

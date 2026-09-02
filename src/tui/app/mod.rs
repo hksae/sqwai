@@ -337,6 +337,12 @@ impl App {
             if matches!(self.cur_menu(), Some(Menu::Themes)) {
                 self.build_menu_rows();
             }
+            // an animated theme shifts the chat's baked frame/border colors
+            // every frame, so force a re-assemble (and thus re-render) of the
+            // transcript while one is active
+            if crate::tui::theme::anim_theme_index().is_some() {
+                self.dirty = true;
+            }
             self.dirty |= self.streaming;
             terminal.draw(|f| self.draw(f))?;
             self.dirty = false;

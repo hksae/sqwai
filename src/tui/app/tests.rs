@@ -760,4 +760,25 @@ mod tests {
         );
         assert!(app.menu_status.is_some(), "notice stays inside the menu");
     }
+
+    #[test]
+    fn animated_theme_makes_seg_key_tick_dependent() {
+        // code block frames are baked into cached segments; for them to
+        // animate, seg_key must change with the anim tick while a theme is on
+        use crate::tui::app::Segment;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let seg = Segment::User("hello".into());
+        // static theme: key is independent of the tick
+        let k_static = app.seg_key(&seg);
+        crate::tui::theme::set_anim_tick(123);
+        assert_eq!(app.seg_key(&seg), k_static, "static key ignores the tick");
+        // animated theme: key tracks the tick -> segments re-render each frame
+        crate::tui::theme::set_anim_theme(2); // lava
+        crate::tui::theme::set_anim_tick(0);
+        let a = app.seg_key(&seg);
+        crate::tui::theme::set_anim_tick(40);
+        let b = app.seg_key(&seg);
+        crate::tui::theme::set_anim_theme_off();
+        assert_ne!(a, b, "seg_key must change with the anim tick");
+    }
 }
