@@ -64,7 +64,7 @@ const fn pal(h: u32) -> Palette {
     }
 }
 
-pub const THEMES: [ThemeDef; 12] = [
+pub const THEMES: [ThemeDef; 20] = [
     ThemeDef {
         name: "rose",
         p: pal(335),
@@ -112,6 +112,39 @@ pub const THEMES: [ThemeDef; 12] = [
     ThemeDef {
         name: "ember",
         p: pal(10),
+    },
+    // --- fun extras: same structure, off-beat hues -----------------------
+    ThemeDef {
+        name: "bubblegum",
+        p: pal(352),
+    },
+    ThemeDef {
+        name: "plasma",
+        p: pal(320),
+    },
+    ThemeDef {
+        name: "grape",
+        p: pal(290),
+    },
+    ThemeDef {
+        name: "denim",
+        p: pal(235),
+    },
+    ThemeDef {
+        name: "lagoon",
+        p: pal(182),
+    },
+    ThemeDef {
+        name: "slime",
+        p: pal(156),
+    },
+    ThemeDef {
+        name: "lime",
+        p: pal(125),
+    },
+    ThemeDef {
+        name: "peach",
+        p: pal(22),
     },
 ];
 

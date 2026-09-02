@@ -620,7 +620,7 @@ mod tests {
     fn themes_menu_applies_and_stays_open() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.open_menu(Menu::Themes);
-        assert_eq!(app.menu_rows.len(), 12, "12 palettes listed");
+        assert_eq!(app.menu_rows.len(), 20, "all palettes listed");
         // every row carries its own colored swatch
         for r in &app.menu_rows {
             assert!(
