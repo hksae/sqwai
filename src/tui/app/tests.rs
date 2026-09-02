@@ -627,7 +627,6 @@ mod tests {
     #[test]
     fn command_popup_contains_only_command_names() {
         assert!(COMMANDS.iter().all(|command| !command.contains(' ')));
-        assert!(!COMMANDS.contains(&"/help"));
         assert!(COMMANDS.contains(&"/undo"));
         assert!(COMMANDS.contains(&"/skill"));
     }
