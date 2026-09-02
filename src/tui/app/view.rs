@@ -19,12 +19,12 @@ use crate::session::Session;
 use crate::tui::markdown::{Highlighter, render, wrap_tagged};
 use crate::tui::theme::Theme;
 
-const STARTUP_LOGO: &str = "█████   ████████ █████ ███ █████  ██████   ████
-███▒▒   ███▒▒███ ▒▒███ ▒███▒▒███  ▒▒▒▒▒███ ▒▒███
-▒▒█████ ▒███ ▒███  ▒███ ▒███ ▒███   ███████  ▒███
-▒▒▒▒███▒███ ▒███  ▒▒███████████   ███▒▒███  ▒███
-██████ ▒▒███████   ▒▒████▒████   ▒▒████████ █████
-▒▒▒▒▒▒   ▒▒▒▒▒███    ▒▒▒▒ ▒▒▒▒     ▒▒▒▒▒▒▒▒ ▒▒▒▒▒";
+const STARTUP_LOGO: &str = "███████╗ ██████╗ ██╗    ██╗ █████╗ ██╗
+██╔════╝██╔═══██╗██║    ██║██╔══██╗██║
+███████╗██║   ██║██║ █╗ ██║███████║██║
+╚════██║██║▄▄ ██║██║███╗██║██╔══██║██║
+███████║╚██████╔╝╚███╔███╔╝██║  ██║██║
+╚══════╝ ╚══▀▀═╝  ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝";
 
 fn startup_logo(width: u16, height: u16) -> Vec<String> {
     let source: Vec<Vec<char>> = STARTUP_LOGO
@@ -969,7 +969,7 @@ impl App {
         if self.segments.is_empty() {
             return Paragraph::new(Line::from(vec![
                 Span::styled(" sqwai", Theme::accent_bold()),
-                Span::styled(" · v0.1.0", Theme::dim()),
+                Span::styled(format!(" · v{}", env!("CARGO_PKG_VERSION")), Theme::dim()),
             ]))
             .style(Theme::base());
         }
@@ -1112,36 +1112,55 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::startup_logo;
+    use super::{STARTUP_LOGO, startup_logo};
+    use unicode_width::UnicodeWidthStr;
 
     #[test]
     fn startup_logo_keeps_native_size_when_it_fits() {
         let logo = startup_logo(40, 6);
-        assert_eq!(logo.len(), 5);
-        assert_eq!(logo.iter().map(|line| line.chars().count()).max(), Some(40));
+        assert_eq!(logo.len(), 6);
+        assert_eq!(
+            logo.iter()
+                .map(|line| UnicodeWidthStr::width(line.as_str()))
+                .max(),
+            Some(38)
+        );
     }
 
     #[test]
     fn startup_logo_scales_to_width_and_height() {
         let logo = startup_logo(20, 4);
         assert!(logo.len() <= 4);
-        assert!(logo.iter().all(|line| line.chars().count() <= 20));
-        assert_eq!(logo.len(), 2);
-        assert_eq!(logo.iter().map(|line| line.chars().count()).max(), Some(20));
+        assert!(
+            logo.iter()
+                .all(|line| UnicodeWidthStr::width(line.as_str()) <= 20)
+        );
+        assert_eq!(logo.len(), 3);
+        assert_eq!(
+            logo.iter()
+                .map(|line| UnicodeWidthStr::width(line.as_str()))
+                .max(),
+            Some(20)
+        );
     }
 
     #[test]
     fn startup_logo_stays_native_size_in_large_terminal() {
         let logo = startup_logo(100, 24);
         assert_eq!(logo.len(), 6);
-        assert_eq!(logo.iter().map(|line| line.chars().count()).max(), Some(49));
+        assert_eq!(
+            logo.iter()
+                .map(|line| UnicodeWidthStr::width(line.as_str()))
+                .max(),
+            Some(38)
+        );
     }
 
     #[test]
     fn startup_logo_handles_tiny_terminal() {
         let logo = startup_logo(1, 1);
         assert_eq!(logo.len(), 1);
-        assert_eq!(logo[0].chars().count(), 1);
+        assert_eq!(UnicodeWidthStr::width(logo[0].as_str()), 1);
     }
 }
 
