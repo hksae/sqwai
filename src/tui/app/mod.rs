@@ -341,8 +341,20 @@ impl App {
             terminal.draw(|f| self.draw(f))?;
             self.dirty = false;
         }
-        self.session.save().ok();
+        // don't litter the sessions list with an empty stub: a freshly
+        // started session that never got a message (no 'n', no send) is not
+        // persisted on exit, so launching and quitting creates nothing.
+        if self.session_has_messages() {
+            self.session.save().ok();
+        }
         Ok(())
+    }
+
+    /// a session is only worth persisting once it carries real conversation;
+    /// a bare launch (no 'n', no send) leaves `messages` empty and must not
+    /// be written to disk as a stub
+    fn session_has_messages(&self) -> bool {
+        !self.session.messages.is_empty()
     }
 
     fn jump_to_bottom_on_typing(&mut self) {

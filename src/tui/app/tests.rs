@@ -665,6 +665,27 @@ mod tests {
     }
 
     #[test]
+    fn empty_startup_session_is_not_persisted() {
+        let app = test_app("http://127.0.0.1:9/v1".into());
+        // a bare launch opens a fresh session with no messages yet; it must
+        // NOT be written to disk on exit (no 'n', no send)
+        assert!(
+            !app.session_has_messages(),
+            "fresh launch session carries no messages"
+        );
+        // once a real message lands it becomes persistable
+        let mut app = app;
+        app.session.messages.push(crate::providers::Message::new(
+            crate::providers::Role::User,
+            "hi",
+        ));
+        assert!(
+            app.session_has_messages(),
+            "session with a message is persisted on exit"
+        );
+    }
+
+    #[test]
     fn sessions_filter_narrows_and_esc_clears() {
         use crossterm::event::{Event, KeyCode, KeyModifiers};
         let mut app = test_app("http://127.0.0.1:9/v1".into());
