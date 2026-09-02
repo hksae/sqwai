@@ -541,8 +541,12 @@ impl App {
 
     fn apply_session(&mut self, mut s: Session) {
         self.startup = false;
-        // persist the session we are leaving
-        self.session.save().ok();
+        // persist the session we are leaving — but skip a brand-new empty one
+        // (e.g. the startup stub), otherwise opening an existing session from
+        // the startup screen would litter the list with an extra empty file
+        if self.session_has_messages() {
+            self.session.save().ok();
+        }
         // resolve the session's model against the current config
         if !self.cfg.models.contains_key(&s.model_key) {
             s.model_key = self.cfg.default_model.clone();

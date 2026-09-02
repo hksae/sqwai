@@ -408,6 +408,25 @@ mod tests {
     }
 
     #[test]
+    fn apply_session_from_startup_does_not_persist_empty_stub() {
+        // on the startup screen the current session is empty; opening an
+        // existing session from there must switch to it without saving that
+        // empty startup stub to disk (see apply_session's session_has_messages guard)
+        use crate::providers::Role;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        assert!(app.session.messages.is_empty(), "startup session is empty");
+        let start_id = app.session.id;
+        let mut s = Session::new("m".into(), 1000);
+        s.push(Role::User, "existing conversation");
+        app.apply_session(s);
+        assert_ne!(app.session.id, start_id, "active session switched");
+        assert!(
+            app.session_has_messages(),
+            "active session is the existing one with history"
+        );
+    }
+
+    #[test]
     fn fork_at_copies_prefix_and_switches() {
         use crate::providers::Role;
         let mut app = test_app("http://127.0.0.1:9/v1".into());
