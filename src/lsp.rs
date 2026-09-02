@@ -57,6 +57,7 @@ pub struct Client {
     stdin: ChildStdin,
     stdout: tokio::io::BufReader<ChildStdout>,
     next_id: u64,
+    diagnostics: Vec<PublishDiagnosticsParams>,
 }
 
 impl Client {
@@ -76,6 +77,7 @@ impl Client {
             stdin,
             stdout: tokio::io::BufReader::new(stdout),
             next_id: 1,
+            diagnostics: Vec::new(),
         })
     }
 
@@ -89,6 +91,13 @@ impl Client {
         .await?;
         loop {
             let msg = read_message(&mut self.stdout).await?;
+            if msg.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
+            {
+                self.diagnostics.push(serde_json::from_value(
+                    msg.get("params").cloned().unwrap_or(Value::Null),
+                )?);
+                continue;
+            }
             if msg.get("id") == Some(&Value::from(id)) {
                 if let Some(error) = msg.get("error") {
                     bail!("LSP {method}: {error}");
@@ -148,13 +157,16 @@ impl Client {
     }
 
     pub async fn next_diagnostics(&mut self) -> Result<Option<PublishDiagnosticsParams>> {
+        if !self.diagnostics.is_empty() {
+            return Ok(Some(self.diagnostics.remove(0)));
+        }
         loop {
             let msg = read_message(&mut self.stdout).await?;
             if msg.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
             {
-                return Ok(Some(serde_json::from_value(
-                    msg.get("params").cloned().unwrap_or(Value::Null),
-                )?));
+                let diagnostic =
+                    serde_json::from_value(msg.get("params").cloned().unwrap_or(Value::Null))?;
+                return Ok(Some(diagnostic));
             }
         }
     }
