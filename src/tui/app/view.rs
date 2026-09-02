@@ -18,17 +18,12 @@ use crate::session::Session;
 use crate::tui::markdown::{Highlighter, render, wrap_tagged};
 use crate::tui::theme::Theme;
 
-const STARTUP_LOGO: &str = "                                              ███
-▒▒▒
-█████   ████████ █████ ███ █████  ██████   ████
+const STARTUP_LOGO: &str = "█████   ████████ █████ ███ █████  ██████   ████
 ███▒▒   ███▒▒███ ▒▒███ ▒███▒▒███  ▒▒▒▒▒███ ▒▒███
 ▒▒█████ ▒███ ▒███  ▒███ ▒███ ▒███   ███████  ▒███
 ▒▒▒▒███▒███ ▒███  ▒▒███████████   ███▒▒███  ▒███
 ██████ ▒▒███████   ▒▒████▒████   ▒▒████████ █████
-▒▒▒▒▒▒   ▒▒▒▒▒███    ▒▒▒▒ ▒▒▒▒     ▒▒▒▒▒▒▒▒ ▒▒▒▒▒
-▒███
-█████
-▒▒▒▒▒";
+▒▒▒▒▒▒   ▒▒▒▒▒███    ▒▒▒▒ ▒▒▒▒     ▒▒▒▒▒▒▒▒ ▒▒▒▒▒";
 
 fn startup_logo(width: u16, height: u16) -> Vec<String> {
     let source: Vec<Vec<char>> = STARTUP_LOGO
@@ -1119,8 +1114,8 @@ mod tests {
 
     #[test]
     fn startup_logo_keeps_native_size_when_it_fits() {
-        let logo = startup_logo(40, 9);
-        assert_eq!(logo.len(), 9);
+        let logo = startup_logo(40, 6);
+        assert_eq!(logo.len(), 5);
         assert_eq!(logo.iter().map(|line| line.chars().count()).max(), Some(40));
     }
 
@@ -1129,14 +1124,14 @@ mod tests {
         let logo = startup_logo(20, 4);
         assert!(logo.len() <= 4);
         assert!(logo.iter().all(|line| line.chars().count() <= 20));
-        assert_eq!(logo.len(), 4);
-        assert_eq!(logo.iter().map(|line| line.chars().count()).max(), Some(18));
+        assert_eq!(logo.len(), 2);
+        assert_eq!(logo.iter().map(|line| line.chars().count()).max(), Some(20));
     }
 
     #[test]
     fn startup_logo_stays_native_size_in_large_terminal() {
         let logo = startup_logo(100, 24);
-        assert_eq!(logo.len(), 11);
+        assert_eq!(logo.len(), 6);
         assert_eq!(logo.iter().map(|line| line.chars().count()).max(), Some(49));
     }
 
