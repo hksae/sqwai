@@ -39,6 +39,24 @@ fn startup_logo(width: u16, height: u16) -> Vec<String> {
     let target_height = usize::from(height).max(1);
     let scale = (target_width as f32 / natural_width.max(1) as f32)
         .min(target_height as f32 / natural_height.max(1) as f32);
+
+    // Upscale only by whole terminal-cell factors. Fractional nearest-neighbor
+    // scaling can repeat some source columns more often than others, which is
+    // especially visible as dark vertical bands in block-art glyphs.
+    if scale >= 1.0 {
+        let factor = scale.floor() as usize;
+        return source
+            .into_iter()
+            .flat_map(|line| {
+                let expanded: String = line
+                    .into_iter()
+                    .flat_map(|ch| std::iter::repeat_n(ch, factor))
+                    .collect();
+                std::iter::repeat_n(expanded, factor)
+            })
+            .collect();
+    }
+
     let output_width = ((natural_width as f32 * scale).round() as usize).max(1);
     let output_height = ((natural_height as f32 * scale).round() as usize).max(1);
 
