@@ -172,9 +172,23 @@ impl Client {
         }
     }
     pub async fn shutdown(mut self) -> Result<()> {
-        let _ = self.request("shutdown", Value::Null).await?;
-        self.notify("exit", Value::Null).await?;
-        let _ = self.child.wait().await?;
+        let mut first_error = None;
+        if let Err(error) = self.request("shutdown", Value::Null).await {
+            first_error = Some(error);
+        }
+        if let Err(error) = self.notify("exit", Value::Null).await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+        if let Err(error) = self.child.wait().await
+            && first_error.is_none()
+        {
+            first_error = Some(error.into());
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
         Ok(())
     }
 }
@@ -257,6 +271,22 @@ impl Manager {
             }
         }
         Ok(result)
+    }
+
+    /// Gracefully stop all configured language servers.
+    pub async fn shutdown(self) -> Result<()> {
+        let mut first_error = None;
+        for (_, client) in self.clients {
+            if let Err(error) = client.shutdown().await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(())
     }
 }
 

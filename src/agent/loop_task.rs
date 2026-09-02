@@ -561,6 +561,9 @@ async fn run_agent(
             plan_todos,
         })))
         .await;
+    if let Some(manager) = lsp_manager {
+        let _ = manager.shutdown().await;
+    }
 }
 
 /// Run the compaction policy, cheapest stage first.
