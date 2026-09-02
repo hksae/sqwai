@@ -73,6 +73,7 @@ pub struct App {
     stable_prefix: String,
     /// Whether the current prompt still needs the full tool-oriented context.
     context_bootstrap_pending: bool,
+    active_skills: Vec<crate::prompts::skills::Skill>,
 
     input: TextArea<'static>,
     segments: Vec<Segment>,
@@ -157,7 +158,12 @@ impl App {
     fn stable_prefix(&self) -> String {
         let mut prompt = crate::prompts::stable_prefix();
         let root = std::env::current_dir().unwrap_or_default();
-        let loaded = crate::prompts::skills::load(&self.cfg.skills, &root);
+        let mut loaded = crate::prompts::skills::load(&self.cfg.skills, &root);
+        for selected in &self.active_skills {
+            if !loaded.iter().any(|skill| skill.name == selected.name) {
+                loaded.push(selected.clone());
+            }
+        }
         if let Some(skills) = crate::prompts::skills::prompt(&loaded) {
             prompt.push_str("\n\n");
             prompt.push_str(&skills);
@@ -210,6 +216,7 @@ impl App {
             hl: Highlighter::new(),
             stable_prefix: String::new(),
             context_bootstrap_pending: true,
+            active_skills: Vec::new(),
             cfg,
             segments: Vec::new(),
             streaming: false,
@@ -699,6 +706,9 @@ impl App {
                 if loaded.is_empty() {
                     self.status("skill not found", StatusKind::Warn);
                 } else {
+                    self.active_skills = loaded.clone();
+                    self.stable_prefix = self.stable_prefix();
+                    self.context_bootstrap_pending = true;
                     self.status(
                         &format!(
                             "loaded skill(s): {}",
@@ -713,7 +723,13 @@ impl App {
                 }
             }
 
-            "/debug" => self.open_menu(Menu::Debug),
+            "/skills" => {
+                self.active_skills.clear();
+                self.stable_prefix = self.stable_prefix();
+                self.context_bootstrap_pending = true;
+                self.status("automatic Skills loading restored", StatusKind::Ok);
+            }
+
             "/themes" | "/theme" => self.open_menu(Menu::Themes),
             "/init" => {
                 if std::path::Path::new("AGENTS.md").exists() {
