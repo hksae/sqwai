@@ -112,10 +112,10 @@ pub struct AnimThemeDef {
 fn anim_palette(kind: AnimKind, base: u32, tick: u64) -> Palette {
     let fg = hsv(base, 5, 93);
     let dim = hsv(base, 21, 59);
-    // each arm yields the four decorative hue channels (accent, border, bg,
-    // surface); the final Palette is built once below so the s/v layering is
-    // identical for every animated theme.
-    let (accent_h, border_h, bg_h, surf_h) = match kind {
+    // each arm yields the six decorative colors (accent, accent_soft, border,
+    // border_dim, bg, surface); fg/dim/ok/err/warn are derived from `base`
+    // below so they stay consistent across every animated theme.
+    let (accent, accent_soft, border, border_dim, bg, surface) = match kind {
         AnimKind::Lava => {
             // slow, smooth ping-pong: hue eases orange -> yellow -> back to
             // orange (triangle wave) instead of snapping to orange at the top
@@ -124,32 +124,53 @@ fn anim_palette(kind: AnimKind, base: u32, tick: u64) -> Palette {
             let st = (tick / 3) as u32;
             let half = st % 60; // period 60 steps
             let f = if half <= 30 { half } else { 60 - half }; // 0..30..0
-            (10 + f, 20 + f, 12 + f, 18 + f)
+            (
+                hsv(10 + f, 57, 100),
+                hsv(10 + f, 44, 84),
+                hsv(20 + f, 59, 87),
+                hsv(20 + f, 31, 35),
+                hsv(12 + f, 33, 9),
+                hsv(18 + f, 33, 13),
+            )
         }
         AnimKind::Gum => {
-            // pink (bubblegum 352) <-> aquamarine (168) ping-pong, taking the
-            // SHORT WAY DOWN through purple/blue (352 -> 300 -> 250 -> 200 ->
-            // 168) so green/yellow/red never appear between the two endpoints.
-            // 1 hue/step, step every 2 frames (~10fps stepping) -> ~18s full
-            // cycle, smooth. all decorative roles share the hue so the UI
-            // shifts as one clean pink<->blue gradient.
+            // pink (bubblegum) <-> aquamarine as a DIRECT RGB blend, NOT a hue
+            // sweep: the morph stays in the pink<->blue family and never walks
+            // the color wheel through green/yellow/red or a vivid purple. The
+            // only in-between is a soft periwinkle, not a distinct hue. Triangle
+            // wave -> smooth ping-pong, ~18s full cycle.
+            let pink = (235u32, 110u32, 255u32); // bubblegum accent (hsv 352,57,100)
+            let blue = (110u32, 255u32, 226u32); // aquamarine accent (hsv 168,57,100)
             let st = (tick / 2) as u32;
-            let period = 92u32; // steps per half-swing (hue span 184 / 2)
+            let period = 90u32; // steps per half-swing
             let half = st % (period * 2);
             let tri = if half <= period { half } else { period * 2 - half }; // 0..period..0
-            let h = 352 - tri * 2; // 352..168 (no wraparound, stays >= 0)
-            (h, h, h, h)
+            let t = tri as f64 / period as f64; // 0..1..0
+            let m = |a: u32, b: u32| -> u8 { (a as f64 + (b as f64 - a as f64) * t).round() as u8 };
+            let ar = m(pink.0, blue.0);
+            let ag = m(pink.1, blue.1);
+            let ab = m(pink.2, blue.2);
+            let lite = |v: u8, k: f64| -> u8 { (v as f64 + (255.0 - v as f64) * k).round() as u8 };
+            let dark = |v: u8, k: f64| -> u8 { (v as f64 * k).round() as u8 };
+            (
+                Color::Rgb(ar, ag, ab),
+                Color::Rgb(lite(ar, 0.25), lite(ag, 0.25), lite(ab, 0.25)),
+                Color::Rgb(lite(ar, 0.12), lite(ag, 0.12), lite(ab, 0.12)),
+                Color::Rgb(dark(ar, 0.40), dark(ag, 0.40), dark(ab, 0.40)),
+                Color::Rgb(dark(ar, 0.09), dark(ag, 0.09), dark(ab, 0.09)),
+                Color::Rgb(dark(ar, 0.13), dark(ag, 0.13), dark(ab, 0.13)),
+            )
         }
     };
     Palette {
-        bg: hsv(bg_h, 33, 9),
-        surface: hsv(surf_h, 33, 13),
+        bg,
+        surface,
         fg,
         dim,
-        accent: hsv(accent_h, 57, 100),
-        accent_soft: hsv(accent_h, 44, 84),
-        border: hsv(border_h, 59, 87),
-        border_dim: hsv(border_h, 31, 35),
+        accent,
+        accent_soft,
+        border,
+        border_dim,
         ok: hsv((base + 150) % 360, 37, 78),
         err: hsv((base + 29) % 360, 55, 94),
         warn: hsv((base + 64) % 360, 53, 92),
@@ -157,8 +178,8 @@ fn anim_palette(kind: AnimKind, base: u32, tick: u64) -> Palette {
 }
 
 pub const ANIMATED_THEMES: [AnimThemeDef; 2] = [
-    AnimThemeDef { name: "lava",  base_hue: 18,  kind: AnimKind::Lava },
-    AnimThemeDef { name: "taffy", base_hue: 352, kind: AnimKind::Gum },
+    AnimThemeDef { name: "lava", base_hue: 18, kind: AnimKind::Lava },
+    AnimThemeDef { name: "gum",  base_hue: 352, kind: AnimKind::Gum },
 ];
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
