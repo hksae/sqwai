@@ -3,7 +3,8 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -179,6 +180,8 @@ impl Client {
 }
 pub struct Manager {
     clients: Vec<(crate::config::LspServerDef, Client)>,
+    /// Open documents and their latest LSP version, shared by all matching servers.
+    documents: HashMap<PathBuf, i32>,
 }
 
 impl Manager {
@@ -189,22 +192,40 @@ impl Manager {
             client.initialize(root).await?;
             clients.push((server.clone(), client));
         }
-        Ok(Self { clients })
+        Ok(Self {
+            clients,
+            documents: HashMap::new(),
+        })
     }
 
     pub async fn did_open(&mut self, path: &Path, text: &str) -> Result<()> {
+        let path = path.to_path_buf();
+        if self.documents.contains_key(&path) {
+            return Ok(());
+        }
         for (server, client) in &mut self.clients {
-            if server_matches_path(server, path) {
-                client.did_open(path, &server.language, text).await?;
+            if server_matches_path(server, &path) {
+                client.did_open(&path, &server.language, text).await?;
             }
         }
+        self.documents.insert(path, 1);
         Ok(())
     }
 
-    pub async fn did_change(&mut self, path: &Path, version: i32, text: &str) -> Result<()> {
+    pub async fn did_change(&mut self, path: &Path, text: &str) -> Result<()> {
+        let path = path.to_path_buf();
+        if !self.documents.contains_key(&path) {
+            self.did_open(&path, text).await?;
+        }
+        let version = self
+            .documents
+            .get_mut(&path)
+            .expect("document opened above");
+        *version += 1;
+        let version = *version;
         for (server, client) in &mut self.clients {
-            if server_matches_path(server, path) {
-                client.did_change(path, version, text).await?;
+            if server_matches_path(server, &path) {
+                client.did_change(&path, version, text).await?;
             }
         }
         Ok(())
@@ -313,6 +334,50 @@ mod tests {
         write_message(&mut bytes, &value).await.unwrap();
         let mut reader = BufReader::new(bytes.as_slice());
         assert_eq!(read_message(&mut reader).await.unwrap(), value);
+    }
+
+    #[tokio::test]
+    async fn manager_opens_once_and_increments_versions() {
+        let path = Path::new("src/main.rs");
+        let mut manager = Manager {
+            clients: Vec::new(),
+            documents: HashMap::new(),
+        };
+
+        manager.did_open(path, "one").await.unwrap();
+        manager.did_open(path, "one").await.unwrap();
+        assert_eq!(manager.documents.get(path), Some(&1));
+
+        manager.did_change(path, "two").await.unwrap();
+        assert_eq!(manager.documents.get(path), Some(&2));
+        manager.did_change(path, "three").await.unwrap();
+        assert_eq!(manager.documents.get(path), Some(&3));
+    }
+
+    #[tokio::test]
+    async fn first_change_opens_document_before_version_two() {
+        let path = Path::new("src/lib.rs");
+        let mut manager = Manager {
+            clients: Vec::new(),
+            documents: HashMap::new(),
+        };
+
+        manager.did_change(path, "content").await.unwrap();
+        assert_eq!(manager.documents.get(path), Some(&2));
+    }
+
+    #[test]
+    fn routes_files_by_extension_marker() {
+        let server = crate::config::LspServerDef {
+            name: "rust".into(),
+            enabled: true,
+            language: "rust".into(),
+            command: "rust-analyzer".into(),
+            args: Vec::new(),
+            root_markers: vec!["*.rs".into()],
+        };
+        assert!(server_matches_path(&server, Path::new("src/main.rs")));
+        assert!(!server_matches_path(&server, Path::new("README.md")));
     }
 
     #[test]

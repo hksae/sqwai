@@ -493,7 +493,7 @@ async fn run_agent(
                     if let Some(path) = call.args.get("file_path").and_then(|v| v.as_str()) {
                         let path = root.join(path);
                         if let Ok(text) = tokio::fs::read_to_string(&path).await {
-                            let _ = manager.did_change(&path, 1, &text).await;
+                            let _ = manager.did_change(&path, &text).await;
                             let _ = manager.did_save(&path).await;
                             tokio::task::yield_now().await;
                             let diagnostics =
