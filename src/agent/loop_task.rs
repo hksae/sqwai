@@ -99,6 +99,10 @@ pub enum AgentEvent {
     },
     /// the agent revised the visible to-do list
     Todos(Vec<String>),
+    /// latest diagnostics count reported after a file mutation
+    Diagnostics {
+        count: usize,
+    },
     Retry {
         attempt: u32,
         delay_secs: u64,
@@ -498,6 +502,15 @@ async fn run_agent(
                             tokio::task::yield_now().await;
                             let diagnostics =
                                 manager.collect_diagnostics().await.unwrap_or_default();
+                            let diagnostic_count = diagnostics
+                                .iter()
+                                .map(|item| item.diagnostics.len())
+                                .sum::<usize>();
+                            let _ = tx
+                                .send(AgentEvent::Diagnostics {
+                                    count: diagnostic_count,
+                                })
+                                .await;
                             if !diagnostics.is_empty() {
                                 outcome.output.push_str("\nLSP diagnostics:\n");
                                 for item in diagnostics {

@@ -1029,7 +1029,12 @@ impl App {
         self.th_click = None;
 
         // right side: [folder] [th:level] [MODE chip]
-        let mut right_len: usize = 1 + th_label.chars().count(); // mode chip always present
+        let lsp_label = if self.lsp_diagnostics > 0 {
+            format!(" LSP:{} ", self.lsp_diagnostics)
+        } else {
+            String::new()
+        };
+        let mut right_len: usize = 1 + th_label.chars().count() + lsp_label.chars().count(); // mode chip always present
         if !dir.is_empty() {
             right_len += truncate_chars(&dir, 20).chars().count() + 1;
         }
@@ -1046,6 +1051,9 @@ impl App {
         };
         spans.push(Span::styled(th_label.clone(), th_style));
         self.th_click = Some((th_x0, th_x0 + th_label.chars().count() as u16));
+        if !lsp_label.is_empty() {
+            spans.push(Span::styled(lsp_label, Theme::warn()));
+        }
         if !dir.is_empty() {
             spans.push(Span::styled(
                 format!("{} ", truncate_chars(&dir, 20)),

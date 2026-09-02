@@ -104,6 +104,9 @@ pub struct App {
     /// label of the last shadow checkpoint (design §10 indicator)
     last_checkpoint: Option<String>,
 
+    /// latest diagnostic count reported by the LSP manager
+    lsp_diagnostics: usize,
+
     follow: bool,
     /// absolute top line of the viewport when not following (None-equivalent: follow == true)
     view_top: usize,
@@ -235,6 +238,7 @@ impl App {
             retry_notified: true, // no toast for the very first turn
             retry_line: None,
             last_checkpoint: None,
+            lsp_diagnostics: 0,
             follow: true,
             view_top: 0,
             spinner_tick: 0,
@@ -1063,6 +1067,19 @@ impl App {
                         command,
                         reason,
                     });
+                    self.dirty = true;
+                }
+                AgentEvent::Diagnostics { count } => {
+                    self.lsp_diagnostics = count;
+                    if count > 0 {
+                        self.status(
+                            &format!(
+                                "LSP: {count} diagnostic{}",
+                                if count == 1 { "" } else { "s" }
+                            ),
+                            StatusKind::Warn,
+                        );
+                    }
                     self.dirty = true;
                 }
                 AgentEvent::Retry {
