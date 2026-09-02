@@ -219,11 +219,23 @@ impl Manager {
         Ok(())
     }
 
-    pub fn take_diagnostics(&mut self) -> Vec<PublishDiagnosticsParams> {
-        self.clients
+    pub async fn collect_diagnostics(&mut self) -> Result<Vec<PublishDiagnosticsParams>> {
+        let mut result = self
+            .clients
             .iter_mut()
             .flat_map(|(_, client)| client.diagnostics.drain(..))
-            .collect()
+            .collect::<Vec<_>>();
+        for (_, client) in &mut self.clients {
+            while let Ok(Ok(Some(item))) = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                client.next_diagnostics(),
+            )
+            .await
+            {
+                result.push(item);
+            }
+        }
+        Ok(result)
     }
 }
 

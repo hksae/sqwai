@@ -496,7 +496,8 @@ async fn run_agent(
                             let _ = manager.did_change(&path, 1, &text).await;
                             let _ = manager.did_save(&path).await;
                             tokio::task::yield_now().await;
-                            let diagnostics = manager.take_diagnostics();
+                            let diagnostics =
+                                manager.collect_diagnostics().await.unwrap_or_default();
                             if !diagnostics.is_empty() {
                                 outcome.output.push_str("\nLSP diagnostics:\n");
                                 for item in diagnostics {
