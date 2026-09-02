@@ -64,7 +64,7 @@ const fn pal(h: u32) -> Palette {
     }
 }
 
-pub const THEMES: [ThemeDef; 20] = [
+pub const THEMES: [ThemeDef; 21] = [
     // ordered by hue so the /themes list reads as one continuous rainbow:
     // 335 -> 320 -> 305 ... -> 10, then 352 wraps back toward rose
     ThemeDef { name: "rose",       p: pal(335) },
@@ -87,6 +87,26 @@ pub const THEMES: [ThemeDef; 20] = [
     ThemeDef { name: "peach",      p: pal(22) },
     ThemeDef { name: "ember",      p: pal(10) },
     ThemeDef { name: "bubblegum",  p: pal(352) },
+    // monochrome: dark background, white text/borders/accents; status colors
+    // stay semantic (ok/err/warn). Kept dark-bg so syntect code tokens stay
+    // readable -- a true white-background light mode would need code-highlight
+    // rework and is out of scope here.
+    ThemeDef {
+        name: "white",
+        p: Palette {
+            bg: hsv(220, 10, 8),
+            surface: hsv(220, 10, 12),
+            fg: hsv(0, 0, 95),
+            dim: hsv(0, 0, 62),
+            accent: hsv(0, 0, 100),
+            accent_soft: hsv(0, 0, 82),
+            border: hsv(0, 0, 84),
+            border_dim: hsv(0, 0, 40),
+            ok: hsv(145, 45, 72),
+            err: hsv(0, 60, 88),
+            warn: hsv(45, 60, 88),
+        },
+    },
 ];
 
 /// kinds of animated (time-driven) palettes.
@@ -96,6 +116,10 @@ pub enum AnimKind {
     Lava,
     /// pink (bubblegum 352) <-> aquamarine (168) ping-pong through purple/blue
     Gum,
+    /// soft breathing between magenta (305) and pink (335)
+    Bloom,
+    /// magenta <-> cyan synthwave duet (direct RGB blend, hold at each end)
+    Neon,
 }
 
 /// an animated theme: a name, the static text hue, and the animation kind
@@ -170,6 +194,58 @@ fn anim_palette(kind: AnimKind, base: u32, tick: u64) -> Palette {
                 Color::Rgb(dark(ar, 0.13), dark(ag, 0.13), dark(ab, 0.13)),
             )
         }
+        AnimKind::Bloom => {
+            // soft breathing between magenta (305) and pink (335) -- a narrow
+            // hue band, so it never sweeps through other colors. Same slow
+            // triangle pacing as Lava (~9s full cycle).
+            let st = (tick / 3) as u32;
+            let half = st % 60;
+            let f = if half <= 30 { half } else { 60 - half }; // 0..30..0
+            let h = 305 + f; // 305..335 (magenta -> pink)
+            (
+                hsv(h, 57, 100),
+                hsv(h, 44, 84),
+                hsv(h + 10, 59, 87),
+                hsv(h + 10, 31, 35),
+                hsv(h + 2, 33, 9),
+                hsv(h + 8, 33, 13),
+            )
+        }
+        AnimKind::Neon => {
+            // synthwave magenta <-> cyan as a DIRECT RGB blend (not a hue
+            // sweep): the morph stays in the magenta<->cyan family with only a
+            // soft blue/white in-between -- no green/yellow/red. Fast morph
+            // (~2s) with a dwell at each endpoint (~2.25s).
+            let magenta = (235u32, 60u32, 255u32); // vivid pink-magenta
+            let cyan = (80u32, 240u32, 255u32); // bright cyan
+            const HOLD: u32 = 45; // frames paused on each endpoint (~2.25s @20fps)
+            const MORPH: u32 = 40; // frames for one magenta<->cyan morph (~2.0s)
+            let cycle = HOLD * 2 + MORPH * 2;
+            let ph = (tick as u32) % cycle;
+            let t = if ph < HOLD {
+                0.0
+            } else if ph < HOLD + MORPH {
+                (ph - HOLD) as f64 / MORPH as f64 // magenta -> cyan
+            } else if ph < HOLD * 2 + MORPH {
+                1.0
+            } else {
+                1.0 - ((ph - (HOLD * 2 + MORPH)) as f64 / MORPH as f64) // cyan -> magenta
+            };
+            let m = |a: u32, b: u32| -> u8 { (a as f64 + (b as f64 - a as f64) * t).round() as u8 };
+            let ar = m(magenta.0, cyan.0);
+            let ag = m(magenta.1, cyan.1);
+            let ab = m(magenta.2, cyan.2);
+            let lite = |v: u8, k: f64| -> u8 { (v as f64 + (255.0 - v as f64) * k).round() as u8 };
+            let dark = |v: u8, k: f64| -> u8 { (v as f64 * k).round() as u8 };
+            (
+                Color::Rgb(ar, ag, ab),
+                Color::Rgb(lite(ar, 0.25), lite(ag, 0.25), lite(ab, 0.25)),
+                Color::Rgb(lite(ar, 0.12), lite(ag, 0.12), lite(ab, 0.12)),
+                Color::Rgb(dark(ar, 0.40), dark(ag, 0.40), dark(ab, 0.40)),
+                Color::Rgb(dark(ar, 0.09), dark(ag, 0.09), dark(ab, 0.09)),
+                Color::Rgb(dark(ar, 0.13), dark(ag, 0.13), dark(ab, 0.13)),
+            )
+        }
     };
     Palette {
         bg,
@@ -186,9 +262,11 @@ fn anim_palette(kind: AnimKind, base: u32, tick: u64) -> Palette {
     }
 }
 
-pub const ANIMATED_THEMES: [AnimThemeDef; 2] = [
-    AnimThemeDef { name: "lava", base_hue: 18, kind: AnimKind::Lava },
-    AnimThemeDef { name: "gum",  base_hue: 352, kind: AnimKind::Gum },
+pub const ANIMATED_THEMES: [AnimThemeDef; 4] = [
+    AnimThemeDef { name: "lava",  base_hue: 18,  kind: AnimKind::Lava },
+    AnimThemeDef { name: "gum",   base_hue: 352, kind: AnimKind::Gum },
+    AnimThemeDef { name: "bloom", base_hue: 335, kind: AnimKind::Bloom },
+    AnimThemeDef { name: "neon",  base_hue: 300, kind: AnimKind::Neon },
 ];
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
