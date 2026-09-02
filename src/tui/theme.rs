@@ -137,15 +137,24 @@ fn anim_palette(kind: AnimKind, base: u32, tick: u64) -> Palette {
             // pink (bubblegum) <-> aquamarine as a DIRECT RGB blend, NOT a hue
             // sweep: the morph stays in the pink<->blue family and never walks
             // the color wheel through green/yellow/red or a vivid purple. The
-            // only in-between is a soft periwinkle, not a distinct hue. Triangle
-            // wave -> smooth ping-pong, ~18s full cycle.
+            // only in-between is a soft periwinkle, not a distinct hue.
+            // Fast morph (~2s) with a dwell at each endpoint (~2.25s) so it
+            // "settles" on pink and on blue instead of continuously sweeping.
             let pink = (235u32, 110u32, 255u32); // bubblegum accent (hsv 352,57,100)
             let blue = (110u32, 255u32, 226u32); // aquamarine accent (hsv 168,57,100)
-            let st = (tick / 2) as u32;
-            let period = 90u32; // steps per half-swing
-            let half = st % (period * 2);
-            let tri = if half <= period { half } else { period * 2 - half }; // 0..period..0
-            let t = tri as f64 / period as f64; // 0..1..0
+            const HOLD: u32 = 45; // frames paused on each endpoint (~2.25s @20fps)
+            const MORPH: u32 = 40; // frames for one pink<->blue morph (~2.0s)
+            let cycle = HOLD * 2 + MORPH * 2;
+            let ph = (tick as u32) % cycle;
+            let t = if ph < HOLD {
+                0.0
+            } else if ph < HOLD + MORPH {
+                (ph - HOLD) as f64 / MORPH as f64 // pink -> blue
+            } else if ph < HOLD * 2 + MORPH {
+                1.0
+            } else {
+                1.0 - ((ph - (HOLD * 2 + MORPH)) as f64 / MORPH as f64) // blue -> pink
+            };
             let m = |a: u32, b: u32| -> u8 { (a as f64 + (b as f64 - a as f64) * t).round() as u8 };
             let ar = m(pink.0, blue.0);
             let ag = m(pink.1, blue.1);
