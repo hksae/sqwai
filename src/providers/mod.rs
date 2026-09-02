@@ -162,11 +162,7 @@ pub struct RequestBreakdown {
 impl RequestBreakdown {
     pub fn from_request(req: &ChatRequest) -> Self {
         let mut out = Self::default();
-        out.system_bytes = req
-            .system
-            .iter()
-            .map(|p| p.text.len() as u64)
-            .sum::<u64>();
+        out.system_bytes = req.system.iter().map(|p| p.text.len() as u64).sum::<u64>();
         for message in &req.messages {
             let bytes = message.content.len() as u64
                 + message

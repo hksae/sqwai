@@ -325,7 +325,8 @@ impl App {
         // tick into the key. Segments only re-highlight while an anim theme
         // is active; static themes keep the cheap content-only key.
         if crate::tui::theme::anim_theme_index().is_some() {
-            base.wrapping_mul(31).wrapping_add(crate::tui::theme::anim_tick() as usize)
+            base.wrapping_mul(31)
+                .wrapping_add(crate::tui::theme::anim_tick() as usize)
         } else {
             base
         }

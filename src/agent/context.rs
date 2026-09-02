@@ -305,7 +305,11 @@ fn prune_message(message: &Message) -> Message {
     if message.role != Role::Tool || message.content.chars().count() <= MAX_TOOL_OUTPUT_CHARS {
         return message.clone();
     }
-    let head: String = message.content.chars().take(MAX_TOOL_OUTPUT_CHARS).collect();
+    let head: String = message
+        .content
+        .chars()
+        .take(MAX_TOOL_OUTPUT_CHARS)
+        .collect();
     let mut copy = message.clone();
     copy.content = format!("{head}\n{PRUNE_NOTE}");
     copy
@@ -421,7 +425,11 @@ mod tests {
         assert!(changed);
         assert_eq!(pruned.len(), messages.len(), "pruning drops no message");
         // the newest tool results keep their full payload
-        assert!(pruned[pruned.len() - 1].content.contains(&"y".repeat(6_000)));
+        assert!(
+            pruned[pruned.len() - 1]
+                .content
+                .contains(&"y".repeat(6_000))
+        );
         // the oldest ones were cut down
         assert!(pruned[1].content.len() < 6_000);
         assert!(pruned[1].content.contains(PRUNE_NOTE));
@@ -439,11 +447,13 @@ mod tests {
         // still leave the recent tail intact
         let messages = vec![
             user("first task"),
-            Message::new(Role::Assistant, "").with_tool_calls(vec![crate::providers::ToolCallReq {
-                id: "c1".into(),
-                name: "read".into(),
-                args: serde_json::json!({"file_path": "a.rs"}),
-            }]),
+            Message::new(Role::Assistant, "").with_tool_calls(vec![
+                crate::providers::ToolCallReq {
+                    id: "c1".into(),
+                    name: "read".into(),
+                    args: serde_json::json!({"file_path": "a.rs"}),
+                },
+            ]),
             Message::tool_result("c1", "fn main() {}", false),
             user("second task"),
             Message::new(Role::Assistant, "did second"),
@@ -520,6 +530,9 @@ mod tests {
             "a trimmed history must open on a user turn"
         );
         // the newest turn always survives
-        assert_eq!(trimmed.last().unwrap().content, messages.last().unwrap().content);
+        assert_eq!(
+            trimmed.last().unwrap().content,
+            messages.last().unwrap().content
+        );
     }
 }
