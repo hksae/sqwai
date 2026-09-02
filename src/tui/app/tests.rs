@@ -620,23 +620,16 @@ mod tests {
     fn themes_menu_applies_and_stays_open() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.open_menu(Menu::Themes);
-        // 20 static + 1 "animated" header + 6 animated themes
-        let total =
-            crate::tui::theme::THEMES.len() + 1 + crate::tui::theme::ANIMATED_THEMES.len();
+        // 20 static + 6 animated themes, listed back-to-back (no header/separator)
+        let total = crate::tui::theme::THEMES.len() + crate::tui::theme::ANIMATED_THEMES.len();
         assert_eq!(app.menu_rows.len(), total, "all palettes listed");
-        // every theme row carries its own colored swatch; the section header
-        // is the only row without one
+        // every theme row carries its own colored swatch (2 blocks)
         let mut swatches = 0;
-        let mut has_header = false;
         for r in &app.menu_rows {
-            if r.0.spans.iter().any(|s| s.content.contains("animated")) {
-                has_header = true;
-            }
             if r.0.spans.iter().any(|s| s.content.contains("██")) {
                 swatches += 1;
             }
         }
-        assert!(has_header, "animated section header present");
         assert_eq!(
             swatches,
             crate::tui::theme::THEMES.len() + crate::tui::theme::ANIMATED_THEMES.len(),
