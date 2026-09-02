@@ -18,6 +18,48 @@ use crate::session::Session;
 use crate::tui::markdown::{Highlighter, render, wrap_tagged};
 use crate::tui::theme::Theme;
 
+const STARTUP_LOGO: &str = "  ██████   █████   █     █░ ▄▄▄       ██▓
+▒██    ▒ ▒██▓  ██▒▓█░ █ ░█░▒████▄    ▓██▒
+░ ▓██▄   ▒██▒  ██░▒█░ █ ░█ ▒██  ▀█▄  ▒██▒
+  ▒   ██▒░██  █▀ ░░█░ █ ░█ ░██▄▄▄▄██ ░██░
+▒██████▒▒░▒███▒█▄ ░░██▒██▓  ▓█   ▓██▒░██░
+▒ ▒▓▒ ▒ ░░░ ▒▒░ ▒ ░ ▓░▒ ▒   ▒▒   ▓▒█░░▓  
+░ ░▒  ░ ░ ░ ▒░  ░   ▒ ░ ░    ▒   ▒▒ ░ ▒ ░
+░  ░  ░     ░   ░   ░   ░    ░   ▒    ▒ ░
+      ░      ░        ░          ░  ░ ░  ";
+
+fn startup_logo(width: u16, height: u16) -> Vec<String> {
+    let source: Vec<Vec<char>> = STARTUP_LOGO
+        .lines()
+        .map(|line| line.chars().collect())
+        .collect();
+    let natural_width = source.iter().map(Vec::len).max().unwrap_or(0);
+    let natural_height = source.len();
+    let target_width = usize::from(width).max(1);
+    let target_height = usize::from(height).max(1);
+    let scale = (target_width as f32 / natural_width.max(1) as f32)
+        .min(target_height as f32 / natural_height.max(1) as f32)
+        .min(1.0);
+    let output_width = ((natural_width as f32 * scale).round() as usize).max(1);
+    let output_height = ((natural_height as f32 * scale).round() as usize).max(1);
+
+    (0..output_height)
+        .map(|row| {
+            let source_row = row * natural_height / output_height;
+            (0..output_width)
+                .map(|column| {
+                    let source_column = column * natural_width / output_width;
+                    source
+                        .get(source_row)
+                        .and_then(|line| line.get(source_column))
+                        .copied()
+                        .unwrap_or(' ')
+                })
+                .collect()
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 pub(super) enum Segment {
     User(String),
@@ -548,21 +590,10 @@ impl App {
         self.seg_cache.truncate(self.segments.len());
 
         if self.segments.is_empty() {
-            let logo = "  ██████   █████   █     █░ ▄▄▄       ██▓
-▒██    ▒ ▒██▓  ██▒▓█░ █ ░█░▒████▄    ▓██▒
-░ ▓██▄   ▒██▒  ██░▒█░ █ ░█ ▒██  ▀█▄  ▒██▒
-  ▒   ██▒░██  █▀ ░░█░ █ ░█ ░██▄▄▄▄██ ░██░
-▒██████▒▒░▒███▒█▄ ░░██▒██▓  ▓█   ▓██▒░██░
-▒ ▒▓▒ ▒ ░░░ ▒▒░ ▒ ░ ▓░▒ ▒   ▒▒   ▓▒█░░▓  
-░ ░▒  ░ ░ ░ ▒░  ░   ▒ ░ ░    ▒   ▒▒ ░ ▒ ░
-░  ░  ░     ░   ░   ░   ░    ░   ▒    ▒ ░
-      ░      ░        ░          ░  ░ ░  ";
+            let logo = startup_logo(w, 9);
             logical.clear();
-            for line in logo.lines() {
-                logical.push((
-                    Line::from(Span::styled(line.to_string(), Theme::accent_bold())),
-                    None,
-                ));
+            for line in logo {
+                logical.push((Line::from(Span::styled(line, Theme::accent_bold())), None));
             }
         }
         let (lines, rowseg) = wrap_tagged(logical, w);
@@ -611,18 +642,10 @@ impl App {
         f.render_widget(Block::new().style(Theme::base()), area);
 
         if self.startup && self.menu_stack.is_empty() {
-            let logo = "  ██████   █████   █     █░ ▄▄▄       ██▓
-▒██    ▒ ▒██▓  ██▒▓█░ █ ░█░▒████▄    ▓██▒
-░ ▓██▄   ▒██▒  ██░▒█░ █ ░█ ▒██  ▀█▄  ▒██▒
-  ▒   ██▒░██  █▀ ░░█░ █ ░█ ░██▄▄▄▄██ ░██░
-▒██████▒▒░▒███▒█▄ ░░██▒██▓  ▓█   ▓██▒░██░
-▒ ▒▓▒ ▒ ░░░ ▒▒░ ▒ ░ ▓░▒ ▒   ▒▒   ▓▒█░░▓  
-░ ░▒  ░ ░ ░ ▒░  ░   ▒ ░ ░    ▒   ▒▒ ░ ▒ ░
-░  ░  ░     ░   ░   ░   ░    ░   ▒    ▒ ░
-      ░      ░        ░          ░  ░ ░  ";
+            let logo = startup_logo(chat.width, chat.height);
             let logo_widget = Paragraph::new(
-                logo.lines()
-                    .map(|line| Line::from(Span::styled(line.to_string(), Theme::accent_bold())))
+                logo.into_iter()
+                    .map(|line| Line::from(Span::styled(line, Theme::accent_bold())))
                     .collect::<Vec<_>>(),
             )
             .style(Theme::base());
