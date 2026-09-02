@@ -692,10 +692,27 @@ impl App {
                 "LSP settings are available from /settings (runtime coming in phase 4)",
                 StatusKind::Info,
             ),
-            "/skills" => self.status(
-                "Skills settings are available from /settings (runtime coming in phase 4)",
-                StatusKind::Info,
-            ),
+            "/skill" => {
+                let query = rest.split_whitespace().nth(1);
+                let root = std::env::current_dir().unwrap_or_default();
+                let loaded = crate::prompts::skills::load_matching(&self.cfg.skills, &root, query);
+                if loaded.is_empty() {
+                    self.status("skill not found", StatusKind::Warn);
+                } else {
+                    self.status(
+                        &format!(
+                            "loaded skill(s): {}",
+                            loaded
+                                .iter()
+                                .map(|s| s.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        StatusKind::Ok,
+                    );
+                }
+            }
+
             "/debug" => self.open_menu(Menu::Debug),
             "/themes" | "/theme" => self.open_menu(Menu::Themes),
             "/init" => {

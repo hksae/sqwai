@@ -24,7 +24,15 @@ pub struct Skill {
 /// Load skills from configured directories, plus the conventional project dir.
 /// Later directories override an earlier skill with the same name.
 pub fn load(config: &SkillsConfig, project_root: &Path) -> Vec<Skill> {
-    if !config.auto_load {
+    load_matching(config, project_root, None)
+}
+
+pub fn load_matching(
+    config: &SkillsConfig,
+    project_root: &Path,
+    query: Option<&str>,
+) -> Vec<Skill> {
+    if !config.auto_load && query.is_none() {
         return Vec::new();
     }
     let mut dirs = config.dirs.clone();
@@ -64,6 +72,15 @@ pub fn load(config: &SkillsConfig, project_root: &Path) -> Vec<Skill> {
             let Some(skill) = parse(&raw, path) else {
                 continue;
             };
+            if let Some(query) = query
+                && !skill.name.eq_ignore_ascii_case(query)
+                && !skill
+                    .triggers
+                    .iter()
+                    .any(|trigger| trigger.eq_ignore_ascii_case(query))
+            {
+                continue;
+            }
             total += size;
             by_name.insert(skill.name.clone(), skill);
         }

@@ -34,6 +34,7 @@ pub(super) const COMMANDS: &[(&str, &str)] = &[
     ("/mcp", "MCP servers settings"),
     ("/lsp", "LSP diagnostics settings"),
     ("/skills", "skills settings"),
+    ("/skill [name]", "load a skill by name or trigger"),
     ("/exit", "quit sqwai"),
 ];
 
