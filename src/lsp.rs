@@ -177,6 +177,72 @@ impl Client {
         Ok(())
     }
 }
+pub struct Manager {
+    clients: Vec<(crate::config::LspServerDef, Client)>,
+}
+
+impl Manager {
+    pub async fn start(config: &crate::config::LspConfig, root: &Path) -> Result<Self> {
+        let mut clients = Vec::new();
+        for server in config.servers.iter().filter(|server| server.enabled) {
+            let mut client = Client::spawn(server, root).await?;
+            client.initialize(root).await?;
+            clients.push((server.clone(), client));
+        }
+        Ok(Self { clients })
+    }
+
+    pub async fn did_open(&mut self, path: &Path, text: &str) -> Result<()> {
+        for (server, client) in &mut self.clients {
+            if server_matches_path(server, path) {
+                client.did_open(path, &server.language, text).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn did_change(&mut self, path: &Path, version: i32, text: &str) -> Result<()> {
+        for (server, client) in &mut self.clients {
+            if server_matches_path(server, path) {
+                client.did_change(path, version, text).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn did_save(&mut self, path: &Path) -> Result<()> {
+        for (server, client) in &mut self.clients {
+            if server_matches_path(server, path) {
+                client.did_save(path).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn take_diagnostics(&mut self) -> Vec<PublishDiagnosticsParams> {
+        self.clients
+            .iter_mut()
+            .flat_map(|(_, client)| client.diagnostics.drain(..))
+            .collect()
+    }
+}
+
+fn server_matches_path(server: &crate::config::LspServerDef, path: &Path) -> bool {
+    if server.root_markers.is_empty() {
+        return true;
+    }
+    let extension = path.extension().and_then(|value| value.to_str());
+    server.root_markers.iter().any(|marker| {
+        marker
+            == path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+            || marker
+                .strip_prefix("*.")
+                .is_some_and(|suffix| Some(suffix) == extension)
+    })
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Position {
     pub line: u32,
