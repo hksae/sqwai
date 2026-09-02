@@ -153,6 +153,8 @@ pub struct AgentInput {
     pub summary: Option<String>,
     /// MCP servers available to this agent turn.
     pub mcp: crate::config::McpConfig,
+    /// LSP servers available to this agent turn.
+    pub lsp: crate::config::LspConfig,
     /// Run the compaction policy and finish without talking to the model
     /// otherwise (the `/compact` command).
     pub compact_only: bool,
@@ -228,7 +230,24 @@ async fn run_agent(
         mut summary,
         compact_only,
         mcp,
+        lsp,
     } = input;
+
+    let mut lsp_manager = if enable_tools && !lsp.servers.is_empty() {
+        match crate::lsp::Manager::start(&lsp, &root).await {
+            Ok(manager) => Some(manager),
+            Err(e) => {
+                let _ = tx
+                    .send(AgentEvent::Completed(Err(format!(
+                        "LSP startup failed: {e:#}"
+                    ))))
+                    .await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
 
     let mcp_registry = if enable_tools {
         match crate::mcp::Registry::from_config(&mcp).await {
@@ -398,7 +417,7 @@ async fn run_agent(
                 })
                 .await;
 
-            let outcome =
+            let mut outcome =
                 if plan_mode && tools::is_mutating(&call.name) && call.name != "plan_update" {
                     tools::Outcome::err(format!(
                         "PLAN mode is read-only: '{}' is not allowed. Explore first, then ask the \
@@ -468,6 +487,34 @@ async fn run_agent(
                         other => run_tool_blocking(&mut ctx, other, &call.args).await,
                     }
                 };
+
+            if outcome.ok && matches!(call.name.as_str(), "write" | "edit" | "multi_edit") {
+                if let Some(manager) = lsp_manager.as_mut() {
+                    if let Some(path) = call.args.get("file_path").and_then(|v| v.as_str()) {
+                        let path = root.join(path);
+                        if let Ok(text) = tokio::fs::read_to_string(&path).await {
+                            let _ = manager.did_change(&path, 1, &text).await;
+                            let _ = manager.did_save(&path).await;
+                            tokio::task::yield_now().await;
+                            let diagnostics = manager.take_diagnostics();
+                            if !diagnostics.is_empty() {
+                                outcome.output.push_str("\nLSP diagnostics:\n");
+                                for item in diagnostics {
+                                    for diagnostic in item.diagnostics {
+                                        outcome.output.push_str(&format!(
+                                            "- {}:{}: {}\n",
+                                            item.uri,
+                                            diagnostic.range.start.line + 1,
+                                            diagnostic.message
+                                        ));
+                                    }
+                                }
+                                outcome.ok = false;
+                            }
+                        }
+                    }
+                }
+            }
 
             let _ = tx
                 .send(AgentEvent::ToolNotice {

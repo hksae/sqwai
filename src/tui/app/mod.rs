@@ -470,6 +470,7 @@ impl App {
             context_limit: self.session.context_limit,
             enable_tools: with_tools,
             mcp: self.cfg.mcp.clone(),
+            lsp: self.cfg.lsp.clone(),
             // A continuation reference only travels with the model that
             // produced it, and only for providers that document the field.
             previous_response_id: if self.context_bootstrap_pending {
@@ -535,6 +536,7 @@ impl App {
             context_limit: self.session.context_limit,
             enable_tools: false,
             mcp: Default::default(),
+            lsp: Default::default(),
             previous_response_id: None,
             summary: self.session.summary.clone(),
             compact_only: true,
