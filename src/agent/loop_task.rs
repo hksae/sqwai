@@ -151,6 +151,8 @@ pub struct AgentInput {
     pub previous_response_id: Option<String>,
     /// Summary of everything already compacted out of `messages`.
     pub summary: Option<String>,
+    /// MCP servers available to this agent turn.
+    pub mcp: crate::config::McpConfig,
     /// Run the compaction policy and finish without talking to the model
     /// otherwise (the `/compact` command).
     pub compact_only: bool,
@@ -225,14 +227,35 @@ async fn run_agent(
         mut previous_response_id,
         mut summary,
         compact_only,
+        mcp,
     } = input;
+
+    let mcp_registry = if enable_tools {
+        match crate::mcp::Registry::from_config(&mcp).await {
+            Ok(registry) => Some(registry),
+            Err(e) => {
+                let _ = tx
+                    .send(AgentEvent::Completed(Err(format!(
+                        "MCP startup failed: {e:#}"
+                    ))))
+                    .await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
 
     let caps = provider.capabilities();
     let policy = context::Policy::new(context_limit);
     // Tools are part of the request prefix: sorted for stability, narrowed in
     // PLAN mode, and omitted entirely for requests that cannot call them.
     let tools: Vec<crate::providers::ToolSpec> = if enable_tools {
-        tools::tool_specs(plan_mode)
+        let mut specs = tools::tool_specs(plan_mode);
+        if let Some(registry) = &mcp_registry {
+            specs.extend_from_slice(registry.specs());
+        }
+        specs
     } else {
         Vec::new()
     };
@@ -422,6 +445,25 @@ async fn run_agent(
                                 }
                             }
                             outcome
+                        }
+                        other
+                            if mcp_registry
+                                .as_ref()
+                                .is_some_and(|registry| registry.contains(other)) =>
+                        {
+                            match mcp_registry
+                                .as_ref()
+                                .unwrap()
+                                .call(other, call.args.clone())
+                                .await
+                            {
+                                Ok((output, is_error)) => tools::Outcome {
+                                    output,
+                                    ok: !is_error,
+                                    diff: None,
+                                },
+                                Err(e) => tools::Outcome::err(format!("MCP call failed: {e:#}")),
+                            }
                         }
                         other => run_tool_blocking(&mut ctx, other, &call.args).await,
                     }
@@ -822,7 +864,12 @@ async fn run_tool_blocking(
         (o, exec_ctx)
     })
     .await
-    .unwrap_or_else(|e| (tools::Outcome::err(format!("tool thread failed: {e}")), fallback_ctx));
+    .unwrap_or_else(|e| {
+        (
+            tools::Outcome::err(format!("tool thread failed: {e}")),
+            fallback_ctx,
+        )
+    });
     ctx.journal = exec_ctx.journal;
     ctx.files_read = exec_ctx.files_read;
     outcome
