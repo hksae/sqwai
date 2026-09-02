@@ -7,6 +7,7 @@
 
 mod exec;
 mod fs;
+mod git;
 
 use crate::plan;
 use serde_json::{Value, json};
@@ -245,6 +246,42 @@ long-running commands.",
             }),
         },
         ToolDef {
+            name: "git_status",
+            kind: Kind::ReadOnly,
+            description: "Show the Git branch and worktree status.",
+            parameters: json!({"type":"object","properties":{"porcelain":{"type":"boolean"}}}),
+        },
+        ToolDef {
+            name: "git_diff",
+            kind: Kind::ReadOnly,
+            description: "Show unstaged Git diff, optionally limited to one path.",
+            parameters: json!({"type":"object","properties":{"target":{"type":"string"}}}),
+        },
+        ToolDef {
+            name: "git_log",
+            kind: Kind::ReadOnly,
+            description: "Show recent Git commits.",
+            parameters: json!({"type":"object","properties":{"count":{"type":"integer","minimum":1,"maximum":100},"format":{"type":"string"}}}),
+        },
+        ToolDef {
+            name: "git_commit",
+            kind: Kind::Mutating,
+            description: "Create a Git commit from currently staged changes, or all tracked changes when all is true.",
+            parameters: json!({"type":"object","properties":{"message":{"type":"string"},"all":{"type":"boolean"}},"required":["message"]}),
+        },
+        ToolDef {
+            name: "git_branch",
+            kind: Kind::Mutating,
+            description: "List branches or create/switch to a local branch.",
+            parameters: json!({"type":"object","properties":{"action":{"type":"string","enum":["list","current","create","switch"]},"name":{"type":"string"}}}),
+        },
+        ToolDef {
+            name: "patch",
+            kind: Kind::Mutating,
+            description: "Validate and apply a unified Git patch to the project.",
+            parameters: json!({"type":"object","properties":{"patch":{"type":"string"}},"required":["patch"]}),
+        },
+        ToolDef {
             name: "plan_update",
             kind: Kind::Mutating,
             description: "Replace the hidden project plan. Keep it compact and structured with Task, Status, Steps, Decisions & Gotchas, Files touched, and Next immediate action.",
@@ -329,6 +366,17 @@ pub fn call_summary(name: &str, args: &Value) -> String {
         "read" | "write" | "edit" | "multi_edit" => s("file_path"),
         "bash" => s("command"),
         "glob" | "grep" => s("pattern"),
+        "git_diff" => s("target"),
+        "git_commit" => s("message"),
+        "git_branch" => {
+            let action = s("action");
+            let name = s("name");
+            format!("{action} {name}").trim().to_string()
+        }
+        "patch" => format!(
+            "{} bytes",
+            args["patch"].as_str().map(str::len).unwrap_or(0)
+        ),
         "todowrite" => format!(
             "{} items",
             args["todos"].as_array().map(|a| a.len()).unwrap_or(0)
@@ -408,6 +456,12 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             args["path"].as_str(),
             args["include"].as_str(),
         ),
+        "git_status" => git::status(ctx, args),
+        "git_diff" => git::diff(ctx, args),
+        "git_log" => git::log(ctx, args),
+        "git_commit" => git::commit(ctx, args),
+        "git_branch" => git::branch(ctx, args),
+        "patch" => git::patch(ctx, args),
         "bash" => exec::bash(
             ctx,
             args["command"].as_str().unwrap_or_default(),
@@ -618,6 +672,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn git_tools_and_patch_work_in_project_root() {
+        let (mut ctx, dir) = proj();
+        let status = execute(&mut ctx, "git_status", &json!({}));
+        assert!(status.ok, "{}", status.output);
+        assert!(status.output.contains("##") || status.output.contains("No commits"));
+
+        let diff = execute(&mut ctx, "git_diff", &json!({}));
+        assert!(diff.ok, "{}", diff.output);
+
+        let log = execute(&mut ctx, "git_log", &json!({"count": 1}));
+        assert!(!log.ok);
+        assert!(
+            log.output.contains("does not have any commits"),
+            "{}",
+            log.output
+        );
+
+        let branches = execute(&mut ctx, "git_branch", &json!({"action": "current"}));
+        assert!(branches.ok, "{}", branches.output);
+
+        std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        let commit = execute(&mut ctx, "git_commit", &json!({"message": "init"}));
+        assert!(commit.ok, "{}", commit.output);
+
+        let log = execute(&mut ctx, "git_log", &json!({"count": 1}));
+        assert!(log.ok, "{}", log.output);
+        assert!(log.output.contains("init"), "{}", log.output);
+        let patch = "diff --git a/README.md b/README.md\nindex 9daeafb..f3b0735 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-# demo\n+# patched\n";
+        let applied = execute(&mut ctx, "patch", &json!({"patch": patch}));
+        assert!(applied.ok, "{}", applied.output);
+        assert_eq!(
+            fs::read_to_string(dir.join("README.md"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "# patched\n"
+        );
+
+        let rejected = execute(&mut ctx, "patch", &json!({"patch": "not a patch"}));
+        assert!(!rejected.ok);
+        assert_eq!(
+            fs::read_to_string(dir.join("README.md"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "# patched\n"
+        );
+    }
+
+    #[test]
+    fn git_commit_requires_message() {
+        let (mut ctx, _dir) = proj();
+        let result = execute(&mut ctx, "git_commit", &json!({}));
+        assert!(!result.ok);
+        assert!(result.output.contains("non-empty message"));
+    }
     #[test]
     fn tool_specs_are_stably_sorted() {
         let names: Vec<String> = tool_specs(false).iter().map(|t| t.name.clone()).collect();
