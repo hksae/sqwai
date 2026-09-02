@@ -52,6 +52,9 @@ fn main() -> Result<()> {
 
     providers::set_http_log(cfg.ui.http_log);
     tui::theme::set_theme(cfg.ui.theme);
+    if let Some(i) = cfg.ui.anim_theme {
+        tui::theme::set_anim_theme(i);
+    }
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(run(cfg, resume_id))

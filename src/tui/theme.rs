@@ -1,5 +1,5 @@
 use ratatui::style::{Color, Modifier, Style};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// one full color scheme; every role keeps the lightness of the original
 /// rose theme, only hues move
@@ -89,16 +89,160 @@ pub const THEMES: [ThemeDef; 20] = [
     ThemeDef { name: "bubblegum",  p: pal(352) },
 ];
 
-static CURRENT: AtomicUsize = AtomicUsize::new(0);
+/// kinds of animated (time-driven) palettes
+#[derive(Clone, Copy)]
+pub enum AnimKind {
+    Rainbow,
+    Aurora,
+    Pulse,
+    Spectrum,
+    Lava,
+    Matrix,
+}
 
-fn cur() -> &'static Palette {
-    &THEMES[CURRENT.load(Ordering::Relaxed)].p
+/// an animated theme: a name, the static text hue, and the animation kind
+#[derive(Clone, Copy)]
+pub struct AnimThemeDef {
+    pub name: &'static str,
+    pub base_hue: u32,
+    pub kind: AnimKind,
+}
+
+/// build a palette for an animated theme at a given animation tick.
+/// text roles (fg/dim) stay static at `base` so the conversation stays
+/// readable; every decorative role is driven by the kind + tick.
+fn anim_palette(kind: AnimKind, base: u32, tick: u64) -> Palette {
+    let fg = hsv(base, 5, 93);
+    let dim = hsv(base, 21, 59);
+    let (mut accent_h, mut border_h, mut bg_h, mut surf_h) = (base, base, base, base);
+    let (mut acc_v, acc_s, mut bd_v) = (100u32, 57u32, 87u32);
+    match kind {
+        AnimKind::Rainbow => {
+            let h = (tick as u32).wrapping_mul(5) % 360;
+            accent_h = h;
+            border_h = h;
+            bg_h = h;
+            surf_h = h;
+        }
+        AnimKind::Aurora => {
+            let h = 150 + ((tick as u32).wrapping_mul(2) % 80); // 150..230
+            accent_h = h;
+            border_h = (h + 25) % 360;
+            bg_h = h;
+            surf_h = (h + 50) % 360;
+        }
+        AnimKind::Pulse => {
+            let p = (tick as u32) % 80;
+            let tri = if p < 40 { p } else { 80 - p }; // 0..40..0
+            acc_v = (55 + tri / 2).min(100);
+            bd_v = (70 + tri / 3).min(100);
+            // hue stays at base
+        }
+        AnimKind::Spectrum => {
+            let h = (tick as u32).wrapping_mul(2) % 360;
+            accent_h = h;
+            border_h = (h + 20) % 360;
+            bg_h = (h + 10) % 360;
+            surf_h = (h + 30) % 360;
+        }
+        AnimKind::Lava => {
+            let f = (tick as u32).wrapping_mul(7) % 30;
+            accent_h = 10 + f;
+            border_h = 20 + f;
+            bg_h = 12 + f;
+            surf_h = 18 + f;
+        }
+        AnimKind::Matrix => {
+            let f = (tick as u32).wrapping_mul(3) % 20;
+            accent_h = 120 + f / 2;
+            border_h = 130 + f / 2;
+            bg_h = 120;
+            surf_h = 125;
+        }
+    }
+    Palette {
+        bg: hsv(bg_h, 33, 9),
+        surface: hsv(surf_h, 33, 13),
+        fg,
+        dim,
+        accent: hsv(accent_h, acc_s, acc_v),
+        accent_soft: hsv(accent_h, 44, (acc_v * 84 / 100).max(40)),
+        border: hsv(border_h, 59, bd_v),
+        border_dim: hsv(border_h, 31, 35),
+        ok: hsv((base + 150) % 360, 37, 78),
+        err: hsv((base + 29) % 360, 55, 94),
+        warn: hsv((base + 64) % 360, 53, 92),
+    }
+}
+
+pub const ANIMATED_THEMES: [AnimThemeDef; 6] = [
+    AnimThemeDef { name: "rainbow",  base_hue: 320, kind: AnimKind::Rainbow },
+    AnimThemeDef { name: "aurora",   base_hue: 160, kind: AnimKind::Aurora },
+    AnimThemeDef { name: "pulse",    base_hue: 280, kind: AnimKind::Pulse },
+    AnimThemeDef { name: "spectrum", base_hue: 200, kind: AnimKind::Spectrum },
+    AnimThemeDef { name: "lava",     base_hue: 18,  kind: AnimKind::Lava },
+    AnimThemeDef { name: "matrix",   base_hue: 120, kind: AnimKind::Matrix },
+];
+
+static CURRENT: AtomicUsize = AtomicUsize::new(0);
+/// index into ANIMATED_THEMES when an animated theme is active, else usize::MAX
+static ACTIVE_ANIM: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// current animation frame counter, bumped once per tick by the TUI loop
+static ANIM_TICK: AtomicU64 = AtomicU64::new(0);
+
+/// feed the latest animation frame to the theme engine (call once per redraw)
+pub fn set_anim_tick(t: u64) {
+    ANIM_TICK.store(t, Ordering::Relaxed);
+}
+
+/// activate an animated theme; switches the live palette to time-driven colors
+pub fn set_anim_theme(idx: usize) -> usize {
+    let i = idx.min(ANIMATED_THEMES.len() - 1);
+    ACTIVE_ANIM.store(i, Ordering::Relaxed);
+    i
+}
+
+/// deactivate any animated theme, falling back to the static palette
+pub fn set_anim_theme_off() {
+    ACTIVE_ANIM.store(usize::MAX, Ordering::Relaxed);
+}
+
+/// live palette for an animated theme at an arbitrary tick (for menu previews)
+pub fn anim_palette_at(idx: usize, tick: u64) -> Palette {
+    let i = idx.min(ANIMATED_THEMES.len() - 1);
+    let t = ANIMATED_THEMES[i];
+    anim_palette(t.kind, t.base_hue, tick)
+}
+
+/// which animated theme is active, if any
+pub fn anim_theme_index() -> Option<usize> {
+    let a = ACTIVE_ANIM.load(Ordering::Relaxed);
+    if a == usize::MAX {
+        None
+    } else {
+        Some(a)
+    }
+}
+
+/// the latest animation frame counter (for live menu previews)
+pub fn anim_tick() -> u64 {
+    ANIM_TICK.load(Ordering::Relaxed)
+}
+
+fn cur() -> Palette {
+    let a = ACTIVE_ANIM.load(Ordering::Relaxed);
+    if a != usize::MAX {
+        let t = ANIMATED_THEMES[a];
+        return anim_palette(t.kind, t.base_hue, ANIM_TICK.load(Ordering::Relaxed));
+    }
+    THEMES[CURRENT.load(Ordering::Relaxed)].p
 }
 
 /// select the active theme by index (clamped); returns the effective index
 pub fn set_theme(idx: usize) -> usize {
     let i = idx.min(THEMES.len() - 1);
     CURRENT.store(i, Ordering::Relaxed);
+    ACTIVE_ANIM.store(usize::MAX, Ordering::Relaxed);
     i
 }
 

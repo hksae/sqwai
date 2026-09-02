@@ -620,15 +620,28 @@ mod tests {
     fn themes_menu_applies_and_stays_open() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.open_menu(Menu::Themes);
-        assert_eq!(app.menu_rows.len(), 20, "all palettes listed");
-        // every row carries its own colored swatch
+        // 20 static + 1 "animated" header + 6 animated themes
+        let total =
+            crate::tui::theme::THEMES.len() + 1 + crate::tui::theme::ANIMATED_THEMES.len();
+        assert_eq!(app.menu_rows.len(), total, "all palettes listed");
+        // every theme row carries its own colored swatch; the section header
+        // is the only row without one
+        let mut swatches = 0;
+        let mut has_header = false;
         for r in &app.menu_rows {
-            assert!(
-                r.0.spans.iter().any(|s| s.content.contains("██")),
-                "no swatch in {:?}",
-                r.0.spans
-            );
+            if r.0.spans.iter().any(|s| s.content.contains("animated")) {
+                has_header = true;
+            }
+            if r.0.spans.iter().any(|s| s.content.contains("██")) {
+                swatches += 1;
+            }
         }
+        assert!(has_header, "animated section header present");
+        assert_eq!(
+            swatches,
+            crate::tui::theme::THEMES.len() + crate::tui::theme::ANIMATED_THEMES.len(),
+            "every theme row has a swatch"
+        );
         app.run_action(MenuAction::SetTheme(5));
         assert_eq!(crate::tui::theme::theme_index(), 5);
         assert_eq!(app.cfg.ui.theme, 5, "choice persisted");
@@ -643,6 +656,10 @@ mod tests {
             app.menu_status.is_none(),
             "no status note is shown on theme switch"
         );
+        // animated theme selects and persists too
+        app.run_action(MenuAction::SetAnimTheme(0));
+        assert_eq!(crate::tui::theme::anim_theme_index(), Some(0));
+        assert_eq!(app.cfg.ui.anim_theme, Some(0), "anim choice persisted");
         crate::tui::theme::set_theme(0); // restore default for other tests
     }
 

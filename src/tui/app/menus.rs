@@ -127,6 +127,7 @@ pub(super) enum MenuAction {
     ToggleMode,
     OpenSessions,
     SetTheme(usize),
+    SetAnimTheme(usize),
     Confirm(Box<MenuAction>),
     SetThinking(ThinkingLevel),
     /// ask_user: submit one chosen option's label
@@ -525,6 +526,9 @@ impl App {
             MenuAction::SetTheme(idx) => {
                 self.apply_theme(idx);
             }
+            MenuAction::SetAnimTheme(idx) => {
+                self.apply_anim_theme(idx);
+            }
             MenuAction::DeleteSession(id) => {
                 let title = self
                     .sessions
@@ -722,6 +726,37 @@ impl App {
                             ),
                         ]),
                         MenuAction::SetTheme(i),
+                    ));
+                }
+                // animated themes: a live multi-color swatch shows the motion
+                let cur_anim = crate::tui::theme::anim_theme_index();
+                let tick = crate::tui::theme::anim_tick();
+                self.menu_rows.push(row(
+                    Line::from(Span::styled(
+                        "  -- animated --",
+                        Style::new().fg(Theme::DIM()).bg(Theme::BG()),
+                    )),
+                    MenuAction::None,
+                ));
+                for (i, t) in crate::tui::theme::ANIMATED_THEMES.iter().enumerate() {
+                    let mark = if cur_anim == Some(i) { " *" } else { "" };
+                    let p0 = crate::tui::theme::anim_palette_at(i, tick);
+                    let p1 = crate::tui::theme::anim_palette_at(i, tick.wrapping_add(40));
+                    let p2 = crate::tui::theme::anim_palette_at(i, tick.wrapping_add(80));
+                    self.menu_rows.push(row(
+                        Line::from(vec![
+                            Span::styled("  ██", Style::new().fg(p0.accent).bg(Theme::BG())),
+                            Span::styled("██", Style::new().fg(p1.accent).bg(Theme::BG())),
+                            Span::styled("██ ", Style::new().fg(p2.accent).bg(Theme::BG())),
+                            Span::styled(
+                                format!("{}{mark}", t.name),
+                                Style::new()
+                                    .fg(p0.accent)
+                                    .bg(Theme::BG())
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]),
+                        MenuAction::SetAnimTheme(i),
                     ));
                 }
                 self.menu_footer_text =
