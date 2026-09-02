@@ -1,3 +1,5 @@
+![sqwai](assets/sqwai_header.png)
+
 # sqwai
 
 An interactive AI coding agent for the terminal, written in Rust. It works inside a project directory and combines an LLM with a terminal UI, project files, shell commands, sessions, safety checks, and development tools.
