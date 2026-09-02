@@ -830,7 +830,7 @@ mod tests {
         // code block frames are baked into cached segments; for them to
         // animate, seg_key must change with the anim tick while a theme is on
         use crate::tui::app::Segment;
-        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let app = test_app("http://127.0.0.1:9/v1".into());
         let seg = Segment::User("hello".into());
         // static theme: key is independent of the tick
         let k_static = app.seg_key(&seg);
