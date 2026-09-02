@@ -632,6 +632,30 @@ mod tests {
     }
 
     #[test]
+    fn busy_statuses_are_deduplicated_and_cleared_on_finish() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.status(
+            "busy: esc stops the current generation first",
+            StatusKind::Warn,
+        );
+        app.status(
+            "busy: esc stops the current generation first",
+            StatusKind::Warn,
+        );
+        assert_eq!(
+            app.segments
+                .iter()
+                .filter(|segment| matches!(segment, Segment::Status { text, .. } if text == "busy: esc stops the current generation first"))
+                .count(),
+            1
+        );
+        app.streaming = true;
+        app.finish_turn(Err("aborted".into()));
+        assert!(!app.segments.iter().any(|segment| {
+            matches!(segment, Segment::Status { text, .. } if text == "busy: esc stops the current generation first")
+        }));
+    }
+    #[test]
     fn settings_hub_reuses_existing_menus() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.open_menu(Menu::Settings);

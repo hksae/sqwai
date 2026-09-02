@@ -805,6 +805,11 @@ impl App {
     }
 
     fn status(&mut self, text: &str, kind: StatusKind) {
+        if text == "busy: esc stops the current generation first" {
+            self.segments.retain(|segment| {
+                !matches!(segment, Segment::Status { text: existing, .. } if existing == text)
+            });
+        }
         if kind == StatusKind::Err {
             self.bar_error = Some(text.to_string());
         }
@@ -1135,7 +1140,18 @@ impl App {
         self.finish_turn(Ok(()));
     }
 
+    fn clear_busy_statuses(&mut self) {
+        self.segments.retain(|segment| {
+            !matches!(
+                segment,
+                Segment::Status { text, .. }
+                    if text == "busy: esc stops the current generation first"
+            )
+        });
+    }
+
     fn finish_turn(&mut self, res: Result<(), String>) {
+        self.clear_busy_statuses();
         // flush whatever the typewriter has not revealed yet
         self.reveal_chars(usize::MAX);
         let text = std::mem::take(&mut self.assistant_buf);

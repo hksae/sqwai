@@ -52,6 +52,15 @@ impl App {
                     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
                     let shift = k.modifiers.contains(KeyModifiers::SHIFT);
                     let alt = k.modifiers.contains(KeyModifiers::ALT);
+                    // Handle paste as a complete, terminal-independent action. In
+                    // particular, do not pass Ctrl+V through to TextArea::input:
+                    // some Windows terminal/keymap combinations interpret it as
+                    // an accept/submit action after the clipboard text is inserted.
+                    if ctrl && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V')) {
+                        self.paste_clipboard();
+                        self.dirty = true;
+                        continue;
+                    }
                     match k.code {
                         KeyCode::Char('c') if ctrl => {
                             // exit is only /exit; ctrl+c copies selection or clears the line
@@ -61,9 +70,6 @@ impl App {
                                 self.input = Self::fresh_input(String::new());
                             }
                         }
-                        // bracketed paste is unavailable on Windows terminals:
-                        // read the clipboard directly
-                        KeyCode::Char('v') if ctrl => self.paste_clipboard(),
                         KeyCode::Esc => {
                             if !self.menu_stack.is_empty() {
                                 // first esc clears an active sessions filter
@@ -81,6 +87,7 @@ impl App {
                                 self.popup_dismiss = true;
                                 self.hover = None;
                             } else if self.streaming {
+                                self.clear_busy_statuses();
                                 self.aborted = true;
                                 if let Some(a) = &self.agent {
                                     a.abort();
