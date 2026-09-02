@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use std::hash::{Hash, Hasher};
 use tui_textarea::TextArea;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::agent::loop_task::AgentEvent;
 use crate::config::{Config, ModelConfig, ThinkingLevel, WireFormat};
@@ -100,16 +101,16 @@ pub(super) enum BlockKind {
 
 /// User message rendered inside a rounded pink outline.
 fn user_box(text: &str, w: u16, hl: &Highlighter) -> Vec<Line<'static>> {
-    let max_inner = w.saturating_sub(6).clamp(8, 100) as usize;
+    let max_inner = usize::from(w.saturating_sub(6)).clamp(1, 100);
     let natural = text
         .lines()
-        .map(|line| line.chars().count())
+        .map(UnicodeWidthStr::width)
         .max()
         .unwrap_or(0)
-        .clamp(8, max_inner);
+        .clamp(1, max_inner);
     let inner_w = natural as u16;
     let inner = render(text, inner_w, hl);
-    let iw = inner_w as usize;
+    let iw = usize::from(inner_w);
     let b = Theme::border_focused();
     let mut out = Vec::with_capacity(inner.len() + 2);
     let edge = |lft: &str, mid: String, rgt: &str| {
@@ -122,7 +123,8 @@ fn user_box(text: &str, w: u16, hl: &Highlighter) -> Vec<Line<'static>> {
     out.push(edge("╭", "─".repeat(iw + 2), "╮"));
     for l in inner {
         let t = line_text(&l);
-        let pad = " ".repeat(iw.saturating_sub(t.chars().count()));
+        let used = UnicodeWidthStr::width(t.as_str());
+        let pad = " ".repeat(iw.saturating_sub(used));
         out.push(Line::from(vec![
             Span::styled("│".to_string(), b),
             Span::styled(" ".to_string(), Theme::base()),
@@ -449,7 +451,7 @@ impl App {
                     // Keep the box width stable. Deriving it from the longest
                     // line makes the border itself wrap when the chat width
                     // changes, which leaves visibly shifted corners behind.
-                    let width = inner_w.max(8);
+                    let width = inner_w.max(1);
                     out.push((
                         Line::from(vec![Span::styled(
                             format!("    ╭{}╮", "─".repeat(width + 2)),
@@ -467,11 +469,11 @@ impl App {
                         } else {
                             Theme::dim()
                         };
-                        let line = truncate_chars(l, width);
+                        let line = truncate_display_width(l, width);
                         out.push((
                             Line::from(vec![
                                 Span::styled("    │ ", border),
-                                Span::styled(format!("{line:<width$}"), st),
+                                Span::styled(pad_display(&line, width), st),
                                 Span::styled(" │", border),
                             ]),
                             Some(idx),
@@ -483,7 +485,7 @@ impl App {
                             Line::from(vec![
                                 Span::styled("    │ ", border),
                                 Span::styled(
-                                    format!("{:<width$}", truncate_chars(&more, width)),
+                                    pad_display(&truncate_display_width(&more, width), width),
                                     Theme::dim(),
                                 ),
                                 Span::styled(" │", border),
@@ -1140,6 +1142,61 @@ mod tests {
         let logo = startup_logo(1, 1);
         assert_eq!(logo.len(), 1);
         assert_eq!(logo[0].chars().count(), 1);
+    }
+}
+
+fn pad_display(s: &str, width: usize) -> String {
+    let used = UnicodeWidthStr::width(s);
+    format!("{s}{}", " ".repeat(width.saturating_sub(used)))
+}
+
+fn truncate_display_width(s: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(s) <= width {
+        return s.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in s.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width > width.saturating_sub(1) {
+            break;
+        }
+        out.push(ch);
+        used += ch_width;
+    }
+    if used < width {
+        out.push('…');
+    }
+    out
+}
+#[cfg(test)]
+mod frame_tests {
+    use super::{pad_display, truncate_display_width};
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn padding_uses_terminal_width_not_character_count() {
+        let padded = pad_display("界", 6);
+        assert_eq!(UnicodeWidthStr::width(padded.as_str()), 6);
+    }
+
+    #[test]
+    fn truncation_never_exceeds_requested_width() {
+        for value in [
+            "a".repeat(100),
+            "界界界界".to_string(),
+            "a界b界c".to_string(),
+        ] {
+            for width in 0..=12 {
+                assert!(
+                    UnicodeWidthStr::width(truncate_display_width(&value, width).as_str()) <= width,
+                    "value exceeded width {width}: {value:?}"
+                );
+            }
+        }
     }
 }
 

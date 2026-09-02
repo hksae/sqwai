@@ -3,6 +3,7 @@ use ratatui::text::{Line, Span};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
+use unicode_width::UnicodeWidthChar;
 
 use super::theme::Theme;
 
@@ -541,8 +542,7 @@ pub fn wrap_tagged(
     lines: Vec<(Line<'static>, Option<usize>)>,
     width: u16,
 ) -> (Vec<Line<'static>>, Vec<Option<usize>>) {
-    const MIN_W: usize = 10;
-    let width = (width as usize).max(MIN_W);
+    let width = (width as usize).max(1);
     let fallback = Style::new().fg(Theme::rule_color()).bg(Theme::BG());
 
     let mut rows: Vec<Line<'static>> = Vec::new();
@@ -562,37 +562,44 @@ pub fn wrap_tagged(
         }
 
         let mut cur: Vec<(Style, char)> = Vec::new();
-        let mut last_space: Option<usize> = None;
+        let mut cur_width = 0usize;
+        let mut last_space: Option<(usize, usize)> = None;
         for (st, ch) in cells {
             if ch == '\n' {
                 continue;
             }
-            if cur.len() >= width {
-                match last_space {
-                    Some(sp) => {
-                        let rest = cur.split_off(sp + 1);
-                        trim_end_spaces(&mut cur);
-                        rows.push(cells_to_line(std::mem::take(&mut cur), fallback));
-                        tags.push(tag);
-                        cur = rest;
-                        last_space = None;
-                    }
-                    None => {
-                        rows.push(cells_to_line(std::mem::take(&mut cur), fallback));
-                        tags.push(tag);
-                    }
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if cur_width + ch_width > width && !cur.is_empty() {
+                if let Some((space_index, width_at_space)) = last_space {
+                    let rest = cur.split_off(space_index + 1);
+                    trim_end_spaces(&mut cur);
+                    rows.push(cells_to_line(std::mem::take(&mut cur), fallback));
+                    tags.push(tag);
+                    cur = rest;
+                    cur_width = cur.iter().map(|(_, c)| cell_width(*c)).sum();
+                    last_space = None;
+                    let _ = width_at_space;
+                } else {
+                    rows.push(cells_to_line(std::mem::take(&mut cur), fallback));
+                    tags.push(tag);
+                    cur_width = 0;
                 }
             }
             if ch == ' ' {
-                last_space = Some(cur.len());
+                last_space = Some((cur.len(), cur_width));
             }
             cur.push((st, ch));
+            cur_width += ch_width;
         }
         trim_end_spaces(&mut cur);
         rows.push(cells_to_line(cur, fallback));
         tags.push(tag);
     }
     (rows, tags)
+}
+
+fn cell_width(ch: char) -> usize {
+    UnicodeWidthChar::width(ch).unwrap_or(0)
 }
 
 fn trim_end_spaces(cells: &mut Vec<(Style, char)>) {
