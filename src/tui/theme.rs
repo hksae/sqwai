@@ -65,87 +65,28 @@ const fn pal(h: u32) -> Palette {
 }
 
 pub const THEMES: [ThemeDef; 20] = [
-    ThemeDef {
-        name: "rose",
-        p: pal(335),
-    },
-    ThemeDef {
-        name: "orchid",
-        p: pal(305),
-    },
-    ThemeDef {
-        name: "violet",
-        p: pal(275),
-    },
-    ThemeDef {
-        name: "indigo",
-        p: pal(250),
-    },
-    ThemeDef {
-        name: "cobalt",
-        p: pal(220),
-    },
-    ThemeDef {
-        name: "sky",
-        p: pal(195),
-    },
-    ThemeDef {
-        name: "aquamarine",
-        p: pal(168),
-    },
-    ThemeDef {
-        name: "mint",
-        p: pal(145),
-    },
-    ThemeDef {
-        name: "citrus",
-        p: pal(105),
-    },
-    ThemeDef {
-        name: "gold",
-        p: pal(60),
-    },
-    ThemeDef {
-        name: "amber",
-        p: pal(35),
-    },
-    ThemeDef {
-        name: "ember",
-        p: pal(10),
-    },
-    // --- fun extras: same structure, off-beat hues -----------------------
-    ThemeDef {
-        name: "bubblegum",
-        p: pal(352),
-    },
-    ThemeDef {
-        name: "plasma",
-        p: pal(320),
-    },
-    ThemeDef {
-        name: "grape",
-        p: pal(290),
-    },
-    ThemeDef {
-        name: "denim",
-        p: pal(235),
-    },
-    ThemeDef {
-        name: "lagoon",
-        p: pal(182),
-    },
-    ThemeDef {
-        name: "slime",
-        p: pal(156),
-    },
-    ThemeDef {
-        name: "lime",
-        p: pal(125),
-    },
-    ThemeDef {
-        name: "peach",
-        p: pal(22),
-    },
+    // ordered by hue so the /themes list reads as one continuous rainbow:
+    // 335 -> 320 -> 305 ... -> 10, then 352 wraps back toward rose
+    ThemeDef { name: "rose",       p: pal(335) },
+    ThemeDef { name: "plasma",     p: pal(320) },
+    ThemeDef { name: "orchid",     p: pal(305) },
+    ThemeDef { name: "grape",      p: pal(290) },
+    ThemeDef { name: "violet",     p: pal(275) },
+    ThemeDef { name: "indigo",     p: pal(250) },
+    ThemeDef { name: "denim",      p: pal(235) },
+    ThemeDef { name: "cobalt",     p: pal(220) },
+    ThemeDef { name: "sky",        p: pal(195) },
+    ThemeDef { name: "lagoon",     p: pal(182) },
+    ThemeDef { name: "aquamarine", p: pal(168) },
+    ThemeDef { name: "slime",      p: pal(156) },
+    ThemeDef { name: "mint",       p: pal(145) },
+    ThemeDef { name: "lime",       p: pal(125) },
+    ThemeDef { name: "citrus",     p: pal(105) },
+    ThemeDef { name: "gold",       p: pal(60) },
+    ThemeDef { name: "amber",      p: pal(35) },
+    ThemeDef { name: "peach",      p: pal(22) },
+    ThemeDef { name: "ember",      p: pal(10) },
+    ThemeDef { name: "bubblegum",  p: pal(352) },
 ];
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
