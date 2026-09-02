@@ -1112,6 +1112,34 @@ impl App {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::startup_logo;
+
+    #[test]
+    fn startup_logo_keeps_native_size_when_it_fits() {
+        let logo = startup_logo(100, 20);
+        assert_eq!(logo.len(), 9);
+        assert_eq!(logo.iter().map(|line| line.chars().count()).max(), Some(41));
+    }
+
+    #[test]
+    fn startup_logo_scales_to_width_and_height() {
+        let logo = startup_logo(20, 4);
+        assert!(logo.len() <= 4);
+        assert!(logo.iter().all(|line| line.chars().count() <= 20));
+        assert_eq!(logo.len(), 4);
+        assert_eq!(logo.iter().map(|line| line.chars().count()).max(), Some(18));
+    }
+
+    #[test]
+    fn startup_logo_handles_tiny_terminal() {
+        let logo = startup_logo(1, 1);
+        assert_eq!(logo.len(), 1);
+        assert_eq!(logo[0].chars().count(), 1);
+    }
+}
+
 fn segment_layout_key(seg: &Segment) -> u64 {
     // Include the stable identifying text, but not the live spinner/text body;
     // normal content changes are handled by seg_key, while insertions/removals
