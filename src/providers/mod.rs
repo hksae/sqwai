@@ -82,11 +82,70 @@ impl Message {
     }
 }
 
+/// Token counters reported by the provider for **one** request.
+///
+/// `prompt_tokens` is the size of that request, not a running total: summing it
+/// over a session would multiply the history by the number of turns. Cumulative
+/// accounting lives in [`crate::session::Session::usage`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cached_tokens: Option<u64>,
+}
+
+impl Usage {
+    /// tokens billed for this request
+    pub fn total(&self) -> u64 {
+        self.prompt_tokens + self.completion_tokens
+    }
+
+    /// true when the provider told us nothing at all
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0 && self.cached_tokens.unwrap_or(0) == 0
+    }
+}
+
+/// One part of the system block.
+///
+/// The system block is **never** part of the conversation transcript: it is
+/// rebuilt for every request and travels separately from `messages`. Parts
+/// marked `cacheable` must stay byte-identical between requests — that stable
+/// prefix is what a provider-side prefix cache can key on. Volatile parts
+/// (current date, git state, project tree) are always appended last so they
+/// cannot invalidate the prefix.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SystemPart {
+    pub text: String,
+    pub cacheable: bool,
+}
+
+impl SystemPart {
+    /// stable prefix: role, rules, project instructions, durable plan
+    pub fn cached(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            cacheable: true,
+        }
+    }
+
+    /// re-read every turn: runtime context and other volatile facts
+    pub fn volatile(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            cacheable: false,
+        }
+    }
+}
+
+/// Render the system block as one string (providers with a single system field).
+pub fn system_text(system: &[SystemPart]) -> String {
+    system
+        .iter()
+        .map(|p| p.text.trim())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Approximate request composition for diagnostics. This is intentionally
@@ -103,6 +162,11 @@ pub struct RequestBreakdown {
 impl RequestBreakdown {
     pub fn from_request(req: &ChatRequest) -> Self {
         let mut out = Self::default();
+        out.system_bytes = req
+            .system
+            .iter()
+            .map(|p| p.text.len() as u64)
+            .sum::<u64>();
         for message in &req.messages {
             let bytes = message.content.len() as u64
                 + message
@@ -130,28 +194,54 @@ impl RequestBreakdown {
     }
 }
 
+/// What a provider is actually documented to support.
+///
+/// Nothing here is inferred from "most servers do X": a capability is either
+/// written down by the provider or it is false. Prompt caching additionally has
+/// an observed side ([`crate::session::Session::cache_confirmed`]) — a
+/// documented cache key only becomes real once the provider reports
+/// `cached_tokens` back.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProviderCapabilities {
     /// The provider accepts a documented server-side conversation reference.
     pub server_conversation: bool,
     /// The provider accepts a documented previous-response reference.
     pub previous_response: bool,
-    /// The provider supports explicit prompt-cache controls.
-    pub prompt_cache: bool,
+    /// The provider documents a prompt-cache mechanism we can address
+    /// (e.g. Anthropic `cache_control` breakpoints). Automatic prefix caching
+    /// that we cannot address or verify does not count.
+    pub prompt_cache_documented: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextTransport {
+    /// the whole transcript is resent every request
     Stateless,
+    /// the provider owns the conversation and we only send deltas
     ServerConversation,
+    /// continuation via a documented previous-response reference
     PreviousResponse,
-    PromptCached,
 }
 
 impl Default for ContextTransport {
     fn default() -> Self {
         Self::Stateless
     }
+}
+
+/// Pick the transport for a request. Only a documented continuation reference
+/// may shorten the local transcript; otherwise everything is resent.
+pub fn select_transport(
+    caps: ProviderCapabilities,
+    previous_response_id: Option<&str>,
+) -> ContextTransport {
+    if previous_response_id.is_some() && caps.previous_response {
+        return ContextTransport::PreviousResponse;
+    }
+    if caps.server_conversation {
+        return ContextTransport::ServerConversation;
+    }
+    ContextTransport::Stateless
 }
 
 #[derive(Debug, Clone)]
@@ -170,12 +260,15 @@ pub type StreamResult = anyhow::Result<StreamEvent>;
 #[derive(Debug, Clone, Default)]
 pub struct ChatRequest {
     pub model_id: String,
+    /// system block for this request; never stored in the session transcript
+    pub system: Vec<SystemPart>,
+    /// conversation history (user / assistant / tool only)
     pub messages: Vec<Message>,
     /// sent only when the model supports it; mapping per provider (phase 1)
     #[allow(dead_code)]
     pub thinking: Option<ThinkingLevel>,
     pub max_tokens: Option<u32>,
-    /// tools available to the model this turn
+    /// tools available to the model this turn (empty = no tool support needed)
     pub tools: Vec<ToolSpec>,
     /// Optional documented continuation reference. Providers must opt in.
     pub previous_response_id: Option<String>,
@@ -183,11 +276,35 @@ pub struct ChatRequest {
     pub context_transport: ContextTransport,
 }
 
+impl ChatRequest {
+    /// true when this request may call tools
+    pub fn tool_capable(&self) -> bool {
+        !self.tools.is_empty()
+    }
+}
+
 pub trait Provider: Send + Sync {
     fn stream_chat(&self, req: ChatRequest) -> BoxStream<'static, StreamResult>;
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities::default()
+    }
+
+    /// Drop every request field this provider has no documented support for.
+    ///
+    /// Chat Completions has no continuation field at all, so an OpenAI
+    /// compatible gateway must never see `previous_response_id` — even one
+    /// silently ignored today can become a 400 after a server update.
+    fn sanitize(&self, req: &mut ChatRequest) {
+        let caps = self.capabilities();
+        if !caps.previous_response {
+            req.previous_response_id = None;
+        }
+        if req.context_transport == ContextTransport::ServerConversation
+            && !caps.server_conversation
+        {
+            req.context_transport = ContextTransport::Stateless;
+        }
     }
 }
 

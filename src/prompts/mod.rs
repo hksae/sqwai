@@ -4,37 +4,37 @@
 /// 1. built-in text from `src/prompts/system.md` (embedded at compile time),
 ///    overridable by `system.md` in the config directory without recompiling;
 /// 2. project instructions from `AGENTS.md` in the working directory;
-/// 3. live environment block (OS, git, tree, toolchains) gathered per request.
+/// 3. stable environment block (OS, shell, working directory).
+///
+/// The system block is assembled per request as ordered *parts*: the stable
+/// prefix above, then the durable plan, then whatever changes while the agent
+/// works (date, git state, project tree). Volatile facts always go last so
+/// they cannot invalidate a cached prefix.
 pub mod env;
 
-pub fn system_prompt() -> String {
-    system_prompt_for(true)
-}
-
-pub fn system_prompt_for(with_tools: bool) -> String {
-    let builtin = if with_tools {
-        builtin_prompt()
-    } else {
-        concise_prompt()
-    };
-    let agents = if with_tools { project_agents() } else { None };
-    let mut prompt = compose(&builtin, agents.as_deref());
-    if with_tools {
-        prompt.push_str("\n\n");
-        prompt.push_str(&env::environment_block());
-        if let Ok(root) = std::env::current_dir()
-            && let Some(plan) = crate::plan::load(&root)
-        {
-            prompt.push_str("\n\n<durable_plan>\n");
-            prompt.push_str(&plan);
-            prompt.push_str("</durable_plan>");
-        }
-    }
+/// Stable prefix: identical for every request of a session, safe to cache.
+pub fn stable_prefix() -> String {
+    let mut prompt = compose(&builtin_prompt(), project_agents().as_deref());
+    prompt.push_str("\n\n");
+    prompt.push_str(&env::stable_block());
     prompt
 }
 
-fn concise_prompt() -> String {
+/// Minimal prompt for requests that need no tools and no project context.
+pub fn concise_prompt() -> String {
     "You are an AI coding agent hosted inside the sqwai CLI application. Reply in the user's language. For trivial requests, answer directly and briefly. Do not claim to use tools or inspect files unless the request requires it.".into()
+}
+
+/// Volatile runtime context: re-read once per user turn, never cached.
+pub fn runtime_context() -> String {
+    env::volatile_block()
+}
+
+/// The durable plan, when the project has one. It changes only when the agent
+/// rewrites it, so it belongs to the cacheable prefix.
+pub fn plan_block(root: &std::path::Path) -> Option<String> {
+    let plan = crate::plan::load(root)?;
+    Some(format!("<durable_plan>\n{plan}</durable_plan>"))
 }
 
 fn builtin_prompt() -> String {
@@ -105,5 +105,18 @@ mod tests {
     #[test]
     fn builtin_prompt_is_not_empty() {
         assert!(!builtin_prompt().trim().is_empty());
+    }
+
+    #[test]
+    fn stable_prefix_carries_no_volatile_facts() {
+        let p = stable_prefix();
+        assert!(p.contains("<environment>"));
+        assert!(!p.contains("<runtime_context>"), "git/tree live elsewhere");
+        assert!(!p.contains("Date:"), "the clock must not enter the prefix");
+
+        // volatile facts are a separate part, appended after the prefix
+        let v = runtime_context();
+        assert!(v.contains("<runtime_context>"));
+        assert!(v.contains("Date:"));
     }
 }

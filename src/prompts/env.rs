@@ -1,9 +1,10 @@
 use std::process::{Command, Stdio};
 
-/// gather everything about the machine/project that helps the model act
-/// correctly; every probe fails silently
-pub fn environment_block() -> String {
-    let mut s = String::from("<runtime_context>\n<environment>\n");
+/// Facts that cannot change while the process runs: OS, shell, working
+/// directory. Part of the **stable prefix** — byte-identical between requests,
+/// so a provider-side prefix cache survives across turns.
+pub fn stable_block() -> String {
+    let mut s = String::from("<environment>\n");
 
     s.push_str(&format!(
         "\nOS: {} {} ({})\n",
@@ -17,17 +18,28 @@ pub fn environment_block() -> String {
             .or_else(|_| std::env::var("COMSPEC"))
             .unwrap_or_else(|_| "unknown".into())
     ));
+
+    let cwd = std::env::current_dir().unwrap_or_default();
+    s.push_str(&format!("Working directory: {}\n", cwd.display()));
+
+    s.push_str("</environment>\n");
+    s
+}
+
+/// Facts that change while the agent works: current date, git state, project
+/// tree. Captured once per user turn and appended **after** the stable prefix,
+/// so a new commit or a changed clock cannot invalidate the cached prefix.
+///
+/// Every probe fails silently.
+pub fn volatile_block() -> String {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut s = String::from("<runtime_context>\n");
     let now = chrono::Local::now();
     s.push_str(&format!(
         "Date: {} (UTC {})\n",
         now.format("%Y-%m-%d %H:%M %A"),
         chrono::Utc::now().format("%Y-%m-%d %H:%M")
     ));
-
-    let cwd = std::env::current_dir().unwrap_or_default();
-    s.push_str(&format!("Working directory: {}\n", cwd.display()));
-
-    s.push_str("</environment>\n\n");
     s.push_str(&git_info());
     s.push_str(&tree_block(&cwd));
     s.push_str("</runtime_context>\n");

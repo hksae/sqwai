@@ -25,23 +25,33 @@ pub fn effort(level: ThinkingLevel) -> Option<&'static str> {
 }
 
 pub fn build_body(req: &ChatRequest) -> Value {
-    let input: Vec<Value> = req
-        .messages
+    let system: Vec<Value> = req
+        .system
         .iter()
-        .map(|m| {
-            let ty = match m.role {
-                Role::System => "system",
-                Role::User => "user",
-                Role::Assistant => "assistant",
-                // tool results ride as user turns until full support lands
-                Role::Tool => "user",
-            };
+        .map(|part| {
             json!({
-                "role": ty,
-                "content": [{"type": "input_text", "text": m.content}],
+                "role": "system",
+                "content": [{"type": "input_text", "text": part.text}],
             })
         })
         .collect();
+    // the system block leads the input; it is rebuilt per request and never
+    // stored in the transcript
+    let mut input = system;
+    input.extend(req.messages.iter().map(|m| {
+        let ty = match m.role {
+            // legacy: a persisted system message would still map correctly
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            // tool results ride as user turns until full support lands
+            Role::Tool => "user",
+        };
+        json!({
+            "role": ty,
+            "content": [{"type": "input_text", "text": m.content}],
+        })
+    }));
 
     let mut body = json!({
         "model": req.model_id,
@@ -51,6 +61,8 @@ pub fn build_body(req: &ChatRequest) -> Value {
     if let Some(e) = req.thinking.and_then(effort) {
         body["reasoning"] = json!({"effort": e});
     }
+    // Only set when the provider documented the field: sanitize() has already
+    // cleared it for providers that did not.
     if let Some(id) = &req.previous_response_id {
         body["previous_response_id"] = json!(id);
     }
@@ -91,6 +103,8 @@ impl Provider for ResponsesProvider {
     fn stream_chat(&self, req: ChatRequest) -> BoxStream<'static, StreamResult> {
         let this = self.clone();
         stream! {
+            let mut req = req;
+            this.sanitize(&mut req);
             if !req.tools.is_empty() {
                 yield Err(anyhow!("responses format: tools are not supported yet (use openai or anthropic)"));
                 return;
@@ -190,10 +204,8 @@ mod tests {
     fn body_roles_and_reasoning() {
         let req = ChatRequest {
             model_id: "gpt-x".into(),
-            messages: vec![
-                Message::new(Role::System, "s"),
-                Message::new(Role::User, "hi"),
-            ],
+            system: vec![crate::providers::SystemPart::cached("s")],
+            messages: vec![Message::new(Role::User, "hi")],
             thinking: Some(ThinkingLevel::Medium),
             max_tokens: None,
             tools: vec![],
@@ -205,5 +217,27 @@ mod tests {
         assert_eq!(b["reasoning"]["effort"], "medium");
         assert_eq!(b["input"][0]["role"], "system");
         assert_eq!(b["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(b["input"][1]["role"], "user");
+    }
+
+    #[test]
+    fn previous_response_id_only_reaches_the_wire_when_documented() {
+        let req = ChatRequest {
+            model_id: "gpt-x".into(),
+            system: vec![],
+            messages: vec![Message::new(Role::User, "hi")],
+            thinking: None,
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: Some("resp_1".into()),
+            context_transport: crate::providers::ContextTransport::PreviousResponse,
+        };
+        assert_eq!(build_body(&req)["previous_response_id"], "resp_1");
+
+        // a provider that does not document the field strips it in sanitize()
+        let mut stripped = req.clone();
+        stripped.previous_response_id = None;
+        stripped.context_transport = crate::providers::ContextTransport::Stateless;
+        assert!(build_body(&stripped).get("previous_response_id").is_none());
     }
 }

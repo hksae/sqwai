@@ -67,8 +67,10 @@ pub struct App {
     provider: SharedProvider,
     session: Session,
     hl: Highlighter,
-    /// Stable system context captured once when the application starts.
-    system_prompt_cache: String,
+    /// Stable system prefix: role, rules, project instructions, static
+    /// environment. Captured once per session and reused byte-for-byte so a
+    /// provider-side prefix cache can hit on every request.
+    stable_prefix: String,
     /// Whether the current prompt still needs the full tool-oriented context.
     context_bootstrap_pending: bool,
 
@@ -150,9 +152,30 @@ pub struct App {
 }
 
 impl App {
-    /// system prompt: built-in markdown, overridable by config_dir/system.md
-    fn system_prompt(&self) -> String {
-        crate::prompts::system_prompt()
+    /// Stable part of the system block: built-in markdown (overridable by
+    /// config_dir/system.md), AGENTS.md and the static environment.
+    fn stable_prefix(&self) -> String {
+        crate::prompts::stable_prefix()
+    }
+
+    /// Assemble the system block for one request.
+    ///
+    /// Order matters: the stable prefix comes first, the durable plan next
+    /// (it only changes when the agent rewrites it), and everything that moves
+    /// while the agent works goes last so it cannot invalidate the prefix.
+    fn system_block(&self, with_tools: bool) -> Vec<crate::providers::SystemPart> {
+        use crate::providers::SystemPart;
+        if !with_tools {
+            return vec![SystemPart::volatile(crate::prompts::concise_prompt())];
+        }
+        let mut parts = vec![SystemPart::cached(self.stable_prefix.clone())];
+        let root = std::env::current_dir().unwrap_or_default();
+        if let Some(plan) = crate::prompts::plan_block(&root) {
+            parts.push(SystemPart::cached(plan));
+        }
+        // re-read once per submitted turn, never cached
+        parts.push(SystemPart::volatile(crate::prompts::runtime_context()));
+        parts
     }
 
     pub fn new(cfg: Config, session: Session, startup: bool) -> Result<Self> {
@@ -178,7 +201,7 @@ impl App {
             provider,
             session,
             hl: Highlighter::new(),
-            system_prompt_cache: String::new(),
+            stable_prefix: String::new(),
             context_bootstrap_pending: true,
             cfg,
             segments: Vec::new(),
@@ -233,7 +256,7 @@ impl App {
         if !startup {
             app.load_history_segments();
         }
-        app.system_prompt_cache = app.system_prompt();
+        app.stable_prefix = app.stable_prefix();
         app.context_bootstrap_pending = true;
         Ok(app)
     }
@@ -342,6 +365,23 @@ impl App {
             .collect()
     }
 
+    /// Rebuild the provider client from the current config so changes made
+    /// while sqwai is running — above all the API key — take effect on the next
+    /// turn without restarting the app. The agent clones this handle per turn,
+    /// so a key edited mid-turn is picked up when the next turn starts (after a
+    /// normal Esc stop, or simply the next message).
+    fn rebuild_provider(&mut self) {
+        let mc = self.model_cfg.clone();
+        match self
+            .cfg
+            .resolve_provider(&mc)
+            .and_then(|rp| providers::create(&rp))
+        {
+            Ok(p) => self.provider = p,
+            Err(e) => self.status(&format!("provider {}: {e:#}", mc.id), StatusKind::Warn),
+        }
+    }
+
     fn submit(&mut self) {
         self.bar_error = None;
         self.retry_notified = false;
@@ -372,23 +412,16 @@ impl App {
             );
             return;
         }
+        // pick up any provider/key change made since the last turn
+        self.rebuild_provider();
         self.segments.push(Segment::User(text.clone()));
         self.session.push(Role::User, &text);
 
         let with_tools = self.context_bootstrap_pending || !Self::is_trivial_request(&text);
-        let prompt = if with_tools {
-            self.system_prompt_cache.clone()
-        } else {
-            crate::prompts::system_prompt_for(false)
-        };
-        let mut msgs: Vec<PMessage> = vec![PMessage::new(Role::System, prompt)];
-        msgs.extend(
-            self.session
-                .messages
-                .iter()
-                .filter(|m| m.role != Role::System)
-                .cloned(),
-        );
+        // The system block is assembled per request and travels separately
+        // from the transcript: nothing here is ever written to the session.
+        let system = self.system_block(with_tools);
+        let msgs: Vec<PMessage> = self.session.messages.clone();
         let root = std::env::current_dir().unwrap_or_default();
         let input = crate::agent::loop_task::AgentInput {
             provider: self.provider.clone(),
@@ -399,19 +432,22 @@ impl App {
                 Some(self.model_cfg.thinking)
             },
             max_tokens: None,
+            system,
             messages: msgs,
             root,
             blocked_patterns: self.cfg.safety.blocked_patterns.clone(),
             plan_mode: self.mode == Mode::Plan,
             context_limit: self.session.context_limit,
             enable_tools: with_tools,
-            previous_response_id: if !self.context_bootstrap_pending
-                && self.provider.capabilities().previous_response
-            {
-                self.session.last_response_id.clone()
-            } else {
+            // A continuation reference only travels with the model that
+            // produced it, and only for providers that document the field.
+            previous_response_id: if self.context_bootstrap_pending {
                 None
+            } else {
+                self.session.response_id_for(&self.session.model_key)
             },
+            summary: self.session.summary.clone(),
+            compact_only: false,
         };
         self.context_bootstrap_pending = false;
         self.agent = Some(spawn_agent(input));
@@ -434,6 +470,48 @@ impl App {
         });
         self.jump_to_bottom_on_typing();
         self.dirty = true;
+    }
+
+    /// `/compact`: run the compaction policy over the stored transcript.
+    /// Reuses the agent plumbing so the summary request streams like any other
+    /// turn and can be aborted with esc.
+    fn start_compaction(&mut self) {
+        if self.streaming {
+            self.status(
+                "busy: esc stops the current generation first",
+                StatusKind::Warn,
+            );
+            return;
+        }
+        if self.session.messages.is_empty() {
+            self.status("nothing to compact yet", StatusKind::Warn);
+            return;
+        }
+        // pick up any provider/key change made since the last turn
+        self.rebuild_provider();
+        self.session.strip_system_messages();
+        let input = crate::agent::loop_task::AgentInput {
+            provider: self.provider.clone(),
+            model_id: self.model_cfg.id.clone(),
+            thinking: None,
+            max_tokens: None,
+            // compaction needs no system block and no tools
+            system: Vec::new(),
+            messages: self.session.messages.clone(),
+            root: std::env::current_dir().unwrap_or_default(),
+            blocked_patterns: Vec::new(),
+            plan_mode: false,
+            context_limit: self.session.context_limit,
+            enable_tools: false,
+            previous_response_id: None,
+            summary: self.session.summary.clone(),
+            compact_only: true,
+        };
+        self.agent = Some(spawn_agent(input));
+        self.streaming = true;
+        self.aborted = false;
+        self.assistant_buf.clear();
+        self.status("compacting context…", StatusKind::Info);
     }
 
     fn is_trivial_request(text: &str) -> bool {
@@ -466,7 +544,8 @@ impl App {
         }
         self.context_bootstrap_pending = true;
         self.session = s;
-        self.session.messages.retain(|m| m.role != Role::System);
+        // defensive: never let a legacy system turn back into the transcript
+        self.session.strip_system_messages();
         self.segments.clear();
         self.seg_cache.clear();
         self.load_history_segments();
@@ -532,7 +611,9 @@ impl App {
                 self.model_cfg = mc;
                 self.provider = p;
                 self.context_bootstrap_pending = true;
+                // a continuation reference belongs to the old model
                 self.session.last_response_id = None;
+                self.session.last_response_model = None;
                 self.session.model_key = key.to_string();
                 self.session.context_limit = self.model_cfg.context;
                 self.cfg.default_model = key.to_string();
@@ -611,31 +692,7 @@ impl App {
                 provider: self.model_cfg.provider.clone(),
             }),
             "/exit" | "/quit" | "/q" => self.quit = true,
-            "/compact" => {
-                if self.streaming {
-                    self.status(
-                        "busy: esc stops the current generation first",
-                        StatusKind::Warn,
-                    );
-                } else {
-                    let root = std::env::current_dir().unwrap_or_default();
-                    match crate::plan::load(&root) {
-                        Some(plan) => {
-                            self.session.messages.retain(|m| m.role != Role::System);
-                            self.todos = crate::plan::todo_items(&plan);
-                            self.session.todos = self.todos.clone();
-                            self.session.save().ok();
-                            self.status(
-                                "context compacted around the current plan",
-                                StatusKind::Ok,
-                            );
-                        }
-                        None => {
-                            self.status("no plan found — use plan_update first", StatusKind::Warn)
-                        }
-                    }
-                }
-            }
+            "/compact" => self.start_compaction(),
             "/undo" => {
                 if self.streaming {
                     self.status(
@@ -786,8 +843,30 @@ impl App {
                     self.dirty = true;
                 }
                 AgentEvent::ResponseId(id) => {
+                    // the id only continues a conversation for the model that
+                    // produced it; the scope is re-checked before each request
                     self.session.last_response_id = Some(id);
+                    self.session.last_response_model = Some(self.session.model_key.clone());
                     self.dirty = true;
+                }
+                AgentEvent::Compaction {
+                    summarized,
+                    before,
+                    after,
+                } => {
+                    let verb = if summarized { "summarized" } else { "trimmed" };
+                    self.status(
+                        &format!(
+                            "context compacted ({verb}): {} → {} tok",
+                            fmt_k(before),
+                            fmt_k(after)
+                        ),
+                        if summarized {
+                            StatusKind::Ok
+                        } else {
+                            StatusKind::Info
+                        },
+                    );
                 }
                 AgentEvent::RequestBreakdown(b) => {
                     crate::providers::log_http(&format!(
@@ -942,12 +1021,13 @@ impl App {
 
     /// agent finished with a full outcome (final answer + tool turns)
     fn finish_turn_ok(&mut self, outcome: AgentOutcome) {
-        // the agent owns the authoritative conversation; persist it whole
-        self.session.messages = outcome
-            .messages
-            .into_iter()
-            .filter(|m| m.role != Role::System)
-            .collect();
+        // The agent owns the authoritative conversation. It never contains a
+        // system turn: the system block is rebuilt per request and never
+        // persisted (the session also refuses one defensively).
+        self.session.messages = outcome.messages;
+        self.session.summary = outcome.summary;
+        // the transcript was replaced wholesale; the token estimate is stale
+        self.session.refresh_estimate();
         self.todos = outcome.todos;
         if !outcome.plan_todos.is_empty() {
             self.todos = outcome.plan_todos;
@@ -980,15 +1060,23 @@ impl App {
         for i in empties.into_iter().rev() {
             self.segments.remove(i);
         }
-        // the final visible assistant message is the last assistant message
-        // without tool calls in the (now updated) session
-        let final_text = self
-            .session
-            .messages
-            .iter()
-            .rev()
-            .find(|m| m.role == Role::Assistant && m.tool_calls.is_empty())
-            .map(|m| m.content.clone());
+        // On a successful completion the agent already replaced the session
+        // wholesale (finish_turn_ok), so the last assistant message there is
+        // authoritative and becomes the visible answer. On an abort/error the
+        // session was NOT updated and still holds the *previous* turn's answer —
+        // backfilling from it would stamp that old answer into the slot for the
+        // turn we just stopped, duplicating it. In that case trust only what was
+        // actually streamed this turn (assistant_buf).
+        let final_text = if res.is_ok() {
+            self.session
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == Role::Assistant && m.tool_calls.is_empty())
+                .map(|m| m.content.clone())
+        } else {
+            None
+        };
         if let Some(t) = final_text {
             if let Some(pos) = self
                 .segments
@@ -999,11 +1087,6 @@ impl App {
                     text: t.clone(),
                     live: false,
                 };
-            }
-            if !t.is_empty() {
-                // ensure the final answer is persisted even if the live buffer
-                // had nothing (e.g. answer arrived with no deltas)
-                let _ = text;
             }
         } else if !text.is_empty() {
             if let Some(pos) = self
@@ -1016,7 +1099,18 @@ impl App {
                     live: false,
                 };
             }
+            // the partial answer that was actually streamed is preserved
             self.session.push(Role::Assistant, text.clone());
+        } else {
+            // nothing was streamed and we have no authoritative answer: drop the
+            // empty live slot instead of leaving a blank assistant line
+            if let Some(pos) = self
+                .segments
+                .iter()
+                .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
+            {
+                self.segments.remove(pos);
+            }
         }
         self.streaming = false;
         self.agent = None;
@@ -1129,8 +1223,14 @@ fn fmt_k(n: u64) -> String {
 fn truncate_chars(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
+    } else if n == 0 {
+        String::new()
     } else {
-        format!("{}…", s.chars().take(n).collect::<String>())
+        // reserve one slot for the ellipsis so the result is never wider than
+        // `n` — otherwise a "…" pushed the boxed tool output one column past its
+        // border and wrap_tagged split the overflow char (and the right │) onto
+        // a new row, breaking the frame on every long line of a large file.
+        format!("{}…", s.chars().take(n - 1).collect::<String>())
     }
 }
 

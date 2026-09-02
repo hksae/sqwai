@@ -55,12 +55,24 @@ fn content_blocks(m: &super::Message) -> Vec<Value> {
 }
 
 /// Build the /v1/messages request body (unit-tested).
-pub fn build_body(req: &ChatRequest, base_max_tokens: u32) -> Value {
-    let system: Vec<String> = req
-        .messages
+///
+/// `cache_breakpoints` mirrors
+/// [`ProviderCapabilities::prompt_cache_documented`](super::ProviderCapabilities):
+/// breakpoints are only emitted for providers that document an addressable
+/// cache key. Breakpoints land on the stable prefix
+/// ([`SystemPart::cacheable`](super::SystemPart)); volatile parts follow them
+/// so a changed date or git status cannot invalidate the cached prefix.
+pub fn build_body(req: &ChatRequest, base_max_tokens: u32, cache_breakpoints: bool) -> Value {
+    let system: Vec<Value> = req
+        .system
         .iter()
-        .filter(|m| m.role == Role::System)
-        .map(|m| m.content.clone())
+        .map(|part| {
+            let mut block = json!({"type": "text", "text": part.text});
+            if cache_breakpoints && part.cacheable {
+                block["cache_control"] = json!({"type": "ephemeral"});
+            }
+            block
+        })
         .collect();
     let mut msgs: Vec<Value> = Vec::new();
     for m in &req.messages {
@@ -101,14 +113,11 @@ pub fn build_body(req: &ChatRequest, base_max_tokens: u32) -> Value {
         "model": req.model_id,
         "max_tokens": base_max_tokens,
         "stream": true,
-        // single stable prefix breakpoint for prompt caching
-        "system": system.iter().map(|s| json!({
-            "type": "text",
-            "text": s,
-            "cache_control": {"type": "ephemeral"},
-        })).collect::<Vec<_>>(),
         "messages": msgs,
     });
+    if !system.is_empty() {
+        body["system"] = json!(system);
+    }
 
     if let Some(level) = req.thinking.filter(|l| *l != ThinkingLevel::Off) {
         let b = budget(level);
@@ -160,16 +169,22 @@ impl AnthropicProvider {
 
 impl Provider for AnthropicProvider {
     fn capabilities(&self) -> super::ProviderCapabilities {
+        // cache_control is a documented, addressable cache-key mechanism:
+        // we decide where the breakpoints go and the server tells us what it
+        // read back. Automatic prefix caching elsewhere does not qualify.
         super::ProviderCapabilities {
-            prompt_cache: true,
+            prompt_cache_documented: true,
             ..Default::default()
         }
     }
 
     fn stream_chat(&self, req: ChatRequest) -> BoxStream<'static, StreamResult> {
         let this = self.clone();
+        let cache_breakpoints = self.capabilities().prompt_cache_documented;
         stream! {
-            let body = build_body(&req, 8192);
+            let mut req = req;
+            this.sanitize(&mut req);
+            let body = build_body(&req, 8192, cache_breakpoints);
             let resp = match this
                 .http
                 .post(&this.url)
@@ -309,28 +324,33 @@ mod tests {
     fn body_has_cache_control_and_thinking() {
         let req = ChatRequest {
             model_id: "claude-x".into(),
-            messages: vec![
-                Message::new(Role::System, "sys"),
-                Message::new(Role::User, "hi"),
+            system: vec![
+                crate::providers::SystemPart::cached("stable prefix"),
+                crate::providers::SystemPart::volatile("git: on branch main"),
             ],
+            messages: vec![Message::new(Role::User, "hi")],
             thinking: Some(ThinkingLevel::High),
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,
             context_transport: crate::providers::ContextTransport::Stateless,
         };
-        let b = build_body(&req, 8192);
+        let b = build_body(&req, 8192, true);
         assert_eq!(b["model"], "claude-x");
+        // breakpoint on the stable prefix only — the volatile tail must not
+        // carry one, otherwise every new date/git state would re-cache
         assert_eq!(b["system"][0]["cache_control"]["type"], "ephemeral");
+        assert!(b["system"][1].get("cache_control").is_none());
         assert_eq!(b["thinking"]["budget_tokens"], 16384);
         assert_eq!(b["max_tokens"], 8192 + 16384);
         assert_eq!(b["messages"][0]["role"], "user");
     }
 
     #[test]
-    fn body_without_thinking_omits_field() {
+    fn body_without_documented_cache_has_no_breakpoints() {
         let req = ChatRequest {
             model_id: "m".into(),
+            system: vec![crate::providers::SystemPart::cached("stable prefix")],
             messages: vec![Message::new(Role::User, "hi")],
             thinking: None,
             max_tokens: None,
@@ -338,7 +358,40 @@ mod tests {
             previous_response_id: None,
             context_transport: crate::providers::ContextTransport::Stateless,
         };
-        let b = build_body(&req, 8192);
+        let b = build_body(&req, 1024, false);
+        assert!(b["system"][0].get("cache_control").is_none());
+        assert_eq!(b["system"][0]["text"], "stable prefix");
+    }
+
+    #[test]
+    fn empty_system_block_is_omitted() {
+        let req = ChatRequest {
+            model_id: "m".into(),
+            system: vec![],
+            messages: vec![Message::new(Role::User, "hi")],
+            thinking: None,
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        let b = build_body(&req, 1024, true);
+        assert!(b.get("system").is_none());
+    }
+
+    #[test]
+    fn body_without_thinking_omits_field() {
+        let req = ChatRequest {
+            model_id: "m".into(),
+            system: vec![],
+            messages: vec![Message::new(Role::User, "hi")],
+            thinking: None,
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        let b = build_body(&req, 8192, true);
         assert!(b.get("thinking").is_none());
     }
 
@@ -346,6 +399,7 @@ mod tests {
     fn body_maps_tools_and_results() {
         let req = ChatRequest {
             model_id: "m".into(),
+            system: vec![],
             messages: vec![
                 Message::new(Role::User, "list"),
                 Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq {
@@ -365,7 +419,7 @@ mod tests {
             previous_response_id: None,
             context_transport: crate::providers::ContextTransport::Stateless,
         };
-        let b = build_body(&req, 8192);
+        let b = build_body(&req, 8192, true);
 
         if std::env::var("SQWAI_DEBUG_BODY").is_ok() {
             eprintln!("{}", serde_json::to_string_pretty(&b).unwrap());
@@ -391,6 +445,7 @@ mod tests {
     fn consecutive_tool_results_merge_into_one_user_turn() {
         let req = ChatRequest {
             model_id: "m".into(),
+            system: vec![],
             messages: vec![
                 Message::new(Role::Assistant, "").with_tool_calls(vec![
                     ToolCallReq {
@@ -413,7 +468,7 @@ mod tests {
             previous_response_id: None,
             context_transport: crate::providers::ContextTransport::Stateless,
         };
-        let b = build_body(&req, 1024);
+        let b = build_body(&req, 1024, true);
         let msgs = b["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 2, "results merged into single user turn");
         let arr = msgs[1]["content"].as_array().unwrap();

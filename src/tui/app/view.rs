@@ -945,14 +945,25 @@ impl App {
                 Style::new().fg(Theme::ACCENT_SOFT()),
             ),
             Span::styled(format!(" · {tok} tok / {pct}% ctx"), Theme::accent()),
+            // cumulative session total — billing/statistics only, kept separate
+            // from the live context meter above (don't mix the two sizes)
+            Span::styled(
+                format!(" · Σ{} tok", fmt_k(self.session.cumulative_tokens())),
+                Theme::dim(),
+            ),
         ];
-        if let Some(c) = self.session.usage.cached_tokens {
-            let cp = if context_used > 0 {
-                c.saturating_mul(100).min(context_used) / context_used
-            } else {
-                0
-            };
-            spans.push(Span::styled(format!(" · cache {cp}%"), Theme::dim()));
+        // Only claim prompt-cache savings once the provider has actually
+        // reported cached tokens. A documented cache key we never see a hit
+        // for stays unverified, so it is not advertised.
+        if self.session.cache_confirmed {
+            if let Some(c) = self.session.usage.cached_tokens {
+                let cp = if context_used > 0 {
+                    c.saturating_mul(100).min(context_used) / context_used
+                } else {
+                    0
+                };
+                spans.push(Span::styled(format!(" · cache {cp}%"), Theme::dim()));
+            }
         }
         // cost meter: enabled later from the settings menu ([ui] show_cost)
         if self.cfg.ui.show_cost

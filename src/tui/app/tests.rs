@@ -552,6 +552,49 @@ mod tests {
     }
 
     #[test]
+    fn aborted_does_not_duplicate_prior_answer() {
+        use crate::providers::Role;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        // a previously completed turn: user + assistant answer (both in the
+        // session and in the visible transcript)
+        app.session.push(Role::User, "привет");
+        app.session.push(Role::Assistant, "привет!");
+        app.segments.push(Segment::User("привет".into()));
+        app.segments.push(Segment::Assistant {
+            text: "привет!".into(),
+            live: false,
+        });
+        app.streaming = true;
+        app.segments.push(Segment::User("как дела".into()));
+        app.segments.push(Segment::Assistant {
+            text: String::new(),
+            live: true,
+        });
+        // nothing streamed yet for the new turn
+        app.assistant_buf = String::new();
+
+        app.finish_turn(Err("aborted".into()));
+
+        assert!(!app.streaming);
+        // the prior answer must not be backfilled into the stopped turn
+        let answers: Vec<&str> = app
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Assistant { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let dupes = answers.iter().filter(|a| *a == &"привет!").count();
+        assert_eq!(dupes, 1, "abort must not duplicate the prior answer: {answers:?}");
+        // and the empty live slot for the new turn must be dropped, not kept
+        assert!(
+            !app.segments.iter().any(|s| matches!(s, Segment::Assistant { live: true, .. })),
+            "empty live slot should be removed on abort"
+        );
+    }
+
+    #[test]
     fn help_menu_lists_symbols_and_keys() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.open_menu(Menu::Help);

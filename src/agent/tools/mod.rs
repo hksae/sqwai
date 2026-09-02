@@ -22,6 +22,7 @@ pub enum Kind {
     Mutating,
 }
 
+#[derive(Clone)]
 pub struct ToolCtx {
     /// project root; every path must resolve inside it
     pub root: PathBuf,
@@ -337,16 +338,27 @@ pub fn call_summary(name: &str, args: &Value) -> String {
     }
 }
 
-/// schemas sent to the model
-pub fn tool_specs() -> Vec<crate::providers::ToolSpec> {
-    defs()
+/// Schemas sent to the model.
+///
+/// Sorted by name, never by registration order: the tool block is part of the
+/// request prefix, so it must be byte-identical between requests for a
+/// prefix cache to hit.
+///
+/// `plan_mode` narrows the set to read-only tools plus `plan_update`, so a
+/// request that cannot mutate anything also does not pay for the mutating
+/// schemas.
+pub fn tool_specs(plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
+    let mut specs: Vec<crate::providers::ToolSpec> = defs()
         .into_iter()
+        .filter(|d| !plan_mode || d.kind == Kind::ReadOnly || d.name == "plan_update")
         .map(|d| crate::providers::ToolSpec {
             name: d.name.to_string(),
             description: d.description.to_string(),
             parameters: d.parameters,
         })
-        .collect()
+        .collect();
+    specs.sort_by(|a, b| a.name.cmp(&b.name));
+    specs
 }
 
 const READ_MAX_BYTES: usize = 400_000;
@@ -604,6 +616,30 @@ mod tests {
             fs::read_to_string(dir.join("src/main.rs")).unwrap(),
             "fn start() {}\n// DONE\n"
         );
+    }
+
+    #[test]
+    fn tool_specs_are_stably_sorted() {
+        let names: Vec<String> = tool_specs(false).iter().map(|t| t.name.clone()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "tool order must not depend on registration");
+        let again: Vec<String> = tool_specs(false).iter().map(|t| t.name.clone()).collect();
+        assert_eq!(names, again, "the schema block must be byte-stable");
+    }
+
+    #[test]
+    fn plan_mode_drops_mutating_schemas() {
+        let names: Vec<String> = tool_specs(true).iter().map(|t| t.name.clone()).collect();
+        assert!(names.contains(&"read".to_string()));
+        assert!(names.contains(&"grep".to_string()));
+        assert!(
+            names.contains(&"plan_update".to_string()),
+            "the plan has to stay writable in PLAN mode"
+        );
+        assert!(!names.contains(&"write".to_string()));
+        assert!(!names.contains(&"edit".to_string()));
+        assert!(!names.contains(&"bash".to_string()));
     }
 
     #[test]

@@ -12,16 +12,32 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     pub model_key: String,
     pub context_limit: u64,
+    /// Conversation transcript: user / assistant / tool turns only.
+    ///
+    /// The system prompt is **never** stored here. It is rebuilt for every
+    /// request from the current project state and passed to the provider
+    /// separately, so a prompt edit or an AGENTS.md change cannot resurrect a
+    /// stale copy from disk.
     pub messages: Vec<Message>,
+    /// Cumulative totals over the whole session — billing and statistics only.
+    /// `prompt_tokens` here is the sum of every request's prompt and is
+    /// therefore *not* a context meter; use `last_usage` for that.
     #[serde(default)]
     pub usage: Usage,
     /// tokens estimated from message length when the provider sent no usage
     #[serde(default)]
     pub estimated_tokens: u64,
-    /// prompt size of the latest provider request (current context occupancy)
-    ///; separate from cumulative usage used for billing/statistics
+    /// Snapshot of the most recent provider request. `prompt_tokens` is the
+    /// live context occupancy — it replaces, never accumulates.
     #[serde(default)]
-    pub context_tokens: u64,
+    pub last_usage: Option<Usage>,
+    /// compaction summary of the messages dropped so far (opencode-style)
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// true once a provider actually reported cached tokens back; prompt
+    /// caching is only real when it is observed, not when it is assumed
+    #[serde(default)]
+    pub cache_confirmed: bool,
     /// time of the latest user/agent message; drives ordering in the sessions menu
     #[serde(default)]
     pub last_message_at: Option<DateTime<Utc>>,
@@ -33,9 +49,13 @@ pub struct Session {
     /// title snapshot of the parent, survives parent deletion
     #[serde(default)]
     pub forked_from_title: Option<String>,
-    /// last provider-native response id, scoped by model/provider in future
+    /// last provider-native response id
     #[serde(default)]
     pub last_response_id: Option<String>,
+    /// model the stored response id belongs to; a continuation reference is
+    /// only valid for the model that produced it
+    #[serde(default)]
+    pub last_response_model: Option<String>,
     /// (sha, label) undo journal: one entry per mutating agent action
     #[serde(default)]
     pub checkpoints: Vec<(String, String)>,
@@ -55,12 +75,15 @@ impl Session {
             messages: Vec::new(),
             usage: Usage::default(),
             estimated_tokens: 0,
-            context_tokens: 0,
+            last_usage: None,
+            summary: None,
+            cache_confirmed: false,
             last_message_at: None,
             pinned: false,
             forked_from_id: None,
             forked_from_title: None,
             last_response_id: None,
+            last_response_model: None,
             checkpoints: Vec::new(),
             todos: Vec::new(),
         }
@@ -81,10 +104,15 @@ impl Session {
         // carry it over only when everything is copied
         if f.messages.len() == self.messages.len() {
             f.usage = self.usage;
+            f.last_usage = self.last_usage;
         }
+        f.summary = self.summary.clone();
+        f.cache_confirmed = self.cache_confirmed;
         f.forked_from_id = Some(self.id.to_string());
         f.forked_from_title = Some(self.title.clone());
+        // a continuation reference belongs to the parent conversation
         f.last_response_id = None;
+        f.last_response_model = None;
         f
     }
 
@@ -108,50 +136,86 @@ impl Session {
         Ok(dir)
     }
 
+    /// Append a conversation turn.
+    ///
+    /// System turns are refused on purpose: the system block is rebuilt per
+    /// request and belongs to no session. Anything that needs to reach the
+    /// model as instructions goes through `AgentInput::system`.
     pub fn push(&mut self, role: Role, content: impl Into<String>) {
+        if role == Role::System {
+            return;
+        }
         let content = content.into();
         if self.messages.is_empty() && role == Role::User {
             self.title = title_from(&content);
         }
-        if role != Role::System {
-            self.estimated_tokens += (content.len() as u64).div_ceil(4);
-            self.last_message_at = Some(Utc::now());
-        }
+        self.estimated_tokens += (content.len() as u64).div_ceil(4);
+        self.last_message_at = Some(Utc::now());
         self.messages.push(Message::new(role, content));
     }
 
+    /// Record usage reported for **one** request.
+    ///
+    /// Two counters move independently:
+    /// - `usage` accumulates (billing / statistics);
+    /// - `last_usage` is *replaced*, never summed, and describes the size of
+    ///   the current request — that is the only live context meter we have.
     pub fn add_usage(&mut self, u: &Usage) {
+        if u.is_empty() {
+            return;
+        }
         self.usage.prompt_tokens += u.prompt_tokens;
         self.usage.completion_tokens += u.completion_tokens;
         if let Some(c) = u.cached_tokens {
             *self.usage.cached_tokens.get_or_insert(0) += c;
+            // Caching is only real once the provider reports it back. A
+            // documented cache key we never see a hit for stays unverified.
+            if c > 0 {
+                self.cache_confirmed = true;
+            }
         }
-        // Provider prompt_tokens describes the current request context. Do not
-        // use the cumulative billing counter as the live context meter. Some
-        // providers emit a second usage event for output with zero input.
+        // Some providers emit a second usage event for output with zero input:
+        // keep the prompt size of the request that actually reported one.
         if u.prompt_tokens > 0 {
-            self.context_tokens = u.prompt_tokens;
+            self.last_usage = Some(*u);
+        } else if let Some(prev) = self.last_usage.as_mut() {
+            prev.completion_tokens += u.completion_tokens;
         }
     }
 
-    /// tokens occupying the latest provider request context
+    /// Tokens occupying the latest provider request — the live context meter.
     pub fn context_tokens_used(&self) -> u64 {
-        if self.context_tokens > 0 {
-            self.context_tokens
-        } else if self.usage.prompt_tokens == 0 {
-            self.estimated_tokens
-        } else {
-            0
+        match self.last_usage {
+            Some(u) if u.prompt_tokens > 0 => u.prompt_tokens,
+            _ => self.estimated_tokens,
         }
     }
 
-    /// cumulative usage, useful for billing/statistics
-    pub fn used_tokens(&self) -> u64 {
-        let reported = self.usage.prompt_tokens + self.usage.completion_tokens;
+    /// Cumulative tokens over the whole session: billing and statistics only.
+    pub fn cumulative_tokens(&self) -> u64 {
+        let reported = self.usage.total();
         if reported > 0 {
             reported
         } else {
             self.estimated_tokens
+        }
+    }
+
+    /// Recompute the fallback estimate after the transcript was replaced
+    /// wholesale (compaction, fork, agent outcome).
+    pub fn refresh_estimate(&mut self) {
+        self.estimated_tokens = self
+            .messages
+            .iter()
+            .map(|m| (m.content.len() as u64).div_ceil(4))
+            .sum();
+    }
+
+    /// true when a continuation reference may be reused for this model
+    pub fn response_id_for(&self, model_key: &str) -> Option<String> {
+        match &self.last_response_model {
+            Some(m) if m == model_key => self.last_response_id.clone(),
+            _ => None,
         }
     }
 
@@ -179,7 +243,19 @@ impl Session {
     pub fn load(id: &str) -> Result<Self> {
         let path = Self::resolve_path(id)?;
         let raw = std::fs::read_to_string(path)?;
-        Ok(serde_json::from_str(&raw)?)
+        let mut s: Self = serde_json::from_str(&raw)?;
+        s.strip_system_messages();
+        Ok(s)
+    }
+
+    /// Drop system messages persisted by older builds: the system block is
+    /// rebuilt per request and must never come back from disk.
+    pub fn strip_system_messages(&mut self) {
+        let before = self.messages.len();
+        self.messages.retain(|m| m.role != Role::System);
+        if self.messages.len() != before {
+            self.refresh_estimate();
+        }
     }
 
     /// find a session file by full uuid or unique prefix
@@ -214,7 +290,10 @@ impl Session {
                 .ok()
                 .and_then(|raw| serde_json::from_str::<Self>(&raw).ok())
             {
-                Some(s) => out.push(s),
+                Some(mut s) => {
+                    s.strip_system_messages();
+                    out.push(s);
+                }
                 // skip corrupt files instead of breaking the whole menu
                 None => continue,
             }
@@ -272,7 +351,7 @@ mod tests {
         });
         assert_eq!(s.context_tokens_used(), 500);
         assert_eq!(s.context_percent(), 50.0);
-        assert_eq!(s.used_tokens(), 1100);
+        assert_eq!(s.cumulative_tokens(), 1100);
 
         // A later request reports its own prompt size; the context meter must
         // follow it instead of accumulating every previous prompt.
@@ -283,6 +362,87 @@ mod tests {
         });
         assert_eq!(s.context_tokens_used(), 36_267);
         assert_eq!(s.context_percent(), 100.0);
+        // cumulative keeps growing on its own track
+        assert_eq!(s.cumulative_tokens(), 1100 + 36_267 + 10);
+    }
+
+    #[test]
+    fn cumulative_usage_never_mixes_into_the_context_meter() {
+        let mut s = Session::new("m".into(), 100_000);
+        for _ in 0..5 {
+            s.add_usage(&Usage {
+                prompt_tokens: 1_000,
+                completion_tokens: 100,
+                cached_tokens: None,
+            });
+        }
+        // five identical requests: the context holds one request, not five
+        assert_eq!(s.context_tokens_used(), 1_000);
+        assert_eq!(s.cumulative_tokens(), 5_500);
+    }
+
+    #[test]
+    fn output_only_usage_event_does_not_reset_the_prompt_size() {
+        let mut s = Session::new("m".into(), 100_000);
+        s.add_usage(&Usage {
+            prompt_tokens: 2_000,
+            completion_tokens: 0,
+            cached_tokens: None,
+        });
+        // anthropic-style second event: output only, zero input
+        s.add_usage(&Usage {
+            prompt_tokens: 0,
+            completion_tokens: 250,
+            cached_tokens: None,
+        });
+        assert_eq!(s.context_tokens_used(), 2_000);
+        assert_eq!(s.last_usage.unwrap().completion_tokens, 250);
+    }
+
+    #[test]
+    fn system_messages_are_never_stored() {
+        let mut s = Session::new("m".into(), 1000);
+        s.push(Role::System, "you are an agent");
+        s.push(Role::User, "hi");
+        assert_eq!(s.messages.len(), 1);
+        assert_eq!(s.messages[0].role, Role::User);
+
+        // legacy files are cleaned up on load
+        let mut legacy = Session::new("m".into(), 1000);
+        legacy
+            .messages
+            .push(Message::new(Role::System, "stale system prompt"));
+        legacy.messages.push(Message::new(Role::User, "hi"));
+        legacy.strip_system_messages();
+        assert!(legacy.messages.iter().all(|m| m.role != Role::System));
+    }
+
+    #[test]
+    fn cache_is_confirmed_only_when_reported() {
+        let mut s = Session::new("m".into(), 1000);
+        s.add_usage(&Usage {
+            prompt_tokens: 10,
+            completion_tokens: 1,
+            cached_tokens: Some(0),
+        });
+        assert!(!s.cache_confirmed, "a zero-cache report proves nothing");
+
+        s.add_usage(&Usage {
+            prompt_tokens: 10,
+            completion_tokens: 1,
+            cached_tokens: Some(7),
+        });
+        assert!(s.cache_confirmed);
+        assert_eq!(s.usage.cached_tokens, Some(7));
+    }
+
+    #[test]
+    fn response_id_is_scoped_to_the_model_that_produced_it() {
+        let mut s = Session::new("m".into(), 1000);
+        s.last_response_id = Some("resp_1".into());
+        s.last_response_model = Some("local/qwen".into());
+        assert_eq!(s.response_id_for("local/qwen").as_deref(), Some("resp_1"));
+        assert_eq!(s.response_id_for("anthropic/sonnet"), None);
     }
 
     #[test]

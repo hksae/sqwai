@@ -110,21 +110,32 @@ impl PartialCall {
 
 impl Provider for OpenAiProvider {
     fn capabilities(&self) -> super::ProviderCapabilities {
+        // Some OpenAI-compatible servers do automatic prefix caching, but
+        // there is no addressable cache key and no per-server guarantee, so we
+        // claim nothing. Caching only counts once cached_tokens come back.
         super::ProviderCapabilities::default()
     }
 
     fn stream_chat(&self, req: ChatRequest) -> BoxStream<'static, StreamResult> {
         let this = self.clone();
         stream! {
+            let mut req = req;
+            this.sanitize(&mut req);
             let url = format!("{}/chat/completions", this.base_url.trim_end_matches('/'));
-            let req_messages = if req.previous_response_id.is_some() {
-                // Chat Completions has no standard continuation field. Keep
-                // sending the complete transcript for compatible gateways.
-                &req.messages
-            } else {
-                &req.messages
-            };
-            let msgs: Vec<Value> = req_messages.iter().map(Self::message_json).collect();
+            // Chat Completions has no documented continuation field, so the
+            // full transcript is always resent. sanitize() has already dropped
+            // previous_response_id; this only records that it happened.
+            if req.previous_response_id.is_some() {
+                super::log_http(
+                    "openai-compatible: previous_response_id dropped (not supported by Chat Completions)",
+                );
+            }
+            let mut msgs: Vec<Value> = Vec::new();
+            let system = super::system_text(&req.system);
+            if !system.trim().is_empty() {
+                msgs.push(json!({"role": "system", "content": system}));
+            }
+            msgs.extend(req.messages.iter().map(Self::message_json));
             let mut body = json!({
                 "model": req.model_id,
                 "messages": msgs,
@@ -270,6 +281,7 @@ mod tests {
     fn request_body_includes_tools_and_tool_messages() {
         let req = ChatRequest {
             model_id: "m".into(),
+            system: vec![],
             messages: vec![
                 Message::new(Role::User, "list files"),
                 Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq {
@@ -307,6 +319,56 @@ mod tests {
             "function": {"name": t.name, "description": t.description, "parameters": t.parameters},
         })).collect::<Vec<_>>());
         assert_eq!(body_tools[0]["function"]["name"], "ls");
+    }
+
+    #[test]
+    fn sanitize_drops_fields_a_gateway_does_not_support() {
+        let p = OpenAiProvider::new(&crate::config::ResolvedProvider {
+            name: "local".into(),
+            format: crate::config::WireFormat::Openai,
+            base_url: "http://localhost:11434/v1".into(),
+            api_key: None,
+        })
+        .unwrap();
+        let mut req = ChatRequest {
+            model_id: "m".into(),
+            system: vec![crate::providers::SystemPart::cached("sys")],
+            messages: vec![Message::new(Role::User, "hi")],
+            thinking: None,
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: Some("resp_1".into()),
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        p.sanitize(&mut req);
+        assert!(
+            req.previous_response_id.is_none(),
+            "Chat Completions has no continuation field — it must never reach the wire"
+        );
+    }
+
+    #[test]
+    fn system_block_precedes_history() {
+        let req = ChatRequest {
+            model_id: "m".into(),
+            system: vec![
+                crate::providers::SystemPart::cached("A"),
+                crate::providers::SystemPart::volatile("B"),
+            ],
+            messages: vec![Message::new(Role::User, "hi")],
+            thinking: None,
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        let system = crate::providers::system_text(&req.system);
+        assert_eq!(system, "A\n\nB");
+        let msgs: Vec<Value> = std::iter::once(json!({"role": "system", "content": system}))
+            .chain(req.messages.iter().map(OpenAiProvider::message_json))
+            .collect();
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[1]["role"], "user");
     }
 
     #[test]

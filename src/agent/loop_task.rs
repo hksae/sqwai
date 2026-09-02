@@ -12,12 +12,18 @@ use tokio::sync::mpsc;
 
 use crate::config::ThinkingLevel;
 use crate::providers::{
-    ChatRequest, Message, RequestBreakdown, Role, SharedProvider, StreamEvent, ToolCallReq, Usage,
+    ChatRequest, ContextTransport, Message, RequestBreakdown, Role, SharedProvider, StreamEvent,
+    SystemPart, ToolCallReq, Usage,
 };
 
+use crate::agent::context;
 use crate::agent::tools::{self, ToolCtx};
 use crate::agent::{checkpoints, safety};
 use crate::plan;
+
+/// Output token cap for the summarization request. It only has to be long
+/// enough for a dense summary; anything more wastes the context we just freed.
+const SUMMARY_MAX_TOKENS: u32 = 2_048;
 
 #[derive(Debug, Clone)]
 pub struct AskOption {
@@ -35,8 +41,10 @@ pub enum ApprovalDecision {
 /// what a finished agent hands back to the TUI
 #[derive(Debug)]
 pub struct AgentOutcome {
-    /// system prompt + full history + tool turns + final assistant answer
+    /// full history + tool turns + final assistant answer (never a system turn)
     pub messages: Vec<Message>,
+    /// compaction summary covering everything dropped from `messages`
+    pub summary: Option<String>,
     /// current to-do list written via todowrite
     pub todos: Vec<String>,
     /// checklist derived from the durable project plan
@@ -82,6 +90,13 @@ pub enum AgentEvent {
     Checkpoint {
         label: String,
     },
+    /// the compaction policy ran: token counts before/after
+    Compaction {
+        /// true when the model produced the summary, false for prune/trim only
+        summarized: bool,
+        before: u64,
+        after: u64,
+    },
     /// the agent revised the visible to-do list
     Todos(Vec<String>),
     Retry {
@@ -115,7 +130,11 @@ pub struct AgentInput {
     pub model_id: String,
     pub thinking: Option<ThinkingLevel>,
     pub max_tokens: Option<u32>,
-    /// system prompt + history + the new user message
+    /// System block for this request, ordered and split into stable/volatile
+    /// parts. It is rebuilt by the caller for every turn and is never stored
+    /// in the session transcript.
+    pub system: Vec<SystemPart>,
+    /// conversation history: user / assistant / tool turns only
     pub messages: Vec<Message>,
     /// project root where tool paths are jailed
     pub root: PathBuf,
@@ -128,7 +147,13 @@ pub struct AgentInput {
     /// Whether this request may use agent tools.
     pub enable_tools: bool,
     /// Optional provider-native continuation from the previous completed turn.
+    /// Only ever set for providers that document the field.
     pub previous_response_id: Option<String>,
+    /// Summary of everything already compacted out of `messages`.
+    pub summary: Option<String>,
+    /// Run the compaction policy and finish without talking to the model
+    /// otherwise (the `/compact` command).
+    pub compact_only: bool,
 }
 
 const RETRY_WINDOW: Duration = Duration::from_secs(3600);
@@ -146,34 +171,22 @@ fn backoff(attempt: u32) -> Duration {
     Duration::from_secs(secs)
 }
 
-fn request_messages(
-    messages: &[Message],
-    previous_response_id: Option<&str>,
-    transport: crate::providers::ContextTransport,
-) -> Vec<Message> {
-    if previous_response_id.is_none()
-        || transport != crate::providers::ContextTransport::PreviousResponse
-    {
+/// Which part of the local transcript goes on the wire.
+///
+/// Only a documented continuation reference shortens it: the provider already
+/// holds those turns, and resending them would duplicate the remote history.
+/// The system block travels separately and is always sent.
+fn request_messages(messages: &[Message], transport: ContextTransport) -> Vec<Message> {
+    if transport != ContextTransport::PreviousResponse {
         return messages.to_vec();
     }
-
-    // Responses continuation already owns the previous conversation on the
-    // provider. Re-send instructions plus only the current user turn; sending
-    // the entire local transcript would duplicate the remote history.
-    let mut current = messages
+    messages
         .iter()
         .rev()
         .find(|m| m.role == Role::User)
         .cloned()
         .into_iter()
-        .collect::<Vec<_>>();
-    let mut out = messages
-        .iter()
-        .filter(|m| m.role == Role::System)
-        .cloned()
-        .collect::<Vec<_>>();
-    out.append(&mut current);
-    out
+        .collect()
 }
 
 struct TurnOutcome {
@@ -202,14 +215,69 @@ async fn run_agent(
         model_id,
         thinking,
         max_tokens,
+        system,
         mut messages,
         root,
         blocked_patterns,
         plan_mode,
         context_limit,
         enable_tools,
-        previous_response_id,
+        mut previous_response_id,
+        mut summary,
+        compact_only,
     } = input;
+
+    let caps = provider.capabilities();
+    let policy = context::Policy::new(context_limit);
+    // Tools are part of the request prefix: sorted for stability, narrowed in
+    // PLAN mode, and omitted entirely for requests that cannot call them.
+    let tools: Vec<crate::providers::ToolSpec> = if enable_tools {
+        tools::tool_specs(plan_mode)
+    } else {
+        Vec::new()
+    };
+    let transport = crate::providers::select_transport(caps, previous_response_id.as_deref());
+
+    // `/compact` — run the policy, hand the transcript back, no chat turn.
+    if compact_only {
+        let outcome = compact_history(
+            &provider,
+            &model_id,
+            &mut messages,
+            &mut summary,
+            &policy,
+            0,
+            true,
+        )
+        .await;
+        if let Some((before, after, summarized)) = outcome {
+            let _ = tx
+                .send(AgentEvent::Compaction {
+                    summarized,
+                    before,
+                    after,
+                })
+                .await;
+        } else {
+            let _ = tx
+                .send(AgentEvent::Compaction {
+                    summarized: false,
+                    before: context::estimated_tokens(&messages),
+                    after: context::estimated_tokens(&messages),
+                })
+                .await;
+        }
+        let _ = tx
+            .send(AgentEvent::Completed(Ok(AgentOutcome {
+                messages,
+                summary,
+                todos: Vec::new(),
+                plan_todos: Vec::new(),
+                journal: Vec::new(),
+            })))
+            .await;
+        return;
+    }
 
     let mut ctx = ToolCtx::new(&root);
     let mut todos: Vec<String> = Vec::new();
@@ -219,27 +287,37 @@ async fn run_agent(
         .unwrap_or_default();
     let mut always_allow: Vec<String> = Vec::new();
     let mut next_id: u64 = 0;
-
-    let tools: Vec<crate::providers::ToolSpec> = if enable_tools {
-        tools::tool_specs()
-    } else {
-        Vec::new()
-    };
-    // The very first turn should not already contain tool results when
-    // resuming a pure text history, but replaying tool turns stored in the
-    // session could; we keep messages as passed — providers handle them.
-
-    let transport = if previous_response_id.is_some() && provider.capabilities().previous_response {
-        crate::providers::ContextTransport::PreviousResponse
-    } else {
-        crate::providers::ContextTransport::Stateless
-    };
+    // prompt size of the last request, as reported by the provider
+    let mut prompt_size: u64 = 0;
 
     loop {
-        let request_messages =
-            request_messages(&messages, previous_response_id.as_deref(), transport);
+        // Compaction gate. The provider's own prompt size is the honest
+        // measurement — it includes the system block and the tool schemas the
+        // estimate cannot see.
+        if let Some((before, after, summarized)) = compact_history(
+            &provider,
+            &model_id,
+            &mut messages,
+            &mut summary,
+            &policy,
+            prompt_size,
+            false,
+        )
+        .await
+        {
+            let _ = tx
+                .send(AgentEvent::Compaction {
+                    summarized,
+                    before,
+                    after,
+                })
+                .await;
+        }
+
+        let request_messages = request_messages(&messages, transport);
         let breakdown = RequestBreakdown::from_request(&ChatRequest {
             model_id: model_id.clone(),
+            system: system.clone(),
             messages: request_messages.clone(),
             thinking,
             max_tokens,
@@ -254,19 +332,18 @@ async fn run_agent(
             &provider,
             &ChatRequest {
                 model_id: model_id.clone(),
+                system: system.clone(),
                 messages: request_messages,
                 thinking,
                 max_tokens,
                 tools: tools.clone(),
                 previous_response_id: previous_response_id.clone(),
-                context_transport: if previous_response_id.is_some() {
-                    crate::providers::ContextTransport::PreviousResponse
-                } else {
-                    crate::providers::ContextTransport::Stateless
-                },
+                context_transport: transport,
             },
             &tx,
             &mut ctl,
+            &mut previous_response_id,
+            &mut prompt_size,
         )
         .await
         {
@@ -336,7 +413,7 @@ async fn run_agent(
                         "plan_update" => {
                             let mut args = call.args.clone();
                             args["context_limit"] = serde_json::json!(context_limit);
-                            let outcome = tools::execute(&mut ctx, "plan_update", &args);
+                            let outcome = run_tool_blocking(&mut ctx, "plan_update", &args).await;
                             if outcome.ok {
                                 if let Some(saved) = plan::load(&root) {
                                     plan_todos = plan::todo_items(&saved);
@@ -346,7 +423,7 @@ async fn run_agent(
                             }
                             outcome
                         }
-                        other => tools::execute(&mut ctx, other, &call.args),
+                        other => run_tool_blocking(&mut ctx, other, &call.args).await,
                     }
                 };
 
@@ -375,11 +452,116 @@ async fn run_agent(
     let _ = tx
         .send(AgentEvent::Completed(Ok(AgentOutcome {
             messages,
+            summary,
             todos,
             journal: ctx.journal,
             plan_todos,
         })))
         .await;
+}
+
+/// Run the compaction policy, cheapest stage first.
+///
+/// 1. prune aged-out tool output (no LLM);
+/// 2. summarize the oldest turns through the model;
+/// 3. if the summary could not be obtained, summarize locally;
+/// 4. hard-trim if the history still does not fit.
+///
+/// Returns `(before, after, summarized_by_the_model)` when something changed.
+/// A failure never propagates: stage 4 always leaves a usable transcript.
+async fn compact_history(
+    provider: &SharedProvider,
+    model_id: &str,
+    messages: &mut Vec<Message>,
+    summary: &mut Option<String>,
+    policy: &context::Policy,
+    observed_prompt: u64,
+    force: bool,
+) -> Option<(u64, u64, bool)> {
+    let measured = |m: &[Message]| observed_prompt.max(context::estimated_tokens(m));
+    let before = measured(messages);
+
+    // stage 1: prune. Cheap, lossless in structure, runs every turn.
+    let (pruned, pruned_changed) = context::prune(messages);
+    if pruned_changed {
+        *messages = pruned;
+    }
+    if !force && policy.pressure(measured(messages)) == context::Pressure::Ok {
+        // Pressure is fine, so no summarization or hard trim will run. Stage-1
+        // `prune` may have shrunk the chat history, but that never moves
+        // `measured`: it is pinned to `observed_prompt` (the provider's full
+        // prompt size of the *previous* request), which prune cannot change.
+        // Emitting "trimmed: 12k → 12k tok" here would be a no-op that reads as
+        // if context compressed when it did not. Prune is lossy, but its effect
+        // is already visible inline via PRUNE_NOTE on the trimmed tool result,
+        // so stay silent instead of lying about the token count.
+        return None;
+    }
+
+    // stage 2: summarize. The cut is safe by construction, so an assistant
+    // tool call can never be separated from its results.
+    let (older, keep) = context::split_for_summary(messages);
+    let older: Vec<Message> = older.to_vec();
+    let keep: Vec<Message> = keep.to_vec();
+    let mut summarized = false;
+    if !older.is_empty() {
+        let request = ChatRequest {
+            model_id: model_id.to_string(),
+            system: vec![SystemPart::volatile(context::SUMMARY_SYSTEM)],
+            messages: vec![Message::new(
+                Role::User,
+                context::summary_input(&older, summary.as_deref()),
+            )],
+            thinking: None,
+            max_tokens: Some(SUMMARY_MAX_TOKENS),
+            // a summarization request needs no tools
+            tools: Vec::new(),
+            previous_response_id: None,
+            context_transport: ContextTransport::Stateless,
+        };
+        let text = match collect_text(provider, &request).await {
+            Ok(text) => text,
+            Err(e) => {
+                crate::providers::log_http(&format!("compaction: summarization failed: {e}"));
+                // stage 3: extract a summary locally instead of losing the turns
+                context::local_summary(&older, summary.as_deref())
+            }
+        };
+        *messages = context::apply_summary(&text, &keep);
+        *summary = Some(text);
+        summarized = true;
+    }
+
+    // stage 4: still too big — drop the oldest turns outright
+    if policy.pressure(measured(messages)) != context::Pressure::Ok {
+        let budget = policy.budget();
+        *messages = context::hard_trim(messages, budget);
+    }
+    let after = measured(messages);
+    if after == before && !summarized {
+        return None;
+    }
+    Some((before, after, summarized))
+}
+
+/// Stream one request and collect its text; every other event is discarded.
+async fn collect_text(provider: &SharedProvider, req: &ChatRequest) -> Result<String, String> {
+    use futures::StreamExt;
+    let mut stream = provider.stream_chat(req.clone());
+    let mut out = String::new();
+    while let Some(ev) = stream.next().await {
+        match ev {
+            Ok(StreamEvent::Text(t)) => out.push_str(&t),
+            Ok(_) => {}
+            Err(e) => return Err(format!("{e:#}")),
+        }
+    }
+    let text = out.trim().to_string();
+    if text.is_empty() {
+        Err("the model returned an empty summary".into())
+    } else {
+        Ok(text)
+    }
 }
 
 /// stream one request, retrying clean failures with backoff until it succeeds
@@ -389,6 +571,8 @@ async fn run_turn(
     req: &ChatRequest,
     tx: &mpsc::Sender<AgentEvent>,
     _ctl: &mut mpsc::Receiver<ControlMsg>,
+    response_id: &mut Option<String>,
+    prompt_size: &mut u64,
 ) -> Result<TurnOutcome, String> {
     use futures::StreamExt;
 
@@ -422,14 +606,29 @@ async fn run_turn(
                     }
                 }
                 Ok(StreamEvent::Usage(u)) => {
+                    // prompt size of *this* request: replaces, never accumulates.
+                    // Some providers send a second output-only event with zero
+                    // input — that must not reset the meter.
+                    if u.prompt_tokens > 0 {
+                        *prompt_size = u.prompt_tokens;
+                    }
                     if tx.send(AgentEvent::Usage(u)).await.is_err() {
                         return Err("tui closed".into());
                     }
                 }
                 Ok(StreamEvent::ResponseId(id)) => {
+                    // A continuation chain moves forward: the next iteration
+                    // must reference this response, not the one before it.
+                    *response_id = Some(id.clone());
                     let _ = tx.send(AgentEvent::ResponseId(id)).await;
                 }
-                Ok(StreamEvent::ToolCall(tc)) => calls.push(tc),
+                Ok(StreamEvent::ToolCall(tc)) => {
+                    // only tool-capable requests may schedule tools; a call
+                    // emitted for a tools-less request is ignored
+                    if req.tool_capable() {
+                        calls.push(tc);
+                    }
+                }
                 Err(e) => failed = Some(format!("{e:#}")),
             }
             if failed.is_some() {
@@ -595,6 +794,36 @@ async fn bash_call(
         }
     }
 
-    // 2. run it through the normal bash handler
-    tools::execute(ctx, "bash", &call.args)
+    // 2. run it through the normal bash handler on a blocking thread so a long
+    //    command never stalls the async runtime (and the TUI render loop)
+    run_tool_blocking(ctx, "bash", &call.args).await
+}
+
+/// Execute a tool handler on a dedicated blocking thread.
+///
+/// `tools::execute` can run for a long time (e.g. `bash` up to its timeout), and
+/// calling it directly inside this async task would occupy a tokio worker —
+/// which, when the scheduler places `run_agent` on the `block_on` driver thread,
+/// freezes the TUI for the whole call. `spawn_blocking` uses a separate thread
+/// pool, so the runtime (and the UI) stay responsive. The cloned `ToolCtx` is
+/// moved in and its journal/checkpoint bookkeeping is merged back afterwards so
+/// callers observe every mutation the handler recorded.
+async fn run_tool_blocking(
+    ctx: &mut ToolCtx,
+    name: &str,
+    args: &serde_json::Value,
+) -> tools::Outcome {
+    let mut exec_ctx = ctx.clone();
+    let fallback_ctx = exec_ctx.clone();
+    let name = name.to_string();
+    let args = args.clone();
+    let (outcome, exec_ctx) = tokio::task::spawn_blocking(move || {
+        let o = tools::execute(&mut exec_ctx, &name, &args);
+        (o, exec_ctx)
+    })
+    .await
+    .unwrap_or_else(|e| (tools::Outcome::err(format!("tool thread failed: {e}")), fallback_ctx));
+    ctx.journal = exec_ctx.journal;
+    ctx.files_read = exec_ctx.files_read;
+    outcome
 }
