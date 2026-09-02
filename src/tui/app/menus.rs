@@ -112,6 +112,9 @@ pub(super) enum MenuAction {
     OpenAppearance,
     OpenThemes,
     OpenProviders,
+    OpenMcp,
+    OpenLsp,
+    OpenSkills,
     AddProvider,
     EditProvider(String),
     DeleteProvider(String),
@@ -411,6 +414,18 @@ impl App {
             MenuAction::OpenAppearance => self.open_menu(Menu::Appearance),
             MenuAction::OpenThemes => self.open_menu(Menu::Themes),
             MenuAction::OpenProviders => self.open_menu(Menu::Providers),
+            MenuAction::OpenMcp => self.status(
+                "MCP servers are configured in config.toml",
+                StatusKind::Info,
+            ),
+            MenuAction::OpenLsp => self.status(
+                "LSP servers are configured in config.toml",
+                StatusKind::Info,
+            ),
+            MenuAction::OpenSkills => self.status(
+                "Skills load from configured paths and .sqwai/skills",
+                StatusKind::Info,
+            ),
             MenuAction::OpenModels(p) => self.open_menu(Menu::Models { provider: p }),
             MenuAction::AddProvider => self.open_menu(Menu::EditProvider { name: None }),
             MenuAction::EditProvider(name) => {
@@ -748,11 +763,14 @@ impl App {
                     MenuAction::OpenProviders,
                 ));
                 self.menu_rows
-                    .push(section("MCP", "tool servers", MenuAction::None));
+                    .push(section("MCP", "tool servers", MenuAction::OpenMcp));
                 self.menu_rows
-                    .push(section("LSP", "language diagnostics", MenuAction::None));
-                self.menu_rows
-                    .push(section("Skills", "agent instructions", MenuAction::None));
+                    .push(section("LSP", "language diagnostics", MenuAction::OpenLsp));
+                self.menu_rows.push(section(
+                    "Skills",
+                    "agent instructions",
+                    MenuAction::OpenSkills,
+                ));
                 self.menu_footer_text = Some("enter: open · esc: close".into());
             }
             Menu::Appearance => {
