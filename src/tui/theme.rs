@@ -92,10 +92,8 @@ pub const THEMES: [ThemeDef; 20] = [
 /// kinds of animated (time-driven) palettes
 #[derive(Clone, Copy)]
 pub enum AnimKind {
-    Rainbow,
     Aurora,
     Pulse,
-    Spectrum,
     Lava,
     Matrix,
 }
@@ -117,13 +115,6 @@ fn anim_palette(kind: AnimKind, base: u32, tick: u64) -> Palette {
     let (mut accent_h, mut border_h, mut bg_h, mut surf_h) = (base, base, base, base);
     let (mut acc_v, acc_s, mut bd_v) = (100u32, 57u32, 87u32);
     match kind {
-        AnimKind::Rainbow => {
-            let h = (tick as u32).wrapping_mul(5) % 360;
-            accent_h = h;
-            border_h = h;
-            bg_h = h;
-            surf_h = h;
-        }
         AnimKind::Aurora => {
             let h = 150 + ((tick as u32).wrapping_mul(2) % 80); // 150..230
             accent_h = h;
@@ -138,15 +129,11 @@ fn anim_palette(kind: AnimKind, base: u32, tick: u64) -> Palette {
             bd_v = (70 + tri / 3).min(100);
             // hue stays at base
         }
-        AnimKind::Spectrum => {
-            let h = (tick as u32).wrapping_mul(2) % 360;
-            accent_h = h;
-            border_h = (h + 20) % 360;
-            bg_h = (h + 10) % 360;
-            surf_h = (h + 30) % 360;
-        }
         AnimKind::Lava => {
-            let f = (tick as u32).wrapping_mul(7) % 30;
+            // slow, smooth drift: 1 hue unit per step, step every 3 frames
+            // (~6.7 fps effective) so the glow eases instead of snapping
+            let st = (tick / 3) as u32;
+            let f = st % 30;
             accent_h = 10 + f;
             border_h = 20 + f;
             bg_h = 12 + f;
@@ -175,13 +162,11 @@ fn anim_palette(kind: AnimKind, base: u32, tick: u64) -> Palette {
     }
 }
 
-pub const ANIMATED_THEMES: [AnimThemeDef; 6] = [
-    AnimThemeDef { name: "rainbow",  base_hue: 320, kind: AnimKind::Rainbow },
-    AnimThemeDef { name: "aurora",   base_hue: 160, kind: AnimKind::Aurora },
-    AnimThemeDef { name: "pulse",    base_hue: 280, kind: AnimKind::Pulse },
-    AnimThemeDef { name: "spectrum", base_hue: 200, kind: AnimKind::Spectrum },
-    AnimThemeDef { name: "lava",     base_hue: 18,  kind: AnimKind::Lava },
-    AnimThemeDef { name: "matrix",   base_hue: 120, kind: AnimKind::Matrix },
+pub const ANIMATED_THEMES: [AnimThemeDef; 4] = [
+    AnimThemeDef { name: "aurora", base_hue: 160, kind: AnimKind::Aurora },
+    AnimThemeDef { name: "pulse",  base_hue: 280, kind: AnimKind::Pulse },
+    AnimThemeDef { name: "lava",   base_hue: 18,  kind: AnimKind::Lava },
+    AnimThemeDef { name: "matrix", base_hue: 120, kind: AnimKind::Matrix },
 ];
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
