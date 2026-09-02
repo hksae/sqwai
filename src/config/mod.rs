@@ -237,6 +237,74 @@ pub struct SafetyConfig {
     pub blocked_patterns: Vec<String>,
 }
 
+/// MCP server transport configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum McpTransport {
+    Stdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+    },
+    Http {
+        url: String,
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerDef {
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub transport: McpTransport,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub servers: Vec<McpServerDef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspServerDef {
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub language: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub root_markers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LspConfig {
+    #[serde(default)]
+    pub servers: Vec<LspServerDef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillsConfig {
+    #[serde(default)]
+    pub dirs: Vec<PathBuf>,
+    #[serde(default = "default_true")]
+    pub auto_load: bool,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            dirs: Vec::new(),
+            auto_load: true,
+        }
+    }
+}
+
 /// runtime-tweakable ui behavior (`/debug`, `/themes`)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiConfig {
@@ -287,6 +355,12 @@ pub struct Config {
     pub safety: SafetyConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
+    #[serde(default)]
+    pub lsp: LspConfig,
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
 
 fn default_model_name() -> String {
@@ -335,6 +409,9 @@ impl Default for Config {
             models: BTreeMap::new(),
             safety: SafetyConfig::default(),
             ui: UiConfig::default(),
+            mcp: McpConfig::default(),
+            lsp: LspConfig::default(),
+            skills: SkillsConfig::default(),
         };
         cfg.ensure_seeds();
         cfg

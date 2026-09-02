@@ -11,6 +11,7 @@
 /// works (date, git state, project tree). Volatile facts always go last so
 /// they cannot invalidate a cached prefix.
 pub mod env;
+pub mod skills;
 
 /// Stable prefix: identical for every request of a session, safe to cache.
 pub fn stable_prefix() -> String {

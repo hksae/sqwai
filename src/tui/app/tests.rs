@@ -77,6 +77,9 @@ mod tests {
             models,
             safety: Default::default(),
             ui: Default::default(),
+            mcp: Default::default(),
+            lsp: Default::default(),
+            skills: Default::default(),
         };
         let session = Session::new("m".into(), 1000);
         App::new(cfg, session, false).unwrap()
@@ -164,6 +167,9 @@ mod tests {
             models,
             safety: Default::default(),
             ui: Default::default(),
+            mcp: Default::default(),
+            lsp: Default::default(),
+            skills: Default::default(),
         };
         let mut app = App::new(cfg, Session::new("m".into(), 1_000_000), false).unwrap();
         app.input = App::fresh_input("say hi in 3 words".into());
@@ -605,10 +611,15 @@ mod tests {
             })
             .collect();
         let dupes = answers.iter().filter(|a| *a == &"привет!").count();
-        assert_eq!(dupes, 1, "abort must not duplicate the prior answer: {answers:?}");
+        assert_eq!(
+            dupes, 1,
+            "abort must not duplicate the prior answer: {answers:?}"
+        );
         // and the empty live slot for the new turn must be dropped, not kept
         assert!(
-            !app.segments.iter().any(|s| matches!(s, Segment::Assistant { live: true, .. })),
+            !app.segments
+                .iter()
+                .any(|s| matches!(s, Segment::Assistant { live: true, .. })),
             "empty live slot should be removed on abort"
         );
     }
@@ -636,6 +647,46 @@ mod tests {
     }
 
     #[test]
+    fn settings_hub_reuses_existing_menus() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::Settings);
+        let labels: Vec<String> = app
+            .menu_rows
+            .iter()
+            .map(|(line, _)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref().to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(labels.iter().any(|row| row.contains("Appearance")));
+        assert!(labels.iter().any(|row| row.contains("Providers")));
+        assert!(labels.iter().any(|row| row.contains("MCP")));
+        assert!(labels.iter().any(|row| row.contains("LSP")));
+        assert!(labels.iter().any(|row| row.contains("Skills")));
+
+        app.run_action(MenuAction::OpenAppearance);
+        assert!(matches!(app.cur_menu(), Some(Menu::Appearance)));
+        app.run_action(MenuAction::OpenThemes);
+        assert!(matches!(app.cur_menu(), Some(Menu::Themes)));
+        app.menu_back();
+        app.menu_back();
+        app.run_action(MenuAction::OpenProviders);
+        assert!(matches!(app.cur_menu(), Some(Menu::Providers)));
+    }
+
+    #[test]
+    fn appearance_toggles_ui_settings() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::Appearance);
+        let before = app.cfg.ui.show_cost;
+        app.run_action(MenuAction::ToggleShowCost);
+        assert_eq!(app.cfg.ui.show_cost, !before);
+        assert!(matches!(app.cur_menu(), Some(Menu::Appearance)));
+    }
+
+    #[test]
     fn themes_menu_applies_and_stays_open() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.open_menu(Menu::Themes);
@@ -646,13 +697,26 @@ mod tests {
         let rows: Vec<String> = app
             .menu_rows
             .iter()
-            .map(|r| r.0.spans.iter().map(|s| s.content.as_ref().to_string()).collect::<String>())
+            .map(|r| {
+                r.0.spans
+                    .iter()
+                    .map(|s| s.content.as_ref().to_string())
+                    .collect::<String>()
+            })
             .collect();
         for t in crate::tui::theme::THEMES.iter() {
-            assert!(rows.iter().any(|n| n.contains(t.name)), "static theme {} listed", t.name);
+            assert!(
+                rows.iter().any(|n| n.contains(t.name)),
+                "static theme {} listed",
+                t.name
+            );
         }
         for t in crate::tui::theme::ANIMATED_THEMES.iter() {
-            assert!(rows.iter().any(|n| n.contains(t.name)), "animated theme {} listed", t.name);
+            assert!(
+                rows.iter().any(|n| n.contains(t.name)),
+                "animated theme {} listed",
+                t.name
+            );
         }
         app.run_action(MenuAction::SetTheme(5));
         assert_eq!(crate::tui::theme::theme_index(), 5);

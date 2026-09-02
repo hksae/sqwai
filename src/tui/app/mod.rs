@@ -155,7 +155,14 @@ impl App {
     /// Stable part of the system block: built-in markdown (overridable by
     /// config_dir/system.md), AGENTS.md and the static environment.
     fn stable_prefix(&self) -> String {
-        crate::prompts::stable_prefix()
+        let mut prompt = crate::prompts::stable_prefix();
+        let root = std::env::current_dir().unwrap_or_default();
+        let loaded = crate::prompts::skills::load(&self.cfg.skills, &root);
+        if let Some(skills) = crate::prompts::skills::prompt(&loaded) {
+            prompt.push_str("\n\n");
+            prompt.push_str(&skills);
+        }
+        prompt
     }
 
     /// Assemble the system block for one request.
@@ -672,6 +679,19 @@ impl App {
             .to_string();
         match name.as_str() {
             "/help" => self.open_menu(Menu::Help),
+            "/settings" => self.open_menu(Menu::Settings),
+            "/mcp" => self.status(
+                "MCP settings are available from /settings (runtime coming in phase 4)",
+                StatusKind::Info,
+            ),
+            "/lsp" => self.status(
+                "LSP settings are available from /settings (runtime coming in phase 4)",
+                StatusKind::Info,
+            ),
+            "/skills" => self.status(
+                "Skills settings are available from /settings (runtime coming in phase 4)",
+                StatusKind::Info,
+            ),
             "/debug" => self.open_menu(Menu::Debug),
             "/themes" | "/theme" => self.open_menu(Menu::Themes),
             "/init" => {

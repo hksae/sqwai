@@ -30,6 +30,10 @@ pub(super) const COMMANDS: &[(&str, &str)] = &[
     ("/undo [n]", "revert last change, or the last n changes"),
     ("/init", "create AGENTS.md (project rules for the agent)"),
     ("/themes", "browse color themes"),
+    ("/settings", "all settings by category"),
+    ("/mcp", "MCP servers settings"),
+    ("/lsp", "LSP diagnostics settings"),
+    ("/skills", "skills settings"),
     ("/exit", "quit sqwai"),
 ];
 
@@ -37,6 +41,10 @@ pub(super) const POPUP_MAX_ROWS: usize = 14;
 
 #[derive(Clone)]
 pub(super) enum Menu {
+    /// /settings: top-level settings hub
+    Settings,
+    /// /settings -> Appearance: organizer for visual settings
+    Appearance,
     Providers,
     Models {
         provider: String,
@@ -100,6 +108,9 @@ pub(super) enum MenuAction {
     None,
     Back,
     OpenModels(String),
+    OpenAppearance,
+    OpenThemes,
+    OpenProviders,
     AddProvider,
     EditProvider(String),
     DeleteProvider(String),
@@ -122,6 +133,7 @@ pub(super) enum MenuAction {
     ForkAt(usize),
     ToggleTypewriter,
     ToggleHttpLog,
+    ToggleShowCost,
     CycleModelThinking,
     CycleDefaultThinking,
     ToggleMode,
@@ -395,6 +407,9 @@ impl App {
         match action {
             MenuAction::None => {}
             MenuAction::Back => self.menu_back(),
+            MenuAction::OpenAppearance => self.open_menu(Menu::Appearance),
+            MenuAction::OpenThemes => self.open_menu(Menu::Themes),
+            MenuAction::OpenProviders => self.open_menu(Menu::Providers),
             MenuAction::OpenModels(p) => self.open_menu(Menu::Models { provider: p }),
             MenuAction::AddProvider => self.open_menu(Menu::EditProvider { name: None }),
             MenuAction::EditProvider(name) => {
@@ -490,6 +505,13 @@ impl App {
                 crate::providers::set_http_log(self.cfg.ui.http_log);
                 let on = self.cfg.ui.http_log;
                 self.status(&format!("http debug log: {}", on_off(on)), StatusKind::Ok);
+                self.build_menu_rows();
+            }
+            MenuAction::ToggleShowCost => {
+                self.cfg.ui.show_cost = !self.cfg.ui.show_cost;
+                self.cfg.save().ok();
+                let on = self.cfg.ui.show_cost;
+                self.status(&format!("show cost: {}", on_off(on)), StatusKind::Ok);
                 self.build_menu_rows();
             }
             MenuAction::CycleModelThinking => {
@@ -654,6 +676,8 @@ impl App {
 
     pub(super) fn menu_title(&self) -> String {
         match &self.cur_menu() {
+            Some(Menu::Settings) => " settings ".into(),
+            Some(Menu::Appearance) => " appearance ".into(),
             Some(Menu::Providers) => " providers (enter: models) ".into(),
             Some(Menu::Models { provider }) => format!(" {provider} models "),
             Some(Menu::PickModel { provider }) => format!(" switch model: {provider} "),
@@ -702,6 +726,61 @@ impl App {
         };
         let row = |l: Line<'static>, a: MenuAction| (l, a);
         match menu {
+            Menu::Settings => {
+                let section = |label: &str, detail: &str, action: MenuAction| {
+                    row(
+                        Line::from(vec![
+                            Span::styled(format!("  {label:<16}"), Theme::accent_bold()),
+                            Span::styled(detail.to_string(), Theme::dim()),
+                        ]),
+                        action,
+                    )
+                };
+                self.menu_rows.push(section(
+                    "Appearance",
+                    "themes and UI",
+                    MenuAction::OpenAppearance,
+                ));
+                self.menu_rows.push(section(
+                    "Providers",
+                    "models and API providers",
+                    MenuAction::OpenProviders,
+                ));
+                self.menu_rows
+                    .push(section("MCP", "tool servers", MenuAction::None));
+                self.menu_rows
+                    .push(section("LSP", "language diagnostics", MenuAction::None));
+                self.menu_rows
+                    .push(section("Skills", "agent instructions", MenuAction::None));
+                self.menu_footer_text = Some("enter: open · esc: close".into());
+            }
+            Menu::Appearance => {
+                let setting = |label: &str, detail: &str, action: MenuAction| {
+                    row(
+                        Line::from(vec![
+                            Span::styled(format!("  {label:<16}"), Theme::accent_bold()),
+                            Span::styled(detail.to_string(), Theme::dim()),
+                        ]),
+                        action,
+                    )
+                };
+                self.menu_rows.push(setting(
+                    "Themes",
+                    "open theme picker",
+                    MenuAction::OpenThemes,
+                ));
+                self.menu_rows.push(setting(
+                    "Typewriter",
+                    on_off(self.cfg.ui.typewriter).as_str(),
+                    MenuAction::ToggleTypewriter,
+                ));
+                self.menu_rows.push(setting(
+                    "Show cost",
+                    on_off(self.cfg.ui.show_cost).as_str(),
+                    MenuAction::ToggleShowCost,
+                ));
+                self.menu_footer_text = Some("enter: open/toggle · esc: back".into());
+            }
             Menu::Themes => {
                 // when an animated theme is active, the static list shows no
                 // marker — only one "*" is ever visible across both lists

@@ -1,5 +1,7 @@
 mod agent;
 mod config;
+mod lsp;
+mod mcp;
 mod plan;
 mod prompts;
 mod providers;
