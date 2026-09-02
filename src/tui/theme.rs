@@ -130,10 +130,13 @@ fn anim_palette(kind: AnimKind, base: u32, tick: u64) -> Palette {
             // hue stays at base
         }
         AnimKind::Lava => {
-            // slow, smooth drift: 1 hue unit per step, step every 3 frames
-            // (~6.7 fps effective) so the glow eases instead of snapping
+            // slow, smooth ping-pong: hue eases orange -> yellow -> back to
+            // orange (triangle wave) instead of snapping to orange at the top
+            // of the range. 1 hue unit per step, step every 3 frames (~6.7 fps)
+            // -> ~4.5s each way, ~9s full cycle.
             let st = (tick / 3) as u32;
-            let f = st % 30;
+            let half = st % 60; // period 60 steps
+            let f = if half <= 30 { half } else { 60 - half }; // 0..30..0
             accent_h = 10 + f;
             border_h = 20 + f;
             bg_h = 12 + f;
