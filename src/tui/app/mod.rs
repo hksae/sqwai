@@ -1151,11 +1151,7 @@ impl App {
                 restyle(ta);
             }
         }
-        // stay inside the menu so the user can browse palettes live
-        self.status(
-            &format!("theme: {}", crate::tui::theme::THEMES[applied].name),
-            StatusKind::Ok,
-        );
+        // no status note on theme switch — the live repaint is the feedback
         self.build_menu_rows();
         self.dirty = true;
     }

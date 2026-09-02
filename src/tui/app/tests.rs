@@ -640,10 +640,8 @@ mod tests {
             "menu must stay open after applying"
         );
         assert!(
-            app.menu_status
-                .as_ref()
-                .is_some_and(|(t, _)| t.contains("theme")),
-            "notice shown inside the menu"
+            app.menu_status.is_none(),
+            "no status note is shown on theme switch"
         );
         crate::tui::theme::set_theme(0); // restore default for other tests
     }
