@@ -773,7 +773,7 @@ mod tests {
         crate::tui::theme::set_anim_tick(123);
         assert_eq!(app.seg_key(&seg), k_static, "static key ignores the tick");
         // animated theme: key tracks the tick -> segments re-render each frame
-        crate::tui::theme::set_anim_theme(2); // lava
+        crate::tui::theme::set_anim_theme(0); // lava (only animated theme left)
         crate::tui::theme::set_anim_tick(0);
         let a = app.seg_key(&seg);
         crate::tui::theme::set_anim_tick(40);

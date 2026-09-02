@@ -89,13 +89,11 @@ pub const THEMES: [ThemeDef; 20] = [
     ThemeDef { name: "bubblegum",  p: pal(352) },
 ];
 
-/// kinds of animated (time-driven) palettes
+/// kinds of animated (time-driven) palettes. Only `Lava` ships for now;
+/// the others were broken and will be reworked later.
 #[derive(Clone, Copy)]
 pub enum AnimKind {
-    Aurora,
-    Pulse,
     Lava,
-    Matrix,
 }
 
 /// an animated theme: a name, the static text hue, and the animation kind
@@ -112,23 +110,7 @@ pub struct AnimThemeDef {
 fn anim_palette(kind: AnimKind, base: u32, tick: u64) -> Palette {
     let fg = hsv(base, 5, 93);
     let dim = hsv(base, 21, 59);
-    let (mut accent_h, mut border_h, mut bg_h, mut surf_h) = (base, base, base, base);
-    let (mut acc_v, acc_s, mut bd_v) = (100u32, 57u32, 87u32);
     match kind {
-        AnimKind::Aurora => {
-            let h = 150 + ((tick as u32).wrapping_mul(2) % 80); // 150..230
-            accent_h = h;
-            border_h = (h + 25) % 360;
-            bg_h = h;
-            surf_h = (h + 50) % 360;
-        }
-        AnimKind::Pulse => {
-            let p = (tick as u32) % 80;
-            let tri = if p < 40 { p } else { 80 - p }; // 0..40..0
-            acc_v = (55 + tri / 2).min(100);
-            bd_v = (70 + tri / 3).min(100);
-            // hue stays at base
-        }
         AnimKind::Lava => {
             // slow, smooth ping-pong: hue eases orange -> yellow -> back to
             // orange (triangle wave) instead of snapping to orange at the top
@@ -137,39 +119,29 @@ fn anim_palette(kind: AnimKind, base: u32, tick: u64) -> Palette {
             let st = (tick / 3) as u32;
             let half = st % 60; // period 60 steps
             let f = if half <= 30 { half } else { 60 - half }; // 0..30..0
-            accent_h = 10 + f;
-            border_h = 20 + f;
-            bg_h = 12 + f;
-            surf_h = 18 + f;
+            let accent_h = 10 + f;
+            let border_h = 20 + f;
+            let bg_h = 12 + f;
+            let surf_h = 18 + f;
+            Palette {
+                bg: hsv(bg_h, 33, 9),
+                surface: hsv(surf_h, 33, 13),
+                fg,
+                dim,
+                accent: hsv(accent_h, 57, 100),
+                accent_soft: hsv(accent_h, 44, 84),
+                border: hsv(border_h, 59, 87),
+                border_dim: hsv(border_h, 31, 35),
+                ok: hsv((base + 150) % 360, 37, 78),
+                err: hsv((base + 29) % 360, 55, 94),
+                warn: hsv((base + 64) % 360, 53, 92),
+            }
         }
-        AnimKind::Matrix => {
-            let f = (tick as u32).wrapping_mul(3) % 20;
-            accent_h = 120 + f / 2;
-            border_h = 130 + f / 2;
-            bg_h = 120;
-            surf_h = 125;
-        }
-    }
-    Palette {
-        bg: hsv(bg_h, 33, 9),
-        surface: hsv(surf_h, 33, 13),
-        fg,
-        dim,
-        accent: hsv(accent_h, acc_s, acc_v),
-        accent_soft: hsv(accent_h, 44, (acc_v * 84 / 100).max(40)),
-        border: hsv(border_h, 59, bd_v),
-        border_dim: hsv(border_h, 31, 35),
-        ok: hsv((base + 150) % 360, 37, 78),
-        err: hsv((base + 29) % 360, 55, 94),
-        warn: hsv((base + 64) % 360, 53, 92),
     }
 }
 
-pub const ANIMATED_THEMES: [AnimThemeDef; 4] = [
-    AnimThemeDef { name: "aurora", base_hue: 160, kind: AnimKind::Aurora },
-    AnimThemeDef { name: "pulse",  base_hue: 280, kind: AnimKind::Pulse },
-    AnimThemeDef { name: "lava",   base_hue: 18,  kind: AnimKind::Lava },
-    AnimThemeDef { name: "matrix", base_hue: 120, kind: AnimKind::Matrix },
+pub const ANIMATED_THEMES: [AnimThemeDef; 1] = [
+    AnimThemeDef { name: "lava", base_hue: 18, kind: AnimKind::Lava },
 ];
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
