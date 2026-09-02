@@ -653,6 +653,14 @@ mod tests {
         app.run_action(MenuAction::SetAnimTheme(0));
         assert_eq!(crate::tui::theme::anim_theme_index(), Some(0));
         assert_eq!(app.cfg.ui.anim_theme, Some(0), "anim choice persisted");
+        // only one "*" marker total — picking an animated theme must deselect
+        // the static one (no two active indicators at once)
+        let stars = app
+            .menu_rows
+            .iter()
+            .filter(|(l, _)| l.spans.iter().any(|s| s.content.contains(" *")))
+            .count();
+        assert_eq!(stars, 1, "exactly one theme is marked active");
         crate::tui::theme::set_theme(0); // restore default for other tests
     }
 

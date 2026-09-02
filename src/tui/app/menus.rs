@@ -703,7 +703,13 @@ impl App {
         let row = |l: Line<'static>, a: MenuAction| (l, a);
         match menu {
             Menu::Themes => {
-                let cur = crate::tui::theme::theme_index();
+                // when an animated theme is active, the static list shows no
+                // marker — only one "*" is ever visible across both lists
+                let cur = if crate::tui::theme::anim_theme_index().is_some() {
+                    usize::MAX
+                } else {
+                    crate::tui::theme::theme_index()
+                };
                 for (i, t) in crate::tui::theme::THEMES.iter().enumerate() {
                     let mark = if i == cur { " *" } else { "" };
                     // the name glows in its own accent color
