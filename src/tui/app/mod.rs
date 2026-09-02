@@ -401,7 +401,7 @@ impl App {
         COMMANDS
             .iter()
             .enumerate()
-            .filter(|(_, (cmd, _))| cmd.starts_with(&t))
+            .filter(|(_, cmd)| cmd.starts_with(&t))
             .map(|(i, _)| i)
             .collect()
     }
@@ -693,7 +693,6 @@ impl App {
             .unwrap_or("")
             .to_string();
         match name.as_str() {
-            "/help" => self.open_menu(Menu::Help),
             "/settings" => self.open_menu(Menu::Settings),
             "/mcp" => self.status(
                 "MCP settings are available from /settings (runtime coming in phase 4)",
@@ -796,14 +795,11 @@ impl App {
                     self.undo(n);
                 }
             }
-            other if COMMANDS.iter().any(|(c, _)| *c == other) => {
+            other if COMMANDS.contains(&other) => {
                 self.status(&format!("{other}: not implemented yet"), StatusKind::Warn)
             }
             "" => {}
-            other => self.status(
-                &format!("unknown command {other} — try /help"),
-                StatusKind::Warn,
-            ),
+            other => self.status(&format!("unknown command {other}"), StatusKind::Warn),
         }
         self.dirty = true;
     }

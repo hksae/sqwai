@@ -16,26 +16,25 @@ use crate::session::Session;
 use crate::tui::markdown::{Highlighter, render, wrap_tagged};
 use crate::tui::theme::Theme;
 
-pub(super) const COMMANDS: &[(&str, &str)] = &[
-    ("/help", "commands, symbols and keybindings"),
-    ("/new", "start a new session"),
-    ("/sessions", "sessions menu (ctrl+s)"),
-    ("/fork", "fork this session from a message"),
-    ("/debug", "runtime settings: typewriter, logs, thinking"),
-    ("/providers", "providers & models menu"),
-    ("/models", "models of current provider"),
-    ("/plan", "switch to plan mode"),
-    ("/act", "switch to act mode"),
-    ("/compact", "compact context around the current plan"),
-    ("/undo [n]", "revert last change, or the last n changes"),
-    ("/init", "create AGENTS.md (project rules for the agent)"),
-    ("/themes", "browse color themes"),
-    ("/settings", "all settings by category"),
-    ("/mcp", "MCP servers settings"),
-    ("/lsp", "LSP diagnostics settings"),
-    ("/skills", "skills settings"),
-    ("/skill [name]", "load a skill by name or trigger"),
-    ("/exit", "quit sqwai"),
+pub(super) const COMMANDS: &[&str] = &[
+    "/new",
+    "/sessions",
+    "/fork",
+    "/debug",
+    "/providers",
+    "/models",
+    "/plan",
+    "/act",
+    "/compact",
+    "/undo",
+    "/init",
+    "/themes",
+    "/settings",
+    "/mcp",
+    "/lsp",
+    "/skills",
+    "/skill",
+    "/exit",
 ];
 
 pub(super) const POPUP_MAX_ROWS: usize = 14;
@@ -60,8 +59,6 @@ pub(super) enum Menu {
     DeleteSessions,
     /// pick a message to copy history up to
     ForkPoint,
-    /// /help: commands, symbols, keybindings
-    Help,
     /// /debug: runtime toggles and diagnostics
     Debug,
     /// /themes: palette browser
@@ -711,7 +708,6 @@ impl App {
             }
             Some(Menu::DeleteSessions) => " delete session ".into(),
             Some(Menu::ForkPoint) => " fork this session ".into(),
-            Some(Menu::Help) => " help ".into(),
             Some(Menu::Debug) => " debug ".into(),
             Some(Menu::Themes) => " themes ".into(),
             Some(Menu::EditSessionTitle { .. }) => " rename session ".into(),
@@ -834,7 +830,7 @@ impl App {
                         ));
                     }
                 }
-                self.menu_footer_text = Some("/skill [name] to activate · esc: back".into());
+                self.menu_footer_text = Some("/skill to activate · esc: back".into());
             }
 
             Menu::Appearance => {
@@ -906,71 +902,6 @@ impl App {
                 }
                 self.menu_footer_text =
                     Some("enter: apply · selection stays open · esc: close".into());
-            }
-            Menu::Help => {
-                let section = |t: &str| {
-                    row(
-                        Line::from(vec![Span::styled(format!(" {t}"), Theme::accent_bold())]),
-                        MenuAction::None,
-                    )
-                };
-                let info = |l: &str, d: &str| {
-                    row(
-                        Line::from(vec![
-                            Span::styled(format!("  {l}"), Theme::accent()),
-                            Span::styled(format!("  {d}"), Theme::base()),
-                        ]),
-                        MenuAction::None,
-                    )
-                };
-                self.menu_rows.push(section("symbols"));
-                self.menu_rows.push(info("/", "slash commands"));
-                self.menu_rows
-                    .push(info("@file", "mark a file for the agent (planned)"));
-                self.menu_rows.push(section("input keys"));
-                self.menu_rows
-                    .push(info("Enter / Ctrl+J", "send / newline"));
-                self.menu_rows.push(info(
-                    "Alt+Up/Down",
-                    "move between lines of a multi-line message",
-                ));
-                self.menu_rows
-                    .push(info("Ctrl+A/E", "line head / end (also in forms)"));
-                self.menu_rows.push(info("Ctrl+Z/Y", "undo / redo"));
-                self.menu_rows.push(info(
-                    "Ctrl+W/U/K/D",
-                    "delete word / to line start / to line end / char",
-                ));
-                self.menu_rows.push(info(
-                    "Ctrl+V",
-                    "paste from clipboard (Ctrl+C copies chat selection)",
-                ));
-                self.menu_rows
-                    .push(info("Tab", "plan/act · next form field"));
-                self.menu_rows.push(info(
-                    "PgUp/PgDn, Ctrl+Up/Down",
-                    "scroll chat by page / a few lines",
-                ));
-                self.menu_rows
-                    .push(info("Ctrl+Home/End", "jump to top / bottom of the chat"));
-                self.menu_rows.push(section("menus & mouse"));
-                self.menu_rows
-                    .push(info("Esc", "stop generation · clear filter · back · close"));
-                self.menu_rows
-                    .push(info("click outside menu", "same as esc"));
-                self.menu_rows
-                    .push(info("drag in chat", "select text — copied on release"));
-                self.menu_rows.push(info(
-                    "wheel in menus",
-                    "move selection; PgUp/PgDn page jump",
-                ));
-                self.menu_rows.push(info(
-                    "in sessions menu",
-                    "enter open · r rename · p pin · d delete · type to filter",
-                ));
-                self.menu_rows
-                    .push(info("Ctrl+S", "sessions menu · Ctrl+T to-do list"));
-                self.menu_footer_text = Some("esc: close".into());
             }
             Menu::Debug => {
                 let setting = |l: &str, val: String, a: MenuAction| {

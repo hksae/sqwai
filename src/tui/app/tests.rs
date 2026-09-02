@@ -625,25 +625,11 @@ mod tests {
     }
 
     #[test]
-    fn help_menu_lists_symbols_and_keys() {
-        let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.open_menu(Menu::Help);
-        let text: String = app
-            .menu_rows
-            .iter()
-            .map(|(l, _)| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect();
-        assert!(text.contains("@file"), "{text:?}");
-        assert!(text.contains("Ctrl+Z"), "{text:?}");
-        assert!(
-            !text.contains("/fork"),
-            "command list was removed from help: {text:?}"
-        );
+    fn command_popup_contains_only_command_names() {
+        assert!(COMMANDS.iter().all(|command| !command.contains(' ')));
+        assert!(!COMMANDS.contains(&"/help"));
+        assert!(COMMANDS.contains(&"/undo"));
+        assert!(COMMANDS.contains(&"/skill"));
     }
 
     #[test]

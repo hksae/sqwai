@@ -18,15 +18,17 @@ use crate::session::Session;
 use crate::tui::markdown::{Highlighter, render, wrap_tagged};
 use crate::tui::theme::Theme;
 
-const STARTUP_LOGO: &str = "  ██████   █████   █     █░ ▄▄▄       ██▓
-▒██    ▒ ▒██▓  ██▒▓█░ █ ░█░▒████▄    ▓██▒
-░ ▓██▄   ▒██▒  ██░▒█░ █ ░█ ▒██  ▀█▄  ▒██▒
-  ▒   ██▒░██  █▀ ░░█░ █ ░█ ░██▄▄▄▄██ ░██░
-▒██████▒▒░▒███▒█▄ ░░██▒██▓  ▓█   ▓██▒░██░
-▒ ▒▓▒ ▒ ░░░ ▒▒░ ▒ ░ ▓░▒ ▒   ▒▒   ▓▒█░░▓  
-░ ░▒  ░ ░ ░ ▒░  ░   ▒ ░ ░    ▒   ▒▒ ░ ▒ ░
-░  ░  ░     ░   ░   ░   ░    ░   ▒    ▒ ░
-      ░      ░        ░          ░  ░ ░  ";
+const STARTUP_LOGO: &str = "                                              ███
+▒▒▒
+█████   ████████ █████ ███ █████  ██████   ████
+███▒▒   ███▒▒███ ▒▒███ ▒███▒▒███  ▒▒▒▒▒███ ▒▒███
+▒▒█████ ▒███ ▒███  ▒███ ▒███ ▒███   ███████  ▒███
+▒▒▒▒███▒███ ▒███  ▒▒███████████   ███▒▒███  ▒███
+██████ ▒▒███████   ▒▒████▒████   ▒▒████████ █████
+▒▒▒▒▒▒   ▒▒▒▒▒███    ▒▒▒▒ ▒▒▒▒     ▒▒▒▒▒▒▒▒ ▒▒▒▒▒
+▒███
+█████
+▒▒▒▒▒";
 
 fn startup_logo(width: u16, height: u16) -> Vec<String> {
     let source: Vec<Vec<char>> = STARTUP_LOGO
@@ -206,7 +208,7 @@ impl App {
         self.sel = None;
         // command popup item?
         if let Some((_, idx)) = self.popup_rows.iter().find(|(y, _)| *y == row) {
-            let cmd = COMMANDS[*idx].0.to_string();
+            let cmd = COMMANDS[*idx].to_string();
             self.apply_command_insert(&cmd);
             return;
         }
@@ -918,7 +920,7 @@ impl App {
         let mut rows: Vec<Line> = Vec::new();
         self.popup_rows.clear();
         for (n, &ci) in items.iter().skip(skip).take(shown).enumerate() {
-            let (cmd, desc) = COMMANDS[ci];
+            let cmd = COMMANDS[ci];
             let hovered = self.hover == Some(ci);
             let cmd_style = if hovered {
                 Style::new()
@@ -928,16 +930,11 @@ impl App {
             } else {
                 Theme::accent()
             };
-            let desc_style = if hovered {
-                Style::new().fg(Theme::BG()).bg(Theme::ACCENT())
-            } else {
-                Theme::dim()
-            };
-            let pad = 12usize.saturating_sub(cmd.chars().count());
-            rows.push(Line::from(vec![
-                Span::styled(format!(" {cmd}{}", " ".repeat(pad)), cmd_style),
-                Span::styled(desc.to_string(), desc_style),
-            ]));
+            let pad = 1usize;
+            rows.push(Line::from(vec![Span::styled(
+                format!(" {cmd}{}", " ".repeat(pad)),
+                cmd_style,
+            )]));
             self.popup_rows.push((rect.y + 1 + n as u16, ci));
         }
 
@@ -1122,9 +1119,9 @@ mod tests {
 
     #[test]
     fn startup_logo_keeps_native_size_when_it_fits() {
-        let logo = startup_logo(41, 9);
+        let logo = startup_logo(40, 9);
         assert_eq!(logo.len(), 9);
-        assert_eq!(logo.iter().map(|line| line.chars().count()).max(), Some(41));
+        assert_eq!(logo.iter().map(|line| line.chars().count()).max(), Some(40));
     }
 
     #[test]
@@ -1139,8 +1136,8 @@ mod tests {
     #[test]
     fn startup_logo_stays_native_size_in_large_terminal() {
         let logo = startup_logo(100, 24);
-        assert_eq!(logo.len(), 9);
-        assert_eq!(logo.iter().map(|line| line.chars().count()).max(), Some(41));
+        assert_eq!(logo.len(), 11);
+        assert_eq!(logo.iter().map(|line| line.chars().count()).max(), Some(49));
     }
 
     #[test]
