@@ -38,8 +38,7 @@ fn startup_logo(width: u16, height: u16) -> Vec<String> {
     let target_width = usize::from(width).max(1);
     let target_height = usize::from(height).max(1);
     let scale = (target_width as f32 / natural_width.max(1) as f32)
-        .min(target_height as f32 / natural_height.max(1) as f32)
-        .min(1.0);
+        .min(target_height as f32 / natural_height.max(1) as f32);
     let output_width = ((natural_width as f32 * scale).round() as usize).max(1);
     let output_height = ((natural_height as f32 * scale).round() as usize).max(1);
 
@@ -1118,7 +1117,7 @@ mod tests {
 
     #[test]
     fn startup_logo_keeps_native_size_when_it_fits() {
-        let logo = startup_logo(100, 20);
+        let logo = startup_logo(41, 9);
         assert_eq!(logo.len(), 9);
         assert_eq!(logo.iter().map(|line| line.chars().count()).max(), Some(41));
     }
@@ -1130,6 +1129,15 @@ mod tests {
         assert!(logo.iter().all(|line| line.chars().count() <= 20));
         assert_eq!(logo.len(), 4);
         assert_eq!(logo.iter().map(|line| line.chars().count()).max(), Some(18));
+    }
+
+    #[test]
+    fn startup_logo_grows_in_large_terminal() {
+        let logo = startup_logo(100, 24);
+        assert!(logo.len() > 9);
+        assert!(logo.iter().map(|line| line.chars().count()).max().unwrap() > 41);
+        assert!(logo.len() <= 24);
+        assert!(logo.iter().all(|line| line.chars().count() <= 100));
     }
 
     #[test]
