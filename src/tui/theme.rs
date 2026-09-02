@@ -89,11 +89,13 @@ pub const THEMES: [ThemeDef; 20] = [
     ThemeDef { name: "bubblegum",  p: pal(352) },
 ];
 
-/// kinds of animated (time-driven) palettes. Only `Lava` ships for now;
-/// the others were broken and will be reworked later.
+/// kinds of animated (time-driven) palettes.
 #[derive(Clone, Copy)]
 pub enum AnimKind {
+    /// slow orange<->yellow ping-pong
     Lava,
+    /// pink (bubblegum 352) <-> aquamarine (168) ping-pong through purple/blue
+    Gum,
 }
 
 /// an animated theme: a name, the static text hue, and the animation kind
@@ -110,38 +112,53 @@ pub struct AnimThemeDef {
 fn anim_palette(kind: AnimKind, base: u32, tick: u64) -> Palette {
     let fg = hsv(base, 5, 93);
     let dim = hsv(base, 21, 59);
-    match kind {
+    // each arm yields the four decorative hue channels (accent, border, bg,
+    // surface); the final Palette is built once below so the s/v layering is
+    // identical for every animated theme.
+    let (accent_h, border_h, bg_h, surf_h) = match kind {
         AnimKind::Lava => {
             // slow, smooth ping-pong: hue eases orange -> yellow -> back to
             // orange (triangle wave) instead of snapping to orange at the top
-            // of the range. 1 hue unit per step, step every 3 frames (~6.7 fps)
-            // -> ~4.5s each way, ~9s full cycle.
+            // of the range. 1 hue/step, step every 3 frames (~6.7 fps) ->
+            // ~4.5s each way, ~9s full cycle.
             let st = (tick / 3) as u32;
             let half = st % 60; // period 60 steps
             let f = if half <= 30 { half } else { 60 - half }; // 0..30..0
-            let accent_h = 10 + f;
-            let border_h = 20 + f;
-            let bg_h = 12 + f;
-            let surf_h = 18 + f;
-            Palette {
-                bg: hsv(bg_h, 33, 9),
-                surface: hsv(surf_h, 33, 13),
-                fg,
-                dim,
-                accent: hsv(accent_h, 57, 100),
-                accent_soft: hsv(accent_h, 44, 84),
-                border: hsv(border_h, 59, 87),
-                border_dim: hsv(border_h, 31, 35),
-                ok: hsv((base + 150) % 360, 37, 78),
-                err: hsv((base + 29) % 360, 55, 94),
-                warn: hsv((base + 64) % 360, 53, 92),
-            }
+            (10 + f, 20 + f, 12 + f, 18 + f)
         }
+        AnimKind::Gum => {
+            // pink (bubblegum 352) <-> aquamarine (168) ping-pong, taking the
+            // SHORT WAY DOWN through purple/blue (352 -> 300 -> 250 -> 200 ->
+            // 168) so green/yellow/red never appear between the two endpoints.
+            // 1 hue/step, step every 2 frames (~10fps stepping) -> ~18s full
+            // cycle, smooth. all decorative roles share the hue so the UI
+            // shifts as one clean pink<->blue gradient.
+            let st = (tick / 2) as u32;
+            let period = 92u32; // steps per half-swing (hue span 184 / 2)
+            let half = st % (period * 2);
+            let tri = if half <= period { half } else { period * 2 - half }; // 0..period..0
+            let h = 352 - tri * 2; // 352..168 (no wraparound, stays >= 0)
+            (h, h, h, h)
+        }
+    };
+    Palette {
+        bg: hsv(bg_h, 33, 9),
+        surface: hsv(surf_h, 33, 13),
+        fg,
+        dim,
+        accent: hsv(accent_h, 57, 100),
+        accent_soft: hsv(accent_h, 44, 84),
+        border: hsv(border_h, 59, 87),
+        border_dim: hsv(border_h, 31, 35),
+        ok: hsv((base + 150) % 360, 37, 78),
+        err: hsv((base + 29) % 360, 55, 94),
+        warn: hsv((base + 64) % 360, 53, 92),
     }
 }
 
-pub const ANIMATED_THEMES: [AnimThemeDef; 1] = [
-    AnimThemeDef { name: "lava", base_hue: 18, kind: AnimKind::Lava },
+pub const ANIMATED_THEMES: [AnimThemeDef; 2] = [
+    AnimThemeDef { name: "lava",  base_hue: 18,  kind: AnimKind::Lava },
+    AnimThemeDef { name: "taffy", base_hue: 352, kind: AnimKind::Gum },
 ];
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
