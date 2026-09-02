@@ -46,6 +46,9 @@ pub(super) enum Menu {
     Settings,
     /// /settings -> Appearance: organizer for visual settings
     Appearance,
+    Mcp,
+    Lsp,
+    Skills,
     Providers,
     Models {
         provider: String,
@@ -414,18 +417,9 @@ impl App {
             MenuAction::OpenAppearance => self.open_menu(Menu::Appearance),
             MenuAction::OpenThemes => self.open_menu(Menu::Themes),
             MenuAction::OpenProviders => self.open_menu(Menu::Providers),
-            MenuAction::OpenMcp => self.status(
-                "MCP servers are configured in config.toml",
-                StatusKind::Info,
-            ),
-            MenuAction::OpenLsp => self.status(
-                "LSP servers are configured in config.toml",
-                StatusKind::Info,
-            ),
-            MenuAction::OpenSkills => self.status(
-                "Skills load from configured paths and .sqwai/skills",
-                StatusKind::Info,
-            ),
+            MenuAction::OpenMcp => self.open_menu(Menu::Mcp),
+            MenuAction::OpenLsp => self.open_menu(Menu::Lsp),
+            MenuAction::OpenSkills => self.open_menu(Menu::Skills),
             MenuAction::OpenModels(p) => self.open_menu(Menu::Models { provider: p }),
             MenuAction::AddProvider => self.open_menu(Menu::EditProvider { name: None }),
             MenuAction::EditProvider(name) => {
@@ -694,6 +688,9 @@ impl App {
         match &self.cur_menu() {
             Some(Menu::Settings) => " settings ".into(),
             Some(Menu::Appearance) => " appearance ".into(),
+            Some(Menu::Mcp) => " mcp servers ".into(),
+            Some(Menu::Lsp) => " lsp servers ".into(),
+            Some(Menu::Skills) => " skills ".into(),
             Some(Menu::Providers) => " providers (enter: models) ".into(),
             Some(Menu::Models { provider }) => format!(" {provider} models "),
             Some(Menu::PickModel { provider }) => format!(" switch model: {provider} "),
@@ -773,6 +770,73 @@ impl App {
                 ));
                 self.menu_footer_text = Some("enter: open · esc: close".into());
             }
+            Menu::Mcp => {
+                self.menu_rows
+                    .push(row(Line::from("  MCP servers"), MenuAction::None));
+                if self.cfg.mcp.servers.is_empty() {
+                    self.menu_rows
+                        .push(row(Line::from("  no servers configured"), MenuAction::None));
+                } else {
+                    for server in &self.cfg.mcp.servers {
+                        self.menu_rows.push(row(
+                            Line::from(format!(
+                                "  {:<20} {}",
+                                server.name,
+                                if server.enabled {
+                                    "enabled"
+                                } else {
+                                    "disabled"
+                                }
+                            )),
+                            MenuAction::None,
+                        ));
+                    }
+                }
+                self.menu_footer_text = Some("edit config.toml · esc: back".into());
+            }
+            Menu::Lsp => {
+                self.menu_rows
+                    .push(row(Line::from("  LSP servers"), MenuAction::None));
+                if self.cfg.lsp.servers.is_empty() {
+                    self.menu_rows
+                        .push(row(Line::from("  no servers configured"), MenuAction::None));
+                } else {
+                    for server in &self.cfg.lsp.servers {
+                        self.menu_rows.push(row(
+                            Line::from(format!(
+                                "  {:<20} {}",
+                                server.name,
+                                if server.enabled {
+                                    "enabled"
+                                } else {
+                                    "disabled"
+                                }
+                            )),
+                            MenuAction::None,
+                        ));
+                    }
+                }
+                self.menu_footer_text = Some("edit config.toml · esc: back".into());
+            }
+            Menu::Skills => {
+                let root = std::env::current_dir().unwrap_or_default();
+                let loaded = crate::prompts::skills::load(&self.cfg.skills, &root);
+                self.menu_rows
+                    .push(row(Line::from("  Loaded skills"), MenuAction::None));
+                if loaded.is_empty() {
+                    self.menu_rows
+                        .push(row(Line::from("  no skills found"), MenuAction::None));
+                } else {
+                    for skill in loaded {
+                        self.menu_rows.push(row(
+                            Line::from(format!("  {}", skill.name)),
+                            MenuAction::None,
+                        ));
+                    }
+                }
+                self.menu_footer_text = Some("/skill [name] to activate · esc: back".into());
+            }
+
             Menu::Appearance => {
                 let setting = |label: &str, detail: &str, action: MenuAction| {
                     row(
