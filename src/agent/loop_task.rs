@@ -708,7 +708,11 @@ async fn run_agent(
                 })
                 .await;
 
-            let mut outcome = if plan_mode
+            let mut outcome = if read_only && tools::is_mutating_call(&call.name, &call.args) {
+                tools::Outcome::err(
+                    "project is read-only because another sqwai instance owns the lock; use --force to enable writes",
+                )
+            } else if plan_mode
                 && tools::is_mutating_call(&call.name, &call.args)
                 && call.name != "plan_update"
             {

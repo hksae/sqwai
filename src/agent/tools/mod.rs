@@ -589,6 +589,21 @@ mod tests {
     }
 
     #[test]
+    fn read_only_context_rejects_mutations_but_allows_reads() {
+        let (_, dir) = proj();
+        let mut ctx = ToolCtx::with_read_only(&dir, true);
+        let denied = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": "src/new.rs", "content": "fn main() {}\n"}),
+        );
+        assert!(!denied.ok);
+        assert!(denied.output.contains("read-only"));
+        let allowed = execute(&mut ctx, "read", &json!({"file_path": "README.md"}));
+        assert!(allowed.ok);
+    }
+
+    #[test]
     fn read_then_edit_flow_and_guards() {
         let (mut ctx, dir) = proj();
 
