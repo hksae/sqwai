@@ -66,10 +66,29 @@ pub enum AgentEvent {
         id: u64,
         task: String,
     },
-    /// a compact progress update from a delegated child
-    SubagentUpdate {
+    /// a reasoning delta from a delegated child
+    SubagentThinking {
         id: u64,
         text: String,
+    },
+    /// an answer delta from a delegated child
+    SubagentText {
+        id: u64,
+        text: String,
+    },
+    /// a child tool started
+    SubagentToolStart {
+        id: u64,
+        name: String,
+        summary: String,
+    },
+    /// a child tool finished
+    SubagentToolDone {
+        id: u64,
+        name: String,
+        summary: String,
+        ok: bool,
+        diff: Option<String>,
     },
     /// a delegated child finished
     SubagentDone {
@@ -366,31 +385,31 @@ async fn run_subagent(
         match event {
             AgentEvent::TextDelta(text) => {
                 output.push_str(&text);
-                let _ = parent_tx
-                    .send(AgentEvent::SubagentUpdate { id, text })
-                    .await;
+                let _ = parent_tx.send(AgentEvent::SubagentText { id, text }).await;
             }
             AgentEvent::ThinkingDelta(text) => {
                 let _ = parent_tx
-                    .send(AgentEvent::SubagentUpdate {
-                        id,
-                        text: format!("thinking: {text}"),
-                    })
+                    .send(AgentEvent::SubagentThinking { id, text })
                     .await;
             }
             AgentEvent::ToolStart { name, summary } => {
                 let _ = parent_tx
-                    .send(AgentEvent::SubagentUpdate {
-                        id,
-                        text: format!("{name}: {summary}"),
-                    })
+                    .send(AgentEvent::SubagentToolStart { id, name, summary })
                     .await;
             }
-            AgentEvent::ToolNotice { name, ok, .. } => {
+            AgentEvent::ToolNotice {
+                name,
+                summary,
+                ok,
+                diff,
+            } => {
                 let _ = parent_tx
-                    .send(AgentEvent::SubagentUpdate {
+                    .send(AgentEvent::SubagentToolDone {
                         id,
-                        text: format!("{name} {}", if ok { "completed" } else { "failed" }),
+                        name,
+                        summary,
+                        ok,
+                        diff,
                     })
                     .await;
             }

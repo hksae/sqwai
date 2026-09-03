@@ -62,7 +62,7 @@ fn startup_logo(width: u16, height: u16) -> Vec<String> {
         .collect()
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) enum Segment {
     User(String),
     Assistant {
@@ -276,7 +276,13 @@ impl App {
             }
             let toggle = match self.segments.get(*seg_idx) {
                 Some(Segment::Thinking { expanded, .. }) => Some(!*expanded),
-                Some(Segment::Subagent { expanded, .. }) => Some(!*expanded),
+                Some(Segment::Subagent { id, .. }) => {
+                    self.active_subagent = Some(*id);
+                    self.follow = true;
+                    self.view_top = 0;
+                    self.dirty = true;
+                    return;
+                }
                 // a finished tool row reveals its full output or diff
                 Some(Segment::Tool {
                     ok: Some(_),
@@ -708,6 +714,10 @@ impl App {
         if area.width < 20 || area.height < 6 {
             return;
         }
+        if let Some(id) = self.active_subagent {
+            self.draw_subagent_chat(f, area, id);
+            return;
+        }
         let input_rows = self.input.lines().len().clamp(1, 6) as u16;
         let input_h = (input_rows + 2).min(8);
         let layout = Layout::vertical([
@@ -802,6 +812,55 @@ impl App {
 
         self.draw_popup(f, layout[2]);
         self.draw_menu(f, area);
+    }
+
+    fn draw_subagent_chat(&mut self, f: &mut ratatui::Frame, area: Rect, id: u64) {
+        let layout = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .split(area);
+        let chat = Rect {
+            x: area.x + 1,
+            y: layout[1].y,
+            width: area.width.saturating_sub(2),
+            height: layout[1].height,
+        };
+        f.render_widget(Block::new().style(Theme::base()), area);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" subagent-{id}"),
+                Theme::accent_bold(),
+            )))
+            .style(Theme::base()),
+            layout[0],
+        );
+        let saved_segments = std::mem::take(&mut self.segments);
+        if let Some(segments) = self.subagent_chats.get(&id).cloned() {
+            self.segments = segments;
+        }
+        self.rebuild_cache(chat.width);
+        let top = self.chat_top(chat.height);
+        let visible: Vec<Line> = self
+            .cache_lines
+            .iter()
+            .skip(top)
+            .take(chat.height as usize)
+            .cloned()
+            .collect();
+        f.render_widget(Paragraph::new(visible).style(Theme::base()), chat);
+        self.segments = saved_segments;
+        self.seg_cache.clear();
+        self.seg_layout.clear();
+        self.dirty = true;
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(" esc close", Theme::dim())))
+                .style(Theme::base()),
+            layout[2],
+        );
+        self.last_chat = chat;
+        self.last_input = Rect::default();
     }
 
     pub(super) fn draw_menu(&mut self, f: &mut ratatui::Frame, area: Rect) {

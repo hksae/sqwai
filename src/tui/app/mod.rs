@@ -84,8 +84,12 @@ pub struct App {
     agent: Option<AgentHandle>,
     /// to-do list written by the agent's todowrite tool
     todos: Vec<String>,
-    /// tracked child agents shown as expandable transcript rows
+    /// tracked child agents shown in the overview
     subagents: Vec<(u64, String, String, String, bool)>,
+    /// full read-only transcripts for each child agent
+    subagent_chats: std::collections::BTreeMap<u64, Vec<Segment>>,
+    /// child transcript currently replacing the main chat on screen
+    active_subagent: Option<u64>,
     /// checked options in the current multi-select ask_user
     ask_picked: Vec<bool>,
     assistant_buf: String,
@@ -240,6 +244,8 @@ impl App {
             agent: None,
             todos: Vec::new(),
             subagents: Vec::new(),
+            subagent_chats: std::collections::BTreeMap::new(),
+            active_subagent: None,
             ask_picked: Vec::new(),
             assistant_buf: String::new(),
             pending_reveal: String::new(),
@@ -992,6 +998,21 @@ impl App {
                 AgentEvent::SubagentStart { id, task } => {
                     self.subagents
                         .push((id, task.clone(), "running".into(), String::new(), false));
+                    self.subagent_chats.insert(
+                        id,
+                        vec![
+                            Segment::User(task.clone()),
+                            Segment::Thinking {
+                                text: String::new(),
+                                expanded: false,
+                                live: true,
+                            },
+                            Segment::Assistant {
+                                text: String::new(),
+                                live: true,
+                            },
+                        ],
+                    );
                     self.segments.push(Segment::Subagent {
                         id,
                         task,
@@ -999,39 +1020,67 @@ impl App {
                         output: String::new(),
                         expanded: false,
                     });
-                    if matches!(
-                        self.cur_menu(),
-                        Some(Menu::Subagents | Menu::SubagentDetail { .. })
-                    ) {
+                    if matches!(self.cur_menu(), Some(Menu::Subagents)) {
                         self.build_menu_rows();
                     }
                     self.dirty = true;
                 }
-                AgentEvent::SubagentUpdate { id, text } => {
-                    if let Some((_, _, status, output, _)) = self
-                        .subagents
-                        .iter_mut()
-                        .find(|(sid, _, _, _, _)| *sid == id)
+                AgentEvent::SubagentThinking { id, text } => {
+                    if let Some(chat) = self.subagent_chats.get_mut(&id)
+                        && let Some(Segment::Thinking { text: current, .. }) = chat
+                            .iter_mut()
+                            .find(|segment| matches!(segment, Segment::Thinking { live: true, .. }))
                     {
-                        *status = "running".into();
-                        output.push_str(&text);
-                        output.push('\n');
+                        current.push_str(&text);
                     }
-                    if let Some(Segment::Subagent { status, output, .. }) = self
-                        .segments
-                        .iter_mut()
-                        .rev()
-                        .find(|s| matches!(s, Segment::Subagent { id: sid, .. } if *sid == id))
+                    self.dirty = true;
+                }
+                AgentEvent::SubagentText { id, text } => {
+                    if let Some(chat) = self.subagent_chats.get_mut(&id)
+                        && let Some(Segment::Assistant { text: current, .. }) =
+                            chat.iter_mut().rev().find(|segment| {
+                                matches!(segment, Segment::Assistant { live: true, .. })
+                            })
                     {
-                        *status = "running".into();
-                        output.push_str(&text);
-                        output.push('\n');
+                        current.push_str(&text);
                     }
-                    if matches!(
-                        self.cur_menu(),
-                        Some(Menu::Subagents | Menu::SubagentDetail { .. })
-                    ) {
-                        self.build_menu_rows();
+                    self.dirty = true;
+                }
+                AgentEvent::SubagentToolStart { id, name, summary } => {
+                    if let Some(chat) = self.subagent_chats.get_mut(&id) {
+                        let pos = chat
+                            .iter()
+                            .rposition(|segment| {
+                                matches!(segment, Segment::Assistant { live: true, .. })
+                            })
+                            .unwrap_or(chat.len());
+                        chat.insert(
+                            pos,
+                            Segment::Tool {
+                                name,
+                                args: summary,
+                                ok: None,
+                                output: String::new(),
+                                diff: None,
+                                expanded: false,
+                            },
+                        );
+                    }
+                    self.dirty = true;
+                }
+                AgentEvent::SubagentToolDone {
+                    id,
+                    name,
+                    summary,
+                    ok,
+                    diff,
+                } => {
+                    if let Some(chat) = self.subagent_chats.get_mut(&id)
+                        && let Some(Segment::Tool { ok: state, output, diff: current_diff, .. }) = chat.iter_mut().rev().find(|segment| matches!(segment, Segment::Tool { name: current, ok: None, .. } if current == &name))
+                    {
+                        *state = Some(ok);
+                        *output = summary;
+                        *current_diff = diff;
                     }
                     self.dirty = true;
                 }
@@ -1065,10 +1114,16 @@ impl App {
                         };
                         *current = output;
                     }
-                    if matches!(
-                        self.cur_menu(),
-                        Some(Menu::Subagents | Menu::SubagentDetail { .. })
-                    ) {
+                    if let Some(chat) = self.subagent_chats.get_mut(&id) {
+                        for segment in chat {
+                            match segment {
+                                Segment::Thinking { live, .. }
+                                | Segment::Assistant { live, .. } => *live = false,
+                                _ => {}
+                            }
+                        }
+                    }
+                    if matches!(self.cur_menu(), Some(Menu::Subagents)) {
                         self.build_menu_rows();
                     }
                     self.dirty = true;
@@ -1259,10 +1314,7 @@ impl App {
             !matches!(segment, Segment::Subagent { .. })
                 && !matches!(segment, Segment::Tool { name, .. } if name == "subagent")
         });
-        if matches!(
-            self.cur_menu(),
-            Some(Menu::Subagents | Menu::SubagentDetail { .. })
-        ) {
+        if matches!(self.cur_menu(), Some(Menu::Subagents)) {
             self.menu_home();
         }
         self.agents_click = None;

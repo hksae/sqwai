@@ -79,7 +79,12 @@ impl App {
                             }
                         }
                         KeyCode::Esc => {
-                            if !self.menu_stack.is_empty() {
+                            if self.active_subagent.is_some() {
+                                self.active_subagent = None;
+                                self.follow = true;
+                                self.view_top = 0;
+                                self.dirty = true;
+                            } else if !self.menu_stack.is_empty() {
                                 // first esc clears an active sessions filter
                                 if matches!(self.cur_menu(), Some(Menu::Sessions))
                                     && !self.sessions_filter.is_empty()

@@ -104,10 +104,6 @@ pub(super) enum Menu {
     Todo,
     /// all delegated child agents, opened with Ctrl+A
     Subagents,
-    /// detailed view for one delegated child agent
-    SubagentDetail {
-        id: u64,
-    },
 }
 
 #[derive(Clone)]
@@ -638,7 +634,13 @@ impl App {
                     _ => {}
                 }
             }
-            MenuAction::OpenSubagent(id) => self.open_menu(Menu::SubagentDetail { id }),
+            MenuAction::OpenSubagent(id) => {
+                self.menu_home();
+                self.active_subagent = Some(id);
+                self.follow = true;
+                self.view_top = 0;
+                self.dirty = true;
+            }
             MenuAction::SetThinking(level) => {
                 self.model_cfg.thinking = level;
                 if let Some(m) = self.cfg.models.get_mut(&self.session.model_key) {
@@ -728,7 +730,6 @@ impl App {
             Some(Menu::AskFree { .. }) => " type your answer (enter: send, esc: cancel) ".into(),
             Some(Menu::Todo) => " to-do ".into(),
             Some(Menu::Subagents) => " subagents ".into(),
-            Some(Menu::SubagentDetail { id }) => format!(" subagent-{id} "),
             None => String::new(),
         }
     }
@@ -1374,39 +1375,6 @@ impl App {
                             ]),
                             MenuAction::OpenSubagent(*id),
                         ));
-                    }
-                }
-            }
-            Menu::SubagentDetail { id } => {
-                if let Some((_, task, status, output, _)) =
-                    self.subagents.iter().find(|(sid, _, _, _, _)| *sid == id)
-                {
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(" task", Theme::accent_bold())]),
-                        MenuAction::None,
-                    ));
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(format!("  {task}"), Theme::base())]),
-                        MenuAction::None,
-                    ));
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(
-                            format!(" status: {status}"),
-                            Theme::dim(),
-                        )]),
-                        MenuAction::None,
-                    ));
-                    if !output.is_empty() {
-                        self.menu_rows.push(row(
-                            Line::from(vec![Span::styled(" activity", Theme::accent_bold())]),
-                            MenuAction::None,
-                        ));
-                        for line in output.lines().take(80) {
-                            self.menu_rows.push(row(
-                                Line::from(vec![Span::styled(format!("  {line}"), Theme::dim())]),
-                                MenuAction::None,
-                            ));
-                        }
                     }
                 }
             }
