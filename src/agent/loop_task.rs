@@ -458,6 +458,7 @@ async fn run_agent(
                         let _ = tx.send(AgentEvent::Todos(items.clone())).await;
                         tools::Outcome::ok(format!("to-do saved ({} items)", items.len()))
                     }
+                    "webfetch" => tools::web::fetch(&call.args).await,
                     "plan_update" => {
                         let mut args = call.args.clone();
                         args["context_limit"] = serde_json::json!(context_limit);
