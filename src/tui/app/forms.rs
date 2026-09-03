@@ -343,17 +343,22 @@ impl App {
                         }
                     }
                 }
-                self.cfg.models.insert(
-                    new_key.clone(),
-                    ModelConfig {
-                        provider: provider.clone(),
-                        id,
-                        context,
-                        thinking,
-                        price_in: None,
-                        price_out: None,
-                    },
-                );
+                let updated = ModelConfig {
+                    provider: provider.clone(),
+                    id,
+                    context,
+                    thinking,
+                    price_in: None,
+                    price_out: None,
+                };
+                self.cfg.models.insert(new_key.clone(), updated.clone());
+                if self.session.model_key == new_key {
+                    self.model_cfg = updated;
+                    self.session.context_limit = context;
+                    self.session.last_response_id = None;
+                    self.session.last_response_model = None;
+                    self.rebuild_provider();
+                }
                 self.cfg.save().ok();
                 self.open_menu_replace(Menu::Models { provider });
             }

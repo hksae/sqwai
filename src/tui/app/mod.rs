@@ -1253,32 +1253,26 @@ impl App {
         self.busy_until = None;
     }
 
-    fn cancel_unfinished_subagents(&mut self) {
-        for (_, _, status, _, _) in &mut self.subagents {
-            if matches!(status.as_str(), "waiting" | "running") {
-                *status = "cancelled".into();
-            }
-        }
-        for segment in &mut self.segments {
-            if let Segment::Subagent { status, .. } = segment {
-                if matches!(status.as_str(), "waiting" | "running") {
-                    *status = "cancelled".into();
-                }
-            }
-        }
+    fn clear_subagent_ui_on_stop(&mut self) {
+        self.subagents.clear();
+        self.segments.retain(|segment| {
+            !matches!(segment, Segment::Subagent { .. })
+                && !matches!(segment, Segment::Tool { name, .. } if name == "subagent")
+        });
         if matches!(
             self.cur_menu(),
             Some(Menu::Subagents | Menu::SubagentDetail { .. })
         ) {
-            self.build_menu_rows();
+            self.menu_home();
         }
+        self.agents_click = None;
         self.dirty = true;
     }
 
     fn finish_turn(&mut self, res: Result<(), String>) {
         self.clear_busy_statuses();
         if res.as_ref().is_err_and(|error| error == "aborted") {
-            self.cancel_unfinished_subagents();
+            self.clear_subagent_ui_on_stop();
         }
         // flush whatever the typewriter has not revealed yet
         self.reveal_chars(usize::MAX);

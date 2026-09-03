@@ -541,9 +541,27 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect();
         assert!(text.contains("agents:1/2"), "bar: {text}");
-        app.cancel_unfinished_subagents();
-        assert_eq!(app.subagents[0].2, "cancelled");
-        assert_eq!(app.subagents[1].2, "completed");
+        app.segments.push(Segment::Subagent {
+            id: 1,
+            task: "one".into(),
+            status: "running".into(),
+            output: String::new(),
+            expanded: false,
+        });
+        app.segments.push(Segment::Tool {
+            name: "subagent".into(),
+            args: "2 tasks".into(),
+            ok: None,
+            output: String::new(),
+            diff: None,
+            expanded: false,
+        });
+        app.clear_subagent_ui_on_stop();
+        assert!(app.subagents.is_empty());
+        assert!(!app.segments.iter().any(|segment| {
+            matches!(segment, Segment::Subagent { .. })
+                || matches!(segment, Segment::Tool { name, .. } if name == "subagent")
+        }));
     }
 
     #[test]
