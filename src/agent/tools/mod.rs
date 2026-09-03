@@ -28,6 +28,8 @@ pub enum Kind {
 pub struct ToolCtx {
     /// project root; every path must resolve inside it
     pub root: PathBuf,
+    /// secondary project instances can inspect but not mutate project state
+    pub read_only: bool,
     /// files successfully read this session (guards edit/write)
     pub files_read: HashSet<PathBuf>,
     /// journal of checkpoints created by this session's mutations
@@ -36,8 +38,13 @@ pub struct ToolCtx {
 
 impl ToolCtx {
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self::with_read_only(root, false)
+    }
+
+    pub fn with_read_only(root: impl Into<PathBuf>, read_only: bool) -> Self {
         Self {
             root: root.into(),
+            read_only,
             files_read: HashSet::new(),
             journal: Vec::new(),
         }
@@ -447,6 +454,23 @@ const READ_MAX_BYTES: usize = 400_000;
 
 /// dispatch one tool call
 pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
+    if ctx.read_only
+        && matches!(
+            name,
+            "write"
+                | "edit"
+                | "multi_edit"
+                | "git_commit"
+                | "git_branch"
+                | "patch"
+                | "bash"
+                | "plan_update"
+        )
+    {
+        return Outcome::err(
+            "project is read-only because another sqwai instance owns the lock; use --force to enable writes",
+        );
+    }
     match name {
         "read" => fs::read(ctx, args["file_path"].as_str().unwrap_or_default(), args),
         "write" => fs::write_file(

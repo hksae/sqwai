@@ -192,6 +192,8 @@ pub struct AgentInput {
     pub context_limit: u64,
     /// Whether this request may use agent tools.
     pub enable_tools: bool,
+    /// Whether this project instance may perform mutations or write durable state.
+    pub read_only: bool,
     /// Optional provider-native continuation from the previous completed turn.
     /// Only ever set for providers that document the field.
     pub previous_response_id: Option<String>,
@@ -510,8 +512,9 @@ async fn run_agent(
         plan_mode,
         context_limit,
         enable_tools,
-        mut previous_response_id,
-        mut summary,
+        read_only,
+        previous_response_id,
+        summary,
         compact_only,
         mcp,
         lsp,
@@ -606,7 +609,7 @@ async fn run_agent(
         return;
     }
 
-    let mut ctx = ToolCtx::new(&root);
+    let mut ctx = ToolCtx::with_read_only(&root, read_only);
     let mut todos: Vec<String> = Vec::new();
     let mut plan_todos: Vec<String> = plan::load(&root)
         .as_deref()

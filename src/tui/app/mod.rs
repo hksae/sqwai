@@ -72,6 +72,8 @@ pub struct App {
     /// environment. Captured once per session and reused byte-for-byte so a
     /// provider-side prefix cache can hit on every request.
     stable_prefix: String,
+    /// This instance is read-only because another sqwai process owns the project lock.
+    read_only: bool,
     /// Whether the current prompt still needs the full tool-oriented context.
     context_bootstrap_pending: bool,
     active_skills: Vec<crate::prompts::skills::Skill>,
@@ -211,7 +213,7 @@ impl App {
         parts
     }
 
-    pub fn new(cfg: Config, session: Session, startup: bool) -> Result<Self> {
+    pub fn new(cfg: Config, session: Session, startup: bool, read_only: bool) -> Result<Self> {
         let model_key = session.model_key.clone();
         let model_cfg = cfg
             .models
@@ -253,6 +255,7 @@ impl App {
             thinking_idx: None,
             mode: Mode::Act,
             startup,
+            read_only,
             bar_error: None,
             prev_turn_ok: false,
             retry_notified: true, // no toast for the very first turn
@@ -511,6 +514,7 @@ impl App {
             plan_mode: self.mode == Mode::Plan,
             context_limit: self.session.context_limit,
             enable_tools: with_tools,
+            read_only: self.read_only,
             mcp: self.cfg.mcp.clone(),
             lsp: self.cfg.lsp.clone(),
             // A continuation reference only travels with the model that
@@ -575,6 +579,7 @@ impl App {
             plan_mode: false,
             context_limit: self.session.context_limit,
             enable_tools: false,
+            read_only: self.read_only,
             mcp: Default::default(),
             lsp: Default::default(),
             previous_response_id: None,

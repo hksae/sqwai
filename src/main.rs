@@ -70,10 +70,10 @@ fn main() -> Result<()> {
     }
 
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(run(cfg, resume_id))
+    runtime.block_on(run(cfg, resume_id, project_lock.read_only))
 }
 
-async fn run(cfg: config::Config, resume_id: Option<String>) -> Result<()> {
+async fn run(cfg: config::Config, resume_id: Option<String>, read_only: bool) -> Result<()> {
     let startup = resume_id.is_none();
     let session = match resume_id {
         Some(id) => session::Session::load(&id)?,
@@ -84,7 +84,7 @@ async fn run(cfg: config::Config, resume_id: Option<String>) -> Result<()> {
     };
 
     let terminal = init_terminal()?;
-    let res = tui::app::App::new(cfg, session, startup)?
+    let res = tui::app::App::new(cfg, session, startup, read_only)?
         .run(terminal)
         .await;
     restore_terminal()?;
