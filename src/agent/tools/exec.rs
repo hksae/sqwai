@@ -7,6 +7,7 @@
 //! truncates very long output to a tail plus the path of the full log file.
 
 use super::{Outcome, ToolCtx};
+use crate::agent::shell::ShellKind;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -15,22 +16,17 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// bytes beyond which output is spilled to a temp file and only its tail returned
 const MAX_RETURNED: usize = 30_000;
 
-fn shell() -> (&'static str, Vec<&'static str>) {
-    #[cfg(windows)]
-    {
-        ("cmd", vec!["/C"])
-    }
-    #[cfg(not(windows))]
-    {
-        ("/bin/sh", vec!["-c"])
-    }
+fn shell() -> (ShellKind, &'static str, &'static str) {
+    let kind = ShellKind::detect();
+    let (program, flag) = kind.program_and_flag();
+    (kind, program, flag)
 }
 
 /// build a Command runnable in `cwd`
 fn spawn_command(ctx: &ToolCtx, command: &str, cwd: Option<&str>) -> Command {
-    let (program, args) = shell();
+    let (_kind, program, flag) = shell();
     let mut c = Command::new(program);
-    c.args(args).arg(command);
+    c.arg(flag).arg(command);
     match cwd {
         Some(d) => {
             if let Ok(p) = ctx.resolve(d) {
