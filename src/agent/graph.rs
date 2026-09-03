@@ -103,6 +103,7 @@ pub trait GraphStore {
     fn upsert_node(&mut self, node: &Node) -> Result<()>;
     fn upsert_edge(&mut self, edge: &Edge) -> Result<()>;
     fn apply_batch(&mut self, nodes: &[Node], edges: &[Edge]) -> Result<()>;
+    fn replace_file_subgraph(&mut self, path: &str, nodes: &[Node], edges: &[Edge]) -> Result<()>;
     fn find_node(&self, stable_key: &str) -> Result<Option<Node>>;
     fn neighbors(&self, stable_key: &str, query: NeighborQuery) -> Result<GraphProjection>;
 }
@@ -235,6 +236,47 @@ impl GraphStore for CozoGraphStore {
             }
             for edge in edges {
                 validate_edge(edge)?;
+                write_edge(&transaction, edge)?;
+            }
+            transaction
+                .commit()
+                .map_err(|error| anyhow!(error.to_string()))
+        })();
+        if result.is_err() {
+            let _ = transaction.abort();
+        }
+        result
+    }
+
+    fn replace_file_subgraph(&mut self, path: &str, nodes: &[Node], edges: &[Edge]) -> Result<()> {
+        if path.trim().is_empty() {
+            bail!("graph file path must not be empty");
+        }
+        for node in nodes {
+            validate_node(node)?;
+        }
+        for edge in edges {
+            validate_edge(edge)?;
+        }
+
+        let transaction = self.db.multi_transaction(true);
+        let result = (|| {
+            transaction
+                .run_script(
+                    "stale[key] := *graph_nodes[key, _, _, path, _, _, _, _, _, _], path == $path\n?[from, to, kind] := *graph_edges[from, to, kind, _, _, _], stale[from]\n?[from, to, kind] := *graph_edges[from, to, kind, _, _, _], stale[to]\n:rm graph_edges {from, to, kind}",
+                    params([("path", DataValue::from(path))]),
+                )
+                .map_err(|error| anyhow!(error.to_string()))?;
+            transaction
+                .run_script(
+                    "?[stable_key] := *graph_nodes[stable_key, _, _, path, _, _, _, _, _, _], path == $path :rm graph_nodes {stable_key}",
+                    params([("path", DataValue::from(path))]),
+                )
+                .map_err(|error| anyhow!(error.to_string()))?;
+            for node in nodes {
+                write_node(&transaction, node)?;
+            }
+            for edge in edges {
                 write_edge(&transaction, edge)?;
             }
             transaction
