@@ -1,5 +1,6 @@
 mod agent;
 mod config;
+mod lock;
 mod lsp;
 mod mcp;
 mod plan;
@@ -15,6 +16,7 @@ use anyhow::{Context, Result};
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut resume_id: Option<String> = None;
+    let mut force = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -25,8 +27,17 @@ fn main() -> Result<()> {
                 println!("sqwai {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
-            other => anyhow::bail!("unknown argument: {other}\nusage: sqwai [--resume <id>]"),
+            "--force" => force = true,
+            other => {
+                anyhow::bail!("unknown argument: {other}\nusage: sqwai [--resume <id>] [--force]")
+            }
         }
+    }
+
+    let project_root = std::env::current_dir().context("cannot determine project root")?;
+    let project_lock = lock::ProjectLock::acquire(&project_root, force)?;
+    if let Some(message) = project_lock.status_message() {
+        eprintln!("warning: {message}");
     }
 
     let cfg = match config::Config::load() {
