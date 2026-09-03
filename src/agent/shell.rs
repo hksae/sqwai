@@ -65,6 +65,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shell_names_are_normalized_from_paths() {
+        assert_eq!(
+            ShellKind::from_program(Path::new("C:\\Windows\\System32\\cmd.exe")),
+            Some(ShellKind::Cmd)
+        );
+        assert_eq!(
+            ShellKind::from_program(Path::new("C:\\Program Files\\PowerShell\\pwsh.exe")),
+            Some(ShellKind::PowerShell)
+        );
+        assert_eq!(
+            ShellKind::from_program(Path::new("/usr/bin/bash")),
+            Some(ShellKind::Bash)
+        );
+        assert_eq!(ShellKind::from_program(Path::new("unknown-shell")), None);
+    }
+
+    #[test]
     fn shell_command_invocation_has_expected_flag() {
         assert_eq!(ShellKind::Bash.program_and_flag().1, "-c");
         assert_eq!(ShellKind::Sh.program_and_flag().1, "-c");

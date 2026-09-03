@@ -124,6 +124,7 @@ fn heuristic_classify(shell: ShellKind, cmd: &str) -> Verdict {
         || lower.contains("invoke-expression")
         || lower.contains("iex ")
         || lower.contains("| iex")
+        || lower.contains("| invoke-expression")
         || lower.contains("curl") && (lower.contains("| sh") || lower.contains("| bash"))
         || lower.contains("wget") && (lower.contains("| sh") || lower.contains("| bash"))
     {
