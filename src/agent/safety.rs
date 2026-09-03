@@ -65,6 +65,13 @@ fn heuristic_classify(shell: ShellKind, cmd: &str) -> Verdict {
         if contains_any(&lower, &["format-volume", "clear-disk", "remove-partition"]) {
             return Verdict::NeedsApproval("destructive disk/filesystem operation");
         }
+        if powershell_critical_write(&lower) {
+            return Verdict::NeedsApproval("write to a critical system path");
+        }
+    }
+
+    if matches!(shell, ShellKind::Cmd) && cmd_critical_redirect(&lower) {
+        return Verdict::NeedsApproval("redirect overwrites a critical path");
     }
 
     // --- destructive filesystem ops -------------------------------------
@@ -197,6 +204,21 @@ fn powershell_recursive_delete(lower: &str) -> bool {
         .split(|c: char| c.is_whitespace() || c == ';' || c == '|')
         .any(|token| aliases.contains(&token.trim_start_matches('-')));
     has_delete && lower.contains("-recurse") && lower.contains("-force")
+}
+
+fn powershell_critical_write(lower: &str) -> bool {
+    let writes = ["set-content", "add-content", "out-file", "> ", ">> "];
+    writes.iter().any(|write| lower.contains(write))
+        && ["c:\\windows", "c:/windows", "\\system32", "/etc/", "/boot/"]
+            .iter()
+            .any(|path| lower.contains(path))
+}
+
+fn cmd_critical_redirect(lower: &str) -> bool {
+    (lower.contains('>') || lower.contains("copy "))
+        && ["c:\\windows", "c:/windows", "\\system32", "c:\\boot"]
+            .iter()
+            .any(|path| lower.contains(path))
 }
 
 fn pipe_into_shell(lower: &str) -> bool {
@@ -505,6 +527,21 @@ mod tests {
             ));
         }
     }
+    #[test]
+    fn critical_windows_writes_are_caught() {
+        assert!(matches!(
+            classify_for(
+                ShellKind::PowerShell,
+                "Set-Content C:\\Windows\\System32\\x.dll data"
+            ),
+            Verdict::NeedsApproval(_)
+        ));
+        assert!(matches!(
+            classify_for(ShellKind::Cmd, "echo data > C:\\Windows\\System32\\x.dll"),
+            Verdict::NeedsApproval(_)
+        ));
+    }
+
     #[test]
     fn safe_commands_pass() {
         for cmd in [
