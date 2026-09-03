@@ -740,8 +740,10 @@ impl App {
         self.build_menu_rows();
 
         // fixed extra lines under the content: hint footer and transient status
-        let footer_h =
-            usize::from(self.menu_footer_text.is_some()) + usize::from(self.menu_status.is_some());
+        // Menu footers are intentionally empty: controls should be consistent
+        // and discoverable from the global interface, not repeated in every menu.
+        self.menu_footer_text = None;
+        let footer_h = usize::from(self.menu_status.is_some());
         let avail_inner = (area.height.saturating_sub(6)).max(3) as usize;
         let content_rows: usize = if is_form {
             self.form_fields.len() + 1
@@ -830,11 +832,6 @@ impl App {
                     }
                 }
             }
-            rows.push(Line::from(vec![Span::styled(
-                " up/down: field · tab next · left/right: move/change · enter: save · esc: cancel"
-                    .to_string(),
-                Theme::dim(),
-            )]));
         } else {
             // render only the visible window of the list
             for (n, (line, _)) in self
@@ -864,12 +861,6 @@ impl App {
                 } else {
                     rows.push(line.clone());
                 }
-            }
-            if let Some(hint) = &self.menu_footer_text {
-                rows.push(Line::from(vec![Span::styled(
-                    format!(" {hint}"),
-                    Theme::dim(),
-                )]));
             }
             if let Some((text, kind)) = &self.menu_status {
                 let st = match kind {
