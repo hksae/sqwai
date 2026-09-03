@@ -3,7 +3,7 @@ use ratatui::text::{Line, Span};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::theme::Theme;
 
@@ -384,13 +384,17 @@ fn emit_code(
         }
         lines.push(Line::from(spans));
     }
-    let max_w = (width.saturating_sub(4) as usize).max(12);
+    // The code frame must never be wider than the chat viewport. Long source
+    // lines are wrapped into additional framed rows below, rather than being
+    // passed to the outer wrapper where the right border could be split away.
+    let max_w = width.saturating_sub(4) as usize;
     let iw = lines
         .iter()
-        .map(|l| line_text_pub(l).chars().count())
+        .map(|l| UnicodeWidthStr::width(line_text_pub(l).as_str()))
         .max()
         .unwrap_or(0)
-        .clamp(8, max_w);
+        .min(max_w)
+        .max(1);
     // Code frame is intentionally a little quieter than the accent text.
     let b = Style::new().fg(Theme::code_border()).bg(Theme::BG());
 
@@ -399,7 +403,7 @@ fn emit_code(
         Some(l) if !l.is_empty() => format!("─ {l} "),
         _ => String::new(),
     };
-    let rest = (iw + 2).saturating_sub(lang_txt.chars().count());
+    let rest = (iw + 2).saturating_sub(UnicodeWidthStr::width(lang_txt.as_str()));
     out.push(Line::from(vec![
         Span::styled("╭".to_string(), b),
         Span::styled(
@@ -410,9 +414,9 @@ fn emit_code(
         ),
         Span::styled(format!("{}╮", "─".repeat(rest)), b),
     ]));
-    for l in lines {
+    for l in lines.into_iter().flat_map(|line| wrap_code_line(line, iw)) {
         let t = line_text_pub(&l);
-        let pad = " ".repeat(iw.saturating_sub(t.chars().count()));
+        let pad = " ".repeat(iw.saturating_sub(UnicodeWidthStr::width(t.as_str())));
         let mut spans = vec![Span::styled("│ ".to_string(), b)];
         spans.extend(l.spans);
         spans.push(Span::styled(format!("{pad} │"), b));
@@ -422,6 +426,37 @@ fn emit_code(
         Span::styled("╰".to_string(), b),
         Span::styled(format!("{}╯", "─".repeat(iw + 2)), b),
     ]));
+}
+
+fn wrap_code_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let mut rows = Vec::new();
+    let mut cells = Vec::new();
+    for span in line.spans {
+        for ch in span.content.chars() {
+            cells.push((span.style, ch));
+        }
+    }
+    if cells.is_empty() {
+        return vec![Line::from(Vec::<Span<'static>>::new())];
+    }
+    let mut current = Vec::new();
+    let mut used = 0usize;
+    for (style, ch) in cells {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cw > width && !current.is_empty() {
+            rows.push(cells_to_line(current, Style::default()));
+            current = Vec::new();
+            used = 0;
+        }
+        if cw <= width || current.is_empty() {
+            current.push((style, ch));
+            used += cw;
+        }
+    }
+    if !current.is_empty() {
+        rows.push(cells_to_line(current, Style::default()));
+    }
+    rows
 }
 
 fn line_text_pub(l: &Line<'_>) -> String {
@@ -641,6 +676,14 @@ mod tests {
         let hl = Highlighter::new();
         let lines = render("```rust\nfn main() {}\n```\ntext", 80, &hl);
         assert!(lines.len() >= 3);
+        let narrow = render(
+            "```cpp\nstd::cout << \"Привет, мир!\" << std::endl;\n```",
+            24,
+            &hl,
+        );
+        for line in &narrow {
+            assert!(UnicodeWidthStr::width(line_text_pub(line).as_str()) <= 24);
+        }
         let label: String = lines[0]
             .spans
             .iter()
