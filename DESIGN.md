@@ -1212,6 +1212,10 @@ show_facts = true
 
 [undo]
 keep_per_session = 50
+blob_grace_secs = 86400
+shadow = "local"             # local (.sqwai/checkpoints/git) | user | off
+shadow_max_files = 50000
+shadow_max_bytes = 1073741824
 
 [secrets]
 exclude_globs = [".env*", "*.pem", "*.key", "id_*", "*credentials*", "*secret*"]
@@ -1324,9 +1328,11 @@ Should verify acceptance evidence require exit 0 specifically, or is any
 exec result acceptable when the acceptance text is negative ("no warnings")?
 Second language: Python (proposed) vs TypeScript — pick by contributor
 demand once the Rust adapter proves the contract.
-Checkpoint tree hashing cost on very large monorepos; fallback to
-"checkpoint only before dangerous bash" above N files?
-Whether memory/ should default to committed for teams; current default
+Checkpoint storage is now two-layered: mandatory content-addressed per-file
+blobs plus an optional Bash-only shadow Git repository; Git CLI is invoked
+through `tokio::process` and never through the user's `.git`. Large-project
+thresholds and the local/user/off shadow location are configuration questions
+(§2.5, `[undo]`), not a reason to remove layer-1 undo.Whether memory/ should default to committed for teams; current default
 ignored.
 Whether the executor should see expects for run checks to choose
 arguments — currently no; revisit if not_observable rates are high.
