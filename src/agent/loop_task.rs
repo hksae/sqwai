@@ -146,6 +146,12 @@ impl AgentHandle {
     }
 }
 
+impl Drop for AgentHandle {
+    fn drop(&mut self) {
+        self.abort.abort();
+    }
+}
+
 pub struct AgentInput {
     pub provider: SharedProvider,
     pub model_id: String,
