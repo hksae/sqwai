@@ -68,6 +68,9 @@ that must be solid but is not what the project is about.
 AGENTS.md project instructions (committed)
 .sqwai/
 lock/<session>.lock pid + session id ignored        # single-instance guard (§2.0)
+checkpoints/
+  blobs/<blake3-hash> content-addressed file bytes ignored
+  git/ shadow repository for Bash only, when enabled ignored
 plans/<plan-id>.json structured plan ignored
 journal/<session>.jsonl host-written event log ignored
 journal/reflect/*.json reflector verdicts ignored
@@ -346,9 +349,9 @@ user_msg	hash, chars, goal_like: bool	user message accepted
 mode_change	from, to, by: user	Tab / /mode
 tool_call	tool, args_digest (path, cmd, pattern — never file contents), call_id	before dispatch
 tool_result	tool, call_id, ok, exit, duration_ms, summary (≤ 200 chars host-derived: test counts, error class), spill_path, trust: high|low	after dispatch
-file_diff	path, added, removed, hash_before, hash_after, checkpoint	after any mutating file tool, and after bash if tree hash changed (one record per changed file)
-checkpoint	sha, `reason: pre_mutation	pre_bash
-undo	to_checkpoint, files, reopened_steps	/undo
+file_diff	path, added, removed, hash_before, hash_after, mode, checkpoint	after any mutating file tool, and after bash if the status/tree check reports changes (one record per changed file; hashes reference checkpoint blobs)
+checkpoint	layer, id, reason (`pre_mutation`|`pre_bash`|`post_bash`), blobs, shadow_commit?	after a layer-1 snapshot or shadow-Git snapshot
+undo	to_checkpoint|step, files, reopened_steps	/undo or /undo step N
 diagnostics	path, errors, warnings, server, digest	LSP publishDiagnostics after a change
 approval	cmd_digest, `decision: once	session
 note	by: model, `note: decision|rejected|assumption|lesson|blocker	model
@@ -639,8 +642,7 @@ Trigger	Action
 write/edit	edit (host)
 external mtime/hash change	host detects before a file tool (§2.2 external_change); mark possibly_stale; before next graph read, reindex the changed path; invalidate the read-guard so the model must re-read (§1.1)
 bash result	if tree hash changed → mark possibly_stale; before the next graph read, scan files by mtime+size, rehash changed, reindex those; new files under root are discovered by a bounded walk (respecting ignore rules)
-/undo	reindex every path in the undo record
-`git checkout	switch
+/undo	reindex every path in the undo record; restoration uses targeted blob writes or `git diff-tree` + `git show`, never checkout or clean
 session start	compare head; if changed, mtime scan
 graph journal records are written for every reindex batch. The agent never
 receives graph facts from a store whose status is building or corrupt;
@@ -689,29 +691,81 @@ Provenance command `/why <path|symbol|j#N>` (§7 Y), step diff and `/export`
 consumers of the same projections. `/why` unifies journal (when/which step
 changed it), diary (why), and graph (what depends on it) into one answer.
 
-2.5 Checkpoints and undo [done, with one change]
-Shadow commits of the working tree to refs/sqwai/checkpoints via git2
-with a temporary index; the user's staging area is untouched. Created:
+### 2.5 Checkpoints and undo [planned]
+Checkpoints have two layers. Layer 1 is mandatory and does not depend on Git;
+layer 2 is an optional shadow repository used only to capture mutations made by
+Bash. Neither layer ever touches the user's `.git`, index, staging area, or
+refs.
 
-before every mutating file tool (write|edit|multi_edit|patch);
-before every bash call if the tree hash differs from the last
-checkpoint (change: previously only "dangerous" commands were
-checkpointed; formatters, generators and git checkout mutate silently);
-after a bash call whose tree hash differs from the pre-call hash
-(reason: post_bash), so the post-state is also restorable.
-Tree hashing uses git2 index hashing of tracked+untracked-unignored files;
-cost is negligible for repos under ~50k files, and bash calls are already
-IO-bound.
+**Layer 1 — per-file copy-on-write blobs.** Before every mutating file tool
+(`write|edit|multi_edit|patch`), the host snapshots the relevant file bytes. The
+same blob operation is used for every changed file discovered after Bash:
 
-Journal checkpoint records replace the separate "checkpoint log" in the
-session file; the session keeps only the last checkpoint sha for fast
-startup. Retention: keep the last undo.keep_per_session (50) per session
-and everything referenced by an active plan's evidence; /new and /exit
-prune older refs. Outside a git repository: no checkpoints, a warning at
-start, and plan create requires acknowledge_no_undo: true from the user
-via ask_user once per session.
+```text
+blob = read(path)
+hash = blake3(blob)
+write_if_absent(.sqwai/checkpoints/blobs/<hash>, blob)
+journal file_diff { path, hash_before, hash_after, mode }
+```
 
-/undo [n] semantics: §3.6.
+`hash_before` and `hash_after` are content-addressed blob references, not
+claims derived from the model's diff. Writes are atomic and deduplicated;
+optional zstd compression may be used behind the blob-store interface while
+the hash always identifies the uncompressed bytes. `mode` preserves the file
+mode needed for restoration. Layer 1 is available in projects without Git and
+supports targeted restore for write/edit-style history.
+
+**Layer 2 — shadow Git around Bash.** When Git is available, Bash is wrapped by
+an isolated repository at `.sqwai/checkpoints/git/` (or the configured
+user-level checkpoint directory). It uses the project root as `core.worktree`
+and is configured with `core.autocrlf=false`, `core.symlinks=true`,
+`core.longpaths=true`, `core.untrackedCache=true`, and `core.fsmonitor=false`.
+The shadow repository is never the user's repository. Git is invoked through
+`tokio::process` with explicit `--git-dir` and `--work-tree` arguments:
+
+```text
+git --git-dir=… --work-tree=… add -A
+git --git-dir=… --work-tree=… write-tree
+git --git-dir=… --work-tree=… commit-tree <tree> -p <prev> -m "session a8f2 pre_bash j#40"
+git --git-dir=… --work-tree=… update-ref refs/sessions/<id> <commit>
+```
+
+Before Bash, the host runs a status/tree check and creates a shadow snapshot
+only when the working tree differs from the last shadow snapshot. After Bash,
+it runs the check again; when the tree changed, it records the changed-file
+list, writes layer-1 blobs for the exact before/after bytes, and creates the
+post-Bash shadow snapshot. If Git is unavailable, Bash still runs with layer 1
+and bounded change detection where possible; the guarantee for unknown Bash
+mutations is reduced, but the agent does not stop.
+
+Journal checkpoint records replace a separate checkpoint log. A checkpoint
+record identifies its layer, reason (`pre_mutation`, `pre_bash`, `post_bash`),
+blob references and, when present, the shadow commit. `file_diff` is emitted
+one record per changed path. The session keeps the latest checkpoint id for
+fast startup; active-plan evidence retains the checkpoint/blob references it
+uses.
+
+**Restore.** The host never restores with `git checkout` or `git clean`. For a
+Bash snapshot it obtains the path set with `git diff-tree`, reads each needed
+version with targeted `git show`, and writes only those paths. For layer 1 it
+reads the referenced blobs and restores only the files named by the undo
+record. Missing files are removed through the same guarded host path. Restore
+is followed by graph reindexing and a new checkpoint of the resulting tree.
+
+`/undo [n]` restores the n-th previous checkpoint (default 1). `/undo step N`
+combines the step's `file_diff` records from its first checkpoint to its last
+and reverts that step only when its files do not overlap later steps; otherwise
+it refuses with the conflicting paths. Outside a Git repository, ordinary file
+undo and `/undo step N` remain available; only rollback of unknown Bash side
+effects is unavailable.
+
+Retention keeps the last `undo.keep_per_session` checkpoints (default 50),
+all blobs referenced by active-plan evidence, and all shadow commits reachable
+from active session refs. `/new` and `/exit` prune older material. Blob garbage
+collection removes unreferenced blobs after the configured grace period;
+shadow repositories may be retained or placed in user-level data storage by
+configuration. Large projects may skip or bound shadow snapshots while keeping
+layer-1 file checkpoints, with the reduced guarantee shown in the status bar.
 
 3. Cycles
 3.1 Agent turn
@@ -974,8 +1028,9 @@ Tool panics	caught per call; tool_result ok:false code:internal; agent continues
 Crash	on restart the session picker marks it recoverable; resume path (§3.4) with journal repair; plan file is always consistent (atomic writes)
 Diary call fails	host-only entry; never blocks compaction
 Graph corrupt	status shown; graph features off until rebuild; nothing else affected
-Not a git repo	no checkpoints; warning; plan creation requires acknowledgment
-.sqwai/ unwritable	plan/journal/memory disabled with a persistent warning; agent runs in "no integrity" mode and says so in the status bar
+Not a git repo	layer-1 file checkpoints and `/undo step N` remain available; Bash side effects that cannot be enumerated are not fully restorable; status shows reduced guarantees
+Git unavailable or shadow snapshot skipped	Bash still runs with layer-1 checkpoints and bounded change detection where possible; unknown Bash mutations have reduced undo guarantees
+.sqwai/ unwritable	plan/journal/memory/checkpoints disabled with a persistent warning; agent runs in "no integrity" mode and says so in the status bar
 
 3.8 Claim lint [planned]
 After the model's response text is generated, the host runs a cheap pattern pass
