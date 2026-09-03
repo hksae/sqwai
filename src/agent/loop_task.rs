@@ -421,76 +421,78 @@ async fn run_agent(
                 })
                 .await;
 
-            let mut outcome =
-                if plan_mode && tools::is_mutating(&call.name) && call.name != "plan_update" {
-                    tools::Outcome::err(format!(
-                        "PLAN mode is read-only: '{}' is not allowed. Explore first, then ask the \
+            let mut outcome = if plan_mode
+                && tools::is_mutating_call(&call.name, &call.args)
+                && call.name != "plan_update"
+            {
+                tools::Outcome::err(format!(
+                    "PLAN mode is read-only: '{}' is not allowed. Explore first, then ask the \
                      user to switch to ACT (Tab) before changing anything.",
-                        call.name
-                    ))
-                } else {
-                    match call.name.as_str() {
-                        "ask_user" => ask_user(&call, &tx, &mut ctl, &mut next_id).await,
-                        "bash" => {
-                            bash_call(
-                                call,
-                                &mut ctx,
-                                &tx,
-                                &mut ctl,
-                                &mut always_allow,
-                                &blocked_patterns,
-                                &mut next_id,
-                            )
-                            .await
-                        }
-                        "todowrite" => {
-                            let items: Vec<String> = call.args["todos"]
-                                .as_array()
-                                .map(|a| {
-                                    a.iter()
-                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            todos = items.clone();
-                            let _ = tx.send(AgentEvent::Todos(items.clone())).await;
-                            tools::Outcome::ok(format!("to-do saved ({} items)", items.len()))
-                        }
-                        "plan_update" => {
-                            let mut args = call.args.clone();
-                            args["context_limit"] = serde_json::json!(context_limit);
-                            let outcome = run_tool_blocking(&mut ctx, "plan_update", &args).await;
-                            if outcome.ok {
-                                if let Some(saved) = plan::load(&root) {
-                                    plan_todos = plan::todo_items(&saved);
-                                    todos = plan_todos.clone();
-                                    let _ = tx.send(AgentEvent::Todos(todos.clone())).await;
-                                }
-                            }
-                            outcome
-                        }
-                        other
-                            if mcp_registry
-                                .as_ref()
-                                .is_some_and(|registry| registry.contains(other)) =>
-                        {
-                            match mcp_registry
-                                .as_ref()
-                                .unwrap()
-                                .call(other, call.args.clone())
-                                .await
-                            {
-                                Ok((output, is_error)) => tools::Outcome {
-                                    output,
-                                    ok: !is_error,
-                                    diff: None,
-                                },
-                                Err(e) => tools::Outcome::err(format!("MCP call failed: {e:#}")),
-                            }
-                        }
-                        other => run_tool_blocking(&mut ctx, other, &call.args).await,
+                    call.name
+                ))
+            } else {
+                match call.name.as_str() {
+                    "ask_user" => ask_user(&call, &tx, &mut ctl, &mut next_id).await,
+                    "bash" => {
+                        bash_call(
+                            call,
+                            &mut ctx,
+                            &tx,
+                            &mut ctl,
+                            &mut always_allow,
+                            &blocked_patterns,
+                            &mut next_id,
+                        )
+                        .await
                     }
-                };
+                    "todowrite" => {
+                        let items: Vec<String> = call.args["todos"]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        todos = items.clone();
+                        let _ = tx.send(AgentEvent::Todos(items.clone())).await;
+                        tools::Outcome::ok(format!("to-do saved ({} items)", items.len()))
+                    }
+                    "plan_update" => {
+                        let mut args = call.args.clone();
+                        args["context_limit"] = serde_json::json!(context_limit);
+                        let outcome = run_tool_blocking(&mut ctx, "plan_update", &args).await;
+                        if outcome.ok {
+                            if let Some(saved) = plan::load(&root) {
+                                plan_todos = plan::todo_items(&saved);
+                                todos = plan_todos.clone();
+                                let _ = tx.send(AgentEvent::Todos(todos.clone())).await;
+                            }
+                        }
+                        outcome
+                    }
+                    other
+                        if mcp_registry
+                            .as_ref()
+                            .is_some_and(|registry| registry.contains(other)) =>
+                    {
+                        match mcp_registry
+                            .as_ref()
+                            .unwrap()
+                            .call(other, call.args.clone())
+                            .await
+                        {
+                            Ok((output, is_error)) => tools::Outcome {
+                                output,
+                                ok: !is_error,
+                                diff: None,
+                            },
+                            Err(e) => tools::Outcome::err(format!("MCP call failed: {e:#}")),
+                        }
+                    }
+                    other => run_tool_blocking(&mut ctx, other, &call.args).await,
+                }
+            };
 
             if outcome.ok && matches!(call.name.as_str(), "write" | "edit" | "multi_edit") {
                 if let Some(manager) = lsp_manager.as_mut() {

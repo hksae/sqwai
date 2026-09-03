@@ -271,7 +271,7 @@ long-running commands.",
         },
         ToolDef {
             name: "git_branch",
-            kind: Kind::Mutating,
+            kind: Kind::ReadOnly,
             description: "List branches or create/switch to a local branch.",
             parameters: json!({"type":"object","properties":{"action":{"type":"string","enum":["list","current","create","switch"]},"name":{"type":"string"}}}),
         },
@@ -356,6 +356,15 @@ pub fn kind_of(name: &str) -> Option<Kind> {
 /// true when the tool can change the worktree or run processes
 pub fn is_mutating(name: &str) -> bool {
     matches!(kind_of(name), Some(Kind::Mutating))
+}
+
+/// Whether this particular call mutates state. `git_branch` contains both
+/// read-only inspection and Act-only branch changes, so its action matters.
+pub fn is_mutating_call(name: &str, args: &Value) -> bool {
+    if name == "git_branch" {
+        return matches!(args["action"].as_str(), Some("create" | "switch"));
+    }
+    is_mutating(name)
 }
 
 /// one-line description of a call's arguments for the live TUI row

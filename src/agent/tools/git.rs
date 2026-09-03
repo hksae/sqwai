@@ -106,7 +106,7 @@ pub fn log(ctx: &ToolCtx, args: &Value) -> Outcome {
     )
 }
 
-pub fn commit(ctx: &ToolCtx, args: &Value) -> Outcome {
+pub fn commit(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let message = arg(args, "message").trim();
     if message.is_empty() {
         return Outcome::err("git_commit requires a non-empty message");
@@ -115,6 +115,9 @@ pub fn commit(ctx: &ToolCtx, args: &Value) -> Outcome {
         return Outcome::err("git_commit message is too long (maximum 2000 bytes)");
     }
     let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
+    if let Ok(sha) = crate::agent::checkpoints::snapshot(&ctx.root, "git_commit") {
+        ctx.journal.push((sha, "git_commit".to_string()));
+    }
     if all {
         run_git(ctx, &["commit", "-am", message])
     } else {
@@ -122,7 +125,7 @@ pub fn commit(ctx: &ToolCtx, args: &Value) -> Outcome {
     }
 }
 
-pub fn branch(ctx: &ToolCtx, args: &Value) -> Outcome {
+pub fn branch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let action = arg(args, "action");
     let name = arg(args, "name").trim();
     match action {
@@ -132,6 +135,10 @@ pub fn branch(ctx: &ToolCtx, args: &Value) -> Outcome {
             if name.is_empty() {
                 Outcome::err("git_branch create requires a name")
             } else {
+                if let Ok(sha) = crate::agent::checkpoints::snapshot(&ctx.root, "git_branch create")
+                {
+                    ctx.journal.push((sha, "git_branch create".to_string()));
+                }
                 run_git(ctx, &["branch", name])
             }
         }
@@ -139,6 +146,10 @@ pub fn branch(ctx: &ToolCtx, args: &Value) -> Outcome {
             if name.is_empty() {
                 Outcome::err("git_branch switch requires a name")
             } else {
+                if let Ok(sha) = crate::agent::checkpoints::snapshot(&ctx.root, "git_branch switch")
+                {
+                    ctx.journal.push((sha, "git_branch switch".to_string()));
+                }
                 run_git(ctx, &["switch", name])
             }
         }
