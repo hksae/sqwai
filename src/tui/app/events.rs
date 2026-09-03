@@ -313,6 +313,17 @@ impl App {
                         }
                     }
                     MouseEventKind::Moved if !self.menu_stack.is_empty() => self.menu_hover(m.row),
+                    MouseEventKind::Down(MouseButton::Left)
+                        if self.in_input_rect(m.row, m.column) =>
+                    {
+                        self.input_mouse_down(m.row, m.column)
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) if self.input.is_selecting() => {
+                        self.input_mouse_drag(m.row, m.column)
+                    }
+                    MouseEventKind::Up(MouseButton::Left) if self.input.is_selecting() => {
+                        self.input_mouse_up()
+                    }
                     MouseEventKind::Down(MouseButton::Left) => self.mouse_down(m.row, m.column),
                     MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(m.row, m.column),
                     MouseEventKind::Up(MouseButton::Left) => self.mouse_up(m.row, m.column),
@@ -348,6 +359,41 @@ impl App {
     }
 
     // ---------- mouse ----------
+
+    fn in_input_rect(&self, row: u16, col: u16) -> bool {
+        col >= self.last_input.x
+            && col < self.last_input.right()
+            && row >= self.last_input.y
+            && row < self.last_input.bottom()
+    }
+
+    fn input_cursor_at(&self, row: u16, col: u16) -> tui_textarea::CursorMove {
+        let line = row.saturating_sub(self.last_input.y);
+        let column = col.saturating_sub(self.last_input.x + 1);
+        tui_textarea::CursorMove::Jump(line, column)
+    }
+
+    fn input_mouse_down(&mut self, row: u16, col: u16) {
+        self.input.move_cursor(self.input_cursor_at(row, col));
+        self.input.start_selection();
+        self.dirty = true;
+    }
+
+    fn input_mouse_drag(&mut self, row: u16, col: u16) {
+        self.input.move_cursor(self.input_cursor_at(row, col));
+        self.dirty = true;
+    }
+
+    fn input_mouse_up(&mut self) {
+        if self.input.is_selecting() {
+            self.input.copy();
+            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                let _ = clipboard.set_text(self.input.yank_text());
+            }
+        }
+        self.input.cancel_selection();
+        self.dirty = true;
+    }
 
     pub(super) fn paste_clipboard(&mut self) {
         let Ok(mut cb) = arboard::Clipboard::new() else {
