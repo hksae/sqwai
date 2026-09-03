@@ -299,6 +299,7 @@ async fn run_subagent(
     system: Vec<SystemPart>,
     mcp: crate::config::McpConfig,
     lsp: crate::config::LspConfig,
+    read_only: bool,
 ) -> tools::Outcome {
     let tasks = match subagent_tasks_from_args(&call.args) {
         Ok(tasks) => tasks,
@@ -328,6 +329,7 @@ async fn run_subagent(
                         system.clone(),
                         mcp.clone(),
                         lsp.clone(),
+                        read_only,
                     )
                     .await;
                     (
@@ -760,6 +762,7 @@ async fn run_agent(
                             system.clone(),
                             mcp.clone(),
                             lsp.clone(),
+                            read_only,
                         )
                         .await
                     }
