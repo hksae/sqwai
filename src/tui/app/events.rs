@@ -390,8 +390,9 @@ impl App {
             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                 let _ = clipboard.set_text(self.input.yank_text());
             }
+            // Keep the selection active so the copied range remains visibly
+            // selected, matching transcript selection behavior.
         }
-        self.input.cancel_selection();
         self.dirty = true;
     }
 

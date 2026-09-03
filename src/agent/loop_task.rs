@@ -5,7 +5,8 @@
 //! receiving user interaction answers (ask_user, dangerous-command approval)
 //! back through the [`ControlMsg`] channel. Aborting the task stops the agent.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
@@ -60,6 +61,22 @@ pub enum AgentEvent {
     Usage(Usage),
     ResponseId(String),
     RequestBreakdown(RequestBreakdown),
+    /// a delegated child agent was created
+    SubagentStart {
+        id: u64,
+        task: String,
+    },
+    /// a compact progress update from a delegated child
+    SubagentUpdate {
+        id: u64,
+        text: String,
+    },
+    /// a delegated child finished
+    SubagentDone {
+        id: u64,
+        ok: bool,
+        output: String,
+    },
     /// a tool just started: name + short arguments, spinner in the TUI
     ToolStart {
         name: String,
@@ -162,6 +179,9 @@ pub struct AgentInput {
     /// Run the compaction policy and finish without talking to the model
     /// otherwise (the `/compact` command).
     pub compact_only: bool,
+    /// nesting guard for delegated subagents; the first generation may create
+    /// children, but children cannot recursively create more children.
+    pub subagent_depth: u8,
 }
 
 const RETRY_WINDOW: Duration = Duration::from_secs(3600);
@@ -202,6 +222,133 @@ struct TurnOutcome {
     calls: Vec<ToolCallReq>,
 }
 
+async fn run_subagent(
+    call: &ToolCallReq,
+    parent_tx: &mpsc::Sender<AgentEvent>,
+    provider: &SharedProvider,
+    model_id: &str,
+    root: &Path,
+    blocked_patterns: &[String],
+    plan_mode: bool,
+    context_limit: u64,
+    thinking: Option<ThinkingLevel>,
+    max_tokens: Option<u32>,
+    system: Vec<SystemPart>,
+    mcp: crate::config::McpConfig,
+    lsp: crate::config::LspConfig,
+) -> tools::Outcome {
+    let id = next_subagent_id();
+    let task = call.args["task"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if task.is_empty() {
+        return tools::Outcome::err("subagent task is required");
+    }
+    let _ = parent_tx
+        .send(AgentEvent::SubagentStart {
+            id,
+            task: task.clone(),
+        })
+        .await;
+    let child = spawn_agent(AgentInput {
+        provider: provider.clone(),
+        model_id: model_id.to_string(),
+        thinking,
+        max_tokens,
+        system,
+        messages: vec![Message::new(Role::User, task)],
+        root: root.to_path_buf(),
+        blocked_patterns: blocked_patterns.to_vec(),
+        plan_mode,
+        context_limit,
+        enable_tools: true,
+        previous_response_id: None,
+        summary: None,
+        mcp,
+        lsp,
+        compact_only: false,
+        subagent_depth: 1,
+    });
+    let mut child = child;
+    let mut output = String::new();
+    while let Some(event) = child.rx.recv().await {
+        match event {
+            AgentEvent::TextDelta(text) => {
+                output.push_str(&text);
+                let _ = parent_tx
+                    .send(AgentEvent::SubagentUpdate { id, text })
+                    .await;
+            }
+            AgentEvent::ThinkingDelta(text) => {
+                let _ = parent_tx
+                    .send(AgentEvent::SubagentUpdate {
+                        id,
+                        text: format!("thinking: {text}"),
+                    })
+                    .await;
+            }
+            AgentEvent::ToolStart { name, summary } => {
+                let _ = parent_tx
+                    .send(AgentEvent::SubagentUpdate {
+                        id,
+                        text: format!("{name}: {summary}"),
+                    })
+                    .await;
+            }
+            AgentEvent::ToolNotice { name, ok, .. } => {
+                let _ = parent_tx
+                    .send(AgentEvent::SubagentUpdate {
+                        id,
+                        text: format!("{name} {}", if ok { "completed" } else { "failed" }),
+                    })
+                    .await;
+            }
+            AgentEvent::Completed(result) => {
+                let result = match result {
+                    Ok(outcome) => {
+                        if output.is_empty() {
+                            output = outcome
+                                .messages
+                                .iter()
+                                .rev()
+                                .find(|m| m.role == Role::Assistant)
+                                .map(|m| m.content.clone())
+                                .unwrap_or_default();
+                        }
+                        tools::Outcome::ok(output.clone())
+                    }
+                    Err(error) => tools::Outcome::err(error),
+                };
+                let _ = parent_tx
+                    .send(AgentEvent::SubagentDone {
+                        id,
+                        ok: result.ok,
+                        output: result.output.clone(),
+                    })
+                    .await;
+                return result;
+            }
+            _ => {}
+        }
+    }
+    let result = tools::Outcome::err("subagent disconnected");
+    let _ = parent_tx
+        .send(AgentEvent::SubagentDone {
+            id,
+            ok: false,
+            output: result.output.clone(),
+        })
+        .await;
+    result
+}
+
+fn next_subagent_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 pub fn spawn_agent(input: AgentInput) -> AgentHandle {
     let (tx, rx) = mpsc::channel::<AgentEvent>(256);
     let (ctl_tx, ctl_rx) = mpsc::channel::<ControlMsg>(32);
@@ -235,6 +382,7 @@ async fn run_agent(
         compact_only,
         mcp,
         lsp,
+        subagent_depth,
     } = input;
 
     let mut lsp_manager = if enable_tools && !lsp.servers.is_empty() {
@@ -460,6 +608,25 @@ async fn run_agent(
                     }
                     "webfetch" => tools::web::fetch(&call.args).await,
                     "websearch" => tools::web::search(&call.args).await,
+                    "subagent" if subagent_depth == 0 => {
+                        run_subagent(
+                            call,
+                            &tx,
+                            &provider,
+                            &model_id,
+                            &root,
+                            &blocked_patterns,
+                            plan_mode,
+                            context_limit,
+                            thinking,
+                            max_tokens,
+                            system.clone(),
+                            mcp.clone(),
+                            lsp.clone(),
+                        )
+                        .await
+                    }
+                    "subagent" => tools::Outcome::err("nested subagents are not allowed"),
                     "plan_update" => {
                         let mut args = call.args.clone();
                         args["context_limit"] = serde_json::json!(context_limit);

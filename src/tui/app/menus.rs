@@ -448,10 +448,7 @@ impl App {
                     self.menu_home();
                     self.status("already in this session", StatusKind::Info);
                 } else if self.streaming {
-                    self.status(
-                        "busy: esc stops the current generation first",
-                        StatusKind::Warn,
-                    );
+                    self.show_busy_status();
                 } else {
                     match Session::load(&id) {
                         Ok(s) => self.apply_session(s),
@@ -487,10 +484,7 @@ impl App {
             }
             MenuAction::ForkAt(last_idx) => {
                 if self.streaming {
-                    self.status(
-                        "busy: esc stops the current generation first",
-                        StatusKind::Warn,
-                    );
+                    self.show_busy_status();
                     return;
                 }
                 let fork = self

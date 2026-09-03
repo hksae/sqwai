@@ -4,6 +4,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Borders};
+use std::time::{Duration, Instant};
 use tui_textarea::TextArea;
 
 use crate::agent::loop_task::{
@@ -83,6 +84,8 @@ pub struct App {
     agent: Option<AgentHandle>,
     /// to-do list written by the agent's todowrite tool
     todos: Vec<String>,
+    /// tracked child agents shown as expandable transcript rows
+    subagents: Vec<(u64, String, String, String, bool)>,
     /// checked options in the current multi-select ask_user
     ask_picked: Vec<bool>,
     assistant_buf: String,
@@ -128,6 +131,9 @@ pub struct App {
     /// Windows terminals may enqueue the key release/accept sequence after
     /// bracketed/clipboard paste; it must not submit the newly pasted prompt.
     paste_enter_guard: bool,
+
+    /// Deadline for the single transient busy notice.
+    busy_until: Option<Instant>,
 
     // command popup
     hover: Option<usize>,
@@ -232,6 +238,7 @@ impl App {
             aborted: false,
             agent: None,
             todos: Vec::new(),
+            subagents: Vec::new(),
             ask_picked: Vec::new(),
             assistant_buf: String::new(),
             pending_reveal: String::new(),
@@ -278,6 +285,7 @@ impl App {
             dragging: false,
             sel: None,
             paste_enter_guard: false,
+            busy_until: None,
         };
         if !startup {
             app.load_history_segments();
@@ -356,6 +364,13 @@ impl App {
                     usize::MAX
                 };
                 self.dirty |= self.reveal_chars(step);
+            }
+            if self
+                .busy_until
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                self.clear_busy_statuses();
+                self.busy_until = None;
             }
             self.spinner_tick = self.spinner_tick.wrapping_add(1);
             crate::tui::theme::set_anim_tick(self.spinner_tick as u64);
@@ -441,15 +456,15 @@ impl App {
         if text.is_empty() {
             return;
         }
+        if self.streaming {
+            self.show_busy_status();
+            return;
+        }
         self.input = Self::fresh_input(String::new());
         self.popup_dismiss = false;
         self.hover = None;
         if let Some(rest) = text.strip_prefix('/') {
             self.command(rest);
-            return;
-        }
-        if self.streaming {
-            self.status("busy: esc stops the current generation", StatusKind::Warn);
             return;
         }
         if let Some(pc) = self.cfg.providers.get(&self.model_cfg.provider)
@@ -499,6 +514,7 @@ impl App {
             },
             summary: self.session.summary.clone(),
             compact_only: false,
+            subagent_depth: 0,
         };
         self.context_bootstrap_pending = false;
         self.agent = Some(spawn_agent(input));
@@ -528,10 +544,7 @@ impl App {
     /// turn and can be aborted with esc.
     fn start_compaction(&mut self) {
         if self.streaming {
-            self.status(
-                "busy: esc stops the current generation first",
-                StatusKind::Warn,
-            );
+            self.show_busy_status();
             return;
         }
         if self.session.messages.is_empty() {
@@ -559,6 +572,7 @@ impl App {
             previous_response_id: None,
             summary: self.session.summary.clone(),
             compact_only: true,
+            subagent_depth: 0,
         };
         self.agent = Some(spawn_agent(input));
         self.streaming = true;
@@ -626,10 +640,7 @@ impl App {
     fn start_new_session(&mut self) -> bool {
         self.startup = false;
         if self.streaming {
-            self.status(
-                "busy: esc stops the current generation first",
-                StatusKind::Warn,
-            );
+            self.show_busy_status();
             return false;
         }
         let ctx = self.session.context_limit;
@@ -650,10 +661,7 @@ impl App {
 
     fn switch_model(&mut self, key: &str) {
         if self.streaming {
-            self.status(
-                "busy: esc stops the current generation first",
-                StatusKind::Warn,
-            );
+            self.show_busy_status();
             return;
         }
         let Some(mc) = self.cfg.models.get(key).cloned() else {
@@ -774,10 +782,7 @@ impl App {
                 if self.session.messages.is_empty() {
                     self.status("nothing to fork yet", StatusKind::Warn);
                 } else if self.streaming {
-                    self.status(
-                        "busy: esc stops the current generation first",
-                        StatusKind::Warn,
-                    );
+                    self.show_busy_status();
                 } else {
                     self.open_menu(Menu::ForkPoint);
                 }
@@ -790,10 +795,7 @@ impl App {
             "/compact" => self.start_compaction(),
             "/undo" => {
                 if self.streaming {
-                    self.status(
-                        "busy: esc stops the current generation first",
-                        StatusKind::Warn,
-                    );
+                    self.show_busy_status();
                 } else {
                     let n = rest
                         .split_whitespace()
@@ -812,10 +814,20 @@ impl App {
         self.dirty = true;
     }
 
+    const BUSY_STATUS: &'static str = "busy · esc to stop";
+
+    fn show_busy_status(&mut self) {
+        self.segments.retain(
+            |segment| !matches!(segment, Segment::Status { text, .. } if text == Self::BUSY_STATUS),
+        );
+        self.status(Self::BUSY_STATUS, StatusKind::Warn);
+        self.busy_until = Some(Instant::now() + Duration::from_secs(2));
+    }
+
     fn status(&mut self, text: &str, kind: StatusKind) {
-        if text == "busy: esc stops the current generation first" {
+        if text == Self::BUSY_STATUS {
             self.segments.retain(|segment| {
-                !matches!(segment, Segment::Status { text: existing, .. } if existing == text)
+                !matches!(segment, Segment::Status { text: existing, .. } if text == existing)
             });
         }
         if kind == StatusKind::Err {
@@ -974,6 +986,72 @@ impl App {
                         b.tool_schema_bytes,
                         b.total_bytes,
                     ));
+                }
+                AgentEvent::SubagentStart { id, task } => {
+                    self.subagents
+                        .push((id, task.clone(), "running".into(), String::new(), false));
+                    self.segments.push(Segment::Subagent {
+                        id,
+                        task,
+                        status: "running".into(),
+                        output: String::new(),
+                        expanded: false,
+                    });
+                    self.dirty = true;
+                }
+                AgentEvent::SubagentUpdate { id, text } => {
+                    if let Some((_, _, status, output, _)) = self
+                        .subagents
+                        .iter_mut()
+                        .find(|(sid, _, _, _, _)| *sid == id)
+                    {
+                        *status = "running".into();
+                        output.push_str(&text);
+                        output.push('\n');
+                    }
+                    if let Some(Segment::Subagent { status, output, .. }) = self
+                        .segments
+                        .iter_mut()
+                        .rev()
+                        .find(|s| matches!(s, Segment::Subagent { id: sid, .. } if *sid == id))
+                    {
+                        *status = "running".into();
+                        output.push_str(&text);
+                        output.push('\n');
+                    }
+                    self.dirty = true;
+                }
+                AgentEvent::SubagentDone { id, ok, output } => {
+                    if let Some((_, _, status, current, _)) = self
+                        .subagents
+                        .iter_mut()
+                        .find(|(sid, _, _, _, _)| *sid == id)
+                    {
+                        *status = if ok {
+                            "completed".into()
+                        } else {
+                            "failed".into()
+                        };
+                        *current = output.clone();
+                    }
+                    if let Some(Segment::Subagent {
+                        status,
+                        output: current,
+                        ..
+                    }) = self
+                        .segments
+                        .iter_mut()
+                        .rev()
+                        .find(|s| matches!(s, Segment::Subagent { id: sid, .. } if *sid == id))
+                    {
+                        *status = if ok {
+                            "completed".into()
+                        } else {
+                            "failed".into()
+                        };
+                        *current = output;
+                    }
+                    self.dirty = true;
                 }
                 AgentEvent::ToolStart { name, summary } => {
                     let tool = Segment::Tool {
@@ -1149,13 +1227,10 @@ impl App {
     }
 
     fn clear_busy_statuses(&mut self) {
-        self.segments.retain(|segment| {
-            !matches!(
-                segment,
-                Segment::Status { text, .. }
-                    if text == "busy: esc stops the current generation first"
-            )
-        });
+        self.segments.retain(
+            |segment| !matches!(segment, Segment::Status { text, .. } if text == Self::BUSY_STATUS),
+        );
+        self.busy_until = None;
     }
 
     fn finish_turn(&mut self, res: Result<(), String>) {
@@ -1267,6 +1342,7 @@ impl App {
             ta.set_style(Theme::base());
             ta.set_cursor_line_style(Style::new().bg(Theme::SURFACE()));
             ta.set_cursor_style(Style::new().bg(Theme::ACCENT()).fg(Theme::BG()));
+            ta.set_selection_style(Style::new().bg(Theme::ACCENT()).fg(Theme::BG()));
         };
         restyle(&mut self.input);
         for f in self.form_fields.iter_mut() {
@@ -1292,6 +1368,7 @@ impl App {
             ta.set_style(Theme::base());
             ta.set_cursor_line_style(Style::new().bg(Theme::SURFACE()));
             ta.set_cursor_style(Style::new().bg(Theme::ACCENT()).fg(Theme::BG()));
+            ta.set_selection_style(Style::new().bg(Theme::ACCENT()).fg(Theme::BG()));
         };
         restyle(&mut self.input);
         for f in self.form_fields.iter_mut() {

@@ -72,8 +72,9 @@ impl<'de> Deserialize<'de> for ThinkingLevel {
 }
 
 impl ThinkingLevel {
-    /// the four selectable levels in the status-bar menu
-    pub const SELECTABLE: [ThinkingLevel; 4] = [
+    /// all levels selectable from the status-bar `th:` menu
+    pub const SELECTABLE: [ThinkingLevel; 5] = [
+        ThinkingLevel::Off,
         ThinkingLevel::Low,
         ThinkingLevel::Medium,
         ThinkingLevel::High,

@@ -195,6 +195,9 @@ mod tests {
                     println!("seg[{i}] THINKING live={live} len={}", text.chars().count())
                 }
                 Segment::Status { text, kind } => println!("seg[{i}] STATUS {kind:?}: {text}"),
+                Segment::Subagent {
+                    id, task, status, ..
+                } => println!("seg[{i}] SUBAGENT {id} {status}: {task}"),
                 Segment::Tool {
                     name,
                     args,
@@ -627,6 +630,12 @@ mod tests {
     }
 
     #[test]
+    fn thinking_levels_include_off_for_status_bar_and_model_settings() {
+        assert!(ThinkingLevel::SELECTABLE.contains(&ThinkingLevel::Off));
+        assert_eq!(ThinkingLevel::SELECTABLE, ThinkingLevel::ALL);
+    }
+
+    #[test]
     fn command_popup_contains_only_command_names() {
         assert!(COMMANDS.iter().all(|command| !command.contains(' ')));
         assert!(COMMANDS.contains(&"/undo"));
@@ -634,27 +643,46 @@ mod tests {
     }
 
     #[test]
-    fn busy_statuses_are_deduplicated_and_cleared_on_finish() {
+    fn busy_status_is_unique_and_expires() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.status(
-            "busy: esc stops the current generation first",
-            StatusKind::Warn,
-        );
-        app.status(
-            "busy: esc stops the current generation first",
-            StatusKind::Warn,
-        );
+        app.show_busy_status();
+        app.show_busy_status();
         assert_eq!(
             app.segments
                 .iter()
-                .filter(|segment| matches!(segment, Segment::Status { text, .. } if text == "busy: esc stops the current generation first"))
+                .filter(|segment| matches!(segment, Segment::Status { text, .. } if text == App::BUSY_STATUS))
+                .count(),
+            1
+        );
+        app.busy_until = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        if app
+            .busy_until
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
+            app.clear_busy_statuses();
+            app.busy_until = None;
+        }
+        assert!(!app.segments.iter().any(|segment| {
+            matches!(segment, Segment::Status { text, .. } if text == App::BUSY_STATUS)
+        }));
+    }
+
+    #[test]
+    fn busy_statuses_are_deduplicated_and_cleared_on_finish() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.show_busy_status();
+        app.show_busy_status();
+        assert_eq!(
+            app.segments
+                .iter()
+                .filter(|segment| matches!(segment, Segment::Status { text, .. } if text == App::BUSY_STATUS))
                 .count(),
             1
         );
         app.streaming = true;
         app.finish_turn(Err("aborted".into()));
         assert!(!app.segments.iter().any(|segment| {
-            matches!(segment, Segment::Status { text, .. } if text == "busy: esc stops the current generation first")
+            matches!(segment, Segment::Status { text, .. } if text == App::BUSY_STATUS)
         }));
     }
     #[test]

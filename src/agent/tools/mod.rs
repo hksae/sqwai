@@ -295,6 +295,12 @@ long-running commands.",
             parameters: json!({"type":"object","properties":{"url":{"type":"string"},"timeout":{"type":"integer","minimum":1,"maximum":60}},"required":["url"]}),
         },
         ToolDef {
+            name: "subagent",
+            kind: Kind::ReadOnly,
+            description: "Delegate one focused, read-only task to a child agent and return its result. Child agents cannot create further subagents.",
+            parameters: json!({"type":"object","properties":{"task":{"type":"string","description":"focused task for the child agent"}},"required":["task"]}),
+        },
+        ToolDef {
             name: "plan_update",
             kind: Kind::Mutating,
             description: "Replace the hidden project plan. Keep it compact and structured with Task, Status, Steps, Decisions & Gotchas, Files touched, and Next immediate action.",
@@ -401,6 +407,7 @@ pub fn call_summary(name: &str, args: &Value) -> String {
         ),
         "webfetch" => s("url"),
         "websearch" => s("query"),
+        "subagent" => s("task"),
         "todowrite" => format!(
             "{} items",
             args["todos"].as_array().map(|a| a.len()).unwrap_or(0)

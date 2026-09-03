@@ -74,6 +74,14 @@ pub(super) enum Segment {
         expanded: bool,
         live: bool,
     },
+    /// compact subagent row; click to reveal its latest output
+    Subagent {
+        id: u64,
+        task: String,
+        status: String,
+        output: String,
+        expanded: bool,
+    },
     /// one tool call: spinner while running, result line when finished,
     /// full output or diff on click
     Tool {
@@ -262,6 +270,7 @@ impl App {
             }
             let toggle = match self.segments.get(*seg_idx) {
                 Some(Segment::Thinking { expanded, .. }) => Some(!*expanded),
+                Some(Segment::Subagent { expanded, .. }) => Some(!*expanded),
                 // a finished tool row reveals its full output or diff
                 Some(Segment::Tool {
                     ok: Some(_),
@@ -273,6 +282,7 @@ impl App {
             if let Some(v) = toggle {
                 match self.segments.get_mut(*seg_idx) {
                     Some(Segment::Thinking { expanded, .. }) => *expanded = v,
+                    Some(Segment::Subagent { expanded, .. }) => *expanded = v,
                     Some(Segment::Tool { expanded, .. }) => *expanded = v,
                     _ => {}
                 }
@@ -347,6 +357,17 @@ impl App {
         let base = match seg {
             Segment::User(t) => t.chars().count(),
             Segment::Assistant { text, .. } => text.chars().count(),
+            Segment::Subagent {
+                id,
+                task,
+                status,
+                output,
+                expanded,
+            } => id
+                .wrapping_add(task.len() as u64)
+                .wrapping_add(status.len() as u64)
+                .wrapping_add(output.len() as u64)
+                .wrapping_add(*expanded as u64) as usize,
             Segment::Thinking { text, expanded, .. } => {
                 text.chars().count() * 2 + *expanded as usize
             }
@@ -417,6 +438,50 @@ impl App {
                         )]),
                         Some(idx),
                     ));
+                }
+            }
+            Segment::Subagent {
+                id,
+                task,
+                status,
+                output,
+                expanded,
+            } => {
+                let marker = match status.as_str() {
+                    "completed" => "✓",
+                    "failed" => "✗",
+                    _ => "→",
+                };
+                out.push((
+                    Line::from(vec![
+                        Span::styled(
+                            format!("  {marker} subagent-{id} "),
+                            if status == "failed" {
+                                Theme::err()
+                            } else {
+                                Theme::accent()
+                            },
+                        ),
+                        Span::styled(task.clone(), Theme::dim()),
+                        Span::styled(format!("  {status}"), Theme::dim()),
+                    ]),
+                    Some(idx),
+                ));
+                if *expanded {
+                    for line in wrap_tagged(
+                        output
+                            .lines()
+                            .map(|l| (Line::from(l.to_string()), None))
+                            .collect(),
+                        w.saturating_sub(4),
+                    )
+                    .0
+                    {
+                        out.push((
+                            Line::from(vec![Span::styled(format!("    {line}"), Theme::dim())]),
+                            Some(idx),
+                        ));
+                    }
                 }
             }
             Segment::Tool {
@@ -581,6 +646,12 @@ impl App {
                     } else {
                         BlockKind::ThoughtCollapsed
                     };
+                }
+                Segment::Subagent { .. } => {
+                    if !in_group {
+                        logical.push((blank(), None));
+                        in_group = true;
+                    }
                 }
                 Segment::Tool { .. } => {
                     // tool rows belong to the agent's turn, keep them grouped
@@ -1237,6 +1308,10 @@ fn segment_layout_key(seg: &Segment) -> u64 {
     match seg {
         Segment::User(text) | Segment::Assistant { text, .. } => text.hash(&mut h),
         Segment::Thinking { .. } => {}
+        Segment::Subagent { id, task, .. } => {
+            id.hash(&mut h);
+            task.hash(&mut h);
+        }
         Segment::Tool { name, args, .. } => {
             name.hash(&mut h);
             args.hash(&mut h);
