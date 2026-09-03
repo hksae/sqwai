@@ -630,6 +630,34 @@ mod tests {
     }
 
     #[test]
+    fn subagents_menu_lists_children_and_opens_details() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.subagents.push((
+            7,
+            "inspect rendering".into(),
+            "running".into(),
+            "read view.rs".into(),
+            false,
+        ));
+        app.open_menu(Menu::Subagents);
+        assert!(
+            app.menu_rows
+                .iter()
+                .any(|(_, action)| matches!(action, MenuAction::OpenSubagent(7)))
+        );
+        app.run_action(MenuAction::OpenSubagent(7));
+        assert!(matches!(
+            app.cur_menu(),
+            Some(Menu::SubagentDetail { id: 7 })
+        ));
+        assert!(app.menu_rows.iter().any(|(line, _)| {
+            line.spans
+                .iter()
+                .any(|span| span.content.contains("read view.rs"))
+        }));
+    }
+
+    #[test]
     fn thinking_levels_include_off_for_status_bar_and_model_settings() {
         assert!(ThinkingLevel::SELECTABLE.contains(&ThinkingLevel::Off));
         assert_eq!(ThinkingLevel::SELECTABLE, ThinkingLevel::ALL);

@@ -164,6 +164,9 @@ impl App {
                         KeyCode::Char('t') if ctrl && self.menu_stack.is_empty() => {
                             self.open_menu(Menu::Todo)
                         }
+                        KeyCode::Char('a') if ctrl && self.menu_stack.is_empty() => {
+                            self.open_menu(Menu::Subagents)
+                        }
                         KeyCode::Char('r')
                             if matches!(self.cur_menu(), Some(Menu::Sessions))
                                 && self.sessions_filter.is_empty() =>
