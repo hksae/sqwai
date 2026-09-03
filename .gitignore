@@ -2,6 +2,7 @@
 **/*.rs.bk
 
 /DESIGN.md
+/GRAPH.md
 
 .sqwai/
 
