@@ -109,7 +109,15 @@ fn user_box(text: &str, w: u16, hl: &Highlighter) -> Vec<Line<'static>> {
         .unwrap_or(0)
         .clamp(1, max_inner);
     let inner_w = natural as u16;
-    let inner = render(text, inner_w, hl);
+    // `render` preserves source lines, so wrap them before adding the frame.
+    // Otherwise the outer transcript wrapper can split a completed row between
+    // the content and its right border.
+    let rendered = render(text, inner_w, hl);
+    let inner = wrap_tagged(
+        rendered.into_iter().map(|line| (line, None)).collect(),
+        inner_w,
+    )
+    .0;
     let iw = usize::from(inner_w);
     let b = Theme::border_focused();
     let mut out = Vec::with_capacity(inner.len() + 2);

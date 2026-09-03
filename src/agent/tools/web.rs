@@ -174,7 +174,9 @@ fn clean_fragment(html: &str) -> String {
 }
 
 fn html_to_text(html: &str) -> String {
-    let no_script = regex::Regex::new(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>").unwrap();
+    let no_script =
+        regex::Regex::new(r"(?is)<(?:script|style|noscript)[^>]*>.*?</(?:script|style|noscript)>")
+            .unwrap();
     let no_tags = regex::Regex::new(r"(?s)<[^>]+>").unwrap();
     let without_embedded = no_script.replace_all(html, "");
     let text = no_tags.replace_all(&without_embedded, " ");

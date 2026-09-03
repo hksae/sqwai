@@ -688,6 +688,28 @@ mod tests {
         }));
     }
     #[test]
+    fn long_user_prompt_keeps_both_frame_borders() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.segments.push(Segment::User("Проверь новый инструмент websearch. Выполни поиск по запросу: Rust ratatui TestBackend resize rendering. Покажи 3 результата с заголовками, URL и краткими описаниями.".into()));
+        let rows = app.render_segment(0, 30);
+        let text: Vec<String> = rows
+            .iter()
+            .map(|(line, _)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.to_string())
+                    .collect()
+            })
+            .collect();
+        assert!(text.iter().any(|line| line.matches('│').count() == 2));
+        assert!(
+            text.iter()
+                .filter(|line| line.contains('│'))
+                .all(|line| line.matches('│').count() == 2)
+        );
+    }
+
+    #[test]
     fn resized_terminal_rebuilds_tool_frames_at_chat_width() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.segments.push(Segment::Tool {
