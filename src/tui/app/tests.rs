@@ -656,6 +656,36 @@ mod tests {
         }));
     }
     #[test]
+    fn narrow_tool_frames_keep_both_borders_on_one_row() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.segments.push(Segment::Tool {
+            name: "patch".into(),
+            args: String::new(),
+            ok: Some(true),
+            output: "a very long line with wide chars 界界界界 and more text".into(),
+            diff: None,
+            expanded: true,
+        });
+        let rows = app.render_segment(0, 18);
+        use unicode_width::UnicodeWidthStr;
+        let frame_rows: Vec<String> = rows
+            .iter()
+            .map(|(line, _)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .filter(|line: &String| line.matches('│').count() == 2)
+            .collect();
+        assert!(!frame_rows.is_empty());
+        assert!(frame_rows.iter().all(|line| {
+            UnicodeWidthStr::width(line.as_str()) == 18
+                && line.starts_with("    │ ")
+                && line.ends_with(" │")
+        }));
+    }
+    #[test]
     fn settings_hub_reuses_existing_menus() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.open_menu(Menu::Settings);
@@ -683,6 +713,25 @@ mod tests {
         app.menu_back();
         app.run_action(MenuAction::OpenProviders);
         assert!(matches!(app.cur_menu(), Some(Menu::Providers)));
+    }
+
+    #[test]
+    fn ctrl_v_does_not_submit_following_enter() {
+        use crossterm::event::{Event, KeyCode, KeyModifiers};
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL,
+        )))
+        .unwrap();
+        tx.send(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::empty(),
+        )))
+        .unwrap();
+        app.poll_input(&rx).unwrap();
+        assert!(!app.streaming);
     }
 
     #[test]

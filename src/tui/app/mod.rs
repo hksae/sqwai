@@ -123,6 +123,11 @@ pub struct App {
     /// stable order/identity of segments used to invalidate positional caches
     seg_layout: Vec<u64>,
 
+    /// Ignore one Enter that can follow a terminal-generated Ctrl+V event.
+    /// Windows terminals may enqueue the key release/accept sequence after
+    /// bracketed/clipboard paste; it must not submit the newly pasted prompt.
+    paste_enter_guard: bool,
+
     // command popup
     hover: Option<usize>,
     popup_dismiss: bool,
@@ -270,6 +275,7 @@ impl App {
             press: None,
             dragging: false,
             sel: None,
+            paste_enter_guard: false,
         };
         if !startup {
             app.load_history_segments();

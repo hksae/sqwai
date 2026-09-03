@@ -58,8 +58,16 @@ impl App {
                     // an accept/submit action after the clipboard text is inserted.
                     if ctrl && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V')) {
                         self.paste_clipboard();
+                        self.paste_enter_guard = true;
                         self.dirty = true;
                         continue;
+                    }
+                    if self.paste_enter_guard {
+                        if matches!(k.code, KeyCode::Enter | KeyCode::Char('\r')) {
+                            self.paste_enter_guard = false;
+                            continue;
+                        }
+                        self.paste_enter_guard = false;
                     }
                     match k.code {
                         KeyCode::Char('c') if ctrl => {

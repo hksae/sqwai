@@ -447,10 +447,11 @@ impl App {
                     let rows: Vec<&str> = body.lines().collect();
                     let shown = &rows[..rows.len().min(MAX_ROWS)];
                     let border = Theme::border_dim();
-                    let inner_w = w.saturating_sub(8).max(8) as usize;
-                    // Keep the box width stable. Deriving it from the longest
-                    // line makes the border itself wrap when the chat width
-                    // changes, which leaves visibly shifted corners behind.
+                    let inner_w = w.saturating_sub(8) as usize;
+                    // The complete frame row must fit exactly inside `w`:
+                    // left prefix (6) + content + right suffix (2). Never keep
+                    // an artificial minimum here, because a narrow terminal must
+                    // shrink the frame rather than let wrap_tagged split it.
                     let width = inner_w.max(1);
                     out.push((
                         Line::from(vec![Span::styled(
