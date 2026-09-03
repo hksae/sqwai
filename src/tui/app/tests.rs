@@ -687,6 +687,30 @@ mod tests {
     }
 
     #[test]
+    fn subagent_chat_click_expands_its_tool_without_switching_chat() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.active_subagent = Some(7);
+        app.subagent_chats.insert(
+            7,
+            vec![Segment::Tool {
+                name: "read".into(),
+                args: "src/main.rs".into(),
+                ok: Some(true),
+                output: "contents".into(),
+                diff: None,
+                expanded: false,
+            }],
+        );
+        app.cache_rowseg = vec![Some(0)];
+        app.click(0);
+        assert_eq!(app.active_subagent, Some(7));
+        assert!(matches!(
+            app.subagent_chats.get(&7).and_then(|chat| chat.first()),
+            Some(Segment::Tool { expanded: true, .. })
+        ));
+    }
+
+    #[test]
     fn thinking_levels_include_off_for_status_bar_and_model_settings() {
         assert!(ThinkingLevel::SELECTABLE.contains(&ThinkingLevel::Off));
         assert_eq!(ThinkingLevel::SELECTABLE, ThinkingLevel::ALL);

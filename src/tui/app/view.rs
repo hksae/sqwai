@@ -251,6 +251,10 @@ impl App {
     }
 
     pub(super) fn click(&mut self, abs_row: usize) {
+        if let Some(id) = self.active_subagent {
+            self.click_subagent_chat(id, abs_row);
+            return;
+        }
         if let Some(Some(seg_idx)) = self.cache_rowseg.get(abs_row) {
             if let Some(text) = self.code_at_row(*seg_idx, abs_row) {
                 match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
@@ -300,6 +304,37 @@ impl App {
                 }
                 self.dirty = true;
             }
+        }
+    }
+
+    fn click_subagent_chat(&mut self, id: u64, abs_row: usize) {
+        let Some(Some(seg_idx)) = self.cache_rowseg.get(abs_row).copied() else {
+            return;
+        };
+        let Some(chat) = self.subagent_chats.get_mut(&id) else {
+            return;
+        };
+        let toggle = match chat.get(seg_idx) {
+            Some(Segment::Thinking { expanded, .. }) => Some(!*expanded),
+            Some(Segment::Tool {
+                ok: Some(_),
+                expanded,
+                ..
+            }) => Some(!*expanded),
+            _ => None,
+        };
+        if let Some(expanded) = toggle {
+            match chat.get_mut(seg_idx) {
+                Some(Segment::Thinking {
+                    expanded: state, ..
+                })
+                | Some(Segment::Tool {
+                    expanded: state, ..
+                }) => *state = expanded,
+                _ => {}
+            }
+            self.seg_cache.clear();
+            self.dirty = true;
         }
     }
 
