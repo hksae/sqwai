@@ -21,7 +21,7 @@ fn url_arg(args: &Value) -> Result<Url, String> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err("webfetch only allows http and https URLs".into());
     }
-    if url.host_str().is_none() {
+    if url.host_str().is_none_or(str::is_empty) {
         return Err("webfetch URL must include a host".into());
     }
     Ok(url)
@@ -206,4 +206,56 @@ fn truncate(text: &str) -> String {
             .collect::<String>()
             .trim_end()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn validates_http_urls_and_rejects_other_schemes() {
+        assert_eq!(url_arg(&json!({"url": " https://example.com/a "})).unwrap().path(), "/a");
+        for value in ["", "not a url", "file:///tmp/a", "https://"] {
+            assert!(url_arg(&json!({"url": value})).is_err(), "accepted {value:?}");
+        }
+    }
+
+    #[test]
+    fn detects_html_and_removes_embedded_content() {
+        assert!(looks_like_html("  <!doctype html><html>"));
+        assert!(looks_like_html("<body>content</body>"));
+        assert!(!looks_like_html("plain text"));
+        let text = html_to_text(
+            "<html><head><style>hidden style</style></head><body>Hello &amp; <b>world</b>!<script>secret()</script></body></html>",
+        );
+        assert_eq!(text, "Hello & world !");
+    }
+
+    #[test]
+    fn parses_search_results_with_markup_and_limits_count() {
+        let html = r#"
+            <div class="result results_links">
+              <a class="result__a" href="https://example.com/?x=1&amp;y=2">First <b>result</b></a>
+              <div class="result__snippet">A useful <b>snippet</b>.</div>
+            </div>
+            <div class="result results_links">
+              <a class="result__a" href="https://second.example/">Second</a>
+              <div class="result__snippet">Another result.</div>
+            </div>
+        "#;
+        let output = parse_search_results(html, 1);
+        assert!(output.contains("1. First result"));
+        assert!(output.contains("https://example.com/?x=1&y=2"));
+        assert!(!output.contains("Second"));
+        assert_eq!(clean_fragment("A useful <b>snippet</b>."), "A useful snippet .");
+    }
+
+    #[test]
+    fn truncates_by_unicode_character_count_and_marks_output() {
+        let output = truncate(&"Ж".repeat(MAX_OUTPUT_CHARS + 10));
+        assert!(output.ends_with("[webfetch output truncated]"));
+        assert!(output.chars().count() <= MAX_OUTPUT_CHARS + 30);
+        assert_eq!(decode_entities("&lt;x&gt; &quot;y&quot; &#39;z&#39;"), "<x> \"y\" 'z'");
+    }
 }
