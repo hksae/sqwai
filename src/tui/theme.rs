@@ -65,8 +65,23 @@ const fn pal(h: u32) -> Palette {
 }
 
 pub const THEMES: [ThemeDef; 21] = [
-    // ordered by hue so the /themes list reads as one continuous rainbow:
-    // 335 -> 320 -> 305 ... -> 10, then 352 wraps back toward rose
+    // neutral default first, followed by the hue-ordered palettes
+    ThemeDef {
+        name: "white",
+        p: Palette {
+            bg: hsv(220, 10, 8),
+            surface: hsv(220, 10, 12),
+            fg: hsv(0, 0, 95),
+            dim: hsv(0, 0, 62),
+            accent: hsv(0, 0, 100),
+            accent_soft: hsv(0, 0, 82),
+            border: hsv(0, 0, 84),
+            border_dim: hsv(0, 0, 40),
+            ok: hsv(145, 45, 72),
+            err: hsv(0, 60, 88),
+            warn: hsv(45, 60, 88),
+        },
+    },
     ThemeDef {
         name: "rose",
         p: pal(335),
@@ -146,26 +161,6 @@ pub const THEMES: [ThemeDef; 21] = [
     ThemeDef {
         name: "bubblegum",
         p: pal(352),
-    },
-    // monochrome: dark background, white text/borders/accents; status colors
-    // stay semantic (ok/err/warn). Kept dark-bg so syntect code tokens stay
-    // readable -- a true white-background light mode would need code-highlight
-    // rework and is out of scope here.
-    ThemeDef {
-        name: "white",
-        p: Palette {
-            bg: hsv(220, 10, 8),
-            surface: hsv(220, 10, 12),
-            fg: hsv(0, 0, 95),
-            dim: hsv(0, 0, 62),
-            accent: hsv(0, 0, 100),
-            accent_soft: hsv(0, 0, 82),
-            border: hsv(0, 0, 84),
-            border_dim: hsv(0, 0, 40),
-            ok: hsv(145, 45, 72),
-            err: hsv(0, 60, 88),
-            warn: hsv(45, 60, 88),
-        },
     },
 ];
 

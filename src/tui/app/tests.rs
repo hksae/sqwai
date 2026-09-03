@@ -717,6 +717,12 @@ mod tests {
     }
 
     #[test]
+    fn white_is_first_theme_and_default() {
+        assert_eq!(crate::tui::theme::THEMES[0].name, "white");
+        assert_eq!(Config::default().ui.theme, 0);
+    }
+
+    #[test]
     fn command_popup_contains_only_command_names() {
         assert!(COMMANDS.iter().all(|command| !command.contains(' ')));
         assert!(COMMANDS.contains(&"/undo"));
