@@ -176,7 +176,9 @@ impl App {
         // unit tests inject the cache directly and never hit the disk
         #[cfg(not(test))]
         if matches!(self.cur_menu(), Some(Menu::Sessions | Menu::DeleteSessions)) {
-            self.sessions = Session::list().unwrap_or_default();
+            // The menu needs metadata only; defer loading full message histories
+            // until the user actually opens a session.
+            self.sessions = Session::list_visible(40).unwrap_or_default();
         }
         if matches!(self.cur_menu(), Some(Menu::Sessions)) {
             self.sessions_filter.clear();
@@ -1003,7 +1005,11 @@ impl App {
                 if !pinned.is_empty() {
                     const FRAME_W: usize = 72;
                     let head = " pinned ";
-                    let mid = format!("{:-^width$}", head, width = FRAME_W);
+                    let mid = {
+                        let label = format!(" {head} ");
+                        let fill = FRAME_W.saturating_sub(label.chars().count());
+                        format!("{}{}", "─".repeat(fill / 2), label) + &"─".repeat(fill - fill / 2)
+                    };
                     self.menu_rows.push(row(
                         Line::from(vec![Span::styled(format!("╭{mid}╮"), Theme::ACCENT_SOFT())]),
                         MenuAction::None,

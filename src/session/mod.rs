@@ -276,6 +276,36 @@ impl Session {
         Ok(dir.join(&found[0]))
     }
 
+    /// Load only the first visible window of saved sessions. The directory is
+    /// ordered by file modification time before deserializing, so opening the
+    /// menu does not parse the complete conversation history of every session.
+    #[allow(dead_code)]
+    pub fn list_visible(limit: usize) -> Result<Vec<Self>> {
+        let dir = Self::sessions_dir()?;
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                let modified = entry.metadata().and_then(|m| m.modified()).ok();
+                entries.push((modified, path));
+            }
+        }
+        entries.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut out = Vec::new();
+        for (_, path) in entries.into_iter().take(limit.max(1)) {
+            if let Some(mut session) = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Self>(&raw).ok())
+            {
+                session.strip_system_messages();
+                out.push(session);
+            }
+        }
+        Self::sort_sessions(&mut out);
+        Ok(out)
+    }
+
     /// all saved sessions, newest activity first, pinned on top
     #[cfg_attr(test, allow(dead_code))]
     pub fn list() -> Result<Vec<Self>> {
