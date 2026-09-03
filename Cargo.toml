@@ -11,6 +11,7 @@ anyhow = "1"
 arboard = "3"
 async-stream = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
+cozo = { version = "0.7.6", default-features = false, features = ["storage-sqlite", "storage-sqlite-src", "rayon"] }
 crossterm = "0.28"
 directories = "6"
 eventsource-stream = "0.2"
@@ -35,6 +36,9 @@ toml = "0.9"
 tui-textarea = "0.7"
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 lto = true

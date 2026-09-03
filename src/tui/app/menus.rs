@@ -1013,7 +1013,12 @@ impl App {
                     let mid = {
                         let label = format!(" {head} ");
                         let fill = FRAME_W.saturating_sub(label.chars().count());
-                        format!("{}{}", "─".repeat(fill / 2), label) + &"─".repeat(fill - fill / 2)
+                        format!(
+                            "{}{}{}",
+                            "─".repeat(fill / 2),
+                            label,
+                            "─".repeat(fill - fill / 2)
+                        )
                     };
                     self.menu_rows.push(row(
                         Line::from(vec![Span::styled(format!("╭{mid}╮"), Theme::ACCENT_SOFT())]),

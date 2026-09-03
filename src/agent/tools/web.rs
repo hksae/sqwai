@@ -215,9 +215,17 @@ mod tests {
 
     #[test]
     fn validates_http_urls_and_rejects_other_schemes() {
-        assert_eq!(url_arg(&json!({"url": " https://example.com/a "})).unwrap().path(), "/a");
+        assert_eq!(
+            url_arg(&json!({"url": " https://example.com/a "}))
+                .unwrap()
+                .path(),
+            "/a"
+        );
         for value in ["", "not a url", "file:///tmp/a", "https://"] {
-            assert!(url_arg(&json!({"url": value})).is_err(), "accepted {value:?}");
+            assert!(
+                url_arg(&json!({"url": value})).is_err(),
+                "accepted {value:?}"
+            );
         }
     }
 
@@ -248,7 +256,10 @@ mod tests {
         assert!(output.contains("1. First result"));
         assert!(output.contains("https://example.com/?x=1&y=2"));
         assert!(!output.contains("Second"));
-        assert_eq!(clean_fragment("A useful <b>snippet</b>."), "A useful snippet .");
+        assert_eq!(
+            clean_fragment("A useful <b>snippet</b>."),
+            "A useful snippet ."
+        );
     }
 
     #[test]
@@ -256,6 +267,9 @@ mod tests {
         let output = truncate(&"Ж".repeat(MAX_OUTPUT_CHARS + 10));
         assert!(output.ends_with("[webfetch output truncated]"));
         assert!(output.chars().count() <= MAX_OUTPUT_CHARS + 30);
-        assert_eq!(decode_entities("&lt;x&gt; &quot;y&quot; &#39;z&#39;"), "<x> \"y\" 'z'");
+        assert_eq!(
+            decode_entities("&lt;x&gt; &quot;y&quot; &#39;z&#39;"),
+            "<x> \"y\" 'z'"
+        );
     }
 }
