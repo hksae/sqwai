@@ -264,7 +264,17 @@ impl App {
                         }
                     }
                     MouseEventKind::ScrollUp => {
-                        if self.popup_visible() {
+                        if self.menu_stack.is_empty()
+                            && m.column >= self.last_chat.x
+                            && m.column < self.last_chat.right()
+                            && m.row >= self.last_chat.y
+                            && m.row < self.last_chat.bottom()
+                            && self.input.lines().len() > 1
+                        {
+                            self.input
+                                .scroll(tui_textarea::Scrolling::Delta { rows: -1, cols: 0 });
+                            self.dirty = true;
+                        } else if self.popup_visible() {
                             self.popup_scroll = self.popup_scroll.saturating_sub(3);
                             self.hover = None;
                             self.dirty = true;
@@ -273,7 +283,17 @@ impl App {
                         }
                     }
                     MouseEventKind::ScrollDown => {
-                        if self.popup_visible() {
+                        if self.menu_stack.is_empty()
+                            && m.column >= self.last_chat.x
+                            && m.column < self.last_chat.right()
+                            && m.row >= self.last_chat.y
+                            && m.row < self.last_chat.bottom()
+                            && self.input.lines().len() > 1
+                        {
+                            self.input
+                                .scroll(tui_textarea::Scrolling::Delta { rows: 1, cols: 0 });
+                            self.dirty = true;
+                        } else if self.popup_visible() {
                             self.popup_scroll = self.popup_scroll.saturating_add(3);
                             self.hover = None;
                             self.dirty = true;
