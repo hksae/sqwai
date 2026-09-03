@@ -6,6 +6,8 @@ use super::*;
 mod tests {
     use super::*;
     use crate::config::{Config, ModelConfig, ProviderConfig, WireFormat};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use std::collections::BTreeMap;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
@@ -685,6 +687,35 @@ mod tests {
                 && line.ends_with(" │")
         }));
     }
+    #[test]
+    fn resized_terminal_rebuilds_tool_frames_at_chat_width() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.segments.push(Segment::Tool {
+            name: "patch".into(),
+            args: String::new(),
+            ok: Some(true),
+            output: "a very long line with wide chars 界界界界 and more text".into(),
+            diff: None,
+            expanded: true,
+        });
+        app.startup = false;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.cache_w, 78);
+        terminal.backend_mut().resize(30, 24);
+        app.dirty = true;
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.cache_w, 28);
+        let buffer = terminal.backend().buffer();
+        for row in buffer.content.chunks(buffer.area.width as usize) {
+            let text: String = row.iter().map(|cell| cell.symbol().to_string()).collect();
+            if text.contains("│") {
+                let borders = text.matches("│").count();
+                assert!(borders == 0 || borders == 2, "broken frame row: {text}");
+            }
+        }
+    }
+
     #[test]
     fn settings_hub_reuses_existing_menus() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());

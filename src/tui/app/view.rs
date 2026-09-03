@@ -522,6 +522,12 @@ impl App {
     }
 
     pub(super) fn rebuild_cache(&mut self, width: u16) {
+        // Segment rows depend on the available width. Reusing a segment cache
+        // built for the previous terminal size would feed old frame geometry
+        // into wrap_tagged, which can split a right border onto the next row.
+        if self.cache_w != width {
+            self.seg_cache.clear();
+        }
         let w = width.saturating_sub(2).max(10); // side padding
         let mut logical: Vec<(Line<'static>, Option<usize>)> = Vec::new();
         let mut in_group = false; // inside one "agent" turn
@@ -637,9 +643,11 @@ impl App {
             height: layout[1].height,
         };
 
-        // expensive rebuild only when something actually changed
-        if self.dirty || self.cache_w != area.width {
-            self.rebuild_cache(area.width);
+        // The transcript is rendered inside `chat`, not the outer frame. Use
+        // that exact width for cache invalidation and frame construction so a
+        // resize cannot leave rows wider than the rectangle that displays them.
+        if self.dirty || self.cache_w != chat.width {
+            self.rebuild_cache(chat.width);
         }
         self.last_chat = chat;
 
