@@ -750,6 +750,17 @@ async fn run_turn(
             return Ok(TurnOutcome { text, calls });
         };
 
+        // A deterministic 4xx request/schema error cannot be fixed by retrying.
+        // In particular, some OpenAI-compatible chat endpoints reject
+        // function tools together with reasoning_effort and require /responses
+        // or reasoning disabled.
+        if err.contains("provider returned 400 Bad Request")
+            || err.contains("invalid_request_error")
+            || err.contains("Function tools with reasoning_effort are not supported")
+        {
+            return Err(err);
+        }
+
         if got_delta {
             // partial answer already streamed; a retry would duplicate it
             return Err(format!("{err} — partial answer kept, not retried"));
