@@ -14,6 +14,9 @@ impl ShellKind {
     pub fn detect() -> Self {
         #[cfg(windows)]
         {
+            if std::env::var_os("PSModulePath").is_some() {
+                return Self::PowerShell;
+            }
             std::env::var_os("SQWAI_SHELL")
                 .or_else(|| std::env::var_os("SHELL"))
                 .or_else(|| std::env::var_os("ComSpec"))
@@ -46,7 +49,16 @@ impl ShellKind {
             Self::Bash => ("bash", "-c"),
             Self::Sh => ("/bin/sh", "-c"),
             Self::Cmd => ("cmd", "/C"),
-            Self::PowerShell => ("powershell", "-Command"),
+            Self::PowerShell => {
+                #[cfg(windows)]
+                {
+                    ("powershell", "-Command")
+                }
+                #[cfg(not(windows))]
+                {
+                    ("pwsh", "-Command")
+                }
+            }
         }
     }
 }
