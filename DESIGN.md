@@ -1030,7 +1030,7 @@ transparently, journals `provider_error` with `recovered: true, switched_to:
 <id>`, notes it in the status bar, and continues; the step stays in_progress
 (§7 Q).
 
-5.2 Safety [done, shell-awareness pending]
+5.2 Safety [done]
 Two-layer command classifier: shell-word heuristics + tree-sitter-bash AST
 (substitutions, pipes into interpreters, redirects over critical paths,
 sudo|doas|env prefixes, find -delete|-exec, compound commands checked per
@@ -1205,7 +1205,7 @@ I4	resolve_ref; validator refs; pre-edit warning; stale markers; reflector execu
 I5	Memory adapter; recall/graph_query exposed; context block		I4, F4
 J	Python adapter; LSP diagnostics → journal; graph-view list MVP; checkpoint before/after bash		I5, C
 K	Canvas graph-view, watcher, LSP Level 4, blast radius, path view	later	J
-L	Windows/PowerShell shell-aware safety layer (§5.2 modify)	now, before F	§5.2
+L	Windows/PowerShell shell-aware safety layer (§5.2 modify)	done	§5.2
 M	Single-instance lock + read-only fallback for plan/journal/memory/graph	next	F1
 N	Untrusted-input handling (trust:low, banner, confirm gates) + prompt rule	next (prompt now)	F2
 O	Cancel mid-tool (Esc): cancelled result, post-checkpoint, in_progress	next	F2
