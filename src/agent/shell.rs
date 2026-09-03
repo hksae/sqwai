@@ -14,36 +14,30 @@ impl ShellKind {
     pub fn detect() -> Self {
         #[cfg(windows)]
         {
-            let shell = std::env::var_os("SHELL")
+            std::env::var_os("SQWAI_SHELL")
+                .or_else(|| std::env::var_os("SHELL"))
                 .or_else(|| std::env::var_os("ComSpec"))
-                .or_else(|| std::env::var_os("COMSPEC"));
-            if let Some(path) = shell {
-                let name = Path::new(&path)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
-                if name == "bash" || name == "sh" || name == "zsh" {
-                    return if name == "bash" { Self::Bash } else { Self::Sh };
-                }
-                if name == "pwsh" || name == "powershell" {
-                    return Self::PowerShell;
-                }
-            }
-            if std::env::var_os("PSModulePath").is_some() {
-                return Self::PowerShell;
-            }
-            Self::Cmd
+                .or_else(|| std::env::var_os("COMSPEC"))
+                .and_then(|path| Self::from_program(Path::new(&path)))
+                .unwrap_or(Self::Cmd)
         }
         #[cfg(not(windows))]
         {
-            let name = std::env::var_os("SHELL")
-                .and_then(|p| Path::new(&p).file_stem().map(|s| s.to_owned()))
-                .and_then(|s| s.to_str().map(str::to_ascii_lowercase));
-            match name.as_deref() {
-                Some("bash") => Self::Bash,
-                _ => Self::Sh,
-            }
+            std::env::var_os("SQWAI_SHELL")
+                .or_else(|| std::env::var_os("SHELL"))
+                .and_then(|path| Self::from_program(Path::new(&path)))
+                .unwrap_or(Self::Sh)
+        }
+    }
+
+    fn from_program(path: &Path) -> Option<Self> {
+        let name = path.file_stem()?.to_str()?.to_ascii_lowercase();
+        match name.as_str() {
+            "bash" => Some(Self::Bash),
+            "sh" | "dash" | "zsh" | "fish" | "ksh" => Some(Self::Sh),
+            "cmd" => Some(Self::Cmd),
+            "pwsh" | "powershell" => Some(Self::PowerShell),
+            _ => None,
         }
     }
 

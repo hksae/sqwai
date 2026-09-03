@@ -1172,10 +1172,11 @@ async fn bash_call(
     }
 
     // 1. heuristic dangerous-command detector
-    let needs_approval = match safety::classify(&command) {
-        safety::Verdict::Safe => None,
-        safety::Verdict::NeedsApproval(reason) => Some(reason),
-    };
+    let needs_approval =
+        match safety::classify_for(crate::agent::shell::ShellKind::detect(), &command) {
+            safety::Verdict::Safe => None,
+            safety::Verdict::NeedsApproval(reason) => Some(reason),
+        };
 
     if let Some(reason) = needs_approval {
         if !always_allow.contains(&command) {
