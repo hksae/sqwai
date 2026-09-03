@@ -448,7 +448,7 @@ impl App {
             }
             Segment::Subagent {
                 id,
-                task,
+                task: _,
                 status,
                 output,
                 expanded,
@@ -459,18 +459,14 @@ impl App {
                     _ => "→",
                 };
                 out.push((
-                    Line::from(vec![
-                        Span::styled(
-                            format!("  {marker} subagent-{id} "),
-                            if status == "failed" {
-                                Theme::err()
-                            } else {
-                                Theme::accent()
-                            },
-                        ),
-                        Span::styled(task.clone(), Theme::dim()),
-                        Span::styled(format!("  {status}"), Theme::dim()),
-                    ]),
+                    Line::from(vec![Span::styled(
+                        format!("  {marker} subagent-{id}"),
+                        if status == "failed" {
+                            Theme::err()
+                        } else {
+                            Theme::accent()
+                        },
+                    )]),
                     Some(idx),
                 ));
                 if *expanded {
