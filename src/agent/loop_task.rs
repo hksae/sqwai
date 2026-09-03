@@ -228,6 +228,42 @@ struct TurnOutcome {
     calls: Vec<ToolCallReq>,
 }
 
+const MAX_SUBAGENTS_PER_CALL: usize = 8;
+const MAX_PARALLEL_SUBAGENTS: usize = 4;
+
+fn subagent_tasks_from_args(args: &serde_json::Value) -> Result<Vec<String>, String> {
+    let mut tasks: Vec<String> = args["tasks"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|task| !task.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if tasks.is_empty() {
+        if let Some(task) = args["task"]
+            .as_str()
+            .map(str::trim)
+            .filter(|task| !task.is_empty())
+        {
+            tasks.push(task.to_string());
+        }
+    }
+    if tasks.is_empty() {
+        return Err("subagent task is required".into());
+    }
+    if tasks.len() > MAX_SUBAGENTS_PER_CALL {
+        return Err(format!(
+            "too many subagents: maximum is {MAX_SUBAGENTS_PER_CALL}"
+        ));
+    }
+    Ok(tasks)
+}
+
 async fn run_subagent(
     call: &ToolCallReq,
     parent_tx: &mpsc::Sender<AgentEvent>,
@@ -243,15 +279,62 @@ async fn run_subagent(
     mcp: crate::config::McpConfig,
     lsp: crate::config::LspConfig,
 ) -> tools::Outcome {
-    let id = next_subagent_id();
-    let task = call.args["task"]
-        .as_str()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if task.is_empty() {
-        return tools::Outcome::err("subagent task is required");
+    let tasks = match subagent_tasks_from_args(&call.args) {
+        Ok(tasks) => tasks,
+        Err(error) => return tools::Outcome::err(error),
+    };
+    if tasks.len() > 1 {
+        use futures::{StreamExt, stream};
+        let outcomes = stream::iter(tasks.into_iter().enumerate())
+            .map(|(index, task)| {
+                let mut one = call.clone();
+                one.args = serde_json::json!({"task": task});
+                let system = system.clone();
+                let mcp = mcp.clone();
+                let lsp = lsp.clone();
+                async move {
+                    let outcome = run_subagent(
+                        &one,
+                        parent_tx,
+                        provider,
+                        model_id,
+                        root,
+                        blocked_patterns,
+                        plan_mode,
+                        context_limit,
+                        thinking,
+                        max_tokens,
+                        system.clone(),
+                        mcp.clone(),
+                        lsp.clone(),
+                    )
+                    .await;
+                    (
+                        index,
+                        one.args["task"].as_str().unwrap_or_default().to_string(),
+                        outcome,
+                    )
+                }
+            })
+            .buffer_unordered(MAX_PARALLEL_SUBAGENTS)
+            .collect::<Vec<_>>()
+            .await;
+        let mut outcomes = outcomes;
+        outcomes.sort_by_key(|(index, _, _)| *index);
+        let all_ok = outcomes.iter().all(|(_, _, outcome)| outcome.ok);
+        let output = outcomes
+            .into_iter()
+            .map(|(_, task, outcome)| format!("## {task}\n{}", outcome.output))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        return if all_ok {
+            tools::Outcome::ok(output)
+        } else {
+            tools::Outcome::err(output)
+        };
     }
+    let task = tasks.into_iter().next().unwrap();
+    let id = next_subagent_id();
     let _ = parent_tx
         .send(AgentEvent::SubagentStart {
             id,
@@ -353,6 +436,31 @@ async fn run_subagent(
 fn next_subagent_id() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod subagent_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_one_or_many_subagent_tasks() {
+        assert_eq!(
+            subagent_tasks_from_args(&serde_json::json!({"task":" inspect "})).unwrap(),
+            vec!["inspect"]
+        );
+        assert_eq!(
+            subagent_tasks_from_args(&serde_json::json!({"tasks":["one","two"]})).unwrap(),
+            vec!["one", "two"]
+        );
+    }
+
+    #[test]
+    fn rejects_more_than_eight_subagents() {
+        let tasks: Vec<String> = (0..9).map(|n| format!("task {n}")).collect();
+        let error = subagent_tasks_from_args(&serde_json::json!({"tasks":tasks})).unwrap_err();
+        assert!(error.contains("maximum is 8"));
+        assert_eq!(MAX_PARALLEL_SUBAGENTS, 4);
+    }
 }
 
 pub fn spawn_agent(input: AgentInput) -> AgentHandle {

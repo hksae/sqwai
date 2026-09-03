@@ -297,8 +297,8 @@ long-running commands.",
         ToolDef {
             name: "subagent",
             kind: Kind::ReadOnly,
-            description: "Delegate one focused, read-only task to a child agent and return its result. Child agents cannot create further subagents.",
-            parameters: json!({"type":"object","properties":{"task":{"type":"string","description":"focused task for the child agent"}},"required":["task"]}),
+            description: "Delegate one or more focused tasks to read-only child agents. Up to 8 tasks are accepted; at most 4 run concurrently. Child agents cannot create further subagents.",
+            parameters: json!({"type":"object","properties":{"task":{"type":"string","description":"one focused child task"},"tasks":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8,"description":"focused child tasks to run concurrently"}},"anyOf":[{"required":["task"]},{"required":["tasks"]}]}),
         },
         ToolDef {
             name: "plan_update",
@@ -407,7 +407,10 @@ pub fn call_summary(name: &str, args: &Value) -> String {
         ),
         "webfetch" => s("url"),
         "websearch" => s("query"),
-        "subagent" => s("task"),
+        "subagent" => args["tasks"]
+            .as_array()
+            .map(|tasks| format!("{} tasks", tasks.len()))
+            .unwrap_or_else(|| s("task")),
         "todowrite" => format!(
             "{} items",
             args["todos"].as_array().map(|a| a.len()).unwrap_or(0)
