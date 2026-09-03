@@ -1206,7 +1206,7 @@ I5	Memory adapter; recall/graph_query exposed; context block		I4, F4
 J	Python adapter; LSP diagnostics → journal; graph-view list MVP; checkpoint before/after bash		I5, C
 K	Canvas graph-view, watcher, LSP Level 4, blast radius, path view	later	J
 L	Windows/PowerShell shell-aware safety layer (§5.2 modify)	done	§5.2
-M	Single-instance lock + read-only fallback for plan/journal/memory/graph	next	F1
+M	Single-instance lock + read-only fallback for plan/journal/memory/graph	done	F1
 N	Untrusted-input handling (trust:low, banner, confirm gates) + prompt rule	next (prompt now)	F2
 O	Cancel mid-tool (Esc): cancelled result, post-checkpoint, in_progress	next	F2
 P	Provider fallback chain ([models.x].fallback)	any	§5.1
