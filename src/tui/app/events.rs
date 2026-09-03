@@ -265,10 +265,10 @@ impl App {
                     }
                     MouseEventKind::ScrollUp => {
                         if self.menu_stack.is_empty()
-                            && m.column >= self.last_chat.x
-                            && m.column < self.last_chat.right()
-                            && m.row >= self.last_chat.y
-                            && m.row < self.last_chat.bottom()
+                            && m.column >= self.last_input.x
+                            && m.column < self.last_input.right()
+                            && m.row >= self.last_input.y
+                            && m.row < self.last_input.bottom()
                             && self.input.lines().len() > 1
                         {
                             self.input
@@ -284,10 +284,10 @@ impl App {
                     }
                     MouseEventKind::ScrollDown => {
                         if self.menu_stack.is_empty()
-                            && m.column >= self.last_chat.x
-                            && m.column < self.last_chat.right()
-                            && m.row >= self.last_chat.y
-                            && m.row < self.last_chat.bottom()
+                            && m.column >= self.last_input.x
+                            && m.column < self.last_input.right()
+                            && m.row >= self.last_input.y
+                            && m.row < self.last_input.bottom()
                             && self.input.lines().len() > 1
                         {
                             self.input

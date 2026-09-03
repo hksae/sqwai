@@ -658,6 +658,7 @@ impl App {
             self.rebuild_cache(chat.width);
         }
         self.last_chat = chat;
+        self.last_input = layout[2];
 
         f.render_widget(Block::new().style(Theme::base()), area);
 

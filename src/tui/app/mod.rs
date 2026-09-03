@@ -118,6 +118,7 @@ pub struct App {
     cache_lines: Vec<Line<'static>>,
     cache_rowseg: Vec<Option<usize>>,
     last_chat: Rect,
+    last_input: Rect,
     /// per-segment render cache: (content key at render time, content lines)
     seg_cache: Vec<Option<(usize, Vec<(Line<'static>, Option<usize>)>)>>,
     /// stable order/identity of segments used to invalidate positional caches
@@ -253,6 +254,7 @@ impl App {
             cache_lines: Vec::new(),
             cache_rowseg: Vec::new(),
             last_chat: Rect::default(),
+            last_input: Rect::default(),
             seg_cache: Vec::new(),
             seg_layout: Vec::new(),
             hover: None,
