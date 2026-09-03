@@ -727,6 +727,7 @@ mod tests {
         assert!(COMMANDS.iter().all(|command| !command.contains(' ')));
         assert!(COMMANDS.contains(&"/undo"));
         assert!(COMMANDS.contains(&"/skill"));
+        assert!(COMMANDS.contains(&"/graph-rebuild"));
     }
 
     #[test]

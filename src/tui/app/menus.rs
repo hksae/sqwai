@@ -28,6 +28,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "/compact",
     "/undo",
     "/init",
+    "/graph-rebuild",
     "/themes",
     "/settings",
     "/mcp",

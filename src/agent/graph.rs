@@ -104,6 +104,7 @@ pub trait GraphStore {
     fn upsert_edge(&mut self, edge: &Edge) -> Result<()>;
     fn apply_batch(&mut self, nodes: &[Node], edges: &[Edge]) -> Result<()>;
     fn replace_file_subgraph(&mut self, path: &str, nodes: &[Node], edges: &[Edge]) -> Result<()>;
+    fn prune_file_subgraphs(&mut self, retained_paths: &BTreeSet<String>) -> Result<usize>;
     fn find_node(&self, stable_key: &str) -> Result<Option<Node>>;
     fn neighbors(&self, stable_key: &str, query: NeighborQuery) -> Result<GraphProjection>;
 }
@@ -261,18 +262,7 @@ impl GraphStore for CozoGraphStore {
 
         let transaction = self.db.multi_transaction(true);
         let result = (|| {
-            transaction
-                .run_script(
-                    "stale[key] := *graph_nodes[key, _, _, path, _, _, _, _, _, _], path == $path\n?[from, to, kind] := *graph_edges[from, to, kind, _, _, _], stale[from]\n?[from, to, kind] := *graph_edges[from, to, kind, _, _, _], stale[to]\n:rm graph_edges {from, to, kind}",
-                    params([("path", DataValue::from(path))]),
-                )
-                .map_err(|error| anyhow!(error.to_string()))?;
-            transaction
-                .run_script(
-                    "?[stable_key] := *graph_nodes[stable_key, _, _, path, _, _, _, _, _, _], path == $path :rm graph_nodes {stable_key}",
-                    params([("path", DataValue::from(path))]),
-                )
-                .map_err(|error| anyhow!(error.to_string()))?;
+            remove_file_subgraph(&transaction, path)?;
             for node in nodes {
                 write_node(&transaction, node)?;
             }
@@ -287,6 +277,42 @@ impl GraphStore for CozoGraphStore {
             let _ = transaction.abort();
         }
         result
+    }
+
+    fn prune_file_subgraphs(&mut self, retained_paths: &BTreeSet<String>) -> Result<usize> {
+        let rows = self.run_read(
+            "?[path] := *graph_nodes[_, 'file', _, path, _, _, _, _, _, _] :sort path",
+            BTreeMap::new(),
+        )?;
+        let stale_paths = rows
+            .rows
+            .iter()
+            .map(|row| {
+                row.first()
+                    .ok_or_else(|| anyhow!("invalid graph file path row"))
+                    .and_then(|value| required_str(value, "file path"))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|path| !retained_paths.contains(path))
+            .collect::<Vec<_>>();
+        if stale_paths.is_empty() {
+            return Ok(0);
+        }
+
+        let transaction = self.db.multi_transaction(true);
+        let result = (|| {
+            for path in &stale_paths {
+                remove_file_subgraph(&transaction, path)?;
+            }
+            transaction
+                .commit()
+                .map_err(|error| anyhow!(error.to_string()))
+        })();
+        if result.is_err() {
+            let _ = transaction.abort();
+        }
+        result.map(|()| stale_paths.len())
     }
 
     fn find_node(&self, stable_key: &str) -> Result<Option<Node>> {
@@ -369,6 +395,17 @@ impl ScriptRunner for MultiTransaction {
             .map(|_| ())
             .map_err(|error| anyhow!(error.to_string()))
     }
+}
+
+fn remove_file_subgraph(runner: &impl ScriptRunner, path: &str) -> Result<()> {
+    runner.execute(
+        "stale[key] := *graph_nodes[key, _, _, path, _, _, _, _, _, _], path == $path\n?[from, to, kind] := *graph_edges[from, to, kind, _, _, _], stale[from]\n?[from, to, kind] := *graph_edges[from, to, kind, _, _, _], stale[to]\n:rm graph_edges {from, to, kind}",
+        params([("path", DataValue::from(path))]),
+    )?;
+    runner.execute(
+        "?[stable_key] := *graph_nodes[stable_key, _, _, path, _, _, _, _, _, _], path == $path :rm graph_nodes {stable_key}",
+        params([("path", DataValue::from(path))]),
+    )
 }
 
 fn write_node(runner: &impl ScriptRunner, node: &Node) -> Result<()> {

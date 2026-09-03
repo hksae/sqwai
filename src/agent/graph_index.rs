@@ -22,6 +22,7 @@ pub struct GraphBatch {
 pub struct IndexReport {
     pub indexed_files: usize,
     pub skipped_files: usize,
+    pub removed_files: usize,
     pub warnings: Vec<String>,
 }
 
@@ -121,6 +122,7 @@ pub fn index_project(store: &mut impl GraphStore, root: &Path) -> Result<IndexRe
         .with_context(|| format!("canonicalize project root {}", root.display()))?;
     let adapter = MarkdownAdapter;
     let mut report = IndexReport::default();
+    let mut retained_paths = std::collections::BTreeSet::new();
 
     let mut walker = WalkBuilder::new(&root);
     walker.hidden(true).require_git(false);
@@ -144,6 +146,7 @@ pub fn index_project(store: &mut impl GraphStore, root: &Path) -> Result<IndexRe
                 continue;
             }
         };
+        retained_paths.insert(relative_path.clone());
         let content = match read_bounded(path) {
             Ok(content) => content,
             Err(error) => {
@@ -175,6 +178,7 @@ pub fn index_project(store: &mut impl GraphStore, root: &Path) -> Result<IndexRe
         report.indexed_files += 1;
     }
 
+    report.removed_files = store.prune_file_subgraphs(&retained_paths)?;
     Ok(report)
 }
 
@@ -512,6 +516,22 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn full_reindex_removes_deleted_file_subgraphs() {
+        let dir = tempdir().unwrap();
+        let stale_path = dir.path().join("stale.md");
+        fs::write(&stale_path, "# Stale\n").unwrap();
+        let mut store = CozoGraphStore::open(dir.path()).unwrap();
+        index_project(&mut store, dir.path()).unwrap();
+        assert!(store.find_node("file:stale.md").unwrap().is_some());
+
+        fs::remove_file(stale_path).unwrap();
+        let report = index_project(&mut store, dir.path()).unwrap();
+        assert_eq!(report.removed_files, 1);
+        assert!(store.find_node("file:stale.md").unwrap().is_none());
+        assert!(store.find_node("document:stale.md").unwrap().is_none());
     }
 
     #[test]

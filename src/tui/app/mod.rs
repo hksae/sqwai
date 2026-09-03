@@ -758,6 +758,26 @@ impl App {
             }
 
             "/themes" | "/theme" => self.open_menu(Menu::Themes),
+            "/graph-rebuild" => {
+                if self.streaming {
+                    self.show_busy_status();
+                } else {
+                    let root = std::env::current_dir().unwrap_or_default();
+                    match crate::agent::graph::CozoGraphStore::open(&root).and_then(|mut store| {
+                        crate::agent::graph_index::index_project(&mut store, &root)
+                    }) {
+                        Ok(report) => self.status(
+                            &format!(
+                                "graph rebuilt: {} indexed, {} removed, {} skipped",
+                                report.indexed_files, report.removed_files, report.skipped_files
+                            ),
+                            StatusKind::Ok,
+                        ),
+                        Err(error) => self
+                            .status(&format!("graph rebuild failed: {error:#}"), StatusKind::Err),
+                    }
+                }
+            }
             "/init" => {
                 if std::path::Path::new("AGENTS.md").exists() {
                     self.status("AGENTS.md already exists", StatusKind::Warn);
