@@ -159,6 +159,7 @@ pub struct App {
     /// live filter typed inside the sessions menu
     sessions_filter: String,
     th_click: Option<(u16, u16)>,
+    agents_click: Option<(u16, u16)>,
     status_y: u16,
 
     // mouse selection
@@ -280,6 +281,7 @@ impl App {
             sessions: Vec::new(),
             sessions_filter: String::new(),
             th_click: None,
+            agents_click: None,
             status_y: 0,
             press: None,
             dragging: false,
@@ -997,6 +999,12 @@ impl App {
                         output: String::new(),
                         expanded: false,
                     });
+                    if matches!(
+                        self.cur_menu(),
+                        Some(Menu::Subagents | Menu::SubagentDetail { .. })
+                    ) {
+                        self.build_menu_rows();
+                    }
                     self.dirty = true;
                 }
                 AgentEvent::SubagentUpdate { id, text } => {
@@ -1018,6 +1026,12 @@ impl App {
                         *status = "running".into();
                         output.push_str(&text);
                         output.push('\n');
+                    }
+                    if matches!(
+                        self.cur_menu(),
+                        Some(Menu::Subagents | Menu::SubagentDetail { .. })
+                    ) {
+                        self.build_menu_rows();
                     }
                     self.dirty = true;
                 }
@@ -1050,6 +1064,12 @@ impl App {
                             "failed".into()
                         };
                         *current = output;
+                    }
+                    if matches!(
+                        self.cur_menu(),
+                        Some(Menu::Subagents | Menu::SubagentDetail { .. })
+                    ) {
+                        self.build_menu_rows();
                     }
                     self.dirty = true;
                 }
@@ -1233,8 +1253,33 @@ impl App {
         self.busy_until = None;
     }
 
+    fn cancel_unfinished_subagents(&mut self) {
+        for (_, _, status, _, _) in &mut self.subagents {
+            if matches!(status.as_str(), "waiting" | "running") {
+                *status = "cancelled".into();
+            }
+        }
+        for segment in &mut self.segments {
+            if let Segment::Subagent { status, .. } = segment {
+                if matches!(status.as_str(), "waiting" | "running") {
+                    *status = "cancelled".into();
+                }
+            }
+        }
+        if matches!(
+            self.cur_menu(),
+            Some(Menu::Subagents | Menu::SubagentDetail { .. })
+        ) {
+            self.build_menu_rows();
+        }
+        self.dirty = true;
+    }
+
     fn finish_turn(&mut self, res: Result<(), String>) {
         self.clear_busy_statuses();
+        if res.as_ref().is_err_and(|error| error == "aborted") {
+            self.cancel_unfinished_subagents();
+        }
         // flush whatever the typewriter has not revealed yet
         self.reveal_chars(usize::MAX);
         let text = std::mem::take(&mut self.assistant_buf);

@@ -96,6 +96,7 @@ impl App {
                                 self.hover = None;
                             } else if self.streaming {
                                 self.clear_busy_statuses();
+                                self.cancel_unfinished_subagents();
                                 self.aborted = true;
                                 if let Some(a) = &self.agent {
                                     a.abort();

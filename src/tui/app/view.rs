@@ -203,7 +203,13 @@ impl App {
     }
 
     pub(super) fn mouse_up(&mut self, row: u16, col: u16) {
-        // thinking selector in the status bar
+        // subagent overview and thinking selector in the status bar
+        if let Some((x0, x1)) = self.agents_click {
+            if row == self.status_y && col >= x0 && col <= x1 && self.menu_stack.is_empty() {
+                self.open_menu(Menu::Subagents);
+                return;
+            }
+        }
         if let Some((x0, x1)) = self.th_click {
             if row == self.status_y && col >= x0 && col <= x1 && self.menu_stack.is_empty() {
                 self.open_menu(Menu::Thinking);
@@ -1143,15 +1149,41 @@ impl App {
             .unwrap_or_default();
 
         let th_label = format!(" th:{} ", self.model_cfg.thinking.as_str());
+        let running = self
+            .subagents
+            .iter()
+            .filter(|(_, _, status, _, _)| status == "running")
+            .count();
+        let waiting = self
+            .subagents
+            .iter()
+            .filter(|(_, _, status, _, _)| status == "waiting")
+            .count();
+        let failed = self
+            .subagents
+            .iter()
+            .filter(|(_, _, status, _, _)| status == "failed")
+            .count();
+        let agents_label = if self.subagents.is_empty() {
+            String::new()
+        } else if running + waiting > 0 {
+            format!(" agents:{running}/{} ", self.subagents.len())
+        } else if failed > 0 {
+            format!(" agents:{} · {failed} failed ", self.subagents.len())
+        } else {
+            format!(" agents:{} ", self.subagents.len())
+        };
         self.th_click = None;
+        self.agents_click = None;
 
-        // right side: [folder] [th:level] [MODE chip]
+        // right side: [agents] [folder] [th:level] [MODE chip]
         let lsp_label = if self.lsp_diagnostics > 0 {
             format!(" LSP:{} ", self.lsp_diagnostics)
         } else {
             String::new()
         };
-        let mut right_len: usize = 1 + th_label.chars().count() + lsp_label.chars().count(); // mode chip always present
+        let mut right_len: usize =
+            1 + agents_label.chars().count() + th_label.chars().count() + lsp_label.chars().count(); // mode chip always present
         if !dir.is_empty() {
             right_len += truncate_chars(&dir, 20).chars().count() + 1;
         }
@@ -1159,8 +1191,20 @@ impl App {
         let lw = left.chars().count() as u16;
         let mut spans = vec![Span::styled(left, left_style)];
         let pad = (w as usize).saturating_sub(lw as usize + right_len);
-        let th_x0 = lw + pad as u16;
+        let agents_x0 = lw + pad as u16;
         spans.push(Span::styled(" ".repeat(pad), Theme::base()));
+        if !agents_label.is_empty() {
+            let agents_style = if failed > 0 {
+                Theme::err()
+            } else if running > 0 {
+                Theme::accent()
+            } else {
+                Theme::dim()
+            };
+            spans.push(Span::styled(agents_label.clone(), agents_style));
+            self.agents_click = Some((agents_x0, agents_x0 + agents_label.chars().count() as u16));
+        }
+        let th_x0 = agents_x0 + agents_label.chars().count() as u16;
         let th_style = if self.model_cfg.thinking == ThinkingLevel::Off {
             Theme::dim()
         } else {

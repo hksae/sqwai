@@ -529,6 +529,24 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_summarizes_subagents_and_abort_cancels_running_children() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.subagents
+            .push((1, "one".into(), "running".into(), String::new(), false));
+        app.subagents
+            .push((2, "two".into(), "completed".into(), "done".into(), false));
+        let text: String = app
+            .status_bar_spans(160)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("agents:1/2"), "bar: {text}");
+        app.cancel_unfinished_subagents();
+        assert_eq!(app.subagents[0].2, "cancelled");
+        assert_eq!(app.subagents[1].2, "completed");
+    }
+
+    #[test]
     fn typewriter_reveals_gradually_and_drains() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.pending_reveal = "Hello".into();
