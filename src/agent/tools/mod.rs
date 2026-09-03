@@ -283,6 +283,12 @@ long-running commands.",
             parameters: json!({"type":"object","properties":{"patch":{"type":"string"}},"required":["patch"]}),
         },
         ToolDef {
+            name: "websearch",
+            kind: Kind::ReadOnly,
+            description: "Search the web for a coding-related query and return a small set of normalized results.",
+            parameters: json!({"type":"object","properties":{"query":{"type":"string"},"count":{"type":"integer","minimum":1,"maximum":10},"timeout":{"type":"integer","minimum":1,"maximum":60}},"required":["query"]}),
+        },
+        ToolDef {
             name: "webfetch",
             kind: Kind::ReadOnly,
             description: "Fetch a bounded HTTP(S) page or text response and return readable text. Use only user-provided or task-relevant URLs.",
@@ -394,6 +400,7 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             args["patch"].as_str().map(str::len).unwrap_or(0)
         ),
         "webfetch" => s("url"),
+        "websearch" => s("query"),
         "todowrite" => format!(
             "{} items",
             args["todos"].as_array().map(|a| a.len()).unwrap_or(0)
@@ -479,7 +486,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         "git_commit" => git::commit(ctx, args),
         "git_branch" => git::branch(ctx, args),
         "patch" => git::patch(ctx, args),
-        "webfetch" => Outcome::err("webfetch must run through the async dispatcher"),
+        "webfetch" | "websearch" => Outcome::err("web tools must run through the async dispatcher"),
         "bash" => exec::bash(
             ctx,
             args["command"].as_str().unwrap_or_default(),
