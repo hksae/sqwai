@@ -709,7 +709,7 @@ fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
     };
     let mut valid = Vec::new();
     for seq in evidence {
-        let record = crate::agent::journal::Journal::evidence(root, &plan_id, *seq)
+        let record = crate::agent::journal::Journal::evidence(root, &plan_id, id, *seq)
             .map_err(|e| format!("evidence_unreadable: {e:#}"))?
             .ok_or_else(|| {
                 format!("invalid_evidence: journal record {seq} is not valid for this plan")

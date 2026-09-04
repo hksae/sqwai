@@ -89,10 +89,11 @@ impl Journal {
     }
 
     /// Check that a sequence belongs to this plan and is useful evidence.
-    pub fn evidence(root: &Path, plan: &str, seq: u64) -> Result<Option<Record>> {
+    pub fn evidence(root: &Path, plan: &str, step: &str, seq: u64) -> Result<Option<Record>> {
         Ok(Self::records(root)?.into_iter().find(|r| {
             r.seq == seq
                 && r.plan.as_deref() == Some(plan)
+                && r.step.as_deref() == Some(step)
                 && matches!(r.kind.as_str(), "tool_result" | "file_diff" | "diagnostics")
         }))
     }
