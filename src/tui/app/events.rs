@@ -360,10 +360,12 @@ impl App {
                     _ => {}
                 },
                 Event::Paste(p) => {
-                    // A native bracketed paste is already the complete
-                    // payload. Do not suppress it merely because Ctrl+V was
-                    // pressed before it arrived.
+                    // A native bracketed paste is the complete payload. Some
+                    // PowerShell versions append a synthetic Enter after the
+                    // paste; arm the guard here as well as in the Ctrl+V path
+                    // so the first pasted line cannot be submitted.
                     self.pasted_clipboard = None;
+                    self.paste_enter_guard = true;
                     if !self.menu_stack.is_empty() {
                         let p = p.replace(['\r', '\n'], " ");
                         if let Some(FormField::Text { ta, .. }) =
@@ -470,7 +472,10 @@ fn consume_replayed_paste_key(slot: &mut Option<String>, key: crossterm::event::
         *slot = (!remainder.is_empty()).then_some(remainder);
         true
     } else {
-        *slot = None;
+        // A terminal may interleave the Ctrl+V trigger or a key-release
+        // artifact with the replayed payload. Do not discard the marker on
+        // one unrelated event; otherwise the first embedded Enter can submit
+        // the first line and leave the rest in the editor.
         false
     }
 }
