@@ -193,6 +193,8 @@ pub struct App {
     pasted_clipboard: Option<String>,
     /// Suppresses the synthetic Enter some terminals emit after Ctrl+V.
     paste_enter_guard: bool,
+    /// Classifies ordinary Windows Enter events as submit vs pasted newlines.
+    enter_gate: events::EnterGate,
 
     /// Deadline for the single transient busy notice.
     busy_until: Option<Instant>,
@@ -366,6 +368,7 @@ impl App {
             sel: None,
             pasted_clipboard: None,
             paste_enter_guard: false,
+            enter_gate: events::EnterGate::default(),
             busy_until: None,
         };
         if !startup {
@@ -438,6 +441,9 @@ impl App {
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
         while !self.quit {
             tick.tick().await;
+            if self.enter_gate.flush(Instant::now()) {
+                self.submit();
+            }
             self.poll_input(&ev_rx)?;
             self.poll_agent();
             // typewriter: reveal queued answer text gradually, catching up when

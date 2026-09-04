@@ -16,6 +16,68 @@ use crate::session::Session;
 use crate::tui::markdown::{Highlighter, render, wrap_tagged};
 use crate::tui::theme::Theme;
 
+const ENTER_BURST_GAP: Duration = Duration::from_millis(30);
+
+#[derive(Debug, Default)]
+pub(super) struct EnterGate {
+    pending: Option<Instant>,
+    burst_until: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EnterDecision {
+    Wait,
+    Newline,
+}
+
+impl EnterGate {
+    pub(super) fn on_enter(&mut self, now: Instant) -> EnterDecision {
+        if let Some(pending) = self.pending.take()
+            && now.duration_since(pending) < ENTER_BURST_GAP
+        {
+            self.burst_until = Some(now + ENTER_BURST_GAP);
+            return EnterDecision::Newline;
+        }
+        if self.burst_until.is_some_and(|until| now < until) {
+            self.burst_until = Some(now + ENTER_BURST_GAP);
+            return EnterDecision::Newline;
+        }
+        self.pending = Some(now);
+        EnterDecision::Wait
+    }
+
+    pub(super) fn before_key(&mut self, now: Instant) -> bool {
+        let Some(at) = self.pending else {
+            return false;
+        };
+        if now.duration_since(at) < ENTER_BURST_GAP {
+            self.pending = None;
+            self.burst_until = Some(now + ENTER_BURST_GAP);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn note_key(&mut self, now: Instant) {
+        if self.burst_until.is_some_and(|until| now < until) {
+            self.burst_until = Some(now + ENTER_BURST_GAP);
+        }
+    }
+
+    pub(super) fn flush(&mut self, now: Instant) -> bool {
+        if self
+            .pending
+            .is_some_and(|at| now.duration_since(at) >= ENTER_BURST_GAP)
+        {
+            self.pending = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 impl App {
     fn paste_text(&mut self, text: &str) {
         self.jump_to_bottom_on_typing();
@@ -73,6 +135,14 @@ impl App {
                     // a fresh keypress dismisses the previous in-menu notice
                     if !self.menu_stack.is_empty() {
                         self.menu_status = None;
+                    }
+                    let now = Instant::now();
+                    let is_enter = matches!(k.code, KeyCode::Enter | KeyCode::Char('\r'));
+                    if !is_enter && self.enter_gate.before_key(now) {
+                        self.input.insert_newline();
+                    }
+                    if !is_enter {
+                        self.enter_gate.note_key(now);
                     }
                     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
                     let shift = k.modifiers.contains(KeyModifiers::SHIFT);
@@ -145,7 +215,9 @@ impl App {
                             self.open_menu(Menu::Sessions)
                         }
                         KeyCode::Enter if !ctrl && !shift && self.menu_stack.is_empty() => {
-                            self.submit()
+                            if self.enter_gate.on_enter(now) == EnterDecision::Newline {
+                                self.input.insert_newline();
+                            }
                         }
                         KeyCode::Up if !self.menu_stack.is_empty() => self.menu_nav(-1),
                         KeyCode::Down if !self.menu_stack.is_empty() => self.menu_nav(1),
@@ -518,7 +590,6 @@ fn consume_replayed_paste_key(slot: &mut Option<String>, key: crossterm::event::
 /// ctrl combos supported identically in the message input and every form field
 pub(super) const TEXT_COMBOS: &[char] = &['z', 'y', 'a', 'e', 'u', 'k', 'w', 'd'];
 
-/// shared editor shortcuts for every text input
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,6 +617,23 @@ mod tests {
     #[test]
     fn normalize_paste_handles_windows_line_endings() {
         assert_eq!(normalize_paste("one\r\ntwo\rthree"), "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn enter_gate_turns_tight_enter_into_newline() {
+        let start = Instant::now();
+        let mut gate = EnterGate::default();
+        assert_eq!(gate.on_enter(start), EnterDecision::Wait);
+        assert!(gate.before_key(start + Duration::from_millis(1)));
+        assert!(!gate.flush(start + Duration::from_millis(31)));
+    }
+
+    #[test]
+    fn enter_gate_flushes_a_real_enter() {
+        let start = Instant::now();
+        let mut gate = EnterGate::default();
+        assert_eq!(gate.on_enter(start), EnterDecision::Wait);
+        assert!(gate.flush(start + Duration::from_millis(31)));
     }
 }
 
