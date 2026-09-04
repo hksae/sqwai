@@ -1000,9 +1000,12 @@ mod tests {
         );
 
         let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-        let mut evidence_journal = crate::agent::journal::Journal::open(&dir, "test-evidence").unwrap();
+        let mut evidence_journal =
+            crate::agent::journal::Journal::open(&dir, "test-evidence").unwrap();
         evidence_journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
-        evidence_journal.append("tool_result", json!({"tool": "read", "ok": true})).unwrap();
+        evidence_journal
+            .append("tool_result", json!({"tool": "read", "ok": true}))
+            .unwrap();
         assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
         let finish = plan_op(
             &mut ctx,

@@ -737,7 +737,11 @@ async fn run_agent(
             let tool_started = Instant::now();
             if let Some(writer) = journal.as_mut() {
                 if call.name == "plan" {
-                    let step = call.args.get("id").and_then(|v| v.as_str()).map(str::to_string);
+                    let step = call
+                        .args
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
                     let plan_id = plan::open_active(&root).ok().flatten().map(|p| p.id);
                     writer.set_attribution(step, plan_id, "main");
                 }
