@@ -98,7 +98,6 @@ fn init_terminal() -> Result<tui::app::Terminal> {
         stdout,
         crossterm::terminal::EnterAlternateScreen,
         crossterm::event::EnableMouseCapture,
-        crossterm::event::EnableBracketedPaste,
         crossterm::cursor::Hide
     )?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
@@ -109,7 +108,6 @@ fn restore_terminal() -> Result<()> {
     crossterm::execute!(
         io::stdout(),
         crossterm::event::DisableMouseCapture,
-        crossterm::event::DisableBracketedPaste,
         crossterm::cursor::Show,
         crossterm::terminal::LeaveAlternateScreen
     )?;

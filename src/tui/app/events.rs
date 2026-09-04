@@ -66,6 +66,9 @@ impl App {
                         self.paste_enter_guard = false;
                         continue;
                     }
+                    // Ctrl+V is handled below through the clipboard API.
+                    // Without bracketed paste, PowerShell cannot inject an
+                    // embedded newline as a separate submit event.
                     // a fresh keypress dismisses the previous in-menu notice
                     if !self.menu_stack.is_empty() {
                         self.menu_status = None;
@@ -360,12 +363,8 @@ impl App {
                     _ => {}
                 },
                 Event::Paste(p) => {
-                    // A native bracketed paste is the complete payload. Some
-                    // PowerShell versions append a synthetic Enter after the
-                    // paste; arm the guard here as well as in the Ctrl+V path
-                    // so the first pasted line cannot be submitted.
                     self.pasted_clipboard = None;
-                    self.paste_enter_guard = true;
+                    self.paste_enter_guard = false;
                     if !self.menu_stack.is_empty() {
                         let p = p.replace(['\r', '\n'], " ");
                         if let Some(FormField::Text { ta, .. }) =
