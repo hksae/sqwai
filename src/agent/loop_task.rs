@@ -1029,13 +1029,36 @@ async fn run_agent(
                     );
                 }
                 if call.name == "plan" {
-                    let _ = writer.append(
-                        "plan",
-                        serde_json::json!({
-                            "op": call.args.get("op").and_then(|v| v.as_str()).unwrap_or("unknown"),
-                            "ok": outcome.ok,
-                        }),
-                    );
+                    let op = call
+                        .args
+                        .get("op")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let _ = writer.append("plan", serde_json::json!({"op": op, "ok": outcome.ok}));
+                    if outcome.ok && matches!(op, "finish" | "block" | "cancel") {
+                        let _ = crate::agent::diary::write_entry(
+                            &root,
+                            crate::agent::diary::today(),
+                            &session_id,
+                            "step_lifecycle",
+                            Some(&provider),
+                            &model_id,
+                            plan::open_active(&root)
+                                .ok()
+                                .flatten()
+                                .map(|plan| plan::render(&plan))
+                                .as_deref(),
+                            None,
+                            messages
+                                .iter()
+                                .rev()
+                                .find(|message| message.role == Role::User)
+                                .map(|message| message.content.as_str()),
+                            Some(diary.token_budget),
+                            Some(Duration::from_secs(diary.timeout_secs)),
+                        )
+                        .await;
+                    }
                 }
             }
             messages.push(Message::tool_result(&call.id, outcome.output, !outcome.ok));
