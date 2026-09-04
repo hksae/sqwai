@@ -90,12 +90,24 @@ impl ToolCtx {
     }
 }
 
+pub struct FileDiff {
+    pub path: String,
+    pub added: usize,
+    pub removed: usize,
+    pub hash_before: Option<String>,
+    pub hash_after: String,
+    pub mode: String,
+    pub checkpoint: Option<String>,
+}
+
 pub struct Outcome {
     pub ok: bool,
     /// short result the model (and the collapsed TUI row) sees
     pub output: String,
     /// unified diff of a file mutation, shown in the TUI when expanded
     pub diff: Option<String>,
+    /// host-derived metadata for the journal
+    pub file_diff: Option<FileDiff>,
 }
 
 impl Outcome {
@@ -104,6 +116,7 @@ impl Outcome {
             ok: true,
             output: output.into(),
             diff: None,
+            file_diff: None,
         }
     }
     pub fn err(output: impl Into<String>) -> Self {
@@ -111,6 +124,7 @@ impl Outcome {
             ok: false,
             output: output.into(),
             diff: None,
+            file_diff: None,
         }
     }
     /// attach a unified diff, keeping the short summary
@@ -118,6 +132,11 @@ impl Outcome {
         if !diff.is_empty() {
             self.diff = Some(diff);
         }
+        self
+    }
+
+    pub fn with_file_diff(mut self, file_diff: FileDiff) -> Self {
+        self.file_diff = Some(file_diff);
         self
     }
 }
