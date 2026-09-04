@@ -480,7 +480,7 @@ tools. memory_read(date) returns a day's file; there is no memory_edit.
 Mistakes are corrected by a new entry's Corrections section. The Corrections
 section is also fed automatically from reflector agent_errors (§3.5.4).
 
-2.3.5 MEMORY.md and memory_propose
+2.3.5 MEMORY.md and memory_propose [partial]
 Sections: ## Project (stack, layout, how to build/test), ## Conventions,
 ## User (name/handle if given, language, preferences), ## Agreements
 (standing rules agreed in chat). Hard cap memory.max_tokens (3000); the
@@ -1288,7 +1288,7 @@ F1	plan tool + validator (all rules except evidence/refs) + /plan /goal /constra
 F2	Journal writer at dispatch; all kinds except `diagnostics`, `reflect`, `graph`	done	B
 F3	Evidence rule in `finish`, `verify`, `complete`; nudges; note	done	F1
 F4	Diary: host block, triggers, writer call, fallback; memory_read; secrets screening	done	F2
-F5	MEMORY.md + memory_propose approval; session-start loading	next	F4
+F5	MEMORY.md + memory_propose approval; session-start loading	done	F4
 F6	Compaction anchor; summary=off default; resume/fork per §3.4; undo→reopen	next	F1–F5
 F7	Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, optional zstd) + layer-2 shadow repo driven by the git CLI through `tokio::process`; restore via diff-tree; `/undo step N`	after F1	F1
 G	Goal-retention benchmark (§8.2)	after F	F6
