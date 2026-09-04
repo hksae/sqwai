@@ -1285,7 +1285,7 @@ C	MCP, skills, LSP foundation, settings hub	done	B
 D	git tools, patch, web tools, subagents	done	B
 E	Graph prototype (Cozo, generic + markdown)	done → to be ported	—
 F1	plan tool + validator (all rules except evidence/refs) + /plan /goal /constraints /mode; remove todowrite; prompt update	done	B
-F2	Journal writer at dispatch; all kinds except `diagnostics	reflect	graph`
+F2	Journal writer at dispatch; all kinds except `diagnostics`, `reflect`, `graph`	done	B
 F3	Evidence rule in `finish	verify	complete; nudges; note`
 F4	Diary: host block, triggers, writer call, fallback; memory_read; secrets screening	next	F2
 F5	MEMORY.md + memory_propose approval; session-start loading	next	F4
