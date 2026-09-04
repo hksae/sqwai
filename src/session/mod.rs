@@ -59,9 +59,6 @@ pub struct Session {
     /// (sha, label) undo journal: one entry per mutating agent action
     #[serde(default)]
     pub checkpoints: Vec<(String, String)>,
-    /// last to-do list written via the todowrite tool, restored on resume
-    #[serde(default)]
-    pub todos: Vec<String>,
 }
 
 impl Session {
@@ -85,7 +82,6 @@ impl Session {
             last_response_id: None,
             last_response_model: None,
             checkpoints: Vec::new(),
-            todos: Vec::new(),
         }
     }
 
