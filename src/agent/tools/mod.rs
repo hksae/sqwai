@@ -750,8 +750,11 @@ fn validate_records(
     let after_seq = if step_id == "acceptance" {
         None
     } else {
-        crate::agent::journal::Journal::step_started_at(root, plan_id, step_id)
-            .map_err(|e| format!("evidence_unreadable: {e:#}"))?
+        Some(
+            crate::agent::journal::Journal::step_started_at(root, plan_id, step_id)
+                .map_err(|e| format!("evidence_unreadable: {e:#}"))?
+                .ok_or_else(|| format!("invalid_evidence: step {step_id} has no journal start"))?,
+        )
     };
     let mut valid = Vec::new();
     for seq in evidence {
@@ -1172,6 +1175,7 @@ mod tests {
 
         assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "2"})).ok);
         journal.set_attribution(Some("2".into()), Some(plan_id.clone()), "main");
+        journal.append("plan", json!({"op": "start"})).unwrap();
         let wrong_type = journal
             .append("tool_result", json!({"tool": "read", "ok": true}))
             .unwrap();
