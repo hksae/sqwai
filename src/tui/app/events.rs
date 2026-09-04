@@ -64,12 +64,19 @@ impl App {
                     // some Windows terminal/keymap combinations interpret it as
                     // an accept/submit action after the clipboard text is inserted.
                     if ctrl && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V')) {
+                        // In PowerShell/Windows Terminal Ctrl+V may be reported
+                        // as a key event while the terminal also injects the
+                        // clipboard bytes asynchronously. Do not let the
+                        // synthetic Enter submit the first line.
                         self.paste_clipboard();
                         self.paste_enter_guard = true;
                         self.dirty = true;
                         continue;
                     }
                     if self.paste_enter_guard {
+                        // Keep the synthetic Enter from submitting the first
+                        // pasted line. Character replay is filtered by the
+                        // clipboard-prefix matcher above.
                         if matches!(k.code, KeyCode::Enter | KeyCode::Char('\r')) {
                             self.paste_enter_guard = false;
                             continue;
@@ -347,13 +354,16 @@ impl App {
                     _ => {}
                 },
                 Event::Paste(p) => {
-                    // Ctrl+V is handled above through the clipboard API. Some
-                    // Windows terminals additionally emit the same bracketed
-                    // paste event, sometimes split into several chunks; consume
-                    // that duplicate without ever routing it through key input.
-                    if consume_duplicate_paste(&mut self.pasted_clipboard, &p) {
+                    // The Ctrl+V branch already inserted this clipboard text.
+                    // PowerShell may emit a delayed bracketed-paste event, or
+                    // split it into chunks. While the replay marker is present,
+                    // consume every such event and never insert it a second time.
+                    if self.pasted_clipboard.is_some() {
+                        let _ = consume_duplicate_paste(&mut self.pasted_clipboard, &p);
                         continue;
                     }
+                    // A genuine paste event must be inserted as one transaction,
+                    // not routed through key handling where Enter can submit it.
                     if !self.menu_stack.is_empty() {
                         let p = p.replace(['\r', '\n'], " ");
                         if let Some(FormField::Text { ta, .. }) =
