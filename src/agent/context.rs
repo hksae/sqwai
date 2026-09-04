@@ -223,7 +223,7 @@ summary replaces the messages it covers.";
 pub enum Pressure {
     /// history fits
     Ok,
-    /// history no longer fits: summarize
+    /// history no longer fits: summarize or prune/trim when summary is off
     Summarize,
 }
 
@@ -309,8 +309,10 @@ impl Policy {
 /// summarize the older turns). It is the standalone fallback an agent can use
 /// when no model is available to rewrite the history; the inline
 /// `compact_history` pipeline in `loop_task` reuses `local_summary` for the
-/// same purpose. Exercised only by the tests at the bottom of this file, so
-/// the non-test build would otherwise flag it dead.
+/// same purpose. The active pipeline can disable model summaries and fall back
+/// to pruning/trimming while preserving the host-generated anchor. Exercised
+/// only by the tests at the bottom of this file, so the non-test build would
+/// otherwise flag it dead.
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct Compaction {
