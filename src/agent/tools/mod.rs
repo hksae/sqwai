@@ -678,6 +678,9 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
 }
 
 fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
+    if matches!(op, plan::Op::Complete) {
+        return validate_complete(root);
+    }
     let (id, evidence): (&str, &Vec<u64>) = match op {
         plan::Op::Finish { id, evidence, .. } => (id.as_str(), evidence),
         plan::Op::Verify { evidence, .. } => ("acceptance", evidence),
@@ -692,13 +695,9 @@ fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
             return Ok(());
         }
     }
-    if evidence.is_empty() {
-        return Err(format!("no_evidence: step {id} requires journal evidence"));
-    }
     let active = plan::open_active(root)
         .map_err(|e| format!("evidence_unreadable: {e:#}"))?
         .ok_or_else(|| "invalid_evidence: no active plan".to_string())?;
-    let plan_id = active.id.clone();
     let required_kind = match op {
         plan::Op::Finish { id, .. } => active
             .step(id)
@@ -707,14 +706,63 @@ fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
         plan::Op::Verify { .. } => plan::StepKind::Verify,
         _ => unreachable!(),
     };
-    let after_seq = crate::agent::journal::Journal::step_started_at(root, &plan_id, id)
-        .map_err(|e| format!("evidence_unreadable: {e:#}"))?;
+    validate_records(root, &active.id, id, required_kind, evidence)
+}
+
+fn validate_complete(root: &Path) -> Result<(), String> {
+    let active = plan::open_active(root)
+        .map_err(|e| format!("evidence_unreadable: {e:#}"))?
+        .ok_or_else(|| "invalid_evidence: no active plan".to_string())?;
+    for step in active
+        .steps
+        .iter()
+        .filter(|step| step.status == plan::StepStatus::Done)
+    {
+        validate_records(root, &active.id, &step.id, step.kind, &step.evidence)?;
+    }
+    for (index, acceptance) in active.acceptance.iter().enumerate() {
+        if acceptance.status == plan::AcceptanceStatus::Verified {
+            validate_records(
+                root,
+                &active.id,
+                "acceptance",
+                plan::StepKind::Verify,
+                &acceptance.evidence,
+            )
+            .map_err(|message| format!("acceptance {index}: {message}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_records(
+    root: &Path,
+    plan_id: &str,
+    step_id: &str,
+    required_kind: plan::StepKind,
+    evidence: &[u64],
+) -> Result<(), String> {
+    if evidence.is_empty() {
+        return Err(format!(
+            "no_evidence: step {step_id} requires journal evidence"
+        ));
+    }
+    let after_seq = if step_id == "acceptance" {
+        None
+    } else {
+        crate::agent::journal::Journal::step_started_at(root, plan_id, step_id)
+            .map_err(|e| format!("evidence_unreadable: {e:#}"))?
+    };
     let mut valid = Vec::new();
     for seq in evidence {
         let record = crate::agent::journal::Journal::evidence(
             root,
-            &plan_id,
-            if id == "acceptance" { None } else { Some(id) },
+            plan_id,
+            if step_id == "acceptance" {
+                None
+            } else {
+                Some(step_id)
+            },
             *seq,
             after_seq,
         )
