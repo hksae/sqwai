@@ -6,7 +6,7 @@ use chrono::{Local, NaiveDate};
 use regex::Regex;
 use serde_json::Value;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 const MAX_DIARY_BYTES: usize = 200_000;
@@ -103,22 +103,27 @@ pub fn host_block(root: &Path, session_id: &str, trigger: &str) -> Result<String
         .join("journal")
         .join(format!("{session_id}.jsonl"));
     let records = if path.exists() {
-        let all = Journal::records(root)?;
-        let mut selected = Vec::new();
-        let mut in_session = false;
-        for record in all {
-            if record.kind == "session_start" && !in_session {
-                in_session = true;
-            }
-            if in_session {
-                selected.push(record);
-            }
-        }
-        selected
+        read_session_records(&path)?
     } else {
         Vec::new()
     };
     render_host_block(&records, trigger)
+}
+
+fn read_session_records(path: &Path) -> Result<Vec<Record>> {
+    let file =
+        fs::File::open(path).with_context(|| format!("opening journal {}", path.display()))?;
+    BufReader::new(file)
+        .lines()
+        .filter_map(|line| match line {
+            Ok(line) if !line.trim().is_empty() => Some(
+                serde_json::from_str(&line)
+                    .with_context(|| format!("decoding journal record in {}", path.display())),
+            ),
+            Ok(_) => None,
+            Err(error) => Some(Err(error).context("reading session journal")),
+        })
+        .collect()
 }
 
 fn render_host_block(records: &[Record], trigger: &str) -> Result<String> {
