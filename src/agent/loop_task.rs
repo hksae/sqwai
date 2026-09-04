@@ -870,8 +870,18 @@ async fn run_agent(
                 })
                 .await;
             // report a checkpoint taken by the mutation, if any
-            if let Some((_, label)) = ctx.journal.last() {
-                if ctx.journal.len() > journal_mark {
+            if ctx.journal.len() > journal_mark {
+                if let Some(writer) = journal.as_mut() {
+                    for (sha, label) in ctx.journal[journal_mark..].iter() {
+                        let _ = writer.append("checkpoint", serde_json::json!({
+                            "layer": "legacy",
+                            "id": sha,
+                            "reason": "post_mutation",
+                            "label": label,
+                        }));
+                    }
+                }
+                if let Some((_, label)) = ctx.journal.last() {
                     let _ = tx
                         .send(AgentEvent::Checkpoint {
                             label: label.clone(),
