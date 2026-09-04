@@ -1134,7 +1134,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn fork_copies_plan_with_new_identity_and_reset_revision() {
         let root = std::env::temp_dir().join(format!("sqwai-plan-fork-{}", std::process::id()));
         let mut source = new_plan();
