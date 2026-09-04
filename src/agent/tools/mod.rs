@@ -658,8 +658,8 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
 }
 
 fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
-    let (id, evidence) = match op {
-        plan::Op::Finish { id, evidence, .. } => (id, evidence),
+    let (id, evidence): (&str, &Vec<u64>) = match op {
+        plan::Op::Finish { id, evidence, .. } => (id.as_str(), evidence),
         plan::Op::Verify { evidence, .. } => ("acceptance", evidence),
         _ => return Ok(()),
     };
