@@ -104,7 +104,7 @@ enforceable rather than requested.
 and session id. A second sqwai started in the same project finds a live lock and
 enters read-only mode for plan/journal/memory/graph with a warning, or proceeds
 with `--force` (which takes over the lock). SQLite serializes graph writes; the
-lock protects the plaintext plan, diary and journal (§7 N).
+lock protects the plaintext plan, diary and journal (§7 Q).
 
 ---
 
@@ -191,7 +191,7 @@ acceptance[].text may be prefixed `cmd:` (host runs it on `plan verify` and on
 `complete`; the result becomes evidence automatically) or `manual:` (user
 waives). `/init` seeds MEMORY.md ## Project with the project's test/lint/build
 commands; `plan create` with no acceptance substitutes those as `cmd:` items by
-default (§2.3.5, §7 S).
+default (§2.3.5, §7 V).
 Writes are atomic: temp file + rename. On open, a plan that fails schema
 validation is moved to plans/corrupt/ and reported; the agent continues
 without a plan and asks whether to recreate.
@@ -255,7 +255,7 @@ assumption; a later `note` with `note: assumption, resolves: <seq>` closes it.
 warning listing them ("step 2 has 1 open assumption (j#19) — resolve or convert
 before completing"). The anchor (§3.3.3) and the diary host block surface open
 assumptions so they are not forgotten. This is the missing closure moment for
-the `assumption` note kind (§7 R).
+the `assumption` note kind (§7 U).
 
 Rejection response is a normal tool result:
 
@@ -310,19 +310,67 @@ TUI todo panel (Ctrl+T) — derived view: current step highlighted, counts.
 Mode switching is Tab or /mode plan|act (§5.3). /plan no longer
 switches mode.
 
-2.1.8 Scope guard and plan-first gate
+#### 2.1.8 Plan from issue **[planned]**
+
+`sqwai plan from <github-url | gitlab-url | file.md | ->` (stdin) builds a
+plan **draft** from an issue and hands it to the user; nothing becomes the
+active plan without confirmation. The user stays the owner of the goal.
+
+**Pipeline.**
+
+1. *Fetch* (code): issue title, body, labels, linked comments marked as
+   acceptance by the author (`- [ ]` items, "acceptance", "expected" headings);
+   via `gh`/`glab` CLI if present, else the public API with the configured token.
+   The text is `trust: low`.
+2. *Extract* (one model call, schema-bound): `goal` (one sentence),
+   `constraints[]`, `acceptance[]` each typed `cmd:|browser:|manual:` when the
+   text is explicit, otherwise `manual:`; `refs[]` — every path and symbol
+   mentioned; `questions[]` — ambiguities the model would otherwise guess.
+3. *Resolve* (code): each ref through `resolve_ref`. `found` → kept;
+   `not_found` → replaced by candidates, listed under **Unresolved**; the plan
+   is not created with unresolved refs.
+4. *Defaults* (code): if no `cmd:` acceptance, add the project's verify
+   commands from `MEMORY.md ## Project`.
+5. *Review* (TUI): editable draft — goal, constraints, acceptance, initial
+   steps (research step per unresolved ref, change step per resolved ref
+   group, one verify step), open questions. Confirm → `plan create` with
+   `source: {kind: issue, url, hash}`; Cancel → draft saved to
+`plans/drafts/`.
+
+**Rules.** Steps are proposed, not final: the model may `split`/`add` later
+as usual. Constraints from the issue are shown separately from constraints
+the user adds — the user can drop any. Comments from non-authors are not used
+for goal or constraints (only for refs). If the issue changes upstream
+(hash mismatch on `/plan`), the plan shows `issue updated` and offers a diff;
+goal is never changed automatically.
+
+**Journal.** `plan_draft {source, refs_found, refs_unresolved, accepted}`.
+**Export.** `/export pr` includes `Closes #N` when `source.kind = issue` and
+the acceptance table.
+
+**Config.** `[issue] provider = "auto|github|gitlab"`, `token_env = ""`,
+`use_comments = true`.
+
+**Tests.** Issue mentioning a renamed function → draft lists candidates and
+no plan is created until the user picks; issue with checklist → acceptance
+typed `manual:` unless a command is quoted; issue body containing "ignore
+previous instructions" → appears only as text in the goal draft the user
+sees, never executed (trust test); confirm → plan identical to the reviewed
+draft.
+
+2.1.9 Scope guard and plan-first gate
 Scope guard (config `scope_guard: warn|block`, default `warn`). When a
 `file_diff` arrives on a path outside `step.refs` and outside the depth-1 graph
 neighborhood of those refs, the tool result carries a warning and block D gains
 a line: "step N: edited <path> outside declared scope — split the step or note
 why". This catches the "incidental refactor" the prompt forbids in words,
-configurably without hard-blocking legitimate work (§7 W).
+configurably without hard-blocking legitimate work (§7 Z).
 Plan-first gate (config `plan_first: soft|off`, default `soft`). In Act mode the
 first mutating tool call with no active plan is allowed only when the user
 message is heuristic-trivial (≤ 1 file mentioned, verbs like "fix typo/rename");
 otherwise it returns `code: plan_required` and the model must `plan create`
 first. Without this the model routes around the plan for "quick" tasks that grow
-(§7 T).
+(§7 W).
 2.2 Journal [planned]
 The journal is the factual record of a session. Written only by the host,
 in the tool dispatch layer and in a few lifecycle points. The model has one
@@ -493,7 +541,7 @@ opens a TUI approval (accept / edit / reject). `scope` selects USER.md
 entries are written by the host with a trailing <!-- session a8f2 2026-08-31 -->
 provenance comment. The model may propose at most
 memory.max_proposals_per_turn (2) per turn. Splitting the two files stops the
-model re-learning per-project facts that are really about the user (§7 V).
+model re-learning per-project facts that are really about the user (§7 X).
 
 2.3.6 Secrets screening
 Applied to every string that reaches diary, MEMORY.md, journal summary|text,
@@ -671,7 +719,7 @@ unavailable or stale beyond graph.reindex_timeout_ms.
 
 Lessons: if any file in the context block has `lesson` memory nodes referencing
 it (§2.4.5), the block appends `lesson (date): <text> (j#N)` automatically — no
-recall needed. This makes file-tied lessons fire at the moment they matter (§7 X).
+recall needed. This makes file-tied lessons fire at the moment they matter (§7 AA).
 
 2.4.10 Graph-view
 MVP (in the core deliverable): an in-process screen (Ctrl+G) with a compact
@@ -685,11 +733,53 @@ provenance timeline, watcher-driven live updates: later phase (§7 K). Native
 GUI and local web view: deferred indefinitely; if built, they consume the
 same projections.
 
-Provenance command `/why <path|symbol|j#N>` (§7 Y), step diff and `/export`
+Provenance command `/why <path|symbol|j#N>` (§7 AB), step diff and `/export`
 (PR description built from journal + diary, not from a guessed diff), and
 `/brief` (human-readable anchor for a returning user) are later-phase (J)
 consumers of the same projections. `/why` unifies journal (when/which step
 changed it), diary (why), and graph (what depends on it) into one answer.
+
+#### 2.4.11 Test impact **[planned]**
+
+Given the symbols changed in a step, the graph answers which tests exercise
+them, so `verify` runs the narrow set first and the full suite only at
+`complete`.
+
+**Data.** Adapters emit `test` nodes (Rust: `#[test]`, `#[tokio::test]`,
+functions in `#[cfg(test)]` modules, files under `tests/`; Python: `test_*`
+functions and classes, pytest fixtures as `uses`) and `calls|uses|references`
+edges from tests to code. Reverse traversal from changed symbols, depth ≤
+`graph.impact_depth` (3), through `calls|uses|implements|extends`; stop at
+`test` nodes. Files at capability Level < 3 contribute nothing (no false precision).
+
+**Command synthesis** per language, from `MEMORY.md ## Project` test command
+or defaults: Rust `cargo test <mod>::<name> -- --exact` batched per crate;
+Python `pytest path::Class::test`; unknown language → full suite. Synthesis
+is a table in the adapter, not model output.
+
+**Where it is used.**
+
+| Point | Behavior |
+|---|---|
+| `finish` of a `change` step | host computes `impact.tests[]` and `impact.files[]`, stores them on the step, shows one line in block D: `impact: 7 tests (session::save, tui::todo_panel…) — verify step suggested` |
+| next `verify` step or `plan verify` on a `cmd:` acceptance | the runner executes the impacted set first; a red result short-circuits; a green result is evidence for the step but **not** for `complete` |
+| `complete` | full suite always; impact never replaces it |
+| `impact.tests` empty for a Level ≥ 3 file | warning in the step: `no tests reach <symbol>` — a fact the user may want to know, not a blocker |
+| reflector | `run` checks may use the impacted set when the criticism names a symbol |
+
+**Confidence.** Each impact result carries `coverage: exact|partial|unknown`
+based on the lowest capability level among traversed files; the runner prints
+it. Dynamic dispatch, macros, reflection, and integration tests that reach
+code through I/O are known gaps; the full-suite rule at `complete` exists
+because of them.
+
+**Config.** `graph.impact_depth = 3`, `graph.impact_max_tests = 200` (above
+that: full suite), `plan.verify_impact_first = true`.
+
+**Tests.** Fixture crate: change one function → exactly its callers' tests
+selected; change a trait method → implementors' tests included; change a file
+at Level 1 → `coverage: unknown`, full suite; `complete` after green impact run
+still runs the full suite.
 
 ### 2.5 Checkpoints and undo
 Схема — два слоя вместо одного. Слой 1 обязателен и не зависит от git; слой 2 —
@@ -963,7 +1053,7 @@ Staged pre-compaction. When used_tokens ≥ context × compaction.stage_ratio
 old read/grep/bash outputs are replaced with a one-line summary
 (`[read src/x.rs 240 lines, hash abc — call read again if needed]`). User
 messages and assistant prose are kept verbatim. This is cheap, preserves the
-anchor, and delays a full compaction by several turns (§7 U). Full compaction
+anchor, and delays a full compaction by several turns (§7 X). Full compaction
 (below) still triggers at the threshold.
 
 3.3.2 Procedure
@@ -1153,8 +1243,8 @@ Redo is not offered in v1; the post-undo tree is itself checkpointed, so
 3.7 Failures
 Failure	Behavior
 Provider error mid-turn after retries	partial text kept in history; provider_error journaled; step stays in_progress; user informed; next turn resumes normally
-User cancels a running tool (Esc)	tool_result ok:false code:cancelled; if the tree changed, a post-checkpoint is written; the cancel is journaled; step stays in_progress; no prior work is reverted (§7 O)
-Provider down with fallback configured	automatic switch to [models.x].fallback after retry exhaustion on network/5xx; provider_error journaled with recovered:true, switched_to; step stays in_progress (§7 Q)
+User cancels a running tool (Esc)	tool_result ok:false code:cancelled; if the tree changed, a post-checkpoint is written; the cancel is journaled; step stays in_progress; no prior work is reverted (§7 S)
+Provider down with fallback configured	automatic switch to [models.x].fallback after retry exhaustion on network/5xx; provider_error journaled with recovered:true, switched_to; step stays in_progress (work queue T)
 Tool panics	caught per call; tool_result ok:false code:internal; agent continues
 Crash	on restart the session picker marks it recoverable; resume path (§3.4) with journal repair; plan file is always consistent (atomic writes)
 Diary call fails	host-only entry; never blocks compaction
@@ -1163,7 +1253,78 @@ Not a git repo	layer-1 file checkpoints and `/undo step N` remain available; Bas
 Git unavailable or shadow snapshot skipped	Bash still runs with layer-1 checkpoints and bounded change detection where possible; unknown Bash mutations have reduced undo guarantees
 .sqwai/ unwritable	plan/journal/memory/checkpoints disabled with a persistent warning; agent runs in "no integrity" mode and says so in the status bar
 
-3.8 Claim lint [planned]
+3.8 Unattended mode **[planned — last phase]**
+
+`sqwai run --plan <id> [--until complete|step N] [--budget tokens|minutes]`
+executes an active plan without a TUI and without a human. It is safe only
+because the plan, evidence, safety classifier, and checkpoints already do not
+depend on a human watching; unattended mode adds policy on top, not new trust.
+
+#### 3.8.1 Preconditions (checked before the first turn, refused otherwise)
+
+- an `active` plan with ≥ 1 acceptance item of kind `cmd:|browser:|ci:`
+  (a plan that can only be completed by `manual:` items cannot run
+  unattended);
+- git available (shadow repo works) or `--no-undo-ack`;
+- mode `act`; `plan.step_max_calls` and `unattended.budget_*` set;
+- no other sqwai instance holds the project lock;
+- `unattended.allowed_hosts` empty or explicitly listed (web tools, browser).
+
+#### 3.8.2 Policy substitutions
+
+| Interactive behavior | Unattended |
+|---|---|
+| `ask_user` | step → `blocked` with the question as reason; agent moves to the next `pending` step whose `refs` do not overlap the blocked one |
+| dangerous command approval | `deny`, journaled; the model must find a safe alternative or block |
+| `blocked_patterns` | unchanged (hard block) |
+| forced `ask_user` after 3 rejections | step → `blocked`, reason = last rejection |
+| `propose_goal_revision` | recorded as `note assumption`, not applied; run continues under the original goal |
+| `memory_propose` | queued in `memory/pending/` for morning approval |
+| compaction | unchanged (host-built anchor; this is the scenario it exists for) |
+| provider failure | retry per policy, then fallback model if configured, then pause with `reason: provider` |
+| reflector | `auto = false`; L0 fact block still on |
+
+The model is told once, in block B: "Unattended run. No user is available.
+Block instead of asking; deny is final; do not retry denied commands."
+
+#### 3.8.3 Stop conditions
+
+`complete` accepted · all remaining steps `blocked` · `--until` reached ·
+budget exhausted (tokens, minutes, or `unattended.max_compactions`) ·
+`unattended.max_consecutive_failures` (5) tool errors without an accepted
+plan op · lock lost · provider unrecoverable. Every stop writes a diary entry
+(`trigger: unattended_stop`) and a session `session_end {reason}`.
+
+#### 3.8.4 Morning
+
+`sqwai brief [--plan <id>]` prints: outcome, acceptance table with evidence,
+steps done/blocked with reasons, files changed by step, irreversible actions
+(`browser`, `git_commit` if allowed), denied commands, pending memory
+proposals, tokens and cost by step. `/review` (step-by-step diff with
+accept/reopen) starts from the same data. Nothing is merged, committed, or
+pushed by the run unless `unattended.allow_commit = true`; push is never
+allowed.
+
+#### 3.8.5 Config
+
+```toml
+[unattended]
+budget_tokens = 2_000_000
+budget_minutes = 480
+max_compactions = 12
+max_consecutive_failures = 5
+allow_commit = false            # commit to a branch named by unattended.branch
+branch = "sqwai/<plan-id>"
+allowed_hosts = []              # web/browser hosts; empty = localhost only
+notify = ""                     # command run on stop, receives brief on stdin
+```
+
+Journal: `unattended {event: start|stop, reason, budget_used}`. Tests: a plan
+whose step needs a question ends with that step `blocked` and others
+completed; a denied `rm -rf` is not retried; budget stop writes a diary entry;
+`brief` equals the journal.
+
+3.9 Claim lint [planned]
 After the model's response text is generated, the host runs a cheap pattern pass
 over it: result claims (`\d+ passed`, `build succeeded`, `tests pass`, `exit 0`,
 named paths/symbols) are checked against journal records since the start of the
@@ -1171,7 +1332,7 @@ turn and via resolve_ref. On mismatch the offending span is appended
 `[unverified]` in the streamed text and a `claim_lint` journal record is written;
 on repetition a nudge fires. It does not block generation — it makes hallucinated
 results visible to the user immediately, which is the most direct realization of
-the thesis. Cost ~1 day after F2+I4 (§7 V).
+the thesis. Cost ~1 day after F2+I4 (§7 Y).
 
 4. Tools
 Tool	Group	Status	Mutates	Journal kinds
@@ -1195,6 +1356,7 @@ why	navigation	planned	no	tool_call/result
 export	reporting	planned	no	tool_call/result
 bench	benchmark	planned	no	tool_call/result
 MCP tools mcp__<server>__<tool>	ext	done	per server	tool_call/result + approval via safety
+No new model tools: `plan from`, `run`, `brief`, and `review` are CLI/user commands.
 Every tool: JSON schema, strict argument validation, normalized result
 {ok, data|code+reason+hint}. Read-before-edit guard: edit|multi_edit|patch
 refuse files not read in this session (hash-tracked; a file changed by bash
@@ -1214,7 +1376,7 @@ Models declare an optional `fallback` to another model id (same or other
 provider). On retry-exhausted network/5xx errors the host switches
 transparently, journals `provider_error` with `recovered: true, switched_to:
 <id>`, notes it in the status bar, and continues; the step stays in_progress
-(§7 Q).
+(§7 T).
 
 5.2 Safety [done]
 Two-layer command classifier: shell-word heuristics + tree-sitter-bash AST
@@ -1233,7 +1395,7 @@ from the environment; if a non-bash shell is detected, a PowerShell/cmd
 heuristic layer runs alongside the bash AST (cmdlet aliases, `-Recurse -Force`,
 redirections to system paths, `iex`, pipe-to-`iex`). If Git Bash/WSL is
 available and named in the environment, sqwai prefers it so the bash classifier
-stays authoritative. The base detector still cannot be disabled (§7 M).
+stays authoritative. The base detector still cannot be disabled (§7 P).
 
 5.3 Modes [done]
 plan mode: read-only toolset (read ls glob grep git_* webfetch websearch recall graph_query resolve_ref memory_read plan note ask_user); the agent may
@@ -1255,10 +1417,10 @@ child chat), help (?), graph-view (Ctrl+G), undo (Ctrl+U), todo panel
 Skills.
 Todo panel (Ctrl+T): derived view — current step highlighted, counts; selecting
 a step shows its combined diff (all `file_diff` of that step from its first
-checkpoint to the last — §7 Y) and offers `/undo step N` (reverts one step if
+checkpoint to the last — §7 AB) and offers `/undo step N` (reverts one step if
 its files do not overlap later steps; otherwise refuses with an explanation).
 
-Commands: /new /sessions /fork /resume /undo /compact /diary /plan [history| complete|abandon|limit|waive] /goal /constraints /mode /verify [--full] /graph-rebuild /why /export /bench /settings /providers /models /themes /skills /skill /mcp /lsp /init /debug /exit. README must list the same set; a test diffs the two.
+Commands: /new /sessions /fork /resume /undo /compact /diary /plan [history| complete|abandon|limit|waive] /plan from /run /brief /review /goal /constraints /mode /verify [--full] /graph-rebuild /why /export /bench /settings /providers /models /themes /skills /skill /mcp /lsp /init /debug /exit. README must list the same set; a test diffs the two.
 
 5.5 MCP [done]
 rmcp client; stdio and streamable HTTP; tool discovery at session start
@@ -1296,6 +1458,13 @@ nudge_after = 8
 require_clean_diagnostics = false
 scope_guard = "warn"          # warn | block — file_diff outside step.refs
 plan_first = "soft"           # soft | off — Act first-mutate w/o plan → plan_required
+verify_impact_first = true
+step_max_calls = 0             # 0 = no per-step override
+
+[issue]
+provider = "auto"              # auto | github | gitlab
+token_env = ""
+use_comments = true
 
 [journal]
 enabled = true
@@ -1322,6 +1491,8 @@ summary = "off"            # off | short
 [graph]
 enabled = true
 max_depth = 3
+impact_depth = 3
+impact_max_tests = 200
 context_tokens = 1200
 reindex_timeout_ms = 2000
 max_file_size = 2097152
@@ -1354,6 +1525,16 @@ entropy_threshold = 4.0
 
 [lsp]
 diag_timeout_ms = 1500
+
+[unattended]
+budget_tokens = 2_000_000
+budget_minutes = 480
+max_compactions = 12
+max_consecutive_failures = 5
+allow_commit = false
+branch = "sqwai/<plan-id>"
+allowed_hosts = []
+notify = ""
 
 5.10 Stack
 Rust 2024, tokio (full), ratatui + crossterm (TUI), reqwest +
@@ -1409,24 +1590,28 @@ I5	Memory adapter; recall/graph_query exposed; context block		I4, F4
 J	Python adapter; LSP diagnostics → journal; graph-view list MVP; checkpoint before/after bash		I5, C
 K	Canvas graph-view, watcher, LSP Level 4, blast radius, path view	later	J
 L	Browser: CDP driver, tree pipeline, tools, safety, trust, acceptance runner, artifacts	last	K, F3, H0
-M	Windows/PowerShell shell-aware safety layer (§5.2 modify)	done	§5.2
-N	Single-instance lock + read-only fallback for plan/journal/memory/graph	done	F1
-O	Untrusted-input handling (trust:low, banner, confirm gates) + prompt rule	next (prompt now)	F2
-P	Cancel mid-tool (Esc): cancelled result, post-checkpoint, in_progress	next	F2
-Q	Provider fallback chain ([models.x].fallback)	any	§5.1
-R	Assumption notes: open tracking, finish warning, resolve	next	F3
-S	Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md)	next	F3
-T	Plan-first gate (Act first-mutate w/o plan → plan_required)	F2–F3	F3
-U	Staged compaction + files-read anchor + USER.md split/load	F5–F6	F1, F5
-V	Claim lint (post-generation verify against journal/resolve_ref)	after F2+I4	I4
-W	Scope guard (step.refs vs file_diff)	after I4	I4
-X	Lessons tied to files (note kind + context-block rule)	after I4	I5
-Y	/why provenance, step diff + /undo step, /export, /brief	J	J
-Z	bench command (user-facing wrapper over §8.2 regression harness)	after G	G
-AA	Bash isolation/sandbox (container/bwrap/WSL)	open question	—
+M	Test impact: `test` nodes in Rust/Python adapters, reverse traversal, command synthesis, runner integration	planned	I5, acceptance runners
+N	Plan from issue: fetch, extract, resolve, review UI, drafts	planned	I4, F1, secrets/trust
+O	Unattended mode: policy layer, stop conditions, `brief`, `/review`, pending memory	last	F6, H0, M, 1.3 lock, 1.9 fallback
+P	Windows/PowerShell shell-aware safety layer (§5.2 modify)	done	§5.2
+Q	Single-instance lock + read-only fallback for plan/journal/memory/graph	done	F1
+R	Untrusted-input handling (trust:low, banner, confirm gates) + prompt rule	next (prompt now)	F2
+S	Cancel mid-tool (Esc): cancelled result, post-checkpoint, in_progress	next	F2
+T	Provider fallback chain ([models.x].fallback)	any	§5.1
+U	Assumption notes: open tracking, finish warning, resolve	next	F3
+V	Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md)	next	F3
+W	Plan-first gate (Act first-mutate w/o plan → plan_required)	F2–F3	F3
+X	Staged compaction + files-read anchor + USER.md split/load	F5–F6	F1, F5
+Y	Claim lint (post-generation verify against journal/resolve_ref)	after F2+I4	I4
+Z	Scope guard (step.refs vs file_diff)	after I4	I4
+AA	Lessons tied to files (note kind + context-block rule)	after I4	I5
+AB	/why provenance, step diff + /undo step, /export, /brief	J	J
+AC	bench command (user-facing wrapper over §8.2 regression harness)	after G	G
+AD	Bash isolation/sandbox (container/bwrap/WSL)	open question	—
+Order among M, N, O: M → N → O. Unattended is last because it is only as safe as everything under it, and `brief` is only as useful as the journal is complete.
 Rules: no agent-facing graph feature before I3; no reflector before F2;
 todowrite removed in the same change that ships plan. F1 is complete except
-its explicitly deferred evidence/refs rules, which belong to F3/I4. Items L–AA are the
+its explicitly deferred evidence/refs rules, which belong to F3/I4. Items L–AD are the
 external-risk + enhancement pass (§1.x/§2.x); §3 is the explicit exclusion list.
 
 Prerequisite for item L: spend two days using Playwright MCP through §5.5 on
@@ -1436,6 +1621,8 @@ real tasks to learn which accessibility-tree format models read well.
 8.1 Core DoD
 A plan's goal cannot be changed by any model action (test: fuzz plan ops).
 finish without host evidence is impossible (test per step kind).
+Impact selection tests match the graph contract; `complete` always runs the
+full suite after any impacted subset.
 After 3 forced compactions in a 150+ tool-call task, the anchor is byte-equal
 in goal/constraints to the original and the model's restated goal matches
 (§8.2).
@@ -1486,13 +1673,18 @@ Whether memory/ should default to committed for teams; current default
 ignored.
 Whether the executor should see expects for run checks to choose
 arguments — currently no; revisit if not_observable rates are high.
-Bash isolation (§2.10 / §7 AA): container / bwrap / WSL sandbox with the project
+Bash isolation (§2.10 / §7 AD): container / bwrap / WSL sandbox with the project
 mounted read-write — the only thing that turns the safety classifier from a
 "seatbelt" into a "guarantee". Deferred to a later phase; track as open question,
 not in the queue.
 Shell-awareness coverage (§5.2 M): how far the PowerShell/cmd heuristic must go
 before falling back to forcing Git Bash/WSL; measure on real Windows command
 corpora before declaring done.
+Should unattended mode stop at the first blocked step, or continue with
+non-overlapping pending steps? Current policy: continue.
+Should impact analysis gate `finish` of `change` steps when impacted tests are
+red? Current policy: no — the verify step handles it.
+Should issue extraction use a cheaper model or the main model?
 Name inference for unlabeled controls: should `title`, `svg <title>`, or nearby
 text be allowed with an `(inferred)` marker, or should the browser refuse the
 control?
@@ -1516,6 +1708,9 @@ Plan bound to session id	breaks resume/fork and multi-session tasks; plans have 
 Project-specific dev rules in the system prompt	leaked sqwai's own AGENTS.md into every user's session
 Screenshot-first control	expensive and imprecise, requires vision; the accessibility tree is exact and model-agnostic
 Playwright MCP as the permanent browser driver	no control over refs, diffs, token budget, or safety; retain it only as a fallback through §5.5
+Unattended `ask_user` answered by a model (auto-approve)	reintroduces trust in the model exactly where the human is absent
+Test impact replacing the full suite at `complete`	dynamic dispatch and I/O tests make impact a lower bound, not an equivalence
+Auto-creating a plan from an issue without review	the goal would be owned by whoever wrote the issue, including strangers
 
 11. Explicitly excluded (do not add)
 To protect execution integrity and determinism, the following are out of scope by
