@@ -184,6 +184,8 @@ pub struct AgentInput {
     pub messages: Vec<Message>,
     /// project root where tool paths are jailed
     pub root: PathBuf,
+    /// session id used for the host-owned journal file
+    pub session_id: String,
     /// hard-blocked command patterns from [safety].blocked_patterns
     pub blocked_patterns: Vec<String>,
     /// PLAN mode: read-only tools only, mutations are refused (design §5)
