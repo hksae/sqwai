@@ -2,6 +2,7 @@
 
 use crate::agent::diary::screen;
 use anyhow::{Context, Result, bail};
+use chrono::Utc;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -74,7 +75,7 @@ pub fn apply_proposal(
     }
     let old = fs::read_to_string(&path).unwrap_or_else(|_| template(scope));
     let mut content = ensure_sections(&old);
-    let provenance = format!("<!-- session {session_id} -->");
+    let provenance = format!("<!-- session {session_id} {} -->", Utc::now().date_naive());
     let replacement = format!("{screened} {provenance}");
     if let Some(target) = replaces.map(str::trim).filter(|target| !target.is_empty()) {
         if !content.contains(target) {
@@ -180,7 +181,7 @@ mod tests {
         .unwrap();
         let text = fs::read_to_string(path).unwrap();
         assert!(text.contains("## Conventions"));
-        assert!(text.contains("Use cargo fmt <!-- session session-1 -->"));
+        assert!(text.contains("Use cargo fmt <!-- session session-1 "));
         fs::remove_dir_all(dir).ok();
     }
 
