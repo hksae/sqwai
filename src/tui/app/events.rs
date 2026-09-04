@@ -340,6 +340,13 @@ impl App {
                     _ => {}
                 },
                 Event::Paste(p) => {
+                    // Ctrl+V is handled above through the clipboard API. Some
+                    // Windows terminals additionally emit the same bracketed
+                    // paste event, sometimes split into several chunks; consume
+                    // that duplicate without ever routing it through key input.
+                    if consume_duplicate_paste(&mut self.pasted_clipboard, &p) {
+                        continue;
+                    }
                     if !self.menu_stack.is_empty() {
                         let p = p.replace(['\r', '\n'], " ");
                         if let Some(FormField::Text { ta, .. }) =
@@ -414,12 +421,14 @@ impl App {
         };
         if !self.menu_stack.is_empty() {
             // form fields stay single-line
+            let text = txt.replace(['\r', '\n'], " ");
             if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus) {
-                ta.insert_str(txt.replace(['\r', '\n'], " "));
+                ta.insert_str(&text);
                 self.dirty = true;
             }
             return;
         }
+        self.pasted_clipboard = Some(txt.clone());
         self.jump_to_bottom_on_typing();
         for (i, line) in txt.split('\n').enumerate() {
             if i > 0 {
@@ -430,6 +439,23 @@ impl App {
         }
         self.dirty = true;
     }
+}
+
+pub(super) fn consume_duplicate_paste(slot: &mut Option<String>, chunk: &str) -> bool {
+    let Some(expected) = slot.as_deref() else {
+        return false;
+    };
+    if expected == chunk {
+        *slot = None;
+        return true;
+    }
+    if expected.starts_with(chunk) {
+        let remainder = expected[chunk.len()..].to_string();
+        *slot = Some(remainder);
+        return true;
+    }
+    *slot = None;
+    false
 }
 
 /// ctrl combos supported identically in the message input and every form field

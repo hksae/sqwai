@@ -6,6 +6,7 @@ use super::*;
 mod tests {
     use super::*;
     use crate::config::{Config, ModelConfig, ProviderConfig, WireFormat};
+    use crate::tui::app::events::consume_duplicate_paste;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::collections::BTreeMap;
@@ -907,6 +908,22 @@ mod tests {
         .unwrap();
         app.poll_input(&rx).unwrap();
         assert!(!app.streaming);
+    }
+
+    #[test]
+    fn duplicate_bracketed_paste_chunks_are_consumed_without_splitting_input() {
+        let mut expected = Some("front of a very long prompt".to_string());
+        assert!(consume_duplicate_paste(&mut expected, "front of "));
+        assert!(consume_duplicate_paste(&mut expected, "a very long prompt"));
+        assert!(expected.is_none());
+        assert!(!consume_duplicate_paste(&mut expected, "unrelated text"));
+    }
+
+    #[test]
+    fn unrelated_paste_event_is_not_consumed() {
+        let mut expected = Some("expected prompt".to_string());
+        assert!(!consume_duplicate_paste(&mut expected, "different prompt"));
+        assert!(expected.is_none());
     }
 
     #[test]

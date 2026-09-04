@@ -192,6 +192,9 @@ pub struct App {
     /// Windows terminals may enqueue the key release/accept sequence after
     /// bracketed/clipboard paste; it must not submit the newly pasted prompt.
     paste_enter_guard: bool,
+    /// Clipboard text inserted for Ctrl+V, used to discard a duplicate
+    /// bracketed-paste event emitted by some Windows terminals.
+    pasted_clipboard: Option<String>,
 
     /// Deadline for the single transient busy notice.
     busy_until: Option<Instant>,
@@ -364,6 +367,7 @@ impl App {
             dragging: false,
             sel: None,
             paste_enter_guard: false,
+            pasted_clipboard: None,
             busy_until: None,
         };
         if !startup {
@@ -1211,9 +1215,16 @@ impl App {
                     Ok(ev) => ev,
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return,
                     Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        // agent died without a final Completed event
+                        // Agent died without a final Completed event. If Esc
+                        // already requested an abort, this is not a successful
+                        // turn and must not read the previous session answer.
+                        let result = if self.aborted {
+                            Err("aborted".to_string())
+                        } else {
+                            Ok(())
+                        };
                         self.agent = None;
-                        self.finish_turn(Ok(()));
+                        self.finish_turn(result);
                         return;
                     }
                 },
@@ -1585,6 +1596,14 @@ impl App {
                     self.dirty = true;
                 }
                 AgentEvent::Completed(res) => {
+                    // Esc aborts the request, but the provider task may still
+                    // race to deliver a buffered successful completion. Once
+                    // abort was requested, that completion is stale and must
+                    // not replace the visible turn with the previous answer.
+                    if self.aborted {
+                        self.finish_turn(Err("aborted".into()));
+                        return;
+                    }
                     match res {
                         Ok(outcome) => self.finish_turn_ok(outcome),
                         Err(e) => self.finish_turn(Err(e)),
@@ -1711,6 +1730,7 @@ impl App {
             }
         }
         self.streaming = false;
+        self.aborted = false;
         self.agent = None;
         self.retry_line = None;
         self.session.save().ok();
