@@ -110,18 +110,33 @@ pub fn host_block(root: &Path, session_id: &str, trigger: &str) -> Result<String
         .join(".sqwai")
         .join("journal")
         .join(format!("{session_id}.jsonl"));
+    let boundary = last_diary_seq(root, session_id);
     let records = if path.exists() {
-        let records = read_session_records(&path)?;
-        let start = records
-            .iter()
-            .rposition(|record| record.kind == "diary")
-            .map(|index| index + 1)
-            .unwrap_or(0);
-        records[start..].to_vec()
+        read_session_records(&path)?
+            .into_iter()
+            .filter(|record| record.seq > boundary)
+            .collect()
     } else {
         Vec::new()
     };
     render_host_block(&records, trigger)
+}
+
+fn last_diary_seq(root: &Path, session_id: &str) -> u64 {
+    let path = root
+        .join(".sqwai")
+        .join("journal")
+        .join(format!("{session_id}.jsonl"));
+    read_session_records(&path)
+        .ok()
+        .and_then(|records| {
+            records
+                .into_iter()
+                .rev()
+                .find(|record| record.kind == "diary")
+                .map(|record| record.seq)
+        })
+        .unwrap_or(0)
 }
 
 fn read_session_records(path: &Path) -> Result<Vec<Record>> {
