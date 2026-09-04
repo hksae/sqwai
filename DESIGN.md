@@ -1284,7 +1284,7 @@ B	Tool core, guard, safety, undo, TUI	done	A
 C	MCP, skills, LSP foundation, settings hub	done	B
 D	git tools, patch, web tools, subagents	done	B
 E	Graph prototype (Cozo, generic + markdown)	done → to be ported	—
-F1	plan tool + validator (all rules except evidence/refs) + /plan /goal /constraints /mode; remove todowrite; prompt update	next	B
+F1	plan tool + validator (all rules except evidence/refs) + /plan /goal /constraints /mode; remove todowrite; prompt update	done	B
 F2	Journal writer at dispatch; all kinds except `diagnostics	reflect	graph`
 F3	Evidence rule in `finish	verify	complete; nudges; note`
 F4	Diary: host block, triggers, writer call, fallback; memory_read; secrets screening	next	F2
@@ -1317,7 +1317,8 @@ X	/why provenance, step diff + /undo step, /export, /brief	J	J
 Y	bench command (user-facing wrapper over §8.2 regression harness)	after G	G
 Z	Bash isolation/sandbox (container/bwrap/WSL)	open question	—
 Rules: no agent-facing graph feature before I3; no reflector before F2;
-todowrite removed in the same change that ships plan. Items L–Z are the
+todowrite removed in the same change that ships plan. F1 is complete except
+its explicitly deferred evidence/refs rules, which belong to F3/I4. Items L–Z are the
 external-risk + enhancement pass (§1.x/§2.x); §3 is the explicit exclusion list.
 
 8. Definition of done and metrics
