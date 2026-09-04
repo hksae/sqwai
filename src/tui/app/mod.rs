@@ -11,9 +11,9 @@ use crate::agent::loop_task::{
     AgentEvent, AgentHandle, AgentOutcome, ApprovalDecision, ControlMsg, spawn_agent,
 };
 use crate::config::{Config, ModelConfig, ThinkingLevel};
+use crate::plan;
 use crate::providers::{self, Message as PMessage, Role, SharedProvider};
 use crate::session::Session;
-use crate::plan;
 use crate::tui::markdown::Highlighter;
 use crate::tui::theme::Theme;
 
@@ -868,16 +868,21 @@ impl App {
                         .join("\n")
                 }
             }
-            Some("limit") => "plan limit is configured through the plan settings; runtime override pending".to_string(),
+            Some("limit") => {
+                "plan limit is configured through the plan settings; runtime override pending"
+                    .to_string()
+            }
             Some("complete") => match plan::open_active(&root) {
-                Ok(Some(mut active)) => match plan::apply(&mut active, plan::Op::Complete, &plan::Limits::default()) {
-                    Ok(plan::Applied::Completed) => match plan::store(&root, &active) {
-                        Ok(()) => "plan completed".to_string(),
-                        Err(e) => format!("plan write failed: {e:#}"),
-                    },
-                    Ok(_) => "plan complete did not change its status".to_string(),
-                    Err(e) => format!("plan complete rejected [{}]: {}", e.code, e.reason),
-                },
+                Ok(Some(mut active)) => {
+                    match plan::apply(&mut active, plan::Op::Complete, &plan::Limits::default()) {
+                        Ok(plan::Applied::Completed) => match plan::store(&root, &active) {
+                            Ok(()) => "plan completed".to_string(),
+                            Err(e) => format!("plan write failed: {e:#}"),
+                        },
+                        Ok(_) => "plan complete did not change its status".to_string(),
+                        Err(e) => format!("plan complete rejected [{}]: {}", e.code, e.reason),
+                    }
+                }
                 Ok(None) => "no active plan".to_string(),
                 Err(e) => format!("plan load failed: {e:#}"),
             },
@@ -918,14 +923,22 @@ impl App {
 
     fn goal_command(&mut self, rest: &str) {
         let root = std::env::current_dir().unwrap_or_default();
-        let text = rest.split_once(' ').map(|(_, value)| value.trim()).unwrap_or_default();
+        let text = rest
+            .split_once(' ')
+            .map(|(_, value)| value.trim())
+            .unwrap_or_default();
         if text.is_empty() {
             self.status("usage: /goal <text>", StatusKind::Warn);
             return;
         }
         match plan::open_active(&root) {
             Ok(Some(mut active)) => {
-                plan::set_goal(&mut active, text.to_string(), "user", Some("user: /goal".to_string()));
+                plan::set_goal(
+                    &mut active,
+                    text.to_string(),
+                    "user",
+                    Some("user: /goal".to_string()),
+                );
                 match plan::store(&root, &active) {
                     Ok(()) => self.status("goal updated; pending steps are stale", StatusKind::Ok),
                     Err(e) => self.status(&format!("goal update failed: {e:#}"), StatusKind::Err),
@@ -956,7 +969,10 @@ impl App {
                 active.revision += 1;
                 match plan::store(&root, &active) {
                     Ok(()) => self.status("constraints updated", StatusKind::Ok),
-                    Err(e) => self.status(&format!("constraints update failed: {e:#}"), StatusKind::Err),
+                    Err(e) => self.status(
+                        &format!("constraints update failed: {e:#}"),
+                        StatusKind::Err,
+                    ),
                 }
             }
             Ok(None) => self.status("no active plan", StatusKind::Warn),
@@ -966,8 +982,14 @@ impl App {
 
     fn mode_command(&mut self, rest: &str) {
         match rest.split_whitespace().nth(1) {
-            Some("plan") => { self.mode = Mode::Plan; self.status("mode: PLAN", StatusKind::Info); }
-            Some("act") => { self.mode = Mode::Act; self.status("mode: ACT", StatusKind::Info); }
+            Some("plan") => {
+                self.mode = Mode::Plan;
+                self.status("mode: PLAN", StatusKind::Info);
+            }
+            Some("act") => {
+                self.mode = Mode::Act;
+                self.status("mode: ACT", StatusKind::Info);
+            }
             _ => self.status("usage: /mode plan|act", StatusKind::Warn),
         }
     }

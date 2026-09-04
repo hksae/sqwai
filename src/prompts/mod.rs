@@ -35,7 +35,10 @@ pub fn runtime_context() -> String {
 /// rewrites it, so it belongs to the cacheable prefix.
 pub fn plan_block(root: &std::path::Path) -> Option<String> {
     let plan = crate::plan::open_active(root).ok().flatten()?;
-    Some(format!("<durable_plan>\n{}\n</durable_plan>", crate::plan::render(&plan)))
+    Some(format!(
+        "<durable_plan>\n{}\n</durable_plan>",
+        crate::plan::render(&plan)
+    ))
 }
 
 fn builtin_prompt() -> String {

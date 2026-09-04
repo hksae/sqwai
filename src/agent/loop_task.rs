@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
 use sha2::Digest;
+use tokio::sync::mpsc;
 
 use crate::config::ThinkingLevel;
 use crate::providers::{
@@ -730,11 +730,14 @@ async fn run_agent(
             let journal_mark = ctx.journal.len();
             let tool_started = Instant::now();
             if let Some(writer) = journal.as_mut() {
-                let _ = writer.append("tool_call", serde_json::json!({
-                    "tool": call.name,
-                    "call_id": call.id,
-                    "args_digest": tools::call_summary(&call.name, &call.args),
-                }));
+                let _ = writer.append(
+                    "tool_call",
+                    serde_json::json!({
+                        "tool": call.name,
+                        "call_id": call.id,
+                        "args_digest": tools::call_summary(&call.name, &call.args),
+                    }),
+                );
             }
             // live row first: the TUI shows the tool name and its arguments
             // with a spinner while it runs (design §10)
@@ -804,7 +807,9 @@ async fn run_agent(
                                 plan_todos = saved
                                     .steps
                                     .iter()
-                                    .map(|step| format!("[{}] {}", step.status.as_str(), step.title))
+                                    .map(|step| {
+                                        format!("[{}] {}", step.status.as_str(), step.title)
+                                    })
                                     .collect();
                                 let _ = tx.send(AgentEvent::Todos(plan_todos.clone())).await;
                             }
@@ -884,12 +889,15 @@ async fn run_agent(
             if ctx.journal.len() > journal_mark {
                 if let Some(writer) = journal.as_mut() {
                     for (sha, label) in ctx.journal[journal_mark..].iter() {
-                        let _ = writer.append("checkpoint", serde_json::json!({
-                            "layer": "legacy",
-                            "id": sha,
-                            "reason": "post_mutation",
-                            "label": label,
-                        }));
+                        let _ = writer.append(
+                            "checkpoint",
+                            serde_json::json!({
+                                "layer": "legacy",
+                                "id": sha,
+                                "reason": "post_mutation",
+                                "label": label,
+                            }),
+                        );
                     }
                 }
                 if let Some((_, label)) = ctx.journal.last() {
@@ -911,18 +919,24 @@ async fn run_agent(
                 }));
                 if outcome.ok && outcome.diff.is_some() {
                     if let Some(path) = call.args.get("file_path").and_then(|v| v.as_str()) {
-                        let _ = writer.append("file_diff", serde_json::json!({
-                            "path": path,
-                            "mode": call.name,
-                            "summary": outcome.output.chars().take(200).collect::<String>(),
-                        }));
+                        let _ = writer.append(
+                            "file_diff",
+                            serde_json::json!({
+                                "path": path,
+                                "mode": call.name,
+                                "summary": outcome.output.chars().take(200).collect::<String>(),
+                            }),
+                        );
                     }
                 }
                 if call.name == "plan" {
-                    let _ = writer.append("plan", serde_json::json!({
-                        "op": call.args.get("op").and_then(|v| v.as_str()).unwrap_or("unknown"),
-                        "ok": outcome.ok,
-                    }));
+                    let _ = writer.append(
+                        "plan",
+                        serde_json::json!({
+                            "op": call.args.get("op").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                            "ok": outcome.ok,
+                        }),
+                    );
                 }
             }
             messages.push(Message::tool_result(&call.id, outcome.output, !outcome.ok));

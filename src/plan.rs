@@ -550,9 +550,7 @@ pub fn apply(plan: &mut Plan, op: Op, limits: &Limits) -> Result<Applied, Reject
         ),
         Op::Show => {
             plan.rejections_in_a_row = 0;
-            Ok(Applied::Shown {
-                text: render(plan),
-            })
+            Ok(Applied::Shown { text: render(plan) })
         }
         Op::Start { id, confirm } => start(plan, &id, confirm),
         Op::Finish { id, summary } => finish(plan, &id, summary),
@@ -596,7 +594,8 @@ fn accept(plan: &mut Plan, message: impl Into<String>) -> Result<Applied, Reject
 /// Gate fields read without holding a borrow, so a rejection can still bump
 /// `rejections_in_a_row`.
 fn step_status(plan: &Plan, id: &str) -> Option<(StepStatus, bool)> {
-    plan.step(id).map(|s| (s.status, s.stale_goal == Some(true)))
+    plan.step(id)
+        .map(|s| (s.status, s.stale_goal == Some(true)))
 }
 
 fn unknown_step(plan: &mut Plan, id: &str) -> Result<Applied, Rejection> {
@@ -772,7 +771,7 @@ fn add(
                         "unknown_step",
                         format!("no step {after_id} to add after"),
                         "call plan show to see the current steps",
-                    )
+                    );
                 }
             }
         }
@@ -818,7 +817,7 @@ fn split(
                 "unknown_step",
                 format!("no step {id} to split"),
                 "call plan show to see the current steps",
-            )
+            );
         }
     };
     let resulting = plan.steps.len() - 1 + into.len();
@@ -826,7 +825,10 @@ fn split(
         return reject(
             plan,
             "too_many_steps",
-            format!("splitting would give {resulting} steps, over the limit of {max}", max = limits.max_steps),
+            format!(
+                "splitting would give {resulting} steps, over the limit of {max}",
+                max = limits.max_steps
+            ),
             "cancel or merge steps first, or /plan limit N",
         );
     }
@@ -861,11 +863,7 @@ fn split(
     accept(plan, format!("step {id} split into {}", ids.join(", ")))
 }
 
-fn verify(
-    plan: &mut Plan,
-    index: usize,
-    evidence: Vec<u64>,
-) -> Result<Applied, Rejection> {
+fn verify(plan: &mut Plan, index: usize, evidence: Vec<u64>) -> Result<Applied, Rejection> {
     if index >= plan.acceptance.len() {
         return reject(
             plan,
@@ -972,10 +970,7 @@ fn next_id(plan: &Plan) -> String {
 
 /// Apply a goal revision the user accepted (§2.1.6). Host-only.
 pub fn set_goal(plan: &mut Plan, text: String, source: &str, reason: Option<String>) {
-    let previous = std::mem::replace(
-        &mut plan.goal.text,
-        text.clone(),
-    );
+    let previous = std::mem::replace(&mut plan.goal.text, text.clone());
     plan.goal.history.push(GoalRevision {
         text: previous,
         source: plan.goal.source.clone(),
@@ -1014,7 +1009,11 @@ pub fn waive(plan: &mut Plan, index: usize, reason: &str) -> Result<(), Rejectio
 pub fn render(plan: &Plan) -> String {
     let c = plan.counts();
     let mut out = String::new();
-    out.push_str(&format!("plan {} · {}\n", plan.id, status_word(plan.status)));
+    out.push_str(&format!(
+        "plan {} · {}\n",
+        plan.id,
+        status_word(plan.status)
+    ));
     out.push_str(&format!("goal: {}\n", plan.goal.text));
     if !plan.constraints.is_empty() {
         out.push_str(&format!("constraints: {}\n", plan.constraints.join(" · ")));
@@ -1106,13 +1105,23 @@ mod tests {
     fn start_then_finish() {
         let mut plan = new_plan();
         assert!(matches!(
-            apply(&mut plan, Op::Start { id: "1".into(), confirm: None }, &Limits::default()),
+            apply(
+                &mut plan,
+                Op::Start {
+                    id: "1".into(),
+                    confirm: None
+                },
+                &Limits::default()
+            ),
             Ok(Applied::Updated { .. })
         ));
         assert!(matches!(
             apply(
                 &mut plan,
-                Op::Finish { id: "1".into(), summary: "model added".into() },
+                Op::Finish {
+                    id: "1".into(),
+                    summary: "model added".into()
+                },
                 &Limits::default()
             ),
             Ok(Applied::Updated { .. })
@@ -1210,15 +1219,17 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, "stale_goal");
-        assert!(apply(
-            &mut plan,
-            Op::Start {
-                id: "1".into(),
-                confirm: Some(true)
-            },
-            &Limits::default()
-        )
-        .is_ok());
+        assert!(
+            apply(
+                &mut plan,
+                Op::Start {
+                    id: "1".into(),
+                    confirm: Some(true)
+                },
+                &Limits::default()
+            )
+            .is_ok()
+        );
     }
 
     #[test]

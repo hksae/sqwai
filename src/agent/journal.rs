@@ -1,13 +1,13 @@
 //! Host-owned append-only session journal (§2.2).
 
 use anyhow::{Context, Result, bail};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use chrono::Utc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
@@ -90,8 +90,12 @@ impl Journal {
             fields,
         };
         let line = serde_json::to_string(&record).context("encoding journal record")?;
-        self.file.write_all(line.as_bytes()).context("writing journal")?;
-        self.file.write_all(b"\n").context("terminating journal record")?;
+        self.file
+            .write_all(line.as_bytes())
+            .context("writing journal")?;
+        self.file
+            .write_all(b"\n")
+            .context("terminating journal record")?;
         self.file.flush().context("flushing journal")?;
         self.next_seq = seq.saturating_add(1);
         Ok(seq)
@@ -121,7 +125,10 @@ fn last_seq(path: &Path) -> Result<u64> {
         }
         let record: Record = serde_json::from_str(&line).context("invalid journal record")?;
         if record.seq < last {
-            bail!("journal sequence is not monotonic: {} after {last}", record.seq);
+            bail!(
+                "journal sequence is not monotonic: {} after {last}",
+                record.seq
+            );
         }
         last = record.seq;
     }
@@ -159,7 +166,8 @@ fn repair_tail(path: &Path) -> Result<()> {
     if last_complete < len {
         file.seek(SeekFrom::Start(last_complete))
             .context("seeking journal repair")?;
-        file.set_len(last_complete).context("truncating journal tail")?;
+        file.set_len(last_complete)
+            .context("truncating journal tail")?;
         file.flush().context("flushing journal repair")?;
     }
     Ok(())
@@ -172,7 +180,10 @@ mod tests {
     fn root() -> PathBuf {
         std::env::temp_dir().join(format!(
             "sqwai-journal-{}",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ))
     }
 
@@ -181,10 +192,21 @@ mod tests {
         let root = root();
         let mut journal = Journal::open(&root, "session").unwrap();
         journal.set_attribution(Some("2".into()), Some("plan".into()), "main");
-        assert_eq!(journal.append("tool_call", json!({"tool": "read"})).unwrap(), 1);
-        assert_eq!(journal.append("tool_result", json!({"ok": true})).unwrap(), 2);
+        assert_eq!(
+            journal
+                .append("tool_call", json!({"tool": "read"}))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            journal.append("tool_result", json!({"ok": true})).unwrap(),
+            2
+        );
         let text = fs::read_to_string(journal.path()).unwrap();
-        let records: Vec<Record> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let records: Vec<Record> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].seq, 1);
         assert_eq!(records[1].kind, "tool_result");
@@ -201,7 +223,11 @@ mod tests {
         let mut journal = Journal::open(&root, "session").unwrap();
         assert_eq!(journal.next_seq(), 2);
         assert_eq!(journal.append("note", json!({"text": "next"})).unwrap(), 2);
-        let lines: Vec<_> = fs::read_to_string(journal.path()).unwrap().lines().map(str::to_string).collect();
+        let lines: Vec<_> = fs::read_to_string(journal.path())
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
         assert_eq!(lines.len(), 2);
         fs::remove_dir_all(root).ok();
     }

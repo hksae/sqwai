@@ -485,7 +485,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
                 | "multi_edit"
                 | "git_commit"
                 | "git_branch"
-                |             "patch"
+                | "patch"
                 | "bash"
                 | "plan"
         )
@@ -564,7 +564,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         Err(e) => {
             return Outcome::err(format!(
                 "plan op rejected: {e} — call plan show to see the current plan"
-            ))
+            ));
         }
     };
     let limits = plan::Limits::default();
@@ -601,7 +601,9 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             let mut active = match plan::open_active(&ctx.root) {
                 Ok(Some(p)) => p,
                 Ok(None) => {
-                    return Outcome::err("no active plan: create one with op=create first".to_string())
+                    return Outcome::err(
+                        "no active plan: create one with op=create first".to_string(),
+                    );
                 }
                 Err(e) => return Outcome::err(format!("plan store unreadable: {e:#}")),
             };
@@ -976,9 +978,16 @@ mod tests {
             &json!({"op": "create", "goal": "g", "steps": [{"title": "one"}]}),
         );
         // finishing a step that was never started
-        let bad = plan_op(&mut ctx, &json!({"op": "finish", "id": "1", "summary": "x"}));
+        let bad = plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "1", "summary": "x"}),
+        );
         assert!(!bad.ok);
-        assert!(bad.output.contains("step_not_in_progress"), "{}", bad.output);
+        assert!(
+            bad.output.contains("step_not_in_progress"),
+            "{}",
+            bad.output
+        );
         assert!(bad.output.contains("hint"), "{}", bad.output);
         // a second create is refused while one is active
         let second = plan_op(
