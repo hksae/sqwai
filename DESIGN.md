@@ -400,7 +400,7 @@ Reflector scope (§3.5).
 L0 fact block (§3.5.1).
 Graph memory adapter (§2.4.5): note records become memory nodes.
 Tooling: sqwai journal <session> [--step N] [--kind K] prints a table.
-2.3 Memory [planned]
+2.3 Memory [partial]
 Three files with distinct roles:
 
 File	Written by	Read by	Purpose
@@ -1287,7 +1287,7 @@ E	Graph prototype (Cozo, generic + markdown)	done → to be ported	—
 F1	plan tool + validator (all rules except evidence/refs) + /plan /goal /constraints /mode; remove todowrite; prompt update	done	B
 F2	Journal writer at dispatch; all kinds except `diagnostics`, `reflect`, `graph`	done	B
 F3	Evidence rule in `finish`, `verify`, `complete`; nudges; note	done	F1
-F4	Diary: host block, triggers, writer call, fallback; memory_read; secrets screening	next	F2
+F4	Diary: host block, triggers, writer call, fallback; memory_read; secrets screening	done	F2
 F5	MEMORY.md + memory_propose approval; session-start loading	next	F4
 F6	Compaction anchor; summary=off default; resume/fork per §3.4; undo→reopen	next	F1–F5
 F7	Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, optional zstd) + layer-2 shadow repo driven by the git CLI through `tokio::process`; restore via diff-tree; `/undo step N`	after F1	F1
