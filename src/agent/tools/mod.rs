@@ -970,7 +970,7 @@ mod tests {
         assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
         let finish = plan_op(
             &mut ctx,
-            &json!({"op": "finish", "id": "1", "summary": "schema added"}),
+            &json!({"op": "finish", "id": "1", "summary": "schema added", "evidence": [1]}),
         );
         assert!(finish.ok, "{}", finish.output);
 
