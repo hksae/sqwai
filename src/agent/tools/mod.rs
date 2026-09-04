@@ -340,7 +340,7 @@ long-running commands.",
         },
         ToolDef {
             name: "memory_propose",
-            kind: Kind::Mutating,
+            kind: Kind::ReadOnly,
             description: "Propose a durable memory fact. The user must approve it before the host writes MEMORY.md or USER.md.",
             parameters: json!({"type":"object","properties":{"section":{"type":"string","enum":["Project","Conventions","User","Agreements"]},"scope":{"type":"string","enum":["project","user"]},"text":{"type":"string"},"replaces":{"type":"string"}},"required":["section","text"]}),
         },

@@ -116,7 +116,6 @@ pub struct App {
 
     /// latest diagnostic count reported by the LSP manager
     lsp_diagnostics: usize,
-
     follow: bool,
     /// absolute top line of the viewport when not following (None-equivalent: follow == true)
     view_top: usize,
