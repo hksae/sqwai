@@ -339,6 +339,12 @@ long-running commands.",
             parameters: json!({"type":"object","properties":{"date":{"type":"string","description":"local diary date, YYYY-MM-DD"}},"required":["date"]}),
         },
         ToolDef {
+            name: "memory_propose",
+            kind: Kind::Mutating,
+            description: "Propose a durable memory fact. The user must approve it before the host writes MEMORY.md or USER.md.",
+            parameters: json!({"type":"object","properties":{"section":{"type":"string","enum":["Project","Conventions","User","Agreements"]},"scope":{"type":"string","enum":["project","user"]},"text":{"type":"string"},"replaces":{"type":"string"}},"required":["section","text"]}),
+        },
+        ToolDef {
             name: "plan",
             kind: Kind::Mutating,
             description: "Work the structured plan, one operation per call. Ops: create, start, \
@@ -476,6 +482,7 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             .map(|tasks| format!("{} tasks", tasks.len()))
             .unwrap_or_else(|| s("task")),
         "memory_read" => s("date"),
+        "memory_propose" => format!("{}: {}", s("scope"), s("text")),
         "ask_user" => s("question"),
         "plan" => format!("plan {}", s("op")),
         _ => String::new(),
@@ -590,6 +597,25 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             Ok(text) => Outcome::ok(text),
             Err(message) => Outcome::err(message),
         },
+        "memory_propose" => {
+            let text = args["text"].as_str().unwrap_or_default().trim();
+            let section = args["section"].as_str().unwrap_or("Project");
+            let scope = args["scope"].as_str().unwrap_or("project");
+            match crate::agent::memory::Scope::parse(scope) {
+                Ok(scope) if !text.is_empty() => Outcome::ok(
+                    serde_json::json!({
+                        "proposal": "memory_propose",
+                        "scope": scope.label(),
+                        "section": section,
+                        "text": crate::agent::diary::screen(text).text,
+                        "replaces": args["replaces"].as_str(),
+                    })
+                    .to_string(),
+                ),
+                Ok(_) => Outcome::err("memory proposal text must not be empty"),
+                Err(error) => Outcome::err(error),
+            }
+        }
         "note" => {
             let note = args["note"].as_str().unwrap_or_default().trim();
             let kind = args["kind"].as_str().unwrap_or_default().trim();

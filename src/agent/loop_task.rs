@@ -211,6 +211,8 @@ pub struct AgentInput {
     pub compact_only: bool,
     /// diary writer limits copied from configuration
     pub diary: crate::config::DiaryConfig,
+    /// memory proposal limits copied from configuration
+    pub memory: crate::config::MemoryConfig,
     /// nesting guard for delegated subagents; the first generation may create
     /// children, but children cannot recursively create more children.
     pub subagent_depth: u8,
@@ -389,6 +391,7 @@ async fn run_subagent(
         lsp,
         compact_only: false,
         diary: crate::config::DiaryConfig::default(),
+        memory: crate::config::MemoryConfig::default(),
         subagent_depth: 1,
     });
     let mut child = child;
@@ -528,6 +531,7 @@ async fn run_agent(
         mut summary,
         compact_only,
         diary,
+        memory,
         mcp,
         lsp,
         subagent_depth,
@@ -668,7 +672,7 @@ async fn run_agent(
             }));
         }
     }
-    let mut todos: Vec<String> = Vec::new();
+    let todos: Vec<String> = Vec::new();
     let mut plan_todos: Vec<String> = plan::open_active(&root)
         .ok()
         .flatten()
@@ -681,6 +685,7 @@ async fn run_agent(
         })
         .unwrap_or_default();
     let mut always_allow: Vec<String> = Vec::new();
+    let mut memory_proposals_this_turn = 0u8;
     let mut next_id: u64 = 0;
     // prompt size of the last request, as reported by the provider
     let mut prompt_size: u64 = 0;
@@ -880,6 +885,67 @@ async fn run_agent(
                         .await
                     }
                     "subagent" => tools::Outcome::err("nested subagents are not allowed"),
+                    "memory_propose" => {
+                        memory_proposals_this_turn = memory_proposals_this_turn.saturating_add(1);
+                        if memory_proposals_this_turn > memory.max_proposals_per_turn {
+                            tools::Outcome::err("memory proposal limit reached for this turn")
+                        } else {
+                            let proposal = tools::execute(&mut ctx, "memory_propose", &call.args);
+                            if !proposal.ok {
+                                proposal
+                            } else {
+                                let prompt = format!(
+                                    "Approve this durable memory proposal?\n{}\nChoose: accept, edit, or reject.",
+                                    proposal.output
+                                );
+                                let question = ToolCallReq {
+                                    id: call.id.clone(),
+                                    name: "ask_user".into(),
+                                    args: serde_json::json!({
+                                        "question": prompt,
+                                        "options": [
+                                            {"label": "accept", "description": "write the proposal"},
+                                            {"label": "edit", "description": "provide replacement text"},
+                                            {"label": "reject", "description": "do not write it"}
+                                        ],
+                                        "multiple": false,
+                                        "allow_free": true
+                                    }),
+                                };
+                                let answer = ask_user(&question, &tx, &mut ctl, &mut next_id).await;
+                                let answer_text = answer.output.trim().to_ascii_lowercase();
+                                if answer.ok && answer_text == "accept" {
+                                    let scope = crate::agent::memory::Scope::parse(
+                                        call.args["scope"].as_str().unwrap_or("project"),
+                                    );
+                                    match scope.and_then(|scope| {
+                                        crate::agent::memory::apply_proposal(
+                                            &root,
+                                            scope,
+                                            call.args["section"].as_str().unwrap_or("Project"),
+                                            call.args["text"].as_str().unwrap_or_default(),
+                                            call.args["replaces"].as_str(),
+                                            &session_id,
+                                            memory.max_tokens,
+                                        )
+                                        .map(|path| format!("memory written: {}", path.display()))
+                                        .map_err(|error| error.to_string())
+                                    }) {
+                                        Ok(output) => tools::Outcome::ok(output),
+                                        Err(error) => tools::Outcome::err(error),
+                                    }
+                                } else if answer.ok && answer_text == "reject" {
+                                    tools::Outcome::ok("memory proposal rejected")
+                                } else if answer.ok && answer_text == "edit" {
+                                    tools::Outcome::err(
+                                        "memory proposal edit requires a follow-up proposal",
+                                    )
+                                } else {
+                                    tools::Outcome::err("memory proposal was not accepted")
+                                }
+                            }
+                        }
+                    }
                     "plan" => {
                         let mut args = call.args.clone();
                         args["context_limit"] = serde_json::json!(context_limit);
