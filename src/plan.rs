@@ -264,6 +264,19 @@ fn now() -> String {
 }
 
 /// Atomic write: temp file + rename (§2.1.2).
+/// Copy a plan for a forked session while preserving step state and resetting
+/// the mutable revision counter. The original plan is left untouched.
+pub fn fork(root: &Path, source: &Plan, session_id: &str) -> Result<Plan> {
+    let mut copy = source.clone();
+    copy.id = new_id();
+    copy.created = now();
+    copy.forked_from = Some(source.id.clone());
+    copy.sessions = vec![session_id.to_string()];
+    copy.revision = 0;
+    store(root, &copy)?;
+    Ok(copy)
+}
+
 pub fn store(root: &Path, plan: &Plan) -> Result<()> {
     let dir = plans_dir(root);
     std::fs::create_dir_all(&dir).context("creating plans directory")?;

@@ -46,6 +46,9 @@ pub struct Session {
     /// set when this session was created by /fork
     #[serde(default)]
     pub forked_from_id: Option<String>,
+    /// plan copied for this fork, if the parent had an active plan
+    #[serde(default)]
+    pub plan_id: Option<String>,
     /// title snapshot of the parent, survives parent deletion
     #[serde(default)]
     pub forked_from_title: Option<String>,
@@ -78,6 +81,7 @@ impl Session {
             last_message_at: None,
             pinned: false,
             forked_from_id: None,
+            plan_id: None,
             forked_from_title: None,
             last_response_id: None,
             last_response_model: None,
@@ -105,6 +109,7 @@ impl Session {
         f.summary = self.summary.clone();
         f.cache_confirmed = self.cache_confirmed;
         f.forked_from_id = Some(self.id.to_string());
+        f.plan_id = self.plan_id.clone();
         f.forked_from_title = Some(self.title.clone());
         // a continuation reference belongs to the parent conversation
         f.last_response_id = None;
