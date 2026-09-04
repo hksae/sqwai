@@ -461,10 +461,6 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             .as_array()
             .map(|tasks| format!("{} tasks", tasks.len()))
             .unwrap_or_else(|| s("task")),
-        "todowrite" => format!(
-            "{} items",
-            args["todos"].as_array().map(|a| a.len()).unwrap_or(0)
-        ),
         "ask_user" => s("question"),
         "plan" => format!("plan {}", s("op")),
         _ => String::new(),
@@ -573,10 +569,6 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         ),
         "plan" => plan_op(ctx, args),
         // direct dispatch never answers "unknown tool"
-        "todowrite" => Outcome::ok(format!(
-            "to-do list updated ({} items)",
-            args["todos"].as_array().map(|a| a.len()).unwrap_or(0)
-        )),
         "ask_user" => Outcome::err("ask_user is served by the agent loop, not by the dispatcher"),
         other => Outcome::err(format!("unknown tool '{other}'")),
     }
