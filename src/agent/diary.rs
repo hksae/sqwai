@@ -1,8 +1,12 @@
 //! Host-owned project diary and secret screening (DESIGN §2.3).
 
-use crate::agent::journal::{Journal, Record};
+use crate::agent::journal::Record;
+use crate::providers::{
+    ChatRequest, ContextTransport, Message, SharedProvider, StreamEvent, SystemPart,
+};
 use anyhow::{Context, Result};
 use chrono::{Local, NaiveDate};
+use futures::StreamExt;
 use regex::Regex;
 use serde_json::Value;
 use std::fs::{self, OpenOptions};
@@ -10,6 +14,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 const MAX_DIARY_BYTES: usize = 200_000;
+const DEFAULT_DIARY_TOKEN_BUDGET: u32 = 1_500;
+const DEFAULT_DIARY_TIMEOUT_SECS: u64 = 30;
+
+pub const WRITER_SYSTEM: &str = "You write a concise coding-agent diary entry. Return only Markdown using these headings when needed: ### Done, ### Decisions, ### Rejected, ### Open, ### Corrections. Copy the host block verbatim and do not invent or restate unverified numbers. Never include secrets.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Screened {
@@ -103,7 +111,13 @@ pub fn host_block(root: &Path, session_id: &str, trigger: &str) -> Result<String
         .join("journal")
         .join(format!("{session_id}.jsonl"));
     let records = if path.exists() {
-        read_session_records(&path)?
+        let records = read_session_records(&path)?;
+        let start = records
+            .iter()
+            .rposition(|record| record.kind == "diary")
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        records[start..].to_vec()
     } else {
         Vec::new()
     };
@@ -228,6 +242,77 @@ fn render_host_block(records: &[Record], trigger: &str) -> Result<String> {
 }
 
 /// Append a host-only diary entry. Model-generated prose is screened first.
+pub async fn write_entry(
+    root: &Path,
+    date: NaiveDate,
+    session_id: &str,
+    trigger: &str,
+    provider: Option<&SharedProvider>,
+    model_id: &str,
+    plan_snapshot: Option<&str>,
+    notes: Option<&str>,
+    last_user_message: Option<&str>,
+    token_budget: Option<u32>,
+    timeout: Option<std::time::Duration>,
+) -> Result<bool> {
+    let host = host_block(root, session_id, trigger)?;
+    let prompt = format!(
+        "Host block:\n{host}\n\nPlan snapshot:\n{}\n\nNotes since last entry:\n{}\n\nLast user message:\n{}\n\nWrite the diary sections now.",
+        plan_snapshot.unwrap_or("none"),
+        notes.unwrap_or("none"),
+        last_user_message.unwrap_or("none"),
+    );
+    let prose = if let Some(provider) = provider {
+        let request = ChatRequest {
+            model_id: model_id.to_string(),
+            system: vec![SystemPart::volatile(WRITER_SYSTEM)],
+            messages: vec![Message::new(crate::providers::Role::User, prompt)],
+            thinking: None,
+            max_tokens: Some(token_budget.unwrap_or(DEFAULT_DIARY_TOKEN_BUDGET)),
+            tools: Vec::new(),
+            previous_response_id: None,
+            context_transport: ContextTransport::Stateless,
+        };
+        let collect = collect_writer_text(provider, &request);
+        match tokio::time::timeout(
+            timeout.unwrap_or(std::time::Duration::from_secs(DEFAULT_DIARY_TIMEOUT_SECS)),
+            collect,
+        )
+        .await
+        {
+            Ok(Ok(text)) => Some(text),
+            Ok(Err(error)) => {
+                crate::providers::log_http(&format!("diary: writer failed: {error}"));
+                None
+            }
+            Err(_) => {
+                crate::providers::log_http("diary: writer timed out");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    append_host_entry(root, date, session_id, trigger, &host, prose.as_deref())?;
+    Ok(prose.is_some())
+}
+
+async fn collect_writer_text(provider: &SharedProvider, request: &ChatRequest) -> Result<String> {
+    let mut stream = provider.stream_chat(request.clone());
+    let mut text = String::new();
+    while let Some(event) = stream.next().await {
+        match event? {
+            StreamEvent::Text(chunk) => text.push_str(&chunk),
+            _ => {}
+        }
+    }
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        anyhow::bail!("the diary writer returned empty text")
+    }
+    Ok(text)
+}
+
 pub fn append_entry(
     root: &Path,
     date: NaiveDate,
@@ -236,14 +321,26 @@ pub fn append_entry(
     prose: Option<&str>,
 ) -> Result<()> {
     let host = host_block(root, session_id, trigger)?;
+    append_host_entry(root, date, session_id, trigger, &host, prose)
+}
+
+fn append_host_entry(
+    root: &Path,
+    date: NaiveDate,
+    session_id: &str,
+    trigger: &str,
+    host: &str,
+    prose: Option<&str>,
+) -> Result<()> {
     let date_path = diary_path(root, date);
     fs::create_dir_all(memory_dir(root)).context("creating diary directory")?;
     let heading = format!(
         "## {} · session {session_id} · trigger {trigger}\n",
         Local::now().format("%H:%M")
     );
-    let body = prose.map(screen).map(|s| s.text).unwrap_or_else(|| {
-        "\n### Done\n- Host-only entry; no model summary was available.\n".to_string()
+    let body = prose.map(|text| screen(text).text).unwrap_or_else(|| {
+        "\nmode: host_only\n\n### Done\n- Host-only entry; no model summary was available.\n"
+            .to_string()
     });
     let entry = format!("\n{heading}{host}\n{body}\n");
     let mut file = OpenOptions::new()
@@ -293,6 +390,34 @@ mod tests {
     fn memory_read_rejects_path_traversal_dates() {
         let error = read_day(&root(), "../2026-09-04").unwrap_err();
         assert!(error.contains("YYYY-MM-DD"));
+    }
+
+    #[tokio::test]
+    async fn writer_falls_back_to_host_only_without_provider() {
+        let dir = root();
+        let written = write_entry(
+            &dir,
+            NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+            "missing-session",
+            "manual",
+            None,
+            "model",
+            None,
+            None,
+            None,
+            Some(8),
+            Some(std::time::Duration::from_millis(1)),
+        )
+        .await
+        .unwrap();
+        assert!(!written);
+        let text = fs::read_to_string(diary_path(
+            &dir,
+            NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+        ))
+        .unwrap();
+        assert!(text.contains("mode: host_only"));
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
