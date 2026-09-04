@@ -1118,13 +1118,16 @@ mod tests {
         let mut evidence_journal =
             crate::agent::journal::Journal::open(&dir, "test-evidence").unwrap();
         evidence_journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        evidence_journal
+            .append("plan", json!({"op": "start"}))
+            .unwrap();
         evidence_journal
             .append("tool_result", json!({"tool": "read", "ok": true}))
             .unwrap();
-        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
         let finish = plan_op(
             &mut ctx,
-            &json!({"op": "finish", "id": "1", "summary": "schema added", "evidence": [1]}),
+            &json!({"op": "finish", "id": "1", "summary": "schema added", "evidence": [2]}),
         );
         assert!(finish.ok, "{}", finish.output);
 
