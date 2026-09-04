@@ -374,6 +374,7 @@ async fn run_subagent(
         system,
         messages: vec![Message::new(Role::User, task)],
         root: root.to_path_buf(),
+        session_id: format!("sub-{id}"),
         blocked_patterns: blocked_patterns.to_vec(),
         plan_mode,
         context_limit,
