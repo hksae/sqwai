@@ -428,6 +428,7 @@ impl App {
         let (ev_tx, ev_rx) = std::sync::mpsc::channel::<crossterm::event::Event>();
         std::thread::spawn(move || {
             while let Ok(ev) = crossterm::event::read() {
+                crate::tui::event_log::log("READ", crate::tui::event_log::describe(&ev));
                 if ev_tx.send(ev).is_err() {
                     break;
                 }
@@ -560,6 +561,14 @@ impl App {
     }
 
     fn submit(&mut self) {
+        crate::tui::event_log::log(
+            "SUBMIT",
+            format!(
+                "input_len={} input={:?}",
+                self.input_text().chars().count(),
+                self.input_text()
+            ),
+        );
         self.bar_error = None;
         self.retry_notified = false;
         self.retry_line = None;

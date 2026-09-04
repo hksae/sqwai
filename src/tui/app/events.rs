@@ -52,6 +52,7 @@ impl App {
                 }
                 continue;
             }
+            crate::tui::event_log::log("RX", crate::tui::event_log::describe(&ev));
             match ev {
                 Event::Key(k) => {
                     if k.kind != KeyEventKind::Press {
