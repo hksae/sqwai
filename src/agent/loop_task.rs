@@ -939,14 +939,22 @@ async fn run_agent(
                         "text": call.args.get("note").and_then(|v| v.as_str()).unwrap_or_default(),
                     }));
                 }
-                let _ = writer.append("tool_result", serde_json::json!({
+                let result_seq = writer.append("tool_result", serde_json::json!({
                     "tool": call.name,
                     "call_id": call.id,
                     "ok": outcome.ok,
                     "duration_ms": tool_started.elapsed().as_millis(),
                     "summary": outcome.output.chars().take(200).collect::<String>(),
                     "trust": if matches!(call.name.as_str(), "webfetch" | "websearch") { "low" } else { "high" },
-                }));
+                })).ok();
+                if call.name == "plan" && outcome.ok {
+                    if let Some(seq) = result_seq {
+                        let _ = writer.append("plan_evidence", serde_json::json!({
+                            "op": call.args.get("op").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                            "evidence": [seq],
+                        }));
+                    }
+                }
                 if let Some(metadata) = outcome.file_diff.as_ref() {
                     let _ = writer.append(
                         "file_diff",
