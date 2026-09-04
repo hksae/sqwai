@@ -7,6 +7,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use chrono::Utc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
@@ -105,12 +106,7 @@ impl Journal {
 }
 
 fn timestamp() -> String {
-    // RFC3339-like UTC timestamp without adding another time dependency.
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default();
-    format!("{seconds}")
+    Utc::now().to_rfc3339()
 }
 
 fn last_seq(path: &Path) -> Result<u64> {
