@@ -308,21 +308,64 @@ long-running commands.",
             parameters: json!({"type":"object","properties":{"task":{"type":"string","description":"one focused child task"},"tasks":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8,"description":"focused child tasks to run concurrently"}},"anyOf":[{"required":["task"]},{"required":["tasks"]}]}),
         },
         ToolDef {
-            name: "plan_update",
+            name: "plan",
             kind: Kind::Mutating,
-            description: "Replace the hidden project plan. Keep it compact and structured with Task, Status, Steps, Decisions & Gotchas, Files touched, and Next immediate action.",
+            description: "Work the structured plan, one operation per call. Ops: create, start, \
+finish, block, unblock, cancel, add, split, verify, complete, propose_goal_revision, show. Call \
+show first if you are unsure of the current step ids. The host owns the goal, the constraints, \
+acceptance status and evidence: you can only propose a goal revision, never apply one.",
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string"},
-                    "status": {"type": "string"},
-                    "steps": {"type": "array", "items": {"type": "string"}},
-                    "decisions": {"type": "array", "items": {"type": "string"}},
-                    "files": {"type": "array", "items": {"type": "string"}},
-                    "next_action": {"type": "string"},
-                    "context_limit": {"type": "integer", "description": "model context limit in tokens"}
+                    "op": {"type": "string", "enum": [
+                        "create", "start", "finish", "block", "unblock", "cancel",
+                        "add", "split", "verify", "complete", "propose_goal_revision", "show"
+                    ]},
+                    "id": {"type": "string", "description": "step id"},
+                    "goal": {"type": "string", "description": "create / propose_goal_revision"},
+                    "constraints": {"type": "array", "items": {"type": "string"}},
+                    "acceptance": {
+                        "type": ["array", "integer"],
+                        "items": {"type": "string"},
+                        "description": "create: criteria; verify: index"
+                    },
+                    "steps": {
+                        "type": "array",
+                        "description": "create: initial steps (3-12)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "kind": {"type": "string", "enum": ["research", "change", "verify"]},
+                                "refs": {"type": "array", "items": {"type": "string"}}
+                            },
+                            "required": ["title"]
+                        }
+                    },
+                    "into": {
+                        "type": "array",
+                        "description": "split: the parts the step becomes",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "kind": {"type": "string", "enum": ["research", "change", "verify"]},
+                                "refs": {"type": "array", "items": {"type": "string"}}
+                            },
+                            "required": ["title"]
+                        }
+                    },
+                    "after": {"type": "string", "description": "add: insert after this step id"},
+                    "title": {"type": "string", "description": "add: new step title"},
+                    "kind": {"type": "string", "enum": ["research", "change", "verify"]},
+                    "refs": {"type": "array", "items": {"type": "string"}},
+                    "summary": {"type": "string", "description": "finish: what changed and where"},
+                    "reason": {"type": "string", "description": "block / cancel / propose_goal_revision"},
+                    "confirm": {"type": "boolean", "description": "start: re-read a stale step"},
+                    "evidence": {"type": "array", "items": {"type": "integer"}},
+                    "context_limit": {"type": "integer", "description": "model context in tokens"}
                 },
-                "required": ["task", "status", "steps", "next_action"]
+                "required": ["op"]
             }),
         },
         ToolDef {
