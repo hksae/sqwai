@@ -142,6 +142,7 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
         ok,
         output: format!("{status_line}\n{body}"),
         diff: None,
+        file_diff: None,
     }
 }
 

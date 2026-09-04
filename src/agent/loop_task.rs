@@ -837,6 +837,7 @@ async fn run_agent(
                                 output,
                                 ok: !is_error,
                                 diff: None,
+                                file_diff: None,
                             },
                             Err(e) => tools::Outcome::err(format!("MCP call failed: {e:#}")),
                         }
