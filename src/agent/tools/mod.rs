@@ -663,9 +663,6 @@ fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
         plan::Op::Verify { evidence, .. } => ("acceptance", evidence),
         _ => return Ok(()),
     };
-    if evidence.is_empty() {
-        return Err(format!("no_evidence: step {id} requires journal evidence"));
-    }
     if let plan::Op::Finish { .. } = op {
         let status = plan::open_active(root)
             .ok()
@@ -674,6 +671,9 @@ fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
         if status != Some(plan::StepStatus::InProgress) {
             return Ok(());
         }
+    }
+    if evidence.is_empty() {
+        return Err(format!("no_evidence: step {id} requires journal evidence"));
     }
     let plan_id = plan::open_active(root)
         .ok()
