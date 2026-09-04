@@ -84,7 +84,7 @@ pub struct App {
     streaming: bool,
     aborted: bool,
     agent: Option<AgentHandle>,
-    /// to-do list written by the agent's todowrite tool
+    /// derived visible steps from the active structured plan
     todos: Vec<String>,
     /// tracked child agents shown in the overview
     subagents: Vec<(u64, String, String, String, bool)>,

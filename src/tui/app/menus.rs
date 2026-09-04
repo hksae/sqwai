@@ -101,7 +101,7 @@ pub(super) enum Menu {
     AskFree {
         id: u64,
     },
-    /// the agent's visible to-do list (todowrite tool), opened with Ctrl+T
+    /// the active plan's visible steps, opened with Ctrl+T
     Todo,
     /// all delegated child agents, opened with Ctrl+A
     Subagents,
@@ -1395,7 +1395,7 @@ impl App {
                 if self.todos.is_empty() {
                     self.menu_rows.push(row(
                         Line::from(vec![Span::styled(
-                            "  (no items yet — the agent fills this via todowrite)",
+                            "  (no active plan steps yet)",
                             Theme::dim(),
                         )]),
                         MenuAction::None,
