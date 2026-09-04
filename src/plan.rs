@@ -1139,7 +1139,8 @@ mod tests {
                 &mut plan,
                 Op::Finish {
                     id: "1".into(),
-                    summary: "model added".into()
+                    summary: "model added".into(),
+                    evidence: vec![1]
                 },
                 &Limits::default()
             ),
@@ -1156,6 +1157,7 @@ mod tests {
             Op::Finish {
                 id: "2".into(),
                 summary: "x".into(),
+                evidence: vec![],
             },
             &Limits::default(),
         )
@@ -1189,6 +1191,7 @@ mod tests {
                 Op::Finish {
                     id: id.into(),
                     summary: "done".into(),
+                    evidence: vec![1],
                 },
                 &Limits::default(),
             )
