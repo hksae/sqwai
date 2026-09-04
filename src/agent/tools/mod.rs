@@ -570,20 +570,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             args["timeout"].as_u64(),
             args["background"].as_bool().unwrap_or(false),
         ),
-        "plan_update" => {
-            let content = plan::from_fields(args);
-            match plan::update(
-                &ctx.root,
-                &content,
-                args["context_limit"].as_u64().unwrap_or(32_000),
-            ) {
-                Ok(saved) => Outcome::ok(format!(
-                    "plan updated ({} checklist items)",
-                    plan::todo_items(&saved).len()
-                )),
-                Err(e) => Outcome::err(format!("plan update rejected: {e:#}")),
-            }
-        }
+        "plan" => plan_op(ctx, args),
         // direct dispatch never answers "unknown tool"
         "todowrite" => Outcome::ok(format!(
             "to-do list updated ({} items)",
@@ -592,6 +579,94 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         "ask_user" => Outcome::err("ask_user is served by the agent loop, not by the dispatcher"),
         other => Outcome::err(format!("unknown tool '{other}'")),
     }
+}
+
+/// The `plan` tool: one operation per call, validated by the host (§2.1.3).
+fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
+    let op: plan::Op = match serde_json::from_value(args.clone()) {
+        Ok(op) => op,
+        Err(e) => {
+            return Outcome::err(format!(
+                "plan op rejected: {e} — call plan show to see the current plan"
+            ))
+        }
+    };
+    let limits = plan::Limits::default();
+
+    match op {
+        plan::Op::Create {
+            goal,
+            constraints,
+            acceptance,
+            steps,
+        } => match plan::open_active(&ctx.root) {
+            Ok(Some(existing)) => rejection(plan::Rejection {
+                code: "plan_exists",
+                reason: format!("an active plan already exists: {}", existing.id),
+                hint: "use /plan to continue, complete or abandon it first".to_string(),
+            }),
+            Ok(None) => {
+                let budget_limit = (args["context_limit"].as_u64().unwrap_or(32_000) / 10).max(256);
+                match plan::create(goal, constraints, acceptance, steps, budget_limit, &limits) {
+                    Ok(created) => {
+                        let id = created.id.clone();
+                        let steps = created.steps.len();
+                        match plan::store(&ctx.root, &created) {
+                            Ok(()) => Outcome::ok(format!("plan {id} created with {steps} steps")),
+                            Err(e) => Outcome::err(format!("plan write failed: {e:#}")),
+                        }
+                    }
+                    Err(r) => rejection(r),
+                }
+            }
+            Err(e) => Outcome::err(format!("plan store unreadable: {e:#}")),
+        },
+        other => {
+            let mut active = match plan::open_active(&ctx.root) {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    return Outcome::err("no active plan: create one with op=create first".to_string())
+                }
+                Err(e) => return Outcome::err(format!("plan store unreadable: {e:#}")),
+            };
+            match plan::apply(&mut active, other, &limits) {
+                Ok(applied) => {
+                    if let Err(e) = plan::store(&ctx.root, &active) {
+                        return Outcome::err(format!("plan write failed: {e:#}"));
+                    }
+                    match applied {
+                        plan::Applied::Created(_) => Outcome::ok("plan created".to_string()),
+                        plan::Applied::Updated { message } => Outcome::ok(message),
+                        plan::Applied::Proposed { goal, reason } => Outcome::ok(format!(
+                            "goal revision proposed for the user to confirm: \"{goal}\" ({reason})"
+                        )),
+                        plan::Applied::Shown { text } => Outcome::ok(text),
+                        plan::Applied::Completed => {
+                            Outcome::ok(format!("plan {} completed", active.id))
+                        }
+                    }
+                }
+                Err(r) => {
+                    // the rejection counter is plan state, so persist it too
+                    let _ = plan::store(&ctx.root, &active);
+                    rejection(r)
+                }
+            }
+        }
+    }
+}
+
+/// Rejections are a normal tool result the model can act on (§2.1.4).
+fn rejection(r: plan::Rejection) -> Outcome {
+    Outcome::err(
+        json!({
+            "ok": false,
+            "code": r.code,
+            "reason": r.reason,
+            "hint": r.hint,
+        })
+        .to_string(),
+    )
 }
 
 #[cfg(test)]
