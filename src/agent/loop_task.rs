@@ -614,9 +614,16 @@ async fn run_agent(
 
     let mut ctx = ToolCtx::with_read_only(&root, read_only);
     let mut todos: Vec<String> = Vec::new();
-    let mut plan_todos: Vec<String> = plan::load(&root)
-        .as_deref()
-        .map(plan::todo_items)
+    let mut plan_todos: Vec<String> = plan::open_active(&root)
+        .ok()
+        .flatten()
+        .map(|active| {
+            active
+                .steps
+                .iter()
+                .map(|step| format!("[{}] {}", step.status.as_str(), step.title))
+                .collect()
+        })
         .unwrap_or_default();
     let mut always_allow: Vec<String> = Vec::new();
     let mut next_id: u64 = 0;
