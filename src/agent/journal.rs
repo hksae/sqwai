@@ -7,7 +7,6 @@ use serde_json::{Value, json};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
@@ -189,7 +188,7 @@ fn repair_tail(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use std::time::{SystemTime, UNIX_EPOCH};
     fn root() -> PathBuf {
         std::env::temp_dir().join(format!(
             "sqwai-journal-{}",
