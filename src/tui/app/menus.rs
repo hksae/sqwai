@@ -494,10 +494,35 @@ impl App {
                     self.show_busy_status();
                     return;
                 }
-                let fork = self
+                let parent_id = self.session.id.to_string();
+                let mut fork = self
                     .session
                     .fork_upto(last_idx.min(self.session.messages.len().saturating_sub(1)));
+                let root = std::env::current_dir().unwrap_or_default();
+                if let Some(source_plan_id) = self.session.plan_id.clone()
+                    && let Ok(source_plan) = crate::plan::open(&root, &source_plan_id)
+                {
+                    match crate::plan::fork(&root, &source_plan, &fork.id.to_string()) {
+                        Ok(copied_plan) => fork.plan_id = Some(copied_plan.id),
+                        Err(error) => {
+                            self.status(&format!("fork plan: {error:#}"), StatusKind::Err);
+                            return;
+                        }
+                    }
+                }
+                let fork_id = fork.id.to_string();
                 self.apply_session(fork);
+                if let Ok(mut journal) = crate::agent::journal::Journal::open(&root, &fork_id) {
+                    journal.set_attribution(None, self.session.plan_id.clone(), "main");
+                    let _ = journal.append(
+                        "fork",
+                        serde_json::json!({
+                            "from_session": parent_id,
+                            "from_seq": last_idx,
+                            "plan_id": self.session.plan_id,
+                        }),
+                    );
+                }
             }
             MenuAction::DeleteSessionList => {
                 self.open_menu(Menu::DeleteSessions);

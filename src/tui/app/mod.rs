@@ -314,6 +314,13 @@ impl App {
         if !startup {
             app.load_history_segments();
         }
+        if app.session.plan_id.is_none() {
+            app.session.plan_id =
+                crate::plan::open_active(&std::env::current_dir().unwrap_or_default())
+                    .ok()
+                    .flatten()
+                    .map(|plan| plan.id);
+        }
         app.stable_prefix = app.stable_prefix();
         app.context_bootstrap_pending = true;
         Ok(app)
@@ -672,6 +679,13 @@ impl App {
         }
         self.context_bootstrap_pending = true;
         self.session = s;
+        if self.session.plan_id.is_none() {
+            self.session.plan_id =
+                crate::plan::open_active(&std::env::current_dir().unwrap_or_default())
+                    .ok()
+                    .flatten()
+                    .map(|plan| plan.id);
+        }
         // defensive: never let a legacy system turn back into the transcript
         self.session.strip_system_messages();
         self.segments.clear();
@@ -702,6 +716,11 @@ impl App {
         }
         let ctx = self.session.context_limit;
         self.session = Session::new(self.cfg.default_model.clone(), ctx);
+        self.session.plan_id =
+            crate::plan::open_active(&std::env::current_dir().unwrap_or_default())
+                .ok()
+                .flatten()
+                .map(|plan| plan.id);
         self.context_bootstrap_pending = true;
         self.segments.clear();
         self.seg_cache.clear();
