@@ -2,8 +2,9 @@
 //! File tool handlers. Every path passes through `ToolCtx::resolve`
 //! (project-jail), mutations snapshot first, edits require a prior read.
 
-use super::{Kind, Outcome, ToolCtx};
+use super::{FileDiff, Kind, Outcome, ToolCtx};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -56,6 +57,31 @@ fn make_diff(old: &str, new: &str) -> String {
 }
 
 /// (+added/-removed) line counts from a unified diff body
+fn content_hash(content: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(content))
+}
+
+fn file_diff(
+    path: &Path,
+    root: &Path,
+    before: Option<&[u8]>,
+    after: &[u8],
+    mode: &str,
+    checkpoint: Option<String>,
+    diff: &str,
+) -> FileDiff {
+    let (added, removed) = diff_counts(diff);
+    FileDiff {
+        path: rel_label(root, path),
+        added,
+        removed,
+        hash_before: before.map(content_hash),
+        hash_after: content_hash(after),
+        mode: mode.to_string(),
+        checkpoint,
+    }
+}
+
 fn diff_counts(diff: &str) -> (usize, usize) {
     let mut add = 0usize;
     let mut rem = 0usize;
@@ -150,17 +176,33 @@ pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome
     }
     ctx.mark_read(&p);
     let label = rel_label(&ctx.root, &p);
+    let diff = prev
+        .as_deref()
+        .map(|before| make_diff(before, content))
+        .unwrap_or_default();
+    let checkpoint = ctx.journal.last().map(|(sha, _)| sha.clone());
+    let metadata = file_diff(
+        &p,
+        &ctx.root,
+        prev.as_deref().map(str::as_bytes),
+        content.as_bytes(),
+        "write",
+        checkpoint,
+        &diff,
+    );
     match prev {
-        Some(prev) => {
-            let diff = make_diff(&prev, content);
-            let (add, rem) = diff_counts(&diff);
-            Outcome::ok(format!("wrote {label} (+{add}/-{rem})")).with_diff(diff)
-        }
+        Some(_) => Outcome::ok(format!(
+            "wrote {label} (+{}/-{})",
+            metadata.added, metadata.removed
+        ))
+        .with_diff(diff)
+        .with_file_diff(metadata),
         None => Outcome::ok(format!(
             "created {} ({} lines)",
             label,
             content.lines().count()
-        )),
+        ))
+        .with_file_diff(metadata),
     }
 }
 
@@ -207,16 +249,27 @@ pub(super) fn edit(
         Err(e) => return Outcome::err(e),
     };
     checkpoint(ctx, &p, "edit");
+    let checkpoint_id = ctx.journal.last().map(|(sha, _)| sha.clone());
     if let Err(e) = fs::write(&p, &updated) {
         return Outcome::err(format!("write failed: {e}"));
     }
     let diff = make_diff(&content, &updated);
     let (add, rem) = diff_counts(&diff);
+    let metadata = file_diff(
+        &p,
+        &ctx.root,
+        Some(content.as_bytes()),
+        updated.as_bytes(),
+        "edit",
+        checkpoint_id,
+        &diff,
+    );
     Outcome::ok(format!(
         "edited {} (+{add}/-{rem})",
         rel_label(&ctx.root, &p)
     ))
     .with_diff(diff)
+    .with_file_diff(metadata)
 }
 
 pub(super) fn multi_edit(
@@ -244,6 +297,7 @@ pub(super) fn multi_edit(
         staged = apply_one(&staged, old, new, *all).unwrap_or(staged.clone());
     }
     checkpoint(ctx, &p, "multi_edit");
+    let checkpoint_id = ctx.journal.last().map(|(sha, _)| sha.clone());
     let before = content;
     content = staged;
     if let Err(e) = fs::write(&p, &content) {
@@ -251,12 +305,22 @@ pub(super) fn multi_edit(
     }
     let diff = make_diff(&before, &content);
     let (add, rem) = diff_counts(&diff);
+    let metadata = file_diff(
+        &p,
+        &ctx.root,
+        Some(before.as_bytes()),
+        content.as_bytes(),
+        "multi_edit",
+        checkpoint_id,
+        &diff,
+    );
     Outcome::ok(format!(
         "applied {} edit(s) to {} (+{add}/-{rem})",
         edits.len(),
         rel_label(&ctx.root, &p)
     ))
     .with_diff(diff)
+    .with_file_diff(metadata)
 }
 
 pub(super) fn ls(ctx: &mut ToolCtx, raw: &str) -> Outcome {
