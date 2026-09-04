@@ -1290,6 +1290,7 @@ F3	Evidence rule in `finish	verify	complete; nudges; note`
 F4	Diary: host block, triggers, writer call, fallback; memory_read; secrets screening	next	F2
 F5	MEMORY.md + memory_propose approval; session-start loading	next	F4
 F6	Compaction anchor; summary=off default; resume/fork per §3.4; undo→reopen	next	F1–F5
+F7	Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, optional zstd) + layer-2 shadow repo driven by the git CLI through `tokio::process`; restore via diff-tree; `/undo step N`	after F1	F1
 G	Goal-retention benchmark (§8.2)	after F	F6
 H0	L0 fact block + criticism detector	after F	F2
 H1	bash_ro, read-only toolset, Scope/Neutralizer/Executor/Verdict, /verify	after H0	H0, D
