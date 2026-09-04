@@ -688,8 +688,9 @@ async fn run_agent(
     loop {
         // The diary is written before the compaction policy can discard any
         // transcript context. The writer has a hard timeout and host fallback.
-        if policy.pressure(prompt_size.max(context::estimated_tokens(&messages)))
-            != context::Pressure::Ok
+        if messages.len() > 8
+            && policy.pressure(prompt_size.max(context::estimated_tokens(&messages)))
+                != context::Pressure::Ok
         {
             let _ = crate::agent::diary::write_entry(
                 &root,
