@@ -89,13 +89,34 @@ impl Journal {
     }
 
     /// Check that a sequence belongs to this plan and is useful evidence.
-    pub fn evidence(root: &Path, plan: &str, step: &str, seq: u64) -> Result<Option<Record>> {
+    pub fn evidence(
+        root: &Path,
+        plan: &str,
+        step: Option<&str>,
+        seq: u64,
+        after_seq: Option<u64>,
+    ) -> Result<Option<Record>> {
         Ok(Self::records(root)?.into_iter().find(|r| {
             r.seq == seq
+                && after_seq.is_none_or(|start| r.seq > start)
                 && r.plan.as_deref() == Some(plan)
-                && r.step.as_deref() == Some(step)
+                && step.is_none_or(|expected| r.step.as_deref() == Some(expected))
                 && matches!(r.kind.as_str(), "tool_result" | "file_diff" | "diagnostics")
         }))
+    }
+
+    /// Return the journal sequence of a step's host-recorded start operation.
+    pub fn step_started_at(root: &Path, plan: &str, step: &str) -> Result<Option<u64>> {
+        Ok(Self::records(root)?
+            .into_iter()
+            .filter(|r| {
+                r.plan.as_deref() == Some(plan)
+                    && r.step.as_deref() == Some(step)
+                    && r.kind == "plan"
+                    && r.fields.get("op").and_then(Value::as_str) == Some("start")
+            })
+            .map(|r| r.seq)
+            .max())
     }
 
     /// Append one host-owned record and flush it before returning.

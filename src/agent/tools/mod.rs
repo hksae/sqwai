@@ -707,13 +707,21 @@ fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
         plan::Op::Verify { .. } => plan::StepKind::Verify,
         _ => unreachable!(),
     };
+    let after_seq = crate::agent::journal::Journal::step_started_at(root, &plan_id, id)
+        .map_err(|e| format!("evidence_unreadable: {e:#}"))?;
     let mut valid = Vec::new();
     for seq in evidence {
-        let record = crate::agent::journal::Journal::evidence(root, &plan_id, id, *seq)
-            .map_err(|e| format!("evidence_unreadable: {e:#}"))?
-            .ok_or_else(|| {
-                format!("invalid_evidence: journal record {seq} is not valid for this plan")
-            })?;
+        let record = crate::agent::journal::Journal::evidence(
+            root,
+            &plan_id,
+            if id == "acceptance" { None } else { Some(id) },
+            *seq,
+            after_seq,
+        )
+        .map_err(|e| format!("evidence_unreadable: {e:#}"))?
+        .ok_or_else(|| {
+            format!("invalid_evidence: journal record {seq} is not valid for this plan")
+        })?;
         let allowed = match required_kind {
             plan::StepKind::Research => record.kind == "tool_result",
             plan::StepKind::Change => record.kind == "file_diff",
