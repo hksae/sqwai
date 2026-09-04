@@ -369,23 +369,6 @@ acceptance status and evidence: you can only propose a goal revision, never appl
             }),
         },
         ToolDef {
-            name: "todowrite",
-            kind: Kind::ReadOnly,
-            description: "Record a visible, user-facing to-do list. Call with a full replacement \
-list of checkboxes: ['- [ ] item', '- [x] done', ...]. Used to keep the user informed of multi-step work.",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "todos": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "complete replacement list of '- [ ] ...' / '- [x] ...' lines"
-                    }
-                },
-                "required": ["todos"]
-            }),
-        },
-        ToolDef {
             name: "ask_user",
             kind: Kind::ReadOnly,
             description: "Ask the user a structured question with 2-5 answer options (and optional \
