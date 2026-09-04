@@ -17,6 +17,18 @@ use crate::tui::markdown::{Highlighter, render, wrap_tagged};
 use crate::tui::theme::Theme;
 
 impl App {
+    fn paste_text(&mut self, text: &str) {
+        self.jump_to_bottom_on_typing();
+        for (i, line) in text.split('\n').enumerate() {
+            if i > 0 {
+                self.input.insert_newline();
+            }
+            self.input
+                .insert_str(line.strip_suffix('\r').unwrap_or(line));
+        }
+        self.dirty = true;
+    }
+
     pub(super) fn poll_input(
         &mut self,
         ev_rx: &std::sync::mpsc::Receiver<crossterm::event::Event>,
@@ -45,11 +57,13 @@ impl App {
                     if k.kind != KeyEventKind::Press {
                         continue;
                     }
-                    // Some Windows consoles do not emit bracketed paste at
-                    // all: they replay clipboard characters as key events.
-                    // Consume that replay before Enter can submit its first
-                    // line or the remainder can be inserted twice.
-                    if consume_duplicate_paste_key(&mut self.pasted_clipboard, k) {
+                    if consume_replayed_paste_key(&mut self.pasted_clipboard, k) {
+                        continue;
+                    }
+                    if self.paste_enter_guard
+                        && matches!(k.code, KeyCode::Enter | KeyCode::Char('\r'))
+                    {
+                        self.paste_enter_guard = false;
                         continue;
                     }
                     // a fresh keypress dismisses the previous in-menu notice
@@ -64,24 +78,16 @@ impl App {
                     // some Windows terminal/keymap combinations interpret it as
                     // an accept/submit action after the clipboard text is inserted.
                     if ctrl && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V')) {
-                        // In PowerShell/Windows Terminal Ctrl+V may be reported
-                        // as a key event while the terminal also injects the
-                        // clipboard bytes asynchronously. Do not let the
-                        // synthetic Enter submit the first line.
-                        self.paste_clipboard();
-                        self.paste_enter_guard = true;
-                        self.dirty = true;
-                        continue;
-                    }
-                    if self.paste_enter_guard {
-                        // Keep the synthetic Enter from submitting the first
-                        // pasted line. Character replay is filtered by the
-                        // clipboard-prefix matcher above.
-                        if matches!(k.code, KeyCode::Enter | KeyCode::Char('\r')) {
-                            self.paste_enter_guard = false;
+                        let Ok(mut cb) = arboard::Clipboard::new() else {
                             continue;
-                        }
-                        self.paste_enter_guard = false;
+                        };
+                        let Ok(txt) = cb.get_text() else {
+                            continue;
+                        };
+                        self.pasted_clipboard = Some(txt.clone());
+                        self.paste_enter_guard = true;
+                        self.paste_text(&txt);
+                        continue;
                     }
                     match k.code {
                         KeyCode::Char('c') if ctrl => {
@@ -354,16 +360,10 @@ impl App {
                     _ => {}
                 },
                 Event::Paste(p) => {
-                    // The Ctrl+V branch already inserted this clipboard text.
-                    // PowerShell may emit a delayed bracketed-paste event, or
-                    // split it into chunks. While the replay marker is present,
-                    // consume every such event and never insert it a second time.
-                    if self.pasted_clipboard.is_some() {
-                        let _ = consume_duplicate_paste(&mut self.pasted_clipboard, &p);
-                        continue;
-                    }
-                    // A genuine paste event must be inserted as one transaction,
-                    // not routed through key handling where Enter can submit it.
+                    // A native bracketed paste is already the complete
+                    // payload. Do not suppress it merely because Ctrl+V was
+                    // pressed before it arrived.
+                    self.pasted_clipboard = None;
                     if !self.menu_stack.is_empty() {
                         let p = p.replace(['\r', '\n'], " ");
                         if let Some(FormField::Text { ta, .. }) =
@@ -374,15 +374,7 @@ impl App {
                         self.dirty = true;
                         continue;
                     }
-                    self.jump_to_bottom_on_typing();
-                    for (i, line) in p.split('\n').enumerate() {
-                        if i > 0 {
-                            self.input.insert_newline();
-                        }
-                        let line = line.strip_suffix('\r').unwrap_or(line);
-                        self.input.insert_str(line);
-                    }
-                    self.dirty = true;
+                    self.paste_text(&p);
                 }
                 Event::Resize(_, _) => self.dirty = true,
                 _ => {}
@@ -429,6 +421,7 @@ impl App {
         self.dirty = true;
     }
 
+    #[allow(dead_code)]
     pub(super) fn paste_clipboard(&mut self) {
         let Ok(mut cb) = arboard::Clipboard::new() else {
             return;
@@ -445,7 +438,6 @@ impl App {
             }
             return;
         }
-        self.pasted_clipboard = Some(txt.clone());
         self.jump_to_bottom_on_typing();
         for (i, line) in txt.split('\n').enumerate() {
             if i > 0 {
@@ -458,41 +450,29 @@ impl App {
     }
 }
 
-pub(super) fn consume_duplicate_paste(slot: &mut Option<String>, chunk: &str) -> bool {
-    let Some(expected) = slot.as_deref() else {
-        return false;
-    };
-    if expected == chunk {
-        *slot = None;
-        return true;
-    }
-    if expected.starts_with(chunk) {
-        let remainder = expected[chunk.len()..].to_string();
-        *slot = Some(remainder);
-        return true;
-    }
-    *slot = None;
-    false
-}
-
-pub(super) fn consume_duplicate_paste_key(
-    slot: &mut Option<String>,
-    key: crossterm::event::KeyEvent,
-) -> bool {
+fn consume_replayed_paste_key(slot: &mut Option<String>, key: crossterm::event::KeyEvent) -> bool {
     if key
         .modifiers
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
     {
         return false;
     }
-    let Some(ch) = (match key.code {
-        KeyCode::Char(ch) => Some(ch),
-        KeyCode::Enter => Some('\n'),
-        _ => None,
-    }) else {
+    let Some(expected) = slot.as_deref() else {
         return false;
     };
-    consume_duplicate_paste(slot, &ch.to_string())
+    let text = match key.code {
+        KeyCode::Char(ch) => ch.to_string(),
+        KeyCode::Enter => "\n".to_string(),
+        _ => return false,
+    };
+    if expected.starts_with(&text) {
+        let remainder = expected[text.len()..].to_string();
+        *slot = (!remainder.is_empty()).then_some(remainder);
+        true
+    } else {
+        *slot = None;
+        false
+    }
 }
 
 /// ctrl combos supported identically in the message input and every form field

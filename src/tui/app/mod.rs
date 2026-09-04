@@ -188,13 +188,11 @@ pub struct App {
     /// stable order/identity of segments used to invalidate positional caches
     seg_layout: Vec<u64>,
 
-    /// Ignore one Enter that can follow a terminal-generated Ctrl+V event.
-    /// Windows terminals may enqueue the key release/accept sequence after
-    /// bracketed/clipboard paste; it must not submit the newly pasted prompt.
-    paste_enter_guard: bool,
-    /// Clipboard text inserted for Ctrl+V, used to discard a duplicate
-    /// bracketed-paste event emitted by some Windows terminals.
+    /// Clipboard text inserted by Ctrl+V, used to consume the terminal's
+    /// replay of the same payload before it reaches normal key handling.
     pasted_clipboard: Option<String>,
+    /// Suppresses the synthetic Enter some terminals emit after Ctrl+V.
+    paste_enter_guard: bool,
 
     /// Deadline for the single transient busy notice.
     busy_until: Option<Instant>,
@@ -366,8 +364,8 @@ impl App {
             press: None,
             dragging: false,
             sel: None,
-            paste_enter_guard: false,
             pasted_clipboard: None,
+            paste_enter_guard: false,
             busy_until: None,
         };
         if !startup {
