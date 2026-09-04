@@ -513,6 +513,7 @@ async fn run_agent(
         system,
         mut messages,
         root,
+        session_id,
         blocked_patterns,
         plan_mode,
         context_limit,
@@ -615,6 +616,14 @@ async fn run_agent(
     }
 
     let mut ctx = ToolCtx::with_read_only(&root, read_only);
+    let mut journal = if enable_tools && !read_only {
+        crate::agent::journal::Journal::open(&root, &session_id).ok()
+    } else {
+        None
+    };
+    if let Some(writer) = journal.as_mut() {
+        let _ = writer.session_start(&model_id, if plan_mode { "plan" } else { "act" }, "unknown");
+    }
     let mut todos: Vec<String> = Vec::new();
     let mut plan_todos: Vec<String> = plan::open_active(&root)
         .ok()
@@ -708,6 +717,13 @@ async fn run_agent(
         // execute each call, feeding results back into the conversation
         for call in &turn.calls {
             let journal_mark = ctx.journal.len();
+            if let Some(writer) = journal.as_mut() {
+                let _ = writer.append("tool_call", serde_json::json!({
+                    "tool": call.name,
+                    "call_id": call.id,
+                    "args_digest": tools::call_summary(&call.name, &call.args),
+                }));
+            }
             // live row first: the TUI shows the tool name and its arguments
             // with a spinner while it runs (design §10)
             let _ = tx
@@ -861,6 +877,14 @@ async fn run_agent(
                         })
                         .await;
                 }
+            }
+            if let Some(writer) = journal.as_mut() {
+                let _ = writer.append("tool_result", serde_json::json!({
+                    "tool": call.name,
+                    "call_id": call.id,
+                    "ok": outcome.ok,
+                    "summary": outcome.output.chars().take(200).collect::<String>(),
+                }));
             }
             messages.push(Message::tool_result(&call.id, outcome.output, !outcome.ok));
         }
