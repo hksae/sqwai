@@ -215,6 +215,12 @@ impl App {
             &root,
             &self.session.id.to_string(),
         )));
+        if self.session.messages.len() > 0
+            && let Some(notice) =
+                crate::agent::context::resume_notice(&root, &self.session.id.to_string())
+        {
+            parts.push(SystemPart::volatile(notice));
+        }
         // re-read once per submitted turn, never cached
         parts.push(SystemPart::volatile(crate::prompts::runtime_context()));
         parts

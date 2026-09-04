@@ -141,6 +141,46 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     out
 }
 
+/// Return the host-owned instruction used when a session resumes mid-step.
+/// A plan `start` without a later `finish`, `block`, or `cancel` is evidence
+/// that the process stopped while work was in progress.
+pub fn resume_notice(root: &std::path::Path, session_id: &str) -> Option<String> {
+    let records = crate::agent::journal::Journal::records_for(root, session_id).ok()?;
+    let mut open_step = None;
+    for record in records.iter().filter(|record| record.kind == "plan") {
+        let op = record.fields.get("op").and_then(|value| value.as_str());
+        let id = record.fields.get("id").and_then(|value| value.as_str());
+        match (op, id) {
+            (Some("start"), Some(id)) => open_step = Some((id.to_string(), record.seq)),
+            (Some("finish" | "block" | "cancel"), Some(id))
+                if open_step.as_ref().is_some_and(|(open, _)| open == id) =>
+            {
+                open_step = None;
+            }
+            _ => {}
+        }
+    }
+    let (step_id, start_seq) = open_step?;
+    let recent = records
+        .iter()
+        .filter(|record| record.seq > start_seq)
+        .rev()
+        .take(2)
+        .map(|record| format!("j#{} {}", record.seq, record.kind))
+        .collect::<Vec<_>>();
+    let suffix = if recent.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; last events: {}",
+            recent.into_iter().rev().collect::<Vec<_>>().join(", ")
+        )
+    };
+    Some(format!(
+        "Session resumed. Step {step_id} was in progress{suffix}. Continue it, block it with a reason, or ask the user."
+    ))
+}
+
 fn bounded(text: &str, max_chars: usize) -> String {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.chars().count() <= max_chars {
@@ -548,6 +588,64 @@ mod tests {
         assert!(rendered.contains("step 1 in_progress implement anchor"));
         assert!(rendered.contains("files changed this session: src/main.rs"));
         assert!(rendered.contains("last verification: successful exec j#2"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn resume_notice_reports_unfinished_plan_step() {
+        let root = temp_root("resume");
+        let mut plan = crate::plan::create(
+            "resume safely".into(),
+            Vec::new(),
+            Vec::new(),
+            vec![crate::plan::NewStep {
+                title: "unfinished change".into(),
+                kind: Some(crate::plan::StepKind::Change),
+                refs: Vec::new(),
+            }],
+            20_000,
+            &crate::plan::Limits::default(),
+        )
+        .unwrap();
+        crate::plan::store(&root, &plan).unwrap();
+        crate::plan::apply(
+            &mut plan,
+            crate::plan::Op::Start {
+                id: "1".into(),
+                confirm: None,
+            },
+            &crate::plan::Limits::default(),
+        )
+        .unwrap();
+        crate::plan::store(&root, &plan).unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&root, "resume-session").unwrap();
+        journal.set_attribution(Some("1".into()), Some(plan.id), "main");
+        journal
+            .append("plan", serde_json::json!({"op": "start", "id": "1"}))
+            .unwrap();
+        journal
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "read", "ok": true}),
+            )
+            .unwrap();
+        let notice = resume_notice(&root, "resume-session").unwrap();
+        assert!(notice.contains("Step 1 was in progress"));
+        assert!(notice.contains("j#2 tool_result"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn completed_plan_step_has_no_resume_notice() {
+        let root = temp_root("resume-closed");
+        let mut journal = crate::agent::journal::Journal::open(&root, "closed-session").unwrap();
+        journal
+            .append("plan", serde_json::json!({"op": "start", "id": "1"}))
+            .unwrap();
+        journal
+            .append("plan", serde_json::json!({"op": "finish", "id": "1"}))
+            .unwrap();
+        assert!(resume_notice(&root, "closed-session").is_none());
         std::fs::remove_dir_all(root).ok();
     }
 
