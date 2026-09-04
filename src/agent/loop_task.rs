@@ -932,6 +932,13 @@ async fn run_agent(
                 }
             }
             if let Some(writer) = journal.as_mut() {
+                if call.name == "note" && outcome.ok {
+                    let _ = writer.append("note", serde_json::json!({
+                        "by": "model",
+                        "note": call.args.get("kind").and_then(|v| v.as_str()).unwrap_or("lesson"),
+                        "text": call.args.get("note").and_then(|v| v.as_str()).unwrap_or_default(),
+                    }));
+                }
                 let _ = writer.append("tool_result", serde_json::json!({
                     "tool": call.name,
                     "call_id": call.id,

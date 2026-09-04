@@ -327,6 +327,12 @@ long-running commands.",
             parameters: json!({"type":"object","properties":{"task":{"type":"string","description":"one focused child task"},"tasks":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8,"description":"focused child tasks to run concurrently"}},"anyOf":[{"required":["task"]},{"required":["tasks"]}]}),
         },
         ToolDef {
+            name: "note",
+            kind: Kind::ReadOnly,
+            description: "Record a concise model note in the host journal.",
+            parameters: json!({"type":"object","properties":{"note":{"type":"string"},"kind":{"type":"string","enum":["decision","rejected","assumption","lesson","blocker"]}},"required":["note","kind"]}),
+        },
+        ToolDef {
             name: "plan",
             kind: Kind::Mutating,
             description: "Work the structured plan, one operation per call. Ops: create, start, \
@@ -570,6 +576,20 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             args["background"].as_bool().unwrap_or(false),
         ),
         "plan" => plan_op(ctx, args),
+        "note" => {
+            let note = args["note"].as_str().unwrap_or_default().trim();
+            let kind = args["kind"].as_str().unwrap_or_default().trim();
+            if note.is_empty() || note.len() > 2000 {
+                Outcome::err("note must be 1-2000 bytes")
+            } else if !matches!(
+                kind,
+                "decision" | "rejected" | "assumption" | "lesson" | "blocker"
+            ) {
+                Outcome::err("note kind is invalid")
+            } else {
+                Outcome::ok(format!("note recorded: {kind}"))
+            }
+        }
         // direct dispatch never answers "unknown tool"
         "ask_user" => Outcome::err("ask_user is served by the agent loop, not by the dispatcher"),
         other => Outcome::err(format!("unknown tool '{other}'")),
