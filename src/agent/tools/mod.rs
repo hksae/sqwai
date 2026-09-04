@@ -1141,6 +1141,131 @@ mod tests {
     }
 
     #[test]
+    fn evidence_must_match_step_kind_and_start_boundary() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "validate evidence",
+                "steps": [
+                    {"title": "research", "kind": "research"},
+                    {"title": "change", "kind": "change"}
+                ]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        let mut journal = crate::agent::journal::Journal::open(&dir, "evidence-rules").unwrap();
+
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
+        journal.append("plan", json!({"op": "start"})).unwrap();
+        journal
+            .append("tool_result", json!({"tool": "read", "ok": true}))
+            .unwrap();
+        let research = plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "1", "summary": "researched", "evidence": [2]}),
+        );
+        assert!(research.ok, "{}", research.output);
+
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "2"})).ok);
+        journal.set_attribution(Some("2".into()), Some(plan_id.clone()), "main");
+        let wrong_type = journal
+            .append("tool_result", json!({"tool": "read", "ok": true}))
+            .unwrap();
+        let rejected = plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "2", "summary": "changed", "evidence": [wrong_type]}),
+        );
+        assert!(!rejected.ok);
+        assert!(
+            rejected.output.contains("wrong_evidence"),
+            "{}",
+            rejected.output
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn verify_requires_successful_exec_evidence() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "verify evidence",
+                "acceptance": ["cmd: cargo test"],
+                "steps": [{"title": "verify", "kind": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        let mut journal = crate::agent::journal::Journal::open(&dir, "verify-rules").unwrap();
+        journal.set_attribution(Some("1".into()), Some(plan_id), "main");
+        let failed = journal
+            .append("tool_result", json!({"tool": "bash", "ok": false}))
+            .unwrap();
+        let rejected = plan_op(
+            &mut ctx,
+            &json!({"op": "verify", "acceptance": 0, "evidence": [failed]}),
+        );
+        assert!(!rejected.ok);
+        assert!(
+            rejected.output.contains("wrong_evidence"),
+            "{}",
+            rejected.output
+        );
+
+        let passed = journal
+            .append("tool_result", json!({"tool": "bash", "ok": true}))
+            .unwrap();
+        let accepted = plan_op(
+            &mut ctx,
+            &json!({"op": "verify", "acceptance": 0, "evidence": [passed]}),
+        );
+        assert!(accepted.ok, "{}", accepted.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn complete_rechecks_stored_evidence() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "complete with evidence",
+                "acceptance": ["cmd: cargo test"],
+                "steps": [{"title": "change", "kind": "change"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        let mut journal = crate::agent::journal::Journal::open(&dir, "complete-rules").unwrap();
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        journal.set_attribution(Some("1".into()), Some(plan_id), "main");
+        journal.append("plan", json!({"op": "start"})).unwrap();
+        let evidence = journal
+            .append("file_diff", json!({"path": "src/main.rs"}))
+            .unwrap();
+        let finished = plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "1", "summary": "changed", "evidence": [evidence]}),
+        );
+        assert!(finished.ok, "{}", finished.output);
+        let complete = plan_op(&mut ctx, &json!({"op": "complete"}));
+        assert!(!complete.ok);
+        assert!(
+            complete.output.contains("acceptance_pending"),
+            "{}",
+            complete.output
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn plan_rejections_carry_a_code_and_a_hint() {
         let (mut ctx, dir) = proj();
         plan_op(
