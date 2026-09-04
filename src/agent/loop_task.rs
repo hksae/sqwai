@@ -1229,11 +1229,11 @@ async fn compact_history(
 
     // stage 2: summarize. The cut is safe by construction, so an assistant
     // tool call can never be separated from its results.
-    let (older, keep) = context::split_for_summary(messages);
+    let (older, keep) = context::split_for_summary_with_keep(messages, policy.keep_turns());
     let older: Vec<Message> = older.to_vec();
     let keep: Vec<Message> = keep.to_vec();
     let mut summarized = false;
-    if !older.is_empty() {
+    if !older.is_empty() && policy.summary_enabled {
         let request = ChatRequest {
             model_id: model_id.to_string(),
             system: vec![SystemPart::volatile(context::SUMMARY_SYSTEM)],

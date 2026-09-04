@@ -377,6 +377,45 @@ pub struct DiaryConfig {
     pub batch_minutes: u16,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionConfig {
+    #[serde(default = "default_compaction_threshold")]
+    pub threshold: f64,
+    #[serde(default = "default_compaction_stage_ratio")]
+    pub stage_ratio: f64,
+    #[serde(default = "default_compaction_keep_turns")]
+    pub keep_turns: usize,
+    #[serde(default = "default_compaction_anchor_ratio")]
+    pub anchor_ratio: f64,
+    #[serde(default)]
+    pub summary: CompactionSummary,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CompactionSummary {
+    Off,
+    Short,
+}
+
+impl Default for CompactionSummary {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            threshold: default_compaction_threshold(),
+            stage_ratio: default_compaction_stage_ratio(),
+            keep_turns: default_compaction_keep_turns(),
+            anchor_ratio: default_compaction_anchor_ratio(),
+            summary: CompactionSummary::default(),
+        }
+    }
+}
+
 impl Default for DiaryConfig {
     fn default() -> Self {
         Self {
@@ -412,6 +451,18 @@ fn default_diary_batch_steps() -> u8 {
 fn default_diary_batch_minutes() -> u16 {
     20
 }
+fn default_compaction_threshold() -> f64 {
+    0.80
+}
+fn default_compaction_stage_ratio() -> f64 {
+    0.60
+}
+fn default_compaction_keep_turns() -> usize {
+    4
+}
+fn default_compaction_anchor_ratio() -> f64 {
+    0.08
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -437,6 +488,8 @@ pub struct Config {
     pub memory: MemoryConfig,
     #[serde(default)]
     pub diary: DiaryConfig,
+    #[serde(default)]
+    pub compaction: CompactionConfig,
 }
 
 fn default_model_name() -> String {
@@ -490,6 +543,7 @@ impl Default for Config {
             skills: SkillsConfig::default(),
             memory: MemoryConfig::default(),
             diary: DiaryConfig::default(),
+            compaction: CompactionConfig::default(),
         };
         cfg.ensure_seeds();
         cfg

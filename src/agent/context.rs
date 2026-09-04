@@ -231,11 +231,40 @@ pub enum Pressure {
 #[derive(Debug, Clone, Copy)]
 pub struct Policy {
     pub context_limit: u64,
+    /// Fraction of context reserved for the next answer. `None` keeps the
+    /// historical defaults; configuration can override it without changing
+    /// the host-generated anchor policy.
+    pub anchor_ratio: Option<f64>,
+    pub keep_turns: Option<usize>,
+    pub stage_ratio: Option<f64>,
+    pub summary_enabled: bool,
 }
 
 impl Policy {
     pub fn new(context_limit: u64) -> Self {
-        Self { context_limit }
+        Self {
+            context_limit,
+            anchor_ratio: None,
+            keep_turns: None,
+            stage_ratio: None,
+            summary_enabled: false,
+        }
+    }
+
+    pub fn with_compaction(
+        context_limit: u64,
+        anchor_ratio: f64,
+        keep_turns: usize,
+        stage_ratio: f64,
+        summary_enabled: bool,
+    ) -> Self {
+        Self {
+            context_limit,
+            anchor_ratio: Some(anchor_ratio),
+            keep_turns: Some(keep_turns),
+            stage_ratio: Some(stage_ratio),
+            summary_enabled,
+        }
     }
 
     /// Tokens kept free for the answer so a compaction request never lands
@@ -244,7 +273,8 @@ impl Policy {
         if self.context_limit == 0 {
             return 0;
         }
-        let raw = (self.context_limit as f64 * RESERVE_RATIO).round() as u64;
+        let ratio = self.anchor_ratio.unwrap_or(RESERVE_RATIO).clamp(0.0, 0.95);
+        let raw = (self.context_limit as f64 * ratio).round() as u64;
         raw.clamp(RESERVE_MIN, RESERVE_MAX).min(self.context_limit)
     }
 
@@ -254,6 +284,14 @@ impl Policy {
             return u64::MAX;
         }
         self.context_limit.saturating_sub(self.reserve())
+    }
+
+    pub fn keep_turns(&self) -> usize {
+        self.keep_turns.unwrap_or(SUMMARY_KEEP_RECENT)
+    }
+
+    pub fn stage_ratio(&self) -> f64 {
+        self.stage_ratio.unwrap_or(0.60).clamp(0.0, 1.0)
     }
 
     pub fn pressure(&self, tokens: u64) -> Pressure {
@@ -350,10 +388,17 @@ pub fn prune(messages: &[Message]) -> (Vec<Message>, bool) {
 /// The cut lands on a user turn and never separates an assistant tool call
 /// from its results — providers reject orphaned tool results.
 pub fn split_for_summary(messages: &[Message]) -> (&[Message], &[Message]) {
-    if messages.len() <= SUMMARY_KEEP_RECENT {
+    split_for_summary_with_keep(messages, SUMMARY_KEEP_RECENT)
+}
+
+pub fn split_for_summary_with_keep(
+    messages: &[Message],
+    keep_recent: usize,
+) -> (&[Message], &[Message]) {
+    if messages.len() <= keep_recent {
         return (&[], messages);
     }
-    let mut cut = messages.len() - SUMMARY_KEEP_RECENT;
+    let mut cut = messages.len() - keep_recent;
     while cut > 0 && !is_safe_cut(messages, cut) {
         cut -= 1;
     }
