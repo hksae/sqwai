@@ -825,6 +825,30 @@ impl App {
             }),
             "/exit" | "/quit" | "/q" => self.quit = true,
             "/compact" => self.start_compaction(),
+            "/diary" => {
+                if self.streaming {
+                    self.show_busy_status();
+                } else if self.read_only {
+                    self.status(
+                        "project is read-only; diary writes are disabled",
+                        StatusKind::Warn,
+                    );
+                } else {
+                    let root = std::env::current_dir().unwrap_or_default();
+                    match crate::agent::diary::append_entry(
+                        &root,
+                        crate::agent::diary::today(),
+                        &self.session.id.to_string(),
+                        "manual",
+                        None,
+                    ) {
+                        Ok(()) => self.status("diary entry written", StatusKind::Ok),
+                        Err(error) => {
+                            self.status(&format!("diary write failed: {error:#}"), StatusKind::Err)
+                        }
+                    }
+                }
+            }
             "/undo" => {
                 if self.streaming {
                     self.show_busy_status();

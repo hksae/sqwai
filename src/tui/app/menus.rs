@@ -28,6 +28,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "/constraints",
     "/mode",
     "/compact",
+    "/diary",
     "/undo",
     "/init",
     "/graph-rebuild",
