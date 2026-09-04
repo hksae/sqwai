@@ -101,10 +101,23 @@ impl Journal {
         Ok(seq)
     }
 
-    pub fn session_start(&mut self, model: &str, mode: &str, cwd_hash: &str) -> Result<u64> {
+    pub fn session_start(
+        &mut self,
+        model: &str,
+        mode: &str,
+        head: Option<&str>,
+        cwd_hash: &str,
+        resumed_from: Option<&str>,
+    ) -> Result<u64> {
         self.append(
             "session_start",
-            json!({"model": model, "mode": mode, "cwd_hash": cwd_hash}),
+            json!({
+                "model": model,
+                "mode": mode,
+                "head": head,
+                "cwd_hash": cwd_hash,
+                "resumed_from": resumed_from,
+            }),
         )
     }
 }
