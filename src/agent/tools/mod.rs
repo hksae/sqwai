@@ -666,6 +666,15 @@ fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
     if evidence.is_empty() {
         return Err(format!("no_evidence: step {id} requires journal evidence"));
     }
+    if let plan::Op::Finish { .. } = op {
+        let status = plan::open_active(root)
+            .ok()
+            .flatten()
+            .and_then(|p| p.step(id).map(|s| s.status));
+        if status != Some(plan::StepStatus::InProgress) {
+            return Ok(());
+        }
+    }
     let plan_id = plan::open_active(root)
         .ok()
         .flatten()
