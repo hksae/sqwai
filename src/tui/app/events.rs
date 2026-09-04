@@ -365,17 +365,16 @@ impl App {
                 },
                 Event::Paste(p) => {
                     let p = normalize_paste(&p);
-                    // Some Windows terminals emit both our Ctrl+V key event
-                    // and a bracketed-paste event for the same clipboard
-                    // payload. The key handler already inserted it; consume
-                    // the duplicate but keep the one-shot Enter guard for
-                    // the synthetic Enter that may follow.
-                    if self.pasted_clipboard.as_deref() == Some(p.as_str()) {
-                        self.pasted_clipboard = None;
+                    // Some Windows terminals emit both our Ctrl+V key
+                    // event and one or more bracketed-paste events for the
+                    // same clipboard payload. The key handler already
+                    // inserted the complete text, so discard native payloads
+                    // while advancing the replay marker by their exact
+                    // prefix. This also handles a payload split at a newline.
+                    if consume_replayed_paste_text(&mut self.pasted_clipboard, &p) {
                         self.paste_enter_guard = true;
                         continue;
                     }
-                    self.pasted_clipboard = None;
                     self.paste_enter_guard = false;
                     if !self.menu_stack.is_empty() {
                         let p = p.replace(['\r', '\n'], " ");
@@ -467,6 +466,19 @@ fn normalize_paste(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+fn consume_replayed_paste_text(slot: &mut Option<String>, text: &str) -> bool {
+    let Some(expected) = slot.as_deref() else {
+        return false;
+    };
+    if expected.starts_with(text) {
+        let remainder = expected[text.len()..].to_string();
+        *slot = (!remainder.is_empty()).then_some(remainder);
+        true
+    } else {
+        false
+    }
+}
+
 fn consume_replayed_paste_key(slot: &mut Option<String>, key: crossterm::event::KeyEvent) -> bool {
     if key
         .modifiers
@@ -509,6 +521,15 @@ pub(super) const TEXT_COMBOS: &[char] = &['z', 'y', 'a', 'e', 'u', 'k', 'w', 'd'
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_native_paste_events_are_consumed_without_submission() {
+        let mut pending = Some("first line\nsecond line".to_string());
+        assert!(consume_replayed_paste_text(&mut pending, "first line\n"));
+        assert_eq!(pending.as_deref(), Some("second line"));
+        assert!(consume_replayed_paste_text(&mut pending, "second line"));
+        assert!(pending.is_none());
+    }
 
     #[test]
     fn replayed_paste_newline_cannot_submit_first_line() {
