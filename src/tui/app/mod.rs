@@ -483,33 +483,18 @@ impl App {
             terminal.draw(|f| self.draw(f))?;
             self.dirty = false;
         }
-        // Persist a final diary entry before saving the session. The model
-        // writer is bounded; host-only content remains available if it fails.
+        // Shutdown must never wait for a provider request. A final diary
+        // entry is host-only here; model-written diary prose belongs to the
+        // explicit diary/compaction paths, not the exit path.
         if self.session_has_messages() && !self.read_only {
             let root = std::env::current_dir().unwrap_or_default();
-            let _ = crate::agent::diary::write_entry(
+            let _ = crate::agent::diary::append_entry(
                 &root,
                 crate::agent::diary::today(),
                 &self.session.id.to_string(),
                 "session_end",
-                Some(&self.provider),
-                &self.model_cfg.id,
-                crate::plan::open_active(&root)
-                    .ok()
-                    .flatten()
-                    .map(|plan| crate::plan::render(&plan))
-                    .as_deref(),
                 None,
-                self.session
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|message| message.role == crate::providers::Role::User)
-                    .map(|message| message.content.as_str()),
-                Some(self.cfg.diary.token_budget),
-                Some(Duration::from_secs(self.cfg.diary.timeout_secs)),
-            )
-            .await;
+            );
             self.session.save().ok();
         } else if self.session_has_messages() {
             self.session.save().ok();
