@@ -169,7 +169,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn headings_only_keeps_structure_without_diary_prose() {
         let text = "## 2026-09-04\n### Done\n- hidden detail\n### Open\n- pending";
         assert_eq!(headings_only(text), "## 2026-09-04\n### Done\n### Open");
