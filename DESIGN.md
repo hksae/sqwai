@@ -104,7 +104,7 @@ enforceable rather than requested.
 and session id. A second sqwai started in the same project finds a live lock and
 enters read-only mode for plan/journal/memory/graph with a warning, or proceeds
 with `--force` (which takes over the lock). SQLite serializes graph writes; the
-lock protects the plaintext plan, diary and journal (§7 M).
+lock protects the plaintext plan, diary and journal (§7 N).
 
 ---
 
@@ -191,7 +191,7 @@ acceptance[].text may be prefixed `cmd:` (host runs it on `plan verify` and on
 `complete`; the result becomes evidence automatically) or `manual:` (user
 waives). `/init` seeds MEMORY.md ## Project with the project's test/lint/build
 commands; `plan create` with no acceptance substitutes those as `cmd:` items by
-default (§2.3.5, §7 R).
+default (§2.3.5, §7 S).
 Writes are atomic: temp file + rename. On open, a plan that fails schema
 validation is moved to plans/corrupt/ and reported; the agent continues
 without a plan and asks whether to recreate.
@@ -255,7 +255,7 @@ assumption; a later `note` with `note: assumption, resolves: <seq>` closes it.
 warning listing them ("step 2 has 1 open assumption (j#19) — resolve or convert
 before completing"). The anchor (§3.3.3) and the diary host block surface open
 assumptions so they are not forgotten. This is the missing closure moment for
-the `assumption` note kind (§7 Q).
+the `assumption` note kind (§7 R).
 
 Rejection response is a normal tool result:
 
@@ -493,7 +493,7 @@ opens a TUI approval (accept / edit / reject). `scope` selects USER.md
 entries are written by the host with a trailing <!-- session a8f2 2026-08-31 -->
 provenance comment. The model may propose at most
 memory.max_proposals_per_turn (2) per turn. Splitting the two files stops the
-model re-learning per-project facts that are really about the user (§7 U).
+model re-learning per-project facts that are really about the user (§7 V).
 
 2.3.6 Secrets screening
 Applied to every string that reaches diary, MEMORY.md, journal summary|text,
@@ -791,6 +791,113 @@ git; `core.autocrlf = false` — снапшот хранит байты как �
 - Ограничение «вне git-репозитория undo недоступен» снимается: недоступен только
   откат последствий bash.
 
+### 2.6 Browser **[planned — last phase]**
+
+A browser driver built on the Chrome DevTools Protocol. Control and observation
+go through the accessibility tree; screenshots are collected as artifacts for
+the user and for evidence but are not shown to the model until a configured
+`vision` role exists. Primary use case: verifying the project's own
+frontend on `localhost`.
+
+Decision: own driver (`chromiumoxide` or a thin CDP client), not an MCP
+server. Reasons: stable refs, diffs, token budget, journal and safety
+integration all live in the tree representation, which a third-party MCP
+does not control; no Node dependency. MCP browsers remain usable through §5.5
+as a fallback behind the `Browser` trait.
+
+#### 2.6.1 Tree
+
+Three CDP sources merged by `backendNodeId`: `Accessibility` (roles, names,
+states), `DOMSnapshot` (layout, visibility, viewport, shadow DOM), `DOM`
+(action targets).
+
+Filtering (deterministic): drop hidden/zero-size nodes; keep interactive
+roles, landmarks, headings, and text inside them; collapse unnamed
+generic|group wrappers; lists/tables > 5 items show 5 + `… +N more (expand
+ref)`; content outside the viewport folds to one line per landmark.
+
+Refs are content-addressed: `hash(role, name, landmark path, ordinal)` →
+`e4a2`. They survive re-renders; navigation bumps the page generation, and a
+stale ref returns `stale_ref` with a fresh snapshot instead of acting on the
+wrong node.
+
+Format: one node per line, `role "name" [ref] state…`; only non-default
+states; field values truncated to 40 chars, password fields masked; external
+`href` shows host only. Header line: `url · title · focus · dialogs`.
+
+Actions return a **diff** (added/removed/changed nodes, url, focus, network
+summary, console errors), not a full tree. Full snapshot on
+`browser_snapshot` and on navigation.
+
+Every action waits for stability: network idle + no DOM mutations for 300 ms
++ no pending navigation, bounded by `browser.action_timeout_ms`.
+
+#### 2.6.2 Tools
+
+`browser_open(url)` `browser_snapshot()` `browser_find(role, name, within)`
+`browser_text(ref)` `browser_table(ref)` `browser_form(ref)`
+`browser_expand(ref)` `browser_click(ref)` `browser_type(ref, text, submit?)`
+`browser_select(ref, value)` `browser_scroll(ref|dir)` `browser_wait_for(cond)`
+`browser_back()` `browser_tabs()` `browser_switch_tab(id)`
+`browser_dialog(accept|dismiss, text?)` `browser_upload(ref, path)`
+`browser_screenshot(ref?)` → artifact only `browser_style(ref, props[])`
+`browser_bbox(ref)` `browser_console()` `browser_network(filter)`.
+`browser_evaluate(js)` exists but is disabled by default.
+
+Edge cases handled: same-origin iframes inline, cross-origin as
+`frame [fr1] (cross-origin)`; shadow DOM; JS dialogs surfaced in the action
+result, never auto-answered; file chooser via `browser_upload` (project files
+only); popups as tabs; downloads to `.sqwai/browser/downloads/`.
+
+#### 2.6.3 Safety and trust
+
+- Isolated profile in `.sqwai/browser/profile/`; attaching to the user's
+  running browser is explicit opt-in with a warning.
+- Host allowlist enforced at protocol level (`Fetch` interception):
+  `browser.allowed_hosts` defaults to `localhost`, `127.0.0.1`; other hosts →
+  approval dialog (once / session / deny).
+- `dangerous` class: navigation to a new host, `type` into
+  password/payment fields (by `autocomplete`/`type`/`name`), submit on a form
+  outside localhost, `upload`, `evaluate`, accepting a `confirm` dialog.
+- Everything read from a page carries `trust: low` (§2.2.2). In a turn whose
+  last result came from a non-localhost page, `plan`, `memory_propose`, `bash`,
+  `git_commit` require approval. Injection fixture page is a required test.
+- Actions with a POST/PUT/DELETE in their network summary are marked
+  `irreversible: true`; `/undo` does not apply and the result says so.
+
+#### 2.6.4 Journal and evidence
+
+Journal `browser_action {op, ref, url_host, outcome, network_errors,
+console_errors, irreversible, artifact}`. Snapshots and screenshots are
+artifacts in `journal/artifacts/` referenced by hash.
+
+Acceptance items may be `browser: <url> find(<role>, "<name>") visible|absent`
+or `browser: <url> console_errors == 0`; the host executes them like `cmd:`
+(§2.1). `verify` steps for frontend tasks close on `browser_action` evidence.
+Diary host block counts `browser: N actions · M irreversible · K screenshots`.
+
+#### 2.6.5 Known blind spots (no vision)
+
+Canvas/WebGL/SVG without ARIA, images, visual layout quality, contrast as
+perception, captchas, unlabeled custom widgets, drag targets defined
+visually, in-browser PDFs. The tree reports these honestly (`canvas [c1]
+800×600 (no accessible content)`, `img "photo.png"`) so the model marks the
+step `blocked` instead of guessing. Screenshot artifacts are ready for a
+`vision` role when one is configured.
+
+#### 2.6.6 Config
+
+```toml
+[browser]
+enabled = false
+headed = false
+allowed_hosts = ["localhost", "127.0.0.1"]
+action_timeout_ms = 8000
+snapshot_token_budget = 2500
+evaluate = false
+attach_to_user_browser = false
+```
+
 3. Cycles
 3.1 Agent turn
 text
@@ -856,7 +963,7 @@ Staged pre-compaction. When used_tokens ≥ context × compaction.stage_ratio
 old read/grep/bash outputs are replaced with a one-line summary
 (`[read src/x.rs 240 lines, hash abc — call read again if needed]`). User
 messages and assistant prose are kept verbatim. This is cheap, preserves the
-anchor, and delays a full compaction by several turns (§7 T). Full compaction
+anchor, and delays a full compaction by several turns (§7 U). Full compaction
 (below) still triggers at the threshold.
 
 3.3.2 Procedure
@@ -1126,7 +1233,7 @@ from the environment; if a non-bash shell is detected, a PowerShell/cmd
 heuristic layer runs alongside the bash AST (cmdlet aliases, `-Recurse -Force`,
 redirections to system paths, `iex`, pipe-to-`iex`). If Git Bash/WSL is
 available and named in the environment, sqwai prefers it so the bash classifier
-stays authoritative. The base detector still cannot be disabled (§7 L).
+stays authoritative. The base detector still cannot be disabled (§7 M).
 
 5.3 Modes [done]
 plan mode: read-only toolset (read ls glob grep git_* webfetch websearch recall graph_query resolve_ref memory_read plan note ask_user); the agent may
@@ -1301,25 +1408,29 @@ I4	resolve_ref; validator refs; pre-edit warning; stale markers; reflector execu
 I5	Memory adapter; recall/graph_query exposed; context block		I4, F4
 J	Python adapter; LSP diagnostics → journal; graph-view list MVP; checkpoint before/after bash		I5, C
 K	Canvas graph-view, watcher, LSP Level 4, blast radius, path view	later	J
-L	Windows/PowerShell shell-aware safety layer (§5.2 modify)	done	§5.2
-M	Single-instance lock + read-only fallback for plan/journal/memory/graph	done	F1
-N	Untrusted-input handling (trust:low, banner, confirm gates) + prompt rule	next (prompt now)	F2
-O	Cancel mid-tool (Esc): cancelled result, post-checkpoint, in_progress	next	F2
-P	Provider fallback chain ([models.x].fallback)	any	§5.1
-Q	Assumption notes: open tracking, finish warning, resolve	next	F3
-R	Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md)	next	F3
-S	Plan-first gate (Act first-mutate w/o plan → plan_required)	F2–F3	F3
-T	Staged compaction + files-read anchor + USER.md split/load	F5–F6	F1, F5
-U	Claim lint (post-generation verify against journal/resolve_ref)	after F2+I4	I4
-V	Scope guard (step.refs vs file_diff)	after I4	I4
-W	Lessons tied to files (note kind + context-block rule)	after I4	I5
-X	/why provenance, step diff + /undo step, /export, /brief	J	J
-Y	bench command (user-facing wrapper over §8.2 regression harness)	after G	G
-Z	Bash isolation/sandbox (container/bwrap/WSL)	open question	—
+L	Browser: CDP driver, tree pipeline, tools, safety, trust, acceptance runner, artifacts	last	K, F3, H0
+M	Windows/PowerShell shell-aware safety layer (§5.2 modify)	done	§5.2
+N	Single-instance lock + read-only fallback for plan/journal/memory/graph	done	F1
+O	Untrusted-input handling (trust:low, banner, confirm gates) + prompt rule	next (prompt now)	F2
+P	Cancel mid-tool (Esc): cancelled result, post-checkpoint, in_progress	next	F2
+Q	Provider fallback chain ([models.x].fallback)	any	§5.1
+R	Assumption notes: open tracking, finish warning, resolve	next	F3
+S	Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md)	next	F3
+T	Plan-first gate (Act first-mutate w/o plan → plan_required)	F2–F3	F3
+U	Staged compaction + files-read anchor + USER.md split/load	F5–F6	F1, F5
+V	Claim lint (post-generation verify against journal/resolve_ref)	after F2+I4	I4
+W	Scope guard (step.refs vs file_diff)	after I4	I4
+X	Lessons tied to files (note kind + context-block rule)	after I4	I5
+Y	/why provenance, step diff + /undo step, /export, /brief	J	J
+Z	bench command (user-facing wrapper over §8.2 regression harness)	after G	G
+AA	Bash isolation/sandbox (container/bwrap/WSL)	open question	—
 Rules: no agent-facing graph feature before I3; no reflector before F2;
 todowrite removed in the same change that ships plan. F1 is complete except
-its explicitly deferred evidence/refs rules, which belong to F3/I4. Items L–Z are the
+its explicitly deferred evidence/refs rules, which belong to F3/I4. Items L–AA are the
 external-risk + enhancement pass (§1.x/§2.x); §3 is the explicit exclusion list.
+
+Prerequisite for item L: spend two days using Playwright MCP through §5.5 on
+real tasks to learn which accessibility-tree format models read well.
 
 8. Definition of done and metrics
 8.1 Core DoD
@@ -1375,13 +1486,18 @@ Whether memory/ should default to committed for teams; current default
 ignored.
 Whether the executor should see expects for run checks to choose
 arguments — currently no; revisit if not_observable rates are high.
-Bash isolation (§2.10 / §7 Z): container / bwrap / WSL sandbox with the project
+Bash isolation (§2.10 / §7 AA): container / bwrap / WSL sandbox with the project
 mounted read-write — the only thing that turns the safety classifier from a
 "seatbelt" into a "guarantee". Deferred to a later phase; track as open question,
 not in the queue.
-Shell-awareness coverage (§5.2 L): how far the PowerShell/cmd heuristic must go
+Shell-awareness coverage (§5.2 M): how far the PowerShell/cmd heuristic must go
 before falling back to forcing Git Bash/WSL; measure on real Windows command
 corpora before declaring done.
+Name inference for unlabeled controls: should `title`, `svg <title>`, or nearby
+text be allowed with an `(inferred)` marker, or should the browser refuse the
+control?
+Should the `vision` role read screenshot artifacts on demand, or only when the
+browser result is `undetermined`?
 
 10. Rejected decisions
 Rejected	Why
@@ -1398,6 +1514,8 @@ Checkpoint only before "dangerous" bash	formatters and git commands mutate silen
 Plan bound to session id	breaks resume/fork and multi-session tasks; plans have their own ids
 /plan /act as mode commands	collides with plan document commands; modes are Tab / /mode
 Project-specific dev rules in the system prompt	leaked sqwai's own AGENTS.md into every user's session
+Screenshot-first control	expensive and imprecise, requires vision; the accessibility tree is exact and model-agnostic
+Playwright MCP as the permanent browser driver	no control over refs, diffs, token budget, or safety; retain it only as a fallback through §5.5
 
 11. Explicitly excluded (do not add)
 To protect execution integrity and determinism, the following are out of scope by
