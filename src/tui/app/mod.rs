@@ -867,8 +867,47 @@ impl App {
                 }
             }
             Some("limit") => "plan limit is configured through the plan settings; runtime override pending".to_string(),
-            Some("complete") | Some("abandon") | Some("waive") => {
-                "this host command is recognized; lifecycle wiring is next".to_string()
+            Some("complete") => match plan::open_active(&root) {
+                Ok(Some(mut active)) => match plan::apply(&mut active, plan::Op::Complete, &plan::Limits::default()) {
+                    Ok(plan::Applied::Completed) => match plan::store(&root, &active) {
+                        Ok(()) => "plan completed".to_string(),
+                        Err(e) => format!("plan write failed: {e:#}"),
+                    },
+                    Ok(_) => "plan complete did not change its status".to_string(),
+                    Err(e) => format!("plan complete rejected [{}]: {}", e.code, e.reason),
+                },
+                Ok(None) => "no active plan".to_string(),
+                Err(e) => format!("plan load failed: {e:#}"),
+            },
+            Some("abandon") => match plan::open_active(&root) {
+                Ok(Some(mut active)) => {
+                    active.status = plan::PlanStatus::Abandoned;
+                    active.revision += 1;
+                    match plan::store(&root, &active) {
+                        Ok(()) => "plan abandoned".to_string(),
+                        Err(e) => format!("plan write failed: {e:#}"),
+                    }
+                }
+                Ok(None) => "no active plan".to_string(),
+                Err(e) => format!("plan load failed: {e:#}"),
+            },
+            Some("waive") => {
+                let index = args.get(1).and_then(|s| s.parse::<usize>().ok());
+                let reason = args.get(2..).map(|v| v.join(" ")).unwrap_or_default();
+                match (index, reason.trim()) {
+                    (Some(index), reason) if !reason.is_empty() => match plan::open_active(&root) {
+                        Ok(Some(mut active)) => match plan::waive(&mut active, index, reason) {
+                            Ok(()) => match plan::store(&root, &active) {
+                                Ok(()) => format!("acceptance {index} waived"),
+                                Err(e) => format!("plan write failed: {e:#}"),
+                            },
+                            Err(e) => format!("plan waive rejected [{}]: {}", e.code, e.reason),
+                        },
+                        Ok(None) => "no active plan".to_string(),
+                        Err(e) => format!("plan load failed: {e:#}"),
+                    },
+                    _ => "usage: /plan waive <acceptance-index> <reason>".to_string(),
+                }
             }
             Some(other) => format!("unknown /plan action '{other}'"),
         };
