@@ -13,6 +13,7 @@ use crate::agent::loop_task::{
 use crate::config::{Config, ModelConfig, ThinkingLevel};
 use crate::providers::{self, Message as PMessage, Role, SharedProvider};
 use crate::session::Session;
+use crate::plan;
 use crate::tui::markdown::Highlighter;
 use crate::tui::theme::Theme;
 
@@ -799,14 +800,10 @@ impl App {
                     }
                 }
             }
-            "/plan" => {
-                self.mode = Mode::Plan;
-                self.status("mode: PLAN", StatusKind::Info);
-            }
-            "/act" => {
-                self.mode = Mode::Act;
-                self.status("mode: ACT", StatusKind::Info);
-            }
+            "/plan" => self.plan_command(rest),
+            "/goal" => self.goal_command(rest),
+            "/constraints" => self.constraints_command(rest),
+            "/mode" => self.mode_command(rest),
             "/new" => {
                 self.start_new_session();
             }
@@ -845,6 +842,93 @@ impl App {
             other => self.status(&format!("unknown command {other}"), StatusKind::Warn),
         }
         self.dirty = true;
+    }
+
+    fn plan_command(&mut self, rest: &str) {
+        let root = std::env::current_dir().unwrap_or_default();
+        let args: Vec<&str> = rest.split_whitespace().skip(1).collect();
+        let result = match args.first().copied() {
+            None | Some("show") => plan::open_active(&root)
+                .ok()
+                .flatten()
+                .map(|p| plan::render(&p))
+                .unwrap_or_else(|| "no active plan".to_string()),
+            Some("history") => {
+                let plans = plan::list(&root);
+                if plans.is_empty() {
+                    "no plan history".to_string()
+                } else {
+                    plans
+                        .iter()
+                        .filter(|p| p.status != plan::PlanStatus::Active)
+                        .map(|p| format!("{} · {:?} · {}", p.id, p.status, p.goal.text))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            }
+            Some("limit") => "plan limit is configured through the plan settings; runtime override pending".to_string(),
+            Some("complete") | Some("abandon") | Some("waive") => {
+                "this host command is recognized; lifecycle wiring is next".to_string()
+            }
+            Some(other) => format!("unknown /plan action '{other}'"),
+        };
+        self.status(&result, StatusKind::Info);
+    }
+
+    fn goal_command(&mut self, rest: &str) {
+        let root = std::env::current_dir().unwrap_or_default();
+        let text = rest.split_once(' ').map(|(_, value)| value.trim()).unwrap_or_default();
+        if text.is_empty() {
+            self.status("usage: /goal <text>", StatusKind::Warn);
+            return;
+        }
+        match plan::open_active(&root) {
+            Ok(Some(mut active)) => {
+                plan::set_goal(&mut active, text.to_string(), "user", Some("user: /goal".to_string()));
+                match plan::store(&root, &active) {
+                    Ok(()) => self.status("goal updated; pending steps are stale", StatusKind::Ok),
+                    Err(e) => self.status(&format!("goal update failed: {e:#}"), StatusKind::Err),
+                }
+            }
+            Ok(None) => self.status("no active plan", StatusKind::Warn),
+            Err(e) => self.status(&format!("plan load failed: {e:#}"), StatusKind::Err),
+        }
+    }
+
+    fn constraints_command(&mut self, rest: &str) {
+        let root = std::env::current_dir().unwrap_or_default();
+        let mut parts = rest.splitn(3, ' ');
+        let _ = parts.next();
+        let action = parts.next().unwrap_or_default();
+        let text = parts.next().unwrap_or_default().trim();
+        if text.is_empty() || !matches!(action, "add" | "remove") {
+            self.status("usage: /constraints add|remove <text>", StatusKind::Warn);
+            return;
+        }
+        match plan::open_active(&root) {
+            Ok(Some(mut active)) => {
+                if action == "add" {
+                    active.constraints.push(text.to_string());
+                } else if let Some(index) = active.constraints.iter().position(|c| c == text) {
+                    active.constraints.remove(index);
+                }
+                active.revision += 1;
+                match plan::store(&root, &active) {
+                    Ok(()) => self.status("constraints updated", StatusKind::Ok),
+                    Err(e) => self.status(&format!("constraints update failed: {e:#}"), StatusKind::Err),
+                }
+            }
+            Ok(None) => self.status("no active plan", StatusKind::Warn),
+            Err(e) => self.status(&format!("plan load failed: {e:#}"), StatusKind::Err),
+        }
+    }
+
+    fn mode_command(&mut self, rest: &str) {
+        match rest.split_whitespace().nth(1) {
+            Some("plan") => { self.mode = Mode::Plan; self.status("mode: PLAN", StatusKind::Info); }
+            Some("act") => { self.mode = Mode::Act; self.status("mode: ACT", StatusKind::Info); }
+            _ => self.status("usage: /mode plan|act", StatusKind::Warn),
+        }
     }
 
     const BUSY_STATUS: &'static str = "busy · esc to stop";
