@@ -1134,6 +1134,23 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn fork_copies_plan_with_new_identity_and_reset_revision() {
+        let root = std::env::temp_dir().join(format!("sqwai-plan-fork-{}", std::process::id()));
+        let mut source = new_plan();
+        source.revision = 7;
+        store(&root, &source).unwrap();
+        let copy = fork(&root, &source, "fork-session").unwrap();
+        assert_ne!(copy.id, source.id);
+        assert_eq!(copy.forked_from.as_deref(), Some(source.id.as_str()));
+        assert_eq!(copy.sessions, vec!["fork-session"]);
+        assert_eq!(copy.revision, 0);
+        assert_eq!(copy.steps.len(), source.steps.len());
+        assert!(open(&root, &copy.id).is_ok());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn start_then_finish() {
         let mut plan = new_plan();
         assert!(matches!(
