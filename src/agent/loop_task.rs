@@ -906,6 +906,12 @@ async fn run_agent(
                     "ok": outcome.ok,
                     "summary": outcome.output.chars().take(200).collect::<String>(),
                 }));
+                if call.name == "plan" {
+                    let _ = writer.append("plan", serde_json::json!({
+                        "op": call.args.get("op").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                        "ok": outcome.ok,
+                    }));
+                }
             }
             messages.push(Message::tool_result(&call.id, outcome.output, !outcome.ok));
         }
