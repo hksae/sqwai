@@ -1144,6 +1144,28 @@ mod tests {
     }
 
     #[test]
+    fn note_requires_an_allowed_kind_and_non_empty_text() {
+        let (mut ctx, dir) = proj();
+        let missing = execute(&mut ctx, "note", &json!({"note": "", "kind": "lesson"}));
+        assert!(!missing.ok);
+        assert!(missing.output.contains("1-2000"), "{}", missing.output);
+        let invalid = execute(
+            &mut ctx,
+            "note",
+            &json!({"note": "keep this", "kind": "other"}),
+        );
+        assert!(!invalid.ok);
+        assert!(invalid.output.contains("invalid"), "{}", invalid.output);
+        let accepted = execute(
+            &mut ctx,
+            "note",
+            &json!({"note": "keep this", "kind": "decision"}),
+        );
+        assert!(accepted.ok, "{}", accepted.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn evidence_must_match_step_kind_and_start_boundary() {
         let (mut ctx, dir) = proj();
         let created = plan_op(
