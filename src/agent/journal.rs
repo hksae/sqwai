@@ -66,6 +66,37 @@ impl Journal {
         self.next_seq
     }
 
+    /// Read records from every journal belonging to this project.
+    pub fn records(root: &Path) -> Result<Vec<Record>> {
+        let dir = root.join(".sqwai").join("journal");
+        let mut records = Vec::new();
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Ok(records);
+        };
+        for entry in entries.flatten() {
+            if entry.path().extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let file = File::open(entry.path()).context("opening journal for evidence")?;
+            for line in BufReader::new(file).lines() {
+                let line = line.context("reading journal for evidence")?;
+                if !line.trim().is_empty() {
+                    records.push(serde_json::from_str(&line).context("decoding journal evidence")?);
+                }
+            }
+        }
+        Ok(records)
+    }
+
+    /// Check that a sequence belongs to this plan and is useful evidence.
+    pub fn evidence(root: &Path, plan: &str, seq: u64) -> Result<Option<Record>> {
+        Ok(Self::records(root)?.into_iter().find(|r| {
+            r.seq == seq
+                && r.plan.as_deref() == Some(plan)
+                && matches!(r.kind.as_str(), "tool_result" | "file_diff" | "diagnostics")
+        }))
+    }
+
     /// Append one host-owned record and flush it before returning.
     pub fn append(&mut self, kind: &str, fields: Value) -> Result<u64> {
         if !fields.is_object() {
