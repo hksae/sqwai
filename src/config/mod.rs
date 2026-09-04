@@ -343,6 +343,77 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    #[serde(default = "default_memory_load_budget_ratio")]
+    pub load_budget_ratio: f64,
+    #[serde(default = "default_memory_heading_days")]
+    pub heading_days: u8,
+    #[serde(default = "default_memory_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_memory_max_proposals")]
+    pub max_proposals_per_turn: u8,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            load_budget_ratio: default_memory_load_budget_ratio(),
+            heading_days: default_memory_heading_days(),
+            max_tokens: default_memory_max_tokens(),
+            max_proposals_per_turn: default_memory_max_proposals(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiaryConfig {
+    #[serde(default = "default_diary_token_budget")]
+    pub token_budget: u32,
+    #[serde(default = "default_diary_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_diary_batch_steps")]
+    pub batch_steps: u8,
+    #[serde(default = "default_diary_batch_minutes")]
+    pub batch_minutes: u16,
+}
+
+impl Default for DiaryConfig {
+    fn default() -> Self {
+        Self {
+            token_budget: default_diary_token_budget(),
+            timeout_secs: default_diary_timeout_secs(),
+            batch_steps: default_diary_batch_steps(),
+            batch_minutes: default_diary_batch_minutes(),
+        }
+    }
+}
+
+fn default_memory_load_budget_ratio() -> f64 {
+    0.06
+}
+fn default_memory_heading_days() -> u8 {
+    7
+}
+fn default_memory_max_tokens() -> u32 {
+    3000
+}
+fn default_memory_max_proposals() -> u8 {
+    2
+}
+fn default_diary_token_budget() -> u32 {
+    1500
+}
+fn default_diary_timeout_secs() -> u64 {
+    30
+}
+fn default_diary_batch_steps() -> u8 {
+    3
+}
+fn default_diary_batch_minutes() -> u16 {
+    20
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_model_name")]
     pub default_model: String,
@@ -362,6 +433,10 @@ pub struct Config {
     pub lsp: LspConfig,
     #[serde(default)]
     pub skills: SkillsConfig,
+    #[serde(default)]
+    pub memory: MemoryConfig,
+    #[serde(default)]
+    pub diary: DiaryConfig,
 }
 
 fn default_model_name() -> String {
@@ -413,6 +488,8 @@ impl Default for Config {
             mcp: McpConfig::default(),
             lsp: LspConfig::default(),
             skills: SkillsConfig::default(),
+            memory: MemoryConfig::default(),
+            diary: DiaryConfig::default(),
         };
         cfg.ensure_seeds();
         cfg
