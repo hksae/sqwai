@@ -46,7 +46,7 @@ pub struct AgentOutcome {
     pub messages: Vec<Message>,
     /// compaction summary covering everything dropped from `messages`
     pub summary: Option<String>,
-    /// current to-do list written via todowrite
+    /// deprecated compatibility field; derived plan data is exposed separately
     pub todos: Vec<String>,
     /// checklist derived from the durable project plan
     pub plan_todos: Vec<String>,
@@ -714,7 +714,7 @@ async fn run_agent(
                 )
             } else if plan_mode
                 && tools::is_mutating_call(&call.name, &call.args)
-                && call.name != "plan_update"
+                && call.name != "plan"
             {
                 tools::Outcome::err(format!(
                     "PLAN mode is read-only: '{}' is not allowed. Explore first, then ask the \
@@ -735,19 +735,6 @@ async fn run_agent(
                             &mut next_id,
                         )
                         .await
-                    }
-                    "todowrite" => {
-                        let items: Vec<String> = call.args["todos"]
-                            .as_array()
-                            .map(|a| {
-                                a.iter()
-                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        todos = items.clone();
-                        let _ = tx.send(AgentEvent::Todos(items.clone())).await;
-                        tools::Outcome::ok(format!("to-do saved ({} items)", items.len()))
                     }
                     "webfetch" => tools::web::fetch(&call.args).await,
                     "websearch" => tools::web::search(&call.args).await,
@@ -771,15 +758,18 @@ async fn run_agent(
                         .await
                     }
                     "subagent" => tools::Outcome::err("nested subagents are not allowed"),
-                    "plan_update" => {
+                    "plan" => {
                         let mut args = call.args.clone();
                         args["context_limit"] = serde_json::json!(context_limit);
-                        let outcome = run_tool_blocking(&mut ctx, "plan_update", &args).await;
+                        let outcome = run_tool_blocking(&mut ctx, "plan", &args).await;
                         if outcome.ok {
-                            if let Some(saved) = plan::load(&root) {
-                                plan_todos = plan::todo_items(&saved);
-                                todos = plan_todos.clone();
-                                let _ = tx.send(AgentEvent::Todos(todos.clone())).await;
+                            if let Ok(Some(saved)) = plan::open_active(&root) {
+                                plan_todos = saved
+                                    .steps
+                                    .iter()
+                                    .map(|step| format!("[{}] {}", step.status.as_str(), step.title))
+                                    .collect();
+                                let _ = tx.send(AgentEvent::Todos(plan_todos.clone())).await;
                             }
                         }
                         outcome
