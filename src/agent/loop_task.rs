@@ -209,6 +209,8 @@ pub struct AgentInput {
     /// Run the compaction policy and finish without talking to the model
     /// otherwise (the `/compact` command).
     pub compact_only: bool,
+    /// diary writer limits copied from configuration
+    pub diary: crate::config::DiaryConfig,
     /// nesting guard for delegated subagents; the first generation may create
     /// children, but children cannot recursively create more children.
     pub subagent_depth: u8,
@@ -386,6 +388,7 @@ async fn run_subagent(
         mcp,
         lsp,
         compact_only: false,
+        diary: crate::config::DiaryConfig::default(),
         subagent_depth: 1,
     });
     let mut child = child;
@@ -524,6 +527,7 @@ async fn run_agent(
         mut previous_response_id,
         mut summary,
         compact_only,
+        diary,
         mcp,
         lsp,
         subagent_depth,
@@ -576,8 +580,31 @@ async fn run_agent(
     };
     let transport = crate::providers::select_transport(caps, previous_response_id.as_deref());
 
-    // `/compact` — run the policy, hand the transcript back, no chat turn.
+    // `/compact` — write the mandatory pre-compaction diary entry first, then
+    // run the policy and hand the transcript back without a chat turn.
     if compact_only {
+        let _ = crate::agent::diary::write_entry(
+            &root,
+            crate::agent::diary::today(),
+            &session_id,
+            "compaction",
+            Some(&provider),
+            &model_id,
+            plan::open_active(&root)
+                .ok()
+                .flatten()
+                .map(|plan| plan::render(&plan))
+                .as_deref(),
+            None,
+            messages
+                .iter()
+                .rev()
+                .find(|message| message.role == Role::User)
+                .map(|message| message.content.as_str()),
+            Some(diary.token_budget),
+            Some(Duration::from_secs(diary.timeout_secs)),
+        )
+        .await;
         let outcome = compact_history(
             &provider,
             &model_id,

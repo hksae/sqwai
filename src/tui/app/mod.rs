@@ -528,6 +528,7 @@ impl App {
             },
             summary: self.session.summary.clone(),
             compact_only: false,
+            diary: self.cfg.diary.clone(),
             subagent_depth: 0,
         };
         self.context_bootstrap_pending = false;
@@ -588,6 +589,7 @@ impl App {
             previous_response_id: None,
             summary: self.session.summary.clone(),
             compact_only: true,
+            diary: self.cfg.diary.clone(),
             subagent_depth: 0,
         };
         self.agent = Some(spawn_agent(input));
