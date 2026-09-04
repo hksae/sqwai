@@ -588,6 +588,10 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     };
     let limits = plan::Limits::default();
 
+    if let Err(message) = validate_evidence(&ctx.root, &op) {
+        return Outcome::err(message);
+    }
+
     match op {
         plan::Op::Create {
             goal,
@@ -651,6 +655,34 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             }
         }
     }
+}
+
+fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
+    let (id, evidence) = match op {
+        plan::Op::Finish { id, evidence, .. } => (id, evidence),
+        plan::Op::Verify { evidence, .. } => ("acceptance", evidence),
+        _ => return Ok(()),
+    };
+    if evidence.is_empty() {
+        return Err(format!("no_evidence: step {id} requires journal evidence"));
+    }
+    let plan_id = plan::open_active(root)
+        .ok()
+        .flatten()
+        .map(|p| p.id)
+        .unwrap_or_default();
+    for seq in evidence {
+        match crate::agent::journal::Journal::evidence(root, &plan_id, *seq) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(format!(
+                    "invalid_evidence: journal record {seq} is not valid for this plan"
+                ));
+            }
+            Err(e) => return Err(format!("evidence_unreadable: {e:#}")),
+        }
+    }
+    Ok(())
 }
 
 /// Rejections are a normal tool result the model can act on (§2.1.4).
