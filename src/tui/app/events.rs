@@ -87,6 +87,7 @@ impl App {
                         let Ok(txt) = cb.get_text() else {
                             continue;
                         };
+                        let txt = normalize_paste(&txt);
                         self.pasted_clipboard = Some(txt.clone());
                         self.paste_enter_guard = true;
                         self.paste_text(&txt);
@@ -363,6 +364,17 @@ impl App {
                     _ => {}
                 },
                 Event::Paste(p) => {
+                    let p = normalize_paste(&p);
+                    // Some Windows terminals emit both our Ctrl+V key event
+                    // and a bracketed-paste event for the same clipboard
+                    // payload. The key handler already inserted it; consume
+                    // the duplicate but keep the one-shot Enter guard for
+                    // the synthetic Enter that may follow.
+                    if self.pasted_clipboard.as_deref() == Some(p.as_str()) {
+                        self.pasted_clipboard = None;
+                        self.paste_enter_guard = true;
+                        continue;
+                    }
                     self.pasted_clipboard = None;
                     self.paste_enter_guard = false;
                     if !self.menu_stack.is_empty() {
@@ -451,6 +463,10 @@ impl App {
     }
 }
 
+fn normalize_paste(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 fn consume_replayed_paste_key(slot: &mut Option<String>, key: crossterm::event::KeyEvent) -> bool {
     if key
         .modifiers
@@ -462,13 +478,20 @@ fn consume_replayed_paste_key(slot: &mut Option<String>, key: crossterm::event::
         return false;
     };
     let text = match key.code {
+        KeyCode::Char('\r') | KeyCode::Enter => "\n".to_string(),
         KeyCode::Char(ch) => ch.to_string(),
-        KeyCode::Enter => "\n".to_string(),
         _ => return false,
     };
     if expected.starts_with(&text) {
         let remainder = expected[text.len()..].to_string();
         *slot = (!remainder.is_empty()).then_some(remainder);
+        true
+    } else if text == "\n" {
+        // On Windows, some terminals replay a clipboard newline as Enter
+        // after the preceding characters, while the next characters may be
+        // delivered in a later batch. Consume that boundary without
+        // advancing the marker; otherwise it submits the first line and the
+        // rest of the paste is left in the editor.
         true
     } else {
         // A terminal may interleave the Ctrl+V trigger or a key-release
@@ -483,6 +506,27 @@ fn consume_replayed_paste_key(slot: &mut Option<String>, key: crossterm::event::
 pub(super) const TEXT_COMBOS: &[char] = &['z', 'y', 'a', 'e', 'u', 'k', 'w', 'd'];
 
 /// shared editor shortcuts for every text input
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replayed_paste_newline_cannot_submit_first_line() {
+        let mut pending = Some("second line".to_string());
+        let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+        assert!(consume_replayed_paste_key(&mut pending, enter));
+        assert_eq!(pending.as_deref(), Some("second line"));
+        let first = crossterm::event::KeyEvent::new(KeyCode::Char('s'), KeyModifiers::empty());
+        assert!(consume_replayed_paste_key(&mut pending, first));
+        assert_eq!(pending.as_deref(), Some("econd line"));
+    }
+
+    #[test]
+    fn normalize_paste_handles_windows_line_endings() {
+        assert_eq!(normalize_paste("one\r\ntwo\rthree"), "one\ntwo\nthree");
+    }
+}
+
 pub(super) fn text_combo(ta: &mut TextArea<'static>, c: char) -> bool {
     use tui_textarea::CursorMove;
     match c {
