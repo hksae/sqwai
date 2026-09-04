@@ -208,6 +208,13 @@ impl App {
         if let Some(plan) = crate::prompts::plan_block(&root) {
             parts.push(SystemPart::cached(plan));
         }
+        // The anchor is host-generated from the plan and this session's
+        // journal. It is rebuilt every turn so resume/compaction never relies
+        // on a model-written summary.
+        parts.push(SystemPart::volatile(crate::agent::context::anchor(
+            &root,
+            &self.session.id.to_string(),
+        )));
         // re-read once per submitted turn, never cached
         parts.push(SystemPart::volatile(crate::prompts::runtime_context()));
         parts

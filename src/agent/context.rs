@@ -18,6 +18,138 @@
 
 use crate::providers::{Message, Role};
 
+/// Host-generated state anchor used after compaction and on session start.
+/// It contains only durable plan data and bounded journal-derived facts; the
+/// model never writes or rewrites this block.
+pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
+    let mut out = String::from("ANCHOR (host-generated; source of truth after compaction)\n");
+    if let Ok(Some(plan)) = crate::plan::open_active(root) {
+        out.push_str(&format!("goal: {}\n", bounded(&plan.goal.text, 500)));
+        if plan.constraints.is_empty() {
+            out.push_str("constraints: none\n");
+        } else {
+            out.push_str("constraints: ");
+            out.push_str(
+                &plan
+                    .constraints
+                    .iter()
+                    .map(|constraint| bounded(constraint, 240))
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            );
+            out.push('\n');
+        }
+        if plan.acceptance.is_empty() {
+            out.push_str("acceptance: none\n");
+        } else {
+            out.push_str("acceptance: ");
+            out.push_str(
+                &plan
+                    .acceptance
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        format!(
+                            "[{index}] {}{}",
+                            item.status.as_str(),
+                            item.evidence
+                                .last()
+                                .map(|seq| format!(" j#{seq}"))
+                                .unwrap_or_default()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            );
+            out.push('\n');
+        }
+        let counts = plan.counts();
+        out.push_str(&format!(
+            "plan {} rev {}: {} done · {} in_progress · {} blocked · {} pending · {} cancelled\n",
+            bounded(&plan.id, 80),
+            plan.revision,
+            counts.done,
+            counts.in_progress,
+            counts.blocked,
+            counts.pending,
+            counts.cancelled
+        ));
+        for step in plan
+            .steps
+            .iter()
+            .filter(|step| {
+                matches!(
+                    step.status,
+                    crate::plan::StepStatus::InProgress
+                        | crate::plan::StepStatus::Blocked
+                        | crate::plan::StepStatus::Pending
+                )
+            })
+            .take(8)
+        {
+            out.push_str(&format!(
+                "  step {} {} {}\n",
+                bounded(&step.id, 40),
+                step.status.as_str(),
+                bounded(&step.title, 240)
+            ));
+        }
+        for folded in plan.folded.iter().take(8) {
+            out.push_str(&format!("  folded: {}\n", bounded(&folded.text, 240)));
+        }
+    } else {
+        out.push_str("goal: none\nconstraints: none\nacceptance: none\nplan: none\n");
+    }
+
+    let mut changed = Vec::new();
+    let mut last_verification = None;
+    if let Ok(records) = crate::agent::journal::Journal::records_for(root, session_id) {
+        for record in records {
+            if record.kind == "file_diff" {
+                if let Some(path) = record.fields.get("path").and_then(|value| value.as_str()) {
+                    changed.push(bounded(path, 160));
+                }
+            }
+            if record.kind == "tool_result"
+                && record
+                    .fields
+                    .get("tool")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|tool| matches!(tool, "bash" | "git_diff" | "git_commit"))
+                && record.fields.get("ok").and_then(|value| value.as_bool()) == Some(true)
+            {
+                last_verification = Some(record.seq);
+            }
+        }
+    }
+    changed.sort();
+    changed.dedup();
+    if changed.is_empty() {
+        out.push_str("files changed this session: none\n");
+    } else {
+        out.push_str(&format!(
+            "files changed this session: {}\n",
+            changed.into_iter().take(24).collect::<Vec<_>>().join(" · ")
+        ));
+    }
+    out.push_str(&format!(
+        "last verification: {}\n",
+        last_verification
+            .map(|seq| format!("successful exec j#{seq}"))
+            .unwrap_or_else(|| "none".to_string())
+    ));
+    out
+}
+
+fn bounded(text: &str, max_chars: usize) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= max_chars {
+        text
+    } else {
+        format!("{}…", text.chars().take(max_chars).collect::<String>())
+    }
+}
+
 /// messages kept verbatim by the local (no-LLM) compaction path
 const RECENT_MESSAGE_COUNT: usize = 8;
 const MAX_TOOL_OUTPUT_CHARS: usize = 12_000;
@@ -364,6 +496,67 @@ mod tests {
 
     fn user(s: &str) -> Message {
         Message::new(Role::User, s)
+    }
+
+    fn temp_root(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("sqwai-context-{label}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn anchor_preserves_plan_state_and_journal_facts() {
+        let root = temp_root("anchor");
+        let mut plan = crate::plan::create(
+            "ship the anchor".into(),
+            vec!["keep the goal host-owned".into()],
+            vec!["cmd: cargo test".into()],
+            vec![crate::plan::NewStep {
+                title: "implement anchor".into(),
+                kind: Some(crate::plan::StepKind::Change),
+                refs: Vec::new(),
+            }],
+            20_000,
+            &crate::plan::Limits::default(),
+        )
+        .unwrap();
+        crate::plan::store(&root, &plan).unwrap();
+        crate::plan::apply(
+            &mut plan,
+            crate::plan::Op::Start {
+                id: "1".into(),
+                confirm: None,
+            },
+            &crate::plan::Limits::default(),
+        )
+        .unwrap();
+        crate::plan::store(&root, &plan).unwrap();
+
+        let mut journal = crate::agent::journal::Journal::open(&root, "anchor-session").unwrap();
+        journal.set_attribution(Some("1".into()), Some(plan.id.clone()), "main");
+        journal
+            .append("file_diff", serde_json::json!({"path": "src/main.rs"}))
+            .unwrap();
+        journal
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "bash", "ok": true}),
+            )
+            .unwrap();
+
+        let rendered = anchor(&root, "anchor-session");
+        assert!(rendered.contains("goal: ship the anchor"));
+        assert!(rendered.contains("constraints: keep the goal host-owned"));
+        assert!(rendered.contains("step 1 in_progress implement anchor"));
+        assert!(rendered.contains("files changed this session: src/main.rs"));
+        assert!(rendered.contains("last verification: successful exec j#2"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn anchor_degrades_without_plan_or_journal() {
+        let root = temp_root("empty");
+        let rendered = anchor(&root, "missing-session");
+        assert!(rendered.contains("goal: none"));
+        assert!(rendered.contains("files changed this session: none"));
     }
 
     #[test]
