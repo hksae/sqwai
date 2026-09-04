@@ -686,6 +686,34 @@ async fn run_agent(
     let mut prompt_size: u64 = 0;
 
     loop {
+        // The diary is written before the compaction policy can discard any
+        // transcript context. The writer has a hard timeout and host fallback.
+        if policy.pressure(prompt_size.max(context::estimated_tokens(&messages)))
+            != context::Pressure::Ok
+        {
+            let _ = crate::agent::diary::write_entry(
+                &root,
+                crate::agent::diary::today(),
+                &session_id,
+                "compaction",
+                Some(&provider),
+                &model_id,
+                plan::open_active(&root)
+                    .ok()
+                    .flatten()
+                    .map(|plan| plan::render(&plan))
+                    .as_deref(),
+                None,
+                messages
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == Role::User)
+                    .map(|message| message.content.as_str()),
+                Some(diary.token_budget),
+                Some(Duration::from_secs(diary.timeout_secs)),
+            )
+            .await;
+        }
         // Compaction gate. The provider's own prompt size is the honest
         // measurement — it includes the system block and the tool schemas the
         // estimate cannot see.
