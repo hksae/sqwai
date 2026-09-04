@@ -309,7 +309,6 @@ pub async fn write_entry(
         None
     };
     append_host_entry(root, date, session_id, trigger, &host, prose.as_deref())?;
-    mark_diary(root, session_id, trigger)?;
     Ok(prose.is_some())
 }
 
@@ -337,15 +336,7 @@ pub fn append_entry(
     prose: Option<&str>,
 ) -> Result<()> {
     let host = host_block(root, session_id, trigger)?;
-    append_host_entry(root, date, session_id, trigger, &host, prose)?;
-    mark_diary(root, session_id, trigger)
-}
-
-fn mark_diary(root: &Path, session_id: &str, trigger: &str) -> Result<()> {
-    let mut journal = crate::agent::journal::Journal::open(root, session_id)?;
-    journal.set_attribution(None, None, "host");
-    journal.append("diary", serde_json::json!({"trigger": trigger}))?;
-    Ok(())
+    append_host_entry(root, date, session_id, trigger, &host, prose)
 }
 
 fn append_host_entry(
