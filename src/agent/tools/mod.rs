@@ -675,21 +675,48 @@ fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
     if evidence.is_empty() {
         return Err(format!("no_evidence: step {id} requires journal evidence"));
     }
-    let plan_id = plan::open_active(root)
-        .ok()
-        .flatten()
-        .map(|p| p.id)
-        .unwrap_or_default();
+    let active = plan::open_active(root)
+        .map_err(|e| format!("evidence_unreadable: {e:#}"))?
+        .ok_or_else(|| "invalid_evidence: no active plan".to_string())?;
+    let plan_id = active.id.clone();
+    let required_kind = match op {
+        plan::Op::Finish { id, .. } => active
+            .step(id)
+            .map(|step| step.kind)
+            .ok_or_else(|| format!("unknown_step: no step {id}"))?,
+        plan::Op::Verify { .. } => plan::StepKind::Verify,
+        _ => unreachable!(),
+    };
+    let mut valid = Vec::new();
     for seq in evidence {
-        match crate::agent::journal::Journal::evidence(root, &plan_id, *seq) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                return Err(format!(
-                    "invalid_evidence: journal record {seq} is not valid for this plan"
-                ));
+        let record = crate::agent::journal::Journal::evidence(root, &plan_id, *seq)
+            .map_err(|e| format!("evidence_unreadable: {e:#}"))?
+            .ok_or_else(|| {
+                format!("invalid_evidence: journal record {seq} is not valid for this plan")
+            })?;
+        let allowed = match required_kind {
+            plan::StepKind::Research => record.kind == "tool_result",
+            plan::StepKind::Change => record.kind == "file_diff",
+            plan::StepKind::Verify => {
+                record.kind == "diagnostics"
+                    || (record.kind == "tool_result"
+                        && record.fields.get("ok").and_then(Value::as_bool) == Some(true)
+                        && record
+                            .fields
+                            .get("tool")
+                            .and_then(Value::as_str)
+                            .is_some_and(|tool| tool == "bash" || tool.starts_with("git_")))
             }
-            Err(e) => return Err(format!("evidence_unreadable: {e:#}")),
+        };
+        if allowed {
+            valid.push(*seq);
         }
+    }
+    if valid.is_empty() {
+        return Err(format!(
+            "wrong_evidence: evidence does not satisfy {} step requirements",
+            required_kind.as_str()
+        ));
     }
     Ok(())
 }
