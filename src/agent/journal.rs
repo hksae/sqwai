@@ -88,6 +88,27 @@ impl Journal {
         Ok(records)
     }
 
+    /// Read records from one session journal only.
+    pub fn records_for(root: &Path, session_id: &str) -> Result<Vec<Record>> {
+        let path = root
+            .join(".sqwai")
+            .join("journal")
+            .join(format!("{session_id}.jsonl"));
+        let Ok(file) = File::open(path) else {
+            return Ok(Vec::new());
+        };
+        BufReader::new(file)
+            .lines()
+            .filter_map(|line| match line {
+                Ok(line) if !line.trim().is_empty() => {
+                    Some(serde_json::from_str(&line).context("decoding session journal record"))
+                }
+                Ok(_) => None,
+                Err(error) => Some(Err(error.into())),
+            })
+            .collect()
+    }
+
     /// Check that a sequence belongs to this plan and is useful evidence.
     pub fn evidence(
         root: &Path,
