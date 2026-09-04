@@ -13,11 +13,68 @@
 pub mod env;
 pub mod skills;
 
+const MEMORY_MAX_CHARS: usize = 12_000;
+const DIARY_HEADING_DAYS: i64 = 7;
+
+/// Durable user/project memory and recent diary context for the stable prefix.
+/// Missing files are normal; all loaded text is screened before it reaches the
+/// provider so secrets cannot be promoted into prompt context.
+pub fn memory_block(root: &std::path::Path) -> Option<String> {
+    let mut sections = Vec::new();
+    if let Ok(path) = crate::config::config_dir().map(|dir| dir.join("USER.md"))
+        && let Some(text) = read_bounded(&path)
+    {
+        sections.push(format!("<user_memory>\n{text}\n</user_memory>"));
+    }
+    let project_memory = root.join(".sqwai").join("memory").join("MEMORY.md");
+    if let Some(text) = read_bounded(&project_memory) {
+        sections.push(format!("<project_memory>\n{text}\n</project_memory>"));
+    }
+    let today = crate::agent::diary::today();
+    for offset in 0..DIARY_HEADING_DAYS {
+        let date = today - chrono::Duration::days(offset);
+        let path = crate::agent::diary::diary_path(root, date);
+        let Some(raw) = read_bounded(&path) else {
+            continue;
+        };
+        let text = if offset < 2 { raw } else { headings_only(&raw) };
+        if !text.trim().is_empty() {
+            sections.push(format!("<diary date=\"{date}\">\n{text}\n</diary>"));
+        }
+    }
+    (!sections.is_empty()).then(|| sections.join("\n\n"))
+}
+
+fn read_bounded(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let screened = crate::agent::diary::screen(&text).text;
+    Some(truncate_chars(&screened, MEMORY_MAX_CHARS))
+}
+
+fn headings_only(text: &str) -> String {
+    text.lines()
+        .filter(|line| line.starts_with("#"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let clipped: String = text.chars().take(max).collect();
+    format!("{clipped}\n[truncated]")
+}
+
 /// Stable prefix: identical for every request of a session, safe to cache.
 pub fn stable_prefix() -> String {
     let mut prompt = compose(&builtin_prompt(), project_agents().as_deref());
     prompt.push_str("\n\n");
     prompt.push_str(&env::stable_block());
+    if let Some(memory) = memory_block(&std::env::current_dir().unwrap_or_default()) {
+        prompt.push_str("\n\n");
+        prompt.push_str(&memory);
+    }
     prompt
 }
 
@@ -109,6 +166,19 @@ mod tests {
     #[test]
     fn builtin_prompt_is_not_empty() {
         assert!(!builtin_prompt().trim().is_empty());
+    }
+
+    #[test]
+    #[test]
+    fn headings_only_keeps_structure_without_diary_prose() {
+        let text = "## 2026-09-04\n### Done\n- hidden detail\n### Open\n- pending";
+        assert_eq!(headings_only(text), "## 2026-09-04\n### Done\n### Open");
+    }
+
+    #[test]
+    fn memory_block_is_optional_for_empty_project() {
+        let root = std::env::temp_dir().join(format!("sqwai-prompt-{}", std::process::id()));
+        assert!(memory_block(&root).is_none());
     }
 
     #[test]
