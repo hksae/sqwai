@@ -85,7 +85,7 @@ without it.
 
 ## Quick start
 
-# ~/.config/sqwai/config.toml   (Windows: %APPDATA%\sqwai\config\config.toml)
+~/.config/sqwai/config.toml   (Windows: %APPDATA%\sqwai\config\config.toml)
 ```toml
 default_model = "sonnet"
 
