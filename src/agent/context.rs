@@ -241,6 +241,7 @@ pub struct Policy {
 }
 
 impl Policy {
+    #[allow(dead_code)]
     pub fn new(context_limit: u64) -> Self {
         Self {
             context_limit,
@@ -290,6 +291,7 @@ impl Policy {
         self.keep_turns.unwrap_or(SUMMARY_KEEP_RECENT)
     }
 
+    #[allow(dead_code)]
     pub fn stage_ratio(&self) -> f64 {
         self.stage_ratio.unwrap_or(0.60).clamp(0.0, 1.0)
     }
@@ -387,6 +389,7 @@ pub fn prune(messages: &[Message]) -> (Vec<Message>, bool) {
 ///
 /// The cut lands on a user turn and never separates an assistant tool call
 /// from its results — providers reject orphaned tool results.
+#[allow(dead_code)]
 pub fn split_for_summary(messages: &[Message]) -> (&[Message], &[Message]) {
     split_for_summary_with_keep(messages, SUMMARY_KEEP_RECENT)
 }
@@ -744,6 +747,25 @@ mod tests {
         assert_eq!(mid.pressure(80_001), Pressure::Summarize);
         // unknown limit: never compact on a guess
         assert_eq!(Policy::new(0).pressure(10_000_000), Pressure::Ok);
+    }
+
+    #[test]
+    fn configured_policy_controls_reserve_tail_and_summary() {
+        let policy = Policy::with_compaction(100_000, 0.08, 4, 0.60, false);
+        assert_eq!(policy.reserve(), 8_000);
+        assert_eq!(policy.keep_turns(), 4);
+        assert!(!policy.summary_enabled);
+        assert!((policy.stage_ratio() - 0.60).abs() < f64::EPSILON);
+
+        let messages: Vec<_> = (0..8).map(|i| user(&format!("message {i}"))).collect();
+        let (older, keep) = split_for_summary_with_keep(&messages, policy.keep_turns());
+        assert_eq!(older.len(), 4);
+        assert_eq!(keep.len(), 4);
+    }
+
+    #[test]
+    fn summary_off_is_the_default() {
+        assert!(!Policy::new(100_000).summary_enabled);
     }
 
     #[test]
