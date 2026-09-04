@@ -213,7 +213,7 @@ JSON
 {"op":"cancel","id":"6","reason":"..."}
 {"op":"add","after":"3","title":"...","kind":"verify","refs":["src/x.rs::fn::foo"]}
 {"op":"split","id":"3","into":[{"title":"..."},{"title":"..."}]}
-{"op":"verify","acceptance":0,"evidence":[41,42]}
+{"op":"verify","acceptance":0}
 {"op":"complete"}
 {"op":"propose_goal_revision","goal":"...","reason":"..."}
 {"op":"show"}
@@ -230,24 +230,37 @@ abandon, restore (resume).
 Op	Rejected when
 create	active plan exists · goal empty · zero steps · more than plan.max_steps (24) steps
 start	step not `pending
-finish	step not in_progress · evidence rule fails (below) · summary empty
+finish	step not in_progress · host evidence rule fails (below) · summary empty
 block	step not `in_progress
 unblock	step not blocked
 cancel	step done · reason empty
 add / split	resulting step count > plan.max_steps (user may raise via /plan limit N) · after id unknown
-verify	acceptance index unknown · any evidence seq missing, belongs to another plan, or is not `tool_result
+verify	acceptance index unknown · host evidence rule fails (below)
 complete	any step `pending
 propose_goal_revision	goal text empty · identical to current
 any	plan `completed
-Evidence rule for finish (evidence = journal records with this
-step_id, written by the host between start and finish):
+Evidence is owned by the host. The model never supplies journal sequence
+numbers to `finish` or `verify`. Whenever the host writes a `tool_result`,
+`file_diff`, or `diagnostics` record with a non-empty step attribution, it
+atomically appends that record's scoped reference to `steps[].evidence`.
+A scoped reference is `{session, seq}` (or the compact string `session:seq`),
+never a bare sequence number. `finish` accepts only `id` and `summary`; it
+checks the evidence already attached to that step. If a model sends an
+`evidence` field, the host ignores it and returns an informational note.
 
 kind	Requires
-research	≥ 1 tool_result of any tool
-change	≥ 1 file_diff
-verify	≥ 1 tool_result from an exec tool (bash, git_*) with exit == 0, or ≥ 1 diagnostics record with zero errors for files changed in this plan
+research	≥ 1 host-attached tool_result of any tool since start
+change	≥ 1 host-attached file_diff since start
+verify	≥ 1 host-attached successful exec result (bash, git_*) or diagnostics with zero errors
 Evidence produced by subagents counts when the subagent ran in Act mode and
-inherited this step_id (§2.2.4).
+inherited this step_id (§2.2.4). Rejections report counts, for example:
+`step 2 (change): 3 tool_result, 0 file_diff since start`.
+
+For `verify`, `cmd:` acceptance is executed by the host and its result is
+attached automatically. `manual:` acceptance is completed only by the user
+through host-only `waive`. Text acceptances verify against host-attached
+evidence for the referenced step; the model does not select sequence
+numbers.
 
 **Open assumptions.** A `note` with `note: assumption` records a model
 assumption; a later `note` with `note: assumption, resolves: <seq>` closes it.
