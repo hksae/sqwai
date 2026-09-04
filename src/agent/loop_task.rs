@@ -1133,7 +1133,14 @@ async fn run_agent(
                         .get("op")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
-                    let _ = writer.append("plan", serde_json::json!({"op": op, "ok": outcome.ok}));
+                    let _ = writer.append(
+                        "plan",
+                        serde_json::json!({
+                            "op": op,
+                            "id": call.args.get("id").and_then(|value| value.as_str()),
+                            "ok": outcome.ok,
+                        }),
+                    );
                     if outcome.ok && matches!(op, "finish" | "block" | "cancel") {
                         let _ = crate::agent::diary::write_entry(
                             &root,
