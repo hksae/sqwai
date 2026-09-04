@@ -277,6 +277,23 @@ pub fn fork(root: &Path, source: &Plan, session_id: &str) -> Result<Plan> {
     Ok(copy)
 }
 
+/// Reopen a completed step after host-side undo removed its recorded evidence.
+pub fn reopen_for_undo(plan: &mut Plan, step_id: &str, reason: impl Into<String>) -> Result<()> {
+    let step = plan
+        .step_mut(step_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown plan step {step_id}"))?;
+    if step.status != StepStatus::Done {
+        return Ok(());
+    }
+    step.status = StepStatus::Reopened;
+    step.finished = None;
+    step.summary = None;
+    step.evidence.clear();
+    step.reason = Some(reason.into());
+    plan.revision = plan.revision.saturating_add(1);
+    Ok(())
+}
+
 pub fn store(root: &Path, plan: &Plan) -> Result<()> {
     let dir = plans_dir(root);
     std::fs::create_dir_all(&dir).context("creating plans directory")?;
@@ -630,12 +647,12 @@ fn start(plan: &mut Plan, id: &str, confirm: Option<bool>) -> Result<Applied, Re
     let Some((status, stale)) = step_status(plan, id) else {
         return unknown_step(plan, id);
     };
-    if status != StepStatus::Pending {
+    if !matches!(status, StepStatus::Pending | StepStatus::Reopened) {
         return reject(
             plan,
             "step_not_pending",
             format!("step {id} is {}", status.as_str()),
-            "only a pending step can be started",
+            "only a pending or reopened step can be started",
         );
     }
     if stale && confirm != Some(true) {
@@ -1147,6 +1164,81 @@ mod tests {
         assert_eq!(copy.steps.len(), source.steps.len());
         assert!(open(&root, &copy.id).is_ok());
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn undo_reopens_done_step_and_clears_completion_metadata() {
+        let mut plan = new_plan();
+        apply(
+            &mut plan,
+            Op::Start {
+                id: "1".into(),
+                confirm: None,
+            },
+            &Limits::default(),
+        )
+        .unwrap();
+        apply(
+            &mut plan,
+            Op::Finish {
+                id: "1".into(),
+                summary: "model added".into(),
+                evidence: vec![42, 43],
+            },
+            &Limits::default(),
+        )
+        .unwrap();
+        let revision = plan.revision;
+
+        reopen_for_undo(&mut plan, "1", "reopened by undo").unwrap();
+
+        let step = plan.step("1").unwrap();
+        assert_eq!(step.status, StepStatus::Reopened);
+        assert_eq!(step.finished, None);
+        assert_eq!(step.summary, None);
+        assert_eq!(step.reason.as_deref(), Some("reopened by undo"));
+        assert!(step.evidence.is_empty());
+        assert_eq!(plan.revision, revision + 1);
+        assert!(
+            apply(
+                &mut plan,
+                Op::Start {
+                    id: "1".into(),
+                    confirm: None,
+                },
+                &Limits::default(),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn undo_leaves_unrelated_steps_and_non_done_steps_unchanged() {
+        let mut plan = new_plan();
+        plan.steps[0].status = StepStatus::Done;
+        plan.steps[0].finished = Some("finished".into());
+        plan.steps[0].summary = Some("kept for undo test".into());
+        plan.steps[1].status = StepStatus::InProgress;
+        plan.steps[1].reason = Some("still working".into());
+        let revision = plan.revision;
+
+        reopen_for_undo(&mut plan, "1", "reopened by undo").unwrap();
+        reopen_for_undo(&mut plan, "2", "must remain in progress").unwrap();
+
+        assert_eq!(plan.step("1").unwrap().status, StepStatus::Reopened);
+        assert_eq!(plan.step("2").unwrap().status, StepStatus::InProgress);
+        assert_eq!(
+            plan.step("2").unwrap().reason.as_deref(),
+            Some("still working")
+        );
+        assert_eq!(plan.revision, revision + 1);
+    }
+
+    #[test]
+    fn undo_rejects_unknown_step() {
+        let mut plan = new_plan();
+        let error = reopen_for_undo(&mut plan, "missing", "reopened by undo").unwrap_err();
+        assert!(error.to_string().contains("unknown plan step missing"));
     }
 
     #[test]

@@ -60,6 +60,22 @@ pub fn snapshot(root: &Path, label: &str) -> Result<String> {
     Ok(oid.to_string())
 }
 
+/// Return paths changed when restoring to a snapshot.
+pub fn changed_files(root: &Path, sha: &str) -> Result<Vec<String>> {
+    let repo = Repository::open(root).context("not a git repository")?;
+    let oid: Oid = sha.parse().context("invalid snapshot sha")?;
+    let commit = repo.find_commit(oid).context("snapshot commit not found")?;
+    let tree = commit.tree().context("snapshot tree")?;
+    let diff = repo
+        .diff_tree_to_workdir(Some(&tree), None)
+        .context("diff snapshot vs workdir")?;
+    Ok(diff
+        .deltas()
+        .filter_map(|delta| delta.new_file().path().or(delta.old_file().path()))
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect())
+}
+
 /// restore the worktree to a snapshot, leaving the index and HEAD untouched;
 /// untracked files created after the snapshot are preserved
 pub fn restore(root: &Path, sha: &str) -> Result<()> {

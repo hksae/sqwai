@@ -1059,6 +1059,51 @@ mod tests {
     }
 
     #[test]
+    fn undo_reopens_only_done_steps_with_reverted_recorded_evidence() {
+        let mut active = crate::plan::create(
+            "restore evidence".into(),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                crate::plan::NewStep {
+                    title: "changed file".into(),
+                    kind: Some(crate::plan::StepKind::Change),
+                    refs: Vec::new(),
+                },
+                crate::plan::NewStep {
+                    title: "unrelated file".into(),
+                    kind: Some(crate::plan::StepKind::Change),
+                    refs: Vec::new(),
+                },
+            ],
+            1000,
+            &crate::plan::Limits::default(),
+        )
+        .unwrap();
+        active.steps[0].status = crate::plan::StepStatus::Done;
+        active.steps[0].evidence = vec![10];
+        active.steps[1].status = crate::plan::StepStatus::Done;
+        active.steps[1].evidence = vec![11];
+        let record = |seq: u64, step: &str, path: &str| crate::agent::journal::Record {
+            seq,
+            ts: "now".into(),
+            step: Some(step.into()),
+            plan: Some(active.id.clone()),
+            agent: "main".into(),
+            kind: "file_diff".into(),
+            fields: serde_json::from_value(serde_json::json!({"path": path})).unwrap(),
+        };
+        let records = vec![
+            record(10, "1", "src/changed.rs"),
+            record(11, "2", "src/other.rs"),
+        ];
+
+        let reopened = reopened_step_ids(&active, &records, &["src/changed.rs".into()]);
+
+        assert_eq!(reopened, vec!["1"]);
+    }
+
+    #[test]
     fn animated_theme_makes_seg_key_tick_dependent() {
         // code block frames are baked into cached segments; for them to
         // animate, seg_key must change with the anim tick while a theme is on

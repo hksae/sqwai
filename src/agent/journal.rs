@@ -213,6 +213,22 @@ impl Journal {
         Ok(seq)
     }
 
+    pub fn append_undo(
+        &mut self,
+        checkpoint: &str,
+        files: &[String],
+        reopened_steps: &[String],
+    ) -> Result<u64> {
+        self.append(
+            "undo",
+            json!({
+                "to_checkpoint": checkpoint,
+                "files": files,
+                "reopened_steps": reopened_steps,
+            }),
+        )
+    }
+
     pub fn session_start(
         &mut self,
         model: &str,
@@ -336,6 +352,33 @@ mod tests {
         assert_eq!(records[0].seq, 1);
         assert_eq!(records[1].kind, "tool_result");
         assert_eq!(records[0].step.as_deref(), Some("2"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn records_undo_checkpoint_files_and_reopened_steps() {
+        let root = root();
+        let mut journal = Journal::open(&root, "session").unwrap();
+        journal.set_attribution(None, Some("plan-1".into()), "host");
+        let seq = journal
+            .append_undo(
+                "checkpoint-1",
+                &["src/lib.rs".into(), "src/main.rs".into()],
+                &["1".into()],
+            )
+            .unwrap();
+
+        let record = Journal::records_for(&root, "session")
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(seq, record.seq);
+        assert_eq!(record.kind, "undo");
+        assert_eq!(record.agent, "host");
+        assert_eq!(record.plan.as_deref(), Some("plan-1"));
+        assert_eq!(record.fields["to_checkpoint"], "checkpoint-1");
+        assert_eq!(record.fields["files"], json!(["src/lib.rs", "src/main.rs"]));
+        assert_eq!(record.fields["reopened_steps"], json!(["1"]));
         fs::remove_dir_all(root).ok();
     }
 

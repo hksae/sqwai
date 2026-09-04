@@ -17,6 +17,61 @@ use crate::session::Session;
 use crate::tui::markdown::Highlighter;
 use crate::tui::theme::Theme;
 
+fn reopened_step_ids(
+    active: &plan::Plan,
+    records: &[crate::agent::journal::Record],
+    files: &[String],
+) -> Vec<String> {
+    let file_set: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
+    active
+        .steps
+        .iter()
+        .filter(|step| step.status == plan::StepStatus::Done)
+        .filter(|step| {
+            let evidence_paths: Vec<&str> = records
+                .iter()
+                .filter(|record| {
+                    record.plan.as_deref() == Some(active.id.as_str())
+                        && record.step.as_deref() == Some(step.id.as_str())
+                        && record.kind == "file_diff"
+                        && step.evidence.contains(&record.seq)
+                })
+                .filter_map(|record| record.fields.get("path").and_then(|value| value.as_str()))
+                .collect();
+            !evidence_paths.is_empty() && evidence_paths.iter().all(|path| file_set.contains(path))
+        })
+        .map(|step| step.id.clone())
+        .collect()
+}
+
+fn reopen_undone_steps(
+    root: &std::path::Path,
+    session_id: &str,
+    files: &[String],
+    checkpoint: &str,
+) -> Vec<String> {
+    let Some(mut active) = plan::open_active(root).ok().flatten() else {
+        return Vec::new();
+    };
+    let records = crate::agent::journal::Journal::records_for(root, session_id).unwrap_or_default();
+    let reopened = reopened_step_ids(&active, &records, files);
+    for step_id in &reopened {
+        let _ = plan::reopen_for_undo(
+            &mut active,
+            step_id,
+            format!("reopened by undo to {checkpoint}"),
+        );
+    }
+    if !reopened.is_empty() {
+        let _ = plan::store(root, &active);
+    }
+    if let Ok(mut journal) = crate::agent::journal::Journal::open(root, session_id) {
+        journal.set_attribution(None, Some(active.id.clone()), "host");
+        let _ = journal.append_undo(checkpoint, files, &reopened);
+    }
+    reopened
+}
+
 pub type Terminal = ratatui::Terminal<CrosstermBackend<std::io::Stdout>>;
 
 mod events;
@@ -1727,7 +1782,7 @@ impl App {
         self.dirty = true;
     }
 
-    /// revert the last `n` mutating actions via git checkpoints (design §6)
+    /// revert the last `n` mutating actions and reopen steps whose evidence was reverted.
     fn undo(&mut self, n: usize) {
         let n = n.max(1);
         if self.session.checkpoints.is_empty() {
@@ -1741,11 +1796,24 @@ impl App {
             self.status("not a git repo — undo unavailable", StatusKind::Warn);
             return;
         }
+        let files = crate::agent::checkpoints::changed_files(&root, &sha).unwrap_or_default();
         match crate::agent::checkpoints::restore(&root, &sha) {
             Ok(()) => {
+                let reopened_steps =
+                    reopen_undone_steps(&root, &self.session.id.to_string(), &files, &sha);
                 self.session.checkpoints.truncate(idx);
                 self.session.save().ok();
-                self.status(&format!("undo: reverted '{label}'"), StatusKind::Ok);
+                self.status(
+                    &format!(
+                        "undo: reverted '{label}'{}",
+                        if reopened_steps.is_empty() {
+                            String::new()
+                        } else {
+                            format!("; reopened {} step(s)", reopened_steps.len())
+                        }
+                    ),
+                    StatusKind::Ok,
+                );
                 self.dirty = true;
             }
             Err(e) => self.status(&format!("undo failed: {e:#}"), StatusKind::Err),
