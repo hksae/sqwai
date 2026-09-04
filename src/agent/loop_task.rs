@@ -728,6 +728,7 @@ async fn run_agent(
         // execute each call, feeding results back into the conversation
         for call in &turn.calls {
             let journal_mark = ctx.journal.len();
+            let tool_started = Instant::now();
             if let Some(writer) = journal.as_mut() {
                 let _ = writer.append("tool_call", serde_json::json!({
                     "tool": call.name,
@@ -904,7 +905,9 @@ async fn run_agent(
                     "tool": call.name,
                     "call_id": call.id,
                     "ok": outcome.ok,
+                    "duration_ms": tool_started.elapsed().as_millis(),
                     "summary": outcome.output.chars().take(200).collect::<String>(),
+                    "trust": "high",
                 }));
                 if call.name == "plan" {
                     let _ = writer.append("plan", serde_json::json!({
