@@ -94,6 +94,9 @@ pub fn apply_proposal(
         let entry = format!("\n- {replacement}\n");
         content.insert_str(end, &entry);
     }
+    if content.chars().count() > max_tokens.saturating_mul(4) as usize {
+        bail!("memory file exceeds the configured memory limit");
+    }
     atomic_write(&path, &content)?;
     Ok(path)
 }
