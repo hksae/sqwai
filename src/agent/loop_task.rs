@@ -609,6 +609,20 @@ async fn run_agent(
             Some(Duration::from_secs(diary.timeout_secs)),
         )
         .await;
+        let mut compaction_journal = if !read_only {
+            crate::agent::journal::Journal::open(&root, &session_id).ok()
+        } else {
+            None
+        };
+        if let Some(writer) = compaction_journal.as_mut() {
+            writer.set_attribution(
+                None,
+                plan::open_active(&root).ok().flatten().map(|plan| plan.id),
+                "main",
+            );
+            let _ = writer.append("compaction", serde_json::json!({"phase": "begin"}));
+        }
+        let message_count_before = messages.len();
         let outcome = compact_history(
             &provider,
             &model_id,
@@ -619,6 +633,21 @@ async fn run_agent(
             true,
         )
         .await;
+        if let Some((before, after, summarized)) = outcome.as_ref() {
+            if let Some(writer) = compaction_journal.as_mut() {
+                let _ = writer.append(
+                    "compaction",
+                    serde_json::json!({
+                        "phase": "end",
+                        "dropped_msgs": message_count_before.saturating_sub(messages.len()),
+                        "kept_msgs": messages.len(),
+                        "anchor_tokens": context::anchor(&root, &session_id).len().div_ceil(4),
+                        "diary_written": true,
+                        "summarized": summarized,
+                    }),
+                );
+            }
+        }
         if let Some((before, after, summarized)) = outcome {
             let _ = tx
                 .send(AgentEvent::Compaction {
@@ -685,7 +714,7 @@ async fn run_agent(
         })
         .unwrap_or_default();
     let mut always_allow: Vec<String> = Vec::new();
-    let mut memory_proposals_this_turn = 0u8;
+    let mut memory_proposals_this_turn: u8;
     let mut next_id: u64 = 0;
     // prompt size of the last request, as reported by the provider
     let mut prompt_size: u64 = 0;
