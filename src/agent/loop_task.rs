@@ -736,15 +736,22 @@ async fn run_agent(
             let journal_mark = ctx.journal.len();
             let tool_started = Instant::now();
             if let Some(writer) = journal.as_mut() {
-                if call.name == "plan" {
-                    let step = call
-                        .args
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string);
-                    let plan_id = plan::open_active(&root).ok().flatten().map(|p| p.id);
-                    writer.set_attribution(step, plan_id, "main");
-                }
+                let active = plan::open_active(&root).ok().flatten();
+                let plan_id = active.as_ref().map(|p| p.id.clone());
+                let step = call
+                    .args
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        active.and_then(|p| {
+                            p.steps
+                                .iter()
+                                .find(|s| s.status == plan::StepStatus::InProgress)
+                                .map(|s| s.id.clone())
+                        })
+                    });
+                writer.set_attribution(step, plan_id, "main");
                 let _ = writer.append(
                     "tool_call",
                     serde_json::json!({
