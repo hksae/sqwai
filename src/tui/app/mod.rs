@@ -574,6 +574,7 @@ impl App {
             compact_only: false,
             diary: self.cfg.diary.clone(),
             memory: self.cfg.memory.clone(),
+            compaction: self.cfg.compaction.clone(),
             subagent_depth: 0,
         };
         self.context_bootstrap_pending = false;
@@ -636,6 +637,7 @@ impl App {
             compact_only: true,
             diary: self.cfg.diary.clone(),
             memory: self.cfg.memory.clone(),
+            compaction: self.cfg.compaction.clone(),
             subagent_depth: 0,
         };
         self.agent = Some(spawn_agent(input));

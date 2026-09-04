@@ -213,6 +213,8 @@ pub struct AgentInput {
     pub diary: crate::config::DiaryConfig,
     /// memory proposal limits copied from configuration
     pub memory: crate::config::MemoryConfig,
+    /// compaction thresholds and summary policy copied from configuration
+    pub compaction: crate::config::CompactionConfig,
     /// nesting guard for delegated subagents; the first generation may create
     /// children, but children cannot recursively create more children.
     pub subagent_depth: u8,
@@ -392,6 +394,7 @@ async fn run_subagent(
         compact_only: false,
         diary: crate::config::DiaryConfig::default(),
         memory: crate::config::MemoryConfig::default(),
+        compaction: crate::config::CompactionConfig::default(),
         subagent_depth: 1,
     });
     let mut child = child;
@@ -532,6 +535,7 @@ async fn run_agent(
         compact_only,
         diary,
         memory,
+        compaction,
         mcp,
         lsp,
         subagent_depth,
@@ -570,7 +574,13 @@ async fn run_agent(
     };
 
     let caps = provider.capabilities();
-    let policy = context::Policy::new(context_limit);
+    let policy = context::Policy::with_compaction(
+        context_limit,
+        compaction.anchor_ratio,
+        compaction.keep_turns,
+        compaction.stage_ratio,
+        matches!(compaction.summary, crate::config::CompactionSummary::Short),
+    );
     // Tools are part of the request prefix: sorted for stability, narrowed in
     // PLAN mode, and omitted entirely for requests that cannot call them.
     let tools: Vec<crate::providers::ToolSpec> = if enable_tools {
