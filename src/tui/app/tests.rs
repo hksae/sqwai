@@ -82,6 +82,8 @@ mod tests {
             mcp: Default::default(),
             lsp: Default::default(),
             skills: Default::default(),
+            memory: Default::default(),
+            diary: Default::default(),
         };
         let session = Session::new("m".into(), 1000);
         App::new(cfg, session, false, false).unwrap()
@@ -172,6 +174,8 @@ mod tests {
             mcp: Default::default(),
             lsp: Default::default(),
             skills: Default::default(),
+            memory: Default::default(),
+            diary: Default::default(),
         };
         let mut app = App::new(cfg, Session::new("m".into(), 1_000_000), false, false).unwrap();
         app.input = App::fresh_input("say hi in 3 words".into());

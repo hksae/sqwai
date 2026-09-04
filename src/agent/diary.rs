@@ -1,6 +1,6 @@
 //! Host-owned project diary and secret screening (DESIGN §2.3).
 
-use crate::agent::journal::Record;
+use crate::agent::journal::{Journal, Record};
 use crate::providers::{
     ChatRequest, ContextTransport, Message, SharedProvider, StreamEvent, SystemPart,
 };
@@ -294,6 +294,7 @@ pub async fn write_entry(
         None
     };
     append_host_entry(root, date, session_id, trigger, &host, prose.as_deref())?;
+    mark_diary(root, session_id, trigger)?;
     Ok(prose.is_some())
 }
 
@@ -321,7 +322,15 @@ pub fn append_entry(
     prose: Option<&str>,
 ) -> Result<()> {
     let host = host_block(root, session_id, trigger)?;
-    append_host_entry(root, date, session_id, trigger, &host, prose)
+    append_host_entry(root, date, session_id, trigger, &host, prose)?;
+    mark_diary(root, session_id, trigger)
+}
+
+fn mark_diary(root: &Path, session_id: &str, trigger: &str) -> Result<()> {
+    let mut journal = Journal::open(root, session_id)?;
+    journal.set_attribution(None, None, "host");
+    journal.append("diary", serde_json::json!({"trigger": trigger}))?;
+    Ok(())
 }
 
 fn append_host_entry(
