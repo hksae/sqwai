@@ -924,17 +924,19 @@ async fn run_agent(
                     "summary": outcome.output.chars().take(200).collect::<String>(),
                     "trust": if matches!(call.name.as_str(), "webfetch" | "websearch") { "low" } else { "high" },
                 }));
-                if outcome.ok && outcome.diff.is_some() {
-                    if let Some(path) = call.args.get("file_path").and_then(|v| v.as_str()) {
-                        let _ = writer.append(
-                            "file_diff",
-                            serde_json::json!({
-                                "path": path,
-                                "mode": call.name,
-                                "summary": outcome.output.chars().take(200).collect::<String>(),
-                            }),
-                        );
-                    }
+                if let Some(metadata) = outcome.file_diff.as_ref() {
+                    let _ = writer.append(
+                        "file_diff",
+                        serde_json::json!({
+                            "path": metadata.path,
+                            "added": metadata.added,
+                            "removed": metadata.removed,
+                            "hash_before": metadata.hash_before,
+                            "hash_after": metadata.hash_after,
+                            "mode": metadata.mode,
+                            "checkpoint": metadata.checkpoint,
+                        }),
+                    );
                 }
                 if call.name == "plan" {
                     let _ = writer.append(
