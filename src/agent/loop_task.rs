@@ -907,8 +907,17 @@ async fn run_agent(
                     "ok": outcome.ok,
                     "duration_ms": tool_started.elapsed().as_millis(),
                     "summary": outcome.output.chars().take(200).collect::<String>(),
-                    "trust": "high",
+                    "trust": if matches!(call.name.as_str(), "webfetch" | "websearch") { "low" } else { "high" },
                 }));
+                if outcome.ok && outcome.diff.is_some() {
+                    if let Some(path) = call.args.get("file_path").and_then(|v| v.as_str()) {
+                        let _ = writer.append("file_diff", serde_json::json!({
+                            "path": path,
+                            "mode": call.name,
+                            "summary": outcome.output.chars().take(200).collect::<String>(),
+                        }));
+                    }
+                }
                 if call.name == "plan" {
                     let _ = writer.append("plan", serde_json::json!({
                         "op": call.args.get("op").and_then(|v| v.as_str()).unwrap_or("unknown"),
