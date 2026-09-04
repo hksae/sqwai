@@ -364,6 +364,8 @@ pub enum Op {
     Finish {
         id: String,
         summary: String,
+        #[serde(default)]
+        evidence: Vec<u64>,
     },
     Block {
         id: String,
@@ -553,7 +555,11 @@ pub fn apply(plan: &mut Plan, op: Op, limits: &Limits) -> Result<Applied, Reject
             Ok(Applied::Shown { text: render(plan) })
         }
         Op::Start { id, confirm } => start(plan, &id, confirm),
-        Op::Finish { id, summary } => finish(plan, &id, summary),
+        Op::Finish {
+            id,
+            summary,
+            evidence,
+        } => finish(plan, &id, summary, evidence),
         Op::Block { id, reason } => block(plan, &id, reason),
         Op::Unblock { id } => unblock(plan, &id),
         Op::Cancel { id, reason } => cancel(plan, &id, reason),
@@ -634,7 +640,12 @@ fn start(plan: &mut Plan, id: &str, confirm: Option<bool>) -> Result<Applied, Re
     accept(plan, format!("step {id} in progress"))
 }
 
-fn finish(plan: &mut Plan, id: &str, summary: String) -> Result<Applied, Rejection> {
+fn finish(
+    plan: &mut Plan,
+    id: &str,
+    summary: String,
+    evidence: Vec<u64>,
+) -> Result<Applied, Rejection> {
     let Some((status, _)) = step_status(plan, id) else {
         return unknown_step(plan, id);
     };
@@ -654,8 +665,16 @@ fn finish(plan: &mut Plan, id: &str, summary: String) -> Result<Applied, Rejecti
             "one line: what changed and where",
         );
     }
-    // Evidence rule (research/change/verify) lands with the journal in F3.
+    if evidence.is_empty() {
+        return reject(
+            plan,
+            "no_evidence",
+            format!("step {id} has no journal evidence"),
+            "provide evidence sequence numbers from tool results or file diffs",
+        );
+    }
     let step = plan.step_mut(id).expect("checked above");
+    step.evidence = evidence;
     step.status = StepStatus::Done;
     step.finished = Some(now());
     step.summary = Some(summary);
