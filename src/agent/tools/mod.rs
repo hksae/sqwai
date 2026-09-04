@@ -466,6 +466,7 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             args["todos"].as_array().map(|a| a.len()).unwrap_or(0)
         ),
         "ask_user" => s("question"),
+        "plan" => format!("plan {}", s("op")),
         _ => String::new(),
     }
 }
@@ -939,12 +940,79 @@ mod tests {
         assert!(names.contains(&"read".to_string()));
         assert!(names.contains(&"grep".to_string()));
         assert!(
-            names.contains(&"plan_update".to_string()),
+            names.contains(&"plan".to_string()),
             "the plan has to stay writable in PLAN mode"
         );
         assert!(!names.contains(&"write".to_string()));
         assert!(!names.contains(&"edit".to_string()));
         assert!(!names.contains(&"bash".to_string()));
+    }
+
+    #[test]
+    fn plan_ops_round_trip_through_the_dispatcher() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "wire the plan tool",
+                "constraints": ["no new dependencies"],
+                "acceptance": ["cmd: cargo test"],
+                "steps": [
+                    {"title": "add the schema", "kind": "research"},
+                    {"title": "add the dispatcher"}
+                ]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(
+            created.output.contains("created with 2 steps"),
+            "{}",
+            created.output
+        );
+
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        let finish = plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "1", "summary": "schema added"}),
+        );
+        assert!(finish.ok, "{}", finish.output);
+
+        let shown = plan_op(&mut ctx, &json!({"op": "show"}));
+        assert!(shown.ok, "{}", shown.output);
+        assert!(
+            shown.output.contains("goal: wire the plan tool"),
+            "{}",
+            shown.output
+        );
+        assert!(
+            shown.output.contains("[x] 1"),
+            "step 1 should read as done:\n{}",
+            shown.output
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn plan_rejections_carry_a_code_and_a_hint() {
+        let (mut ctx, dir) = proj();
+        plan_op(
+            &mut ctx,
+            &json!({"op": "create", "goal": "g", "steps": [{"title": "one"}]}),
+        );
+        // finishing a step that was never started
+        let bad = plan_op(&mut ctx, &json!({"op": "finish", "id": "1", "summary": "x"}));
+        assert!(!bad.ok);
+        assert!(bad.output.contains("step_not_in_progress"), "{}", bad.output);
+        assert!(bad.output.contains("hint"), "{}", bad.output);
+        // a second create is refused while one is active
+        let second = plan_op(
+            &mut ctx,
+            &json!({"op": "create", "goal": "h", "steps": [{"title": "two"}]}),
+        );
+        assert!(!second.ok);
+        assert!(second.output.contains("plan_exists"), "{}", second.output);
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
