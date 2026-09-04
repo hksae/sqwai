@@ -686,13 +686,17 @@ async fn run_agent(
     if let Some(writer) = journal.as_mut() {
         let plan_id = plan::open_active(&root).ok().flatten().map(|p| p.id);
         writer.set_attribution(None, plan_id, "main");
+        let resumed_from = context::resume_notice(&root, &session_id).map(|_| "journal");
         let _ = writer.session_start(
             &model_id,
             if plan_mode { "plan" } else { "act" },
             None,
             "unknown",
-            None,
+            resumed_from,
         );
+        if let Some(notice) = context::resume_notice(&root, &session_id) {
+            let _ = writer.append("resume", serde_json::json!({"notice": notice}));
+        }
         if let Some(user_message) = messages.iter().rev().find(|m| m.role == Role::User) {
             let _ = writer.append("user_msg", serde_json::json!({
                 "hash": format!("{:x}", sha2::Sha256::digest(user_message.content.as_bytes())),
