@@ -135,7 +135,7 @@ independently.
 
 #### 2.1.2 On-disk format
 
-```json
+
 {
   "version": 1,
   "id": "01J...",
