@@ -476,13 +476,13 @@ pub fn call_summary(name: &str, args: &Value) -> String {
 /// request prefix, so it must be byte-identical between requests for a
 /// prefix cache to hit.
 ///
-/// `plan_mode` narrows the set to read-only tools plus `plan_update`, so a
-/// request that cannot mutate anything also does not pay for the mutating
-/// schemas.
+/// `plan_mode` narrows the set to read-only tools plus `plan`, so a request
+/// that cannot mutate the project still lets the model build and refine the
+/// plan (§5.3) without paying for the mutating schemas.
 pub fn tool_specs(plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
     let mut specs: Vec<crate::providers::ToolSpec> = defs()
         .into_iter()
-        .filter(|d| !plan_mode || d.kind == Kind::ReadOnly || d.name == "plan_update")
+        .filter(|d| !plan_mode || d.kind == Kind::ReadOnly || d.name == "plan")
         .map(|d| crate::providers::ToolSpec {
             name: d.name.to_string(),
             description: d.description.to_string(),
