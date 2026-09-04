@@ -4,8 +4,8 @@
 //! `plan` tool operations validated here. The model can never write `goal`,
 //! `constraints`, `acceptance[].status`, `evidence` or `folded` directly.
 //!
-//! The legacy markdown helpers at the bottom of this file back the old
-//! `plan_update` tool and are removed when the `plan` tool lands (§7 F1).
+//! Legacy markdown helpers remain temporarily for the old startup context path;
+//! they are removed once command handling is migrated to structured storage.
 
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -1068,7 +1068,7 @@ fn status_word(status: PlanStatus) -> &'static str {
 
 // ------------------------------------------------------- legacy markdown plan
 //
-// Backs the old `plan_update` tool; removed when the `plan` tool lands (§7 F1).
+// Temporary compatibility for the startup context path; removed in F1.
 
 const PLAN_DIR: &str = ".sqwai";
 const PLAN_FILE: &str = "plan.md";
