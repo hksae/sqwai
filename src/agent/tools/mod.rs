@@ -333,6 +333,12 @@ long-running commands.",
             parameters: json!({"type":"object","properties":{"note":{"type":"string"},"kind":{"type":"string","enum":["decision","rejected","assumption","lesson","blocker"]}},"required":["note","kind"]}),
         },
         ToolDef {
+            name: "memory_read",
+            kind: Kind::ReadOnly,
+            description: "Read one host-owned daily diary entry. Date must use YYYY-MM-DD.",
+            parameters: json!({"type":"object","properties":{"date":{"type":"string","description":"local diary date, YYYY-MM-DD"}},"required":["date"]}),
+        },
+        ToolDef {
             name: "plan",
             kind: Kind::Mutating,
             description: "Work the structured plan, one operation per call. Ops: create, start, \
@@ -469,6 +475,7 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             .as_array()
             .map(|tasks| format!("{} tasks", tasks.len()))
             .unwrap_or_else(|| s("task")),
+        "memory_read" => s("date"),
         "ask_user" => s("question"),
         "plan" => format!("plan {}", s("op")),
         _ => String::new(),
@@ -576,6 +583,13 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             args["background"].as_bool().unwrap_or(false),
         ),
         "plan" => plan_op(ctx, args),
+        "memory_read" => match crate::agent::diary::read_day(
+            &ctx.root,
+            args["date"].as_str().unwrap_or_default(),
+        ) {
+            Ok(text) => Outcome::ok(text),
+            Err(message) => Outcome::err(message),
+        },
         "note" => {
             let note = args["note"].as_str().unwrap_or_default().trim();
             let kind = args["kind"].as_str().unwrap_or_default().trim();
@@ -1143,6 +1157,24 @@ mod tests {
             "step 1 should read as done:\n{}",
             shown.output
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn memory_read_returns_only_a_valid_diary_date() {
+        let (mut ctx, dir) = proj();
+        let path = crate::agent::diary::diary_path(
+            &dir,
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+        );
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "## diary\n- fact\n").unwrap();
+        let read = execute(&mut ctx, "memory_read", &json!({"date": "2026-09-04"}));
+        assert!(read.ok, "{}", read.output);
+        assert!(read.output.contains("fact"));
+        let invalid = execute(&mut ctx, "memory_read", &json!({"date": "../secret"}));
+        assert!(!invalid.ok);
+        assert!(invalid.output.contains("YYYY-MM-DD"), "{}", invalid.output);
         fs::remove_dir_all(&dir).ok();
     }
 
