@@ -337,6 +337,51 @@ mod tests {
     }
 
     #[test]
+    fn nudges_after_unaccounted_step_actions() {
+        let root = root();
+        let mut plan = crate::plan::create(
+            "keep working".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![crate::plan::NewStep {
+                title: "step".into(),
+                kind: Some(crate::plan::StepKind::Change),
+                refs: Vec::new(),
+            }],
+            1000,
+            &crate::plan::Limits::default(),
+        )
+        .unwrap();
+        crate::plan::store(&root, &plan).unwrap();
+        crate::plan::apply(
+            &mut plan,
+            crate::plan::Op::Start {
+                id: "1".into(),
+                confirm: None,
+            },
+            &crate::plan::Limits::default(),
+        )
+        .unwrap();
+        crate::plan::store(&root, &plan).unwrap();
+        let mut journal = Journal::open(&root, "nudge").unwrap();
+        journal.set_attribution(Some("1".into()), Some(plan.id.clone()), "main");
+        for _ in 0..3 {
+            journal
+                .append("tool_result", json!({"tool": "read", "ok": true}))
+                .unwrap();
+        }
+        assert!(
+            Journal::nudge(&root, 2)
+                .unwrap()
+                .unwrap()
+                .contains("3 actions")
+        );
+        journal.append("plan", json!({"op": "show"})).unwrap();
+        assert!(Journal::nudge(&root, 2).unwrap().is_none());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn rejects_non_object_fields() {
         let root = root();
         let mut journal = Journal::open(&root, "session").unwrap();
