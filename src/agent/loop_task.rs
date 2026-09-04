@@ -691,6 +691,9 @@ async fn run_agent(
     let mut prompt_size: u64 = 0;
 
     loop {
+        // The proposal limit applies to one model request/turn, not the whole
+        // session. A new request gets a fresh allowance.
+        memory_proposals_this_turn = 0;
         // The diary is written before the compaction policy can discard any
         // transcript context. The writer has a hard timeout and host fallback.
         if messages.len() > 8
