@@ -6,7 +6,7 @@ use super::*;
 mod tests {
     use super::*;
     use crate::config::{Config, ModelConfig, ProviderConfig, WireFormat};
-    use crate::tui::app::events::consume_duplicate_paste;
+    use crate::tui::app::events::{consume_duplicate_paste, consume_duplicate_paste_key};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::collections::BTreeMap;
@@ -923,6 +923,29 @@ mod tests {
     fn unrelated_paste_event_is_not_consumed() {
         let mut expected = Some("expected prompt".to_string());
         assert!(!consume_duplicate_paste(&mut expected, "different prompt"));
+        assert!(expected.is_none());
+    }
+
+    #[test]
+    fn replayed_key_events_are_consumed_before_submit() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut expected = Some("first line\nsecond line".to_string());
+        for ch in "first line".chars() {
+            assert!(consume_duplicate_paste_key(
+                &mut expected,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()),
+            ));
+        }
+        assert!(consume_duplicate_paste_key(
+            &mut expected,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        ));
+        for ch in "second line".chars() {
+            assert!(consume_duplicate_paste_key(
+                &mut expected,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()),
+            ));
+        }
         assert!(expected.is_none());
     }
 

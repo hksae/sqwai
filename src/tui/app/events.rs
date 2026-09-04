@@ -45,6 +45,13 @@ impl App {
                     if k.kind != KeyEventKind::Press {
                         continue;
                     }
+                    // Some Windows consoles do not emit bracketed paste at
+                    // all: they replay clipboard characters as key events.
+                    // Consume that replay before Enter can submit its first
+                    // line or the remainder can be inserted twice.
+                    if consume_duplicate_paste_key(&mut self.pasted_clipboard, k) {
+                        continue;
+                    }
                     // a fresh keypress dismisses the previous in-menu notice
                     if !self.menu_stack.is_empty() {
                         self.menu_status = None;
@@ -456,6 +463,26 @@ pub(super) fn consume_duplicate_paste(slot: &mut Option<String>, chunk: &str) ->
     }
     *slot = None;
     false
+}
+
+pub(super) fn consume_duplicate_paste_key(
+    slot: &mut Option<String>,
+    key: crossterm::event::KeyEvent,
+) -> bool {
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return false;
+    }
+    let Some(ch) = (match key.code {
+        KeyCode::Char(ch) => Some(ch),
+        KeyCode::Enter => Some('\n'),
+        _ => None,
+    }) else {
+        return false;
+    };
+    consume_duplicate_paste(slot, &ch.to_string())
 }
 
 /// ctrl combos supported identically in the message input and every form field
