@@ -633,7 +633,7 @@ async fn run_agent(
             true,
         )
         .await;
-        if let Some((before, after, summarized)) = outcome.as_ref() {
+        if let Some((_, _, summarized)) = outcome.as_ref() {
             if let Some(writer) = compaction_journal.as_mut() {
                 let _ = writer.append(
                     "compaction",
