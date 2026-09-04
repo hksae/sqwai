@@ -5,6 +5,7 @@ pub mod graph;
 pub mod graph_index;
 pub mod journal;
 pub mod loop_task;
+pub mod memory;
 pub mod notify;
 pub mod safety;
 pub mod shell;
