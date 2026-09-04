@@ -321,8 +321,8 @@ impl App {
                 Role::Assistant | Role::System | Role::Tool => {}
             }
         }
-        // the to-do list travels with the session, not the live agent turn
-        self.todos = self.session.todos.clone();
+        // The panel is derived from the active structured plan; legacy session
+        // to-do state is intentionally not loaded.
     }
 
     fn fresh_input(text: String) -> TextArea<'static> {
@@ -1320,8 +1320,6 @@ impl App {
         if !outcome.plan_todos.is_empty() {
             self.todos = outcome.plan_todos;
         }
-        // carry the to-do list onto the session so it survives the next save
-        self.session.todos = self.todos.clone();
         self.session.checkpoints.extend(outcome.journal);
         self.finish_turn(Ok(()));
     }
