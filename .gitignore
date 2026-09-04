@@ -2,6 +2,7 @@
 **/*.rs.bk
 
 .sqwai/
+.zig-cache/
 
 .workbuddy-ai/
 
