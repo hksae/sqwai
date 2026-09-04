@@ -682,10 +682,14 @@ async fn run_agent(
                 .await;
         }
 
+        let mut turn_system = system.clone();
+        if let Ok(Some(nudge)) = crate::agent::journal::Journal::nudge(&root, 8) {
+            turn_system.push(crate::providers::SystemPart::volatile(nudge));
+        }
         let request_messages = request_messages(&messages, transport);
         let breakdown = RequestBreakdown::from_request(&ChatRequest {
             model_id: model_id.clone(),
-            system: system.clone(),
+            system: turn_system.clone(),
             messages: request_messages.clone(),
             thinking,
             max_tokens,
@@ -700,7 +704,7 @@ async fn run_agent(
             &provider,
             &ChatRequest {
                 model_id: model_id.clone(),
-                system: system.clone(),
+                system: turn_system,
                 messages: request_messages,
                 thinking,
                 max_tokens,

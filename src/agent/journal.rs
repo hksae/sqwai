@@ -119,6 +119,45 @@ impl Journal {
             .max())
     }
 
+    /// Return a non-blocking reminder when a step has accumulated actions
+    /// since its last plan operation.
+    pub fn nudge(root: &Path, threshold: usize) -> Result<Option<String>> {
+        let records = Self::records(root)?;
+        let active = crate::plan::open_active(root)?;
+        let Some(active) = active else {
+            return Ok(None);
+        };
+        let Some(step) = active
+            .steps
+            .iter()
+            .find(|step| step.status == crate::plan::StepStatus::InProgress)
+        else {
+            return Ok(None);
+        };
+        let mut actions = 0usize;
+        for record in records.iter().rev() {
+            if record.plan.as_deref() != Some(active.id.as_str())
+                || record.step.as_deref() != Some(step.id.as_str())
+            {
+                continue;
+            }
+            if record.kind == "plan" {
+                break;
+            }
+            if matches!(record.kind.as_str(), "file_diff" | "tool_result") {
+                actions += 1;
+            }
+        }
+        if actions >= threshold {
+            Ok(Some(format!(
+                "plan: step {} has {actions} actions and no update — finish, split or block it.",
+                step.id
+            )))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Append one host-owned record and flush it before returning.
     pub fn append(&mut self, kind: &str, fields: Value) -> Result<u64> {
         if !fields.is_object() {
