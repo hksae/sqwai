@@ -505,9 +505,9 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
                 | "multi_edit"
                 | "git_commit"
                 | "git_branch"
-                | "patch"
+                |             "patch"
                 | "bash"
-                | "plan_update"
+                | "plan"
         )
     {
         return Outcome::err(
