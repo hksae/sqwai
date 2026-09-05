@@ -754,7 +754,9 @@ impl App {
             return;
         }
         let input_rows = self.input.lines().len().clamp(1, 6) as u16;
-        let input_h = (input_rows + 2).min(8);
+        // The borderless composer takes exactly its content height: one row
+        // until the user enters a newline, then it grows up to six rows.
+        let input_h = input_rows;
         let layout = Layout::vertical([
             Constraint::Min(3),
             Constraint::Length(1),
@@ -1230,7 +1232,7 @@ impl App {
                 }
             })
             .unwrap_or_default();
-        let left = format!(" {} {}", self.mode.label(), plan_label);
+        let left = format!(" {}  {}", self.mode.label(), plan_label);
         let (activity, activity_style) = if let Some(line) = &self.retry_line {
             (format!(" {line}"), Theme::warn())
         } else {
@@ -1299,7 +1301,7 @@ impl App {
             format!(" {} ", self.mode.label()),
             Theme::status_chip(),
         )];
-        spans.push(Span::styled(plan_label, Theme::dim()));
+        spans.push(Span::styled(format!("  {plan_label}"), Theme::dim()));
         spans.push(Span::styled(activity, activity_style));
         let pad = (w as usize).saturating_sub(lw as usize + right_len);
         let agents_x0 = lw + pad as u16;
