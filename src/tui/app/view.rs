@@ -520,33 +520,41 @@ impl App {
             }
             Segment::Tool {
                 name,
-                args: _,
+                args,
                 ok,
                 output,
                 diff,
                 expanded,
             } => {
-                let prefix = name.clone();
-                let head = match ok {
-                    None => Line::from(vec![
-                        Span::styled(
-                            format!(
-                                "  {} ",
-                                WORKING_SPINNER[self.spinner_tick % WORKING_SPINNER.len()]
-                            ),
-                            Theme::accent(),
+                // Every tool uses the same three-part row: state marker, tool
+                // name, and a quiet one-line argument summary. Keeping the
+                // geometry identical makes running, successful, and failed
+                // calls scan as one list.
+                let marker = match ok {
+                    None => (
+                        format!(
+                            "  {} ",
+                            WORKING_SPINNER[self.spinner_tick % WORKING_SPINNER.len()]
                         ),
-                        Span::styled(prefix.clone(), Theme::dim()),
-                    ]),
-                    Some(true) => Line::from(vec![
-                        Span::styled("  ✓ ".to_string(), Theme::ok()),
-                        Span::styled(prefix.clone(), Theme::dim()),
-                    ]),
-                    Some(false) => Line::from(vec![
-                        Span::styled("  ✗ ".to_string(), Theme::err()),
-                        Span::styled(prefix.clone(), Theme::dim()),
-                    ]),
+                        Theme::accent(),
+                    ),
+                    Some(true) => ("  ✓ ".to_string(), Theme::ok()),
+                    Some(false) => ("  ✗ ".to_string(), Theme::err()),
                 };
+                let available = usize::from(w.saturating_sub(4 + name.width() as u16));
+                let summary = if args.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "  {}",
+                        truncate_display_width(args, available.saturating_sub(2))
+                    )
+                };
+                let head = Line::from(vec![
+                    Span::styled(marker.0, marker.1),
+                    Span::styled(name.clone(), Theme::accent()),
+                    Span::styled(summary, Theme::dim()),
+                ]);
                 out.push((head, Some(idx)));
                 if *expanded {
                     let body = diff.clone().unwrap_or_else(|| output.clone());
