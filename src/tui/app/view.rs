@@ -1030,6 +1030,7 @@ impl App {
         f.render_widget(sb, layout[4]);
 
         self.draw_popup(f, layout[2]);
+        self.draw_inline_ask(f, chat);
         self.draw_menu(f, area);
     }
 
@@ -1090,7 +1091,7 @@ impl App {
 
     pub(super) fn draw_menu(&mut self, f: &mut ratatui::Frame, area: Rect) {
         let menu = self.cur_menu().cloned();
-        if menu.is_none() {
+        if menu.is_none() || self.is_inline_ask() {
             return;
         }
         let is_form = self.is_form_menu();
@@ -1124,6 +1125,17 @@ impl App {
             height: h,
         };
         self.menu_rect = rect;
+
+        // Menus are modal surfaces: dim the already-rendered screen while
+        // preserving its text, then paint the menu at normal contrast.
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                if let Some(cell) = f.buffer_mut().cell_mut((x, y)) {
+                    let style = cell.style();
+                    cell.set_style(style.fg(Theme::DIM()).bg(Theme::BG()));
+                }
+            }
+        }
 
         // keep the selection inside the visible window for list menus
         let list_rows = if is_form { 0 } else { content_rows };
@@ -1235,8 +1247,8 @@ impl App {
             Paragraph::new(rows).style(Theme::base()).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Theme::border_focused())
+                    .border_type(BorderType::Plain)
+                    .border_style(Theme::border_dim())
                     .title(Span::styled(
                         format!(" {} ", self.menu_title()),
                         Theme::dim(),
@@ -1252,6 +1264,38 @@ impl App {
         {
             f.render_widget(ta.as_ref(), field_rect);
         }
+    }
+
+    pub(super) fn draw_inline_ask(&mut self, f: &mut ratatui::Frame, chat: Rect) {
+        let Some(menu) = self.cur_menu().cloned() else { return };
+        let (question, options, multiple, allow_free, free_text) = match menu {
+            Menu::AskUser { question, options, multiple, allow_free, .. } => {
+                (question, options, multiple, allow_free, false)
+            }
+            Menu::AskFree { .. } => ("Your answer".into(), Vec::new(), false, false, true),
+            _ => return,
+        };
+        let mut lines = vec![Line::from(Span::styled(format!("? {question}"), Theme::accent_bold()))];
+        for (i, (label, desc)) in options.iter().enumerate() {
+            let checked = if multiple && self.ask_picked.get(i).copied().unwrap_or(false) { "[x]" } else if multiple { "[ ]" } else { " " };
+            let mut spans = vec![Span::styled(format!("  {checked} {}. ", i + 1), Theme::accent()), Span::raw(label)];
+            if let Some(desc) = desc { spans.push(Span::styled(format!(" — {desc}"), Theme::dim())); }
+            lines.push(Line::from(spans));
+        }
+        if allow_free { lines.push(Line::from(Span::styled("  type a custom answer", Theme::dim()))); }
+        if free_text {
+            lines.push(Line::from(Span::styled("  › type your answer", Theme::accent())));
+        } else {
+            lines.push(Line::from(Span::styled("  enter choose · esc skip", Theme::dim())));
+        }
+        let h = lines.len().min(chat.height as usize) as u16;
+        let rect = Rect {
+            x: chat.x,
+            y: chat.y + chat.height.saturating_sub(h),
+            width: chat.width,
+            height: h,
+        };
+        f.render_widget(Paragraph::new(lines).style(Theme::base()), rect);
     }
 
     pub(super) fn draw_popup(&mut self, f: &mut ratatui::Frame, input_area: Rect) {
@@ -1280,6 +1324,8 @@ impl App {
             height: h,
         };
 
+        // This is an inline command completion list, not a modal popup:
+        // it must not dim or otherwise alter the underlying chat.
         let mut rows: Vec<Line> = Vec::new();
         self.popup_rows.clear();
         for (n, &ci) in items.iter().skip(skip).take(shown).enumerate() {
@@ -1288,10 +1334,10 @@ impl App {
             let cmd_style = if hovered {
                 Style::new()
                     .fg(Theme::BG())
-                    .bg(Theme::ACCENT())
+                    .bg(Theme::ACCENT_SOFT())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Theme::accent()
+                Style::new().fg(Theme::ACCENT_SOFT()).bg(Theme::BG())
             };
             let pad = 1usize;
             rows.push(Line::from(vec![Span::styled(
@@ -1303,12 +1349,14 @@ impl App {
 
         f.render_widget(Clear, rect);
         f.render_widget(
-            Paragraph::new(rows).style(Theme::base()).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Theme::border_focused()),
-            ),
+            Paragraph::new(rows)
+                .style(Theme::base())
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Plain)
+                        .border_style(Theme::border_dim()),
+                ),
             rect,
         );
         // mini scrollbar on the right border when the list overflows
@@ -1324,7 +1372,7 @@ impl App {
                 {
                     if i >= pos && i < pos + thumb {
                         cell.set_symbol("▐")
-                            .set_style(Style::new().fg(Theme::ACCENT()));
+                            .set_style(Style::new().fg(Theme::rule_color()));
                     }
                 }
             }
