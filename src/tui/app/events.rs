@@ -378,14 +378,10 @@ impl App {
                 Event::Mouse(m) => match m.kind {
                     // wheel navigates list menus (forms keep wheel inert)
                     MouseEventKind::ScrollUp if !self.menu_stack.is_empty() => {
-                        if !self.is_form_menu() {
-                            self.menu_nav(-1);
-                        }
+                        self.menu_scroll_by(-3);
                     }
                     MouseEventKind::ScrollDown if !self.menu_stack.is_empty() => {
-                        if !self.is_form_menu() {
-                            self.menu_nav(1);
-                        }
+                        self.menu_scroll_by(3);
                     }
                     MouseEventKind::ScrollUp => {
                         if self.menu_stack.is_empty()

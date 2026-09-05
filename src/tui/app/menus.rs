@@ -236,6 +236,22 @@ impl App {
         self.dirty = true;
     }
 
+    pub(super) fn menu_scroll_by(&mut self, delta: i32) {
+        if self.is_form_menu() {
+            return;
+        }
+        let visible = self.menu_rect.height.saturating_sub(2) as usize;
+        let max_scroll = self.menu_rows.len().saturating_sub(visible.max(1));
+        self.menu_scroll = if delta < 0 {
+            self.menu_scroll
+                .saturating_sub(delta.unsigned_abs() as usize)
+        } else {
+            self.menu_scroll.saturating_add(delta as usize)
+        }
+        .min(max_scroll);
+        self.dirty = true;
+    }
+
     pub(super) fn menu_nav(&mut self, dir: i32) {
         let is_form = self.is_form_menu();
         if is_form {
