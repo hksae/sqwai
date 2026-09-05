@@ -1101,7 +1101,8 @@ impl App {
         // Menu footers are intentionally empty: controls should be consistent
         // and discoverable from the global interface, not repeated in every menu.
         self.menu_footer_text = None;
-        let footer_h = usize::from(self.menu_status.is_some());
+        // Popup actions do not show transient green notices at the bottom.
+        let footer_h = 0usize;
         let avail_inner = (area.height.saturating_sub(6)).max(3) as usize;
         let content_rows: usize = if is_form {
             self.form_fields.len() + 1
@@ -1230,15 +1231,6 @@ impl App {
                 } else {
                     rows.push(line.clone());
                 }
-            }
-            if let Some((text, kind)) = &self.menu_status {
-                let st = match kind {
-                    StatusKind::Info => Theme::dim(),
-                    StatusKind::Ok => Theme::ok(),
-                    StatusKind::Warn => Theme::warn(),
-                    StatusKind::Err => Theme::err(),
-                };
-                rows.push(Line::from(vec![Span::styled(format!(" {text}"), st)]));
             }
         }
 
