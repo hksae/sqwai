@@ -1244,7 +1244,11 @@ impl App {
                     .title(Span::styled(
                         format!(" {} ", self.menu_title()),
                         Theme::dim(),
-                    )),
+                    ))
+                    .title_bottom(Line::from(Span::styled(
+                        " p: pin · d: delete ",
+                        Theme::dim(),
+                    )).right_aligned()),
             ),
             rect,
         );
