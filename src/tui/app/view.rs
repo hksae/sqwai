@@ -1247,10 +1247,7 @@ impl App {
                         format!(" checkpoint: {}", truncate_chars(cp, 44)),
                         Theme::dim(),
                     ),
-                    None => (
-                        " enter send · tab plan/act · esc stop".to_string(),
-                        Theme::dim(),
-                    ),
+                    None => (String::new(), Theme::dim()),
                 },
             }
         };
