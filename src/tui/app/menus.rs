@@ -1081,6 +1081,15 @@ impl App {
                     )]),
                     MenuAction::ForkSessionList,
                 ));
+                if self.sessions_filter.is_empty() {
+                    self.menu_rows.push(row(
+                        Line::from(Span::styled(
+                            " p: pin · d: delete",
+                            Theme::dim(),
+                        )),
+                        MenuAction::None,
+                    ));
+                }
                 self.menu_footer_text = Some(if self.sessions_filter.is_empty() {
                     "enter: open · r: rename · p: pin · d: delete · type to filter".into()
                 } else {
