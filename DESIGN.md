@@ -1391,6 +1391,31 @@ transparently, journals `provider_error` with `recovered: true, switched_to:
 <id>`, notes it in the status bar, and continues; the step stays in_progress
 (§7 T).
 
+**User-facing effort.** There is one user-controlled slider, named `effort`
+(not `thinking`): `off|low|medium|high|max`. It describes how much work the
+user asks the model to spend, not a second host execution mode. The levels are
+mapped honestly per provider/model and recorded in one table:
+
+| Provider/model family | Mapping | If unsupported |
+|---|---|---|
+| OpenAI Responses | `reasoning.effort`: `low`, `medium`, `high`; `max` → `xhigh` only where the model documents it | omit the parameter |
+| Anthropic | `thinking.budget_tokens`, plus `effort` for models that document it | use the documented budget only; otherwise mark effort ignored |
+| DeepSeek and similar reasoning APIs | provider-native reasoning enable/disable only | `off` disables it; other levels are best-effort and must be marked ignored when not supported |
+| Ollama/local and other providers without a reasoning control | no-op | always mark effort ignored |
+
+The UI shows the effective mapping. When a model ignores the selected level,
+the status/header text must say `effort: <level> (ignored by model)` rather
+than implying that more work is active. The model is never allowed to raise
+its own effort; only the user may change it.
+
+Effort is also assigned per internal role: the main model defaults to `high`,
+the diary writer to `low`, and the neutralizer to `medium`. These are real
+provider request settings and must not be exposed as a second user slider.
+Changing effort must not change the stable system prompt or block A (§3.2),
+so provider prefix caches remain reusable. Effort must not enable extra host
+checks, reflection, or subagent fan-out; those mechanisms remain deterministic
+and independent of the slider.
+
 5.2 Safety [done]
 Two-layer command classifier: shell-word heuristics + tree-sitter-bash AST
 (substitutions, pipes into interpreters, redirects over critical paths,
