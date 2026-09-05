@@ -13,7 +13,7 @@ use crate::agent::loop_task::{
 use crate::config::{Config, ModelConfig, ThinkingLevel};
 use crate::plan;
 use crate::providers::{self, Message as PMessage, Role, SharedProvider};
-use crate::session::Session;
+use crate::session::{ActivitySummary, Session};
 use crate::tui::markdown::Highlighter;
 use crate::tui::theme::Theme;
 
@@ -411,16 +411,43 @@ impl App {
         // transcript. Keep the rendered row keyed by call id so batched calls
         // and providers that return results out of order are restored safely.
         let mut pending_tools = std::collections::HashMap::<String, usize>::new();
+        let mut activity = self.session.activity.iter();
+        let mut work_start: Option<usize> = None;
         for m in &self.session.messages {
             match m.role {
                 Role::User => self.segments.push(Segment::User(m.content.clone())),
                 Role::Assistant if m.tool_calls.is_empty() => {
+                    let answer = self.segments.len();
                     self.segments.push(Segment::Assistant {
                         text: m.content.clone(),
                         live: false,
                     });
+                    if let Some(seg_start) = work_start.take() {
+                        // A saved session is never streaming: historical work
+                        // must begin folded, even if it ended with an error.
+                        let saved = activity.next().cloned();
+                        let derived = self.build_activity_group((seg_start, answer));
+                        let saved = saved.unwrap_or_else(|| ActivitySummary {
+                            calls: derived.calls,
+                            thinking: derived.thinking,
+                            duration_ms: 0,
+                            errors: derived.errors,
+                            rejected: 0,
+                        });
+                        self.activity_groups.push(ActivityGroup {
+                            seg_start,
+                            seg_end: answer,
+                            calls: saved.calls,
+                            thinking: saved.thinking,
+                            duration_ms: saved.duration_ms,
+                            errors: saved.errors,
+                            rejected: saved.rejected,
+                            expanded: false,
+                        });
+                    }
                 }
                 Role::Assistant => {
+                    work_start.get_or_insert(self.segments.len());
                     for call in &m.tool_calls {
                         let idx = self.segments.len();
                         self.segments.push(Segment::Tool {
@@ -1964,7 +1991,6 @@ impl App {
         self.aborted = false;
         self.agent = None;
         self.retry_line = None;
-        self.session.save().ok();
         self.prev_turn_ok = matches!(res, Ok(()));
         let turn_failed = res.is_err();
         match res {
@@ -1979,6 +2005,20 @@ impl App {
         // Segment indices are stable from here on: the empty-thinking cleanup
         // and the answer backfill above have all run.
         self.finalize_activity_group(turn_failed);
+        // Persist the presentation summary only after the group was finalized.
+        // Saving earlier lost it across a restart and restored bare tool rows.
+        self.session.activity = self
+            .activity_groups
+            .iter()
+            .map(|g| ActivitySummary {
+                calls: g.calls,
+                thinking: g.thinking,
+                duration_ms: g.duration_ms,
+                errors: g.errors,
+                rejected: g.rejected,
+            })
+            .collect();
+        self.session.save().ok();
         self.dirty = true;
     }
 

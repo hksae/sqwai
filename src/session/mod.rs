@@ -5,6 +5,17 @@ use uuid::Uuid;
 
 use crate::providers::{Message, Role, Usage};
 
+/// Durable UI-only summary for one agent turn. Segment indices are deliberately
+/// not persisted: the transcript is reconstructed on load and supplies them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ActivitySummary {
+    pub calls: usize,
+    pub thinking: usize,
+    pub duration_ms: u64,
+    pub errors: usize,
+    pub rejected: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: Uuid,
@@ -62,6 +73,10 @@ pub struct Session {
     /// (sha, label) undo journal: one entry per mutating agent action
     #[serde(default)]
     pub checkpoints: Vec<(String, String)>,
+    /// One summary for each completed agent turn that produced activity.
+    /// Kept separately from provider messages because it is presentation state.
+    #[serde(default)]
+    pub activity: Vec<ActivitySummary>,
 }
 
 impl Session {
@@ -86,6 +101,7 @@ impl Session {
             last_response_id: None,
             last_response_model: None,
             checkpoints: Vec::new(),
+            activity: Vec::new(),
         }
     }
 
@@ -114,6 +130,11 @@ impl Session {
         // a continuation reference belongs to the parent conversation
         f.last_response_id = None;
         f.last_response_model = None;
+        // UI ranges cannot be copied safely until the fork's transcript is
+        // reconstructed; retain only full-history summaries.
+        if f.messages.len() == self.messages.len() {
+            f.activity = self.activity.clone();
+        }
         f
     }
 

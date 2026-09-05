@@ -747,6 +747,32 @@ mod tests {
             matches!(app.segments[1], Segment::Tool { ref name, ok: Some(true), ref output, .. } if name == "read" && output == "file contents")
         );
         assert!(matches!(app.segments[2], Segment::Assistant { ref text, .. } if text == "done"));
+        assert_eq!(app.activity_groups.len(), 1, "tool turn is grouped");
+        assert!(
+            !app.activity_groups[0].expanded,
+            "restored groups are folded by default"
+        );
+
+        app.rebuild_cache(80);
+        let text = rendered(&app);
+        assert!(
+            text.contains("activity · 1 calls"),
+            "header restored: {text}"
+        );
+        assert!(!text.contains("read"), "tool is folded: {text}");
+        assert!(text.contains("done"), "answer remains visible: {text}");
+
+        let header = app
+            .cache_rowseg
+            .iter()
+            .position(|tag| *tag == Some(GROUP_BASE))
+            .expect("restored activity header");
+        app.click(header);
+        app.rebuild_cache(80);
+        assert!(
+            rendered(&app).contains("read"),
+            "restored group can be unfolded"
+        );
     }
 
     #[test]
