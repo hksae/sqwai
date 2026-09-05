@@ -757,7 +757,9 @@ impl App {
         let input_h = (input_rows + 2).min(8);
         let layout = Layout::vertical([
             Constraint::Min(3),
+            Constraint::Length(1),
             Constraint::Length(input_h),
+            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .split(area);
@@ -826,14 +828,20 @@ impl App {
             .collect();
         f.render_widget(Paragraph::new(visible).style(Theme::base()), chat);
 
+        let rule = Paragraph::new(Line::from(Span::styled(
+            "─".repeat(area.width as usize),
+            Theme::border_dim(),
+        )))
+        .style(Theme::base());
+        f.render_widget(rule.clone(), layout[1]);
         self.input.set_block(Self::input_block());
-        // the cursor is rendered by tui-textarea as a pink styled cell;
-        // the hardware cursor stays hidden
+        // the cursor is rendered by tui-textarea; the input has no frame
         f.render_widget(&self.input, layout[2]);
+        f.render_widget(rule, layout[3]);
 
-        self.status_y = layout[2].y;
+        self.status_y = layout[4].y;
         let sb = self.status_bar(area.width);
-        f.render_widget(sb, layout[2]);
+        f.render_widget(sb, layout[4]);
 
         self.draw_popup(f, layout[2]);
         self.draw_menu(f, area);
@@ -1206,7 +1214,24 @@ impl App {
 
     pub(super) fn status_bar_spans(&mut self, w: u16) -> Vec<Span<'static>> {
         // a live retry overrides everything else on the left side
-        let (left, left_style) = if let Some(line) = &self.retry_line {
+        let plan_label = crate::plan::open_active(&std::env::current_dir().unwrap_or_default())
+            .ok()
+            .flatten()
+            .map(|plan| {
+                let current = plan
+                    .steps
+                    .iter()
+                    .position(|step| step.status == crate::plan::StepStatus::InProgress)
+                    .map(|index| index + 1);
+                let total = plan.steps.len();
+                match current {
+                    Some(step) => format!("step {step}/{total} "),
+                    None => String::new(),
+                }
+            })
+            .unwrap_or_default();
+        let left = format!(" {} {}", self.mode.label(), plan_label);
+        let (activity, activity_style) = if let Some(line) = &self.retry_line {
             (format!(" {line}"), Theme::warn())
         } else {
             match &self.bar_error {
@@ -1270,7 +1295,12 @@ impl App {
         }
 
         let lw = left.chars().count() as u16;
-        let mut spans = vec![Span::styled(left, left_style)];
+        let mut spans = vec![Span::styled(
+            format!(" {} ", self.mode.label()),
+            Theme::status_chip(),
+        )];
+        spans.push(Span::styled(plan_label, Theme::dim()));
+        spans.push(Span::styled(activity, activity_style));
         let pad = (w as usize).saturating_sub(lw as usize + right_len);
         let agents_x0 = lw + pad as u16;
         spans.push(Span::styled(" ".repeat(pad), Theme::base()));

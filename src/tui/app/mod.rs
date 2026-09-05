@@ -3,7 +3,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Line;
-use ratatui::widgets::{Block, BorderType, Borders};
+use ratatui::widgets::Block;
 use std::time::{Duration, Instant};
 use tui_textarea::TextArea;
 
@@ -426,9 +426,6 @@ impl App {
 
     fn input_block() -> Block<'static> {
         Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Theme::border_focused())
     }
 
     pub async fn run(mut self, mut terminal: Terminal) -> Result<()> {
