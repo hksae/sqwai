@@ -498,6 +498,12 @@ pub fn call_summary(name: &str, args: &Value) -> String {
 /// `plan_mode` narrows the set to read-only tools plus `plan`, so a request
 /// that cannot mutate the project still lets the model build and refine the
 /// plan (§5.3) without paying for the mutating schemas.
+pub fn tool_names() -> Vec<String> {
+    let mut names: Vec<String> = defs().into_iter().map(|d| d.name.to_string()).collect();
+    names.sort();
+    names
+}
+
 pub fn tool_specs(plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
     let mut specs: Vec<crate::providers::ToolSpec> = defs()
         .into_iter()
@@ -1133,6 +1139,8 @@ mod tests {
     #[test]
     fn tool_specs_are_stably_sorted() {
         let names: Vec<String> = tool_specs(false).iter().map(|t| t.name.clone()).collect();
+        assert_eq!(names, tool_names());
+
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted, "tool order must not depend on registration");

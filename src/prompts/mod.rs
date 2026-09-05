@@ -99,13 +99,15 @@ pub fn plan_block(root: &std::path::Path) -> Option<String> {
 }
 
 fn builtin_prompt() -> String {
-    if let Ok(dir) = crate::config::config_dir()
+    let source = if let Ok(dir) = crate::config::config_dir()
         && let Ok(s) = std::fs::read_to_string(dir.join("system.md"))
         && !s.trim().is_empty()
     {
-        return s;
-    }
-    include_str!("system.md").to_string()
+        s
+    } else {
+        include_str!("system.md").to_string()
+    };
+    source.replace("{{TOOLS}}", &crate::agent::tools::tool_names().join(", "))
 }
 
 /// AGENTS.md of the current project, truncated to a sane size
