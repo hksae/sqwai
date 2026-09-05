@@ -98,6 +98,10 @@ pub fn plan_block(root: &std::path::Path) -> Option<String> {
     ))
 }
 
+fn render_tools(source: &str) -> String {
+    source.replace("{{TOOLS}}", &crate::agent::tools::tool_names().join(", "))
+}
+
 fn builtin_prompt() -> String {
     let source = if let Ok(dir) = crate::config::config_dir()
         && let Ok(s) = std::fs::read_to_string(dir.join("system.md"))
@@ -107,7 +111,7 @@ fn builtin_prompt() -> String {
     } else {
         include_str!("system.md").to_string()
     };
-    source.replace("{{TOOLS}}", &crate::agent::tools::tool_names().join(", "))
+    render_tools(&source)
 }
 
 /// AGENTS.md of the current project, truncated to a sane size
@@ -168,6 +172,14 @@ mod tests {
     #[test]
     fn builtin_prompt_is_not_empty() {
         assert!(!builtin_prompt().trim().is_empty());
+    }
+
+    #[test]
+    fn tool_placeholder_renders_exactly_the_registry() {
+        let source = "available: {{TOOLS}}";
+        let expected = crate::agent::tools::tool_names().join(", ");
+        assert_eq!(render_tools(source), format!("available: {expected}"));
+        assert!(include_str!("system.md").contains("{{TOOLS}}"));
     }
 
     #[test]
