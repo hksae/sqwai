@@ -756,7 +756,6 @@ impl App {
         let input_rows = self.input.lines().len().clamp(1, 6) as u16;
         let input_h = (input_rows + 2).min(8);
         let layout = Layout::vertical([
-            Constraint::Length(1),
             Constraint::Min(3),
             Constraint::Length(input_h),
             Constraint::Length(1),
@@ -764,9 +763,9 @@ impl App {
         .split(area);
         let chat = Rect {
             x: area.x + 1,
-            y: layout[1].y,
+            y: layout[0].y,
             width: area.width.saturating_sub(2),
-            height: layout[1].height,
+            height: layout[0].height,
         };
 
         // The transcript is rendered inside `chat`, not the outer frame. Use
@@ -789,13 +788,6 @@ impl App {
             )
             .style(Theme::base());
             f.render_widget(logo_widget, chat);
-            f.render_widget(self.header_line(), layout[0]);
-            let hints = Paragraph::new(Line::from(vec![Span::styled(
-                " enter sessions · n new session · q quit",
-                Theme::dim(),
-            )]))
-            .style(Theme::base());
-            f.render_widget(hints, layout[3]);
             return;
         }
 
@@ -834,16 +826,14 @@ impl App {
             .collect();
         f.render_widget(Paragraph::new(visible).style(Theme::base()), chat);
 
-        f.render_widget(self.header_line(), layout[0]);
-
         self.input.set_block(Self::input_block());
         // the cursor is rendered by tui-textarea as a pink styled cell;
         // the hardware cursor stays hidden
         f.render_widget(&self.input, layout[2]);
 
-        self.status_y = layout[3].y;
+        self.status_y = layout[2].y;
         let sb = self.status_bar(area.width);
-        f.render_widget(sb, layout[3]);
+        f.render_widget(sb, layout[2]);
 
         self.draw_popup(f, layout[2]);
         self.draw_menu(f, area);
@@ -1141,6 +1131,7 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn header_line(&self) -> Paragraph<'static> {
         if self.segments.is_empty() {
             return Paragraph::new(Line::from(vec![
