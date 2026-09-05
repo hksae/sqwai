@@ -541,18 +541,22 @@ impl App {
                     Some(true) => ("  ✓ ".to_string(), Theme::ok()),
                     Some(false) => ("  ✗ ".to_string(), Theme::err()),
                 };
-                let available = usize::from(w.saturating_sub(4 + name.width() as u16));
-                let summary = if args.is_empty() {
+                let marker_width = 4usize;
+                let name_width = name
+                    .width()
+                    .min(usize::from(w).saturating_sub(marker_width));
+                let shown_name = truncate_display_width(name, name_width);
+                let available = usize::from(w)
+                    .saturating_sub(marker_width + name_width)
+                    .saturating_sub(2);
+                let summary = if args.is_empty() || available == 0 {
                     String::new()
                 } else {
-                    format!(
-                        "  {}",
-                        truncate_display_width(args, available.saturating_sub(2))
-                    )
+                    format!("  {}", truncate_display_width(args, available))
                 };
                 let head = Line::from(vec![
                     Span::styled(marker.0, marker.1),
-                    Span::styled(name.clone(), Theme::accent()),
+                    Span::styled(shown_name, Theme::accent()),
                     Span::styled(summary, Theme::dim()),
                 ]);
                 out.push((head, Some(idx)));
@@ -562,17 +566,12 @@ impl App {
                     let rows: Vec<&str> = body.lines().collect();
                     let shown = &rows[..rows.len().min(MAX_ROWS)];
                     let border = Theme::border_dim();
-                    let inner_w = w.saturating_sub(8) as usize;
-                    // The complete frame row must fit exactly inside `w`:
-                    // left prefix (6) + content + right suffix (2). Never keep
-                    // an artificial minimum here, because a narrow terminal must
-                    // shrink the frame rather than let wrap_tagged split it.
-                    let width = inner_w.max(1);
+                    let width = usize::from(w).saturating_sub(6).max(1);
+                    // Expanded output has no surrounding box. Keep one quiet
+                    // left rail so the body remains visibly attached to the
+                    // tool row while every line stays within the chat width.
                     out.push((
-                        Line::from(vec![Span::styled(
-                            format!("    ╭{}╮", "─".repeat(width + 2)),
-                            border,
-                        )]),
+                        Line::from(vec![Span::styled("    │".to_string(), border)]),
                         Some(idx),
                     ));
                     for l in shown {
@@ -589,8 +588,7 @@ impl App {
                         out.push((
                             Line::from(vec![
                                 Span::styled("    │ ", border),
-                                Span::styled(pad_display(&line, width), st),
-                                Span::styled(" │", border),
+                                Span::styled(truncate_display_width(&line, width), st),
                             ]),
                             Some(idx),
                         ));
@@ -600,22 +598,11 @@ impl App {
                         out.push((
                             Line::from(vec![
                                 Span::styled("    │ ", border),
-                                Span::styled(
-                                    pad_display(&truncate_display_width(&more, width), width),
-                                    Theme::dim(),
-                                ),
-                                Span::styled(" │", border),
+                                Span::styled(truncate_display_width(&more, width), Theme::dim()),
                             ]),
                             Some(idx),
                         ));
                     }
-                    out.push((
-                        Line::from(vec![Span::styled(
-                            format!("    ╰{}╯", "─".repeat(width + 2)),
-                            border,
-                        )]),
-                        Some(idx),
-                    ));
                 }
             }
             Segment::Status { text, kind } => {

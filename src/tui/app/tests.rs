@@ -780,7 +780,7 @@ mod tests {
         }));
     }
     #[test]
-    fn narrow_tool_frames_keep_both_borders_on_one_row() {
+    fn expanded_tool_output_uses_left_rail_and_truncates() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.segments.push(Segment::Tool {
             name: "patch".into(),
@@ -792,7 +792,7 @@ mod tests {
         });
         let rows = app.render_segment(0, 18);
         use unicode_width::UnicodeWidthStr;
-        let frame_rows: Vec<String> = rows
+        let text: Vec<String> = rows
             .iter()
             .map(|(line, _)| {
                 line.spans
@@ -800,14 +800,19 @@ mod tests {
                     .map(|span| span.content.as_ref())
                     .collect()
             })
-            .filter(|line: &String| line.matches('│').count() == 2)
             .collect();
-        assert!(!frame_rows.is_empty());
-        assert!(frame_rows.iter().all(|line| {
-            UnicodeWidthStr::width(line.as_str()) == 18
-                && line.starts_with("    │ ")
-                && line.ends_with(" │")
-        }));
+        assert!(text.iter().any(|line| line == "    │"));
+        assert!(
+            text.iter()
+                .filter(|line| line.contains('│'))
+                .all(|line| line.matches('│').count() == 1)
+        );
+        assert!(text.iter().any(|line| line.contains("…")));
+        assert!(
+            text.iter()
+                .filter(|line| line.starts_with("    │ "))
+                .all(|line| { UnicodeWidthStr::width(line.as_str()) <= 18 })
+        );
     }
     #[test]
     fn long_user_prompt_keeps_both_frame_borders() {
@@ -854,8 +859,7 @@ mod tests {
         for row in buffer.content.chunks(buffer.area.width as usize) {
             let text: String = row.iter().map(|cell| cell.symbol().to_string()).collect();
             if text.contains("│") {
-                let borders = text.matches("│").count();
-                assert!(borders == 0 || borders == 2, "broken frame row: {text}");
+                assert_eq!(text.matches("│").count(), 1, "broken tool rail row: {text}");
             }
         }
     }
