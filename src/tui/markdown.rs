@@ -101,14 +101,18 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
                 in_code = false;
             } else {
                 in_code = true;
-                code_lang = Some(
-                    trimmed_start[3..]
-                        .trim()
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or("")
-                        .to_string(),
-                );
+                let label = trimmed_start[3..]
+                    .trim()
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                // Generic fence labels add no useful context and make prose
+                // blocks look like source code. Keep the language badge only
+                // when the model supplied an actual language name.
+                code_lang = match label.to_ascii_lowercase().as_str() {
+                    "" | "text" | "txt" | "plain" | "plaintext" => None,
+                    _ => Some(label.to_string()),
+                };
             }
             continue;
         }
@@ -406,12 +410,9 @@ fn emit_code(
     let rest = (iw + 2).saturating_sub(UnicodeWidthStr::width(lang_txt.as_str()));
     out.push(Line::from(vec![
         Span::styled("╭".to_string(), b),
-        Span::styled(
-            lang_txt,
-            Style::new()
-                .fg(Theme::ACCENT())
-                .add_modifier(Modifier::BOLD),
-        ),
+        // The label is part of the frame, not an accent badge: one quiet
+        // border color keeps the left cap and the rest of the outline uniform.
+        Span::styled(lang_txt, b),
         Span::styled(format!("{}╮", "─".repeat(rest)), b),
     ]));
     for l in lines.into_iter().flat_map(|line| wrap_code_line(line, iw)) {
@@ -690,6 +691,19 @@ mod tests {
             .map(|s| s.content.to_string())
             .collect();
         assert!(label.contains("rust"), "label was {label:?}");
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .all(|span| span.style == lines[0].spans[0].style),
+            "language label must share the quiet frame style"
+        );
+        let generic = render("```text\nplain note\n```", 80, &hl);
+        let generic_top = line_text_pub(&generic[0]);
+        assert!(
+            !generic_top.contains("text"),
+            "generic text label must be hidden: {generic_top:?}"
+        );
         let body: String = lines[1]
             .spans
             .iter()
