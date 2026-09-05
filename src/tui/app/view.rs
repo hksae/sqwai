@@ -81,8 +81,10 @@ pub(super) enum Segment {
     Thinking {
         text: String,
         expanded: bool,
-        /// time the first delta arrived; `None` until then
+        /// monotonic start of this reasoning block
         started: Option<std::time::Instant>,
+        /// frozen elapsed time once the block closes
+        duration_ms: u64,
         live: bool,
     },
     /// one tool call: spinner while running, result line when finished,
@@ -536,9 +538,14 @@ impl App {
                 text,
                 expanded,
                 started,
-                ..
+                duration_ms,
+                live,
             } => {
-                let elapsed = started.map_or(0u64, |t| t.elapsed().as_secs());
+                let elapsed = if *live {
+                    started.map_or(0u64, |t| t.elapsed().as_secs())
+                } else {
+                    duration_ms / 1000
+                };
                 if !*expanded {
                     let label = if text.is_empty() {
                         format!("  thinking… {elapsed}s")

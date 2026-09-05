@@ -369,6 +369,7 @@ mod tests {
             text: "hmm".into(),
             expanded: false,
             started: None,
+            duration_ms: 0,
             live: false,
         });
         app.segments.push(Segment::Tool {
@@ -383,6 +384,30 @@ mod tests {
             text: "done".into(),
             live: false,
         });
+    }
+
+    #[test]
+    fn thinking_duration_freezes_when_block_closes() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.segments.push(Segment::Thinking {
+            text: "work".into(),
+            expanded: false,
+            started: Some(std::time::Instant::now() - std::time::Duration::from_millis(1200)),
+            duration_ms: 0,
+            live: true,
+        });
+        app.thinking_idx = Some(0);
+        app.thinking_open = true;
+        app.handle_tool_start("read".into(), "a.rs".into());
+        match &app.segments[0] {
+            Segment::Thinking {
+                duration_ms, live, ..
+            } => {
+                assert!(*duration_ms >= 1000, "duration froze at {duration_ms}ms");
+                assert!(!live);
+            }
+            _ => panic!("thinking row was removed unexpectedly"),
+        }
     }
 
     #[test]
@@ -455,6 +480,7 @@ mod tests {
             text: "hmm".into(),
             expanded: false,
             started: None,
+            duration_ms: 0,
             live: false,
         });
         app.segments.push(Segment::Tool {

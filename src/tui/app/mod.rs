@@ -680,7 +680,10 @@ impl App {
         self.segments.push(Segment::Thinking {
             text: String::new(),
             expanded: false,
+            // Do not start the thinking stopwatch at request start: connection
+            // latency before the first reasoning delta is not model thinking.
             started: None,
+            duration_ms: 0,
             live: true,
         });
         self.thinking_idx = Some(tpos);
@@ -1325,6 +1328,7 @@ impl App {
                                 text: String::new(),
                                 expanded: false,
                                 started: None,
+                                duration_ms: 0,
                                 live: true,
                             },
                             Segment::Assistant {
@@ -1558,6 +1562,21 @@ impl App {
         }
     }
 
+    fn freeze_thinking(&mut self, index: usize) {
+        if let Some(Segment::Thinking {
+            started,
+            duration_ms,
+            live,
+            ..
+        }) = self.segments.get_mut(index)
+        {
+            if let Some(started_at) = *started {
+                *duration_ms = started_at.elapsed().as_millis() as u64;
+            }
+            *live = false;
+        }
+    }
+
     /// append reasoning text, opening a fresh thinking row when none is open.
     /// This keeps multiple reasoning blocks separate and interleaved with the
     /// tool calls that follow them (think -> tool -> think -> tool -> answer).
@@ -1576,6 +1595,7 @@ impl App {
                     text: String::new(),
                     expanded: false,
                     started: Some(std::time::Instant::now()),
+                    duration_ms: 0,
                     live: true,
                 },
             );
@@ -1599,6 +1619,7 @@ impl App {
     fn handle_tool_start(&mut self, name: String, summary: String) {
         if self.thinking_open {
             if let Some(i) = self.thinking_idx.take() {
+                self.freeze_thinking(i);
                 let empty = matches!(
                     self.segments.get(i),
                     Some(Segment::Thinking { text, .. }) if text.is_empty()
@@ -1682,6 +1703,7 @@ impl App {
     fn handle_text_delta(&mut self, t: String) {
         if self.thinking_open {
             if let Some(i) = self.thinking_idx.take() {
+                self.freeze_thinking(i);
                 let empty = matches!(
                     self.segments.get(i),
                     Some(Segment::Thinking { text, .. }) if text.is_empty()
@@ -1825,6 +1847,8 @@ impl App {
                 _ => {}
             }
         }
+        // The activity header measures the full turn (including provider and
+        // tool latency); individual thinking rows use their own frozen timer.
         let duration_ms = self
             .turn_started
             .map(|t| t.elapsed().as_millis() as u64)
@@ -1868,9 +1892,9 @@ impl App {
         let text = std::mem::take(&mut self.assistant_buf);
         self.thinking_open = false;
         self.thinking_idx = None;
-        for s in &mut self.segments {
-            if let Segment::Thinking { live, .. } = s {
-                *live = false;
+        for i in 0..self.segments.len() {
+            if matches!(self.segments[i], Segment::Thinking { live: true, .. }) {
+                self.freeze_thinking(i);
             }
         }
         // never render "(0 chars)" ghosts
