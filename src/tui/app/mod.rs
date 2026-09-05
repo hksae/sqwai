@@ -662,6 +662,7 @@ impl App {
         self.segments.push(Segment::Thinking {
             text: String::new(),
             expanded: false,
+            started: None,
             live: true,
         });
         self.thinking_idx = Some(tpos);
@@ -1247,52 +1248,10 @@ impl App {
             };
             match ev {
                 AgentEvent::TextDelta(t) => {
-                    // drop the reasoning placeholder once the answer starts and
-                    // it never received any thought text
-                    if self.thinking_open {
-                        let is_empty = self
-                            .thinking_idx
-                            .and_then(|i| match self.segments.get(i) {
-                                Some(Segment::Thinking { text, .. }) => Some(text.is_empty()),
-                                _ => None,
-                            })
-                            .unwrap_or(false);
-                        if is_empty {
-                            if let Some(i) = self.thinking_idx.take() {
-                                self.segments.remove(i);
-                                self.thinking_open = false;
-                            }
-                        }
-                    }
-                    // queue for the typewriter reveal instead of showing at once
-                    self.pending_reveal.push_str(&t);
-                    self.dirty = true;
+                    self.handle_text_delta(t);
                 }
                 AgentEvent::ThinkingDelta(t) => {
-                    if !self.thinking_open {
-                        self.thinking_open = true;
-                        // thinking precedes the answer: insert before the live assistant
-                        let pos = self
-                            .segments
-                            .iter()
-                            .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
-                            .unwrap_or(self.segments.len());
-                        self.segments.insert(
-                            pos,
-                            Segment::Thinking {
-                                text: String::new(),
-                                expanded: false,
-                                live: true,
-                            },
-                        );
-                        self.thinking_idx = Some(pos);
-                    }
-                    if let Some(i) = self.thinking_idx {
-                        if let Some(Segment::Thinking { text, .. }) = self.segments.get_mut(i) {
-                            text.push_str(&t);
-                        }
-                    }
-                    self.dirty = true;
+                    self.handle_thinking_delta(t);
                 }
                 AgentEvent::Usage(u) => {
                     self.session.add_usage(&u);
@@ -1344,6 +1303,7 @@ impl App {
                             Segment::Thinking {
                                 text: String::new(),
                                 expanded: false,
+                                started: None,
                                 live: true,
                             },
                             Segment::Assistant {
@@ -1468,24 +1428,7 @@ impl App {
                     self.dirty = true;
                 }
                 AgentEvent::ToolStart { name, summary } => {
-                    let tool = Segment::Tool {
-                        name,
-                        args: summary,
-                        ok: None,
-                        output: String::new(),
-                        diff: None,
-                        expanded: false,
-                    };
-                    // The model may stream a short preamble before emitting
-                    // its tool call. Keep tool activity above the live answer
-                    // so the chat reads in execution order: tool -> result -> answer.
-                    let pos = self
-                        .segments
-                        .iter()
-                        .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
-                        .unwrap_or(self.segments.len());
-                    self.segments.insert(pos, tool);
-                    self.dirty = true;
+                    self.handle_tool_start(name, summary);
                 }
                 AgentEvent::ToolNotice {
                     name,
@@ -1493,42 +1436,7 @@ impl App {
                     ok,
                     diff,
                 } => {
-                    // close the row opened by ToolStart; fall back to a new one
-                    let hit = self.segments.iter().rposition(
-                        |s| matches!(s, Segment::Tool { name: n, ok: None, .. } if *n == name),
-                    );
-                    match hit {
-                        Some(i) => {
-                            if let Some(Segment::Tool {
-                                ok: slot,
-                                output,
-                                diff: dslot,
-                                ..
-                            }) = self.segments.get_mut(i)
-                            {
-                                *slot = Some(ok);
-                                *output = summary;
-                                *dslot = diff;
-                            }
-                        }
-                        None => {
-                            let tool = Segment::Tool {
-                                name,
-                                args: String::new(),
-                                ok: Some(ok),
-                                output: summary,
-                                diff,
-                                expanded: false,
-                            };
-                            let pos = self
-                                .segments
-                                .iter()
-                                .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
-                                .unwrap_or(self.segments.len());
-                            self.segments.insert(pos, tool);
-                        }
-                    }
-                    self.dirty = true;
+                    self.handle_tool_notice(name, summary, ok, diff);
                 }
                 AgentEvent::Checkpoint { label } => {
                     self.last_checkpoint = Some(label);
@@ -1627,6 +1535,145 @@ impl App {
                 }
             }
         }
+    }
+
+    /// append reasoning text, opening a fresh thinking row when none is open.
+    /// This keeps multiple reasoning blocks separate and interleaved with the
+    /// tool calls that follow them (think -> tool -> think -> tool -> answer).
+    fn handle_thinking_delta(&mut self, t: String) {
+        if !self.thinking_open {
+            self.thinking_open = true;
+            // reasoning precedes the answer: insert before the live assistant
+            let pos = self
+                .segments
+                .iter()
+                .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
+                .unwrap_or(self.segments.len());
+            self.segments.insert(
+                pos,
+                Segment::Thinking {
+                    text: String::new(),
+                    expanded: false,
+                    started: Some(std::time::Instant::now()),
+                    live: true,
+                },
+            );
+            self.thinking_idx = Some(pos);
+        }
+        if let Some(i) = self.thinking_idx {
+            if let Some(Segment::Thinking { text, started, .. }) = self.segments.get_mut(i) {
+                if started.is_none() {
+                    *started = Some(std::time::Instant::now());
+                }
+                text.push_str(&t);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// close any open reasoning block, then insert a running tool row above the
+    /// live answer (tool -> result -> answer). A tool call ends the current
+    /// reasoning block, so the next ThinkingDelta opens its own row instead of
+    /// piling onto the previous one.
+    fn handle_tool_start(&mut self, name: String, summary: String) {
+        if self.thinking_open {
+            if let Some(i) = self.thinking_idx.take() {
+                let empty = matches!(
+                    self.segments.get(i),
+                    Some(Segment::Thinking { text, .. }) if text.is_empty()
+                );
+                if empty {
+                    self.segments.remove(i);
+                }
+            }
+            self.thinking_open = false;
+        }
+        let tool = Segment::Tool {
+            name,
+            args: summary,
+            ok: None,
+            output: String::new(),
+            diff: None,
+            expanded: false,
+        };
+        // The model may stream a short preamble before emitting its tool call.
+        // Keep tool activity above the live answer so the chat reads in
+        // execution order.
+        let pos = self
+            .segments
+            .iter()
+            .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
+            .unwrap_or(self.segments.len());
+        self.segments.insert(pos, tool);
+        self.dirty = true;
+    }
+
+    /// attach a tool result to the running row opened by handle_tool_start,
+    /// or create a closed row if the start event was missed.
+    fn handle_tool_notice(
+        &mut self,
+        name: String,
+        summary: String,
+        ok: bool,
+        diff: Option<String>,
+    ) {
+        // close the row opened by ToolStart; fall back to a new one
+        let hit = self
+            .segments
+            .iter()
+            .rposition(|s| matches!(s, Segment::Tool { name: n, ok: None, .. } if *n == name));
+        match hit {
+            Some(i) => {
+                if let Some(Segment::Tool {
+                    ok: slot,
+                    output,
+                    diff: dslot,
+                    ..
+                }) = self.segments.get_mut(i)
+                {
+                    *slot = Some(ok);
+                    *output = summary;
+                    *dslot = diff;
+                }
+            }
+            None => {
+                let tool = Segment::Tool {
+                    name,
+                    args: String::new(),
+                    ok: Some(ok),
+                    output: summary,
+                    diff,
+                    expanded: false,
+                };
+                let pos = self
+                    .segments
+                    .iter()
+                    .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
+                    .unwrap_or(self.segments.len());
+                self.segments.insert(pos, tool);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// stream the final answer; close any open reasoning block first so it no
+    /// longer receives later (errant) thinking deltas.
+    fn handle_text_delta(&mut self, t: String) {
+        if self.thinking_open {
+            if let Some(i) = self.thinking_idx.take() {
+                let empty = matches!(
+                    self.segments.get(i),
+                    Some(Segment::Thinking { text, .. }) if text.is_empty()
+                );
+                if empty {
+                    self.segments.remove(i);
+                }
+            }
+            self.thinking_open = false;
+        }
+        // queue for the typewriter reveal instead of showing at once
+        self.pending_reveal.push_str(&t);
+        self.dirty = true;
     }
 
     /// agent finished with a full outcome (final answer + tool turns)

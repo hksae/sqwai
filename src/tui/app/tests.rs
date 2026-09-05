@@ -197,8 +197,17 @@ mod tests {
                         text.chars().take(60).collect::<String>()
                     )
                 }
-                Segment::Thinking { text, live, .. } => {
-                    println!("seg[{i}] THINKING live={live} len={}", text.chars().count())
+                Segment::Thinking {
+                    text,
+                    live,
+                    started,
+                    ..
+                } => {
+                    println!(
+                        "seg[{i}] THINKING live={live} len={} started={}",
+                        text.chars().count(),
+                        started.is_some()
+                    )
                 }
                 Segment::Status { text, kind } => println!("seg[{i}] STATUS {kind:?}: {text}"),
                 Segment::Subagent {
@@ -249,6 +258,95 @@ mod tests {
                 .any(|s| matches!(s, Segment::Thinking { text, .. } if text.is_empty())),
             "empty thinking ghost left behind"
         );
+    }
+
+    #[test]
+    fn thinking_segments_stay_in_event_order() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        // Simulate an agent stream: think, two tools, think again.
+        app.streaming = true;
+        app.segments.push(Segment::Assistant {
+            text: String::new(),
+            live: true,
+        });
+        let ev = |e: AgentEvent, app: &mut App| {
+            let _ = app.agent.as_mut();
+            match e {
+                AgentEvent::ThinkingDelta(t) => app.handle_thinking_delta(t),
+                AgentEvent::ToolStart { name, summary } => app.handle_tool_start(name, summary),
+                AgentEvent::ToolNotice {
+                    name,
+                    summary,
+                    ok,
+                    diff,
+                } => app.handle_tool_notice(name, summary, ok, diff),
+                AgentEvent::TextDelta(t) => app.handle_text_delta(t),
+                _ => {}
+            }
+        };
+        ev(AgentEvent::ThinkingDelta("first".into()), &mut app);
+        ev(
+            AgentEvent::ToolStart {
+                name: "read".into(),
+                summary: "a.rs".into(),
+            },
+            &mut app,
+        );
+        ev(
+            AgentEvent::ToolNotice {
+                name: "read".into(),
+                summary: "lines".into(),
+                ok: true,
+                diff: None,
+            },
+            &mut app,
+        );
+        ev(AgentEvent::ThinkingDelta("second".into()), &mut app);
+        ev(
+            AgentEvent::ToolStart {
+                name: "edit".into(),
+                summary: "a.rs".into(),
+            },
+            &mut app,
+        );
+        ev(
+            AgentEvent::ToolNotice {
+                name: "edit".into(),
+                summary: "ok".into(),
+                ok: true,
+                diff: None,
+            },
+            &mut app,
+        );
+        ev(AgentEvent::TextDelta("answer".into()), &mut app);
+
+        let kinds: Vec<&str> = app
+            .segments
+            .iter()
+            .map(|s| match s {
+                Segment::Thinking { .. } => "thinking",
+                Segment::Tool { .. } => "tool",
+                Segment::Assistant { .. } => "answer",
+                _ => "other",
+            })
+            .filter(|k| *k != "other")
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["thinking", "tool", "thinking", "tool", "answer"],
+            "thinking and tools must interleave by event order"
+        );
+        // both thinking blocks kept their own text
+        let thoughts: Vec<&String> = app
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Thinking { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(thoughts.iter().any(|t| t.as_str() == "first"));
+        assert!(thoughts.iter().any(|t| t.as_str() == "second"));
     }
 
     #[test]

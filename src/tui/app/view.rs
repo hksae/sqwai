@@ -69,11 +69,6 @@ pub(super) enum Segment {
         text: String,
         live: bool,
     },
-    Thinking {
-        text: String,
-        expanded: bool,
-        live: bool,
-    },
     /// compact subagent row; click to reveal its latest output
     Subagent {
         id: u64,
@@ -81,6 +76,14 @@ pub(super) enum Segment {
         status: String,
         output: String,
         expanded: bool,
+    },
+    /// one reasoning block; the model may emit several across a turn
+    Thinking {
+        text: String,
+        expanded: bool,
+        /// time the first delta arrived; `None` until then
+        started: Option<std::time::Instant>,
+        live: bool,
     },
     /// one tool call: spinner while running, result line when finished,
     /// full output or diff on click
@@ -429,8 +432,15 @@ impl App {
                 .wrapping_add(status.len() as u64)
                 .wrapping_add(output.len() as u64)
                 .wrapping_add(*expanded as u64) as usize,
-            Segment::Thinking { text, expanded, .. } => {
-                text.chars().count() * 2 + *expanded as usize
+            Segment::Thinking {
+                text,
+                expanded,
+                started,
+                ..
+            } => {
+                text.chars().count() * 2
+                    + *expanded as usize
+                    + started.map(|t| t.elapsed().as_secs() as usize).unwrap_or(0) / 8
             }
             Segment::Tool {
                 name,
@@ -471,13 +481,20 @@ impl App {
                     out.push((l, Some(idx)));
                 }
             }
-            Segment::Thinking { text, expanded, .. } => {
+            Segment::Thinking {
+                text,
+                expanded,
+                started,
+                ..
+            } => {
+                let elapsed = started.map_or(0u64, |t| t.elapsed().as_secs());
                 if !*expanded {
-                    let n = text.chars().count();
-                    let spans = vec![Span::styled(
-                        format!("  thinking ({n} chars)"),
-                        Theme::dim(),
-                    )];
+                    let label = if text.is_empty() {
+                        format!("  thinking… {elapsed}s")
+                    } else {
+                        format!("  thinking · {elapsed}s")
+                    };
+                    let spans = vec![Span::styled(label, Theme::dim())];
                     out.push((Line::from(spans), Some(idx)));
                 } else {
                     for l in render(text, w, &self.hl) {
@@ -485,7 +502,7 @@ impl App {
                     }
                     out.push((
                         Line::from(vec![Span::styled(
-                            "  click to collapse".to_string(),
+                            format!("  click to collapse · {elapsed}s"),
                             Style::new().fg(Theme::DIM()).add_modifier(Modifier::ITALIC),
                         )]),
                         Some(idx),
