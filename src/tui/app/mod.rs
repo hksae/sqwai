@@ -519,7 +519,7 @@ impl App {
         input.set_block(Self::input_block());
         input.set_style(Theme::base());
         input.set_cursor_line_style(Style::new().bg(Theme::SURFACE()));
-        input.set_cursor_style(Style::new().bg(Theme::ACCENT()).fg(Theme::BG()));
+        input.set_cursor_style(Style::new().bg(Theme::ACCENT_SOFT()).fg(Theme::BG()));
         input
     }
 
@@ -608,6 +608,17 @@ impl App {
         self.input.lines().join("\n")
     }
 
+    pub(super) fn is_inline_ask(&self) -> bool {
+        matches!(
+            self.cur_menu(),
+            Some(Menu::AskUser { .. }) | Some(Menu::AskFree { .. })
+        )
+    }
+
+    pub(super) fn is_inline_ask_free(&self) -> bool {
+        matches!(self.cur_menu(), Some(Menu::AskFree { .. }))
+    }
+
     fn popup_visible(&self) -> bool {
         let t = self.input_text();
         !self.popup_dismiss && t.starts_with('/') && !t.contains(' ')
@@ -621,6 +632,21 @@ impl App {
             .filter(|(_, cmd)| cmd.starts_with(&t))
             .map(|(i, _)| i)
             .collect()
+    }
+
+    pub(super) fn popup_scroll_by(&mut self, delta: i32) {
+        let items = self.popup_items();
+        let shown = items
+            .len()
+            .min(menus::POPUP_MAX_ROWS)
+            .min((self.last_input.y as usize).saturating_sub(2).max(3));
+        let max_scroll = items.len().saturating_sub(shown);
+        let next = if delta < 0 {
+            self.popup_scroll.saturating_sub(delta.unsigned_abs() as usize)
+        } else {
+            self.popup_scroll.saturating_add(delta as usize)
+        };
+        self.popup_scroll = next.min(max_scroll);
     }
 
     /// Rebuild the provider client from the current config so changes made

@@ -180,6 +180,12 @@ impl App {
                                 self.view_top = 0;
                                 self.dirty = true;
                             } else if !self.menu_stack.is_empty() {
+                                // inline ask_user still uses the session stream, but Esc answers it
+                                // before ordinary popup/menu navigation.
+                                if self.is_inline_ask() {
+                                    self.menu_back();
+                                    continue;
+                                }
                                 // first esc clears an active sessions filter
                                 if matches!(self.cur_menu(), Some(Menu::Sessions))
                                     && !self.sessions_filter.is_empty()
@@ -219,6 +225,8 @@ impl App {
                                 self.input.insert_newline();
                             }
                         }
+                        KeyCode::Up if self.is_inline_ask() => self.menu_nav(-1),
+                        KeyCode::Down if self.is_inline_ask() => self.menu_nav(1),
                         KeyCode::Up if !self.menu_stack.is_empty() => self.menu_nav(-1),
                         KeyCode::Down if !self.menu_stack.is_empty() => self.menu_nav(1),
                         KeyCode::PageUp if !self.menu_stack.is_empty() => self.menu_nav(-2),
@@ -233,6 +241,11 @@ impl App {
                                 self.menu_jump(k.code == KeyCode::End);
                             }
                         }
+                        KeyCode::Enter if self.is_inline_ask_free() => {
+                            let text = self.input_text();
+                            self.ask_answer(text);
+                        }
+                        KeyCode::Enter if self.is_inline_ask() => self.menu_activate(),
                         KeyCode::Enter if !self.menu_stack.is_empty() => self.menu_activate(),
                         // plan/act is switched by the user only (design §5)
                         KeyCode::Tab if self.menu_stack.is_empty() => {
@@ -336,6 +349,11 @@ impl App {
                             self.view_top = 0;
                             self.dirty = true;
                         }
+                        _ if self.is_inline_ask_free() => {
+                            self.jump_to_bottom_on_typing();
+                            self.bar_error = None;
+                            self.input.input(k);
+                        }
                         _ if !self.menu_stack.is_empty() => {}
                         _ => {
                             self.jump_to_bottom_on_typing();
@@ -381,7 +399,7 @@ impl App {
                                 .scroll(tui_textarea::Scrolling::Delta { rows: -1, cols: 0 });
                             self.dirty = true;
                         } else if self.popup_visible() {
-                            self.popup_scroll = self.popup_scroll.saturating_sub(3);
+                            self.popup_scroll_by(-3);
                             self.hover = None;
                             self.dirty = true;
                         } else {
@@ -400,7 +418,7 @@ impl App {
                                 .scroll(tui_textarea::Scrolling::Delta { rows: 1, cols: 0 });
                             self.dirty = true;
                         } else if self.popup_visible() {
-                            self.popup_scroll = self.popup_scroll.saturating_add(3);
+                            self.popup_scroll_by(3);
                             self.hover = None;
                             self.dirty = true;
                         } else {
