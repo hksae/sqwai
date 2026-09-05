@@ -318,9 +318,6 @@ pub struct UiConfig {
     /// index into tui::theme::THEMES
     #[serde(default)]
     pub theme: usize,
-    /// active animated theme index into tui::theme::ANIMATED_THEMES, if any
-    #[serde(default)]
-    pub anim_theme: Option<usize>,
     /// show $ spent in the header (needs price_in/price_out on the model)
     #[serde(default)]
     pub show_cost: bool,
@@ -332,7 +329,6 @@ impl Default for UiConfig {
             typewriter: true,
             http_log: false,
             theme: 0,
-            anim_theme: None,
             show_cost: false,
         }
     }

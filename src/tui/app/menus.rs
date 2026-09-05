@@ -149,7 +149,6 @@ pub(super) enum MenuAction {
     ToggleMode,
     OpenSessions,
     SetTheme(usize),
-    SetAnimTheme(usize),
     Confirm(Box<MenuAction>),
     SetThinking(ThinkingLevel),
     OpenSubagent(u64),
@@ -583,9 +582,6 @@ impl App {
             MenuAction::SetTheme(idx) => {
                 self.apply_theme(idx);
             }
-            MenuAction::SetAnimTheme(idx) => {
-                self.apply_anim_theme(idx);
-            }
             MenuAction::DeleteSession(id) => {
                 let title = self
                     .sessions
@@ -897,13 +893,7 @@ impl App {
                 self.menu_footer_text = Some("enter: open/toggle · esc: back".into());
             }
             Menu::Themes => {
-                // when an animated theme is active, the static list shows no
-                // marker — only one "*" is ever visible across both lists
-                let cur = if crate::tui::theme::anim_theme_index().is_some() {
-                    usize::MAX
-                } else {
-                    crate::tui::theme::theme_index()
-                };
+                let cur = crate::tui::theme::theme_index();
                 for (i, t) in crate::tui::theme::THEMES.iter().enumerate() {
                     let mark = if i == cur { " *" } else { "" };
                     // the name glows in its own accent color (no swatch square)
@@ -916,24 +906,6 @@ impl App {
                                 .add_modifier(Modifier::BOLD),
                         )]),
                         MenuAction::SetTheme(i),
-                    ));
-                }
-                // animated themes flow right after the static ones, same 2-block swatch
-                let cur_anim = crate::tui::theme::anim_theme_index();
-                let tick = crate::tui::theme::anim_tick();
-                for (i, t) in crate::tui::theme::ANIMATED_THEMES.iter().enumerate() {
-                    let mark = if cur_anim == Some(i) { " *" } else { "" };
-                    let p0 = crate::tui::theme::anim_palette_at(i, tick);
-                    // the name glows in the live animated accent (no swatch square)
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(
-                            format!("  {}{mark}", t.name),
-                            Style::new()
-                                .fg(p0.accent)
-                                .bg(Theme::BG())
-                                .add_modifier(Modifier::BOLD),
-                        )]),
-                        MenuAction::SetAnimTheme(i),
                     ));
                 }
                 self.menu_footer_text =

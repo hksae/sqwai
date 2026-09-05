@@ -441,16 +441,7 @@ impl App {
             }
             Segment::Status { .. } => 0,
         };
-        // an animated theme shifts its palette every frame, so baked-in
-        // frame/border/background colors must be re-rendered too — fold the
-        // tick into the key. Segments only re-highlight while an anim theme
-        // is active; static themes keep the cheap content-only key.
-        if crate::tui::theme::anim_theme_index().is_some() {
-            base.wrapping_mul(31)
-                .wrapping_add(crate::tui::theme::anim_tick() as usize)
-        } else {
-            base
-        }
+        base
     }
 
     pub(super) fn render_segment(&self, idx: usize, w: u16) -> Vec<(Line<'static>, Option<usize>)> {

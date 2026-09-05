@@ -469,17 +469,6 @@ impl App {
                 self.busy_until = None;
             }
             self.spinner_tick = self.spinner_tick.wrapping_add(1);
-            crate::tui::theme::set_anim_tick(self.spinner_tick as u64);
-            // keep the /themes live swatches animating while the menu is open
-            if matches!(self.cur_menu(), Some(Menu::Themes)) {
-                self.build_menu_rows();
-            }
-            // an animated theme shifts the chat's baked frame/border colors
-            // every frame, so force a re-assemble (and thus re-render) of the
-            // transcript while one is active
-            if crate::tui::theme::anim_theme_index().is_some() {
-                self.dirty = true;
-            }
             self.dirty |= self.streaming;
             terminal.draw(|f| self.draw(f))?;
             self.dirty = false;
@@ -1749,9 +1738,7 @@ impl App {
     /// switch the palette and repaint everything that caches colors
     fn apply_theme(&mut self, idx: usize) {
         let applied = crate::tui::theme::set_theme(idx);
-        crate::tui::theme::set_anim_theme_off();
         self.cfg.ui.theme = applied;
-        self.cfg.ui.anim_theme = None;
         self.cfg.save().ok();
         // rendered lines are cached by text length only — drop them so every
         // message repaints in the new palette (otherwise old accents linger)
@@ -1772,31 +1759,6 @@ impl App {
             }
         }
         // no status note on theme switch — the live repaint is the feedback
-        self.build_menu_rows();
-        self.dirty = true;
-    }
-
-    /// switch to an animated (time-driven) theme and repaint
-    fn apply_anim_theme(&mut self, idx: usize) {
-        let applied = crate::tui::theme::set_anim_theme(idx);
-        self.cfg.ui.anim_theme = Some(applied);
-        self.cfg.save().ok();
-        // same cache/textarea refresh as a static theme switch
-        self.seg_cache.clear();
-        self.cache_lines.clear();
-        self.cache_rowseg.clear();
-        let restyle = |ta: &mut TextArea<'static>| {
-            ta.set_style(Theme::base());
-            ta.set_cursor_line_style(Style::new().bg(Theme::SURFACE()));
-            ta.set_cursor_style(Style::new().bg(Theme::ACCENT()).fg(Theme::BG()));
-            ta.set_selection_style(Style::new().bg(Theme::ACCENT()).fg(Theme::BG()));
-        };
-        restyle(&mut self.input);
-        for f in self.form_fields.iter_mut() {
-            if let FormField::Text { ta, .. } = f {
-                restyle(ta);
-            }
-        }
         self.build_menu_rows();
         self.dirty = true;
     }
