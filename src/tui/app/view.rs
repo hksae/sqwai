@@ -99,6 +99,20 @@ pub(super) enum Segment {
     },
 }
 
+fn edit_change_counts(diff: &str) -> (usize, usize) {
+    diff.lines().fold((0, 0), |(added, removed), line| {
+        if line.starts_with("+++") || line.starts_with("---") {
+            (added, removed)
+        } else if line.starts_with('+') {
+            (added + 1, removed)
+        } else if line.starts_with('-') {
+            (added, removed + 1)
+        } else {
+            (added, removed)
+        }
+    })
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum BlockKind {
     None,
@@ -549,16 +563,30 @@ impl App {
                 let available = usize::from(w)
                     .saturating_sub(marker_width + name_width)
                     .saturating_sub(2);
-                let summary = if args.is_empty() || available == 0 {
+                let edit_counts = if name == "edit" {
+                    diff.as_deref().map(edit_change_counts)
+                } else {
+                    None
+                };
+                let counts_width = edit_counts
+                    .map(|(added, removed)| format!("  +{added} -{removed}").width())
+                    .unwrap_or(0);
+                let summary_width = available.saturating_sub(counts_width);
+                let summary = if args.is_empty() || summary_width == 0 {
                     String::new()
                 } else {
-                    format!("  {}", truncate_display_width(args, available))
+                    format!("  {}", truncate_display_width(args, summary_width))
                 };
-                let head = Line::from(vec![
+                let mut head_spans = vec![
                     Span::styled(marker.0, marker.1),
                     Span::styled(shown_name, Theme::accent()),
                     Span::styled(summary, Theme::dim()),
-                ]);
+                ];
+                if let Some((added, removed)) = edit_counts {
+                    head_spans.push(Span::styled(format!("  +{added}"), Theme::ok()));
+                    head_spans.push(Span::styled(format!(" -{removed}"), Theme::err()));
+                }
+                let head = Line::from(head_spans);
                 out.push((head, Some(idx)));
                 if *expanded {
                     let body = diff.clone().unwrap_or_else(|| output.clone());

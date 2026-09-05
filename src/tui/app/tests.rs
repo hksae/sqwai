@@ -780,6 +780,28 @@ mod tests {
         }));
     }
     #[test]
+    fn edit_row_shows_colored_change_counts() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.segments.push(Segment::Tool {
+            name: "edit".into(),
+            args: "src/a-very-long-file-name.rs".into(),
+            ok: Some(true),
+            output: "done".into(),
+            diff: Some("--- old\n+++ new\n-old\n+new\n+more".into()),
+            expanded: false,
+        });
+        let rows = app.render_segment(0, 80);
+        let text: String = rows[0]
+            .0
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("+2"));
+        assert!(text.contains("-1"));
+    }
+
+    #[test]
     fn expanded_tool_output_uses_left_rail_and_truncates() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.segments.push(Segment::Tool {
