@@ -1256,6 +1256,7 @@ impl App {
             .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
             .unwrap_or_default();
 
+        let model_label = format!(" {} ", self.model_cfg.id);
         let th_label = format!(" th:{} ", self.model_cfg.thinking.as_str());
         let running = self
             .subagents
@@ -1290,8 +1291,11 @@ impl App {
         } else {
             String::new()
         };
-        let mut right_len: usize =
-            1 + agents_label.chars().count() + th_label.chars().count() + lsp_label.chars().count(); // mode chip always present
+        let mut right_len: usize = 1
+            + agents_label.chars().count()
+            + model_label.chars().count()
+            + th_label.chars().count()
+            + lsp_label.chars().count(); // mode chip always present
         if !dir.is_empty() {
             right_len += truncate_chars(&dir, 20).chars().count() + 1;
         }
@@ -1320,7 +1324,9 @@ impl App {
             spans.push(Span::styled(agents_label.clone(), agents_style));
             self.agents_click = Some((agents_x0, agents_x0 + agents_label.chars().count() as u16));
         }
-        let th_x0 = agents_x0 + agents_label.chars().count() as u16;
+        let model_x0 = agents_x0 + agents_label.chars().count() as u16;
+        spans.push(Span::styled(model_label, Theme::dim()));
+        let th_x0 = model_x0 + self.model_cfg.id.chars().count() as u16 + 2;
         let th_style = if self.model_cfg.thinking == ThinkingLevel::Off {
             Theme::dim()
         } else {
