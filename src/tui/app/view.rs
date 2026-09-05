@@ -1257,6 +1257,14 @@ impl App {
             .unwrap_or_default();
 
         let model_label = format!(" {} ", self.model_cfg.id);
+        let working_label = if self.streaming {
+            format!(
+                "{} ",
+                WORKING_SPINNER[self.spinner_tick % WORKING_SPINNER.len()]
+            )
+        } else {
+            String::new()
+        };
         let th_label = format!(" th:{} ", self.model_cfg.thinking.as_str());
         let running = self
             .subagents
@@ -1293,6 +1301,7 @@ impl App {
         };
         let mut right_len: usize = 1
             + agents_label.chars().count()
+            + working_label.chars().count()
             + model_label.chars().count()
             + th_label.chars().count()
             + lsp_label.chars().count(); // mode chip always present
@@ -1325,6 +1334,9 @@ impl App {
             self.agents_click = Some((agents_x0, agents_x0 + agents_label.chars().count() as u16));
         }
         let model_x0 = agents_x0 + agents_label.chars().count() as u16;
+        if !working_label.is_empty() {
+            spans.push(Span::styled(working_label, Theme::accent()));
+        }
         spans.push(Span::styled(model_label, Theme::dim()));
         let th_x0 = model_x0 + self.model_cfg.id.chars().count() as u16 + 2;
         let th_style = if self.model_cfg.thinking == ThinkingLevel::Off {
