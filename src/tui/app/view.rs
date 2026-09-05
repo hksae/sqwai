@@ -155,49 +155,41 @@ pub(super) enum BlockKind {
     Activity,
 }
 
-/// User message rendered inside a rounded pink outline.
+/// Full-width user strip. The quiet surface is the primary distinction; `›`
+/// keeps it legible in terminals that flatten colors and in light themes.
 fn user_box(text: &str, w: u16, hl: &Highlighter) -> Vec<Line<'static>> {
-    let max_inner = usize::from(w.saturating_sub(6)).clamp(1, 100);
-    let natural = text
-        .lines()
-        .map(UnicodeWidthStr::width)
-        .max()
-        .unwrap_or(0)
-        .clamp(1, max_inner);
-    let inner_w = natural as u16;
-    // `render` preserves source lines, so wrap them before adding the frame.
-    // Otherwise the outer transcript wrapper can split a completed row between
-    // the content and its right border.
-    let rendered = render(text, inner_w, hl);
+    let inner_w = w.saturating_sub(2).max(1);
     let inner = wrap_tagged(
-        rendered.into_iter().map(|line| (line, None)).collect(),
+        render(text, inner_w, hl)
+            .into_iter()
+            .map(|line| (line, None))
+            .collect(),
         inner_w,
     )
     .0;
-    let iw = usize::from(inner_w);
-    let b = Theme::border_focused();
+    let surface = Style::new().fg(Theme::FG()).bg(Theme::SURFACE());
     let mut out = Vec::with_capacity(inner.len() + 2);
-    let edge = |lft: &str, mid: String, rgt: &str| {
-        Line::from(vec![
-            Span::styled(lft.to_string(), b),
-            Span::styled(mid, b),
-            Span::styled(rgt.to_string(), b),
-        ])
-    };
-    out.push(edge("╭", "─".repeat(iw + 2), "╮"));
-    for l in inner {
-        let t = line_text(&l);
-        let used = UnicodeWidthStr::width(t.as_str());
-        let pad = " ".repeat(iw.saturating_sub(used));
+    // One blank surface line above and below keeps the message from adhering to
+    // the strip's edge. The prefix is intentionally repeated on continuation
+    // lines rather than relying solely on a possibly-invisible background.
+    out.push(Line::from(Span::styled(
+        " ".repeat(usize::from(w)),
+        surface,
+    )));
+    for line in inner {
+        let text = line_text(&line);
+        let used = UnicodeWidthStr::width(text.as_str());
+        let pad = " ".repeat(usize::from(inner_w).saturating_sub(used));
         out.push(Line::from(vec![
-            Span::styled("│".to_string(), b),
-            Span::styled(" ".to_string(), Theme::base()),
-            Span::styled(format!("{t}{pad}"), Theme::base()),
-            Span::styled(" ".to_string(), Theme::base()),
-            Span::styled("│".to_string(), b),
+            Span::styled("› ".to_string(), surface),
+            Span::styled(text, surface),
+            Span::styled(pad, surface),
         ]));
     }
-    out.push(edge("╰", "─".repeat(iw + 2), "╯"));
+    out.push(Line::from(Span::styled(
+        " ".repeat(usize::from(w)),
+        surface,
+    )));
     out
 }
 

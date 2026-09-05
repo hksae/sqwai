@@ -1188,9 +1188,9 @@ mod tests {
         );
     }
     #[test]
-    fn long_user_prompt_keeps_both_frame_borders() {
+    fn user_prompt_is_a_padded_full_width_surface_strip() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.segments.push(Segment::User("Проверь новый инструмент websearch. Выполни поиск по запросу: Rust ratatui TestBackend resize rendering. Покажи 3 результата с заголовками, URL и краткими описаниями.".into()));
+        app.segments.push(Segment::User("one\ntwo".into()));
         let rows = app.render_segment(0, 30);
         let text: Vec<String> = rows
             .iter()
@@ -1201,11 +1201,20 @@ mod tests {
                     .collect()
             })
             .collect();
-        assert!(text.iter().any(|line| line.matches('│').count() == 2));
+        assert_eq!(text.len(), 4, "one blank row above and below");
+        assert!(text[0].trim().is_empty() && text[3].trim().is_empty());
+        assert!(text[1].starts_with("› ") && text[2].starts_with("› "));
         assert!(
             text.iter()
-                .filter(|line| line.contains('│'))
-                .all(|line| line.matches('│').count() == 2)
+                .all(|line| !line.contains(['╭', '╮', '╰', '╯', '│'])),
+            "user strip must have no frame: {text:?}"
+        );
+        assert!(
+            rows.iter().all(|(line, _)| line
+                .spans
+                .iter()
+                .all(|s| s.style.bg == Some(Theme::SURFACE()))),
+            "every user-strip cell must use the surface background"
         );
     }
 
