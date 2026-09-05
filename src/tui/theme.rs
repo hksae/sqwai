@@ -54,7 +54,7 @@ const fn pal(h: u32) -> Palette {
     Palette {
         bg: hsv(h, 33, 9),
         surface: hsv(h, 33, 13),
-        user_surface: hsv(h, 36, 20),
+        user_surface: hsv(h, 36, 17),
         fg: hsv(h, 5, 93),
         dim: hsv(h, 21, 59),
         accent: hsv(h, 57, 100),
@@ -74,7 +74,7 @@ pub const THEMES: [ThemeDef; 21] = [
         p: Palette {
             bg: hsv(220, 10, 8),
             surface: hsv(220, 10, 12),
-            user_surface: hsv(220, 12, 20),
+            user_surface: hsv(220, 12, 17),
             fg: hsv(0, 0, 95),
             dim: hsv(0, 0, 62),
             accent: hsv(0, 0, 100),

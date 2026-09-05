@@ -16,6 +16,15 @@ pub struct ActivitySummary {
     pub rejected: usize,
 }
 
+/// A completed request with no normal assistant answer (provider failure or an
+/// Esc stop). It is UI history only and is never sent back to the provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnNote {
+    pub user_index: usize,
+    pub text: String,
+    pub is_error: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: Uuid,
@@ -77,6 +86,9 @@ pub struct Session {
     /// Kept separately from provider messages because it is presentation state.
     #[serde(default)]
     pub activity: Vec<ActivitySummary>,
+    /// Terminal outcomes for agent turns that have no normal final answer.
+    #[serde(default)]
+    pub turn_notes: Vec<TurnNote>,
 }
 
 impl Session {
@@ -102,6 +114,7 @@ impl Session {
             last_response_model: None,
             checkpoints: Vec::new(),
             activity: Vec::new(),
+            turn_notes: Vec::new(),
         }
     }
 
@@ -134,6 +147,14 @@ impl Session {
         // reconstructed; retain only full-history summaries.
         if f.messages.len() == self.messages.len() {
             f.activity = self.activity.clone();
+            f.turn_notes = self.turn_notes.clone();
+        } else {
+            f.turn_notes = self
+                .turn_notes
+                .iter()
+                .filter(|note| note.user_index < f.messages.len())
+                .cloned()
+                .collect();
         }
         f
     }

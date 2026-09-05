@@ -13,7 +13,7 @@ use crate::agent::loop_task::{
 use crate::config::{Config, ModelConfig, ThinkingLevel};
 use crate::plan;
 use crate::providers::{self, Message as PMessage, Role, SharedProvider};
-use crate::session::{ActivitySummary, Session};
+use crate::session::{ActivitySummary, Session, TurnNote};
 use crate::tui::markdown::Highlighter;
 use crate::tui::theme::Theme;
 
@@ -411,11 +411,25 @@ impl App {
         // transcript. Keep the rendered row keyed by call id so batched calls
         // and providers that return results out of order are restored safely.
         let mut pending_tools = std::collections::HashMap::<String, usize>::new();
-        let mut activity = self.session.activity.iter();
+        let activity_summaries = self.session.activity.clone();
+        let turn_notes = self.session.turn_notes.clone();
+        let messages = self.session.messages.clone();
+        let mut activity = activity_summaries.iter();
         let mut work_start: Option<usize> = None;
-        for m in &self.session.messages {
+        let mut previous_user: Option<usize> = None;
+        for (message_index, m) in messages.iter().enumerate() {
             match m.role {
-                Role::User => self.segments.push(Segment::User(m.content.clone())),
+                Role::User => {
+                    // A stopped/failed turn has no Assistant message to give
+                    // it a place in the provider transcript. Restore its note
+                    // immediately before the next user turn (or after the loop
+                    // for the final turn) to preserve chat order.
+                    if let Some(user_index) = previous_user {
+                        self.restore_turn_notes(&turn_notes, user_index);
+                    }
+                    previous_user = Some(message_index);
+                    self.segments.push(Segment::User(m.content.clone()));
+                }
                 Role::Assistant if m.tool_calls.is_empty() => {
                     let answer = self.segments.len();
                     self.segments.push(Segment::Assistant {
@@ -474,8 +488,24 @@ impl App {
                 Role::System => {}
             }
         }
+        if let Some(user_index) = previous_user {
+            self.restore_turn_notes(&turn_notes, user_index);
+        }
         // The panel is derived from the active structured plan; legacy session
         // to-do state is intentionally not loaded.
+    }
+
+    fn restore_turn_notes(&mut self, notes: &[TurnNote], user_index: usize) {
+        for note in notes.iter().filter(|note| note.user_index == user_index) {
+            self.segments.push(Segment::Status {
+                text: note.text.clone(),
+                kind: if note.is_error {
+                    StatusKind::Err
+                } else {
+                    StatusKind::Info
+                },
+            });
+        }
     }
 
     fn fresh_input(text: String) -> TextArea<'static> {
@@ -1993,20 +2023,44 @@ impl App {
         self.retry_line = None;
         self.prev_turn_ok = matches!(res, Ok(()));
         let turn_failed = res.is_err();
-        match res {
-            Ok(()) => {}
-            Err(e) if e == "aborted" => self.status("stopped", StatusKind::Info),
-            Err(e) if e == "tui closed" => {}
-            Err(e) => {
-                self.bar_error = Some(format!("error: {e}"));
-                self.status(&format!("error: {e}"), StatusKind::Err)
+        let turn_note = match &res {
+            Ok(()) => None,
+            Err(e) if e == "tui closed" => None,
+            Err(e) if e == "aborted" => Some(("stopped".to_string(), false)),
+            Err(e) => Some((format!("error: {e}"), true)),
+        };
+        if let Some((note, is_error)) = &turn_note {
+            if *is_error {
+                self.bar_error = Some(note.clone());
             }
+            self.status(
+                note,
+                if *is_error {
+                    StatusKind::Err
+                } else {
+                    StatusKind::Info
+                },
+            );
         }
         // Segment indices are stable from here on: the empty-thinking cleanup
         // and the answer backfill above have all run.
         self.finalize_activity_group(turn_failed);
         // Persist the presentation summary only after the group was finalized.
         // Saving earlier lost it across a restart and restored bare tool rows.
+        if let Some((text, is_error)) = turn_note {
+            if let Some(user_index) = self
+                .session
+                .messages
+                .iter()
+                .rposition(|message| message.role == Role::User)
+            {
+                self.session.turn_notes.push(TurnNote {
+                    user_index,
+                    text,
+                    is_error,
+                });
+            }
+        }
         self.session.activity = self
             .activity_groups
             .iter()

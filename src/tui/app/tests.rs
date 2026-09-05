@@ -776,6 +776,74 @@ mod tests {
     }
 
     #[test]
+    fn stopped_and_failed_turns_append_durable_notes() {
+        let mut stopped = test_app("http://127.0.0.1:9/v1".into());
+        stopped.session.push(Role::User, "first");
+        stopped.segments.push(Segment::Assistant {
+            text: String::new(),
+            live: true,
+        });
+        stopped.streaming = true;
+        stopped.finish_turn(Err("aborted".into()));
+        assert!(matches!(
+            stopped.session.turn_notes.as_slice(),
+            [crate::session::TurnNote { text, is_error: false, .. }] if text == "stopped"
+        ));
+
+        let mut failed = test_app("http://127.0.0.1:9/v1".into());
+        failed.session.push(Role::User, "second");
+        failed.segments.push(Segment::Assistant {
+            text: String::new(),
+            live: true,
+        });
+        failed.streaming = true;
+        failed.finish_turn(Err("provider offline".into()));
+        assert!(matches!(
+            failed.session.turn_notes.as_slice(),
+            [crate::session::TurnNote { text, is_error: true, .. }]
+                if text == "error: provider offline"
+        ));
+    }
+
+    #[test]
+    fn history_restores_stopped_and_failed_turn_notes() {
+        use crate::session::TurnNote;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.session.push(Role::User, "first");
+        app.session.push(Role::User, "second");
+        app.session.turn_notes = vec![
+            TurnNote {
+                user_index: 0,
+                text: "stopped".into(),
+                is_error: false,
+            },
+            TurnNote {
+                user_index: 1,
+                text: "error: provider offline".into(),
+                is_error: true,
+            },
+        ];
+        app.segments.clear();
+        app.load_history_segments();
+
+        let rows: Vec<(&str, StatusKind)> = app
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Status { text, kind } => Some((text.as_str(), *kind)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("stopped", StatusKind::Info),
+                ("error: provider offline", StatusKind::Err)
+            ]
+        );
+    }
+
+    #[test]
     fn apply_session_from_startup_does_not_persist_empty_stub() {
         // on the startup screen the current session is empty; opening an
         // existing session from there must switch to it without saving that
