@@ -1223,15 +1223,9 @@ impl App {
                 let current = plan
                     .steps
                     .iter()
-                    .enumerate()
-                    .find(|(_, step)| step.status == crate::plan::StepStatus::InProgress);
+                    .position(|step| step.status == crate::plan::StepStatus::InProgress);
                 match current {
-                    Some((index, step)) => format!(
-                        "step {}/{} {}",
-                        index + 1,
-                        plan.steps.len(),
-                        truncate_chars(&step.title, 28)
-                    ),
+                    Some(index) => format!("step {}/{}", index + 1, plan.steps.len()),
                     None => String::new(),
                 }
             })
