@@ -392,6 +392,10 @@ impl App {
 
     /// render persisted messages as chat segments (used on start and on resume)
     fn load_history_segments(&mut self) {
+        // Tool calls and their results are part of the durable provider
+        // transcript. Keep the rendered row keyed by call id so batched calls
+        // and providers that return results out of order are restored safely.
+        let mut pending_tools = std::collections::HashMap::<String, usize>::new();
         for m in &self.session.messages {
             match m.role {
                 Role::User => self.segments.push(Segment::User(m.content.clone())),
@@ -401,8 +405,31 @@ impl App {
                         live: false,
                     });
                 }
-                // assistant tool-call turns and tool results are housekeeping
-                Role::Assistant | Role::System | Role::Tool => {}
+                Role::Assistant => {
+                    for call in &m.tool_calls {
+                        let idx = self.segments.len();
+                        self.segments.push(Segment::Tool {
+                            name: call.name.clone(),
+                            args: crate::agent::tools::call_summary(&call.name, &call.args),
+                            ok: None,
+                            output: String::new(),
+                            diff: None,
+                            expanded: false,
+                        });
+                        pending_tools.insert(call.id.clone(), idx);
+                    }
+                }
+                Role::Tool => {
+                    if let Some(call_id) = m.tool_call_id.as_ref()
+                        && let Some(idx) = pending_tools.remove(call_id)
+                    {
+                        if let Some(Segment::Tool { ok, output, .. }) = self.segments.get_mut(idx) {
+                            *ok = Some(!m.is_error);
+                            *output = m.content.clone();
+                        }
+                    }
+                }
+                Role::System => {}
             }
         }
         // The panel is derived from the active structured plan; legacy session

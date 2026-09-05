@@ -425,6 +425,29 @@ mod tests {
     }
 
     #[test]
+    fn load_history_restores_tool_calls_and_results() {
+        use crate::providers::{Message, Role, ToolCallReq};
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.session.messages = vec![
+            Message::new(Role::User, "inspect"),
+            Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq {
+                id: "call-1".into(),
+                name: "read".into(),
+                args: serde_json::json!({"file_path": "src/main.rs"}),
+            }]),
+            Message::tool_result("call-1", "file contents", false),
+            Message::new(Role::Assistant, "done"),
+        ];
+        app.segments.clear();
+        app.load_history_segments();
+        assert!(matches!(app.segments[0], Segment::User(ref text) if text == "inspect"));
+        assert!(
+            matches!(app.segments[1], Segment::Tool { ref name, ok: Some(true), ref output, .. } if name == "read" && output == "file contents")
+        );
+        assert!(matches!(app.segments[2], Segment::Assistant { ref text, .. } if text == "done"));
+    }
+
+    #[test]
     fn apply_session_from_startup_does_not_persist_empty_stub() {
         // on the startup screen the current session is empty; opening an
         // existing session from there must switch to it without saving that
