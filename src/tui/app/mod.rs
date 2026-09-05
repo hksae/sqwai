@@ -20,6 +20,7 @@ use crate::tui::theme::Theme;
 fn reopened_step_ids(
     active: &plan::Plan,
     records: &[crate::agent::journal::Record],
+    session_id: &str,
     files: &[String],
 ) -> Vec<String> {
     let file_set: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
@@ -34,7 +35,10 @@ fn reopened_step_ids(
                     record.plan.as_deref() == Some(active.id.as_str())
                         && record.step.as_deref() == Some(step.id.as_str())
                         && record.kind == "file_diff"
-                        && step.evidence.contains(&record.seq)
+                        && step.evidence.iter().any(|reference| {
+                            (reference.session.is_empty() || reference.session == session_id)
+                                && reference.seq == record.seq
+                        })
                 })
                 .filter_map(|record| record.fields.get("path").and_then(|value| value.as_str()))
                 .collect();
@@ -54,7 +58,7 @@ fn reopen_undone_steps(
         return Vec::new();
     };
     let records = crate::agent::journal::Journal::records_for(root, session_id).unwrap_or_default();
-    let reopened = reopened_step_ids(&active, &records, files);
+    let reopened = reopened_step_ids(&active, &records, session_id, files);
     for step_id in &reopened {
         let _ = plan::reopen_for_undo(
             &mut active,

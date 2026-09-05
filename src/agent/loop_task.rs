@@ -855,7 +855,17 @@ async fn run_agent(
                     .and_then(|v| v.as_str())
                     .map(str::to_string)
                     .or_else(|| {
-                        active.and_then(|p| {
+                        if call.name == "plan"
+                            && call.args.get("op").and_then(|v| v.as_str()) == Some("verify")
+                        {
+                            return active.as_ref().and_then(|p| {
+                                p.steps
+                                    .iter()
+                                    .find(|s| s.kind == plan::StepKind::Verify)
+                                    .map(|s| s.id.clone())
+                            });
+                        }
+                        active.as_ref().and_then(|p| {
                             p.steps
                                 .iter()
                                 .find(|s| s.status == plan::StepStatus::InProgress)
@@ -1111,14 +1121,20 @@ async fn run_agent(
                         "text": call.args.get("note").and_then(|v| v.as_str()).unwrap_or_default(),
                     }));
                 }
-                let result_seq = writer.append("tool_result", serde_json::json!({
-                    "tool": call.name,
-                    "call_id": call.id,
-                    "ok": outcome.ok,
-                    "duration_ms": tool_started.elapsed().as_millis(),
-                    "summary": outcome.output.chars().take(200).collect::<String>(),
-                    "trust": if matches!(call.name.as_str(), "webfetch" | "websearch") { "low" } else { "high" },
-                })).ok();
+                let result_seq = writer
+                    .append_evidence(
+                        "tool_result",
+                        serde_json::json!({
+                            "tool": call.name,
+                            "call_id": call.id,
+                            "ok": outcome.ok,
+                            "duration_ms": tool_started.elapsed().as_millis(),
+                            "summary": outcome.output.chars().take(200).collect::<String>(),
+                            "trust": if matches!(call.name.as_str(), "webfetch" | "websearch") { "low" } else { "high" },
+                        }),
+                    )
+                    .ok()
+                    .flatten();
                 if call.name == "plan" && outcome.ok {
                     if let Some(seq) = result_seq {
                         let _ = writer.append("plan_evidence", serde_json::json!({
@@ -1128,7 +1144,7 @@ async fn run_agent(
                     }
                 }
                 if let Some(metadata) = outcome.file_diff.as_ref() {
-                    let _ = writer.append(
+                    let _ = writer.append_evidence(
                         "file_diff",
                         serde_json::json!({
                             "path": metadata.path,

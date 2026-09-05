@@ -54,7 +54,10 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
                             item.status.as_str(),
                             item.evidence
                                 .last()
-                                .map(|seq| format!(" j#{seq}"))
+                                .map(|reference| format!(
+                                    " j#{}:{}",
+                                    reference.session, reference.seq
+                                ))
                                 .unwrap_or_default()
                         )
                     })

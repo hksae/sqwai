@@ -1081,9 +1081,15 @@ mod tests {
         )
         .unwrap();
         active.steps[0].status = crate::plan::StepStatus::Done;
-        active.steps[0].evidence = vec![10];
+        active.steps[0].evidence = vec![crate::plan::EvidenceRef {
+            session: "session".into(),
+            seq: 10,
+        }];
         active.steps[1].status = crate::plan::StepStatus::Done;
-        active.steps[1].evidence = vec![11];
+        active.steps[1].evidence = vec![crate::plan::EvidenceRef {
+            session: "session".into(),
+            seq: 11,
+        }];
         let record = |seq: u64, step: &str, path: &str| crate::agent::journal::Record {
             seq,
             ts: "now".into(),
@@ -1098,7 +1104,7 @@ mod tests {
             record(11, "2", "src/other.rs"),
         ];
 
-        let reopened = reopened_step_ids(&active, &records, &["src/changed.rs".into()]);
+        let reopened = reopened_step_ids(&active, &records, "session", &["src/changed.rs".into()]);
 
         assert_eq!(reopened, vec!["1"]);
     }

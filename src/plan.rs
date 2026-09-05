@@ -7,9 +7,63 @@
 
 use anyhow::{Context, Result};
 use chrono::Local;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
+/// A host-owned journal reference. The session is part of the identity because
+/// journal sequence numbers restart for every session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EvidenceRef {
+    pub session: String,
+    pub seq: u64,
+}
+
+impl<'de> Deserialize<'de> for EvidenceRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct EvidenceRefVisitor;
+        impl<'de> Visitor<'de> for EvidenceRefVisitor {
+            type Value = EvidenceRef;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("an evidence object or legacy sequence number")
+            }
+
+            fn visit_u64<E>(self, seq: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(EvidenceRef {
+                    session: String::new(),
+                    seq,
+                })
+            }
+
+            fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+            where
+                M: de::MapAccess<'de>,
+            {
+                #[derive(Deserialize)]
+                struct Wire {
+                    session: String,
+                    seq: u64,
+                }
+                Wire::deserialize(de::value::MapAccessDeserializer::new(map)).map(|wire| {
+                    EvidenceRef {
+                        session: wire.session,
+                        seq: wire.seq,
+                    }
+                })
+            }
+        }
+        deserializer.deserialize_any(EvidenceRefVisitor)
+    }
+}
 
 /// Default ceiling for the number of steps (§2.1.2, `[plan].max_steps`).
 pub const MAX_STEPS_DEFAULT: usize = 24;
@@ -116,7 +170,7 @@ pub struct Acceptance {
     pub text: String,
     pub status: AcceptanceStatus,
     #[serde(default)]
-    pub evidence: Vec<u64>,
+    pub evidence: Vec<EvidenceRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -140,7 +194,7 @@ pub struct Step {
     pub reason: Option<String>,
     /// Journal seq values. Written by the host only (§2.1.2).
     #[serde(default)]
-    pub evidence: Vec<u64>,
+    pub evidence: Vec<EvidenceRef>,
     /// Stable graph keys the step intends to touch (§2.4.3).
     #[serde(default)]
     pub refs: Vec<String>,
@@ -158,7 +212,7 @@ pub struct Folded {
     pub ids: Vec<String>,
     pub text: String,
     #[serde(default)]
-    pub evidence: Vec<u64>,
+    pub evidence: Vec<EvidenceRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -394,6 +448,7 @@ pub enum Op {
     Finish {
         id: String,
         summary: String,
+        /// Deprecated input retained for wire compatibility; the host ignores it.
         #[serde(default)]
         evidence: Vec<u64>,
     },
@@ -423,6 +478,7 @@ pub enum Op {
     },
     Verify {
         acceptance: usize,
+        /// Deprecated input retained for wire compatibility; the host ignores it.
         #[serde(default)]
         evidence: Vec<u64>,
     },
@@ -589,7 +645,7 @@ pub fn apply(plan: &mut Plan, op: Op, limits: &Limits) -> Result<Applied, Reject
             id,
             summary,
             evidence,
-        } => finish(plan, &id, summary, evidence),
+        } => finish(plan, &id, summary, !evidence.is_empty()),
         Op::Block { id, reason } => block(plan, &id, reason),
         Op::Unblock { id } => unblock(plan, &id),
         Op::Cancel { id, reason } => cancel(plan, &id, reason),
@@ -603,7 +659,7 @@ pub fn apply(plan: &mut Plan, op: Op, limits: &Limits) -> Result<Applied, Reject
         Op::Verify {
             acceptance,
             evidence,
-        } => verify(plan, acceptance, evidence),
+        } => verify(plan, acceptance, !evidence.is_empty()),
         Op::Complete => complete(plan),
         Op::ProposeGoalRevision { goal, reason } => propose_goal_revision(plan, goal, reason),
     }
@@ -674,7 +730,7 @@ fn finish(
     plan: &mut Plan,
     id: &str,
     summary: String,
-    evidence: Vec<u64>,
+    supplied_evidence: bool,
 ) -> Result<Applied, Rejection> {
     let Some((status, _)) = step_status(plan, id) else {
         return unknown_step(plan, id);
@@ -695,20 +751,18 @@ fn finish(
             "one line: what changed and where",
         );
     }
-    if evidence.is_empty() {
-        return reject(
-            plan,
-            "no_evidence",
-            format!("step {id} has no journal evidence"),
-            "provide evidence sequence numbers from tool results or file diffs",
-        );
-    }
+    // Evidence presence and kind are validated by the host tool dispatcher,
+    // after host journal records have been attached to this step.
     let step = plan.step_mut(id).expect("checked above");
-    step.evidence = evidence;
     step.status = StepStatus::Done;
     step.finished = Some(now());
     step.summary = Some(summary);
-    accept(plan, format!("step {id} done"))
+    let message = if supplied_evidence {
+        format!("step {id} done (model evidence ignored; host evidence used)")
+    } else {
+        format!("step {id} done")
+    };
+    accept(plan, message)
 }
 
 fn block(plan: &mut Plan, id: &str, reason: String) -> Result<Applied, Rejection> {
@@ -912,7 +966,7 @@ fn split(
     accept(plan, format!("step {id} split into {}", ids.join(", ")))
 }
 
-fn verify(plan: &mut Plan, index: usize, evidence: Vec<u64>) -> Result<Applied, Rejection> {
+fn verify(plan: &mut Plan, index: usize, supplied_evidence: bool) -> Result<Applied, Rejection> {
     if index >= plan.acceptance.len() {
         return reject(
             plan,
@@ -921,11 +975,24 @@ fn verify(plan: &mut Plan, index: usize, evidence: Vec<u64>) -> Result<Applied, 
             "call plan show to see the acceptance list",
         );
     }
-    // Evidence-seq validation needs the journal (F2) — checked there.
+    // Evidence is attached by the host before this operation runs. Copy the
+    // verified step's scoped references onto the acceptance item so completion
+    // can re-check the same host records later.
+    let evidence = plan
+        .steps
+        .iter()
+        .find(|step| step.kind == StepKind::Verify && !step.evidence.is_empty())
+        .map(|step| step.evidence.clone())
+        .unwrap_or_default();
     let item = &mut plan.acceptance[index];
     item.status = AcceptanceStatus::Verified;
     item.evidence = evidence;
-    accept(plan, format!("acceptance {index} verified"))
+    let message = if supplied_evidence {
+        format!("acceptance {index} verified (model evidence ignored; host evidence used)")
+    } else {
+        format!("acceptance {index} verified")
+    };
+    accept(plan, message)
 }
 
 fn complete(plan: &mut Plan) -> Result<Applied, Rejection> {
@@ -1178,12 +1245,16 @@ mod tests {
             &Limits::default(),
         )
         .unwrap();
+        plan.step_mut("1").unwrap().evidence.push(EvidenceRef {
+            session: "test".into(),
+            seq: 42,
+        });
         apply(
             &mut plan,
             Op::Finish {
                 id: "1".into(),
                 summary: "model added".into(),
-                evidence: vec![42, 43],
+                evidence: vec![42],
             },
             &Limits::default(),
         )

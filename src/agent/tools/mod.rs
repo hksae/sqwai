@@ -399,7 +399,7 @@ acceptance status and evidence: you can only propose a goal revision, never appl
                     "summary": {"type": "string", "description": "finish: what changed and where"},
                     "reason": {"type": "string", "description": "block / cancel / propose_goal_revision"},
                     "confirm": {"type": "boolean", "description": "start: re-read a stale step"},
-                    "evidence": {"type": "array", "items": {"type": "integer"}},
+                    "evidence": {"type": "array", "items": {"type": "integer"}, "description": "deprecated informational field; host ignores it"},
                     "context_limit": {"type": "integer", "description": "model context in tokens"}
                 },
                 "required": ["op"]
@@ -721,11 +721,30 @@ fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
     if matches!(op, plan::Op::Complete) {
         return validate_complete(root);
     }
-    let (id, evidence): (&str, &Vec<u64>) = match op {
-        plan::Op::Finish { id, evidence, .. } => (id.as_str(), evidence),
-        plan::Op::Verify { evidence, .. } => ("acceptance", evidence),
+    let id: &str = match op {
+        plan::Op::Finish { id, .. } => id.as_str(),
+        plan::Op::Verify { .. } => "acceptance",
         _ => return Ok(()),
     };
+    if matches!(op, plan::Op::Verify { .. }) {
+        let active = plan::open_active(root)
+            .map_err(|e| format!("evidence_unreadable: {e:#}"))?
+            .ok_or_else(|| "invalid_evidence: no active plan".to_string())?;
+        let Some(step) = active
+            .steps
+            .iter()
+            .find(|step| step.kind == plan::StepKind::Verify && !step.evidence.is_empty())
+        else {
+            return Err("no_evidence: no host-recorded verify evidence".to_string());
+        };
+        return validate_attached_records(
+            root,
+            &active.id,
+            &step.id,
+            plan::StepKind::Verify,
+            &step.evidence,
+        );
+    }
     if let plan::Op::Finish { .. } = op {
         let status = plan::open_active(root)
             .ok()
@@ -746,7 +765,11 @@ fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
         plan::Op::Verify { .. } => plan::StepKind::Verify,
         _ => unreachable!(),
     };
-    validate_records(root, &active.id, id, required_kind, evidence)
+    let evidence = active
+        .step(id)
+        .map(|step| step.evidence.clone())
+        .unwrap_or_default();
+    validate_attached_records(root, &active.id, id, required_kind, &evidence)
 }
 
 fn validate_complete(root: &Path) -> Result<(), String> {
@@ -758,11 +781,11 @@ fn validate_complete(root: &Path) -> Result<(), String> {
         .iter()
         .filter(|step| step.status == plan::StepStatus::Done)
     {
-        validate_records(root, &active.id, &step.id, step.kind, &step.evidence)?;
+        validate_attached_records(root, &active.id, &step.id, step.kind, &step.evidence)?;
     }
     for (index, acceptance) in active.acceptance.iter().enumerate() {
         if acceptance.status == plan::AcceptanceStatus::Verified {
-            validate_records(
+            validate_attached_records(
                 root,
                 &active.id,
                 "acceptance",
@@ -775,12 +798,12 @@ fn validate_complete(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_records(
+fn validate_attached_records(
     root: &Path,
     plan_id: &str,
     step_id: &str,
     required_kind: plan::StepKind,
-    evidence: &[u64],
+    evidence: &[plan::EvidenceRef],
 ) -> Result<(), String> {
     if evidence.is_empty() {
         return Err(format!(
@@ -790,14 +813,11 @@ fn validate_records(
     let after_seq = if step_id == "acceptance" {
         None
     } else {
-        Some(
-            crate::agent::journal::Journal::step_started_at(root, plan_id, step_id)
-                .map_err(|e| format!("evidence_unreadable: {e:#}"))?
-                .ok_or_else(|| format!("invalid_evidence: step {step_id} has no journal start"))?,
-        )
+        crate::agent::journal::Journal::step_started_at(root, plan_id, step_id)
+            .map_err(|e| format!("evidence_unreadable: {e:#}"))?
     };
-    let mut valid = Vec::new();
-    for seq in evidence {
+    let mut valid = 0usize;
+    for reference in evidence {
         let record = crate::agent::journal::Journal::evidence(
             root,
             plan_id,
@@ -806,12 +826,15 @@ fn validate_records(
             } else {
                 Some(step_id)
             },
-            *seq,
+            reference,
             after_seq,
         )
         .map_err(|e| format!("evidence_unreadable: {e:#}"))?
         .ok_or_else(|| {
-            format!("invalid_evidence: journal record {seq} is not valid for this plan")
+            format!(
+                "invalid_evidence: journal record {} is not valid for this plan",
+                reference.seq
+            )
         })?;
         let allowed = match required_kind {
             plan::StepKind::Research => record.kind == "tool_result",
@@ -828,10 +851,10 @@ fn validate_records(
             }
         };
         if allowed {
-            valid.push(*seq);
+            valid += 1;
         }
     }
-    if valid.is_empty() {
+    if valid == 0 {
         return Err(format!(
             "wrong_evidence: evidence does not satisfy {} step requirements",
             required_kind.as_str()
@@ -1163,7 +1186,7 @@ mod tests {
             .append("plan", json!({"op": "start"}))
             .unwrap();
         evidence_journal
-            .append("tool_result", json!({"tool": "read", "ok": true}))
+            .append_evidence("tool_result", json!({"tool": "read", "ok": true}))
             .unwrap();
         let finish = plan_op(
             &mut ctx,
@@ -1248,7 +1271,7 @@ mod tests {
         journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
         journal.append("plan", json!({"op": "start"})).unwrap();
         journal
-            .append("tool_result", json!({"tool": "read", "ok": true}))
+            .append_evidence("tool_result", json!({"tool": "read", "ok": true}))
             .unwrap();
         let research = plan_op(
             &mut ctx,
@@ -1260,7 +1283,8 @@ mod tests {
         journal.set_attribution(Some("2".into()), Some(plan_id.clone()), "main");
         journal.append("plan", json!({"op": "start"})).unwrap();
         let wrong_type = journal
-            .append("tool_result", json!({"tool": "read", "ok": true}))
+            .append_evidence("tool_result", json!({"tool": "read", "ok": true}))
+            .unwrap()
             .unwrap();
         let rejected = plan_op(
             &mut ctx,
@@ -1292,7 +1316,8 @@ mod tests {
         let mut journal = crate::agent::journal::Journal::open(&dir, "verify-rules").unwrap();
         journal.set_attribution(Some("1".into()), Some(plan_id), "main");
         let failed = journal
-            .append("tool_result", json!({"tool": "bash", "ok": false}))
+            .append_evidence("tool_result", json!({"tool": "bash", "ok": false}))
+            .unwrap()
             .unwrap();
         let rejected = plan_op(
             &mut ctx,
@@ -1306,7 +1331,8 @@ mod tests {
         );
 
         let passed = journal
-            .append("tool_result", json!({"tool": "bash", "ok": true}))
+            .append_evidence("tool_result", json!({"tool": "bash", "ok": true}))
+            .unwrap()
             .unwrap();
         let accepted = plan_op(
             &mut ctx,
@@ -1335,7 +1361,8 @@ mod tests {
         journal.set_attribution(Some("1".into()), Some(plan_id), "main");
         journal.append("plan", json!({"op": "start"})).unwrap();
         let evidence = journal
-            .append("file_diff", json!({"path": "src/main.rs"}))
+            .append_evidence("file_diff", json!({"path": "src/main.rs"}))
+            .unwrap()
             .unwrap();
         let finished = plan_op(
             &mut ctx,

@@ -62,6 +62,48 @@ impl Journal {
         self.agent = agent.to_string();
     }
 
+    pub fn attribution(&self) -> (Option<String>, Option<String>) {
+        (self.step.clone(), self.plan.clone())
+    }
+
+    pub fn append_evidence(&mut self, kind: &str, fields: Value) -> Result<Option<u64>> {
+        let (Some(step_id), Some(plan_id)) = (self.step.clone(), self.plan.clone()) else {
+            return Ok(None);
+        };
+        if !matches!(kind, "tool_result" | "file_diff" | "diagnostics") {
+            return Ok(None);
+        }
+        let seq = self.append(kind, fields)?;
+        let root = self
+            .path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .context("journal path has no project root")?;
+        let mut active = match crate::plan::open_active(root)? {
+            Some(plan) if plan.id == plan_id => plan,
+            _ => return Ok(Some(seq)),
+        };
+        let session = self
+            .path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if let Some(step) = active.step_mut(&step_id)
+            && !step
+                .evidence
+                .iter()
+                .any(|reference| reference.session == session && reference.seq == seq)
+        {
+            step.evidence
+                .push(crate::plan::EvidenceRef { session, seq });
+            active.revision += 1;
+            crate::plan::store(root, &active)?;
+        }
+        Ok(Some(seq))
+    }
+
     pub fn next_seq(&self) -> u64 {
         self.next_seq
     }
@@ -114,11 +156,16 @@ impl Journal {
         root: &Path,
         plan: &str,
         step: Option<&str>,
-        seq: u64,
+        reference: &crate::plan::EvidenceRef,
         after_seq: Option<u64>,
     ) -> Result<Option<Record>> {
-        Ok(Self::records(root)?.into_iter().find(|r| {
-            r.seq == seq
+        let records = if reference.session.is_empty() {
+            Self::records(root)?
+        } else {
+            Self::records_for(root, &reference.session)?
+        };
+        Ok(records.into_iter().find(|r| {
+            r.seq == reference.seq
                 && after_seq.is_none_or(|start| r.seq > start)
                 && r.plan.as_deref() == Some(plan)
                 && step.is_none_or(|expected| r.step.as_deref() == Some(expected))
