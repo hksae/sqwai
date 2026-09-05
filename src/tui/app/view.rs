@@ -167,7 +167,7 @@ fn user_box(text: &str, w: u16, hl: &Highlighter) -> Vec<Line<'static>> {
         inner_w,
     )
     .0;
-    let surface = Style::new().fg(Theme::FG()).bg(Theme::SURFACE());
+    let surface = Style::new().fg(Theme::FG()).bg(Theme::USER_SURFACE());
     let mut out = Vec::with_capacity(inner.len() + 2);
     // One blank surface line above and below keeps the message from adhering to
     // the strip's edge. The prefix is intentionally repeated on continuation

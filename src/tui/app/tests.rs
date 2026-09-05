@@ -1213,8 +1213,8 @@ mod tests {
             rows.iter().all(|(line, _)| line
                 .spans
                 .iter()
-                .all(|s| s.style.bg == Some(Theme::SURFACE()))),
-            "every user-strip cell must use the surface background"
+                .all(|s| s.style.bg == Some(Theme::USER_SURFACE()))),
+            "every user-strip cell must use the stronger user-strip background"
         );
     }
 

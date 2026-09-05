@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub struct Palette {
     pub bg: Color,
     pub surface: Color,
+    /// stronger one-step panel used for full-width user-message strips
+    pub user_surface: Color,
     pub fg: Color,
     pub dim: Color,
     pub accent: Color,
@@ -52,6 +54,7 @@ const fn pal(h: u32) -> Palette {
     Palette {
         bg: hsv(h, 33, 9),
         surface: hsv(h, 33, 13),
+        user_surface: hsv(h, 36, 20),
         fg: hsv(h, 5, 93),
         dim: hsv(h, 21, 59),
         accent: hsv(h, 57, 100),
@@ -71,6 +74,7 @@ pub const THEMES: [ThemeDef; 21] = [
         p: Palette {
             bg: hsv(220, 10, 8),
             surface: hsv(220, 10, 12),
+            user_surface: hsv(220, 12, 20),
             fg: hsv(0, 0, 95),
             dim: hsv(0, 0, 62),
             accent: hsv(0, 0, 100),
@@ -191,6 +195,10 @@ impl Theme {
     #[allow(non_snake_case)]
     pub fn SURFACE() -> Color {
         cur().surface
+    }
+    #[allow(non_snake_case)]
+    pub fn USER_SURFACE() -> Color {
+        cur().user_surface
     }
     #[allow(non_snake_case)]
     pub fn FG() -> Color {
