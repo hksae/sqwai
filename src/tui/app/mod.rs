@@ -87,7 +87,7 @@ mod view;
 
 use forms::FormField;
 use menus::{Menu, MenuAction};
-use view::{CellPos, Segment, Selection};
+use view::{ActivityGroup, CellPos, Segment, Selection};
 
 use menus::COMMANDS;
 
@@ -187,8 +187,10 @@ pub struct App {
     cache_rowseg: Vec<Option<usize>>,
     last_chat: Rect,
     last_input: Rect,
-    /// per-segment render cache: (content key at render time, content lines)
-    seg_cache: Vec<Option<(usize, Vec<(Line<'static>, Option<usize>)>)>>,
+    /// per-segment render cache: (content key at render time, width used,
+    /// content lines). Segments nested in an activity group render narrower,
+    /// so the width has to be part of the check.
+    seg_cache: Vec<Option<(usize, u16, Vec<(Line<'static>, Option<usize>)>)>>,
     /// stable order/identity of segments used to invalidate positional caches
     seg_layout: Vec<u64>,
 
@@ -202,6 +204,16 @@ pub struct App {
 
     /// Deadline for the single transient busy notice.
     busy_until: Option<Instant>,
+
+    /// Finalized activity groups (one per completed agent turn). The currently
+    /// streaming turn is rendered live and only lands here at `finish_turn`.
+    activity_groups: Vec<ActivityGroup>,
+    /// Wall-clock start of the turn currently streaming, used to freeze the
+    /// activity duration once the turn completes.
+    turn_started: Option<Instant>,
+    /// The running turn's group is expanded by default; the user can fold it
+    /// manually before the turn ends.
+    live_group_collapsed: bool,
 
     // command popup
     hover: Option<usize>,
@@ -374,6 +386,9 @@ impl App {
             paste_enter_guard: false,
             enter_gate: events::EnterGate::default(),
             busy_until: None,
+            activity_groups: Vec::new(),
+            turn_started: None,
+            live_group_collapsed: false,
         };
         if !startup {
             app.load_history_segments();
@@ -656,6 +671,9 @@ impl App {
         self.streaming = true;
         self.aborted = false;
         self.assistant_buf.clear();
+        // the activity header shows how long the turn took; measure from here
+        self.turn_started = Some(Instant::now());
+        self.live_group_collapsed = false;
         // show the thinking placeholder right away so the indicator is visible
         // from turn start even before any reasoning deltas arrive
         let tpos = self.segments.len();
@@ -767,6 +785,8 @@ impl App {
         self.session.strip_system_messages();
         self.segments.clear();
         self.seg_cache.clear();
+        // the transcript is replaced: old group ranges point nowhere
+        self.activity_groups.clear();
         self.load_history_segments();
         self.menu_home();
         self.follow = true;
@@ -801,6 +821,7 @@ impl App {
         self.context_bootstrap_pending = true;
         self.segments.clear();
         self.seg_cache.clear();
+        self.activity_groups.clear();
         self.follow = true;
         self.view_top = 0;
         self.menu_home();
@@ -1693,6 +1714,11 @@ impl App {
         self.finish_turn(Ok(()));
     }
 
+    fn is_subagent_row(segment: &Segment) -> bool {
+        matches!(segment, Segment::Subagent { .. })
+            || matches!(segment, Segment::Tool { name, .. } if name == "subagent")
+    }
+
     fn clear_busy_statuses(&mut self) {
         self.segments.retain(
             |segment| !matches!(segment, Segment::Status { text, .. } if text == Self::BUSY_STATUS),
@@ -1702,15 +1728,134 @@ impl App {
 
     fn clear_subagent_ui_on_stop(&mut self) {
         self.subagents.clear();
-        self.segments.retain(|segment| {
-            !matches!(segment, Segment::Subagent { .. })
-                && !matches!(segment, Segment::Tool { name, .. } if name == "subagent")
-        });
+        let removed: Vec<usize> = self
+            .segments
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| Self::is_subagent_row(s))
+            .map(|(i, _)| i)
+            .collect();
+        if !removed.is_empty() {
+            self.segments.retain(|s| !Self::is_subagent_row(s));
+            // Group ranges index the transcript. Shift them past the removals
+            // instead of dropping the folds the user already made.
+            for g in &mut self.activity_groups {
+                let before = removed.iter().filter(|i| **i < g.seg_start).count();
+                let inside = removed
+                    .iter()
+                    .filter(|i| **i >= g.seg_start && **i < g.seg_end)
+                    .count();
+                g.seg_start -= before;
+                g.seg_end -= before + inside;
+            }
+            // Keep summaries in sync with rows removed during abort. This is
+            // done after all ranges shift so the slice uses current indices.
+            for g in &mut self.activity_groups {
+                g.calls = self.segments[g.seg_start..g.seg_end]
+                    .iter()
+                    .filter(|s| matches!(s, Segment::Tool { .. }))
+                    .count();
+                g.thinking = self.segments[g.seg_start..g.seg_end]
+                    .iter()
+                    .filter(|s| matches!(s, Segment::Thinking { .. }))
+                    .count();
+                g.errors = self.segments[g.seg_start..g.seg_end]
+                    .iter()
+                    .filter(|s| {
+                        matches!(
+                            s,
+                            Segment::Tool {
+                                ok: Some(false),
+                                ..
+                            }
+                        )
+                    })
+                    .count();
+            }
+        }
+        self.turn_started = None;
+        self.live_group_collapsed = false;
         if matches!(self.cur_menu(), Some(Menu::Subagents)) {
             self.menu_home();
         }
         self.agents_click = None;
         self.dirty = true;
+    }
+
+    /// The contiguous run of `Thinking`/`Tool` segments immediately preceding
+    /// the last assistant answer — the working content of one agent turn.
+    /// Thinking and tools are interleaved, so the run is exactly "everything
+    /// between the previous turn and this turn's answer".
+    fn trailing_work_run(&self) -> Option<(usize, usize)> {
+        let segs = &self.segments;
+        let answer = segs
+            .iter()
+            .rposition(|s| matches!(s, Segment::Assistant { .. }))?;
+        let mut start = answer;
+        while start > 0
+            && matches!(
+                segs[start - 1],
+                Segment::Thinking { .. } | Segment::Tool { .. }
+            )
+        {
+            start -= 1;
+        }
+        if start == answer {
+            // the turn produced neither reasoning nor tool calls
+            return None;
+        }
+        Some((start, answer))
+    }
+
+    /// Summarize one run of working segments into an `ActivityGroup`.
+    fn build_activity_group(&self, (seg_start, seg_end): (usize, usize)) -> ActivityGroup {
+        let mut calls = 0usize;
+        let mut thinking = 0usize;
+        let mut errors = 0usize;
+        for seg in &self.segments[seg_start..seg_end] {
+            match seg {
+                Segment::Tool {
+                    ok: Some(false), ..
+                } => {
+                    calls += 1;
+                    errors += 1;
+                }
+                Segment::Tool { .. } => calls += 1,
+                Segment::Thinking { .. } => thinking += 1,
+                _ => {}
+            }
+        }
+        let duration_ms = self
+            .turn_started
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        ActivityGroup {
+            seg_start,
+            seg_end,
+            calls,
+            thinking,
+            duration_ms,
+            errors,
+            rejected: 0,
+            expanded: true,
+        }
+    }
+
+    /// Freeze the turn that just finished into a group. Called once the
+    /// segments are final, so the stored indices stay valid.
+    fn finalize_activity_group(&mut self, turn_failed: bool) {
+        let Some(run) = self.trailing_work_run() else {
+            self.turn_started = None;
+            self.live_group_collapsed = false;
+            return;
+        };
+        let mut group = self.build_activity_group(run);
+        // A turn that ended badly stays open: the user must see the failure
+        // instead of a collapsed summary line.
+        group.expanded = turn_failed || group.errors > 0;
+        self.activity_groups.push(group);
+        self.turn_started = None;
+        self.live_group_collapsed = false;
     }
 
     fn finish_turn(&mut self, res: Result<(), String>) {
@@ -1797,6 +1942,7 @@ impl App {
         self.retry_line = None;
         self.session.save().ok();
         self.prev_turn_ok = matches!(res, Ok(()));
+        let turn_failed = res.is_err();
         match res {
             Ok(()) => {}
             Err(e) if e == "aborted" => self.status("stopped", StatusKind::Info),
@@ -1806,6 +1952,9 @@ impl App {
                 self.status(&format!("error: {e}"), StatusKind::Err)
             }
         }
+        // Segment indices are stable from here on: the empty-thinking cleanup
+        // and the answer backfill above have all run.
+        self.finalize_activity_group(turn_failed);
         self.dirty = true;
     }
 

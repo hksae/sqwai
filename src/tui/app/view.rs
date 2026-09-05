@@ -102,6 +102,33 @@ pub(super) enum Segment {
     },
 }
 
+/// A finished (or still-streaming) agent turn's working content — the
+/// contiguous run of `Thinking`/`Tool` segments that precedes the turn's final
+/// answer. Collapsed behind one summary line; expanded on click/Enter.
+///
+/// `seg_start..seg_end` indexes into `App.segments` and covers the run up to
+/// (but excluding) the final `Assistant` answer of that turn.
+#[derive(Clone)]
+pub(super) struct ActivityGroup {
+    pub seg_start: usize,
+    pub seg_end: usize,
+    pub calls: usize,
+    pub thinking: usize,
+    pub duration_ms: u64,
+    pub errors: usize,
+    pub rejected: usize,
+    pub expanded: bool,
+}
+
+/// Click-tag offset for an activity-group header line inside `cache_rowseg`.
+/// Real segment indices never reach this range, so it cleanly separates a
+/// group header (toggle the whole block) from a normal segment (toggle itself).
+pub(super) const GROUP_BASE: usize = 1 << 40;
+
+/// Indent applied to segments nested inside an activity group. Tool rows are
+/// already inset by two, so this reads as one more level under the header.
+const GROUP_INDENT: u16 = 2;
+
 fn edit_change_counts(diff: &str) -> (usize, usize) {
     diff.lines().fold((0, 0), |(added, removed), line| {
         if line.starts_with("+++") || line.starts_with("---") {
@@ -122,6 +149,8 @@ pub(super) enum BlockKind {
     ThoughtCollapsed,
     ThoughtExpanded,
     Answer,
+    /// the header line of an activity group
+    Activity,
 }
 
 /// User message rendered inside a rounded pink outline.
@@ -272,8 +301,15 @@ impl App {
             self.click_subagent_chat(id, abs_row);
             return;
         }
-        if let Some(Some(seg_idx)) = self.cache_rowseg.get(abs_row) {
-            if let Some(text) = self.code_at_row(*seg_idx, abs_row) {
+        if let Some(Some(tag)) = self.cache_rowseg.get(abs_row).copied() {
+            // An activity-group header folds the whole block; segment indices
+            // never reach the GROUP_BASE range.
+            if tag >= GROUP_BASE {
+                self.toggle_activity_group(tag - GROUP_BASE);
+                return;
+            }
+            let seg_idx = tag;
+            if let Some(text) = self.code_at_row(seg_idx, abs_row) {
                 match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
                     Ok(()) => self.status("code copied to clipboard", StatusKind::Info),
                     Err(e) => self.status(&format!("copy failed: {e}"), StatusKind::Err),
@@ -281,7 +317,7 @@ impl App {
                 return;
             }
             // clicking an error line copies its full text to the clipboard
-            let err_text = match self.segments.get(*seg_idx) {
+            let err_text = match self.segments.get(seg_idx) {
                 Some(Segment::Status {
                     text,
                     kind: StatusKind::Err,
@@ -295,7 +331,7 @@ impl App {
                 }
                 return;
             }
-            let toggle = match self.segments.get(*seg_idx) {
+            let toggle = match self.segments.get(seg_idx) {
                 Some(Segment::Thinking { expanded, .. }) => Some(!*expanded),
                 Some(Segment::Subagent { id, .. }) => {
                     self.active_subagent = Some(*id);
@@ -313,7 +349,7 @@ impl App {
                 _ => None,
             };
             if let Some(v) = toggle {
-                match self.segments.get_mut(*seg_idx) {
+                match self.segments.get_mut(seg_idx) {
                     Some(Segment::Thinking { expanded, .. }) => *expanded = v,
                     Some(Segment::Subagent { expanded, .. }) => *expanded = v,
                     Some(Segment::Tool { expanded, .. }) => *expanded = v,
@@ -322,6 +358,21 @@ impl App {
                 self.dirty = true;
             }
         }
+    }
+
+    /// Fold or unfold one activity group. Index `activity_groups.len()` is the
+    /// running turn: its state lives in `live_group_collapsed` until the turn
+    /// ends and the group is frozen.
+    fn toggle_activity_group(&mut self, g: usize) {
+        if g < self.activity_groups.len() {
+            self.activity_groups[g].expanded = !self.activity_groups[g].expanded;
+        } else if g == self.activity_groups.len() && self.streaming {
+            self.live_group_collapsed = !self.live_group_collapsed;
+        } else {
+            // stale tag from a turn that has since ended
+            return;
+        }
+        self.dirty = true;
     }
 
     fn click_subagent_chat(&mut self, id: u64, abs_row: usize) {
@@ -690,7 +741,48 @@ impl App {
         }
         self.seg_cache.resize(self.segments.len(), None);
 
+        // A turn's working content is wrapped in one activity group. Finished
+        // turns are frozen in `activity_groups`; the running turn is recomputed
+        // here, so its header counts grow while events stream in. The running
+        // turn's group sits at index `activity_groups.len()` — which is exactly
+        // where finalize_activity_group will store it.
+        let mut groups = self.activity_groups.clone();
+        if self.streaming {
+            if let Some(run) = self.trailing_work_run() {
+                let mut live = self.build_activity_group(run);
+                live.expanded = !self.live_group_collapsed;
+                groups.push(live);
+            }
+        }
+        let mut gi = 0usize; // next group waiting to be opened
+        let mut hide_until = 0usize; // collapsed group: skip [seg_start, seg_end)
+        let mut inside_until = 0usize; // expanded group: indent [seg_start, seg_end)
+
         for idx in 0..self.segments.len() {
+            if gi < groups.len() && idx == groups[gi].seg_start {
+                let g = &groups[gi];
+                if !in_group {
+                    logical.push((blank(), None));
+                    in_group = true;
+                }
+                last_block = BlockKind::Activity;
+                logical.push((activity_header_line(g), Some(GROUP_BASE + gi)));
+                if g.expanded {
+                    inside_until = g.seg_end;
+                } else {
+                    hide_until = g.seg_end;
+                }
+                gi += 1;
+            }
+            if idx < hide_until {
+                continue;
+            }
+            let indent = if idx < inside_until {
+                usize::from(GROUP_INDENT)
+            } else {
+                0
+            };
+
             let seg = &self.segments[idx];
             // group spacing rules (cheap, done per assembly pass)
             match seg {
@@ -739,16 +831,22 @@ impl App {
 
             // expensive part: reuse rendered lines unless the text changed
             let key = self.seg_key(seg);
+            // nested rows render narrower so the indent cannot push them past
+            // the chat width; the width is part of the cache check so a segment
+            // that moves in or out of a group is repainted at the right size.
+            let render_w = w.saturating_sub(indent as u16);
             let needs_render = match self.seg_cache[idx].as_ref() {
-                Some((k, _)) => *k != key,
+                Some((k, cw, _)) => *k != key || *cw != render_w,
                 None => true,
             };
             if needs_render {
-                let lines = self.render_segment(idx, w);
-                self.seg_cache[idx] = Some((key, lines));
+                let lines = self.render_segment(idx, render_w);
+                self.seg_cache[idx] = Some((key, render_w, lines));
             }
             let cached = self.seg_cache[idx].as_ref().unwrap();
-            logical.extend(cached.1.iter().cloned());
+            for (line, tag) in &cached.2 {
+                logical.push((indent_line(line.clone(), indent), *tag));
+            }
         }
         self.seg_cache.truncate(self.segments.len());
 
@@ -903,6 +1001,10 @@ impl App {
             layout[0],
         );
         let saved_segments = std::mem::take(&mut self.segments);
+        // Group ranges index the main transcript; they would fold the wrong
+        // rows while a subagent's segments are swapped in.
+        let saved_groups = std::mem::take(&mut self.activity_groups);
+        let saved_live = std::mem::replace(&mut self.live_group_collapsed, false);
         if let Some(segments) = self.subagent_chats.get(&id).cloned() {
             self.segments = segments;
         }
@@ -917,6 +1019,8 @@ impl App {
             .collect();
         f.render_widget(Paragraph::new(visible).style(Theme::base()), chat);
         self.segments = saved_segments;
+        self.activity_groups = saved_groups;
+        self.live_group_collapsed = saved_live;
         self.seg_cache.clear();
         self.seg_layout.clear();
         self.dirty = true;
@@ -1520,6 +1624,39 @@ fn segment_layout_key(seg: &Segment) -> u64 {
 
 pub(super) fn blank() -> Line<'static> {
     Line::from(vec![Span::styled(String::new(), Theme::base())])
+}
+
+/// The one-line summary of a turn's working content. Failures are spelled out
+/// here: a collapsed block must never hide the fact that something broke.
+fn activity_header_line(g: &ActivityGroup) -> Line<'static> {
+    let arrow = if g.expanded { "▾" } else { "▸" };
+    let mut text = format!("  {arrow} activity · {} calls", g.calls);
+    if g.thinking > 0 {
+        text.push_str(&format!(" · {} thinking", g.thinking));
+    }
+    text.push_str(&format!(" · {}s", g.duration_ms / 1000));
+    let mut spans = vec![Span::styled(text, Theme::dim())];
+    if g.errors > 0 {
+        spans.push(Span::styled(format!(" · {} error", g.errors), Theme::err()));
+    }
+    if g.rejected > 0 {
+        spans.push(Span::styled(
+            format!(" · {} rejected", g.rejected),
+            Theme::warn(),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// Shift a rendered line right by `n` columns without touching its styles.
+fn indent_line(l: Line<'static>, n: usize) -> Line<'static> {
+    if n == 0 {
+        return l;
+    }
+    let mut spans = Vec::with_capacity(l.spans.len() + 1);
+    spans.push(Span::styled(" ".repeat(n), Theme::base()));
+    spans.extend(l.spans);
+    Line::from(spans)
 }
 
 fn dim_all(l: Line<'static>) -> Line<'static> {

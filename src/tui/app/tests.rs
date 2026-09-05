@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 use super::menus::{Menu, MenuAction};
-use super::view::blank;
+use super::view::{GROUP_BASE, blank};
 use super::*;
 
 mod tests {
@@ -347,6 +347,184 @@ mod tests {
             .collect();
         assert!(thoughts.iter().any(|t| t.as_str() == "first"));
         assert!(thoughts.iter().any(|t| t.as_str() == "second"));
+    }
+
+    fn rendered(app: &App) -> String {
+        app.cache_lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// one finished turn: user, thinking, one tool, answer
+    fn finished_turn(app: &mut App, ok: bool) {
+        app.segments.push(Segment::User("do it".into()));
+        app.segments.push(Segment::Thinking {
+            text: "hmm".into(),
+            expanded: false,
+            started: None,
+            live: false,
+        });
+        app.segments.push(Segment::Tool {
+            name: "read".into(),
+            args: "a.rs".into(),
+            ok: Some(ok),
+            output: String::new(),
+            diff: None,
+            expanded: false,
+        });
+        app.segments.push(Segment::Assistant {
+            text: "done".into(),
+            live: false,
+        });
+    }
+
+    #[test]
+    fn activity_group_folds_the_turn_work_and_keeps_the_answer() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        finished_turn(&mut app, true);
+        app.finalize_activity_group(false);
+
+        assert_eq!(app.activity_groups.len(), 1);
+        let g = &app.activity_groups[0];
+        assert_eq!((g.seg_start, g.seg_end), (1, 3));
+        assert_eq!((g.calls, g.thinking, g.errors), (1, 1, 0));
+
+        app.rebuild_cache(80);
+        let text = rendered(&app);
+        assert!(
+            text.contains("activity · 1 calls · 1 thinking"),
+            "header missing: {text}"
+        );
+        assert!(!text.contains("read"), "tool row must be folded: {text}");
+        assert!(!text.contains("hmm"), "thinking must be folded: {text}");
+        assert!(text.contains("done"), "the answer stays visible: {text}");
+
+        // clicking the header unfolds the whole block
+        let header = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(GROUP_BASE))
+            .expect("one header row tagged as group 0");
+        app.click(header);
+        assert!(app.activity_groups[0].expanded);
+        app.rebuild_cache(80);
+        let text = rendered(&app);
+        assert!(text.contains("read"), "unfolded block shows tools: {text}");
+        assert!(text.contains("done"), "answer still visible: {text}");
+    }
+
+    #[test]
+    fn failed_turn_leaves_its_activity_group_open() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        finished_turn(&mut app, false);
+        app.finalize_activity_group(true);
+
+        let g = &app.activity_groups[0];
+        assert_eq!(g.errors, 1);
+        assert!(g.expanded, "a failed turn must not collapse silently");
+
+        app.rebuild_cache(80);
+        let text = rendered(&app);
+        assert!(text.contains("1 error"), "error marker missing: {text}");
+        assert!(
+            text.contains("read"),
+            "the failed call stays visible: {text}"
+        );
+    }
+
+    #[test]
+    fn abort_remaps_activity_group_ranges_past_dropped_rows() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.segments.push(Segment::User("go".into()));
+        app.segments.push(Segment::Tool {
+            name: "subagent".into(),
+            args: "task".into(),
+            ok: Some(true),
+            output: String::new(),
+            diff: None,
+            expanded: false,
+        });
+        app.segments.push(Segment::Thinking {
+            text: "hmm".into(),
+            expanded: false,
+            started: None,
+            live: false,
+        });
+        app.segments.push(Segment::Tool {
+            name: "read".into(),
+            args: "a.rs".into(),
+            ok: Some(true),
+            output: String::new(),
+            diff: None,
+            expanded: false,
+        });
+        app.segments.push(Segment::Assistant {
+            text: "done".into(),
+            live: false,
+        });
+        app.finalize_activity_group(false);
+        // The subagent row is itself a tool call, so it belongs to the run.
+        let g = &app.activity_groups[0];
+        assert_eq!((g.seg_start, g.seg_end), (1, 4));
+
+        // Stopping drops the subagent row, pulling only the range end inward.
+        app.clear_subagent_ui_on_stop();
+        assert_eq!(app.segments.len(), 4, "the subagent row is gone");
+        let g = &app.activity_groups[0];
+        assert_eq!((g.seg_start, g.seg_end), (1, 3), "end pulled in by one");
+
+        app.rebuild_cache(80);
+        let text = rendered(&app);
+        assert!(
+            text.contains("activity · 1 calls · 1 thinking"),
+            "header intact: {text}"
+        );
+        assert!(!text.contains("read"), "group stays folded: {text}");
+        assert!(!text.contains("subagent"), "subagent row removed: {text}");
+        assert!(text.contains("done"), "answer stays visible: {text}");
+    }
+
+    #[test]
+    fn activity_group_renders_live_while_the_turn_streams() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.streaming = true;
+        app.segments.push(Segment::Assistant {
+            text: String::new(),
+            live: true,
+        });
+        app.handle_thinking_delta("thinking".into());
+        app.handle_tool_start("read".into(), "a.rs".into());
+
+        // the running turn is not frozen yet: no group stored, but rendered
+        assert!(app.activity_groups.is_empty());
+        app.rebuild_cache(80);
+        let text = rendered(&app);
+        assert!(
+            text.contains("activity · 1 calls · 1 thinking"),
+            "live header missing: {text}"
+        );
+        assert!(text.contains("read"), "live work is expanded: {text}");
+
+        // clicking the live header folds it; the turn stays running
+        let header = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(GROUP_BASE))
+            .expect("live header row");
+        app.click(header);
+        assert!(app.streaming);
+        app.rebuild_cache(80);
+        assert!(
+            !rendered(&app).contains("read"),
+            "live group folds on click"
+        );
     }
 
     #[test]
