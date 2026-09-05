@@ -1219,6 +1219,32 @@ mod tests {
     }
 
     #[test]
+    fn user_surface_strip_fills_the_entire_terminal_row() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.segments.push(Segment::User("full width".into()));
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let user_row = (0..buffer.area.height)
+            .find(|y| {
+                (0..buffer.area.width)
+                    .any(|x| buffer.cell((x, *y)).is_some_and(|c| c.symbol() == "›"))
+            })
+            .expect("user prefix rendered");
+        for y in [user_row - 1, user_row, user_row + 1] {
+            for x in 0..buffer.area.width {
+                assert_eq!(
+                    buffer.cell((x, y)).unwrap().bg,
+                    Theme::USER_SURFACE(),
+                    "row {y}, column {x} must be filled"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn resized_terminal_rebuilds_tool_frames_at_chat_width() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.segments.push(Segment::Tool {

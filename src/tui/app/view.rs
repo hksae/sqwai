@@ -924,6 +924,29 @@ impl App {
         }
 
         let top = self.chat_top(chat.height);
+        // User-message surface strips intentionally extend beyond the chat
+        // gutter, all the way to the terminal edges. Paint these rows first;
+        // the transcript below supplies the prefix and text over that fill.
+        for (screen_row, abs_row) in (top..top + chat.height as usize).enumerate() {
+            let is_user = self
+                .cache_rowseg
+                .get(abs_row)
+                .and_then(|tag| *tag)
+                .is_some_and(|idx| matches!(self.segments.get(idx), Some(Segment::User(_))));
+            if is_user {
+                let strip = Rect {
+                    x: area.x,
+                    y: chat.y + screen_row as u16,
+                    width: area.width,
+                    height: 1,
+                };
+                f.render_widget(
+                    Paragraph::new(" ".repeat(area.width as usize))
+                        .style(Style::new().bg(Theme::USER_SURFACE())),
+                    strip,
+                );
+            }
+        }
         let sel = self.sel;
         let visible: Vec<Line> = self
             .cache_lines
@@ -956,7 +979,40 @@ impl App {
                 _ => l.clone(),
             })
             .collect();
-        f.render_widget(Paragraph::new(visible).style(Theme::base()), chat);
+        // Lines carry their own styles. Do not apply the base background at
+        // widget level: it would override USER_SURFACE on user-strip rows.
+        f.render_widget(Paragraph::new(visible), chat);
+        // The transcript widget repaints its own rectangle, so apply the
+        // full-width fill again afterwards to restore the two outer gutters.
+        for (screen_row, abs_row) in (top..top + chat.height as usize).enumerate() {
+            let is_user = self
+                .cache_rowseg
+                .get(abs_row)
+                .and_then(|tag| *tag)
+                .is_some_and(|idx| matches!(self.segments.get(idx), Some(Segment::User(_))));
+            if is_user {
+                let y = chat.y + screen_row as u16;
+                let fill = Paragraph::new(" ").style(Style::new().bg(Theme::USER_SURFACE()));
+                f.render_widget(
+                    fill.clone(),
+                    Rect {
+                        x: area.x,
+                        y,
+                        width: 1,
+                        height: 1,
+                    },
+                );
+                f.render_widget(
+                    fill,
+                    Rect {
+                        x: area.x + area.width.saturating_sub(1),
+                        y,
+                        width: 1,
+                        height: 1,
+                    },
+                );
+            }
+        }
 
         let rule = Paragraph::new(Line::from(Span::styled(
             "─".repeat(area.width as usize),
