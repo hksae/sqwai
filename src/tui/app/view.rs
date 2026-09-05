@@ -1223,16 +1223,19 @@ impl App {
                 let current = plan
                     .steps
                     .iter()
-                    .position(|step| step.status == crate::plan::StepStatus::InProgress)
-                    .map(|index| index + 1);
-                let total = plan.steps.len();
+                    .enumerate()
+                    .find(|(_, step)| step.status == crate::plan::StepStatus::InProgress);
                 match current {
-                    Some(step) => format!("step {step}/{total} "),
+                    Some((index, step)) => format!(
+                        "step {}/{} {}",
+                        index + 1,
+                        plan.steps.len(),
+                        truncate_chars(&step.title, 28)
+                    ),
                     None => String::new(),
                 }
             })
             .unwrap_or_default();
-        let left = format!(" {}  {}", self.mode.label(), plan_label);
         let (activity, activity_style) = if let Some(line) = &self.retry_line {
             (format!(" {line}"), Theme::warn())
         } else {
@@ -1296,12 +1299,15 @@ impl App {
             right_len += truncate_chars(&dir, 20).chars().count() + 1;
         }
 
+        let left = format!(" {}  {}", self.mode.label(), plan_label);
         let lw = left.chars().count() as u16;
         let mut spans = vec![Span::styled(
             format!(" {} ", self.mode.label()),
             Theme::status_chip(),
         )];
-        spans.push(Span::styled(format!("  {plan_label}"), Theme::dim()));
+        if !plan_label.is_empty() {
+            spans.push(Span::styled(format!("  {plan_label}"), Theme::dim()));
+        }
         spans.push(Span::styled(activity, activity_style));
         let pad = (w as usize).saturating_sub(lw as usize + right_len);
         let agents_x0 = lw + pad as u16;
@@ -1334,15 +1340,6 @@ impl App {
                 Theme::dim(),
             ));
         }
-        let chip = match self.mode {
-            Mode::Act => Theme::status_chip(),
-            Mode::Plan => Style::new()
-                .fg(Theme::BG())
-                .bg(Theme::ACCENT_SOFT())
-                .add_modifier(Modifier::BOLD),
-        };
-        spans.push(Span::styled(format!("{} ", self.mode.label()), chip));
-
         spans
     }
 }
