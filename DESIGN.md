@@ -1628,7 +1628,7 @@ number; a `partial` one is missing something the design calls for.
 | F4 | Diary: host block, triggers, writer call, fallback; memory_read; secrets screening | done — the journal itself is not screened (#11); the diary number post-check of §2.3.2 is a prompt instruction, not host code (#12) | F2 |
 | F5 | MEMORY.md + memory_propose approval; session-start loading | done | F4 |
 | F6 | Compaction anchor; summary=off default; resume/fork per §3.4; undo→reopen | done | F1–F5 |
-| F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, optional zstd) + layer-2 shadow repo driven by the git CLI through `tokio::process`; restore via diff-tree; `/undo step N` | next — restore currently force-checks-out the whole tree and loses edits made outside sqwai (#4), and `/undo step N` parses as `/undo 1` (#5) | F1 |
+| F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, optional zstd) + layer-2 shadow repo driven by the git CLI through `tokio::process`; restore via diff-tree; `/undo step N` | next — restore is path-scoped and a non-count `/undo` argument is refused (#4, #5); remaining: git2, checkpoints in the user's `.git`, no undo outside git repos (#17) | F1 |
 | G | Goal-retention benchmark (§8.2) | planned | F6 |
 | H0 | L0 fact block + criticism detector | planned | F2 |
 | H1 | bash_ro, read-only toolset, Scope/Neutralizer/Executor/Verdict, /verify | planned | H0, D |
