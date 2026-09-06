@@ -50,33 +50,53 @@ impl ToolCtx {
         }
     }
 
-    /// resolve a user-supplied path inside the project; rejects escapes
+    /// resolve a user-supplied path inside the project; rejects escapes and
+    /// host-owned state under `.sqwai/` (§2.0)
     pub fn resolve(&self, p: &str) -> Result<PathBuf, String> {
         let joined = if Path::new(p).is_absolute() {
             PathBuf::from(p)
         } else {
             self.root.join(p)
         };
-        // canonicalize the deepest existing ancestor to defeat `..` and symlinks
+        // canonicalize the deepest existing ancestor to defeat `..` and
+        // symlinks, then re-append the part that does not exist yet, so the
+        // full target is known even when the file is about to be created
         let mut anc = joined.clone();
+        let mut tail: Vec<std::ffi::OsString> = Vec::new();
         while !anc.exists() {
+            let Some(name) = anc.file_name().map(|n| n.to_os_string()) else {
+                break;
+            };
             match anc.parent() {
-                Some(par) => anc = par.to_path_buf(),
+                Some(par) => {
+                    tail.push(name);
+                    anc = par.to_path_buf();
+                }
                 None => break,
             }
         }
         let canon = anc
             .canonicalize()
             .map_err(|e| format!("cannot resolve path {}: {e}", joined.display()))?;
+        let mut resolved = canon;
+        for name in tail.iter().rev() {
+            resolved.push(name);
+        }
         let root_canon = self
             .root
             .canonicalize()
             .map_err(|e| format!("bad project root: {e}"))?;
-        if !canon.starts_with(&root_canon) {
+        let Ok(relative) = resolved.strip_prefix(&root_canon) else {
             return Err(format!(
                 "path '{}' escapes the project directory",
                 joined.display()
             ));
+        };
+        // Plan, journal, memory and graph are reachable only through their own
+        // tools. Enforcing it here is what makes "host-written" and
+        // "append-only" guarantees rather than requests (§2.0).
+        if let Some(denied) = host_owned_denial(relative) {
+            return Err(denied);
         }
         Ok(joined)
     }
@@ -88,6 +108,37 @@ impl ToolCtx {
     fn was_read(&self, p: &Path) -> bool {
         self.files_read.contains(p)
     }
+}
+
+/// The agent's own state directory. File tools see only `skills/` and
+/// `config.toml` inside it; plan, journal, memory and graph are host-owned and
+/// reachable only through their dedicated tools (§2.0).
+const STATE_DIR: &str = ".sqwai";
+
+/// Deny message when `relative` points at host-owned state, `None` otherwise.
+/// `relative` must already be relative to the canonicalized project root, so a
+/// symlink pointing into `.sqwai/` cannot slip past this check.
+fn host_owned_denial(relative: &Path) -> Option<String> {
+    use std::path::Component;
+    let mut components = relative.components();
+    match components.next() {
+        Some(Component::Normal(first)) if first == STATE_DIR => {}
+        _ => return None,
+    }
+    let allowed = match components.next() {
+        Some(Component::Normal(second)) => second == "skills" || second == "config.toml",
+        // `.sqwai` itself: listing or writing the directory is not allowed
+        _ => false,
+    };
+    if allowed {
+        return None;
+    }
+    Some(format!(
+        "path '{}' is host-owned state: plan, journal, memory and graph are reachable \
+         only through their own tools (plan, note, memory_read, memory_propose). \
+         Inside {STATE_DIR}/ the file tools may use skills/ and config.toml only.",
+        relative.display()
+    ))
 }
 
 pub struct FileDiff {
@@ -972,6 +1023,102 @@ mod tests {
             let o = execute(&mut ctx, "read", &json!({"file_path": p}));
             assert!(!o.ok, "{p} must be rejected");
         }
+    }
+
+    /// §2.0: file tools must refuse host-owned state under `.sqwai/`. Without
+    /// this the model can rewrite the goal and mark steps done with `write`,
+    /// which would contradict §8.1 ("a plan's goal cannot be changed by any
+    /// model action").
+    #[test]
+    fn host_owned_state_is_unreachable_from_file_tools() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({"op":"create","goal":"original goal","constraints":["keep the format"],
+                    "acceptance":[],"steps":[{"title":"first"}]}),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        fs::create_dir_all(dir.join(".sqwai/journal")).unwrap();
+        fs::write(dir.join(".sqwai/journal/live.jsonl"), "").unwrap();
+
+        for path in [
+            format!(".sqwai/plans/{plan_id}.json"),
+            ".sqwai/journal/live.jsonl".to_string(),
+            ".sqwai/journal/forged.jsonl".to_string(),
+            ".sqwai/memory/MEMORY.md".to_string(),
+            ".sqwai/graph/graph.db".to_string(),
+            ".sqwai".to_string(),
+        ] {
+            for tool in ["read", "ls", "write", "edit"] {
+                let out = execute(
+                    &mut ctx,
+                    tool,
+                    &json!({"file_path": path, "path": path, "content": "x",
+                            "old_string": "a", "new_string": "b"}),
+                );
+                assert!(!out.ok, "{tool} must refuse {path}: {}", out.output);
+                assert!(
+                    out.output.contains("host-owned state"),
+                    "{tool} on {path} must say why: {}",
+                    out.output
+                );
+            }
+        }
+
+        // the goal survived every attempt above
+        let after = plan::open_active(&dir).unwrap().unwrap();
+        assert_eq!(after.goal.text, "original goal");
+        assert_eq!(after.constraints, vec!["keep the format".to_string()]);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The two documented exceptions stay reachable: project skills are
+    /// committed and edited like any other file, and so is the project config.
+    #[test]
+    fn skills_and_project_config_stay_reachable() {
+        let (mut ctx, dir) = proj();
+        fs::create_dir_all(dir.join(".sqwai/skills/demo")).unwrap();
+
+        let written = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": ".sqwai/skills/demo/SKILL.md", "content": "# demo\n"}),
+        );
+        assert!(written.ok, "{}", written.output);
+        let read = execute(
+            &mut ctx,
+            "read",
+            &json!({"file_path": ".sqwai/skills/demo/SKILL.md"}),
+        );
+        assert!(read.ok, "{}", read.output);
+
+        let config = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": ".sqwai/config.toml", "content": "scope_guard = \"warn\"\n"}),
+        );
+        assert!(config.ok, "{}", config.output);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A symlink inside the project pointing at host-owned state must not be a
+    /// way around the jail: the check runs on the canonicalized path.
+    #[cfg(unix)]
+    #[test]
+    fn symlink_into_host_state_is_refused() {
+        let (mut ctx, dir) = proj();
+        fs::create_dir_all(dir.join(".sqwai/plans")).unwrap();
+        fs::write(dir.join(".sqwai/plans/p.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(dir.join(".sqwai/plans"), dir.join("shortcut")).unwrap();
+
+        let out = execute(&mut ctx, "read", &json!({"file_path": "shortcut/p.json"}));
+        assert!(!out.ok, "symlink must not bypass the jail: {}", out.output);
+        assert!(out.output.contains("host-owned state"), "{}", out.output);
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
