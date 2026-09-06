@@ -1133,8 +1133,7 @@ async fn run_agent(
                             "trust": if matches!(call.name.as_str(), "webfetch" | "websearch") { "low" } else { "high" },
                         }),
                     )
-                    .ok()
-                    .flatten();
+                    .ok();
                 if call.name == "plan" && outcome.ok {
                     if let Some(seq) = result_seq {
                         let _ = writer.append("plan_evidence", serde_json::json!({
