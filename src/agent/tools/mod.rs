@@ -13,7 +13,7 @@ pub(crate) mod web;
 use crate::agent::safety;
 use crate::plan;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// whether a tool may run in parallel with others
@@ -36,8 +36,13 @@ pub struct ToolCtx {
     root_canon: PathBuf,
     /// secondary project instances can inspect but not mutate project state
     pub read_only: bool,
-    /// files successfully read this session (guards edit/write)
-    pub files_read: HashSet<PathBuf>,
+    /// Files read this session and the content hash they had at the time,
+    /// keyed by canonical path. §4 calls for the guard to be hash-tracked: a
+    /// file changed by `bash` since the last read has to be read again, and
+    /// with paths alone the model could edit it blind. The canonical key also
+    /// stops `read("src/x.rs")` followed by `edit("./src/x.rs")` from being
+    /// refused as unread.
+    pub files_read: HashMap<PathBuf, String>,
     /// journal of checkpoints created by this session's mutations
     pub journal: Vec<(String, String)>,
 }
@@ -56,7 +61,7 @@ impl ToolCtx {
             root,
             root_canon,
             read_only,
-            files_read: HashSet::new(),
+            files_read: HashMap::new(),
             journal: Vec::new(),
         }
     }
@@ -116,12 +121,50 @@ impl ToolCtx {
         Ok(joined)
     }
 
-    fn mark_read(&mut self, p: &Path) {
-        self.files_read.insert(p.to_path_buf());
+    fn read_key(p: &Path) -> PathBuf {
+        p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
     }
 
-    fn was_read(&self, p: &Path) -> bool {
-        self.files_read.contains(p)
+    fn mark_read(&mut self, p: &Path) {
+        let hash = file_hash(p);
+        self.files_read.insert(Self::read_key(p), hash);
+    }
+
+    /// Whether the file may be edited: it was read, and it still holds what it
+    /// held then.
+    fn read_state(&self, p: &Path) -> ReadState {
+        match self.files_read.get(&Self::read_key(p)) {
+            None => ReadState::Unread,
+            Some(seen) if *seen == file_hash(p) => ReadState::Current,
+            Some(_) => ReadState::Stale,
+        }
+    }
+}
+
+/// What the read guard knows about a file the model wants to edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadState {
+    /// never read in this session
+    Unread,
+    /// read, and unchanged since
+    Current,
+    /// read, but something changed it afterwards — `bash`, a formatter, the
+    /// user's editor
+    Stale,
+}
+
+/// Content hash of a file, matching what `file_diff` records. A missing or
+/// unreadable file hashes to the empty string, which never equals a recorded
+/// hash, so it reads as stale rather than as current.
+fn file_hash(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            format!("{:x}", hasher.finalize())
+        }
+        Err(_) => String::new(),
     }
 }
 
@@ -1476,6 +1519,91 @@ mod tests {
         assert!(!names.contains(&"write".to_string()));
         assert!(!names.contains(&"edit".to_string()));
         assert!(!names.contains(&"bash".to_string()));
+    }
+
+    /// §4: the guard is hash-tracked, so a file changed by `bash` since the
+    /// last read has to be read again. With paths alone the model could edit
+    /// content that was already gone.
+    #[test]
+    fn a_file_changed_after_reading_it_must_be_read_again() {
+        let (mut ctx, dir) = proj();
+        assert!(execute(&mut ctx, "read", &json!({"file_path": "src/main.rs"})).ok);
+
+        // something else changes it: bash, a formatter, the user's editor
+        fs::write(dir.join("src/main.rs"), "fn main() { /* moved on */ }\n").unwrap();
+
+        let refused = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "src/main.rs", "old_string": "fn main() {}", "new_string": "x"}),
+        );
+        assert!(!refused.ok, "{}", refused.output);
+        assert!(
+            refused.output.contains("changed since you read it"),
+            "{}",
+            refused.output
+        );
+
+        // reading again clears it
+        assert!(execute(&mut ctx, "read", &json!({"file_path": "src/main.rs"})).ok);
+        let accepted = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "src/main.rs", "old_string": "moved on", "new_string": "here"}),
+        );
+        assert!(accepted.ok, "{}", accepted.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The guard is keyed on the canonical path, so the same file spelled two
+    /// ways is the same file. It used to key on the string the model passed,
+    /// which refused a legitimate edit as unread.
+    #[test]
+    fn the_read_guard_does_not_care_how_the_path_is_spelled() {
+        let (mut ctx, dir) = proj();
+        assert!(execute(&mut ctx, "read", &json!({"file_path": "src/main.rs"})).ok);
+        let accepted = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "./src/main.rs", "old_string": "fn main() {}", "new_string": "fn main() { }"}),
+        );
+        assert!(accepted.ok, "{}", accepted.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// §2.1.4 lets a verify step close on "diagnostics with zero errors". The
+    /// record was defined in §2.2.2 and never written, so that branch was
+    /// unreachable — this is the evidence path, now that it exists.
+    #[test]
+    fn clean_diagnostics_close_a_verify_step() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({"op": "create", "goal": "diagnostics as evidence", "acceptance": [],
+                    "steps": [{"title": "check", "kind": "verify"}]}),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+
+        let mut journal = crate::agent::journal::Journal::open(&dir, "diagnostics").unwrap();
+        journal.set_attribution(Some("1".into()), Some(plan_id), "main");
+        journal
+            .append("plan", json!({"op": "start", "id": "1"}))
+            .unwrap();
+        journal
+            .append_evidence(
+                "diagnostics",
+                json!({"path": "src/main.rs", "errors": 0, "warnings": 2, "server": "rust-analyzer"}),
+            )
+            .unwrap();
+
+        let finished = plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "1", "summary": "no errors reported"}),
+        );
+        assert!(finished.ok, "{}", finished.output);
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

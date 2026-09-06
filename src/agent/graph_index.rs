@@ -117,9 +117,27 @@ impl SourceAdapter for MarkdownAdapter {
 }
 
 pub fn index_project(store: &mut impl GraphStore, root: &Path) -> Result<IndexReport> {
+    index_project_excluding(
+        store,
+        root,
+        &crate::config::SecretsConfig::default().exclude_globs,
+    )
+}
+
+/// Index the project, skipping paths that match `exclude_globs`.
+///
+/// §2.3.6 keeps credential files out of the index: their contents would land
+/// in graph node properties and in the FTS table, which is durable state the
+/// screening in `agent::secrets` never sees.
+pub fn index_project_excluding(
+    store: &mut impl GraphStore,
+    root: &Path,
+    exclude_globs: &[String],
+) -> Result<IndexReport> {
     let root = root
         .canonicalize()
         .with_context(|| format!("canonicalize project root {}", root.display()))?;
+    let excluded = build_globset(exclude_globs);
     let adapter = MarkdownAdapter;
     let mut report = IndexReport::default();
     let mut retained_paths = std::collections::BTreeSet::new();
@@ -137,6 +155,16 @@ pub fn index_project(store: &mut impl GraphStore, root: &Path) -> Result<IndexRe
         let path = entry.path();
         if !path.is_file() || is_internal_graph_path(&root, path) {
             continue;
+        }
+        // Match on the file name as well as the relative path: `.env*` and
+        // `id_*` are written to match a name, not a location.
+        if let Some(excluded) = &excluded {
+            let name = path.file_name().map(Path::new).unwrap_or(path);
+            let relative = path.strip_prefix(&root).unwrap_or(path);
+            if excluded.is_match(name) || excluded.is_match(relative) {
+                report.skipped_files += 1;
+                continue;
+            }
         }
         let relative_path = match relative_path(&root, path) {
             Ok(path) => path,
@@ -247,6 +275,20 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>> {
         bail!("binary file skipped");
     }
     Ok(bytes)
+}
+
+/// Compile the exclude patterns, ignoring ones that do not parse rather than
+/// failing the whole index for a typo in config.
+fn build_globset(patterns: &[String]) -> Option<globset::GlobSet> {
+    let mut builder = globset::GlobSetBuilder::new();
+    let mut any = false;
+    for pattern in patterns {
+        if let Ok(glob) = globset::Glob::new(pattern) {
+            builder.add(glob);
+            any = true;
+        }
+    }
+    any.then(|| builder.build().ok()).flatten()
 }
 
 fn is_internal_graph_path(root: &Path, path: &Path) -> bool {
@@ -415,6 +457,44 @@ mod tests {
     use crate::agent::graph::{CozoGraphStore, Direction, NeighborQuery};
     use std::fs;
     use tempfile::tempdir;
+
+    /// §2.3.6: credential files stay out of the index. Their contents would
+    /// land in node properties and the FTS table, which is durable state the
+    /// screening in `agent::secrets` never sees.
+    #[test]
+    fn excluded_globs_are_not_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# ok\n").unwrap();
+        std::fs::write(dir.path().join(".env"), "ANTHROPIC_API_KEY=sk-secret\n").unwrap();
+        std::fs::write(
+            dir.path().join("server.pem"),
+            "-----BEGIN PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("id_rsa"), "private\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        std::fs::write(dir.path().join("config/app_secret.toml"), "token = 1\n").unwrap();
+
+        let mut store = CozoGraphStore::open(dir.path()).unwrap();
+        let globs = crate::config::SecretsConfig::default().exclude_globs;
+        index_project_excluding(&mut store, dir.path(), &globs).unwrap();
+
+        assert!(
+            store.find_node("file:README.md").unwrap().is_some(),
+            "an ordinary file is still indexed"
+        );
+        for excluded in [
+            "file:.env",
+            "file:server.pem",
+            "file:id_rsa",
+            "file:config/app_secret.toml",
+        ] {
+            assert!(
+                store.find_node(excluded).unwrap().is_none(),
+                "{excluded} must not be indexed"
+            );
+        }
+    }
 
     #[test]
     fn markdown_adapter_emits_document_sections_and_links() {

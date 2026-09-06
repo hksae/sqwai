@@ -373,6 +373,36 @@ pub struct DiaryConfig {
     pub batch_minutes: u16,
 }
 
+/// `[secrets]` — files the host must not read into durable state (§2.3.6).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretsConfig {
+    /// glob patterns the project indexer skips entirely
+    #[serde(default = "default_secrets_exclude_globs")]
+    pub exclude_globs: Vec<String>,
+}
+
+impl Default for SecretsConfig {
+    fn default() -> Self {
+        Self {
+            exclude_globs: default_secrets_exclude_globs(),
+        }
+    }
+}
+
+fn default_secrets_exclude_globs() -> Vec<String> {
+    [
+        ".env*",
+        "*.pem",
+        "*.key",
+        "id_*",
+        "*credentials*",
+        "*secret*",
+    ]
+    .iter()
+    .map(|pattern| (*pattern).to_string())
+    .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionConfig {
     #[serde(default = "default_compaction_threshold")]
@@ -481,6 +511,8 @@ pub struct Config {
     pub diary: DiaryConfig,
     #[serde(default)]
     pub compaction: CompactionConfig,
+    #[serde(default)]
+    pub secrets: SecretsConfig,
 }
 
 fn default_model_name() -> String {
@@ -535,6 +567,7 @@ impl Default for Config {
             memory: MemoryConfig::default(),
             diary: DiaryConfig::default(),
             compaction: CompactionConfig::default(),
+            secrets: SecretsConfig::default(),
         };
         cfg.ensure_seeds();
         cfg
