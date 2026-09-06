@@ -1,9 +1,10 @@
 # sqwai — Design
 
-Status: living design document. Sections marked **[done]** describe shipped
-behavior; **[partial]** — shipped with gaps listed inline; **[planned]** —
-specification only. When code and this document disagree, the document is
-wrong until deliberately changed; fix one or the other in the same commit.
+Status: living design document. It describes the design, not the state of the
+build — **§7 is the only place status lives.** A section here saying how
+something works says nothing about whether it exists yet; check the work queue.
+When code and this document disagree, the document is wrong until deliberately
+changed; fix one or the other in the same commit.
 
 Reading order for newcomers: §0 → §1 → §2 → §3. Everything else is reference.
 
@@ -108,10 +109,7 @@ lock protects the plaintext plan, diary and journal (§7 Q).
 
 ---
 
-### 2.1 Goal and Plan **[partial]**
-
-Shipped: `todowrite` (free-form list, persisted in session). This section
-replaces it.
+### 2.1 Goal and Plan
 
 #### 2.1.1 Identity and lifecycle
 
@@ -323,7 +321,7 @@ TUI todo panel (Ctrl+T) — derived view: current step highlighted, counts.
 Mode switching is Tab or /mode plan|act (§5.3). /plan no longer
 switches mode.
 
-#### 2.1.8 Plan from issue **[planned]**
+#### 2.1.8 Plan from issue
 
 `sqwai plan from <github-url | gitlab-url | file.md | ->` (stdin) builds a
 plan **draft** from an issue and hands it to the user; nothing becomes the
@@ -384,7 +382,7 @@ message is heuristic-trivial (≤ 1 file mentioned, verbs like "fix typo/rename"
 otherwise it returns `code: plan_required` and the model must `plan create`
 first. Without this the model routes around the plan for "quick" tasks that grow
 (§7 W).
-2.2 Journal [planned]
+2.2 Journal
 The journal is the factual record of a session. Written only by the host,
 in the tool dispatch layer and in a few lifecycle points. The model has one
 narrow write path (note) that is labeled as such.
@@ -461,7 +459,7 @@ Reflector scope (§3.5).
 L0 fact block (§3.5.1).
 Graph memory adapter (§2.4.5): note records become memory nodes.
 Tooling: sqwai journal <session> [--step N] [--kind K] prints a table.
-2.3 Memory [partial]
+2.3 Memory
 Three files with distinct roles:
 
 File	Written by	Read by	Purpose
@@ -541,7 +539,7 @@ tools. memory_read(date) returns a day's file; there is no memory_edit.
 Mistakes are corrected by a new entry's Corrections section. The Corrections
 section is also fed automatically from reflector agent_errors (§3.5.4).
 
-2.3.5 MEMORY.md and memory_propose [partial]
+2.3.5 MEMORY.md and memory_propose
 Sections: ## Project (stack, layout, how to build/test), ## Conventions,
 ## User (name/handle if given, language, preferences), ## Agreements
 (standing rules agreed in chat). Hard cap memory.max_tokens (3000); the
@@ -576,9 +574,9 @@ memory.heading_days (7); the model calls memory_read(date) for detail.
 Stale markers: when the graph is available, every backticked path/symbol in
 the loaded diary text is resolved; unresolved ones are annotated inline as
 `load_history_segments` [stale]. Cost: one batch query.
-2.4 Graph [partial]
-Shipped: SQLite-free prototype on CozoDB with generic + Markdown indexing and
-/graph-rebuild. Decision: replace the engine with SQLite (rusqlite,
+2.4 Graph
+Engine decision: the first prototype ran on CozoDB with generic + Markdown
+indexing behind /graph-rebuild; replace that engine with SQLite (rusqlite,
 bundled), keep the GraphStore contract, port the two adapters. Reasons:
 Cozo is pre-1.0 with no format guarantees and low upstream activity; the
 queries needed (bounded neighborhoods, exact lookups, FTS) do not need
@@ -752,7 +750,7 @@ Provenance command `/why <path|symbol|j#N>` (§7 AB), step diff and `/export`
 consumers of the same projections. `/why` unifies journal (when/which step
 changed it), diary (why), and graph (what depends on it) into one answer.
 
-#### 2.4.11 Test impact **[planned]**
+#### 2.4.11 Test impact
 
 Given the symbols changed in a step, the graph answers which tests exercise
 them, so `verify` runs the narrow set first and the full suite only at
@@ -893,7 +891,7 @@ Configured via `[undo].shadow` (local | user | off), default local.
 - Restore operates via `diff-tree`, never via checkout.
 - The constraint "undo unavailable outside git repositories" is lifted: only bash reverts require git.
 
-### 2.6 Browser **[planned — last phase]**
+### 2.6 Browser
 
 A browser driver built on the Chrome DevTools Protocol. Control and observation
 go through the accessibility tree; screenshots are collected as artifacts for
@@ -1130,7 +1128,7 @@ forked_from; the original plan remains the project's active one only if the
 user says so — otherwise the fork's copy becomes active and the original is
 marked archived.
 
-3.5 Criticism → Reflector [planned]
+3.5 Criticism → Reflector
 Problem: "what did you even do?" / "this is wrong" makes models either argue
 or capitulate without knowing which is right. Three levels; cheap always,
 expensive by escalation.
@@ -1265,7 +1263,7 @@ Not a git repo	layer-1 file checkpoints and `/undo step N` remain available; Bas
 Git unavailable or shadow snapshot skipped	Bash still runs with layer-1 checkpoints and bounded change detection where possible; unknown Bash mutations have reduced undo guarantees
 .sqwai/ unwritable	plan/journal/memory/checkpoints disabled with a persistent warning; agent runs in "no integrity" mode and says so in the status bar
 
-3.8 Unattended mode **[planned — last phase]**
+3.8 Unattended mode
 
 `sqwai run --plan <id> [--until complete|step N] [--budget tokens|minutes]`
 executes an active plan without a TUI and without a human. It is safe only
@@ -1336,7 +1334,7 @@ whose step needs a question ends with that step `blocked` and others
 completed; a denied `rm -rf` is not retried; budget stop writes a diary entry;
 `brief` equals the journal.
 
-3.9 Claim lint [planned]
+3.9 Claim lint
 After the model's response text is generated, the host runs a cheap pattern pass
 over it: result claims (`\d+ passed`, `build succeeded`, `tests pass`, `exit 0`,
 named paths/symbols) are checked against journal records since the start of the
@@ -1347,27 +1345,32 @@ results visible to the user immediately, which is the most direct realization of
 the thesis. Cost ~1 day after F2+I4 (§7 Y).
 
 4. Tools
-Tool	Group	Status	Mutates	Journal kinds
-read ls glob grep	files	done	no	tool_call/result
-write edit multi_edit patch	files	done	yes	+ file_diff, checkpoint; pre-edit graph warning planned
-bash	exec	done	yes	+ checkpoint (pre/post), file_diff on tree change, approval
-git_status git_diff git_log git_show git_branch	git	done (git_show to add)	no	tool_call/result
-git_commit	git	done	yes	+ checkpoint
-webfetch websearch	web	done	no	tool_call/result (URL digest only)
-ask_user	interaction	done	no	tool_call/result
-subagent	delegation	done	inherits mode	subagent
-todowrite	planning	done → remove after plan ships	—	—
-plan	planning	planned	plan file	plan
-note	planning	planned	journal	note
-memory_propose	memory	planned	MEMORY.md via approval	tool_call/result
-memory_read	memory	planned	no	tool_call/result
-resolve_ref	graph	planned	no	tool_call/result
-recall graph_query	graph	planned (prototype exists)	no	tool_call/result
-reflect	verification	planned	no	reflect
-why	navigation	planned	no	tool_call/result
-export	reporting	planned	no	tool_call/result
-bench	benchmark	planned	no	tool_call/result
-MCP tools mcp__<server>__<tool>	ext	done	per server	tool_call/result + approval via safety
+
+The tool reference: what each tool touches and what the host records for it.
+Whether a tool exists yet is §7's business, not this table's.
+
+| Tool | Group | Mutates | Journal kinds |
+|---|---|---|---|
+| `read` `ls` `glob` `grep` | files | no | tool_call/result |
+| `write` `edit` `multi_edit` `patch` | files | yes | + file_diff, checkpoint; pre-edit graph warning per §2.4.8 |
+| `bash` | exec | yes | + checkpoint (pre/post), file_diff on tree change, approval |
+| `git_status` `git_diff` `git_log` `git_show` `git_branch` | git | no | tool_call/result |
+| `git_commit` | git | yes | + checkpoint |
+| `webfetch` `websearch` | web | no | tool_call/result (URL digest only) |
+| `ask_user` | interaction | no | tool_call/result |
+| `subagent` | delegation | inherits mode | subagent |
+| `plan` | planning | plan file | plan |
+| `note` | planning | journal | note |
+| `memory_propose` | memory | MEMORY.md via approval | tool_call/result |
+| `memory_read` | memory | no | tool_call/result |
+| `resolve_ref` | graph | no | tool_call/result |
+| `recall` `graph_query` | graph | no | tool_call/result |
+| `reflect` | verification | no | reflect |
+| `why` | navigation | no | tool_call/result |
+| `export` | reporting | no | tool_call/result |
+| `bench` | benchmark | no | tool_call/result |
+| MCP tools `mcp__<server>__<tool>` | ext | per server | tool_call/result + approval via safety |
+
 No new model tools: `plan from`, `run`, `brief`, and `review` are CLI/user commands.
 Every tool: JSON schema, strict argument validation, normalized result
 {ok, data|code+reason+hint}. Read-before-edit guard: edit|multi_edit|patch
@@ -1375,7 +1378,7 @@ refuse files not read in this session (hash-tracked; a file changed by bash
 since the last read must be re-read).
 
 5. Infrastructure
-5.1 Providers [done]
+5.1 Providers
 Internal ChatRequest/ChatResponse/StreamDelta; adapters for OpenAI Chat
 Completions, Anthropic Messages, OpenAI Responses. SSE streaming mandatory;
 retries with backoff on 429/5xx; classified errors (auth, quota, network,
@@ -1415,7 +1418,7 @@ so provider prefix caches remain reusable. Effort must not enable extra host
 checks, reflection, or subagent fan-out; those mechanisms remain deterministic
 and independent of the slider.
 
-5.2 Safety [done]
+5.2 Safety
 Two-layer command classifier: shell-word heuristics + tree-sitter-bash AST
 (substitutions, pipes into interpreters, redirects over critical paths,
 sudo|doas|env prefixes, find -delete|-exec, compound commands checked per
@@ -1434,13 +1437,13 @@ redirections to system paths, `iex`, pipe-to-`iex`). If Git Bash/WSL is
 available and named in the environment, sqwai prefers it so the bash classifier
 stays authoritative. The base detector still cannot be disabled (§7 P).
 
-5.3 Modes [done]
+5.3 Modes
 plan mode: read-only toolset (read ls glob grep git_* webfetch websearch recall graph_query resolve_ref memory_read plan note ask_user); the agent may
 create and refine the plan but not mutate files. act mode: full toolset.
 Switching: Tab or /mode plan|act; only the user. Subagents inherit the
 mode at spawn. The mode indicator is always visible.
 
-5.4 TUI [done]
+5.4 TUI
 ratatui + crossterm; ASCII/box-drawing only, no emoji; English UI strings
 centralized. Header: model, mode, tokens and context %, cache reads, cost.
 Streaming markdown with syntect highlighting; tool calls collapse on
@@ -1459,27 +1462,27 @@ its files do not overlap later steps; otherwise refuses with an explanation).
 
 Commands: /new /sessions /fork /resume /undo /compact /diary /plan [history| complete|abandon|limit|waive] /plan from /run /brief /review /goal /constraints /mode /verify [--full] /graph-rebuild /why /export /bench /settings /providers /models /themes /skills /skill /mcp /lsp /init /debug /exit. README must list the same set; a test diffs the two.
 
-5.5 MCP [done]
+5.5 MCP
 rmcp client; stdio and streamable HTTP; tool discovery at session start
 (before the first turn, so tool schemas stay in the stable prefix); namespaced
 mcp__<server>__<tool>; per-server env/args/headers; safety policy per §5.2.
 
-5.6 LSP [partial]
-Shipped: JSON-RPC framing, initialize, didOpen/didChange/didSave, queued
-publishDiagnostics. Planned wiring: after each file mutation the host
+5.6 LSP
+Foundation: JSON-RPC framing, initialize, didOpen/didChange/didSave, queued
+publishDiagnostics. Wiring on top of it: after each file mutation the host
 awaits diagnostics up to lsp.diag_timeout_ms (1500), writes a diagnostics
 journal record, and appends an error summary to the tool result. finish of
 a change step warns (or rejects, if plan.require_clean_diagnostics) when
 changed files have errors. Navigation tools (definition, references) feed
 the graph at Level 4 later.
 
-5.7 Skills [done]
+5.7 Skills
 SKILL.md with name, description, triggers frontmatter; directories:
 config paths, ~/.config/sqwai/skills, .sqwai/skills; project overrides
 earlier definitions. Always-on skills enter prompt block A; trigger-matched
 skills enter block D for that turn only (§3.2).
 
-5.8 Sessions [done]
+5.8 Sessions
 ~/.local/share/sqwai/sessions/<uuid>.json: messages, tool calls, usage,
 model, mode, plan_id, last checkpoint sha, compaction markers. Autosave
 after every event. Picker shows title, plan status, last activity,
@@ -1601,55 +1604,70 @@ from past incidents ("2000 lines"); no developer notes about postponed work.
 docs/prompt.md holds the full text with a changelog.
 
 7. Work queue
-Dependencies, not chronology. Each item ends in a usable state.
 
-#	Item	Status	Depends on
-A	Providers, streaming, cache, thinking	done	—
-B	Tool core, guard, safety, undo, TUI	done	A
-C	MCP, skills, LSP foundation, settings hub	done	B
-D	git tools, patch, web tools, subagents	done	B
-E	Graph prototype (Cozo, generic + markdown)	done → to be ported	—
-F1	plan tool + validator (all rules except evidence/refs) + /plan /goal /constraints /mode; remove todowrite; prompt update	done	B
-F2	Journal writer at dispatch; all kinds except `diagnostics`, `reflect`, `graph`	done	B
-F3	Evidence rule in `finish`, `verify`, `complete`; nudges; note	done	F1
-F4	Diary: host block, triggers, writer call, fallback; memory_read; secrets screening	done	F2
-F5	MEMORY.md + memory_propose approval; session-start loading	done	F4
-F6	Compaction anchor; summary=off default; resume/fork per §3.4; undo→reopen	next	F1–F5
-F7	Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, optional zstd) + layer-2 shadow repo driven by the git CLI through `tokio::process`; restore via diff-tree; `/undo step N`	after F1	F1
-G	Goal-retention benchmark (§8.2)	after F	F6
-H0	L0 fact block + criticism detector	after F	F2
-H1	bash_ro, read-only toolset, Scope/Neutralizer/Executor/Verdict, /verify	after H0	H0, D
-I1	Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild	after F	E
-I2	Rust adapter (tree-sitter), qualified keys		I1
-I3	Freshness: edit/bash/undo/head triggers; status semantics		I1
-I4	resolve_ref; validator refs; pre-edit warning; stale markers; reflector executor tool		I2, I3, F1, H1
-I5	Memory adapter; recall/graph_query exposed; context block		I4, F4
-J	Python adapter; LSP diagnostics → journal; graph-view list MVP; checkpoint before/after bash		I5, C
-K	Canvas graph-view, watcher, LSP Level 4, blast radius, path view	later	J
-L	Browser: CDP driver, tree pipeline, tools, safety, trust, acceptance runner, artifacts	last	K, F3, H0
-M	Test impact: `test` nodes in Rust/Python adapters, reverse traversal, command synthesis, runner integration	planned	I5, acceptance runners
-N	Plan from issue: fetch, extract, resolve, review UI, drafts	planned	I4, F1, secrets/trust
-O	Unattended mode: policy layer, stop conditions, `brief`, `/review`, pending memory	last	F6, H0, M, 1.3 lock, 1.9 fallback
-P	Windows/PowerShell shell-aware safety layer (§5.2 modify)	done	§5.2
-Q	Single-instance lock + read-only fallback for plan/journal/memory/graph	done	F1
-R	Untrusted-input handling (trust:low, banner, confirm gates) + prompt rule	next (prompt now)	F2
-S	Cancel mid-tool (Esc): cancelled result, post-checkpoint, in_progress	next	F2
-T	Provider fallback chain ([models.x].fallback)	any	§5.1
-U	Assumption notes: open tracking, finish warning, resolve	next	F3
-V	Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md)	next	F3
-W	Plan-first gate (Act first-mutate w/o plan → plan_required)	F2–F3	F3
-X	Staged compaction + files-read anchor + USER.md split/load	F5–F6	F1, F5
-Y	Claim lint (post-generation verify against journal/resolve_ref)	after F2+I4	I4
-Z	Scope guard (step.refs vs file_diff)	after I4	I4
-AA	Lessons tied to files (note kind + context-block rule)	after I4	I5
-AB	/why provenance, step diff + /undo step, /export, /brief	J	J
-AC	bench command (user-facing wrapper over §8.2 regression harness)	after G	G
-AD	Bash isolation/sandbox (container/bwrap/WSL)	open question	—
-Order among M, N, O: M → N → O. Unattended is last because it is only as safe as everything under it, and `brief` is only as useful as the journal is complete.
-Rules: no agent-facing graph feature before I3; no reflector before F2;
-todowrite removed in the same change that ships plan. F1 is complete except
-its explicitly deferred evidence/refs rules, which belong to F3/I4. Items L–AD are the
-external-risk + enhancement pass (§1.x/§2.x); §3 is the explicit exclusion list.
+Dependencies, not chronology. Each item ends in a usable state. **This table is
+the only status in this document** — the sections above describe the design
+regardless of what is built.
+
+Status vocabulary: `done` — shipped and behaving as specified; `partial` —
+shipped with a named gap; `next` — unblocked and in line; `planned` —
+specified, waiting on its dependencies; `open question` — not decided.
+A `done` item with a known defect keeps its status and carries the issue
+number; a `partial` one is missing something the design calls for.
+
+| # | Item | Status | Depends on |
+|---|---|---|---|
+| A | Providers, streaming, cache, thinking | partial — no retries/backoff and no error classification (#8); tool schemas outside the prompt cache (#10) | — |
+| B | Tool core, guard, safety, undo, TUI | done | A |
+| C | MCP, skills, LSP foundation, settings hub | done | B |
+| D | git tools, patch, web tools, subagents | done | B |
+| E | Graph prototype (Cozo, generic + markdown) | done — engine replaced by I1 | — |
+| F1 | plan tool + validator (all rules except evidence/refs) + /plan /goal /constraints /mode; prompt update | done | B |
+| F2 | Journal writer at dispatch; all kinds except `diagnostics`, `reflect`, `graph` | done | B |
+| F3 | Evidence rule in `finish`, `verify`, `complete`; nudges; note | done — `verify` accepts evidence from an unrelated step (#6) | F1 |
+| F4 | Diary: host block, triggers, writer call, fallback; memory_read; secrets screening | done — the journal itself is not screened (#11); the diary number post-check of §2.3.2 is a prompt instruction, not host code (#12) | F2 |
+| F5 | MEMORY.md + memory_propose approval; session-start loading | done | F4 |
+| F6 | Compaction anchor; summary=off default; resume/fork per §3.4; undo→reopen | done | F1–F5 |
+| F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, optional zstd) + layer-2 shadow repo driven by the git CLI through `tokio::process`; restore via diff-tree; `/undo step N` | next — restore currently force-checks-out the whole tree and loses edits made outside sqwai (#4), and `/undo step N` parses as `/undo 1` (#5) | F1 |
+| G | Goal-retention benchmark (§8.2) | planned | F6 |
+| H0 | L0 fact block + criticism detector | planned | F2 |
+| H1 | bash_ro, read-only toolset, Scope/Neutralizer/Executor/Verdict, /verify | planned | H0, D |
+| I1 | Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild | planned | E |
+| I2 | Rust adapter (tree-sitter), qualified keys | planned | I1 |
+| I3 | Freshness: edit/bash/undo/head triggers; status semantics | planned | I1 |
+| I4 | resolve_ref; validator refs; pre-edit warning; stale markers; reflector executor tool | planned | I2, I3, F1, H1 |
+| I5 | Memory adapter; recall/graph_query exposed; context block | planned | I4, F4 |
+| J | Python adapter; LSP diagnostics → journal; graph-view list MVP; checkpoint before/after bash | planned | I5, C |
+| K | Canvas graph-view, watcher, LSP Level 4, blast radius, path view | planned | J |
+| L | Browser: CDP driver, tree pipeline, tools, safety, trust, acceptance runner, artifacts | planned | K, F3, H0 |
+| M | Test impact: `test` nodes in Rust/Python adapters, reverse traversal, command synthesis, runner integration | planned | I5, acceptance runners |
+| N | Plan from issue: fetch, extract, resolve, review UI, drafts | planned | I4, F1, secrets/trust |
+| O | Unattended mode: policy layer, stop conditions, `brief`, `/review`, pending memory | planned | F6, H0, M, Q, T |
+| P | Windows/PowerShell shell-aware safety layer (§5.2) | done | §5.2 |
+| Q | Single-instance lock + read-only fallback for plan/journal/memory/graph | done | F1 |
+| R | Untrusted-input handling (trust:low, banner, confirm gates) + prompt rule | partial — the prompt rule and `trust: low` in the journal are in; the prompt banner and the confirm gates on plan/memory_propose/git_commit are not | F2 |
+| S | Cancel mid-tool (Esc): cancelled result, post-checkpoint, in_progress | next | F2 |
+| T | Provider fallback chain ([models.x].fallback) | planned — the `fallback` field does not exist on ModelConfig (#8) | §5.1 |
+| U | Assumption notes: open tracking, finish warning, resolve | next | F3 |
+| V | Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md) | next — `cmd:` items are stored as opaque text and never run (#7) | F3 |
+| W | Plan-first gate (Act first-mutate w/o plan → plan_required) | planned | F3 |
+| X | Staged compaction + files-read anchor + USER.md split/load | partial — USER.md split and loading are in; staged pre-compaction (§3.3.1) and the files-read line in the anchor (§3.3.3) are not | F1, F5 |
+| Y | Claim lint (post-generation verify against journal/resolve_ref) | planned | I4 |
+| Z | Scope guard (step.refs vs file_diff) | planned | I4 |
+| AA | Lessons tied to files (note kind + context-block rule) | planned | I5 |
+| AB | /why provenance, step diff + /undo step, /export, /brief | planned | J |
+| AC | bench command (user-facing wrapper over §8.2 regression harness) | planned | G |
+| AD | Bash isolation/sandbox (container/bwrap/WSL) | open question | — |
+
+Ordering beyond the dependency column: K, L and O are the last passes — the
+canvas graph view, the browser and unattended mode. Order among M, N, O is
+M → N → O. Unattended is last because it is only as safe as everything under
+it, and `brief` is only as useful as the journal is complete.
+
+Rules: no agent-facing graph feature before I3; no reflector before F2. F1 is
+complete except its explicitly deferred evidence/refs rules, which belong to
+F3/I4. Items L–AD are the external-risk + enhancement pass (§1.x/§2.x); §11 is
+the explicit exclusion list.
 
 Prerequisite for item L: spend two days using Playwright MCP through §5.5 on
 real tasks to learn which accessibility-tree format models read well.
