@@ -4,6 +4,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::Block;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tui_textarea::TextArea;
 
@@ -176,6 +177,18 @@ pub struct App {
     /// Whether the current prompt still needs the full tool-oriented context.
     context_bootstrap_pending: bool,
     active_skills: Vec<crate::prompts::skills::Skill>,
+
+    /// Project root, resolved once at construction. The status bar used to
+    /// call `std::env::current_dir()` on every frame; nothing in the process
+    /// ever changes directory, so this is the same value with none of the
+    /// per-redraw syscalls — and it is injectable in tests.
+    pub(super) project_root: PathBuf,
+    /// Name of the project directory as shown in the status bar.
+    pub(super) cwd_label: String,
+    /// `step N/M` for the active plan, or empty when there is none. Refreshed
+    /// when the plan can have changed (see `refresh_plan_label`) rather than
+    /// re-read and re-parsed from disk on every redraw.
+    pub(super) plan_step_label: String,
 
     input: TextArea<'static>,
     segments: Vec<Segment>,
@@ -352,6 +365,25 @@ impl App {
         parts
     }
 
+    /// Recompute the plan label from disk.
+    ///
+    /// Called where the active plan can have changed — construction, a plan
+    /// operation reported by the agent, the end of a turn, `/undo`, and any
+    /// slash command — instead of on every frame from inside the renderer.
+    pub(super) fn refresh_plan_label(&mut self) {
+        self.plan_step_label = plan::open_active(&self.project_root)
+            .ok()
+            .flatten()
+            .and_then(|plan| {
+                let current = plan
+                    .steps
+                    .iter()
+                    .position(|step| step.status == plan::StepStatus::InProgress)?;
+                Some(format!("step {}/{}", current + 1, plan.steps.len()))
+            })
+            .unwrap_or_default();
+    }
+
     pub fn new(cfg: Config, session: Session, startup: bool, read_only: bool) -> Result<Self> {
         let model_key = session.model_key.clone();
         let model_cfg = cfg
@@ -375,7 +407,16 @@ impl App {
             None
         };
 
+        let project_root = std::env::current_dir().unwrap_or_default();
+        let cwd_label = project_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
         let mut app = Self {
+            project_root,
+            cwd_label,
+            plan_step_label: String::new(),
             input: Self::fresh_input(String::new()),
             model_cfg,
             provider,
@@ -456,12 +497,12 @@ impl App {
             app.load_history_segments();
         }
         if app.session.plan_id.is_none() {
-            app.session.plan_id =
-                crate::plan::open_active(&std::env::current_dir().unwrap_or_default())
-                    .ok()
-                    .flatten()
-                    .map(|plan| plan.id);
+            app.session.plan_id = crate::plan::open_active(&app.project_root)
+                .ok()
+                .flatten()
+                .map(|plan| plan.id);
         }
+        app.refresh_plan_label();
         app.stable_prefix = app.stable_prefix();
         app.rebuild_session_environment();
         app.context_bootstrap_pending = true;
@@ -1191,6 +1232,10 @@ impl App {
             "" => {}
             other => self.status(&format!("unknown command {other}"), StatusKind::Warn),
         }
+        // /plan, /goal, /constraints, /init, /undo and /new can all change the
+        // active plan; refreshing once per command is cheaper than the
+        // per-frame read this replaces.
+        self.refresh_plan_label();
         self.dirty = true;
     }
 
@@ -1632,6 +1677,7 @@ impl App {
                 }
                 AgentEvent::Todos(items) => {
                     self.todos = items;
+                    self.refresh_plan_label();
                     self.dirty = true;
                 }
                 AgentEvent::AskUser {
@@ -1895,6 +1941,7 @@ impl App {
         if !outcome.plan_todos.is_empty() {
             self.todos = outcome.plan_todos;
         }
+        self.refresh_plan_label();
         self.session.checkpoints.extend(outcome.journal);
         self.finish_turn(Ok(()));
     }
