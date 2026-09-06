@@ -57,6 +57,14 @@ pub(super) fn bash(
     run_blocking(ctx, command, timeout_secs)
 }
 
+/// Kill a child and drain its wait, ignoring errors: by the time this runs the
+/// process may already be gone (it finished a moment before the flag was
+/// checked), and that race is not a failure worth reporting.
+fn kill_and_reap(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
     use std::io::Read;
     use std::sync::{Arc, Mutex};
@@ -105,9 +113,25 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
         if status.is_some() {
             break;
         }
+        // §3.7 / §7 S: Esc sets this from the TUI. Checked at the same
+        // cadence as the timeout, because this loop is the only place a
+        // long-running `bash` call can be interrupted at all — the tokio task
+        // running the agent loop can be aborted, but that does not reach a
+        // child process spawned on this blocking thread; without this check,
+        // pressing Esc during `bash` gave the *illusion* of cancelling while
+        // the command kept mutating the project unseen until it finished on
+        // its own.
+        if ctx.cancel_requested() {
+            kill_and_reap(&mut child);
+            // the readers still hold the pipe ends; joining them is what
+            // notices the pipes closed and lets them return
+            for r in readers {
+                let _ = r.join();
+            }
+            return Outcome::cancelled();
+        }
         if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_and_reap(&mut child);
             return Outcome::err(format!(
                 "command timed out after {timeout_secs}s — output discarded"
             ));
@@ -143,6 +167,7 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
         output: format!("{status_line}\n{body}"),
         diff: None,
         file_diff: None,
+        cancelled: false,
     }
 }
 
@@ -211,4 +236,110 @@ fn spill(contents: &str) -> PathBuf {
     ));
     let _ = std::fs::File::create(&path).and_then(|mut f| f.write_all(contents.as_bytes()));
     path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx() -> ToolCtx {
+        ToolCtx::new(std::env::temp_dir())
+    }
+
+    /// The bug this exists to fix: before the poll loop checked the cancel
+    /// flag, aborting the surrounding tokio task did not reach a child
+    /// process spawned on a `spawn_blocking` thread at all — `bash` kept
+    /// running, invisibly, until its own timeout. This drives a command whose
+    /// timeout is far longer than the test, flips the flag from another
+    /// thread partway through, and asserts the call returns promptly with a
+    /// cancelled outcome rather than only after the long timeout.
+    #[test]
+    fn cancelling_a_running_command_returns_promptly_as_cancelled() {
+        let mut c = ctx();
+        let cancel = c.cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        let started = std::time::Instant::now();
+        // a command that would otherwise run far longer than this test
+        let outcome = bash(&mut c, "sleep 30", Some(60), false);
+        let elapsed = started.elapsed();
+
+        assert!(
+            outcome.cancelled,
+            "ok={} output={:?}",
+            outcome.ok, outcome.output
+        );
+        assert!(!outcome.ok);
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "cancellation did not interrupt the command: took {elapsed:?}"
+        );
+    }
+
+    /// The point of killing the child rather than only giving up on it: a
+    /// process left running after "cancellation" is worse than no
+    /// cancellation at all, because nothing in the UI shows it is still
+    /// mutating the project. Proven here by having the child write to a file
+    /// repeatedly and checking that it stops the moment it is cancelled.
+    #[test]
+    fn the_child_process_is_actually_killed_not_abandoned() {
+        let dir = tempfile::Builder::new()
+            .prefix("sqwai-cancel")
+            .tempdir()
+            .unwrap();
+        let marker = dir.path().join("alive");
+        let mut c = ToolCtx::new(dir.path());
+        let cancel = c.cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        let command = format!(
+            "for i in $(seq 1 200); do date +%s%N >> {}; sleep 0.05; done",
+            marker.display()
+        );
+        let started = std::time::Instant::now();
+        let outcome = bash(&mut c, &command, Some(60), false);
+        let elapsed = started.elapsed();
+        assert!(
+            outcome.cancelled,
+            "ok={} output={:?}",
+            outcome.ok, outcome.output
+        );
+        // The real proof: `bash` must not block until the child exits on its
+        // own (the loop runs for up to 10s). If the process were merely
+        // abandoned rather than killed, the pipe readers this call joins on
+        // would keep it waiting for the full 10s regardless of the flag.
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "bash() blocked until the child finished on its own: {elapsed:?}"
+        );
+
+        let count_after_cancel = std::fs::read_to_string(&marker)
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let count_later = std::fs::read_to_string(&marker)
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        assert_eq!(
+            count_after_cancel, count_later,
+            "the marker kept growing after cancellation — the child is still running"
+        );
+    }
+
+    /// Without a cancellation, ordinary completion is unaffected: the flag
+    /// starting `false` must not itself do anything.
+    #[test]
+    fn an_uncancelled_command_completes_normally() {
+        let mut c = ctx();
+        let outcome = bash(&mut c, "echo hi", Some(10), false);
+        assert!(outcome.ok);
+        assert!(!outcome.cancelled);
+        assert!(outcome.output.contains("hi"));
+    }
 }

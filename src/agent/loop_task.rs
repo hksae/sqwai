@@ -165,11 +165,30 @@ pub struct AgentHandle {
     pub rx: mpsc::Receiver<AgentEvent>,
     pub control: mpsc::Sender<ControlMsg>,
     abort: tokio::task::AbortHandle,
+    /// §3.7 (§7 S): flipped by Esc while a tool is executing. Distinct from
+    /// [`Self::abort`] — that tears the whole turn down via `AbortHandle`,
+    /// which does not reach a child process spawned on a `spawn_blocking`
+    /// thread (tokio cannot cancel a blocking closure), so pressing Esc
+    /// during `bash` used to leave the command running, invisibly, until it
+    /// finished on its own. This flag lets the tool notice the request at its
+    /// own polling point and stop the process itself.
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AgentHandle {
     pub fn abort(&self) {
         self.abort.abort();
+    }
+
+    /// Ask the tool currently running to stop cooperatively. The call still
+    /// gets a normal `tool_result` (`ok:false`, cancelled) recorded in the
+    /// journal and the transcript, but `run_agent` then stops requesting
+    /// further model turns rather than letting the model react and try
+    /// something else — Esc is the user saying "stop", not a hint for the
+    /// model to keep going on its own.
+    pub fn request_tool_cancel(&self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -540,11 +559,13 @@ fn next_subagent_id() -> u64 {
 pub fn spawn_agent(input: AgentInput) -> AgentHandle {
     let (tx, rx) = mpsc::channel::<AgentEvent>(256);
     let (ctl_tx, ctl_rx) = mpsc::channel::<ControlMsg>(32);
-    let abort = tokio::spawn(run_agent(input, tx, ctl_rx)).abort_handle();
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let abort = tokio::spawn(run_agent(input, tx, ctl_rx, cancel.clone())).abort_handle();
     AgentHandle {
         rx,
         control: ctl_tx,
         abort,
+        cancel,
     }
 }
 
@@ -552,6 +573,7 @@ async fn run_agent(
     input: AgentInput,
     tx: mpsc::Sender<AgentEvent>,
     mut ctl: mpsc::Receiver<ControlMsg>,
+    cancel_tool: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let AgentInput {
         provider,
@@ -732,7 +754,8 @@ async fn run_agent(
 
     let mut ctx = ToolCtx::with_read_only(&root, read_only)
         .in_session(&session_id)
-        .with_plan_limits(plan_limits, context_limit);
+        .with_plan_limits(plan_limits, context_limit)
+        .with_cancel(cancel_tool);
     let mut journal = if enable_tools && !read_only {
         crate::agent::journal::Journal::open(&root, &session_id).ok()
     } else {
@@ -1047,8 +1070,17 @@ async fn run_agent(
         // assistant requested tools; record the call(s)
         messages.push(Message::new(Role::Assistant, turn.text).with_tool_calls(turn.calls.clone()));
 
+        // §3.7 / §7 S: once the user cancels one call, no further calls in
+        // this batch run and no further model turns are requested — Esc means
+        // stop, not "let the model decide what to do about it".
+        let mut interrupted = false;
+
         // execute each call, feeding results back into the conversation
         for call in &turn.calls {
+            // A cancellation from the previous call must not leak into this
+            // one: the flag is per-request, reset right before dispatch.
+            ctx.cancel
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             let journal_mark = ctx.journal.len();
             let tool_started = Instant::now();
             if let Some(writer) = journal.as_mut() {
@@ -1240,6 +1272,7 @@ async fn run_agent(
                                 ok: !is_error,
                                 diff: None,
                                 file_diff: None,
+                                cancelled: false,
                             },
                             Err(e) => tools::Outcome::err(format!("MCP call failed: {e:#}")),
                         }
@@ -1247,6 +1280,24 @@ async fn run_agent(
                     other => run_tool_blocking(&mut ctx, other, &call.args).await,
                 }
             };
+
+            // §2.5 / §3.7: `bash` is the one tool whose targets are not known
+            // in advance, so a cancelled run can have mutated files no
+            // pre-checkpoint covered. `snapshot_session` already implements
+            // "only if the tree changed since the previous snapshot" — that
+            // is exactly the condition §3.7 asks for, so it is read from
+            // there rather than reimplemented.
+            if outcome.cancelled
+                && call.name == "bash"
+                && let Ok(Some(sha)) = checkpoints::snapshot_session(
+                    &ctx.root,
+                    crate::config::ShadowStore::Local,
+                    &ctx.session_id,
+                    "post_bash cancelled",
+                )
+            {
+                ctx.journal.push((sha, "bash (cancelled)".to_string()));
+            }
 
             if outcome.ok
                 && matches!(call.name.as_str(), "write" | "edit" | "multi_edit")
@@ -1349,18 +1400,11 @@ async fn run_agent(
             }
             if let Some(writer) = journal.as_mut() {
                 if call.name == "note" && outcome.ok {
-                    let _ = writer.append(
-                        "note",
-                        serde_json::json!({
-                            "by": "model",
-                            "note": call.args.get("kind").and_then(|v| v.as_str()).unwrap_or("lesson"),
-                            "text": call.args.get("note").and_then(|v| v.as_str()).unwrap_or_default(),
-                            // present only when this note closes an assumption
-                            // (§2.1.4); the dispatcher has already checked that
-                            // the target is open
-                            "resolves": call.args.get("resolves").and_then(|v| v.as_u64()),
-                        }),
-                    );
+                    let _ = writer.append("note", serde_json::json!({
+                        "by": "model",
+                        "note": call.args.get("kind").and_then(|v| v.as_str()).unwrap_or("lesson"),
+                        "text": call.args.get("note").and_then(|v| v.as_str()).unwrap_or_default(),
+                    }));
                 }
                 let result_seq = writer
                     .append_evidence(
@@ -1372,6 +1416,10 @@ async fn run_agent(
                             "duration_ms": tool_started.elapsed().as_millis(),
                             "summary": outcome.output.chars().take(200).collect::<String>(),
                             "trust": if matches!(call.name.as_str(), "webfetch" | "websearch") { "low" } else { "high" },
+                            // §3.7: distinct from an ordinary failure, so the
+                            // journal can say the user stopped this rather
+                            // than that it went wrong on its own
+                            "code": if outcome.cancelled { Some("cancelled") } else { None },
                         }),
                     )
                     .ok();
@@ -1447,7 +1495,21 @@ async fn run_agent(
                     }
                 }
             }
+            if outcome.cancelled {
+                interrupted = true;
+            }
             messages.push(Message::tool_result(&call.id, outcome.output, !outcome.ok));
+            if interrupted {
+                // §3.7: Esc means stop — the remaining calls in this batch
+                // (if the model requested several) do not run.
+                break;
+            }
+        }
+        if interrupted {
+            // and no further model turn is requested this round; the turn
+            // ends with what was accumulated, the same shape as a normal
+            // final answer (§3.7: step stays in_progress, nothing reverted).
+            break;
         }
     }
 

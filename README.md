@@ -39,12 +39,6 @@ recorded by the host. Rejections come with a reason and a hint. The goal
 changes only via `/goal`. Executable acceptance criteria — the host running a
 `cmd:` item itself and attaching the result — are **[in development]**.
 
-**Assumptions.** A `note` of kind `assumption` stays open until another note
-closes it by sequence number. Finishing a step that still carries one succeeds
-with a warning naming it, and the compaction anchor and the diary carry open
-assumptions forward — so an assumption cannot quietly outlive the work that
-depended on it.
-
 **Journal.** An append-only event log written by the host at tool dispatch:
 calls, results, diffs, checkpoints, approvals, compactions. The model has one
 labeled write path, `note`. The journal is what the plan validator and the
@@ -55,6 +49,14 @@ model-written decisions, rejected approaches, and corrections. A curated
 `MEMORY.md` for durable project facts, updated only with user approval.
 Another model, another day, another session picks up exactly where things
 stopped.
+
+**Cancel.** Esc during a running `bash` call kills the process — the previous
+behavior only tore down the turn's own task, which does not reach a child
+process spawned on a blocking thread, so the command kept running unseen until
+it finished on its own. The call is recorded as a normal `tool_result` with
+`code: cancelled`, a post-checkpoint is taken if the tree changed, and the turn
+ends there: nothing is reverted, and the step stays in progress for the next
+turn to pick up.
 
 **Undo.** Every file the agent is about to change is kept first, byte for
 byte, in a content-addressed store under `.sqwai/checkpoints/blobs/` — so

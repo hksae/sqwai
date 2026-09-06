@@ -2836,6 +2836,31 @@ mod tests {
     /// checkpoint instead — a destructive command acting on the wrong target
     /// and reporting success. Per-step undo is not built yet, so an argument
     /// that is not a count has to be refused.
+    /// §3.7 / §7 S: Esc must tell a running tool from plain text streaming.
+    /// Only one tool executes at a time, so the open row — `ok: None` — is
+    /// the signal; a closed row or no tool row at all means there is nothing
+    /// "mid-tool" to cancel.
+    #[test]
+    fn tool_running_reflects_whether_the_last_tool_row_is_still_open() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        assert!(!app.tool_running(), "no tool segment at all");
+
+        app.segments.push(Segment::Tool {
+            name: "bash".into(),
+            args: "sleep 30".into(),
+            ok: None,
+            output: String::new(),
+            diff: None,
+            expanded: false,
+        });
+        assert!(app.tool_running());
+
+        if let Some(Segment::Tool { ok, .. }) = app.segments.last_mut() {
+            *ok = Some(false);
+        }
+        assert!(!app.tool_running(), "the row closed, nothing is running");
+    }
+
     #[test]
     fn undo_refuses_an_argument_that_is_not_a_count() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());

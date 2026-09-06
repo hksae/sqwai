@@ -315,11 +315,27 @@ impl App {
                                 self.popup_dismiss = true;
                                 self.hover = None;
                             } else if self.streaming {
-                                self.clear_busy_statuses();
-                                self.clear_subagent_ui_on_stop();
-                                self.aborted = true;
-                                if let Some(a) = &self.agent {
-                                    a.abort();
+                                if self.tool_running() {
+                                    // §3.7 / §7 S: a tool is mid-flight —
+                                    // cancel that call cooperatively (it gets
+                                    // a normal cancelled tool_result) rather
+                                    // than tearing down the whole turn. The
+                                    // turn still ends once the cancellation is
+                                    // observed (run_agent stops requesting
+                                    // further model turns), but whatever was
+                                    // already produced is kept, unlike a hard
+                                    // abort.
+                                    if let Some(a) = &self.agent {
+                                        a.request_tool_cancel();
+                                    }
+                                    self.status("cancelling…", StatusKind::Info);
+                                } else {
+                                    self.clear_busy_statuses();
+                                    self.clear_subagent_ui_on_stop();
+                                    self.aborted = true;
+                                    if let Some(a) = &self.agent {
+                                        a.abort();
+                                    }
                                 }
                             }
                         }
