@@ -222,10 +222,18 @@ fn emit_table(out: &mut Vec<Line<'static>>, rows: Vec<Vec<String>>, width: u16) 
         return;
     }
     let avail = width.saturating_sub(ncols as u16 + 1).max(4);
+    // Column widths are terminal columns, not characters: the border below is
+    // drawn as `"─".repeat(w(i))`, and a CJK glyph occupies two cells while a
+    // combining mark occupies none. Counting characters here made every table
+    // with non-Latin text draw its right border inside the cell text.
     let mut widths: Vec<usize> = (0..ncols)
         .map(|i| {
             rows.iter()
-                .map(|r| r.get(i).map(|c| c.chars().count()).unwrap_or(0))
+                .map(|r| {
+                    r.get(i)
+                        .map(|c| UnicodeWidthStr::width(c.as_str()))
+                        .unwrap_or(0)
+                })
                 .max()
                 .unwrap_or(0)
                 .max(3)
@@ -276,9 +284,12 @@ fn emit_table(out: &mut Vec<Line<'static>>, rows: Vec<Vec<String>>, width: u16) 
         // greedy word wrap
         let mut lines: Vec<Vec<(Style, char)>> = Vec::new();
         let mut cur: Vec<(Style, char)> = Vec::new();
+        // `budget` is a column count, so the running total has to be one too
+        let mut cur_cols = 0usize;
         let mut last_space: Option<usize> = None;
         for (s, ch) in chars {
-            if cur.len() >= budget && !cur.is_empty() {
+            let ch_cols = cell_width(ch);
+            if cur_cols + ch_cols > budget && !cur.is_empty() {
                 match last_space {
                     Some(sp) => {
                         let rest = cur.split_off(sp + 1);
@@ -290,12 +301,14 @@ fn emit_table(out: &mut Vec<Line<'static>>, rows: Vec<Vec<String>>, width: u16) 
                         lines.push(std::mem::take(&mut cur));
                     }
                 }
+                cur_cols = columns_of(&cur);
                 last_space = None;
             }
             if ch == ' ' {
                 last_space = Some(cur.len());
             }
             cur.push((s, ch));
+            cur_cols += ch_cols;
         }
         trim_end_spaces(&mut cur);
         lines.push(cur);
@@ -303,7 +316,8 @@ fn emit_table(out: &mut Vec<Line<'static>>, rows: Vec<Vec<String>>, width: u16) 
         let lines_out = lines
             .into_iter()
             .map(|v| {
-                let used = 1 + v.len();
+                // one leading space plus the cell's rendered columns
+                let used = 1 + columns_of(&v);
                 let mut line = cells_to_line(v, st);
                 let mut spans: Vec<Span> = vec![Span::styled(" ".to_string(), st)];
                 spans.append(&mut line.spans);
@@ -639,6 +653,11 @@ fn cell_width(ch: char) -> usize {
     UnicodeWidthChar::width(ch).unwrap_or(0)
 }
 
+/// Terminal columns occupied by a run of styled characters.
+fn columns_of(cells: &[(Style, char)]) -> usize {
+    cells.iter().map(|(_, ch)| cell_width(*ch)).sum()
+}
+
 fn trim_end_spaces(cells: &mut Vec<(Style, char)>) {
     while matches!(cells.last(), Some((_, ' '))) {
         cells.pop();
@@ -807,6 +826,33 @@ mod tests {
         for l in &lines {
             let wdt: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
             assert!(wdt <= 30, "row too wide ({wdt}): {l:?}");
+        }
+    }
+
+    /// Every line of a table — borders and rows alike — must occupy the same
+    /// number of terminal columns. Measuring cells in characters instead of
+    /// columns made the grid ragged for any non-Latin text: a CJK glyph takes
+    /// two cells, so `"─".repeat(w)` came out shorter than the row it framed
+    /// and the right border landed inside the text.
+    #[test]
+    fn table_grid_is_rectangular_with_wide_and_cyrillic_text() {
+        let hl = Highlighter::new();
+        let md = "| lang | note |\n|---|---|\n| 日本語 | データ |\n| кириллица | текст |\n";
+        for width in [40u16, 60, 80] {
+            let lines = render(md, width, &hl);
+            let cols: Vec<usize> = lines
+                .iter()
+                .map(|l| UnicodeWidthStr::width(line_text_pub(l).as_str()))
+                .collect();
+            assert!(!cols.is_empty(), "width {width}: nothing rendered");
+            assert!(
+                cols.iter().all(|&c| c == cols[0]),
+                "width {width}: ragged grid {cols:?}"
+            );
+            assert!(
+                cols[0] <= width as usize,
+                "width {width}: grid overflows the terminal {cols:?}"
+            );
         }
     }
 
