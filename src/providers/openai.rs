@@ -352,6 +352,57 @@ mod tests {
         (format!("http://{addr}/v1"), h)
     }
 
+    /// Like [`sse_server`] but keeps the request bodies it received.
+    fn capturing_sse_server() -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let bodies: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = bodies.clone();
+        let h = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            let mut len = 0usize;
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line
+                    .to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .and_then(|s| s.trim().parse::<usize>().ok())
+                {
+                    len = v;
+                }
+            }
+            let mut buf = vec![0u8; len];
+            reader.read_exact(&mut buf).ok();
+            seen.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&buf).into_owned());
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
+            let mut out = stream;
+            write!(
+                out,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            let _ = out.flush();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        });
+        (format!("http://{addr}/v1"), bodies, h)
+    }
+
     fn plain_request() -> ChatRequest {
         ChatRequest {
             model_id: "m".into(),
@@ -409,6 +460,53 @@ mod tests {
             })
             .collect();
         assert_eq!(text, "abc", "text must still stream in full");
+    }
+
+    /// The Gemini preset speaks this wire format, so this is the body its
+    /// requests actually carry. Asserted here rather than only in
+    /// `providers::effort`, because the mapping being right and the body being
+    /// right are two different claims.
+    #[tokio::test]
+    async fn the_body_carries_the_declared_level() {
+        use crate::config::{EffortControl, EffortLevel, EffortSupport};
+        for (level, control, expected) in [
+            (EffortLevel::Max, EffortControl::Levels, Some("high")),
+            (EffortLevel::Max, EffortControl::Xhigh, Some("xhigh")),
+            (EffortLevel::High, EffortControl::Levels, Some("high")),
+            (EffortLevel::Low, EffortControl::Levels, Some("low")),
+            (EffortLevel::High, EffortControl::None, None),
+            (EffortLevel::Off, EffortControl::Levels, None),
+        ] {
+            let (url, bodies, h) = capturing_sse_server();
+            let mut req = plain_request();
+            req.effort = Some(level);
+            req.effort_support = EffortSupport {
+                control,
+                always_on: false,
+            };
+            let p = OpenAiProvider::new(&crate::config::ResolvedProvider {
+                name: "p".into(),
+                format: crate::config::WireFormat::Openai,
+                base_url: url,
+                api_key: Some("k".into()),
+            })
+            .unwrap();
+            let _: Vec<_> = {
+                use futures::StreamExt;
+                p.stream_chat(req).collect().await
+            };
+            h.join().unwrap();
+            let body = bodies.lock().unwrap().first().cloned().unwrap_or_default();
+            let sent: Option<String> = serde_json::from_str::<Value>(&body).ok().and_then(|v| {
+                v.get("reasoning_effort")
+                    .and_then(|e| e.as_str().map(String::from))
+            });
+            assert_eq!(
+                sent.as_deref(),
+                expected,
+                "{level:?} under {control:?} produced: {body}"
+            );
+        }
     }
 
     /// Gemini 3 attaches a `thought_signature` to the first function call of a
