@@ -811,11 +811,11 @@ mod tests {
         let messages = vec![
             user("first task"),
             Message::new(Role::Assistant, "").with_tool_calls(vec![
-                crate::providers::ToolCallReq {
-                    id: "c1".into(),
-                    name: "read".into(),
-                    args: serde_json::json!({"file_path": "a.rs"}),
-                },
+                crate::providers::ToolCallReq::new(
+                    "c1",
+                    "read",
+                    serde_json::json!({"file_path": "a.rs"}),
+                ),
             ]),
             Message::tool_result("c1", "fn main() {}", false),
             user("second task"),

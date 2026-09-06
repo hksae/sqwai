@@ -737,11 +737,11 @@ mod tests {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.session.messages = vec![
             Message::new(Role::User, "inspect"),
-            Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq {
-                id: "call-1".into(),
-                name: "read".into(),
-                args: serde_json::json!({"file_path": "src/main.rs"}),
-            }]),
+            Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+                "call-1",
+                "read",
+                serde_json::json!({"file_path": "src/main.rs"}),
+            )]),
             Message::tool_result("call-1", "file contents", false),
             Message::new(Role::Assistant, "done"),
         ];
