@@ -19,16 +19,6 @@ pub struct AnthropicProvider {
     api_key: String,
 }
 
-fn budget(level: EffortLevel) -> u32 {
-    match level {
-        EffortLevel::Off => 0,
-        EffortLevel::Low => 2048,
-        EffortLevel::Medium => 8192,
-        EffortLevel::High => 16384,
-        EffortLevel::Max => 32768,
-    }
-}
-
 /// content blocks for one message (anthropic wire format)
 fn content_blocks(m: &super::Message) -> Vec<Value> {
     let mut blocks = Vec::new();
@@ -140,8 +130,12 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
         body["system"] = json!(system);
     }
 
-    if let Some(level) = req.effort.filter(|l| *l != EffortLevel::Off) {
-        let b = budget(level);
+    // one mapping for the whole codebase: what goes on the wire and what the
+    // UI reports come from the same plan (§5.1)
+    if let Some(level) = req.effort.filter(|l| *l != EffortLevel::Off)
+        && let super::effort::Wire::Budget(b) = super::effort::plan(level, req.effort_support).wire
+        && b > 0
+    {
         body["thinking"] = json!({"type": "enabled", "budget_tokens": b});
         body["max_tokens"] = json!((base_max_tokens + b).min(64_000));
     }
@@ -366,6 +360,15 @@ fn short(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The Messages API expresses effort as a token budget, which is what a
+    /// model on this provider resolves to in `ModelConfig::effort_support`.
+    fn budget_support() -> crate::config::EffortSupport {
+        crate::config::EffortSupport {
+            control: crate::config::EffortControl::Budget,
+            always_on: false,
+        }
+    }
+
     use super::*;
     use crate::providers::Message;
 
@@ -379,6 +382,7 @@ mod tests {
             system: vec![],
             messages: vec![],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: Some(32_000),
             tools: vec![],
             previous_response_id: None,
@@ -395,6 +399,7 @@ mod tests {
         // not to the default
         let mut with_effort = req.clone();
         with_effort.effort = Some(EffortLevel::Medium);
+        with_effort.effort_support = budget_support();
         let body = build_body(&with_effort, 8192, false);
         let budget = body["thinking"]["budget_tokens"].as_u64().unwrap();
         assert_eq!(
@@ -421,6 +426,7 @@ mod tests {
             ],
             messages: vec![],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: None,
             tools: vec![tool("read"), tool("write"), tool("bash")],
             previous_response_id: None,
@@ -461,6 +467,7 @@ mod tests {
                 .collect(),
             messages: vec![],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: None,
             tools: vec![crate::providers::ToolSpec {
                 name: "read".into(),
@@ -496,6 +503,7 @@ mod tests {
             ],
             messages: vec![Message::new(Role::User, "hi")],
             effort: Some(EffortLevel::High),
+            effort_support: budget_support(),
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,
@@ -519,6 +527,7 @@ mod tests {
             system: vec![crate::providers::SystemPart::cached("stable prefix")],
             messages: vec![Message::new(Role::User, "hi")],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,
@@ -536,6 +545,7 @@ mod tests {
             system: vec![],
             messages: vec![Message::new(Role::User, "hi")],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,
@@ -552,6 +562,7 @@ mod tests {
             system: vec![],
             messages: vec![Message::new(Role::User, "hi")],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,
@@ -576,6 +587,7 @@ mod tests {
                 Message::tool_result("tu_1", "a.txt", false),
             ],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: None,
             tools: vec![super::super::ToolSpec {
                 name: "ls".into(),
@@ -621,6 +633,7 @@ mod tests {
                 Message::tool_result("b", "res-b", false),
             ],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,

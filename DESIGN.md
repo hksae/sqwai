@@ -1491,6 +1491,13 @@ recoverable flag.
 5.9 Configuration reference (new keys)
 toml
 
+[models.<key>]
+effort = "high"                # off | low | medium | high | max (was: thinking)
+effort_control = "levels"      # none | toggle | levels | xhigh | budget;
+                               # omitted = derived from the wire format and
+                               # clamped to what that format can express
+effort_always_on = false       # model always reasons; `off` reported ignored
+
 [plan]
 budget_ratio = 0.10
 max_steps = 24

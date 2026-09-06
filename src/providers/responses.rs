@@ -14,16 +14,6 @@ pub struct ResponsesProvider {
     api_key: Option<String>,
 }
 
-/// Map effort level to the `reasoning.effort` parameter.
-pub fn effort(level: EffortLevel) -> Option<&'static str> {
-    match level {
-        EffortLevel::Off => None,
-        EffortLevel::Low => Some("low"),
-        EffortLevel::Medium => Some("medium"),
-        EffortLevel::High | EffortLevel::Max => Some("high"),
-    }
-}
-
 pub fn build_body(req: &ChatRequest) -> Value {
     let system: Vec<Value> = req
         .system
@@ -58,7 +48,9 @@ pub fn build_body(req: &ChatRequest) -> Value {
         "input": input,
         "stream": true,
     });
-    if let Some(e) = req.effort.and_then(effort) {
+    if let Some(level) = req.effort.filter(|l| *l != EffortLevel::Off)
+        && let super::effort::Wire::Level(e) = super::effort::plan(level, req.effort_support).wire
+    {
         body["reasoning"] = json!({"effort": e});
     }
     // Only set when the provider documented the field: sanitize() has already
@@ -212,11 +204,40 @@ mod tests {
     use super::*;
     use crate::providers::Message;
 
+    fn request_at(level: EffortLevel, control: crate::config::EffortControl) -> ChatRequest {
+        ChatRequest {
+            model_id: "gpt-x".into(),
+            system: vec![],
+            messages: vec![Message::new(Role::User, "hi")],
+            effort: Some(level),
+            effort_support: crate::config::EffortSupport {
+                control,
+                always_on: false,
+            },
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        }
+    }
+
+    /// `max` reaches `xhigh` only where the model declares it; on a
+    /// three-level model it is sent as `high` (and the UI says so — see
+    /// `providers::effort`).
     #[test]
-    fn effort_mapping() {
-        assert_eq!(effort(EffortLevel::Off), None);
-        assert_eq!(effort(EffortLevel::Low), Some("low"));
-        assert_eq!(effort(EffortLevel::Max), Some("high"));
+    fn effort_reaches_the_body_at_the_declared_level() {
+        use crate::config::EffortControl;
+        let b = build_body(&request_at(EffortLevel::Max, EffortControl::Levels));
+        assert_eq!(b["reasoning"]["effort"], "high");
+        let b = build_body(&request_at(EffortLevel::Max, EffortControl::Xhigh));
+        assert_eq!(b["reasoning"]["effort"], "xhigh");
+        let b = build_body(&request_at(EffortLevel::Low, EffortControl::Levels));
+        assert_eq!(b["reasoning"]["effort"], "low");
+        // a model with no reasoning control gets no parameter at all
+        let b = build_body(&request_at(EffortLevel::High, EffortControl::None));
+        assert!(b.get("reasoning").is_none(), "unexpected reasoning: {b}");
+        let b = build_body(&request_at(EffortLevel::Off, EffortControl::Levels));
+        assert!(b.get("reasoning").is_none());
     }
 
     #[test]
@@ -226,6 +247,7 @@ mod tests {
             system: vec![crate::providers::SystemPart::cached("s")],
             messages: vec![Message::new(Role::User, "hi")],
             effort: Some(EffortLevel::Medium),
+            effort_support: Default::default(),
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,
@@ -246,6 +268,7 @@ mod tests {
             system: vec![],
             messages: vec![Message::new(Role::User, "hi")],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: None,
             tools: vec![],
             previous_response_id: Some("resp_1".into()),

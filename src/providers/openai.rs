@@ -148,13 +148,10 @@ impl Provider for OpenAiProvider {
             });
             // openai-compatible reasoning control; servers that do not know
             // the field simply ignore it
-            if let Some(level) = req.effort.filter(|l| *l != EffortLevel::Off) {
-                let effort = match level {
-                    EffortLevel::Low => "low",
-                    EffortLevel::Medium => "medium",
-                    EffortLevel::High | EffortLevel::Max => "high",
-                    EffortLevel::Off => unreachable!(),
-                };
+            if let Some(level) = req.effort.filter(|l| *l != EffortLevel::Off)
+                && let super::effort::Wire::Level(effort) =
+                    super::effort::plan(level, req.effort_support).wire
+            {
                 body["reasoning_effort"] = json!(effort);
             }
             if let Some(mt) = req.max_tokens { body["max_tokens"] = json!(mt); }
@@ -358,6 +355,7 @@ mod tests {
             system: vec![],
             messages: vec![Message::new(Role::User, "hi")],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,
@@ -505,6 +503,7 @@ mod tests {
                 Message::tool_result("call_1", "a.txt\nb.txt", false),
             ],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: None,
             tools: vec![super::super::ToolSpec {
                 name: "ls".into(),
@@ -548,6 +547,7 @@ mod tests {
             system: vec![crate::providers::SystemPart::cached("sys")],
             messages: vec![Message::new(Role::User, "hi")],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: None,
             tools: vec![],
             previous_response_id: Some("resp_1".into()),
@@ -570,6 +570,7 @@ mod tests {
             ],
             messages: vec![Message::new(Role::User, "hi")],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,

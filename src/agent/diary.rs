@@ -311,6 +311,7 @@ pub async fn write_entry(
             system: vec![SystemPart::volatile(WRITER_SYSTEM)],
             messages: vec![Message::new(crate::providers::Role::User, prompt)],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: Some(token_budget.unwrap_or(DEFAULT_DIARY_TOKEN_BUDGET)),
             tools: Vec::new(),
             previous_response_id: None,

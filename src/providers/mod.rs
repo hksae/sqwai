@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod effort;
 pub mod openai;
 pub mod responses;
 
@@ -393,9 +394,11 @@ pub struct ChatRequest {
     pub system: Vec<SystemPart>,
     /// conversation history (user / assistant / tool only)
     pub messages: Vec<Message>,
-    /// sent only when the model supports it; mapping per provider (phase 1)
-    #[allow(dead_code)]
+    /// how much work the user asked for; `None` means the caller does not
+    /// touch the model's reasoning at all (summaries, the diary writer)
     pub effort: Option<EffortLevel>,
+    /// what the target model does with that level; see [`effort::plan`]
+    pub effort_support: crate::config::EffortSupport,
     pub max_tokens: Option<u32>,
     /// tools available to the model this turn (empty = no tool support needed)
     pub tools: Vec<ToolSpec>,

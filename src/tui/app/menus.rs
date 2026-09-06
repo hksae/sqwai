@@ -150,6 +150,10 @@ pub(super) enum MenuAction {
     ToggleShowCost,
     CycleModelEffort,
     CycleDefaultEffort,
+    /// cycle what the current model is declared to do with the slider
+    CycleEffortControl,
+    /// toggle "this model always reasons, `off` cannot be honoured"
+    ToggleEffortAlwaysOn,
     ToggleMode,
     OpenSessions,
     SetTheme(usize),
@@ -586,6 +590,37 @@ impl App {
                 self.cfg.save().ok();
                 self.build_menu_rows();
             }
+            MenuAction::CycleEffortControl => {
+                // `None` means "derive from the wire format", and it leads the
+                // cycle: the declaration is an override, not a requirement.
+                let cycle: Vec<Option<crate::config::EffortControl>> = std::iter::once(None)
+                    .chain(crate::config::EffortControl::ALL.into_iter().map(Some))
+                    .collect();
+                let cur = cycle
+                    .iter()
+                    .position(|c| *c == self.model_cfg.effort_control)
+                    .unwrap_or(0);
+                let next = cycle[(cur + 1) % cycle.len()];
+                self.model_cfg.effort_control = next;
+                if let Some(m) = self.cfg.models.get_mut(&self.session.model_key) {
+                    m.effort_control = next;
+                }
+                self.cfg.save().ok();
+                let plan = self.effort_plan();
+                self.status(&plan.label(), StatusKind::Ok);
+                self.build_menu_rows();
+            }
+            MenuAction::ToggleEffortAlwaysOn => {
+                let next = !self.model_cfg.effort_always_on;
+                self.model_cfg.effort_always_on = next;
+                if let Some(m) = self.cfg.models.get_mut(&self.session.model_key) {
+                    m.effort_always_on = next;
+                }
+                self.cfg.save().ok();
+                let plan = self.effort_plan();
+                self.status(&plan.label(), StatusKind::Ok);
+                self.build_menu_rows();
+            }
             MenuAction::CycleDefaultEffort => {
                 let all = EffortLevel::ALL;
                 let cur = all
@@ -697,7 +732,13 @@ impl App {
                 }
                 self.cfg.save().ok();
                 self.menu_home();
-                self.status(&format!("effort: {}", level.as_str()), StatusKind::Ok);
+                let plan = self.effort_plan();
+                let kind = if plan.is_honoured() {
+                    StatusKind::Ok
+                } else {
+                    StatusKind::Warn
+                };
+                self.status(&plan.label(), kind);
             }
             MenuAction::AskSelect(label) => {
                 self.ask_answer(label);
@@ -976,6 +1017,20 @@ impl App {
                     MenuAction::CycleModelEffort,
                 ));
                 self.menu_rows.push(setting(
+                    "effort control",
+                    match self.model_cfg.effort_control {
+                        Some(c) => c.as_str().to_string(),
+                        // show what it resolved to, so "auto" is not a mystery
+                        None => format!("auto ({})", self.effort_support().control.as_str()),
+                    },
+                    MenuAction::CycleEffortControl,
+                ));
+                self.menu_rows.push(setting(
+                    "always reasons",
+                    on_off(self.model_cfg.effort_always_on),
+                    MenuAction::ToggleEffortAlwaysOn,
+                ));
+                self.menu_rows.push(setting(
                     "default effort",
                     self.cfg.default_effort.as_str().to_string(),
                     MenuAction::CycleDefaultEffort,
@@ -1191,10 +1246,22 @@ impl App {
                                 Span::styled(format!(" {k}{mark}"), Theme::accent()),
                                 Span::styled(
                                     format!(
-                                        "  {} · ctx {} · ef:{}",
+                                        "  {} · ctx {} · {}",
                                         m.id,
                                         m.context,
-                                        m.effort.as_str()
+                                        // each row reports what that model
+                                        // would actually do with its level
+                                        crate::providers::effort::plan(
+                                            m.effort,
+                                            m.effort_support(
+                                                self.cfg
+                                                    .providers
+                                                    .get(&m.provider)
+                                                    .map(|p| p.format)
+                                                    .unwrap_or(WireFormat::Openai)
+                                            )
+                                        )
+                                        .short_label()
                                     ),
                                     Theme::dim(),
                                 ),
@@ -1267,13 +1334,35 @@ impl App {
                 ));
             }
             Menu::Effort => {
-                for lvl in EffortLevel::SELECTABLE {
+                // The menu has room for the whole truth: what each level does
+                // on *this* model, not just its name.
+                let plans: Vec<(EffortLevel, crate::providers::effort::Plan)> =
+                    EffortLevel::SELECTABLE
+                        .iter()
+                        .map(|lvl| (*lvl, self.effort_plan_for(*lvl)))
+                        .collect();
+                for (lvl, plan) in plans {
                     let current = lvl == self.model_cfg.effort;
                     let mark = if current { " *current" } else { "" };
+                    let note = match plan.status {
+                        crate::providers::effort::Status::Applied => String::new(),
+                        crate::providers::effort::Status::Clamped { to } => {
+                            format!("  → sent as {to}")
+                        }
+                        crate::providers::effort::Status::Ignored { why } => {
+                            format!("  → ignored by model ({why})")
+                        }
+                    };
+                    let name_style = if plan.is_honoured() {
+                        Theme::accent()
+                    } else {
+                        Theme::dim()
+                    };
                     self.menu_rows.push(row(
                         Line::from(vec![
-                            Span::styled(format!(" {}", lvl.as_str()), Theme::accent()),
+                            Span::styled(format!(" {}", lvl.as_str()), name_style),
                             Span::styled(mark.to_string(), Theme::dim()),
+                            Span::styled(note, Theme::dim()),
                         ]),
                         MenuAction::SetEffort(lvl),
                     ));

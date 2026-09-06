@@ -69,6 +69,8 @@ mod tests {
                 id: "test-model".into(),
                 context: 1000,
                 effort: EffortLevel::Off,
+                effort_control: None,
+                effort_always_on: false,
                 price_in: None,
                 price_out: None,
             },
@@ -164,6 +166,8 @@ mod tests {
                 id: "x-preview-f-free".into(),
                 context: 1_000_000,
                 effort: EffortLevel::Off,
+                effort_control: None,
+                effort_always_on: false,
                 price_in: None,
                 price_out: None,
             },
@@ -707,6 +711,8 @@ mod tests {
                 id: "test-model-2".into(),
                 context: 2000,
                 effort: EffortLevel::Off,
+                effort_control: None,
+                effort_always_on: false,
                 price_in: None,
                 price_out: None,
             },
@@ -1141,9 +1147,77 @@ mod tests {
     }
 
     #[test]
-    fn thinking_levels_include_off_for_status_bar_and_model_settings() {
+    fn effort_levels_include_off_for_status_bar_and_model_settings() {
         assert!(EffortLevel::SELECTABLE.contains(&EffortLevel::Off));
         assert_eq!(EffortLevel::SELECTABLE, EffortLevel::ALL);
+    }
+
+    /// §5.1: the status bar shows the *effective* mapping. Selecting `max` on
+    /// a model whose API stops at `high` used to read `th:max`, which claimed
+    /// work that was never requested.
+    #[test]
+    fn the_status_bar_reports_a_clamped_level_rather_than_the_selection() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.model_cfg.effort = EffortLevel::Max;
+
+        app.model_cfg.effort_control = Some(crate::config::EffortControl::Levels);
+        let text: String = app
+            .status_bar_spans(120)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("ef:max→high"), "status bar: {text:?}");
+
+        // a model that documents xhigh gets max, and the bar says so plainly
+        app.model_cfg.effort_control = Some(crate::config::EffortControl::Xhigh);
+        let text: String = app
+            .status_bar_spans(120)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            text.contains("ef:max") && !text.contains("ef:max→"),
+            "status bar: {text:?}"
+        );
+
+        // and a level the model will not act on is marked, not implied
+        app.model_cfg.effort_control = Some(crate::config::EffortControl::None);
+        let text: String = app
+            .status_bar_spans(120)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("ef:max (ignored)"), "status bar: {text:?}");
+    }
+
+    /// The effort menu is the one place with room for the reason, so it must
+    /// carry it for every level rather than only for the selected one.
+    #[test]
+    fn the_effort_menu_annotates_every_level_it_offers() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.model_cfg.effort_control = Some(crate::config::EffortControl::Levels);
+        app.open_menu(crate::tui::app::menus::Menu::Effort);
+        let rows: Vec<String> = app
+            .menu_rows
+            .iter()
+            .map(|(line, _)| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        let all = rows.join("\n");
+        assert_eq!(rows.len(), EffortLevel::SELECTABLE.len(), "{all}");
+        assert!(
+            all.contains("max") && all.contains("sent as high"),
+            "max must be marked as clamped: {all}"
+        );
+        assert!(
+            !all.contains("low  →"),
+            "levels that land must carry no note: {all}"
+        );
     }
 
     #[test]
@@ -2499,6 +2573,11 @@ mod tests {
                 app.startup = false;
                 app.cwd_label = label.to_string();
                 app.plan_step_label = plan.to_string();
+                // The widest effort label there is: `ef:max (ignored)` spends
+                // ten more columns than `ef:off`, and the row must still fit
+                // with the directory budget absorbing the difference.
+                app.model_cfg.effort = EffortLevel::Max;
+                app.model_cfg.effort_control = Some(crate::config::EffortControl::None);
 
                 let spans = app.status_bar_spans(w);
                 let text: String = spans.iter().map(|s| s.content.as_ref()).collect();

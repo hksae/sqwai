@@ -176,6 +176,9 @@ pub struct AgentInput {
     pub provider: SharedProvider,
     pub model_id: String,
     pub effort: Option<EffortLevel>,
+    /// what the target model does with that level (§5.1); threaded through so
+    /// providers never have to guess and the UI never has to re-derive it
+    pub effort_support: crate::config::EffortSupport,
     pub max_tokens: Option<u32>,
     /// System block for this request, ordered and split into stable/volatile
     /// parts. It is rebuilt by the caller for every turn and is never stored
@@ -308,6 +311,7 @@ async fn run_subagent(
     plan_mode: bool,
     context_limit: u64,
     effort: Option<EffortLevel>,
+    effort_support: crate::config::EffortSupport,
     max_tokens: Option<u32>,
     system: Vec<SystemPart>,
     mcp: crate::config::McpConfig,
@@ -338,6 +342,7 @@ async fn run_subagent(
                         plan_mode,
                         context_limit,
                         effort,
+                        effort_support,
                         max_tokens,
                         system.clone(),
                         mcp.clone(),
@@ -381,6 +386,7 @@ async fn run_subagent(
         provider: provider.clone(),
         model_id: model_id.to_string(),
         effort,
+        effort_support,
         max_tokens,
         system,
         messages: vec![Message::new(Role::User, task)],
@@ -500,6 +506,7 @@ async fn run_agent(
         provider,
         model_id,
         effort,
+        effort_support,
         max_tokens,
         system,
         mut messages,
@@ -787,6 +794,7 @@ async fn run_agent(
             system: turn_system.clone(),
             messages: request_messages.clone(),
             effort,
+            effort_support,
             max_tokens,
             tools: tools.clone(),
             previous_response_id: previous_response_id.clone(),
@@ -802,6 +810,7 @@ async fn run_agent(
                 system: turn_system,
                 messages: request_messages,
                 effort,
+                effort_support,
                 max_tokens,
                 tools: tools.clone(),
                 previous_response_id: previous_response_id.clone(),
@@ -983,6 +992,7 @@ async fn run_agent(
                             plan_mode,
                             context_limit,
                             effort,
+                            effort_support,
                             max_tokens,
                             system.clone(),
                             mcp.clone(),
@@ -1350,6 +1360,7 @@ async fn compact_history(
                 context::summary_input(&older, summary.as_deref()),
             )],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: Some(SUMMARY_MAX_TOKENS),
             // a summarization request needs no tools
             tools: Vec::new(),

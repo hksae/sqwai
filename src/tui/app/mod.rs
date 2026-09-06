@@ -395,6 +395,8 @@ impl App {
                 id: model_key.clone(),
                 context: session.context_limit,
                 effort: EffortLevel::Off,
+                effort_control: None,
+                effort_always_on: false,
                 price_in: None,
                 price_out: None,
             });
@@ -759,6 +761,27 @@ impl App {
     /// turn without restarting the app. The agent clones this handle per turn,
     /// so a key edited mid-turn is picked up when the next turn starts (after a
     /// normal Esc stop, or simply the next message).
+    /// What the current model does with the effort slider. The wire format is
+    /// the fallback declaration, so an unknown provider is treated as the
+    /// conservative case rather than as full support.
+    pub(super) fn effort_support(&self) -> crate::config::EffortSupport {
+        let format = self
+            .cfg
+            .providers
+            .get(&self.model_cfg.provider)
+            .map(|p| p.format)
+            .unwrap_or(crate::config::WireFormat::Openai);
+        self.model_cfg.effort_support(format)
+    }
+
+    pub(super) fn effort_plan_for(&self, level: EffortLevel) -> crate::providers::effort::Plan {
+        crate::providers::effort::plan(level, self.effort_support())
+    }
+
+    pub(super) fn effort_plan(&self) -> crate::providers::effort::Plan {
+        self.effort_plan_for(self.model_cfg.effort)
+    }
+
     fn rebuild_provider(&mut self) {
         let mc = self.model_cfg.clone();
         match self
@@ -847,6 +870,7 @@ impl App {
             } else {
                 Some(self.model_cfg.effort)
             },
+            effort_support: self.effort_support(),
             max_tokens: None,
             system,
             messages: msgs,
@@ -923,6 +947,7 @@ impl App {
             provider: self.provider.clone(),
             model_id: self.model_cfg.id.clone(),
             effort: None,
+            effort_support: self.effort_support(),
             max_tokens: None,
             // compaction needs no system block and no tools
             system: Vec::new(),
