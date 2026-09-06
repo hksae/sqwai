@@ -358,6 +358,12 @@ impl App {
                     base_url: url,
                     api_key: (!key.is_empty()).then_some(key),
                     api_key_env: (!key_env.is_empty()).then_some(key_env),
+                    // not shown in the form; preserve what the config says
+                    continuation: name
+                        .as_ref()
+                        .and_then(|n| self.cfg.providers.get(n))
+                        .or_else(|| self.cfg.providers.get(&new_name))
+                        .is_none_or(|p| p.continuation),
                 };
                 if let Some(old) = &name
                     && old != &new_name

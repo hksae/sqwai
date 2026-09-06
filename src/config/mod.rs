@@ -171,6 +171,18 @@ pub struct ProviderConfig {
     /// `<PROVIDER>_API_KEY` convention
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
+    /// Continue from the provider's copy of the conversation when the wire
+    /// format documents a reference for it, instead of resending the
+    /// transcript. Cheaper — a measured 92% prompt-cache hit — but it hands
+    /// the context to the provider, and `capabilities()` only knows what the
+    /// format documents, not what the endpoint behind it actually keeps.
+    /// Relays have been seen accepting the reference and storing nothing.
+    #[serde(default = "default_continuation")]
+    pub continuation: bool,
+}
+
+fn default_continuation() -> bool {
+    true
 }
 
 impl ProviderConfig {
@@ -759,6 +771,7 @@ impl Config {
                     base_url: s.base_url.to_string(),
                     api_key: None,
                     api_key_env: Some(s.key_env.to_string()),
+                    continuation: default_continuation(),
                 });
             for (key, id, ctx, th, pin, pout) in s.models {
                 self.models
@@ -1044,6 +1057,7 @@ mod tests {
             base_url: "http://x".into(),
             api_key: api_key.map(str::to_string),
             api_key_env: api_key_env.map(str::to_string),
+            continuation: true,
         };
         // explicit env variable
         assert_eq!(

@@ -1523,6 +1523,11 @@ heading_days = 7
 max_tokens = 3000          # MEMORY.md cap
 max_proposals_per_turn = 2
 
+[providers.<name>]
+continuation = true           # continue from the provider's own copy of the
+                              # conversation where the format documents a
+                              # reference for it; false resends the transcript
+
 [diary]
 token_budget = 1500
 effort = "off"                 # effort for the diary's own model call
