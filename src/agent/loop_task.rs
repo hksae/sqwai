@@ -263,6 +263,30 @@ fn backoff(attempt: u32) -> Duration {
 /// exchange and wrong the moment tools are in play: a tool result is
 /// `Role::Tool`, so the run of results the model is waiting for was dropped
 /// and the turn continued as if the tools had never been called.
+/// Transport for one request.
+///
+/// Continuation is dropped whenever the request answers a tool call: the
+/// matching `function_call` items live in the provider's chain, and a provider
+/// that does not really keep that chain rejects the outputs outright. Sending
+/// the transcript ourselves costs a few hundred bytes and cannot fail that
+/// way. `capabilities()` describes the wire format, not the endpoint behind
+/// it, so it cannot answer this on its own — relays accept the field and
+/// ignore it.
+fn turn_transport(
+    caps: crate::providers::ProviderCapabilities,
+    previous_response_id: Option<&str>,
+    messages: &[Message],
+    continuation_usable: bool,
+) -> ContextTransport {
+    let answering_a_call = messages.last().is_some_and(|m| m.role == Role::Tool);
+    if !continuation_usable || answering_a_call {
+        let mut caps = caps;
+        caps.previous_response = false;
+        return crate::providers::select_transport(caps, None);
+    }
+    crate::providers::select_transport(caps, previous_response_id)
+}
+
 fn request_messages(messages: &[Message], transport: ContextTransport) -> Vec<Message> {
     if transport != ContextTransport::PreviousResponse {
         return messages.to_vec();
@@ -607,7 +631,10 @@ async fn run_agent(
     } else {
         Vec::new()
     };
-    let transport = crate::providers::select_transport(caps, previous_response_id.as_deref());
+    // A continuation reference is only usable while the provider is known to
+    // honour it; the first request that proves otherwise turns it off for the
+    // rest of the session.
+    let mut continuation_usable = true;
 
     // `/compact` — write the mandatory pre-compaction diary entry first, then
     // run the policy and hand the transcript back without a chat turn.
@@ -821,6 +848,18 @@ async fn run_agent(
         {
             turn_system.push(crate::providers::SystemPart::volatile(nudge));
         }
+        // Decided per request, not once per turn: a request that carries tool
+        // results must never rely on the provider holding the calls they
+        // answer. Field failure on an OpenAI-compatible relay that accepts
+        // `previous_response_id` and does not chain by it:
+        // `400 No tool call found for function call output with call_id ...`
+        // — the outputs travelled, the calls stayed behind.
+        let transport = turn_transport(
+            caps,
+            previous_response_id.as_deref(),
+            &messages,
+            continuation_usable,
+        );
         let request_messages = request_messages(&messages, transport);
         let breakdown = RequestBreakdown::from_request(&ChatRequest {
             model_id: model_id.clone(),
@@ -929,6 +968,26 @@ async fn run_agent(
                         }),
                     );
                 }
+                // The reference was refused: the provider is not keeping the
+                // chain it advertised. Send the transcript we own instead, and
+                // stop using the reference for this session.
+                if failure.continuation_rejected && continuation_usable {
+                    continuation_usable = false;
+                    previous_response_id = None;
+                    if let Some(writer) = journal.as_mut() {
+                        let _ = writer.append(
+                            "provider_error",
+                            serde_json::json!({
+                                "class": "continuation_refused",
+                                "retries": failure.retries,
+                                "recovered": true,
+                                "by": "host",
+                            }),
+                        );
+                    }
+                    continue;
+                }
+
                 // A request that does not fit gets one compaction and one more
                 // try, which is the only thing that can make it fit (§5.1).
                 // Asking the same oversized request again cannot.
@@ -1499,6 +1558,9 @@ pub struct TurnFailure {
     pub class: Option<crate::providers::ErrorClass>,
     /// how many times the request was retried before giving up
     pub retries: u32,
+    /// the provider refused the continuation reference; the caller can retry
+    /// once with the transcript it owns
+    pub continuation_rejected: bool,
 }
 
 impl TurnFailure {
@@ -1511,6 +1573,14 @@ impl TurnFailure {
             message: message.into(),
             class,
             retries,
+            continuation_rejected: false,
+        }
+    }
+
+    fn continuation_rejected(message: impl Into<String>, retries: u32) -> Self {
+        Self {
+            continuation_rejected: true,
+            ..Self::new(message, None, retries)
         }
     }
 }
@@ -1560,6 +1630,16 @@ fn effort_ignored_reason(turn: &TurnOutcome, consecutive_zero_turns: u32) -> Opt
         ));
     }
     None
+}
+
+/// A provider rejecting the continuation reference, in the shapes seen so far.
+/// The first is what a relay says when it accepted `previous_response_id` and
+/// kept nothing behind it: the tool outputs arrive with no calls to match.
+fn rejects_continuation(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("no tool call found for function call output")
+        || (lower.contains("previous_response") && !lower.contains("not supported"))
+        || lower.contains("previous response not found")
 }
 
 fn rejects_effort_parameter(err: &str) -> bool {
@@ -1708,6 +1788,17 @@ async fn run_turn(
         };
         let class = crate::providers::class_of(&error);
         let err = format!("{error:#}");
+
+        // A provider that took a continuation reference and cannot resolve it
+        // leaves the caller a way out: resend the transcript. run_turn cannot
+        // do that itself — the request it holds was already shortened — so it
+        // reports the cause and stops.
+        if req.previous_response_id.is_some() && rejects_continuation(&err) {
+            crate::providers::log_http(&format!(
+                "provider refused the continuation reference: {err}"
+            ));
+            return Err(TurnFailure::continuation_rejected(err, attempt));
+        }
 
         // A gateway that refuses the reasoning parameter is telling us the
         // model's declared support is wrong. Retrying the same body cannot
@@ -2044,6 +2135,85 @@ mod transport_tests {
             )),
             vec![Role::Tool, Role::User]
         );
+    }
+
+    fn caps() -> crate::providers::ProviderCapabilities {
+        crate::providers::ProviderCapabilities {
+            previous_response: true,
+            ..Default::default()
+        }
+    }
+
+    /// The live 400 this exists for, from an OpenAI-compatible relay that
+    /// accepts `previous_response_id` and does not chain by it:
+    /// `No tool call found for function call output with call_id ...`.
+    /// A request answering a tool call must carry the calls itself.
+    #[test]
+    fn a_request_answering_a_tool_call_does_not_rely_on_the_chain() {
+        let mid_turn = vec![
+            Message::new(Role::User, "read the file"),
+            Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+                "c1",
+                "read",
+                serde_json::json!({}),
+            )]),
+            Message::tool_result("c1", "fn main() {}", false),
+        ];
+        assert_eq!(
+            turn_transport(caps(), Some("resp_1"), &mid_turn, true),
+            ContextTransport::Stateless,
+            "tool outputs must travel with the calls they answer"
+        );
+        // and the whole transcript goes with it, calls included
+        assert_eq!(
+            request_messages(&mid_turn, ContextTransport::Stateless).len(),
+            3
+        );
+
+        // between turns there is nothing to match, so continuation is fine
+        let between = vec![
+            Message::new(Role::Assistant, "done"),
+            Message::new(Role::User, "next"),
+        ];
+        assert_eq!(
+            turn_transport(caps(), Some("resp_1"), &between, true),
+            ContextTransport::PreviousResponse
+        );
+    }
+
+    /// Once a provider has refused the reference, the session stops offering
+    /// it — one failed request per session, not one per turn.
+    #[test]
+    fn a_refused_reference_is_not_offered_again() {
+        let between = vec![
+            Message::new(Role::Assistant, "done"),
+            Message::new(Role::User, "next"),
+        ];
+        assert_eq!(
+            turn_transport(caps(), Some("resp_1"), &between, false),
+            ContextTransport::Stateless
+        );
+    }
+
+    /// Prose matching again, so it is bounded on both sides: it must catch the
+    /// refusal and must not fire on a provider that simply has no such field.
+    #[test]
+    fn only_a_real_refusal_disables_the_continuation() {
+        assert!(rejects_continuation(
+            "provider returned 400: No tool call found for function call output with call_id call_x0"
+        ));
+        assert!(rejects_continuation(
+            "provider returned 400: previous response not found"
+        ));
+        assert!(!rejects_continuation(
+            "openai-compatible: previous_response_id dropped (not supported by Chat Completions)"
+        ));
+        assert!(!rejects_continuation(
+            "provider returned 429: rate limit exceeded"
+        ));
+        assert!(!rejects_continuation(
+            "provider returned 400: messages must alternate"
+        ));
     }
 
     /// Stateless is the default for a reason: everything is resent, and the
