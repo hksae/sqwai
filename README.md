@@ -131,6 +131,15 @@ provider = "anthropic"
 id = "claude-sonnet-5"
 context = 1000000
 effort = "high"                             # off | low | medium | high | max
+effort_control = "levels"                   # none | toggle | levels | xhigh | budget
+                                            # omit it and the wire format decides:
+                                            # a token budget on Anthropic, the three
+                                            # documented levels elsewhere. Declare
+                                            # "xhigh" for a model that documents it,
+                                            # otherwise `max` is sent as `high` and
+                                            # the status bar says `ef:max→high`.
+effort_always_on = false                    # the model cannot stop reasoning, so
+                                            # `off` is reported as ignored
 ```
 
 Local models: point `base_url` at the server, set `format = "openai"` and leave

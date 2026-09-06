@@ -296,6 +296,8 @@ pub async fn write_entry(
     notes: Option<&str>,
     last_user_message: Option<&str>,
     token_budget: Option<u32>,
+    // effort for this call; the diary is a cheap summariser by default (§5.1)
+    effort: crate::config::EffortLevel,
     timeout: Option<std::time::Duration>,
 ) -> Result<bool> {
     let host = host_block(root, session_id, trigger)?;
@@ -310,7 +312,8 @@ pub async fn write_entry(
             model_id: model_id.to_string(),
             system: vec![SystemPart::volatile(WRITER_SYSTEM)],
             messages: vec![Message::new(crate::providers::Role::User, prompt)],
-            effort: None,
+            effort: Some(effort).filter(|l| *l != crate::config::EffortLevel::Off),
+            effort_support: Default::default(),
             max_tokens: Some(token_budget.unwrap_or(DEFAULT_DIARY_TOKEN_BUDGET)),
             tools: Vec::new(),
             previous_response_id: None,
@@ -518,6 +521,7 @@ mod tests {
             None,
             None,
             Some(8),
+            crate::config::EffortLevel::Off,
             Some(std::time::Duration::from_millis(1)),
         )
         .await

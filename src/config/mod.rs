@@ -27,9 +27,10 @@ impl WireFormat {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, PartialOrd, Ord, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum EffortLevel {
+    #[default]
     Off,
     Low,
     Medium,
@@ -101,6 +102,65 @@ impl EffortLevel {
     }
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// What a model's API actually does with the effort slider.
+///
+/// The host cannot discover this: an endpoint that ignores `reasoning_effort`
+/// answers exactly like one that honours it. So it is declared, and the
+/// default is deliberately the conservative reading of the wire format rather
+/// than a guess about a particular model — a claim we cannot verify is worse
+/// than an admitted unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EffortControl {
+    /// no reasoning control at all (local models, non-reasoning chat models)
+    None,
+    /// reasoning can be switched on and off, but not levelled (DeepSeek-like)
+    Toggle,
+    /// `low` / `medium` / `high`
+    Levels,
+    /// `low` / `medium` / `high` / `xhigh`, for models that document `xhigh`
+    Xhigh,
+    /// a numeric thinking budget, so every level is a real distinct request
+    Budget,
+}
+
+impl EffortControl {
+    pub const ALL: [EffortControl; 5] = [
+        EffortControl::None,
+        EffortControl::Toggle,
+        EffortControl::Levels,
+        EffortControl::Xhigh,
+        EffortControl::Budget,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Toggle => "toggle",
+            Self::Levels => "levels",
+            Self::Xhigh => "xhigh",
+            Self::Budget => "budget",
+        }
+    }
+
+    /// what a wire format supports when the model says nothing more specific
+    pub fn default_for(format: WireFormat) -> Self {
+        match format {
+            // budget_tokens is part of the Messages API, not of a model's
+            // optional feature set
+            WireFormat::Anthropic => EffortControl::Budget,
+            // `reasoning_effort` / `reasoning.effort` are widely accepted and
+            // widely ignored; assume the three documented levels and nothing
+            // above them
+            WireFormat::Openai | WireFormat::Responses => EffortControl::Levels,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub format: WireFormat,
@@ -155,12 +215,63 @@ pub struct ModelConfig {
     /// accepted as a legacy spelling of the same key
     #[serde(alias = "thinking")]
     pub effort: EffortLevel,
+    /// what this model does with the slider; omitted means "whatever the wire
+    /// format documents"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_control: Option<EffortControl>,
+    /// true for models that always reason and cannot be told to stop, so that
+    /// `off` is reported as unsupported instead of pretending to disable it
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub effort_always_on: bool,
     /// $ per 1M input tokens (for the cost meter)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_in: Option<f64>,
     /// $ per 1M output tokens
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_out: Option<f64>,
+}
+
+/// A model's declared effort behaviour, resolved against its wire format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffortSupport {
+    pub control: EffortControl,
+    /// the model always reasons; `off` cannot be honoured
+    pub always_on: bool,
+}
+
+impl Default for EffortSupport {
+    fn default() -> Self {
+        Self {
+            control: EffortControl::Levels,
+            always_on: false,
+        }
+    }
+}
+
+impl ModelConfig {
+    /// What this model does with the slider, falling back to the wire format
+    /// and clamped to what that format can actually express: a declaration of
+    /// `levels` on the Anthropic API, or of `budget` on an OpenAI one, would
+    /// otherwise make the request carry nothing while the UI reported the
+    /// level as applied.
+    pub fn effort_support(&self, format: WireFormat) -> EffortSupport {
+        let declared = self
+            .effort_control
+            .unwrap_or_else(|| EffortControl::default_for(format));
+        let control = match (format, declared) {
+            (WireFormat::Anthropic, EffortControl::Levels | EffortControl::Xhigh) => {
+                EffortControl::Budget
+            }
+            (WireFormat::Openai | WireFormat::Responses, EffortControl::Budget) => {
+                EffortControl::Levels
+            }
+            _ => declared,
+        };
+        EffortSupport {
+            control,
+            always_on: self.effort_always_on,
+        }
+    }
 }
 
 /// built-in providers seeded on first run / merged into existing configs;
@@ -368,6 +479,13 @@ impl Default for MemoryConfig {
 pub struct DiaryConfig {
     #[serde(default = "default_diary_token_budget")]
     pub token_budget: u32,
+    /// Effort for the diary's own model call. §5.1 assigns effort per internal
+    /// role and puts the diary writer at `low`; §2.3.4 describes the same call
+    /// as running with effort off. The default keeps the cheaper reading — the
+    /// entry is a summary of facts the host already extracted — and the key
+    /// exists so the other one costs a line of config rather than a patch.
+    #[serde(default)]
+    pub effort: EffortLevel,
     #[serde(default = "default_diary_timeout_secs")]
     pub timeout_secs: u64,
     #[serde(default = "default_diary_batch_steps")]
@@ -492,6 +610,7 @@ impl Default for DiaryConfig {
     fn default() -> Self {
         Self {
             token_budget: default_diary_token_budget(),
+            effort: EffortLevel::Off,
             timeout_secs: default_diary_timeout_secs(),
             batch_steps: default_diary_batch_steps(),
             batch_minutes: default_diary_batch_minutes(),
@@ -649,6 +768,8 @@ impl Config {
                         id: id.to_string(),
                         context: *ctx,
                         effort: *th,
+                        effort_control: None,
+                        effort_always_on: false,
                         price_in: Some(*pin),
                         price_out: Some(*pout),
                     });
@@ -799,6 +920,82 @@ mod tests {
         assert_eq!(t.effort, EffortLevel::High);
         let t: T = toml::from_str("effort = \"max\"").unwrap();
         assert_eq!(t.effort, EffortLevel::Max);
+    }
+
+    /// The declaration is an override, not a requirement: a model that says
+    /// nothing gets the conservative reading of its wire format.
+    #[test]
+    fn effort_support_falls_back_to_the_wire_format() {
+        let mut m: ModelConfig = toml::from_str(
+            "provider = \"anthropic\"\nid = \"claude-sonnet-5\"\ncontext = 1000\neffort = \"high\"\n",
+        )
+        .unwrap();
+        assert_eq!(m.effort_control, None);
+        assert_eq!(
+            m.effort_support(WireFormat::Anthropic).control,
+            EffortControl::Budget,
+            "the Messages API expresses effort as a token budget"
+        );
+        assert_eq!(
+            m.effort_support(WireFormat::Openai).control,
+            EffortControl::Levels,
+            "an unknown OpenAI-compatible endpoint must not be assumed to do more"
+        );
+        assert!(!m.effort_support(WireFormat::Openai).always_on);
+
+        m.effort_control = Some(EffortControl::Xhigh);
+        assert_eq!(
+            m.effort_support(WireFormat::Openai).control,
+            EffortControl::Xhigh,
+            "a documented xhigh model must be able to say so"
+        );
+    }
+
+    /// A declaration the wire format cannot express would otherwise make the
+    /// request carry nothing while the UI called the level applied.
+    #[test]
+    fn a_declaration_is_clamped_to_what_the_format_can_express() {
+        let mut m: ModelConfig = toml::from_str(
+            "provider = \"p\"\nid = \"m\"\ncontext = 1000\neffort = \"high\"\neffort_control = \"levels\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            m.effort_support(WireFormat::Anthropic).control,
+            EffortControl::Budget
+        );
+        m.effort_control = Some(EffortControl::Budget);
+        assert_eq!(
+            m.effort_support(WireFormat::Openai).control,
+            EffortControl::Levels
+        );
+        // shapes the format *can* express are left alone
+        m.effort_control = Some(EffortControl::Toggle);
+        assert_eq!(
+            m.effort_support(WireFormat::Openai).control,
+            EffortControl::Toggle
+        );
+    }
+
+    #[test]
+    fn effort_declaration_parses_and_round_trips() {
+        let m: ModelConfig = toml::from_str(
+            "provider = \"p\"\nid = \"m\"\ncontext = 1000\neffort = \"max\"\n\
+             effort_control = \"xhigh\"\neffort_always_on = true\n",
+        )
+        .unwrap();
+        assert_eq!(m.effort_control, Some(EffortControl::Xhigh));
+        assert!(m.effort_always_on);
+        let back: ModelConfig = toml::from_str(&toml::to_string_pretty(&m).unwrap()).unwrap();
+        assert_eq!(back.effort_control, m.effort_control);
+        assert!(back.effort_always_on);
+
+        // a model that declares nothing writes nothing
+        let plain: ModelConfig =
+            toml::from_str("provider = \"p\"\nid = \"m\"\ncontext = 1000\neffort = \"low\"\n")
+                .unwrap();
+        let text = toml::to_string_pretty(&plain).unwrap();
+        assert!(!text.contains("effort_control"), "{text}");
+        assert!(!text.contains("effort_always_on"), "{text}");
     }
 
     /// configs written before the slider was renamed say `thinking`; they must

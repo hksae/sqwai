@@ -60,6 +60,13 @@ pub enum AgentEvent {
     TextDelta(String),
     ThinkingDelta(String),
     Usage(Usage),
+    /// The model did not act on the selected effort level, as a fact rather
+    /// than a guess: either the provider counted zero reasoning tokens, or it
+    /// rejected the parameter outright. The UI must stop implying the work.
+    EffortIgnored {
+        level: String,
+        why: String,
+    },
     ResponseId(String),
     RequestBreakdown(RequestBreakdown),
     /// a delegated child agent was created
@@ -176,6 +183,9 @@ pub struct AgentInput {
     pub provider: SharedProvider,
     pub model_id: String,
     pub effort: Option<EffortLevel>,
+    /// what the target model does with that level (§5.1); threaded through so
+    /// providers never have to guess and the UI never has to re-derive it
+    pub effort_support: crate::config::EffortSupport,
     pub max_tokens: Option<u32>,
     /// System block for this request, ordered and split into stable/volatile
     /// parts. It is rebuilt by the caller for every turn and is never stored
@@ -260,6 +270,13 @@ struct TurnOutcome {
     calls: Vec<ToolCallReq>,
     /// how many retries it took to get this answer, for the journal
     retries: u32,
+    /// reasoning tokens the provider reported for this turn, when it counts
+    /// them at all. `Some(0)` is evidence that a requested effort level was
+    /// not acted on; `None` says nothing either way.
+    reasoning_tokens: Option<u64>,
+    /// the provider rejected the effort parameter outright, so the turn was
+    /// retried without it and the session must stop sending it
+    effort_rejected: bool,
 }
 
 const MAX_SUBAGENTS_PER_CALL: usize = 8;
@@ -308,6 +325,7 @@ async fn run_subagent(
     plan_mode: bool,
     context_limit: u64,
     effort: Option<EffortLevel>,
+    effort_support: crate::config::EffortSupport,
     max_tokens: Option<u32>,
     system: Vec<SystemPart>,
     mcp: crate::config::McpConfig,
@@ -338,6 +356,7 @@ async fn run_subagent(
                         plan_mode,
                         context_limit,
                         effort,
+                        effort_support,
                         max_tokens,
                         system.clone(),
                         mcp.clone(),
@@ -381,6 +400,7 @@ async fn run_subagent(
         provider: provider.clone(),
         model_id: model_id.to_string(),
         effort,
+        effort_support,
         max_tokens,
         system,
         messages: vec![Message::new(Role::User, task)],
@@ -499,7 +519,8 @@ async fn run_agent(
     let AgentInput {
         provider,
         model_id,
-        effort,
+        mut effort,
+        effort_support,
         max_tokens,
         system,
         mut messages,
@@ -597,6 +618,7 @@ async fn run_agent(
                 .find(|message| message.role == Role::User)
                 .map(|message| message.content.as_str()),
             Some(diary.token_budget),
+            diary.effort,
             Some(Duration::from_secs(diary.timeout_secs)),
         )
         .await;
@@ -718,6 +740,8 @@ async fn run_agent(
     // gets through: without the guard a request that stays too large would
     // compact in a loop.
     let mut compacted_for_overflow = false;
+    // one record and one status line per session, not per turn
+    let mut effort_ignored_reported = false;
 
     loop {
         // The proposal limit applies to one model request/turn, not the whole
@@ -748,6 +772,7 @@ async fn run_agent(
                     .find(|message| message.role == Role::User)
                     .map(|message| message.content.as_str()),
                 Some(diary.token_budget),
+                diary.effort,
                 Some(Duration::from_secs(diary.timeout_secs)),
             )
             .await;
@@ -787,6 +812,7 @@ async fn run_agent(
             system: turn_system.clone(),
             messages: request_messages.clone(),
             effort,
+            effort_support,
             max_tokens,
             tools: tools.clone(),
             previous_response_id: previous_response_id.clone(),
@@ -802,6 +828,7 @@ async fn run_agent(
                 system: turn_system,
                 messages: request_messages,
                 effort,
+                effort_support,
                 max_tokens,
                 tools: tools.clone(),
                 previous_response_id: previous_response_id.clone(),
@@ -815,6 +842,44 @@ async fn run_agent(
         .await
         {
             Ok(turn) => {
+                // §5.1 asks the UI to say "(ignored by model)" when a level
+                // does not land. Everything the config can tell us is a claim;
+                // these two are evidence, so they are recorded like any other
+                // fact the host observed (§2.2.2) and reported once.
+                if let Some(level) = effort
+                    && !effort_ignored_reported
+                    && let Some(why) = effort_ignored_reason(&turn)
+                {
+                    effort_ignored_reported = true;
+                    if let Some(writer) = journal.as_mut() {
+                        let _ = writer.append(
+                            "effort_ignored",
+                            serde_json::json!({
+                                "level": level.as_str(),
+                                "model": model_id,
+                                "source": if turn.effort_rejected {
+                                    "rejected"
+                                } else {
+                                    "observed"
+                                },
+                                "reasoning_tokens": turn.reasoning_tokens,
+                                "by": "host",
+                            }),
+                        );
+                    }
+                    let _ = tx
+                        .send(AgentEvent::EffortIgnored {
+                            level: level.as_str().to_string(),
+                            why: why.to_string(),
+                        })
+                        .await;
+                    // A rejected parameter must not be sent again: the next
+                    // turn would spend a failed request to learn the same
+                    // thing.
+                    if turn.effort_rejected {
+                        effort = None;
+                    }
+                }
                 if turn.retries > 0
                     && let Some(writer) = journal.as_mut()
                 {
@@ -983,6 +1048,7 @@ async fn run_agent(
                             plan_mode,
                             context_limit,
                             effort,
+                            effort_support,
                             max_tokens,
                             system.clone(),
                             mcp.clone(),
@@ -1273,6 +1339,7 @@ async fn run_agent(
                                 .find(|message| message.role == Role::User)
                                 .map(|message| message.content.as_str()),
                             Some(diary.token_budget),
+                            diary.effort,
                             Some(Duration::from_secs(diary.timeout_secs)),
                         )
                         .await;
@@ -1350,6 +1417,7 @@ async fn compact_history(
                 context::summary_input(&older, summary.as_deref()),
             )],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: Some(SUMMARY_MAX_TOKENS),
             // a summarization request needs no tools
             tools: Vec::new(),
@@ -1428,6 +1496,38 @@ impl TurnFailure {
 
 /// stream one request, retrying failures that waiting can fix, with backoff,
 /// until it succeeds or the retry window elapses
+/// A provider refusing the reasoning parameter, in the several shapes the
+/// gateways phrase it. This is prose matching, which is unreliable by nature —
+/// but the alternative is dropping the effort level for the whole session on
+/// any 400, which is worse. When it misses, the turn fails as before.
+/// Evidence that a requested effort level was not acted on, or `None` when
+/// there is none. The distinction that matters: `reasoning_tokens: None` means
+/// the provider said nothing about reasoning, which is not the same as saying
+/// it did none — only an explicit zero is evidence (§5.1, §1.1).
+fn effort_ignored_reason(turn: &TurnOutcome) -> Option<&'static str> {
+    if turn.effort_rejected {
+        Some("the provider rejected the effort parameter")
+    } else if turn.reasoning_tokens == Some(0) {
+        Some("the provider reported zero reasoning tokens")
+    } else {
+        None
+    }
+}
+
+fn rejects_effort_parameter(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    (lower.contains("reasoning_effort")
+        || lower.contains("reasoning.effort")
+        || lower.contains("thinking")
+        || lower.contains("budget_tokens"))
+        && (lower.contains("not supported")
+            || lower.contains("unsupported")
+            || lower.contains("unrecognized")
+            || lower.contains("unknown")
+            || lower.contains("not allowed")
+            || lower.contains("invalid"))
+}
+
 async fn run_turn(
     provider: &SharedProvider,
     req: &ChatRequest,
@@ -1440,8 +1540,13 @@ async fn run_turn(
 
     let mut attempt: u32 = 0;
     let mut deadline: Option<Instant> = None;
+    // The request can lose its effort parameter mid-flight (see below), so the
+    // loop works on its own copy rather than on the caller's.
+    let mut req = req.clone();
+    let mut effort_rejected = false;
 
     loop {
+        let mut reasoning_tokens: Option<u64> = None;
         let mut got_delta = false;
         let mut failed: Option<anyhow::Error> = None;
         let mut text = String::new();
@@ -1474,6 +1579,9 @@ async fn run_turn(
                     if u.prompt_tokens > 0 {
                         *prompt_size = u.prompt_tokens;
                     }
+                    if u.reasoning_tokens.is_some() {
+                        reasoning_tokens = u.reasoning_tokens;
+                    }
                     if tx.send(AgentEvent::Usage(u)).await.is_err() {
                         return Err(TurnFailure::new("tui closed", None, attempt));
                     }
@@ -1502,11 +1610,29 @@ async fn run_turn(
             return Ok(TurnOutcome {
                 text,
                 calls,
+                reasoning_tokens,
+                effort_rejected,
                 retries: attempt,
             });
         };
         let class = crate::providers::class_of(&error);
         let err = format!("{error:#}");
+
+        // A gateway that refuses the reasoning parameter is telling us the
+        // model's declared support is wrong. Retrying the same body cannot
+        // help, but retrying without the parameter can — and the caller then
+        // stops sending it for the rest of the session. This is checked before
+        // the class, because the rejection arrives as an ordinary 400 that
+        // would otherwise end the turn.
+        if req.effort.is_some() && rejects_effort_parameter(&err) {
+            crate::providers::log_http(&format!(
+                "provider rejected the effort parameter, retrying without it: {err}"
+            ));
+            req.effort = None;
+            effort_rejected = true;
+            attempt += 1;
+            continue;
+        }
 
         // Decide from the class, not from the prose. Retrying an expired key
         // or an exhausted quota for an hour is as wrong as giving up on a 503.
@@ -1529,7 +1655,6 @@ async fn run_turn(
             }
         } else if err.contains("provider returned 400 Bad Request")
             || err.contains("invalid_request_error")
-            || err.contains("Function tools with reasoning_effort are not supported")
         {
             // Unclassified, but recognisably deterministic: a gateway that
             // answers 200 with an error body lands here.
@@ -1760,5 +1885,200 @@ mod subagent_tests {
         let error = subagent_tasks_from_args(&serde_json::json!({"tasks":tasks})).unwrap_err();
         assert!(error.contains("maximum is 8"));
         assert_eq!(MAX_PARALLEL_SUBAGENTS, 4);
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+
+    /// The prose match that replaces the one in the error classifier. It has
+    /// to catch the shapes gateways actually use, and — more importantly — not
+    /// fire on unrelated failures, since a false positive silently drops the
+    /// user's effort level for the rest of the session.
+    #[test]
+    fn a_rejected_effort_parameter_is_recognised_across_gateways() {
+        for err in [
+            "provider returned 400: Function tools with reasoning_effort are not supported",
+            "provider returned 400: {\"error\":{\"message\":\"Unrecognized request argument \
+             supplied: reasoning_effort\"}}",
+            "provider returned 400: unsupported parameter: 'reasoning.effort'",
+            "provider returned 400: thinking is not supported for this model",
+            "provider returned 400: invalid value for budget_tokens",
+        ] {
+            assert!(rejects_effort_parameter(err), "should have matched: {err}");
+        }
+    }
+
+    /// The behaviour the string match exists for: one retry without the
+    /// parameter, and a signal so the session stops sending it. Before this,
+    /// the same 400 ended the turn with "provider returned 400".
+    #[tokio::test]
+    async fn a_rejected_parameter_is_retried_once_without_it() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let bodies: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = bodies.clone();
+        let server = std::thread::spawn(move || {
+            for (n, stream) in listener.incoming().take(2).enumerate() {
+                let stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                let mut len = 0usize;
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line
+                        .to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .and_then(|s| s.trim().parse::<usize>().ok())
+                    {
+                        len = v;
+                    }
+                }
+                let mut buf = vec![0u8; len];
+                reader.read_exact(&mut buf).ok();
+                seen.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf).into_owned());
+
+                let mut out = stream;
+                if n == 0 {
+                    let body = "{\"error\":{\"message\":\"Unrecognized request argument \
+                                supplied: reasoning_effort\"}}";
+                    write!(
+                        out,
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                } else {
+                    let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+                                data: [DONE]\n\n";
+                    write!(
+                        out,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                }
+                let _ = out.flush();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
+
+        let provider = crate::providers::create(&crate::config::ResolvedProvider {
+            name: "p".into(),
+            format: crate::config::WireFormat::Openai,
+            base_url: format!("http://{addr}/v1"),
+            api_key: Some("k".into()),
+        })
+        .unwrap();
+        let req = ChatRequest {
+            model_id: "m".into(),
+            system: vec![],
+            messages: vec![Message::new(Role::User, "hi")],
+            effort: Some(crate::config::EffortLevel::High),
+            effort_support: Default::default(),
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        let (tx, mut rx) = mpsc::channel(64);
+        let (_ctl_tx, mut ctl) = mpsc::channel(4);
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let mut response_id = None;
+        let mut prompt_size = 0u64;
+        let outcome = run_turn(
+            &provider,
+            &req,
+            &tx,
+            &mut ctl,
+            &mut response_id,
+            &mut prompt_size,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "the retry without the parameter must succeed: {}",
+                e.message
+            )
+        });
+        drop(tx);
+        drain.await.unwrap();
+        server.join().unwrap();
+
+        assert_eq!(outcome.text, "ok");
+        assert!(
+            outcome.effort_rejected,
+            "the caller has to learn that the parameter was refused"
+        );
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2, "exactly one retry: {bodies:?}");
+        assert!(
+            bodies[0].contains("reasoning_effort"),
+            "first attempt carried the parameter: {}",
+            bodies[0]
+        );
+        assert!(
+            !bodies[1].contains("reasoning_effort"),
+            "the retry must drop it: {}",
+            bodies[1]
+        );
+    }
+
+    fn turn(reasoning_tokens: Option<u64>, effort_rejected: bool) -> TurnOutcome {
+        TurnOutcome {
+            text: String::new(),
+            calls: Vec::new(),
+            retries: 0,
+            reasoning_tokens,
+            effort_rejected,
+        }
+    }
+
+    /// The whole point of doing this from the response rather than from the
+    /// config: silence is not evidence. A provider that reports no reasoning
+    /// counter at all (Anthropic) must never be read as "it ignored you".
+    #[test]
+    fn only_an_explicit_zero_counts_as_evidence() {
+        assert_eq!(effort_ignored_reason(&turn(None, false)), None);
+        assert_eq!(effort_ignored_reason(&turn(Some(1), false)), None);
+        assert_eq!(effort_ignored_reason(&turn(Some(4096), false)), None);
+        assert_eq!(
+            effort_ignored_reason(&turn(Some(0), false)),
+            Some("the provider reported zero reasoning tokens")
+        );
+        // a refusal is evidence regardless of the counters
+        assert_eq!(
+            effort_ignored_reason(&turn(None, true)),
+            Some("the provider rejected the effort parameter")
+        );
+    }
+
+    #[test]
+    fn unrelated_failures_do_not_drop_the_effort_level() {
+        for err in [
+            "provider returned 401: invalid api key",
+            "provider returned 400: messages must alternate",
+            "provider returned 429: rate limit exceeded",
+            "request failed: error sending request",
+            // names the parameter, but not as the thing that failed
+            "provider returned 500: internal error while streaming thinking blocks",
+            "provider returned 400: prompt is too long: 300000 tokens > 200000 maximum",
+        ] {
+            assert!(!rejects_effort_parameter(err), "should not match: {err}");
+        }
     }
 }

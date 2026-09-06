@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod effort;
 pub mod openai;
 pub mod responses;
 
@@ -116,6 +117,11 @@ pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cached_tokens: Option<u64>,
+    /// Tokens the model spent reasoning, when the provider counts them.
+    /// `Some(0)` is the only positive evidence that a request for effort was
+    /// not acted on — `None` means the provider said nothing, which is not
+    /// the same thing and must never be read as zero (§5.1).
+    pub reasoning_tokens: Option<u64>,
 }
 
 impl Usage {
@@ -393,9 +399,11 @@ pub struct ChatRequest {
     pub system: Vec<SystemPart>,
     /// conversation history (user / assistant / tool only)
     pub messages: Vec<Message>,
-    /// sent only when the model supports it; mapping per provider (phase 1)
-    #[allow(dead_code)]
+    /// how much work the user asked for; `None` means the caller does not
+    /// touch the model's reasoning at all (summaries, the diary writer)
     pub effort: Option<EffortLevel>,
+    /// what the target model does with that level; see [`effort::plan`]
+    pub effort_support: crate::config::EffortSupport,
     pub max_tokens: Option<u32>,
     /// tools available to the model this turn (empty = no tool support needed)
     pub tools: Vec<ToolSpec>,

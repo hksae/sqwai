@@ -410,13 +410,23 @@ impl App {
                         self.session.model_key = new_key.clone();
                     }
                 }
+                // Fields the form does not show must survive an edit: before
+                // this, editing a model silently reset its prices, and it
+                // would now also reset its declared effort support.
+                let previous = key
+                    .as_ref()
+                    .and_then(|k| self.cfg.models.get(k))
+                    .cloned()
+                    .or_else(|| self.cfg.models.get(&new_key).cloned());
                 let updated = ModelConfig {
                     provider: provider.clone(),
                     id,
                     context,
                     effort,
-                    price_in: None,
-                    price_out: None,
+                    effort_control: previous.as_ref().and_then(|p| p.effort_control),
+                    effort_always_on: previous.as_ref().is_some_and(|p| p.effort_always_on),
+                    price_in: previous.as_ref().and_then(|p| p.price_in),
+                    price_out: previous.as_ref().and_then(|p| p.price_out),
                 };
                 self.cfg.models.insert(new_key.clone(), updated.clone());
                 if self.session.model_key == new_key {

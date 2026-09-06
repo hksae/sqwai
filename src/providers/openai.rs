@@ -40,6 +40,9 @@ impl OpenAiProvider {
             cached_tokens: u
                 .pointer("/prompt_tokens_details/cached_tokens")
                 .and_then(|c| c.as_u64()),
+            reasoning_tokens: u
+                .pointer("/completion_tokens_details/reasoning_tokens")
+                .and_then(|c| c.as_u64()),
         })
     }
 
@@ -148,13 +151,10 @@ impl Provider for OpenAiProvider {
             });
             // openai-compatible reasoning control; servers that do not know
             // the field simply ignore it
-            if let Some(level) = req.effort.filter(|l| *l != EffortLevel::Off) {
-                let effort = match level {
-                    EffortLevel::Low => "low",
-                    EffortLevel::Medium => "medium",
-                    EffortLevel::High | EffortLevel::Max => "high",
-                    EffortLevel::Off => unreachable!(),
-                };
+            if let Some(level) = req.effort.filter(|l| *l != EffortLevel::Off)
+                && let super::effort::Wire::Level(effort) =
+                    super::effort::plan(level, req.effort_support).wire
+            {
                 body["reasoning_effort"] = json!(effort);
             }
             if let Some(mt) = req.max_tokens { body["max_tokens"] = json!(mt); }
@@ -358,6 +358,7 @@ mod tests {
             system: vec![],
             messages: vec![Message::new(Role::User, "hi")],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,
@@ -452,6 +453,27 @@ mod tests {
         );
     }
 
+    /// The counter the observed-ignored check reads. `0` is a claim the
+    /// provider made; a missing field must stay `None` rather than become 0,
+    /// or every non-reasoning gateway would look like it ignored the request.
+    #[test]
+    fn reasoning_tokens_are_read_when_the_provider_reports_them() {
+        let with = json!({"usage": {"prompt_tokens": 10, "completion_tokens": 5,
+            "completion_tokens_details": {"reasoning_tokens": 0}}});
+        assert_eq!(
+            OpenAiProvider::map_usage(&with).unwrap().reasoning_tokens,
+            Some(0)
+        );
+        let without = json!({"usage": {"prompt_tokens": 10, "completion_tokens": 5}});
+        assert_eq!(
+            OpenAiProvider::map_usage(&without)
+                .unwrap()
+                .reasoning_tokens,
+            None,
+            "no counter is not the same as a zero counter"
+        );
+    }
+
     /// A provider that never sent state must not grow an empty field: Gemini is
     /// the only one that validates it, and other gateways reject unknown keys.
     #[test]
@@ -505,6 +527,7 @@ mod tests {
                 Message::tool_result("call_1", "a.txt\nb.txt", false),
             ],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: None,
             tools: vec![super::super::ToolSpec {
                 name: "ls".into(),
@@ -548,6 +571,7 @@ mod tests {
             system: vec![crate::providers::SystemPart::cached("sys")],
             messages: vec![Message::new(Role::User, "hi")],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: None,
             tools: vec![],
             previous_response_id: Some("resp_1".into()),
@@ -570,6 +594,7 @@ mod tests {
             ],
             messages: vec![Message::new(Role::User, "hi")],
             effort: None,
+            effort_support: Default::default(),
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,

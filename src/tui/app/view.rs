@@ -1477,7 +1477,9 @@ impl App {
         } else {
             String::new()
         };
-        let ef_label = format!(" ef:{} ", self.model_cfg.effort.as_str());
+        // reports the effective mapping, not the raw selection (§5.1)
+        let effort_plan = self.effort_plan();
+        let ef_label = format!(" {} ", effort_plan.short_label());
         let running = self
             .subagents
             .iter()
@@ -1579,7 +1581,9 @@ impl App {
                 Style::new().fg(Theme::ACCENT_SOFT()),
             ));
         }
-        let ef_style = if self.model_cfg.effort == EffortLevel::Off {
+        let ef_style = if self.model_cfg.effort == EffortLevel::Off || !effort_plan.is_honoured() {
+            // a level the model will not act on must not be lit up as if it
+            // were doing work
             Theme::dim()
         } else {
             Style::new().fg(Theme::ACCENT_SOFT())
