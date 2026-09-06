@@ -1779,6 +1779,30 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// Existence probe the acceptance runner can execute. `test -f` is POSIX
+    /// shell syntax, and this suite also runs on Windows, where the shell
+    /// has no `test` builtin — so each platform spells the probe its own
+    /// way, and the test exercises the re-run at `complete`, not the shell.
+    #[cfg(unix)]
+    fn gate_probe_command(flag: &std::path::Path) -> String {
+        format!("test -f {}", flag.display())
+    }
+
+    /// Windows spelling of [`gate_probe_command`]: `Get-Item` on a missing
+    /// path exits 1, on a present one 0. Deliberately no double quotes,
+    /// parentheses or semicolons anywhere: the command travels through Rust
+    /// argv quoting and `cmd /C` parsing before it reaches PowerShell, and
+    /// any of those would be mangled on the way (verified by watching a
+    /// parenthesised form exit 0 either way). Single quotes pass through
+    /// `cmd` literally, so paths with spaces survive.
+    #[cfg(windows)]
+    fn gate_probe_command(flag: &std::path::Path) -> String {
+        format!(
+            "powershell -NoProfile -Command Get-Item '{}'",
+            flag.display()
+        )
+    }
+
     /// `complete` runs `cmd:` items again instead of trusting the verify that
     /// happened earlier: a criterion that stopped passing must block
     /// completion (§2.1.2).
@@ -1787,7 +1811,7 @@ mod tests {
         let (mut ctx, dir) = proj();
         let flag = dir.join("gate.txt");
         fs::write(&flag, "ok").unwrap();
-        let command = format!("test -f {}", flag.display());
+        let command = gate_probe_command(&flag);
         let created = plan_op(
             &mut ctx,
             &json!({
