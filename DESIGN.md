@@ -1649,7 +1649,7 @@ number; a `partial` one is missing something the design calls for.
 | S | Cancel mid-tool (Esc): cancelled result, post-checkpoint, in_progress | next | F2 |
 | T | Provider fallback chain ([models.x].fallback) | planned — the `fallback` field does not exist on ModelConfig (#8) | §5.1 |
 | U | Assumption notes: open tracking, finish warning, resolve | next | F3 |
-| V | Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md) | next — `cmd:` items are stored as opaque text and never run (#7) | F3 |
+| V | Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md) | next — cmd:/manual: settling done (#7); remaining: /init seeding of verify commands and their substitution on create | F3 |
 | W | Plan-first gate (Act first-mutate w/o plan → plan_required) | planned | F3 |
 | X | Staged compaction + files-read anchor + USER.md split/load | partial — USER.md split and loading are in; staged pre-compaction (§3.3.1) and the files-read line in the anchor (§3.3.3) are not | F1, F5 |
 | Y | Claim lint (post-generation verify against journal/resolve_ref) | planned | I4 |
