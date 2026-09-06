@@ -169,6 +169,23 @@ File tools cannot reach `.sqwai/` except `skills/` and `config.toml`; plan,
 journal and memory are modified only through their own tools. That is what
 makes "host-written" and "append-only" guarantees rather than requests.
 
+## Debugging a provider
+
+`/settings` → **Debug** → `http debug log` writes failed requests, dropped SSE
+payloads and a per-turn effort line to `debug.log` in the platform data
+directory (the debug menu shows the exact path). The effort line reports what
+was asked for, what went on the wire, and what the provider counted:
+
+```
+turn: effort requested=max sent=Level("high") reasoning_tokens=not reported
+```
+
+`reasoning_tokens=not reported` and `reasoning_tokens=0` mean different things:
+the first is a provider that says nothing about reasoning, the second is
+evidence that the level was ignored, and only the second is acted on. The same
+switch can be set in the config as `[ui] http_log = true`. Successful request
+and response bodies are not logged.
+
 ## Design
 
 The full design — state layers, validator rules, compaction anchor, reflector

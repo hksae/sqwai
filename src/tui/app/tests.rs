@@ -1593,6 +1593,71 @@ mod tests {
         assert!(app.menu_stack.is_empty(), "second esc closes");
     }
 
+    /// The debug menu holds the http-log switch and the effort declaration,
+    /// and nothing in the UI opened it — it was reachable from tests only, so
+    /// every setting in it was effectively config-file-only. Every section
+    /// offered by `/settings` must open a menu that has rows.
+    #[test]
+    fn every_settings_section_opens_a_menu_with_rows() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::Settings);
+        let sections: Vec<(String, MenuAction)> = app
+            .menu_rows
+            .iter()
+            .map(|(line, action)| {
+                (
+                    line.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>(),
+                    action.clone(),
+                )
+            })
+            .collect();
+        assert!(
+            sections.iter().any(|(label, _)| label.contains("Debug")),
+            "no way to reach the debug menu: {:?}",
+            sections.iter().map(|(l, _)| l).collect::<Vec<_>>()
+        );
+        for (label, action) in sections {
+            let mut app = test_app("http://127.0.0.1:9/v1".into());
+            app.open_menu(Menu::Settings);
+            app.run_action(action);
+            assert!(
+                !app.menu_rows.is_empty(),
+                "section {label:?} opened nothing"
+            );
+        }
+    }
+
+    /// The switch the http log lives behind has to be clickable, since the log
+    /// is the only place the effort mapping can be inspected from outside.
+    #[test]
+    fn the_http_log_switch_is_reachable_from_settings() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let before = app.cfg.ui.http_log;
+        app.open_menu(Menu::Settings);
+        let open_debug = app
+            .menu_rows
+            .iter()
+            .find(|(line, _)| line.spans.iter().any(|s| s.content.contains("Debug")))
+            .map(|(_, action)| action.clone())
+            .expect("settings offers a debug section");
+        app.run_action(open_debug);
+        let toggle = app
+            .menu_rows
+            .iter()
+            .find(|(line, _)| {
+                line.spans
+                    .iter()
+                    .any(|s| s.content.contains("http debug log"))
+            })
+            .map(|(_, action)| action.clone())
+            .expect("the debug menu offers the http log switch");
+        app.run_action(toggle);
+        assert_ne!(app.cfg.ui.http_log, before);
+    }
+
     #[test]
     fn debug_toggles_flip_config() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());

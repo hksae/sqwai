@@ -125,6 +125,7 @@ pub(super) enum MenuAction {
     OpenMcp,
     OpenLsp,
     OpenSkills,
+    OpenDebug,
     AddProvider,
     EditProvider(String),
     DeleteProvider(String),
@@ -453,6 +454,7 @@ impl App {
             MenuAction::OpenMcp => self.open_menu(Menu::Mcp),
             MenuAction::OpenLsp => self.open_menu(Menu::Lsp),
             MenuAction::OpenSkills => self.open_menu(Menu::Skills),
+            MenuAction::OpenDebug => self.open_menu(Menu::Debug),
             MenuAction::OpenModels(p) => self.open_menu(Menu::Models { provider: p }),
             MenuAction::AddProvider => self.open_menu(Menu::EditProvider { name: None }),
             MenuAction::EditProvider(name) => {
@@ -860,6 +862,11 @@ impl App {
                     "Skills",
                     "agent instructions",
                     MenuAction::OpenSkills,
+                ));
+                self.menu_rows.push(section(
+                    "Debug",
+                    "http log, effort declaration, log path",
+                    MenuAction::OpenDebug,
                 ));
                 self.menu_footer_text = Some("enter: open · esc: close".into());
             }
