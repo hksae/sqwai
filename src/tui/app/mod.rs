@@ -1086,6 +1086,11 @@ impl App {
             self.show_busy_status();
             return false;
         }
+        // §2.5 runs retention when a session ends. Doing it here rather than
+        // on the way out means it also happens for a session the user simply
+        // walks away from, and the new session's own chain is protected by
+        // name so its undo history survives its own maintenance.
+        self.run_undo_maintenance();
         let ctx = self.session.context_limit;
         self.session = Session::new(self.cfg.default_model.clone(), ctx);
         self.session.plan_id =
@@ -1107,6 +1112,40 @@ impl App {
             StatusKind::Ok,
         );
         true
+    }
+
+    /// Retention for both checkpoint layers (§2.5). Reports only when it did
+    /// something: a maintenance pass that announces "nothing to do" on every
+    /// `/new` is noise.
+    pub(super) fn run_undo_maintenance(&mut self) {
+        let root = std::env::current_dir().unwrap_or_default();
+        let session = self.session.id.to_string();
+        match crate::agent::checkpoints::maintain(&root, &self.cfg.undo, &session) {
+            Ok(report) if report.did_anything() => {
+                let mut note = String::from("undo maintenance:");
+                if report.blobs_removed > 0 {
+                    note.push_str(&format!(
+                        " {} pre-image(s) freed {}",
+                        report.blobs_removed,
+                        fmt_bytes(report.blobs_freed_bytes)
+                    ));
+                }
+                if !report.chains_dropped.is_empty() {
+                    note.push_str(&format!(
+                        " {} finished session chain(s) dropped",
+                        report.chains_dropped.len()
+                    ));
+                }
+                if report.collected {
+                    note.push_str(" shadow repository collected");
+                }
+                self.status(&note, StatusKind::Info);
+            }
+            Ok(_) => {}
+            // Maintenance failing must never block a new session: the cost is
+            // disk, and the user is told rather than stopped.
+            Err(e) => crate::providers::log_http(&format!("undo maintenance failed: {e:#}")),
+        }
     }
 
     fn switch_model(&mut self, key: &str) {
@@ -1258,7 +1297,13 @@ impl App {
             "/models" => self.open_menu(Menu::Models {
                 provider: self.model_cfg.provider.clone(),
             }),
-            "/exit" => self.quit = true,
+            "/exit" => {
+                // §2.5 runs retention on `/new` and `/exit`; the current
+                // session's own chain is kept so a resumed session still has
+                // its undo history.
+                self.run_undo_maintenance();
+                self.quit = true;
+            }
             "/compact" => self.start_compaction(),
             "/diary" => {
                 if self.streaming {
@@ -2965,6 +3010,16 @@ pub(super) fn fmt_relative_time(dt: chrono::DateTime<chrono::Utc>) -> String {
         format!("{days} days ago")
     } else {
         local.format("%d.%m %H:%M").to_string()
+    }
+}
+
+fn fmt_bytes(n: u64) -> String {
+    if n >= 1024 * 1024 {
+        format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
+    } else if n >= 1024 {
+        format!("{} KB", n / 1024)
+    } else {
+        format!("{n} B")
     }
 }
 

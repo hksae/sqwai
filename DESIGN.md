@@ -875,7 +875,10 @@ via the journal's `file_diff` chain).
 **Maintenance.**
 One branch per session `refs/sessions/<id>`, with checkpoints forming a commit chain.
 Retention: keep the last N commits of the session (`undo.keep_per_session`, 50) along with
-everything referenced by active plan evidence; on `/new` and `/exit`, run `update-ref` on
+everything referenced by active plan evidence — implemented as a *report*, since
+dropping the oldest commits of a chain rewrites every descendant and invalidates
+the shas already recorded in the journal and in plan evidence; enforcing it needs
+per-snapshot refs with parentless commits instead of one chain; on `/new` and `/exit`, run `update-ref` on
 the truncated chain, and every M sessions trigger `git gc --prune=now` in the shadow repo.
 Layer 1 blobs are retained based on references in active plan journals (`undo.blob_grace_secs`);
 purged together with the session journal. The shadow repo can be stored either in the project
@@ -1637,7 +1640,7 @@ number; a `partial` one is missing something the design calls for.
 | F4 | Diary: host block, triggers, writer call, fallback; memory_read; secrets screening | done — the journal itself is not screened (#11); the diary number post-check of §2.3.2 is a prompt instruction, not host code (#12) | F2 |
 | F5 | MEMORY.md + memory_propose approval; session-start loading | done | F4 |
 | F6 | Compaction anchor; summary=off default; resume/fork per §3.4; undo→reopen | done | F1–F5 |
-| F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, optional zstd) + layer-2 shadow repo driven by the git CLI through `tokio::process`; restore via diff-tree; `/undo step N` | done except retention (`keep_per_session`, blob grace, shadow `gc`); git invoked synchronously rather than through `tokio::process` — the call sites are already blocking — restore is path-scoped and a non-count `/undo` argument is refused (#4, #5); remaining: git2, checkpoints in the user's `.git`, no undo outside git repos (#17) | F1 |
+| F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, optional zstd) + layer-2 shadow repo driven by the git CLI through `tokio::process`; restore via diff-tree; `/undo step N` | done, with two stated deviations: git is invoked synchronously (the call sites are already blocking), and `keep_per_session` is reported rather than enforced — truncating a commit chain rewrites the shas the journal recorded — restore is path-scoped and a non-count `/undo` argument is refused (#4, #5); remaining: git2, checkpoints in the user's `.git`, no undo outside git repos (#17) | F1 |
 | G | Goal-retention benchmark (§8.2) | planned | F6 |
 | H0 | L0 fact block + criticism detector | planned | F2 |
 | H1 | bash_ro, read-only toolset, Scope/Neutralizer/Executor/Verdict, /verify | planned | H0, D |

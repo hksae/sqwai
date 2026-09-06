@@ -23,6 +23,7 @@
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 /// Content stored above this size is compressed. Below it, zstd's frame header
 /// and the CPU cost buy nothing: source files that small are dominated by the
@@ -112,6 +113,73 @@ pub fn has(root: &Path, id: &str) -> bool {
     path_for(root, id).exists()
 }
 
+/// Remove blobs nothing references any more (§2.5 retention).
+///
+/// A blob is kept when a journal still names it, or when it is younger than
+/// `grace` — the second condition is what stops a race with a write that has
+/// stored its pre-image but not yet appended the `file_diff` record.
+///
+/// Returns how many blobs were removed and how many bytes that freed, because
+/// a maintenance routine that reports nothing is a maintenance routine nobody
+/// trusts.
+pub fn purge(
+    root: &Path,
+    referenced: &std::collections::HashSet<String>,
+    grace: Duration,
+) -> Purged {
+    let mut purged = Purged::default();
+    let Ok(shards) = std::fs::read_dir(dir(root)) else {
+        return purged;
+    };
+    let now = SystemTime::now();
+    for shard in shards.flatten() {
+        if !shard.path().is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(shard.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            // temporary files from an interrupted `put`
+            let is_temp = name.starts_with('.');
+            let id = format!("blake3:{name}");
+            if !is_temp && referenced.contains(&id) {
+                purged.kept += 1;
+                continue;
+            }
+            let young = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age < grace);
+            if young && !is_temp {
+                purged.kept += 1;
+                continue;
+            }
+            let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+            if std::fs::remove_file(&path).is_ok() {
+                purged.removed += 1;
+                purged.freed_bytes += size;
+            }
+        }
+        // an empty shard directory is noise in `ls`
+        let _ = std::fs::remove_dir(shard.path());
+    }
+    purged
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Purged {
+    pub removed: usize,
+    pub kept: usize,
+    pub freed_bytes: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +244,62 @@ mod tests {
         let err = get(dir.path(), "blake3:deadbeef").unwrap_err().to_string();
         assert!(err.contains("blake3:deadbeef"), "{err}");
         assert!(err.contains("not in the store"), "{err}");
+    }
+
+    /// Retention must not collect a pre-image `/undo` could still need. The
+    /// grace window is the second guard: a blob stored microseconds before its
+    /// `file_diff` record was appended is not yet referenced by anything.
+    #[test]
+    fn purge_keeps_what_is_referenced_and_what_is_still_young() {
+        use std::collections::HashSet;
+        let dir = root();
+        let root_path = dir.path();
+
+        let referenced = put(root_path, b"still needed by a journal record").unwrap();
+        let orphan = put(root_path, b"nothing points here any more").unwrap();
+        let young = put(root_path, b"stored a moment ago").unwrap();
+
+        // age the first two past the window; the third stays young
+        for id in [&referenced, &orphan] {
+            let path = path_for(root_path, id);
+            let old = SystemTime::now() - Duration::from_secs(3600);
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(old).unwrap();
+        }
+
+        let keep: HashSet<String> = HashSet::from([referenced.clone()]);
+        let report = purge(root_path, &keep, Duration::from_secs(60));
+
+        assert_eq!(report.removed, 1, "only the orphan goes");
+        assert!(report.freed_bytes > 0);
+        assert!(
+            has(root_path, &referenced),
+            "a referenced blob was collected"
+        );
+        assert!(
+            has(root_path, &young),
+            "a blob younger than the grace window"
+        );
+        assert!(!has(root_path, &orphan));
+    }
+
+    /// A `put` interrupted between writing the temp file and renaming it
+    /// leaves a dot-file that nothing will ever reference.
+    #[test]
+    fn purge_removes_leftover_temporary_files() {
+        use std::collections::HashSet;
+        let dir = root();
+        let root_path = dir.path();
+        let id = put(root_path, b"real").unwrap();
+        let shard = path_for(root_path, &id).parent().unwrap().to_path_buf();
+        let temp = shard.join(".999.tmp");
+        std::fs::write(&temp, b"half-written").unwrap();
+
+        let keep = HashSet::from([id.clone()]);
+        let report = purge(root_path, &keep, Duration::from_secs(0));
+        assert!(!temp.exists(), "the temporary file survived");
+        assert!(has(root_path, &id));
+        assert_eq!(report.removed, 1);
     }
 
     fn walk(dir: &Path) -> Vec<PathBuf> {

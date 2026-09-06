@@ -91,6 +91,88 @@ pub fn changed_files(root: &Path, sha: &str) -> Result<Vec<String>> {
     shadow.changed_files(sha)
 }
 
+/// What one maintenance pass did, for the status line and the journal.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Maintenance {
+    /// session chains dropped because their journal is gone
+    pub chains_dropped: Vec<String>,
+    /// Length of the surviving session's chain, against
+    /// `[undo].keep_per_session`. Reported rather than enforced — see the
+    /// note on [`maintain`].
+    pub kept_chain_len: usize,
+    pub over_keep_limit: bool,
+    /// layer-1 blobs removed and bytes freed
+    pub blobs_removed: usize,
+    pub blobs_freed_bytes: u64,
+    /// the shadow repository was collected
+    pub collected: bool,
+}
+
+impl Maintenance {
+    pub fn did_anything(&self) -> bool {
+        !self.chains_dropped.is_empty() || self.blobs_removed > 0 || self.collected
+    }
+}
+
+/// Retention for both layers (§2.5), run when a session ends.
+///
+/// Layer 1: a blob is kept while any journal still names it, or while it is
+/// younger than `[undo].blob_grace_secs`.
+///
+/// Layer 2: a session chain whose journal is gone has nothing left that could
+/// reference its checkpoints, so its ref is dropped; `git gc --prune=now`
+/// then collects what became unreachable. Collection also runs when the
+/// shadow repository is over `[undo].shadow_max_bytes`, because that is the
+/// only bound the user was given.
+///
+/// Never touches the chain of `keep_session`: that is the session asking for
+/// the maintenance, and its own undo history has to survive it.
+///
+/// `[undo].keep_per_session` is **reported, not enforced**, and that is a
+/// deliberate gap rather than an oversight. §2.5 stores checkpoints as a
+/// commit chain, and dropping the oldest commits of a chain requires
+/// rewriting every descendant — which changes the shas the session already
+/// recorded in its journal and in plan evidence, turning working undo
+/// references into dangling ones. Reporting the overrun keeps the promise
+/// honest until the chain shape is revisited (see the PR that added this).
+pub fn maintain(
+    root: &Path,
+    cfg: &crate::config::UndoConfig,
+    keep_session: &str,
+) -> Result<Maintenance> {
+    let mut report = Maintenance::default();
+
+    let referenced = crate::agent::journal::Journal::referenced_blobs(root)?;
+    let purged = crate::agent::blobs::purge(
+        root,
+        &referenced,
+        std::time::Duration::from_secs(cfg.blob_grace_secs),
+    );
+    report.blobs_removed = purged.removed;
+    report.blobs_freed_bytes = purged.freed_bytes;
+
+    let Some(shadow) = shadow(root, cfg.shadow) else {
+        return Ok(report);
+    };
+    let alive = crate::agent::journal::Journal::sessions_on_disk(root);
+    for session in shadow.sessions()? {
+        if session == keep_session || alive.contains(&session) {
+            continue;
+        }
+        if shadow.drop_session(&session).is_ok() {
+            report.chains_dropped.push(session);
+        }
+    }
+    report.kept_chain_len = shadow.chain_len(keep_session).unwrap_or(0);
+    report.over_keep_limit = report.kept_chain_len > cfg.keep_per_session as usize;
+    let oversized = shadow.size_bytes() > cfg.shadow_max_bytes;
+    if !report.chains_dropped.is_empty() || oversized {
+        shadow.gc()?;
+        report.collected = true;
+    }
+    Ok(report)
+}
+
 /// One path to put back, with the hash the agent left it at when the host
 /// recorded one. `None` means "restore unconditionally" — the caller could not
 /// narrow the scope and has said so to the user.
@@ -251,6 +333,77 @@ pub fn restore_paths(root: &Path, sha: &str, targets: &[Target]) -> Result<Resto
 mod tests {
     use super::*;
     use std::fs;
+
+    /// §2.5: blobs are *"purged together with the session journal"*. A chain
+    /// whose journal is gone has nothing left that could reference its
+    /// checkpoints; a chain whose journal is still there must survive, and so
+    /// must the session running the maintenance.
+    #[test]
+    fn maintenance_drops_only_the_chains_whose_journal_is_gone() {
+        let dir = tempfile::Builder::new()
+            .prefix("sqwai-maintain")
+            .tempdir()
+            .unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.rs"), b"fn main() {}").unwrap();
+        let cfg = crate::config::UndoConfig::default();
+
+        let Some(shadow) = shadow(root, cfg.shadow) else {
+            // no git binary: layer 2 is absent and there is nothing to test
+            return;
+        };
+        for session in ["current", "alive", "finished"] {
+            fs::write(root.join("a.rs"), format!("// {session}")).unwrap();
+            shadow.snapshot(session, "one").unwrap();
+        }
+        // two of the three still have a journal on disk
+        fs::create_dir_all(root.join(".sqwai/journal")).unwrap();
+        for session in ["current", "alive"] {
+            fs::write(root.join(format!(".sqwai/journal/{session}.jsonl")), b"").unwrap();
+        }
+
+        let report = maintain(root, &cfg, "current").unwrap();
+        assert_eq!(report.chains_dropped, vec!["finished".to_string()]);
+        assert!(
+            report.collected,
+            "dropping a chain must be followed by a gc"
+        );
+
+        let left = shadow.sessions().unwrap();
+        assert!(left.contains(&"current".to_string()));
+        assert!(left.contains(&"alive".to_string()));
+        assert!(!left.contains(&"finished".to_string()));
+    }
+
+    /// `keep_per_session` is reported, not enforced — truncating a commit
+    /// chain would rewrite the shas the journal recorded. The report has to
+    /// say so, or the setting silently means nothing.
+    #[test]
+    fn maintenance_reports_a_chain_over_the_keep_limit() {
+        let dir = tempfile::Builder::new()
+            .prefix("sqwai-keep")
+            .tempdir()
+            .unwrap();
+        let root = dir.path();
+        let cfg = crate::config::UndoConfig {
+            keep_per_session: 2,
+            ..Default::default()
+        };
+
+        let Some(shadow) = shadow(root, cfg.shadow) else {
+            return;
+        };
+        for n in 0..4 {
+            fs::write(root.join("a.rs"), format!("// {n}")).unwrap();
+            shadow.snapshot("current", "snap").unwrap();
+        }
+        let report = maintain(root, &cfg, "current").unwrap();
+        assert_eq!(report.kept_chain_len, 4);
+        assert!(
+            report.over_keep_limit,
+            "four commits against a limit of two has to be visible"
+        );
+    }
 
     /// §2.5's headline promise: undo works in a project that is not a git
     /// repository at all. No `git init` anywhere in this test.

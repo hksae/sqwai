@@ -392,6 +392,47 @@ impl Journal {
         )
     }
 
+    /// Every layer-1 blob any journal in this project still names.
+    ///
+    /// Retention reads this rather than the current session's journal alone:
+    /// a resumed session, or a plan whose evidence points at an older
+    /// session's records, must not have its pre-images collected out from
+    /// under it (§2.5).
+    pub fn referenced_blobs(root: &Path) -> Result<std::collections::HashSet<String>> {
+        let mut ids = std::collections::HashSet::new();
+        for record in Self::records(root)? {
+            if record.kind != "file_diff" {
+                continue;
+            }
+            for field in ["blob_before", "blob_after"] {
+                if let Some(id) = record.fields.get(field).and_then(Value::as_str) {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Session ids that still have a journal on disk. A chain whose journal is
+    /// gone has nothing left that could reference its checkpoints, which is
+    /// what §2.5 means by blobs being *"purged together with the session
+    /// journal"*.
+    pub fn sessions_on_disk(root: &Path) -> Vec<String> {
+        let dir = root.join(".sqwai").join("journal");
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                (path.extension().and_then(|s| s.to_str()) == Some("jsonl"))
+                    .then(|| path.file_stem()?.to_str().map(str::to_string))
+                    .flatten()
+            })
+            .collect()
+    }
+
     /// Which of `checkpoints` have at least one recorded write.
     ///
     /// The complement is what `/undo` cannot account for: a `bash` checkpoint
