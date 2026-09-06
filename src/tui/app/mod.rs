@@ -1140,6 +1140,7 @@ impl App {
             .to_string();
         match name.as_str() {
             "/settings" => self.open_menu(Menu::Settings),
+            "/debug" => self.open_menu(Menu::Debug),
             "/mcp" => self.status(
                 "MCP settings are available from /settings (runtime coming in phase 4)",
                 StatusKind::Info,
@@ -1179,7 +1180,7 @@ impl App {
                 self.status("automatic Skills loading restored", StatusKind::Ok);
             }
 
-            "/themes" | "/theme" => self.open_menu(Menu::Themes),
+            "/theme" => self.open_menu(Menu::Themes),
             "/graph-rebuild" => {
                 if self.streaming {
                     self.show_busy_status();
@@ -1237,7 +1238,7 @@ impl App {
             "/models" => self.open_menu(Menu::Models {
                 provider: self.model_cfg.provider.clone(),
             }),
-            "/exit" | "/quit" | "/q" => self.quit = true,
+            "/exit" => self.quit = true,
             "/compact" => self.start_compaction(),
             "/diary" => {
                 if self.streaming {

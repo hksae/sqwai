@@ -2043,13 +2043,25 @@ mod tests {
     fn startup_command_dismisses_startup_screen() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = true;
-        app.input = App::fresh_input("/themes".into());
+        app.input = App::fresh_input("/theme".into());
 
         app.submit();
 
-        // /themes command dismisses startup and opens Themes menu
+        // /theme command dismisses startup and opens Themes menu
         assert!(!app.startup);
         assert!(matches!(app.cur_menu(), Some(Menu::Themes)));
+    }
+
+    #[test]
+    fn debug_command_opens_the_debug_menu() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.input = App::fresh_input("/debug".into());
+
+        app.submit();
+
+        // /debug used to fall through to "not implemented yet" even though
+        // the menu behind it exists
+        assert!(matches!(app.cur_menu(), Some(Menu::Debug)));
     }
 
     #[test]

@@ -420,7 +420,7 @@ impl Default for SkillsConfig {
     }
 }
 
-/// runtime-tweakable ui behavior (`/debug`, `/themes`)
+/// runtime-tweakable ui behavior (`/debug`, `/theme`)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiConfig {
     /// reveal assistant text gradually instead of per-chunk

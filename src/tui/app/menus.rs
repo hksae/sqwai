@@ -33,14 +33,11 @@ pub(super) const COMMANDS: &[&str] = &[
     "/new",
     "/plan",
     "/providers",
-    "/q",
-    "/quit",
     "/sessions",
     "/settings",
     "/skill",
     "/skills",
     "/theme",
-    "/themes",
     "/undo",
 ];
 
@@ -69,7 +66,7 @@ pub(super) enum Menu {
     /// /debug: runtime toggles and diagnostics
     #[allow(dead_code)]
     Debug,
-    /// /themes: palette browser
+    /// /theme: palette browser
     Themes,
     /// single-field form to rename a session
     EditSessionTitle {
