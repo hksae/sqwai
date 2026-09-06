@@ -178,6 +178,8 @@ asked for, what went on the wire, and what the provider counted:
 
 ```
 turn: effort requested=max sent=Level("high") reasoning_tokens=not reported
+turn: effort requested=high sent=Level("high") reasoning_tokens=1088
+turn: effort requested=max sent=nothing (parameter refused by the provider) reasoning_tokens=0
 ```
 
 `reasoning_tokens=not reported` and `reasoning_tokens=0` mean different things:
