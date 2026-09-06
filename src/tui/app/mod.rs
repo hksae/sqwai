@@ -871,6 +871,7 @@ impl App {
             diary: self.cfg.diary.clone(),
             memory: self.cfg.memory.clone(),
             compaction: self.cfg.compaction.clone(),
+            plan_limits: self.cfg.plan,
             subagent_depth: 0,
         };
         self.context_bootstrap_pending = false;
@@ -941,6 +942,7 @@ impl App {
             diary: self.cfg.diary.clone(),
             memory: self.cfg.memory.clone(),
             compaction: self.cfg.compaction.clone(),
+            plan_limits: self.cfg.plan,
             subagent_depth: 0,
         };
         self.agent = Some(spawn_agent(input));
@@ -1274,8 +1276,11 @@ impl App {
                 }
             }
             Some("limit") => {
-                "plan limit is configured through the plan settings; runtime override pending"
-                    .to_string()
+                format!(
+                    "plan step limit is [plan].max_steps in the config (currently {}); \
+                     a runtime override is not implemented yet",
+                    self.cfg.plan.max_steps
+                )
             }
             Some("complete") => match plan::open_active(&root) {
                 Ok(Some(mut active)) => {

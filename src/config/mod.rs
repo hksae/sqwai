@@ -373,6 +373,54 @@ pub struct DiaryConfig {
     pub batch_minutes: u16,
 }
 
+/// `[plan]` — the host's own limits on the structured plan (§5.9).
+///
+/// These are host values on purpose. The plan budget used to be computed from
+/// a `context_limit` the model passed in its own tool arguments, which let it
+/// raise its own ceiling and avoid the folding in §2.1.5.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct PlanConfig {
+    /// share of the model's context the injected plan may occupy
+    #[serde(default = "default_plan_budget_ratio")]
+    pub budget_ratio: f64,
+    /// most steps a plan may hold before `add`/`split` are refused
+    #[serde(default = "default_plan_max_steps")]
+    pub max_steps: usize,
+    /// actions attributed to a step before the tail block reminds the model
+    /// to update the plan
+    #[serde(default = "default_plan_nudge_after")]
+    pub nudge_after: usize,
+}
+
+impl Default for PlanConfig {
+    fn default() -> Self {
+        Self {
+            budget_ratio: default_plan_budget_ratio(),
+            max_steps: default_plan_max_steps(),
+            nudge_after: default_plan_nudge_after(),
+        }
+    }
+}
+
+impl PlanConfig {
+    /// Token budget for the injected plan, from the model's context.
+    pub fn budget_tokens(&self, context_limit: u64) -> u64 {
+        ((context_limit as f64) * self.budget_ratio.clamp(0.0, 1.0)) as u64
+    }
+}
+
+fn default_plan_budget_ratio() -> f64 {
+    0.10
+}
+
+fn default_plan_max_steps() -> usize {
+    24
+}
+
+fn default_plan_nudge_after() -> usize {
+    8
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionConfig {
     #[serde(default = "default_compaction_threshold")]
@@ -481,6 +529,8 @@ pub struct Config {
     pub diary: DiaryConfig,
     #[serde(default)]
     pub compaction: CompactionConfig,
+    #[serde(default)]
+    pub plan: PlanConfig,
 }
 
 fn default_model_name() -> String {
@@ -535,6 +585,7 @@ impl Default for Config {
             memory: MemoryConfig::default(),
             diary: DiaryConfig::default(),
             compaction: CompactionConfig::default(),
+            plan: PlanConfig::default(),
         };
         cfg.ensure_seeds();
         cfg
