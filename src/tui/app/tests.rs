@@ -2516,6 +2516,41 @@ mod tests {
             }
         }
     }
+    /// The working spinner reads as part of the model group: the same chip
+    /// style as PLAN/ACT, immediately right of the model name.
+    #[test]
+    fn working_spinner_sits_right_of_the_model_in_chip_style() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.streaming = true;
+
+        let spans = app.status_bar_spans(100);
+        let model_at = spans
+            .iter()
+            .position(|s| s.content.contains("test-model"))
+            .expect("model span rendered");
+        let spinner_at = spans
+            .iter()
+            .position(|s| {
+                let text = s.content.trim();
+                text.chars().count() == 1
+                    && text
+                        .chars()
+                        .next()
+                        .is_some_and(|c| WORKING_SPINNER.contains(&c))
+            })
+            .expect("spinner span rendered while streaming");
+        assert_eq!(
+            spinner_at,
+            model_at + 1,
+            "spinner must sit immediately right of the model"
+        );
+        assert_eq!(
+            spans[spinner_at].style,
+            crate::tui::theme::Theme::status_chip(),
+            "spinner shares the PLAN/ACT chip style"
+        );
+    }
     /// `/undo step 3` used to parse as `/undo 1`: `nth(1)` yielded "step",
     /// `parse::<usize>()` failed and `unwrap_or(1)` reverted the most recent
     /// checkpoint instead — a destructive command acting on the wrong target

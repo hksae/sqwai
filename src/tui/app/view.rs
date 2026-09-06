@@ -1505,7 +1505,7 @@ impl App {
         self.th_click = None;
         self.agents_click = None;
 
-        // right side: [agents] [ctx metrics] [working] [model] [folder] [th:level] [MODE chip]
+        // right side: [agents] [ctx metrics] [model] [working] [folder] [th:level] [MODE chip]
         let lsp_label = if self.lsp_diagnostics > 0 {
             format!(" LSP:{} ", self.lsp_diagnostics)
         } else {
@@ -1566,11 +1566,14 @@ impl App {
         }
         spans.push(Span::styled(ctx_metrics_label.clone(), Theme::dim()));
         let model_x0 = agents_x0 + cols(&agents_label) as u16 + cols(&ctx_metrics_label) as u16;
-        if !working_label.is_empty() {
-            spans.push(Span::styled(working_label, Theme::accent()));
-        }
         spans.push(Span::styled(model_label, Theme::dim()));
-        let th_x0 = model_x0 + cols(&self.model_cfg.id) as u16 + 2;
+        // The working spinner reads as part of the model group: the same chip
+        // style as PLAN/ACT, right of the model name. Click targets below are
+        // measured from the same numbers, so `th_x0` accounts for its width.
+        let th_x0 = model_x0 + cols(&self.model_cfg.id) as u16 + 2 + cols(&working_label) as u16;
+        if !working_label.is_empty() {
+            spans.push(Span::styled(working_label, Theme::status_chip()));
+        }
         let th_style = if self.model_cfg.thinking == ThinkingLevel::Off {
             Theme::dim()
         } else {
