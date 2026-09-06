@@ -414,7 +414,7 @@ undo	to_checkpoint|step, files, reopened_steps	/undo or /undo step N
 diagnostics	path, errors, warnings, server, digest	LSP publishDiagnostics after a change
 effort_ignored	level, model, `source: observed|rejected`, reasoning_tokens, by: host	the provider counted zero reasoning tokens for a request that asked for effort, or refused the parameter (once per session)
 approval	cmd_digest, `decision: once	session
-note	by: model, `note: decision|rejected|assumption|lesson|blocker	model
+note	by: model, `note: decision|rejected|assumption|lesson|blocker`, resolves? (seq of the assumption this note closes)	model
 external_change	path, mtime, hash_before, hash_after, last_known_seq, by: host	before a file tool when mtime/hash differs from last known
 claim_lint	pattern, text, line, matched_journal, matched_ref, action, repeated	host, after response generation
 plan	op, id, `by: host	host
@@ -1662,7 +1662,7 @@ number; a `partial` one is missing something the design calls for.
 | R | Untrusted-input handling (trust:low, banner, confirm gates) + prompt rule | partial — the prompt rule and `trust: low` in the journal are in; the prompt banner and the confirm gates on plan/memory_propose/git_commit are not | F2 |
 | S | Cancel mid-tool (Esc): cancelled result, post-checkpoint, in_progress | next | F2 |
 | T | Provider fallback chain ([models.x].fallback) | planned — the `fallback` field does not exist on ModelConfig (#8) | §5.1 |
-| U | Assumption notes: open tracking, finish warning, resolve | next | F3 |
+| U | Assumption notes: open tracking, finish warning, resolve | done | F3 |
 | V | Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md) | next — cmd:/manual: settling done (#7); remaining: /init seeding of verify commands and their substitution on create | F3 |
 | W | Plan-first gate (Act first-mutate w/o plan → plan_required) | planned | F3 |
 | X | Staged compaction + files-read anchor + USER.md split/load | partial — USER.md split and loading are in; staged pre-compaction (§3.3.1) and the files-read line in the anchor (§3.3.3) are not | F1, F5 |
