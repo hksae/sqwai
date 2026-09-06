@@ -1108,11 +1108,42 @@ async fn run_agent(
                         .iter()
                         .map(|item| item.diagnostics.len())
                         .sum::<usize>();
+                    // LSP severity 1 is an error, 2 a warning; anything else
+                    // is information or a hint and is not an outcome.
+                    let severity = |item: &crate::lsp::PublishDiagnosticsParams, want: u8| {
+                        item.diagnostics
+                            .iter()
+                            .filter(|d| d.severity == Some(want))
+                            .count()
+                    };
+                    let errors: usize = diagnostics.iter().map(|i| severity(i, 1)).sum();
+                    let warnings: usize = diagnostics.iter().map(|i| severity(i, 2)).sum();
                     let _ = tx
                         .send(AgentEvent::Diagnostics {
                             count: diagnostic_count,
                         })
                         .await;
+                    // §2.2.2 defines this record and nothing was writing it,
+                    // which left §2.1.4's "diagnostics with zero errors" route
+                    // to closing a verify step unreachable: the branch existed
+                    // on the read side only.
+                    if let Some(writer) = journal.as_mut() {
+                        let _ = writer.append_evidence(
+                            "diagnostics",
+                            serde_json::json!({
+                                "path": path.strip_prefix(&root).unwrap_or(&path)
+                                    .to_string_lossy()
+                                    .replace('\\', "/"),
+                                "errors": errors,
+                                "warnings": warnings,
+                                "server": diagnostics
+                                    .iter()
+                                    .flat_map(|item| item.diagnostics.iter())
+                                    .find_map(|d| d.source.clone())
+                                    .unwrap_or_else(|| "lsp".to_string()),
+                            }),
+                        );
+                    }
                     if !diagnostics.is_empty() {
                         outcome.output.push_str("\nLSP diagnostics:\n");
                         for item in diagnostics {

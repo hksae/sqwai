@@ -25,13 +25,18 @@ fn existing(ctx: &ToolCtx, p: &str) -> Result<PathBuf, String> {
 
 /// guard shared by write-over-existing / edit / multi_edit
 fn require_read(ctx: &ToolCtx, p: &Path) -> Result<(), String> {
-    if !ctx.was_read(p) {
-        return err(format!(
+    match ctx.read_state(p) {
+        super::ReadState::Current => Ok(()),
+        super::ReadState::Unread => err(format!(
             "edit denied: {} was not read in this session — call read first",
             p.display()
-        ));
+        )),
+        super::ReadState::Stale => err(format!(
+            "edit denied: {} changed since you read it — read it again before editing, \
+             or the edit will be based on content that is gone",
+            p.display()
+        )),
     }
-    Ok(())
 }
 
 fn is_binary(buf: &[u8]) -> bool {

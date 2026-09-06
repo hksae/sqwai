@@ -402,6 +402,22 @@ impl Default for PlanConfig {
     }
 }
 
+/// `[secrets]` — files the host must not read into durable state (§2.3.6).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretsConfig {
+    /// glob patterns the project indexer skips entirely
+    #[serde(default = "default_secrets_exclude_globs")]
+    pub exclude_globs: Vec<String>,
+}
+
+impl Default for SecretsConfig {
+    fn default() -> Self {
+        Self {
+            exclude_globs: default_secrets_exclude_globs(),
+        }
+    }
+}
+
 impl PlanConfig {
     /// Token budget for the injected plan, from the model's context.
     pub fn budget_tokens(&self, context_limit: u64) -> u64 {
@@ -419,6 +435,20 @@ fn default_plan_max_steps() -> usize {
 
 fn default_plan_nudge_after() -> usize {
     8
+}
+
+fn default_secrets_exclude_globs() -> Vec<String> {
+    [
+        ".env*",
+        "*.pem",
+        "*.key",
+        "id_*",
+        "*credentials*",
+        "*secret*",
+    ]
+    .iter()
+    .map(|pattern| (*pattern).to_string())
+    .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -531,6 +561,8 @@ pub struct Config {
     pub compaction: CompactionConfig,
     #[serde(default)]
     pub plan: PlanConfig,
+    #[serde(default)]
+    pub secrets: SecretsConfig,
 }
 
 fn default_model_name() -> String {
@@ -586,6 +618,7 @@ impl Default for Config {
             diary: DiaryConfig::default(),
             compaction: CompactionConfig::default(),
             plan: PlanConfig::default(),
+            secrets: SecretsConfig::default(),
         };
         cfg.ensure_seeds();
         cfg

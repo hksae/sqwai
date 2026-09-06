@@ -297,7 +297,7 @@ mod tests {
                 }),
             )
             .unwrap();
-        let targets: Vec<Target> = Journal::recorded_writes(dir, &[sha.clone()])
+        let targets: Vec<Target> = Journal::recorded_writes(dir, std::slice::from_ref(&sha))
             .unwrap()
             .into_iter()
             .map(|(path, agent_hash)| Target { path, agent_hash })
