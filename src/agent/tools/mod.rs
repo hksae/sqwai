@@ -28,6 +28,11 @@ pub enum Kind {
 pub struct ToolCtx {
     /// project root; every path must resolve inside it
     pub root: PathBuf,
+    /// canonicalized [`Self::root`], computed once at construction so the
+    /// jail check in [`Self::resolve`] does not canonicalize the root on
+    /// every call. Falls back to [`Self::root`] when canonicalization fails;
+    /// every tool op fails downstream in that case anyway.
+    root_canon: PathBuf,
     /// secondary project instances can inspect but not mutate project state
     pub read_only: bool,
     /// files successfully read this session (guards edit/write)
@@ -42,8 +47,13 @@ impl ToolCtx {
     }
 
     pub fn with_read_only(root: impl Into<PathBuf>, read_only: bool) -> Self {
+        let root = root.into();
+        // Canonicalize once: `resolve` compares canonical paths, and the root
+        // itself may sit behind a symlink (macOS `/var` -> `/private/var`).
+        let root_canon = root.canonicalize().unwrap_or_else(|_| root.clone());
         Self {
-            root: root.into(),
+            root,
+            root_canon,
             read_only,
             files_read: HashSet::new(),
             journal: Vec::new(),
@@ -82,11 +92,7 @@ impl ToolCtx {
         for name in tail.iter().rev() {
             resolved.push(name);
         }
-        let root_canon = self
-            .root
-            .canonicalize()
-            .map_err(|e| format!("bad project root: {e}"))?;
-        let Ok(relative) = resolved.strip_prefix(&root_canon) else {
+        let Ok(relative) = resolved.strip_prefix(&self.root_canon) else {
             return Err(format!(
                 "path '{}' escapes the project directory",
                 joined.display()
@@ -98,6 +104,14 @@ impl ToolCtx {
         if let Some(denied) = host_owned_denial(relative) {
             return Err(denied);
         }
+        // Return `joined`, not `resolved`: the whole display layer
+        // (`rel_label`, checkpoint labels, `FileDiff.path`) strips the
+        // *uncanonicalized* root, and where the root itself is reached
+        // through a symlink (macOS `/var` -> `/private/var`) a canonical
+        // path would miss that prefix and leak absolute machine-specific
+        // paths into the journal. The security decision above was already
+        // made in canonical space, so the spelling returned here only
+        // affects labels, never the verdict.
         Ok(joined)
     }
 
