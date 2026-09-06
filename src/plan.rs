@@ -102,10 +102,12 @@ impl StepStatus {
     }
 
     /// Steps the host may fold away when the plan outgrows its budget (§2.1.5).
+    #[allow(dead_code)]
     pub fn is_closed(self) -> bool {
         matches!(self, Self::Done | Self::Cancelled)
     }
 
+    #[allow(dead_code)]
     pub fn is_open(self) -> bool {
         !self.is_closed()
     }
@@ -394,10 +396,10 @@ pub fn open_active(root: &Path) -> Result<Option<Plan>> {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        if let Ok(plan) = serde_json::from_str::<Plan>(&text) {
-            if plan.status == PlanStatus::Active {
-                return Ok(Some(plan));
-            }
+        if let Ok(plan) = serde_json::from_str::<Plan>(&text)
+            && plan.status == PlanStatus::Active
+        {
+            return Ok(Some(plan));
         }
     }
     Ok(None)
@@ -508,8 +510,10 @@ impl Rejection {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // Created(Plan) is intentionally large; boxing would change call sites
 pub enum Applied {
     /// `create` result — the caller must persist the plan.
+    #[allow(dead_code)]
     Created(Plan),
     Updated {
         message: String,

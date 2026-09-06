@@ -160,6 +160,7 @@ pub struct RequestBreakdown {
 }
 
 impl RequestBreakdown {
+    #[allow(clippy::field_reassign_with_default)] // system_bytes is accumulated in a loop after the initial set
     pub fn from_request(req: &ChatRequest) -> Self {
         let mut out = Self::default();
         out.system_bytes = req.system.iter().map(|p| p.text.len() as u64).sum::<u64>();
@@ -209,20 +210,15 @@ pub struct ProviderCapabilities {
     pub prompt_cache_documented: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ContextTransport {
     /// the whole transcript is resent every request
+    #[default]
     Stateless,
     /// the provider owns the conversation and we only send deltas
     ServerConversation,
     /// continuation via a documented previous-response reference
     PreviousResponse,
-}
-
-impl Default for ContextTransport {
-    fn default() -> Self {
-        Self::Stateless
-    }
 }
 
 /// Pick the transport for a request. Only a documented continuation reference

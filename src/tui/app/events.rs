@@ -136,25 +136,36 @@ impl App {
                         && self.pasted_clipboard.is_none()
                         && !ctrl
                         && !alt
+                        && let KeyCode::Char(c) = k.code
                     {
-                        if let KeyCode::Char(c) = k.code {
-                            if c == '?'
-                                && self.input_text().trim().is_empty()
-                                && self.menu_stack.is_empty()
-                            {
-                                self.status(
-                                    "commands: /settings, /plan, /sessions, /undo, /init, /exit",
-                                    StatusKind::Info,
-                                );
-                                self.dirty = true;
-                                continue;
+                        if c == '?'
+                            && self.input_text().trim().is_empty()
+                            && self.menu_stack.is_empty()
+                        {
+                            self.status(
+                                "commands: /settings, /plan, /sessions, /undo, /init, /exit",
+                                StatusKind::Info,
+                            );
+                            self.dirty = true;
+                            continue;
+                        }
+                        let mut text_batch = String::new();
+                        text_batch.push(c);
+                        while let Some(next_ev) = self
+                            .pending_events
+                            .pop_front()
+                            .or_else(|| ev_rx.try_recv().ok())
+                        {
+                            if let Some(next_c) = is_paste_key(&next_ev) {
+                                text_batch.push(next_c);
+                            } else {
+                                self.pending_events.push_back(next_ev);
+                                break;
                             }
-                            let mut text_batch = String::new();
-                            text_batch.push(c);
-                            while let Some(next_ev) = self
-                                .pending_events
-                                .pop_front()
-                                .or_else(|| ev_rx.try_recv().ok())
+                        }
+                        if text_batch.chars().count() > 1 {
+                            while let Ok(next_ev) =
+                                ev_rx.recv_timeout(std::time::Duration::from_millis(5))
                             {
                                 if let Some(next_c) = is_paste_key(&next_ev) {
                                     text_batch.push(next_c);
@@ -163,35 +174,23 @@ impl App {
                                     break;
                                 }
                             }
-                            if text_batch.chars().count() > 1 {
-                                while let Ok(next_ev) =
-                                    ev_rx.recv_timeout(std::time::Duration::from_millis(5))
-                                {
-                                    if let Some(next_c) = is_paste_key(&next_ev) {
-                                        text_batch.push(next_c);
-                                    } else {
-                                        self.pending_events.push_back(next_ev);
-                                        break;
-                                    }
-                                }
-                                if !self.menu_stack.is_empty() {
-                                    if self.is_inline_ask_free() {
-                                        self.jump_to_bottom_on_typing();
-                                        self.paste_text(&text_batch);
-                                    } else if self.is_form_menu() {
-                                        let p = text_batch.replace(['\r', '\n'], " ");
-                                        if let Some(FormField::Text { ta, .. }) =
-                                            self.form_fields.get_mut(self.form_focus)
-                                        {
-                                            ta.insert_str(p);
-                                        }
-                                    }
-                                } else {
+                            if !self.menu_stack.is_empty() {
+                                if self.is_inline_ask_free() {
+                                    self.jump_to_bottom_on_typing();
                                     self.paste_text(&text_batch);
+                                } else if self.is_form_menu() {
+                                    let p = text_batch.replace(['\r', '\n'], " ");
+                                    if let Some(FormField::Text { ta, .. }) =
+                                        self.form_fields.get_mut(self.form_focus)
+                                    {
+                                        ta.insert_str(p);
+                                    }
                                 }
-                                self.dirty = true;
-                                continue;
+                            } else {
+                                self.paste_text(&text_batch);
                             }
+                            self.dirty = true;
+                            continue;
                         }
                     }
 
@@ -242,17 +241,16 @@ impl App {
                             if self.is_form_menu() {
                                 if let Some(FormField::Text { ta, .. }) =
                                     self.form_fields.get_mut(self.form_focus)
+                                    && ta.is_selecting()
                                 {
-                                    if ta.is_selecting() {
-                                        ta.copy();
-                                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                            let text = ta.yank_text();
-                                            if !text.is_empty() {
-                                                let _ = clipboard.set_text(text);
-                                            }
+                                    ta.copy();
+                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                        let text = ta.yank_text();
+                                        if !text.is_empty() {
+                                            let _ = clipboard.set_text(text);
                                         }
-                                        self.dirty = true;
                                     }
+                                    self.dirty = true;
                                 }
                                 continue;
                             }
@@ -270,7 +268,10 @@ impl App {
                             if let Some(sel) = self.sel {
                                 self.copy_selection(&sel);
                             } else if self.input_text().is_empty() {
-                                if self.last_ctrl_c.is_some_and(|t| t.elapsed() < Duration::from_millis(1500)) {
+                                if self
+                                    .last_ctrl_c
+                                    .is_some_and(|t| t.elapsed() < Duration::from_millis(1500))
+                                {
                                     self.quit = true;
                                 } else {
                                     self.last_ctrl_c = Some(Instant::now());
@@ -394,7 +395,7 @@ impl App {
                         }
                         KeyCode::Char('r')
                             if matches!(self.cur_menu(), Some(Menu::Sessions))
-                                 && self.sessions_filter.is_empty() =>
+                                && self.sessions_filter.is_empty() =>
                         {
                             if let Some(id) = self.selected_session_id() {
                                 self.run_action(MenuAction::RenameSession(id));
@@ -688,19 +689,18 @@ impl App {
 }
 
 fn is_paste_key(ev: &crossterm::event::Event) -> Option<char> {
-    if let crossterm::event::Event::Key(k) = ev {
-        if k.kind == crossterm::event::KeyEventKind::Press
-            && !k
-                .modifiers
-                .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT)
-        {
-            match k.code {
-                crossterm::event::KeyCode::Enter
-                | crossterm::event::KeyCode::Char('\r')
-                | crossterm::event::KeyCode::Char('\n') => return Some('\n'),
-                crossterm::event::KeyCode::Char(c) => return Some(c),
-                _ => {}
-            }
+    if let crossterm::event::Event::Key(k) = ev
+        && k.kind == crossterm::event::KeyEventKind::Press
+        && !k.modifiers.intersects(
+            crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
+        )
+    {
+        match k.code {
+            crossterm::event::KeyCode::Enter
+            | crossterm::event::KeyCode::Char('\r')
+            | crossterm::event::KeyCode::Char('\n') => return Some('\n'),
+            crossterm::event::KeyCode::Char(c) => return Some(c),
+            _ => {}
         }
     }
     None
@@ -714,9 +714,8 @@ fn consume_replayed_paste_text(slot: &mut Option<String>, text: &str) -> bool {
     let Some(expected) = slot.as_deref() else {
         return false;
     };
-    if expected.starts_with(text) {
-        let remainder = expected[text.len()..].to_string();
-        *slot = (!remainder.is_empty()).then_some(remainder);
+    if let Some(remainder) = expected.strip_prefix(text) {
+        *slot = (!remainder.is_empty()).then_some(remainder.to_string());
         true
     } else {
         false
@@ -759,7 +758,94 @@ fn consume_replayed_paste_key(slot: &mut Option<String>, key: crossterm::event::
 }
 
 /// ctrl combos supported identically in the message input and every form field
+#[allow(dead_code)]
 pub(super) const TEXT_COMBOS: &[char] = &['z', 'y', 'a', 'e', 'u', 'k', 'w', 'd'];
+
+pub(super) fn is_redo_key(k: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+    if !ctrl {
+        return false;
+    }
+    if (shift && matches!(k.code, KeyCode::Char('z') | KeyCode::Char('Z')))
+        || k.code == KeyCode::Char('Z')
+        || matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y'))
+    {
+        return true;
+    }
+    false
+}
+
+pub(super) fn is_undo_key(k: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+    if !ctrl {
+        return false;
+    }
+    !shift && k.code == KeyCode::Char('z')
+}
+
+pub(super) fn is_select_all_key(k: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+    ctrl && !shift && matches!(k.code, KeyCode::Char('a') | KeyCode::Char('A'))
+}
+
+pub(super) fn select_all(ta: &mut TextArea<'static>) {
+    ta.cancel_selection();
+    ta.move_cursor(tui_textarea::CursorMove::Top);
+    ta.move_cursor(tui_textarea::CursorMove::Head);
+    ta.start_selection();
+    ta.move_cursor(tui_textarea::CursorMove::Bottom);
+    ta.move_cursor(tui_textarea::CursorMove::End);
+}
+
+pub(super) fn handle_text_combo(ta: &mut TextArea<'static>, k: crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use tui_textarea::CursorMove;
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    if !ctrl {
+        return false;
+    }
+    if is_select_all_key(&k) {
+        select_all(ta);
+        return true;
+    }
+    if is_undo_key(&k) {
+        let _ = ta.undo();
+        return true;
+    }
+    if is_redo_key(&k) {
+        let _ = ta.redo();
+        return true;
+    }
+    match k.code {
+        KeyCode::Char('e') => {
+            ta.move_cursor(CursorMove::End);
+            true
+        }
+        KeyCode::Char('k') => {
+            let _ = ta.delete_line_by_end();
+            true
+        }
+        KeyCode::Char('u') => {
+            let _ = ta.delete_line_by_head();
+            true
+        }
+        KeyCode::Char('w') => {
+            let _ = ta.delete_word();
+            true
+        }
+        KeyCode::Char('d') => {
+            let _ = ta.delete_char();
+            true
+        }
+        _ => false,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -805,94 +891,5 @@ mod tests {
         let mut gate = EnterGate::default();
         assert_eq!(gate.on_enter(start), EnterDecision::Wait);
         assert!(gate.flush(start + Duration::from_millis(31)));
-    }
-}
-
-pub(super) fn is_redo_key(k: &crossterm::event::KeyEvent) -> bool {
-    use crossterm::event::{KeyCode, KeyModifiers};
-    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
-    if !ctrl {
-        return false;
-    }
-    if (shift && matches!(k.code, KeyCode::Char('z') | KeyCode::Char('Z')))
-        || k.code == KeyCode::Char('Z')
-        || matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y'))
-    {
-        return true;
-    }
-    false
-}
-
-pub(super) fn is_undo_key(k: &crossterm::event::KeyEvent) -> bool {
-    use crossterm::event::{KeyCode, KeyModifiers};
-    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
-    if !ctrl {
-        return false;
-    }
-    !shift && k.code == KeyCode::Char('z')
-}
-
-pub(super) fn is_select_all_key(k: &crossterm::event::KeyEvent) -> bool {
-    use crossterm::event::{KeyCode, KeyModifiers};
-    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
-    ctrl && !shift && matches!(k.code, KeyCode::Char('a') | KeyCode::Char('A'))
-}
-
-pub(super) fn select_all(ta: &mut TextArea<'static>) {
-    ta.cancel_selection();
-    ta.move_cursor(tui_textarea::CursorMove::Top);
-    ta.move_cursor(tui_textarea::CursorMove::Head);
-    ta.start_selection();
-    ta.move_cursor(tui_textarea::CursorMove::Bottom);
-    ta.move_cursor(tui_textarea::CursorMove::End);
-}
-
-pub(super) fn handle_text_combo(
-    ta: &mut TextArea<'static>,
-    k: crossterm::event::KeyEvent,
-) -> bool {
-    use crossterm::event::{KeyCode, KeyModifiers};
-    use tui_textarea::CursorMove;
-    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-    if !ctrl {
-        return false;
-    }
-    if is_select_all_key(&k) {
-        select_all(ta);
-        return true;
-    }
-    if is_undo_key(&k) {
-        let _ = ta.undo();
-        return true;
-    }
-    if is_redo_key(&k) {
-        let _ = ta.redo();
-        return true;
-    }
-    match k.code {
-        KeyCode::Char('e') => {
-            ta.move_cursor(CursorMove::End);
-            true
-        }
-        KeyCode::Char('k') => {
-            let _ = ta.delete_line_by_end();
-            true
-        }
-        KeyCode::Char('u') => {
-            let _ = ta.delete_line_by_head();
-            true
-        }
-        KeyCode::Char('w') => {
-            let _ = ta.delete_word();
-            true
-        }
-        KeyCode::Char('d') => {
-            let _ = ta.delete_char();
-            true
-        }
-        _ => false,
     }
 }

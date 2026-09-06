@@ -387,17 +387,12 @@ pub struct CompactionConfig {
     pub summary: CompactionSummary,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum CompactionSummary {
+    #[default]
     Off,
     Short,
-}
-
-impl Default for CompactionSummary {
-    fn default() -> Self {
-        Self::Off
-    }
 }
 
 impl Default for CompactionConfig {

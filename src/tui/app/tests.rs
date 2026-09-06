@@ -3,6 +3,7 @@ use super::menus::{Menu, MenuAction};
 use super::view::{GROUP_BASE, blank};
 use super::*;
 
+#[allow(clippy::module_inception)] // this file IS the tests module; the inner mod is required by the test framework
 mod tests {
     use super::*;
     use crate::config::{Config, ModelConfig, ProviderConfig, WireFormat};
@@ -661,9 +662,9 @@ mod tests {
 
         // plain enter on the prompt deletes the provider
         press_enter(&mut app);
-        assert!(app.cfg.providers.get("p").is_none(), "provider not deleted");
+        assert!(!app.cfg.providers.contains_key("p"), "provider not deleted");
         assert!(
-            app.cfg.models.get("m").is_none(),
+            !app.cfg.models.contains_key("m"),
             "models of provider left behind"
         );
     }
@@ -686,7 +687,7 @@ mod tests {
         .unwrap();
         app.poll_input(&rx).unwrap();
         assert!(
-            app.cfg.providers.get("p").is_some(),
+            app.cfg.providers.contains_key("p"),
             "esc deleted the provider"
         );
     }
@@ -1595,7 +1596,10 @@ mod tests {
             name: Some("anthropic".into()),
         });
         let title = app.menu_title();
-        assert!(!title.contains('(') && !title.contains(')'), "title has parens: {title}");
+        assert!(
+            !title.contains('(') && !title.contains(')'),
+            "title has parens: {title}"
+        );
         assert!(title.contains("edit provider: anthropic"));
 
         app.open_menu_replace(Menu::EditModel {
@@ -1603,7 +1607,10 @@ mod tests {
             key: Some("sonnet".into()),
         });
         let mtitle = app.menu_title();
-        assert!(!mtitle.contains('(') && !mtitle.contains(')'), "mtitle has parens: {mtitle}");
+        assert!(
+            !mtitle.contains('(') && !mtitle.contains(')'),
+            "mtitle has parens: {mtitle}"
+        );
         assert!(mtitle.contains("model @ anthropic"));
 
         // Simulate form rect and mouse interaction
@@ -1657,8 +1664,10 @@ mod tests {
         assert!(!is_redo_key(&ctrl_z));
 
         // Ctrl+Shift+Z with Shift modifier
-        let ctrl_shift_z =
-            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        let ctrl_shift_z = KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
         assert!(!is_undo_key(&ctrl_shift_z));
         assert!(is_redo_key(&ctrl_shift_z));
 
@@ -1850,7 +1859,9 @@ mod tests {
         assert!(has_version, "startup screen must show cargo version");
 
         // Must show hints
-        let has_hints = text.iter().any(|line| line.contains("tab") && line.contains("plan / act"));
+        let has_hints = text
+            .iter()
+            .any(|line| line.contains("tab") && line.contains("plan / act"));
         assert!(has_hints, "startup screen must show tab hint");
     }
 
@@ -1879,7 +1890,10 @@ mod tests {
             .iter()
             .find(|line| line.contains("sqwai"))
             .expect("identification line");
-        assert!(!id_line.contains(&app.model_cfg.id), "narrow layout omits model from line 1");
+        assert!(
+            !id_line.contains(&app.model_cfg.id),
+            "narrow layout omits model from line 1"
+        );
     }
 
     #[test]
@@ -1973,11 +1987,7 @@ mod tests {
     fn startup_screen_wraps_text_on_narrow_window() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = true;
-        let mut data = App::collect_startup_data(
-            &app.cfg,
-            &app.model_cfg,
-            app.read_only,
-        );
+        let mut data = App::collect_startup_data(&app.cfg, &app.model_cfg, app.read_only);
         data.project_path = "~/dev/a/very/long/nested/path/to/project".into();
         app.startup_data = Some(data);
 

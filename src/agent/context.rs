@@ -108,10 +108,10 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     let mut last_verification = None;
     if let Ok(records) = crate::agent::journal::Journal::records_for(root, session_id) {
         for record in records {
-            if record.kind == "file_diff" {
-                if let Some(path) = record.fields.get("path").and_then(|value| value.as_str()) {
-                    changed.push(bounded(path, 160));
-                }
+            if record.kind == "file_diff"
+                && let Some(path) = record.fields.get("path").and_then(|value| value.as_str())
+            {
+                changed.push(bounded(path, 160));
             }
             if record.kind == "tool_result"
                 && record
@@ -779,7 +779,7 @@ mod tests {
         for i in 0..10 {
             messages.push(user(&format!("turn {i}")));
             messages.push(Message::tool_result(
-                &format!("call{i}"),
+                format!("call{i}"),
                 "y".repeat(6_000),
                 false,
             ));

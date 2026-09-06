@@ -13,6 +13,7 @@ pub struct Palette {
     pub dim: Color,
     pub accent: Color,
     pub accent_soft: Color,
+    #[allow(dead_code)]
     pub border: Color,
     pub border_dim: Color,
     pub ok: Color,
@@ -217,6 +218,7 @@ impl Theme {
         cur().accent_soft
     }
     #[allow(non_snake_case)]
+    #[allow(dead_code)]
     pub fn BORDER() -> Color {
         cur().border
     }
@@ -259,6 +261,7 @@ impl Theme {
             .bg(Self::BG())
             .add_modifier(Modifier::BOLD)
     }
+    #[allow(dead_code)]
     pub fn border_focused() -> Style {
         Style::new().fg(Self::BORDER()).bg(Self::BG())
     }

@@ -19,8 +19,6 @@ use crate::session::Session;
 use crate::tui::markdown::{Highlighter, render, wrap_tagged};
 use crate::tui::theme::Theme;
 
-
-
 #[derive(Debug, Clone)]
 pub(super) enum Segment {
     User(String),
@@ -203,22 +201,28 @@ impl App {
 
     pub(super) fn mouse_up(&mut self, row: u16, col: u16) {
         // subagent overview and thinking selector in the status bar
-        if let Some((x0, x1)) = self.agents_click {
-            if row == self.status_y && col >= x0 && col <= x1 && self.menu_stack.is_empty() {
-                self.open_menu(Menu::Subagents);
-                return;
-            }
+        if let Some((x0, x1)) = self.agents_click
+            && row == self.status_y
+            && col >= x0
+            && col <= x1
+            && self.menu_stack.is_empty()
+        {
+            self.open_menu(Menu::Subagents);
+            return;
         }
-        if let Some((x0, x1)) = self.th_click {
-            if row == self.status_y && col >= x0 && col <= x1 && self.menu_stack.is_empty() {
-                self.open_menu(Menu::Thinking);
-                return;
-            }
+        if let Some((x0, x1)) = self.th_click
+            && row == self.status_y
+            && col >= x0
+            && col <= x1
+            && self.menu_stack.is_empty()
+        {
+            self.open_menu(Menu::Thinking);
+            return;
         }
         let pressed = self.press.take();
         let was_drag = std::mem::take(&mut self.dragging);
         if was_drag {
-            if let Some(sel) = self.sel.clone() {
+            if let Some(sel) = self.sel {
                 self.copy_selection(&sel);
             }
             return; // keep the selection visible until the next action
@@ -422,7 +426,7 @@ impl App {
 
     /// cache key for a segment's rendered content; changing it forces a repaint
     pub(super) fn seg_key(&self, seg: &Segment) -> usize {
-        let base = match seg {
+        match seg {
             Segment::User(t) => t.chars().count(),
             Segment::Assistant { text, .. } => text.chars().count(),
             Segment::Subagent {
@@ -468,8 +472,7 @@ impl App {
                 k
             }
             Segment::Status { .. } => 0,
-        };
-        base
+        }
     }
 
     pub(super) fn render_segment(&self, idx: usize, w: u16) -> Vec<(Line<'static>, Option<usize>)> {
@@ -705,12 +708,12 @@ impl App {
         // turn's group sits at index `activity_groups.len()` — which is exactly
         // where finalize_activity_group will store it.
         let mut groups = self.activity_groups.clone();
-        if self.streaming {
-            if let Some(run) = self.trailing_work_run() {
-                let mut live = self.build_activity_group(run);
-                live.expanded = !self.live_group_collapsed;
-                groups.push(live);
-            }
+        if self.streaming
+            && let Some(run) = self.trailing_work_run()
+        {
+            let mut live = self.build_activity_group(run);
+            live.expanded = !self.live_group_collapsed;
+            groups.push(live);
         }
         let mut gi = 0usize; // next group waiting to be opened
         let mut hide_until = 0usize; // collapsed group: skip [seg_start, seg_end)
@@ -1188,32 +1191,20 @@ impl App {
             ));
         if matches!(self.cur_menu(), Some(Menu::Sessions)) {
             block = block.title_bottom(
-                Line::from(Span::styled(
-                    " p: pin · d: delete ",
-                    Theme::dim(),
-                ))
-                .right_aligned(),
+                Line::from(Span::styled(" p: pin · d: delete ", Theme::dim())).right_aligned(),
             );
         } else if matches!(
             self.cur_menu(),
             Some(
-                Menu::EditProvider { .. }
-                    | Menu::EditModel { .. }
-                    | Menu::EditSessionTitle { .. }
+                Menu::EditProvider { .. } | Menu::EditModel { .. } | Menu::EditSessionTitle { .. }
             )
         ) {
             block = block.title_bottom(
-                Line::from(Span::styled(
-                    " enter: save · esc: cancel ",
-                    Theme::dim(),
-                ))
-                .right_aligned(),
+                Line::from(Span::styled(" enter: save · esc: cancel ", Theme::dim()))
+                    .right_aligned(),
             );
         }
-        f.render_widget(
-            Paragraph::new(rows).style(Theme::base()).block(block),
-            rect,
-        );
+        f.render_widget(Paragraph::new(rows).style(Theme::base()).block(block), rect);
 
         // draw the focused text field as a real textarea: same block cursor
         // and editing behavior as the message input
@@ -1225,26 +1216,57 @@ impl App {
     }
 
     pub(super) fn draw_inline_ask(&mut self, f: &mut ratatui::Frame, chat: Rect) {
-        let Some(menu) = self.cur_menu().cloned() else { return };
+        let Some(menu) = self.cur_menu().cloned() else {
+            return;
+        };
         let (question, options, multiple, allow_free, free_text) = match menu {
-            Menu::AskUser { question, options, multiple, allow_free, .. } => {
-                (question, options, multiple, allow_free, false)
-            }
+            Menu::AskUser {
+                question,
+                options,
+                multiple,
+                allow_free,
+                ..
+            } => (question, options, multiple, allow_free, false),
             Menu::AskFree { .. } => ("Your answer".into(), Vec::new(), false, false, true),
             _ => return,
         };
-        let mut lines = vec![Line::from(Span::styled(format!("? {question}"), Theme::accent_bold()))];
+        let mut lines = vec![Line::from(Span::styled(
+            format!("? {question}"),
+            Theme::accent_bold(),
+        ))];
         for (i, (label, desc)) in options.iter().enumerate() {
-            let checked = if multiple && self.ask_picked.get(i).copied().unwrap_or(false) { "[x]" } else if multiple { "[ ]" } else { " " };
-            let mut spans = vec![Span::styled(format!("  {checked} {}. ", i + 1), Theme::accent()), Span::raw(label)];
-            if let Some(desc) = desc { spans.push(Span::styled(format!(" — {desc}"), Theme::dim())); }
+            let checked = if multiple && self.ask_picked.get(i).copied().unwrap_or(false) {
+                "[x]"
+            } else if multiple {
+                "[ ]"
+            } else {
+                " "
+            };
+            let mut spans = vec![
+                Span::styled(format!("  {checked} {}. ", i + 1), Theme::accent()),
+                Span::raw(label),
+            ];
+            if let Some(desc) = desc {
+                spans.push(Span::styled(format!(" — {desc}"), Theme::dim()));
+            }
             lines.push(Line::from(spans));
         }
-        if allow_free { lines.push(Line::from(Span::styled("  type a custom answer", Theme::dim()))); }
+        if allow_free {
+            lines.push(Line::from(Span::styled(
+                "  type a custom answer",
+                Theme::dim(),
+            )));
+        }
         if free_text {
-            lines.push(Line::from(Span::styled("  › type your answer", Theme::accent())));
+            lines.push(Line::from(Span::styled(
+                "  › type your answer",
+                Theme::accent(),
+            )));
         } else {
-            lines.push(Line::from(Span::styled("  enter choose · esc skip", Theme::dim())));
+            lines.push(Line::from(Span::styled(
+                "  enter choose · esc skip",
+                Theme::dim(),
+            )));
         }
         let h = lines.len().min(chat.height as usize) as u16;
         let rect = Rect {
@@ -1307,14 +1329,12 @@ impl App {
 
         f.render_widget(Clear, rect);
         f.render_widget(
-            Paragraph::new(rows)
-                .style(Theme::base())
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Plain)
-                        .border_style(Theme::border_dim()),
-                ),
+            Paragraph::new(rows).style(Theme::base()).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Plain)
+                    .border_style(Theme::border_dim()),
+            ),
             rect,
         );
         // mini scrollbar on the right border when the list overflows
@@ -1327,11 +1347,11 @@ impl App {
                 if let Some(cell) = f
                     .buffer_mut()
                     .cell_mut(ratatui::layout::Position::new(bx, rect.y + 1 + i as u16))
+                    && i >= pos
+                    && i < pos + thumb
                 {
-                    if i >= pos && i < pos + thumb {
-                        cell.set_symbol("▐")
-                            .set_style(Style::new().fg(Theme::rule_color()));
-                    }
+                    cell.set_symbol("▐")
+                        .set_style(Style::new().fg(Theme::rule_color()));
                 }
             }
         }
@@ -1375,15 +1395,15 @@ impl App {
         // Only claim prompt-cache savings once the provider has actually
         // reported cached tokens. A documented cache key we never see a hit
         // for stays unverified, so it is not advertised.
-        if self.session.cache_confirmed {
-            if let Some(c) = self.session.usage.cached_tokens {
-                let cp = if context_used > 0 {
-                    c.saturating_mul(100).min(context_used) / context_used
-                } else {
-                    0
-                };
-                spans.push(Span::styled(format!(" · cache {cp}%"), Theme::dim()));
-            }
+        if self.session.cache_confirmed
+            && let Some(c) = self.session.usage.cached_tokens
+        {
+            let cp = c
+                .saturating_mul(100)
+                .min(context_used)
+                .checked_div(context_used)
+                .unwrap_or(0);
+            spans.push(Span::styled(format!(" · cache {cp}%"), Theme::dim()));
         }
         // cost meter: enabled later from the settings menu ([ui] show_cost)
         if self.cfg.ui.show_cost
@@ -1456,11 +1476,11 @@ impl App {
             .and_then(|u| u.cached_tokens)
             .or(self.session.usage.cached_tokens)
             .unwrap_or(0);
-        let cp = if context_used > 0 {
-            (cached_tokens.saturating_mul(100) / context_used).min(100)
-        } else {
-            0
-        };
+        let cp = cached_tokens
+            .saturating_mul(100)
+            .checked_div(context_used)
+            .unwrap_or(0)
+            .min(100);
         let ctx_metrics_label = format!(" cache {cp}% · {ctx_pct}% · {tok_str} ·");
 
         let model_label = format!(" {} ", self.model_cfg.id);
@@ -1542,7 +1562,9 @@ impl App {
             self.agents_click = Some((agents_x0, agents_x0 + agents_label.chars().count() as u16));
         }
         spans.push(Span::styled(ctx_metrics_label.clone(), Theme::dim()));
-        let model_x0 = agents_x0 + agents_label.chars().count() as u16 + ctx_metrics_label.chars().count() as u16;
+        let model_x0 = agents_x0
+            + agents_label.chars().count() as u16
+            + ctx_metrics_label.chars().count() as u16;
         if !working_label.is_empty() {
             spans.push(Span::styled(working_label, Theme::accent()));
         }
@@ -1584,7 +1606,10 @@ impl App {
 
         // 1. Identification line
         let mut id_spans = Vec::new();
-        id_spans.push(Span::styled(format!("sqwai {}", data.version), Theme::base()));
+        id_spans.push(Span::styled(
+            format!("sqwai {}", data.version),
+            Theme::base(),
+        ));
         id_spans.push(Span::styled(" · ", Theme::dim()));
         id_spans.push(Span::styled(data.project_path.clone(), Theme::base()));
         id_spans.push(Span::styled(" · ", Theme::dim()));
@@ -1597,7 +1622,11 @@ impl App {
                     id_spans.push(Span::styled(label, Theme::ok()));
                 }
                 Some(n) => {
-                    let label = if is_narrow { format!("● {n}") } else { format!("● {n} modified") };
+                    let label = if is_narrow {
+                        format!("● {n}")
+                    } else {
+                        format!("● {n} modified")
+                    };
                     id_spans.push(Span::styled(label, Theme::warn()));
                 }
                 None => {}
@@ -1616,13 +1645,24 @@ impl App {
         if let Some(plan) = &data.active_plan {
             raw_lines.push(Line::from(vec![
                 Span::styled("▸ active plan   ", Theme::accent()),
-                Span::styled(format!("\"{}\"", plan.title), Theme::base().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("\"{}\"", plan.title),
+                    Theme::base().add_modifier(Modifier::BOLD),
+                ),
             ]));
-            raw_lines.push(Line::from(vec![
-                Span::styled(format!("  step {}/{} {}", plan.current_step, plan.total_steps, plan.status_text), Theme::dim()),
-            ]));
+            raw_lines.push(Line::from(vec![Span::styled(
+                format!(
+                    "  step {}/{} {}",
+                    plan.current_step, plan.total_steps, plan.status_text
+                ),
+                Theme::dim(),
+            )]));
             if let Some(ls) = &data.last_session {
-                let prefix = if is_narrow { "  last    " } else { "  last session  " };
+                let prefix = if is_narrow {
+                    "  last    "
+                } else {
+                    "  last session  "
+                };
                 raw_lines.push(Line::from(vec![
                     Span::styled(prefix, Theme::dim()),
                     Span::styled(format!("{} · {}", ls.date, ls.outcome), Theme::dim()),
@@ -1641,7 +1681,11 @@ impl App {
                 mem_parts.push("graph ready".to_string());
             }
             if !mem_parts.is_empty() {
-                let prefix = if is_narrow { "  memory  " } else { "  memory        " };
+                let prefix = if is_narrow {
+                    "  memory  "
+                } else {
+                    "  memory        "
+                };
                 raw_lines.push(Line::from(vec![
                     Span::styled(prefix, Theme::dim()),
                     Span::styled(mem_parts.join(" · "), Theme::dim()),
@@ -1650,11 +1694,17 @@ impl App {
         } else if data.has_sqwai_dir {
             // No active plan, but has .sqwai history
             if is_narrow {
-                raw_lines.push(Line::from(vec![Span::styled("no active plan", Theme::dim())]));
+                raw_lines.push(Line::from(vec![Span::styled(
+                    "no active plan",
+                    Theme::dim(),
+                )]));
             } else {
                 let mut spans = vec![Span::styled("no active plan", Theme::dim())];
                 if let Some(ls) = &data.last_session {
-                    spans.push(Span::styled(format!(" · last session {}", ls.date), Theme::dim()));
+                    spans.push(Span::styled(
+                        format!(" · last session {}", ls.date),
+                        Theme::dim(),
+                    ));
                 }
                 raw_lines.push(Line::from(spans));
             }
@@ -1671,7 +1721,11 @@ impl App {
                 mem_parts.push("graph ready".to_string());
             }
             if !mem_parts.is_empty() {
-                let prefix = if is_narrow { "memory  " } else { "memory        " };
+                let prefix = if is_narrow {
+                    "memory  "
+                } else {
+                    "memory        "
+                };
                 raw_lines.push(Line::from(vec![
                     Span::styled(prefix, Theme::dim()),
                     Span::styled(mem_parts.join(" · "), Theme::dim()),
@@ -1679,10 +1733,16 @@ impl App {
             }
         } else {
             // First run: no .sqwai
-            raw_lines.push(Line::from(vec![Span::styled("this project has no .sqwai yet", Theme::dim())]));
+            raw_lines.push(Line::from(vec![Span::styled(
+                "this project has no .sqwai yet",
+                Theme::dim(),
+            )]));
             raw_lines.push(Line::from(vec![
                 Span::styled("/init", Theme::base()),
-                Span::styled(" create AGENTS.md and memory or just type a task", Theme::dim()),
+                Span::styled(
+                    " create AGENTS.md and memory or just type a task",
+                    Theme::dim(),
+                ),
             ]));
         }
 
@@ -1695,11 +1755,18 @@ impl App {
         if !is_narrow && !data.recent.is_empty() {
             raw_lines.push(Line::default()); // blank line
             for (i, session) in data.recent.iter().take(3).enumerate() {
-                let prefix = if i == 0 { "recent        " } else { "              " };
+                let prefix = if i == 0 {
+                    "recent        "
+                } else {
+                    "              "
+                };
                 raw_lines.push(Line::from(vec![
                     Span::styled(prefix, Theme::dim()),
                     Span::styled(format!("{:<16}", session.date), Theme::dim()),
-                    Span::styled(format!("{:<24}", truncate_chars(&session.title, 22)), Theme::base()),
+                    Span::styled(
+                        format!("{:<24}", truncate_chars(&session.title, 22)),
+                        Theme::base(),
+                    ),
                     Span::styled(session.outcome.clone(), Theme::dim()),
                 ]));
             }
@@ -1754,7 +1821,11 @@ impl App {
             for r in 0..num_rows {
                 let mut row_spans = Vec::new();
                 if let Some(&(k, d)) = col1_items.get(r) {
-                    let pair_text = if d.is_empty() { k.to_string() } else { format!("{k}  {d}") };
+                    let pair_text = if d.is_empty() {
+                        k.to_string()
+                    } else {
+                        format!("{k}  {d}")
+                    };
                     let pad = 26usize.saturating_sub(pair_text.chars().count());
                     if d.is_empty() {
                         row_spans.push(Span::styled(k, Theme::dim()));
@@ -1768,7 +1839,11 @@ impl App {
                 }
 
                 if let Some(&(k, d)) = col2_items.get(r) {
-                    let pair_text = if d.is_empty() { k.to_string() } else { format!("{k}  {d}") };
+                    let pair_text = if d.is_empty() {
+                        k.to_string()
+                    } else {
+                        format!("{k}  {d}")
+                    };
                     let pad = 24usize.saturating_sub(pair_text.chars().count());
                     if d.is_empty() {
                         row_spans.push(Span::styled(k, Theme::dim()));
@@ -1800,13 +1875,14 @@ impl App {
             ((chat.width as i32 - 84) / 2).max(2) as u16
         };
         let pad_str = " ".repeat(left_pad as usize);
-        let max_content_width = (chat.width as usize).saturating_sub(left_pad as usize + 1).max(10);
+        let max_content_width = (chat.width as usize)
+            .saturating_sub(left_pad as usize + 1)
+            .max(10);
 
-        let tagged_raw: Vec<(Line<'static>, Option<usize>)> = raw_lines
-            .into_iter()
-            .map(|l| (l, None))
-            .collect();
-        let (wrapped_lines, _) = crate::tui::markdown::wrap_tagged(tagged_raw, max_content_width as u16);
+        let tagged_raw: Vec<(Line<'static>, Option<usize>)> =
+            raw_lines.into_iter().map(|l| (l, None)).collect();
+        let (wrapped_lines, _) =
+            crate::tui::markdown::wrap_tagged(tagged_raw, max_content_width as u16);
 
         let padded_lines: Vec<Line<'static>> = wrapped_lines
             .into_iter()
@@ -1833,14 +1909,18 @@ impl App {
         };
 
         let available_height = chat.height.saturating_sub(top_pad) as usize;
-        let render_lines: Vec<Line<'static>> = padded_lines.into_iter().take(available_height).collect();
+        let render_lines: Vec<Line<'static>> =
+            padded_lines.into_iter().take(available_height).collect();
         let render_rect = Rect {
             x: chat.x,
             y: chat.y + top_pad,
             width: chat.width,
             height: render_lines.len() as u16,
         };
-        f.render_widget(Paragraph::new(render_lines).style(Theme::base()), render_rect);
+        f.render_widget(
+            Paragraph::new(render_lines).style(Theme::base()),
+            render_rect,
+        );
     }
 }
 
@@ -1855,11 +1935,15 @@ mod tests {
         if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
             let path = Path::new(&home).join("dev").join("sqwai");
             let shortened = shorten_path(&path);
-            assert!(shortened.starts_with("~/"), "must start with ~/: {shortened}");
+            assert!(
+                shortened.starts_with("~/"),
+                "must start with ~/: {shortened}"
+            );
         }
     }
 }
 
+#[allow(dead_code)]
 fn pad_display(s: &str, width: usize) -> String {
     let used = UnicodeWidthStr::width(s);
     format!("{s}{}", " ".repeat(width.saturating_sub(used)))

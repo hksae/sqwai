@@ -206,15 +206,19 @@ impl Provider for OpenAiProvider {
                         let Some(delta) = choice.get("delta") else { continue };
 
                         // streamed text / reasoning
-                        if let Some(c) = delta.get("content").and_then(|c| c.as_str()) {
-                            if !c.is_empty() { yield Ok(StreamEvent::Text(c.to_string())); }
+                        if let Some(c) = delta.get("content").and_then(|c| c.as_str())
+                            && !c.is_empty()
+                        {
+                            yield Ok(StreamEvent::Text(c.to_string()));
                         }
                         let reasoning = delta
                             .get("reasoning_content")
                             .or_else(|| delta.get("reasoning"))
                             .and_then(|r| r.as_str());
-                        if let Some(rr) = reasoning {
-                            if !rr.is_empty() { yield Ok(StreamEvent::Reasoning(rr.to_string())); }
+                        if let Some(rr) = reasoning
+                            && !rr.is_empty()
+                        {
+                            yield Ok(StreamEvent::Reasoning(rr.to_string()));
                         }
 
                         // streamed tool calls

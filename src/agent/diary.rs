@@ -257,6 +257,7 @@ fn render_host_block(records: &[Record], trigger: &str) -> Result<String> {
 }
 
 /// Append a host-only diary entry. Model-generated prose is screened first.
+#[allow(clippy::too_many_arguments)] // all parameters are required to build the diary entry
 pub async fn write_entry(
     root: &Path,
     date: NaiveDate,
@@ -316,9 +317,8 @@ async fn collect_writer_text(provider: &SharedProvider, request: &ChatRequest) -
     let mut stream = provider.stream_chat(request.clone());
     let mut text = String::new();
     while let Some(event) = stream.next().await {
-        match event? {
-            StreamEvent::Text(chunk) => text.push_str(&chunk),
-            _ => {}
+        if let StreamEvent::Text(chunk) = event? {
+            text.push_str(&chunk);
         }
     }
     let text = text.trim().to_string();
@@ -368,6 +368,7 @@ fn append_host_entry(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn validate_date(date: &str) -> Result<NaiveDate, String> {
     NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| "date must be YYYY-MM-DD".into())
 }

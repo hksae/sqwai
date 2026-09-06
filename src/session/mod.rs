@@ -334,7 +334,7 @@ impl Session {
                 entries.push((modified, path));
             }
         }
-        entries.sort_by(|a, b| b.0.cmp(&a.0));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.0));
         let mut out = Vec::new();
         for (_, path) in entries.into_iter().take(limit.max(1)) {
             if let Some(mut session) = std::fs::read_to_string(&path)
@@ -350,7 +350,7 @@ impl Session {
     }
 
     /// all saved sessions, newest activity first, pinned on top
-    #[cfg_attr(test, allow(dead_code))]
+    #[allow(dead_code)]
     pub fn list() -> Result<Vec<Self>> {
         let dir = Self::sessions_dir()?;
         let mut out = Vec::new();

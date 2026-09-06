@@ -93,15 +93,14 @@ pub fn build_body(req: &ChatRequest, base_max_tokens: u32, cache_breakpoints: bo
             .and_then(|p| p.get("role"))
             .and_then(|r| r.as_str())
             == Some(role);
-        if same_role {
-            if let Some(arr) = msgs
+        if same_role
+            && let Some(arr) = msgs
                 .last_mut()
                 .and_then(|p| p.get_mut("content"))
                 .and_then(|c| c.as_array_mut())
-            {
-                arr.extend(content_blocks(m));
-                continue;
-            }
+        {
+            arr.extend(content_blocks(m));
+            continue;
         }
         msgs.push(json!({
             "role": role,
@@ -248,21 +247,25 @@ impl Provider for AnthropicProvider {
                                 let kind = v.pointer("/delta/type").and_then(|x| x.as_str()).unwrap_or("");
                                 match kind {
                                     "text_delta" => {
-                                        if let Some(t) = v.pointer("/delta/text").and_then(|x| x.as_str()) {
-                                            if !t.is_empty() { yield Ok(StreamEvent::Text(t.to_string())); }
+                                        if let Some(t) = v.pointer("/delta/text").and_then(|x| x.as_str())
+                                            && !t.is_empty()
+                                        {
+                                            yield Ok(StreamEvent::Text(t.to_string()));
                                         }
                                     }
                                     "thinking_delta" => {
-                                        if let Some(t) = v.pointer("/delta/thinking").and_then(|x| x.as_str()) {
-                                            if !t.is_empty() { yield Ok(StreamEvent::Reasoning(t.to_string())); }
+                                        if let Some(t) = v.pointer("/delta/thinking").and_then(|x| x.as_str())
+                                            && !t.is_empty()
+                                        {
+                                            yield Ok(StreamEvent::Reasoning(t.to_string()));
                                         }
                                     }
                                     "input_json_delta" => {
                                         let idx = v.pointer("/index").and_then(|x| x.as_i64()).unwrap_or(0);
-                                        if let Some(pj) = v.pointer("/delta/partial_json").and_then(|x| x.as_str()) {
-                                            if let Some(slot) = partials.get_mut(&idx) {
-                                                slot.2.push_str(pj);
-                                            }
+                                        if let Some(pj) = v.pointer("/delta/partial_json").and_then(|x| x.as_str())
+                                            && let Some(slot) = partials.get_mut(&idx)
+                                        {
+                                            slot.2.push_str(pj);
                                         }
                                     }
                                     _ => {}

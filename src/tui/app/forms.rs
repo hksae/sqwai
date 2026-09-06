@@ -256,12 +256,10 @@ impl App {
                             ta.move_cursor(tui_textarea::CursorMove::End);
                         }
                     }
-                    Some(FormField::Choice { .. }) => {
-                        if col >= text_x {
-                            self.choice_cycle(1);
-                        }
+                    Some(FormField::Choice { .. }) if col >= text_x => {
+                        self.choice_cycle(1);
                     }
-                    None => {}
+                    _ => {}
                 }
                 self.dirty = true;
             }
@@ -269,26 +267,26 @@ impl App {
     }
 
     pub(super) fn form_mouse_drag(&mut self, _row: u16, col: u16) {
-        if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus) {
-            if ta.is_selecting() {
-                let label_w = 16u16;
-                let text_x = self.menu_rect.x + 1 + label_w;
-                let char_col = (col.saturating_sub(text_x)) as usize;
-                ta.move_cursor(tui_textarea::CursorMove::Jump(0, char_col as u16));
-                self.dirty = true;
-            }
+        if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus)
+            && ta.is_selecting()
+        {
+            let label_w = 16u16;
+            let text_x = self.menu_rect.x + 1 + label_w;
+            let char_col = (col.saturating_sub(text_x)) as usize;
+            ta.move_cursor(tui_textarea::CursorMove::Jump(0, char_col as u16));
+            self.dirty = true;
         }
     }
 
     pub(super) fn form_mouse_up(&mut self) {
-        if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus) {
-            if ta.is_selecting() {
-                ta.copy();
-                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                    let text = ta.yank_text();
-                    if !text.is_empty() {
-                        let _ = clipboard.set_text(text);
-                    }
+        if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus)
+            && ta.is_selecting()
+        {
+            ta.copy();
+            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                let text = ta.yank_text();
+                if !text.is_empty() {
+                    let _ = clipboard.set_text(text);
                 }
             }
         }
@@ -361,19 +359,19 @@ impl App {
                     api_key: (!key.is_empty()).then_some(key),
                     api_key_env: (!key_env.is_empty()).then_some(key_env),
                 };
-                if let Some(old) = &name {
-                    if old != &new_name {
-                        if let Some(pc_old) = self.cfg.providers.remove(old) {
-                            for m in self.cfg.models.values_mut() {
-                                if &m.provider == old {
-                                    m.provider = new_name.clone();
-                                }
+                if let Some(old) = &name
+                    && old != &new_name
+                {
+                    if let Some(pc_old) = self.cfg.providers.remove(old) {
+                        for m in self.cfg.models.values_mut() {
+                            if &m.provider == old {
+                                m.provider = new_name.clone();
                             }
-                            let _ = pc_old;
                         }
-                        if self.model_cfg.provider == *old {
-                            self.model_cfg.provider = new_name.clone();
-                        }
+                        let _ = pc_old;
+                    }
+                    if self.model_cfg.provider == *old {
+                        self.model_cfg.provider = new_name.clone();
                     }
                 }
                 self.cfg.providers.insert(new_name.clone(), pc);
@@ -404,12 +402,12 @@ impl App {
                     );
                     return;
                 }
-                if let Some(old) = &key {
-                    if old != &new_key {
-                        self.cfg.models.remove(old);
-                        if self.session.model_key == *old {
-                            self.session.model_key = new_key.clone();
-                        }
+                if let Some(old) = &key
+                    && old != &new_key
+                {
+                    self.cfg.models.remove(old);
+                    if self.session.model_key == *old {
+                        self.session.model_key = new_key.clone();
                     }
                 }
                 let updated = ModelConfig {

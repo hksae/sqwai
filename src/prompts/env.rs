@@ -26,6 +26,7 @@ pub fn process_block() -> String {
 }
 
 /// Compatibility name for callers that need only the immutable process facts.
+#[allow(dead_code)]
 pub fn stable_block() -> String {
     process_block()
 }
@@ -171,6 +172,7 @@ fn os_info() -> String {
     }
 }
 
+#[allow(dead_code)]
 fn value_from_reg(output: &str, value_name: &str) -> Option<String> {
     output.lines().find_map(|line| {
         let line = line.trim();
@@ -194,7 +196,10 @@ fn git_info(root: &Path) -> String {
             };
             let mut out = format!("Git: {branch}\n");
             match capture_in(root, "git", &["status", "--porcelain"]) {
-                Ok(status) => out.push_str(&format!("Git status at session start: {} changed file(s)\n", status.lines().count())),
+                Ok(status) => out.push_str(&format!(
+                    "Git status at session start: {} changed file(s)\n",
+                    status.lines().count()
+                )),
                 Err(error) => out.push_str(&format!("Git status: unavailable ({error})\n")),
             }
             match capture_in(root, "git", &["log", "-3", "--format=- %s"]) {
@@ -235,7 +240,9 @@ fn tree_block(root: &Path) -> String {
         entries.push((relative.to_path_buf(), is_dir));
     }
     entries.sort_by(|(left_path, left_dir), (right_path, right_dir)| {
-        right_dir.cmp(left_dir).then_with(|| left_path.cmp(right_path))
+        right_dir
+            .cmp(left_dir)
+            .then_with(|| left_path.cmp(right_path))
     });
 
     let omitted = entries.len().saturating_sub(TREE_LIMIT);

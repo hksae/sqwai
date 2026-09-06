@@ -30,9 +30,18 @@ impl ShellKind {
         }
     }
 
+    /// Recognize the shell from a program path, under either separator.
+    ///
+    /// `Path::file_stem` is platform-dependent: on Unix `\` is an ordinary
+    /// character, so a Windows-style `SHELL` value such as
+    /// `C:\Windows\System32\cmd.exe` is one single component and `file_stem`
+    /// returns the whole string. That made every such value fall through to
+    /// the `Sh` default — and shell detection decides which layer of the
+    /// dangerous-command classifier is authoritative (§5.2).
     fn from_program(path: &Path) -> Option<Self> {
-        let name = path.file_stem()?.to_str()?.to_ascii_lowercase();
-        match name.as_str() {
+        let segment = path.to_str()?.rsplit(['/', '\\']).next()?;
+        let stem = segment.rsplit_once('.').map_or(segment, |(stem, _)| stem);
+        match stem.to_ascii_lowercase().as_str() {
             "bash" => Some(Self::Bash),
             "sh" | "dash" | "zsh" | "fish" | "ksh" => Some(Self::Sh),
             "cmd" => Some(Self::Cmd),

@@ -67,6 +67,7 @@ pub(super) enum Menu {
     /// pick a message to copy history up to
     ForkPoint,
     /// /debug: runtime toggles and diagnostics
+    #[allow(dead_code)]
     Debug,
     /// /themes: palette browser
     Themes,
@@ -257,8 +258,7 @@ impl App {
         if is_form {
             let n = self.form_fields.len();
             if n > 0 {
-                if let Some(FormField::Text { ta, .. }) =
-                    self.form_fields.get_mut(self.form_focus)
+                if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus)
                 {
                     ta.cancel_selection();
                 }
@@ -1088,10 +1088,7 @@ impl App {
                 ));
                 if self.sessions_filter.is_empty() {
                     self.menu_rows.push(row(
-                        Line::from(Span::styled(
-                            " p: pin · d: delete",
-                            Theme::dim(),
-                        )),
+                        Line::from(Span::styled(" p: pin · d: delete", Theme::dim())),
                         MenuAction::None,
                     ));
                 }
@@ -1310,7 +1307,7 @@ impl App {
                     };
                     let mut spans = vec![
                         Span::styled(format!("{checked}{}. ", i + 1), Theme::accent()),
-                        Span::styled(format!("{label}"), Theme::base()),
+                        Span::styled(label.to_string(), Theme::base()),
                     ];
                     if let Some(d) = desc {
                         spans.push(Span::styled(format!(" — {d}"), Theme::dim()));

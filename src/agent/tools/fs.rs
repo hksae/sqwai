@@ -91,10 +91,10 @@ fn diff_counts(diff: &str) -> (usize, usize) {
             if !rest.starts_with("++") {
                 add += 1;
             }
-        } else if let Some(rest) = l.strip_prefix('-') {
-            if !rest.starts_with("--") {
-                rem += 1;
-            }
+        } else if let Some(rest) = l.strip_prefix('-')
+            && !rest.starts_with("--")
+        {
+            rem += 1;
         }
     }
     (add, rem)
@@ -119,14 +119,12 @@ pub(super) fn read(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Ou
     let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
     let limit = args["limit"].as_u64().unwrap_or(READ_MAX_LINES as u64) as usize;
     let mut out = String::new();
-    let mut emitted = 0usize;
-    for (i, line) in text.lines().enumerate().skip(offset - 1) {
+    for (emitted, (i, line)) in text.lines().enumerate().skip(offset - 1).enumerate() {
         if emitted >= limit.min(READ_MAX_LINES) || out.len() > 300_000 {
             out.push_str("\n…(output truncated)");
             break;
         }
         out.push_str(&format!("{:>6}\t{line}\n", i + 1));
-        emitted += 1;
     }
     if text.lines().count() == 0 {
         out.push_str("(empty file)\n");
