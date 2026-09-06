@@ -2795,6 +2795,53 @@ mod tests {
             .checkpoints
             .push(("deadbeef".into(), "write src/a.rs".into()));
 
+        let last_status = |app: &App| {
+            app.segments
+                .iter()
+                .rev()
+                .find_map(|segment| match segment {
+                    Segment::Status { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+
+        // An argument that is neither a count nor a step is refused with the
+        // forms that do work, rather than silently reverting the last
+        // checkpoint and reporting success.
+        app.command("undo yesterday");
+        let status = last_status(&app);
+        assert!(
+            status.contains("takes a count or a step") && status.contains("yesterday"),
+            "must explain instead of undoing the wrong thing: {status:?}"
+        );
+
+        // `step` without an id is refused too, not read as `/undo 1`
+        app.command("undo step");
+        assert!(
+            last_status(&app).contains("needs a step id"),
+            "{:?}",
+            last_status(&app)
+        );
+
+        assert_eq!(
+            app.session.checkpoints.len(),
+            1,
+            "nothing may be reverted for an argument we cannot honour"
+        );
+    }
+
+    /// `/undo step N` reverts through layer 1, so it must reach that path
+    /// rather than the checkpoint one — with no journal records for the step
+    /// there is nothing to put back, and saying so is the correct answer.
+    #[test]
+    fn undo_step_reports_a_step_with_no_recorded_writes() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.session
+            .checkpoints
+            .push(("deadbeef".into(), "write src/a.rs".into()));
+
         app.command("undo step 3");
         let status = app
             .segments
@@ -2806,13 +2853,13 @@ mod tests {
             })
             .unwrap_or_default();
         assert!(
-            status.contains("takes a count") && status.contains("not implemented"),
-            "must explain instead of undoing the wrong thing: {status:?}"
+            status.contains("step 3") && status.contains("no file writes"),
+            "{status:?}"
         );
         assert_eq!(
             app.session.checkpoints.len(),
             1,
-            "nothing may be reverted for an argument we cannot honour"
+            "a per-step revert must not touch the checkpoint stack"
         );
     }
 

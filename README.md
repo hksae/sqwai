@@ -54,9 +54,10 @@ stopped.
 byte, in a content-addressed store under `.sqwai/checkpoints/blobs/` — so
 `/undo [n]` puts back exactly what the agent wrote and **does not need git at
 all**. A file you edited yourself in the meantime is reported and left alone
-rather than overwritten. Undoing a `bash` command still needs a worktree
-snapshot, which today is a dangling commit in your repository; the separate
-shadow repository from DESIGN.md §2.5 and `/undo step N` are
+rather than overwritten. `/undo step N` reverts one plan step and reopens it, refusing by
+name any file a later step has rewritten since. Undoing a `bash` command still
+needs a worktree snapshot, which today is a dangling commit in your
+repository; the separate shadow repository from DESIGN.md §2.5 is
 **[in development]**.
 
 **Graph. [in development]** An index of files, symbols, documents and memory,
