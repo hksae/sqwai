@@ -111,51 +111,87 @@ pub fn restore(root: &Path, sha: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::PathBuf;
 
-    fn git_in(dir: &PathBuf, args: &[&str]) -> String {
+    /// Run git against the fixture repository in an isolated environment.
+    ///
+    /// The fixture must not depend on the machine's git configuration: a
+    /// global or system config can carry `init.templateDir`, `core.hooksPath`
+    /// or a signing setup that makes a bare `git init` fail, which is how this
+    /// test died on the macOS runner while passing everywhere else. `HOME`
+    /// points at the fixture, system config is off, and the identity and
+    /// initial branch are passed per invocation instead of being written into
+    /// the repository by follow-up `git config` calls.
+    fn git_in(dir: &Path, args: &[&str]) -> String {
         let o = std::process::Command::new("git")
             .current_dir(dir)
+            .env("HOME", dir)
+            .env("XDG_CONFIG_HOME", dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", dir.join("absent.gitconfig"))
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args([
+                "-c",
+                "init.defaultBranch=main",
+                "-c",
+                "user.name=sqwai-test",
+                "-c",
+                "user.email=test@sqwai.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
             .args(args)
             .output()
-            .unwrap();
-        assert!(o.status.success(), "git {args:?} failed");
+            .unwrap_or_else(|e| panic!("could not spawn git {args:?} in {}: {e}", dir.display()));
+        // Report why, not just that: a bare "git failed" in CI is undebuggable.
+        assert!(
+            o.status.success(),
+            "git {args:?} in {} exited with {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            dir.display(),
+            o.status,
+            String::from_utf8_lossy(&o.stdout).trim(),
+            String::from_utf8_lossy(&o.stderr).trim(),
+        );
         String::from_utf8_lossy(&o.stdout).into_owned()
     }
 
-    fn tmp_repo() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "sqwai-ckpt-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        git_in(&dir, &["init", "-q"]);
-        git_in(&dir, &["config", "user.email", "t@t"]);
-        git_in(&dir, &["config", "user.name", "t"]);
-        fs::write(dir.join("a.txt"), "hello\n").unwrap();
-        git_in(&dir, &["add", "."]);
-        git_in(&dir, &["commit", "-qm", "init"]);
+    /// A fresh fixture repository that cleans itself up when dropped.
+    ///
+    /// The name used to be built from `SystemTime::now().as_nanos()`. Cargo
+    /// runs the tests in this module on parallel threads, and clock
+    /// granularity is not uniform across platforms: where two calls land in
+    /// the same tick, both tests get the *same* directory and then race on
+    /// `.git`. `tempfile` allocates the directory atomically instead, so the
+    /// fixtures cannot collide, and a panicking test no longer leaves it
+    /// behind.
+    fn tmp_repo() -> tempfile::TempDir {
+        let dir = tempfile::Builder::new()
+            .prefix("sqwai-ckpt-test-")
+            .tempdir()
+            .expect("temp dir for the fixture repository");
+        let path = dir.path();
+        git_in(path, &["init", "-q"]);
+        fs::write(path.join("a.txt"), "hello\n").unwrap();
+        git_in(path, &["add", "."]);
+        git_in(path, &["commit", "-qm", "init"]);
         dir
     }
 
     #[test]
     fn snapshot_and_restore_revert_edits_and_creations() {
-        let dir = tmp_repo();
+        let repo = tmp_repo();
+        let dir = repo.path();
         // mutate an existing file and create a new one
         fs::write(dir.join("a.txt"), "changed\n").unwrap();
         fs::write(dir.join("new.txt"), "created\n").unwrap();
 
-        let sha = snapshot(&dir, "test").expect("snapshot");
+        let sha = snapshot(dir, "test").expect("snapshot");
 
         // make further damage after the snapshot
         fs::write(dir.join("a.txt"), "worse\n").unwrap();
         fs::write(dir.join("extra.txt"), "extra\n").unwrap();
         fs::remove_file(dir.join("new.txt")).unwrap();
 
-        restore(&dir, &sha).expect("restore");
+        restore(dir, &sha).expect("restore");
 
         assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "changed\n");
         assert_eq!(
@@ -169,23 +205,21 @@ mod tests {
         );
 
         // the git index must still equal HEAD (user staging untouched)
-        let staged = git_in(&dir, &["diff", "--cached", "--name-only"]);
+        let staged = git_in(dir, &["diff", "--cached", "--name-only"]);
         assert!(staged.trim().is_empty(), "staging area was modified");
 
         // branch must still be HEAD (no commit attached)
-        let log = git_in(&dir, &["log", "--oneline"]);
+        let log = git_in(dir, &["log", "--oneline"]);
         assert_eq!(log.lines().count(), 1, "extra commit leaked onto branch");
-
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn available_detects_repo() {
-        let dir = tmp_repo();
-        assert!(available(&dir));
+        let repo = tmp_repo();
+        let dir = repo.path();
+        assert!(available(dir));
         let plain = dir.join("nested");
         fs::create_dir_all(&plain).unwrap();
         assert!(!available(&plain));
-        let _ = fs::remove_dir_all(dir);
     }
 }
