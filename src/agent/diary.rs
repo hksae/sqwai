@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 const MAX_DIARY_BYTES: usize = 200_000;
 const DEFAULT_DIARY_TOKEN_BUDGET: u32 = 1_500;
@@ -61,19 +62,25 @@ fn one_line(text: &str, limit: usize) -> String {
 /// Deliberately narrow: only numbers that describe an outcome the host
 /// recorded. Step counts and "added two tests" are the model's own reading of
 /// the plan and stay untouched.
-fn claim_patterns() -> Vec<Regex> {
-    [
-        r"(?i)\d+\s+passed",
-        r"(?i)\d+\s+failed",
-        r"(?i)\d+\s+ignored",
-        r"(?i)\d+\s+errors?",
-        r"(?i)\d+\s+warnings?",
-        r"(?i)exit\s+code\s+\d+",
-        r"(?i)exit\s+\d+",
-    ]
-    .iter()
-    .map(|pattern| Regex::new(pattern).unwrap())
-    .collect()
+///
+/// Compiled once: the post-check runs on every diary entry, and these change
+/// only when the code does.
+fn claim_patterns() -> &'static [Regex] {
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        [
+            r"(?i)\d+\s+passed",
+            r"(?i)\d+\s+failed",
+            r"(?i)\d+\s+ignored",
+            r"(?i)\d+\s+errors?",
+            r"(?i)\d+\s+warnings?",
+            r"(?i)exit\s+code\s+\d+",
+            r"(?i)exit\s+\d+",
+        ]
+        .into_iter()
+        .map(|source| Regex::new(source).unwrap())
+        .collect()
+    })
 }
 
 /// Remove lines that state a result the host block does not contain.

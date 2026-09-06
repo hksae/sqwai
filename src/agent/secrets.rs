@@ -5,6 +5,7 @@
 //! that echoes a token and a file that keeps it forever.
 
 use regex::Regex;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Screened {
@@ -12,29 +13,45 @@ pub struct Screened {
     pub redacted: bool,
 }
 
+/// The secret shapes, compiled once: `screen` runs on every journal append,
+/// and recompiling eight expressions per call would tax exactly the hot path
+/// the filter sits on.
+fn secret_patterns() -> &'static [Regex] {
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        [
+            r"(?i)\bAKIA[0-9A-Z]{16}\b",
+            r"\bsk-[A-Za-z0-9_-]{16,}\b",
+            r"\bghp_[A-Za-z0-9]{20,}\b",
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+            r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}",
+            r"(?i)https?://[^\s/@:]+:[^\s/@]+@[^\s]+\b",
+            r"(?i)\b[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)[A-Z0-9_]*\s*=\s*[^\s]+\b",
+        ]
+        .into_iter()
+        .map(|source| Regex::new(source).unwrap())
+        .collect()
+    })
+}
+
+fn opaque_token_pattern() -> &'static Regex {
+    static TOKEN: OnceLock<Regex> = OnceLock::new();
+    TOKEN.get_or_init(|| Regex::new(r##"[^\s`\"']{20,}"##).unwrap())
+}
+
 /// Screen text before it reaches durable diary or summary storage.
 pub fn screen(text: &str) -> Screened {
-    let patterns = [
-        Regex::new(r"(?i)\bAKIA[0-9A-Z]{16}\b").unwrap(),
-        Regex::new(r"\bsk-[A-Za-z0-9_-]{16,}\b").unwrap(),
-        Regex::new(r"\bghp_[A-Za-z0-9]{20,}\b").unwrap(),
-        Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----").unwrap(),
-        Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}").unwrap(),
-        Regex::new(r"(?i)https?://[^\s/@:]+:[^\s/@]+@[^\s]+\b").unwrap(),
-        Regex::new(r"(?i)\b[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)[A-Z0-9_]*\s*=\s*[^\s]+\b").unwrap(),
-    ];
     let mut output = text.to_string();
     let mut redacted = false;
-    for pattern in patterns {
+    for pattern in secret_patterns() {
         let replaced = pattern.replace_all(&output, "[redacted]");
         if replaced != output {
             redacted = true;
             output = replaced.into_owned();
         }
     }
-    let token_re = Regex::new(r##"[^\s`\"']{20,}"##).unwrap();
     let mut replacements = Vec::new();
-    for found in token_re.find_iter(&output) {
+    for found in opaque_token_pattern().find_iter(&output) {
         if shannon_entropy(found.as_str()) > OPAQUE_ENTROPY {
             replacements.push((found.start(), found.end()));
         }
