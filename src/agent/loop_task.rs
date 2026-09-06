@@ -1607,22 +1607,6 @@ async fn run_turn(
         }
 
         let Some(error) = failed else {
-            // The one line that makes the effort machinery inspectable: what
-            // was asked for, what went on the wire, and what the provider
-            // counted. Without it, "the level was honoured" and "the provider
-            // says nothing about reasoning" look identical from outside.
-            if let Some(level) = req.effort {
-                let wire = crate::providers::effort::plan(level, req.effort_support).wire;
-                crate::providers::log_http(&format!(
-                    "turn: effort requested={} sent={:?} reasoning_tokens={}",
-                    level.as_str(),
-                    wire,
-                    match reasoning_tokens {
-                        Some(n) => n.to_string(),
-                        None => "not reported".into(),
-                    }
-                ));
-            }
             return Ok(TurnOutcome {
                 text,
                 calls,
