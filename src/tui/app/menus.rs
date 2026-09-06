@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tui_textarea::TextArea;
 
 use crate::agent::loop_task::AgentEvent;
-use crate::config::{Config, ModelConfig, ThinkingLevel, WireFormat};
+use crate::config::{Config, EffortLevel, ModelConfig, WireFormat};
 use crate::providers::{self, ChatRequest, Message as PMessage, Role, SharedProvider};
 use crate::session::Session;
 use crate::tui::markdown::{Highlighter, render, wrap_tagged};
@@ -89,7 +89,7 @@ pub(super) enum Menu {
     DeleteModelList {
         provider: String,
     },
-    Thinking,
+    Effort,
     /// the model asked the user a structured question (ask_user)
     AskUser {
         id: u64,
@@ -148,13 +148,13 @@ pub(super) enum MenuAction {
     ToggleTypewriter,
     ToggleHttpLog,
     ToggleShowCost,
-    CycleModelThinking,
-    CycleDefaultThinking,
+    CycleModelEffort,
+    CycleDefaultEffort,
     ToggleMode,
     OpenSessions,
     SetTheme(usize),
     Confirm(Box<MenuAction>),
-    SetThinking(ThinkingLevel),
+    SetEffort(EffortLevel),
     OpenSubagent(u64),
     /// ask_user: submit one chosen option's label
     AskSelect(String),
@@ -572,27 +572,27 @@ impl App {
                 self.status(&format!("show cost: {}", on_off(on)), StatusKind::Ok);
                 self.build_menu_rows();
             }
-            MenuAction::CycleModelThinking => {
-                let all = ThinkingLevel::ALL;
+            MenuAction::CycleModelEffort => {
+                let all = EffortLevel::ALL;
                 let cur = all
                     .iter()
-                    .position(|l| *l == self.model_cfg.thinking)
+                    .position(|l| *l == self.model_cfg.effort)
                     .unwrap_or(0);
                 let next = all[(cur + 1) % all.len()];
-                self.model_cfg.thinking = next;
+                self.model_cfg.effort = next;
                 if let Some(m) = self.cfg.models.get_mut(&self.session.model_key) {
-                    m.thinking = next;
+                    m.effort = next;
                 }
                 self.cfg.save().ok();
                 self.build_menu_rows();
             }
-            MenuAction::CycleDefaultThinking => {
-                let all = ThinkingLevel::ALL;
+            MenuAction::CycleDefaultEffort => {
+                let all = EffortLevel::ALL;
                 let cur = all
                     .iter()
-                    .position(|l| *l == self.cfg.default_thinking)
+                    .position(|l| *l == self.cfg.default_effort)
                     .unwrap_or(0);
-                self.cfg.default_thinking = all[(cur + 1) % all.len()];
+                self.cfg.default_effort = all[(cur + 1) % all.len()];
                 self.cfg.save().ok();
                 self.build_menu_rows();
             }
@@ -690,14 +690,14 @@ impl App {
                 self.view_top = 0;
                 self.dirty = true;
             }
-            MenuAction::SetThinking(level) => {
-                self.model_cfg.thinking = level;
+            MenuAction::SetEffort(level) => {
+                self.model_cfg.effort = level;
                 if let Some(m) = self.cfg.models.get_mut(&self.session.model_key) {
-                    m.thinking = level;
+                    m.effort = level;
                 }
                 self.cfg.save().ok();
                 self.menu_home();
-                self.status(&format!("thinking: {}", level.as_str()), StatusKind::Ok);
+                self.status(&format!("effort: {}", level.as_str()), StatusKind::Ok);
             }
             MenuAction::AskSelect(label) => {
                 self.ask_answer(label);
@@ -767,7 +767,7 @@ impl App {
             Some(Menu::Themes) => " themes ".into(),
             Some(Menu::EditSessionTitle { .. }) => " rename session ".into(),
             Some(Menu::ConfirmDelete { .. }) => " confirm ".into(),
-            Some(Menu::Thinking) => " thinking ".into(),
+            Some(Menu::Effort) => " effort ".into(),
             Some(Menu::AskUser { multiple, .. }) => {
                 if *multiple {
                     " ask · multiple (enter toggles, confirm to finish) ".into()
@@ -971,14 +971,14 @@ impl App {
                     MenuAction::ToggleHttpLog,
                 ));
                 self.menu_rows.push(setting(
-                    "thinking",
-                    self.model_cfg.thinking.as_str().to_string(),
-                    MenuAction::CycleModelThinking,
+                    "effort",
+                    self.model_cfg.effort.as_str().to_string(),
+                    MenuAction::CycleModelEffort,
                 ));
                 self.menu_rows.push(setting(
-                    "default thinking",
-                    self.cfg.default_thinking.as_str().to_string(),
-                    MenuAction::CycleDefaultThinking,
+                    "default effort",
+                    self.cfg.default_effort.as_str().to_string(),
+                    MenuAction::CycleDefaultEffort,
                 ));
                 self.menu_rows.push(setting(
                     "mode",
@@ -1191,10 +1191,10 @@ impl App {
                                 Span::styled(format!(" {k}{mark}"), Theme::accent()),
                                 Span::styled(
                                     format!(
-                                        "  {} · ctx {} · th:{}",
+                                        "  {} · ctx {} · ef:{}",
                                         m.id,
                                         m.context,
-                                        m.thinking.as_str()
+                                        m.effort.as_str()
                                     ),
                                     Theme::dim(),
                                 ),
@@ -1266,16 +1266,16 @@ impl App {
                     MenuAction::Back,
                 ));
             }
-            Menu::Thinking => {
-                for lvl in ThinkingLevel::SELECTABLE {
-                    let current = lvl == self.model_cfg.thinking;
+            Menu::Effort => {
+                for lvl in EffortLevel::SELECTABLE {
+                    let current = lvl == self.model_cfg.effort;
                     let mark = if current { " *current" } else { "" };
                     self.menu_rows.push(row(
                         Line::from(vec![
                             Span::styled(format!(" {}", lvl.as_str()), Theme::accent()),
                             Span::styled(mark.to_string(), Theme::dim()),
                         ]),
-                        MenuAction::SetThinking(lvl),
+                        MenuAction::SetEffort(lvl),
                     ));
                 }
             }

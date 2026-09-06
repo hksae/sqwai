@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 use super::{ChatRequest, Provider, Role, StreamEvent, StreamResult, ToolCallReq};
-use crate::config::{ResolvedProvider, ThinkingLevel};
+use crate::config::{EffortLevel, ResolvedProvider};
 
 #[derive(Clone)]
 pub struct OpenAiProvider {
@@ -144,12 +144,12 @@ impl Provider for OpenAiProvider {
             });
             // openai-compatible reasoning control; servers that do not know
             // the field simply ignore it
-            if let Some(level) = req.thinking.filter(|l| *l != ThinkingLevel::Off) {
+            if let Some(level) = req.effort.filter(|l| *l != EffortLevel::Off) {
                 let effort = match level {
-                    ThinkingLevel::Low => "low",
-                    ThinkingLevel::Medium => "medium",
-                    ThinkingLevel::High | ThinkingLevel::Max => "high",
-                    ThinkingLevel::Off => unreachable!(),
+                    EffortLevel::Low => "low",
+                    EffortLevel::Medium => "medium",
+                    EffortLevel::High | EffortLevel::Max => "high",
+                    EffortLevel::Off => unreachable!(),
                 };
                 body["reasoning_effort"] = json!(effort);
             }
@@ -190,15 +190,31 @@ impl Provider for OpenAiProvider {
             let mut partials: BTreeMap<i64, PartialCall> = BTreeMap::new();
 
             let mut es = resp.bytes_stream().eventsource();
+            // every chunk of a Chat Completions stream repeats the response id;
+            // the event means "this response started", so it is emitted once
+            let mut response_id_sent = false;
             while let Some(ev) = es.next().await {
                 match ev {
                     Ok(ev) => {
                         if ev.data.trim() == "[DONE]" { break; }
                         let v: Value = match serde_json::from_str(&ev.data) {
                             Ok(v) => v,
-                            Err(_) => continue,
+                            // eventsource-stream already reassembled the frame, so
+                            // this is a syntactically invalid payload, not a partial
+                            // one. Dropping it silently loses whatever it carried —
+                            // a tool-call delta included.
+                            Err(e) => {
+                                super::log_http(&format!(
+                                    "openai: dropped unparsable SSE payload ({e}): {}",
+                                    ev.data.chars().take(200).collect::<String>()
+                                ));
+                                continue;
+                            }
                         };
-                        if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
+                        if let Some(id) = v.get("id").and_then(|x| x.as_str())
+                            && !response_id_sent
+                        {
+                            response_id_sent = true;
                             yield Ok(StreamEvent::ResponseId(id.to_string()));
                         }
                         if let Some(u) = Self::map_usage(&v) { yield Ok(StreamEvent::Usage(u)); }
@@ -281,6 +297,128 @@ mod tests {
     use super::super::Message;
     use super::*;
 
+    /// Serves one canned SSE body and closes. `id` is repeated on every chunk,
+    /// the way Chat Completions actually streams.
+    fn sse_server(body: String) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let h = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut line = String::new();
+            let mut len = 0usize;
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line
+                    .to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .and_then(|s| s.trim().parse::<usize>().ok())
+                {
+                    len = v;
+                }
+            }
+            // the request body must be drained or the client sees a reset
+            let mut buf = vec![0u8; len];
+            std::io::Read::read_exact(&mut reader, &mut buf).ok();
+            let mut out = stream;
+            write!(
+                out,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            let _ = out.flush();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        });
+        (format!("http://{addr}/v1"), h)
+    }
+
+    fn plain_request() -> ChatRequest {
+        ChatRequest {
+            model_id: "m".into(),
+            system: vec![],
+            messages: vec![Message::new(Role::User, "hi")],
+            effort: None,
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        }
+    }
+
+    async fn collect(url: String) -> Vec<StreamEvent> {
+        use futures::StreamExt;
+        let p = OpenAiProvider::new(&crate::config::ResolvedProvider {
+            name: "p".into(),
+            format: crate::config::WireFormat::Openai,
+            base_url: url,
+            api_key: Some("k".into()),
+        })
+        .unwrap();
+        p.stream_chat(plain_request())
+            .filter_map(|e| async move { e.ok() })
+            .collect()
+            .await
+    }
+
+    /// The id identifies the response, not the chunk. Emitting it per chunk
+    /// makes every consumer of `ResponseId` see a fresh response each time.
+    #[tokio::test]
+    async fn response_id_is_emitted_once_per_response() {
+        let body = "data: {\"id\":\"resp_1\",\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n\
+                    data: {\"id\":\"resp_1\",\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n\
+                    data: {\"id\":\"resp_1\",\"choices\":[{\"delta\":{\"content\":\"c\"}}]}\n\n\
+                    data: [DONE]\n\n"
+            .to_string();
+        let (url, h) = sse_server(body);
+        let events = collect(url).await;
+        h.join().unwrap();
+        let ids: Vec<&String> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ResponseId(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec!["resp_1"], "one response, one id: {events:?}");
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "abc", "text must still stream in full");
+    }
+
+    /// An invalid payload is dropped (there is nothing else to do with it), but
+    /// it must not end the stream: the deltas after it still arrive.
+    #[tokio::test]
+    async fn an_unparsable_payload_does_not_end_the_stream() {
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n\
+                    data: {not json at all\n\n\
+                    data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n\
+                    data: [DONE]\n\n"
+            .to_string();
+        let (url, h) = sse_server(body);
+        let events = collect(url).await;
+        h.join().unwrap();
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "ab");
+    }
+
     #[test]
     fn request_body_includes_tools_and_tool_messages() {
         let req = ChatRequest {
@@ -295,7 +433,7 @@ mod tests {
                 }]),
                 Message::tool_result("call_1", "a.txt\nb.txt", false),
             ],
-            thinking: None,
+            effort: None,
             max_tokens: None,
             tools: vec![super::super::ToolSpec {
                 name: "ls".into(),
@@ -338,7 +476,7 @@ mod tests {
             model_id: "m".into(),
             system: vec![crate::providers::SystemPart::cached("sys")],
             messages: vec![Message::new(Role::User, "hi")],
-            thinking: None,
+            effort: None,
             max_tokens: None,
             tools: vec![],
             previous_response_id: Some("resp_1".into()),
@@ -360,7 +498,7 @@ mod tests {
                 crate::providers::SystemPart::volatile("B"),
             ],
             messages: vec![Message::new(Role::User, "hi")],
-            thinking: None,
+            effort: None,
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,

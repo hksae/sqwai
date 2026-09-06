@@ -10,7 +10,7 @@ use super::{ChatRequest, Provider, Role, StreamEvent, StreamResult, ToolCallReq}
 /// Anthropic accepts at most four `cache_control` markers in one request and
 /// rejects the request beyond that.
 const MAX_CACHE_BREAKPOINTS: usize = 4;
-use crate::config::{ResolvedProvider, ThinkingLevel};
+use crate::config::{EffortLevel, ResolvedProvider};
 
 #[derive(Clone)]
 pub struct AnthropicProvider {
@@ -19,13 +19,13 @@ pub struct AnthropicProvider {
     api_key: String,
 }
 
-fn budget(level: ThinkingLevel) -> u32 {
+fn budget(level: EffortLevel) -> u32 {
     match level {
-        ThinkingLevel::Off => 0,
-        ThinkingLevel::Low => 2048,
-        ThinkingLevel::Medium => 8192,
-        ThinkingLevel::High => 16384,
-        ThinkingLevel::Max => 32768,
+        EffortLevel::Off => 0,
+        EffortLevel::Low => 2048,
+        EffortLevel::Medium => 8192,
+        EffortLevel::High => 16384,
+        EffortLevel::Max => 32768,
     }
 }
 
@@ -140,7 +140,7 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
         body["system"] = json!(system);
     }
 
-    if let Some(level) = req.thinking.filter(|l| *l != ThinkingLevel::Off) {
+    if let Some(level) = req.effort.filter(|l| *l != EffortLevel::Off) {
         let b = budget(level);
         body["thinking"] = json!({"type": "enabled", "budget_tokens": b});
         body["max_tokens"] = json!((base_max_tokens + b).min(64_000));
@@ -252,7 +252,17 @@ impl Provider for AnthropicProvider {
                     Ok(ev) => {
                         let v: Value = match serde_json::from_str(&ev.data) {
                             Ok(v) => v,
-                            Err(_) => continue,
+                            // eventsource-stream already reassembled the frame, so
+                            // this is a syntactically invalid payload, not a partial
+                            // one. Dropping it silently loses whatever it carried —
+                            // a tool-call delta included.
+                            Err(e) => {
+                                super::log_http(&format!(
+                                    "anthropic: dropped unparsable SSE payload ({e}): {}",
+                                    ev.data.chars().take(200).collect::<String>()
+                                ));
+                                continue;
+                            }
                         };
                         match ev.event.as_str() {
                             "message_start" => {
@@ -288,7 +298,7 @@ impl Provider for AnthropicProvider {
                                         }
                                     }
                                     "thinking_delta" => {
-                                        if let Some(t) = v.pointer("/delta/thinking").and_then(|x| x.as_str())
+                                        if let Some(t) = v.pointer("/delta/effort").and_then(|x| x.as_str())
                                             && !t.is_empty()
                                         {
                                             yield Ok(StreamEvent::Reasoning(t.to_string()));
@@ -368,7 +378,7 @@ mod tests {
             model_id: "m".into(),
             system: vec![],
             messages: vec![],
-            thinking: None,
+            effort: None,
             max_tokens: Some(32_000),
             tools: vec![],
             previous_response_id: None,
@@ -381,14 +391,14 @@ mod tests {
         without.max_tokens = None;
         assert_eq!(build_body(&without, 8192, false)["max_tokens"], 8192);
 
-        // with thinking on, the budget is added to what the caller asked for,
+        // with effort on, the budget is added to what the caller asked for,
         // not to the default
-        let mut thinking = req.clone();
-        thinking.thinking = Some(ThinkingLevel::Medium);
-        let with_thinking = build_body(&thinking, 8192, false);
-        let budget = with_thinking["thinking"]["budget_tokens"].as_u64().unwrap();
+        let mut with_effort = req.clone();
+        with_effort.effort = Some(EffortLevel::Medium);
+        let body = build_body(&with_effort, 8192, false);
+        let budget = body["thinking"]["budget_tokens"].as_u64().unwrap();
         assert_eq!(
-            with_thinking["max_tokens"].as_u64().unwrap(),
+            body["max_tokens"].as_u64().unwrap(),
             (32_000 + budget).min(64_000)
         );
     }
@@ -410,7 +420,7 @@ mod tests {
                 crate::providers::SystemPart::volatile("anchor"),
             ],
             messages: vec![],
-            thinking: None,
+            effort: None,
             max_tokens: None,
             tools: vec![tool("read"), tool("write"), tool("bash")],
             previous_response_id: None,
@@ -450,7 +460,7 @@ mod tests {
                 .map(|i| crate::providers::SystemPart::cached(format!("part {i}")))
                 .collect(),
             messages: vec![],
-            thinking: None,
+            effort: None,
             max_tokens: None,
             tools: vec![crate::providers::ToolSpec {
                 name: "read".into(),
@@ -485,7 +495,7 @@ mod tests {
                 crate::providers::SystemPart::volatile("git: on branch main"),
             ],
             messages: vec![Message::new(Role::User, "hi")],
-            thinking: Some(ThinkingLevel::High),
+            effort: Some(EffortLevel::High),
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,
@@ -508,7 +518,7 @@ mod tests {
             model_id: "m".into(),
             system: vec![crate::providers::SystemPart::cached("stable prefix")],
             messages: vec![Message::new(Role::User, "hi")],
-            thinking: None,
+            effort: None,
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,
@@ -525,7 +535,7 @@ mod tests {
             model_id: "m".into(),
             system: vec![],
             messages: vec![Message::new(Role::User, "hi")],
-            thinking: None,
+            effort: None,
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,
@@ -541,7 +551,7 @@ mod tests {
             model_id: "m".into(),
             system: vec![],
             messages: vec![Message::new(Role::User, "hi")],
-            thinking: None,
+            effort: None,
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,
@@ -565,7 +575,7 @@ mod tests {
                 }]),
                 Message::tool_result("tu_1", "a.txt", false),
             ],
-            thinking: None,
+            effort: None,
             max_tokens: None,
             tools: vec![super::super::ToolSpec {
                 name: "ls".into(),
@@ -618,7 +628,7 @@ mod tests {
                 Message::tool_result("a", "res-a", false),
                 Message::tool_result("b", "res-b", false),
             ],
-            thinking: None,
+            effort: None,
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,

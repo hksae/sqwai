@@ -526,7 +526,7 @@ contains ≥ 3 file_diff.
 On session end (/exit, /new, process exit via hook) — if any journal
 events since the last entry.
 Manual: /diary writes an entry now.
-Writing is a separate short model call (same provider, thinking off,
+Writing is a separate short model call (same provider, effort off,
 diary.token_budget 1500 output) with: host block, plan snapshot, notes since
 the last entry, the last user message, and the instruction template. Cost is
 bounded; if the call fails or times out (diary.timeout_secs 30), the host
@@ -1382,10 +1382,10 @@ since the last read must be re-read).
 Internal ChatRequest/ChatResponse/StreamDelta; adapters for OpenAI Chat
 Completions, Anthropic Messages, OpenAI Responses. SSE streaming mandatory;
 retries with backoff on 429/5xx; classified errors (auth, quota, network,
-context overflow → triggers compaction and one retry). Thinking levels
+context overflow → triggers compaction and one retry). Effort levels
 off|low|medium|high|max mapped per provider; thinking content collapsed in
 the TUI. Config: provider = preset | base_url + format + api_key_env; models
-declared with id, context, thinking. Presets: OpenAI, Anthropic,
+declared with id, context, effort. Presets: OpenAI, Anthropic,
 OpenRouter, DeepSeek, Groq, Mistral, xAI, Together, Ollama/LM Studio/vLLM.
 Models declare an optional `fallback` to another model id (same or other
 provider). On retry-exhausted network/5xx errors the host switches
@@ -1617,7 +1617,7 @@ number; a `partial` one is missing something the design calls for.
 
 | # | Item | Status | Depends on |
 |---|---|---|---|
-| A | Providers, streaming, cache, thinking | partial — no retries/backoff and no error classification (#8); tool schemas outside the prompt cache (#10) | — |
+| A | Providers, streaming, cache, effort | partial — no retries/backoff and no error classification (#8); tool schemas outside the prompt cache (#10) | — |
 | B | Tool core, guard, safety, undo, TUI | done | A |
 | C | MCP, skills, LSP foundation, settings hub | done | B |
 | D | git tools, patch, web tools, subagents | done | B |

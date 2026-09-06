@@ -11,7 +11,7 @@ expression: s
 
 
   ┌  p models  ────────────────────────────────────────────────────┐
-  │ m *  test-model · ctx 1000 · th:off                            │
+  │ m *  test-model · ctx 1000 · ef:off                            │
   │ + add model                                                    │
   │ · switch active model                                          │
   │ · edit provider                                                │
@@ -25,4 +25,4 @@ expression: s
 ──────────────────────────────────────────────────────────────────────
 
 ──────────────────────────────────────────────────────────────────────
- ACT                   cache 0% · 0% · 0 · test-model  th:off [CWD]
+ ACT                   cache 0% · 0% · 0 · test-model  ef:off [CWD]

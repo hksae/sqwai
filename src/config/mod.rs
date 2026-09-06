@@ -29,7 +29,7 @@ impl WireFormat {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
-pub enum ThinkingLevel {
+pub enum EffortLevel {
     Off,
     Low,
     Medium,
@@ -37,33 +37,33 @@ pub enum ThinkingLevel {
     Max,
 }
 
-impl<'de> Deserialize<'de> for ThinkingLevel {
+impl<'de> Deserialize<'de> for EffortLevel {
     fn deserialize<D>(d: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         struct V;
         impl serde::de::Visitor<'_> for V {
-            type Value = ThinkingLevel;
+            type Value = EffortLevel;
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a thinking level string or a bool")
+                f.write_str("an effort level string or a bool")
             }
             fn visit_str<E: serde::de::Error>(
                 self,
                 s: &str,
-            ) -> std::result::Result<ThinkingLevel, E> {
-                ThinkingLevel::from_str(s)
-                    .ok_or_else(|| E::custom(format!("unknown thinking level: {s}")))
+            ) -> std::result::Result<EffortLevel, E> {
+                EffortLevel::from_str(s)
+                    .ok_or_else(|| E::custom(format!("unknown effort level: {s}")))
             }
             // backward compatibility with the old `thinking = true/false`
             fn visit_bool<E: serde::de::Error>(
                 self,
                 b: bool,
-            ) -> std::result::Result<ThinkingLevel, E> {
+            ) -> std::result::Result<EffortLevel, E> {
                 Ok(if b {
-                    ThinkingLevel::High
+                    EffortLevel::High
                 } else {
-                    ThinkingLevel::Off
+                    EffortLevel::Off
                 })
             }
         }
@@ -71,21 +71,21 @@ impl<'de> Deserialize<'de> for ThinkingLevel {
     }
 }
 
-impl ThinkingLevel {
+impl EffortLevel {
     /// all levels selectable from the status-bar `th:` menu
-    pub const SELECTABLE: [ThinkingLevel; 5] = [
-        ThinkingLevel::Off,
-        ThinkingLevel::Low,
-        ThinkingLevel::Medium,
-        ThinkingLevel::High,
-        ThinkingLevel::Max,
+    pub const SELECTABLE: [EffortLevel; 5] = [
+        EffortLevel::Off,
+        EffortLevel::Low,
+        EffortLevel::Medium,
+        EffortLevel::High,
+        EffortLevel::Max,
     ];
-    pub const ALL: [ThinkingLevel; 5] = [
-        ThinkingLevel::Off,
-        ThinkingLevel::Low,
-        ThinkingLevel::Medium,
-        ThinkingLevel::High,
-        ThinkingLevel::Max,
+    pub const ALL: [EffortLevel; 5] = [
+        EffortLevel::Off,
+        EffortLevel::Low,
+        EffortLevel::Medium,
+        EffortLevel::High,
+        EffortLevel::Max,
     ];
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -151,7 +151,10 @@ pub struct ModelConfig {
     /// model id sent in requests
     pub id: String,
     pub context: u64,
-    pub thinking: ThinkingLevel,
+    /// how much work the user asks this model to spend; `thinking` is
+    /// accepted as a legacy spelling of the same key
+    #[serde(alias = "thinking")]
+    pub effort: EffortLevel,
     /// $ per 1M input tokens (for the cost meter)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_in: Option<f64>,
@@ -168,7 +171,7 @@ pub struct SeedProvider {
     pub base_url: &'static str,
     /// conventional env variable for the key
     pub key_env: &'static str,
-    pub models: &'static [(&'static str, &'static str, u64, ThinkingLevel, f64, f64)],
+    pub models: &'static [(&'static str, &'static str, u64, EffortLevel, f64, f64)],
 }
 
 macro_rules! m {
@@ -184,9 +187,9 @@ pub const SEED_PROVIDERS: &[SeedProvider] = &[
         base_url: "https://api.anthropic.com",
         key_env: "ANTHROPIC_API_KEY",
         models: &[
-            m!("claude-opus-5", 1_000_000, ThinkingLevel::High, 5.0, 25.0),
-            m!("claude-sonnet-5", 1_000_000, ThinkingLevel::High, 2.0, 10.0),
-            m!("claude-haiku-4-5", 200_000, ThinkingLevel::Medium, 1.0, 5.0),
+            m!("claude-opus-5", 1_000_000, EffortLevel::High, 5.0, 25.0),
+            m!("claude-sonnet-5", 1_000_000, EffortLevel::High, 2.0, 10.0),
+            m!("claude-haiku-4-5", 200_000, EffortLevel::Medium, 1.0, 5.0),
         ],
     },
     SeedProvider {
@@ -195,9 +198,9 @@ pub const SEED_PROVIDERS: &[SeedProvider] = &[
         base_url: "https://api.openai.com/v1",
         key_env: "OPENAI_API_KEY",
         models: &[
-            m!("gpt-5.6", 922_000, ThinkingLevel::High, 4.0, 20.0),
-            m!("gpt-5.6-luna", 922_000, ThinkingLevel::Low, 0.2, 1.2),
-            m!("gpt-5.3-codex", 272_000, ThinkingLevel::High, 1.75, 14.0),
+            m!("gpt-5.6", 922_000, EffortLevel::High, 4.0, 20.0),
+            m!("gpt-5.6-luna", 922_000, EffortLevel::Low, 0.2, 1.2),
+            m!("gpt-5.3-codex", 272_000, EffortLevel::High, 1.75, 14.0),
         ],
     },
     SeedProvider {
@@ -209,21 +212,21 @@ pub const SEED_PROVIDERS: &[SeedProvider] = &[
             m!(
                 "gemini-3.1-pro-preview",
                 1_048_576,
-                ThinkingLevel::High,
+                EffortLevel::High,
                 2.0,
                 12.0
             ),
             m!(
                 "gemini-3.7-flash",
                 1_048_576,
-                ThinkingLevel::Medium,
+                EffortLevel::Medium,
                 0.75,
                 3.75
             ),
             m!(
                 "gemini-3.5-flash-lite",
                 1_048_576,
-                ThinkingLevel::Off,
+                EffortLevel::Off,
                 0.3,
                 2.5
             ),
@@ -537,8 +540,8 @@ fn default_compaction_anchor_ratio() -> f64 {
 pub struct Config {
     #[serde(default = "default_model_name")]
     pub default_model: String,
-    #[serde(default = "default_thinking")]
-    pub default_thinking: ThinkingLevel,
+    #[serde(default = "default_effort", alias = "default_thinking")]
+    pub default_effort: EffortLevel,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
@@ -568,8 +571,8 @@ pub struct Config {
 fn default_model_name() -> String {
     "default".into()
 }
-fn default_thinking() -> ThinkingLevel {
-    ThinkingLevel::Medium
+fn default_effort() -> EffortLevel {
+    EffortLevel::Medium
 }
 
 #[derive(Debug, Clone)]
@@ -606,7 +609,7 @@ impl Default for Config {
     fn default() -> Self {
         let mut cfg = Self {
             default_model: String::new(),
-            default_thinking: ThinkingLevel::Medium,
+            default_effort: EffortLevel::Medium,
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
             safety: SafetyConfig::default(),
@@ -645,7 +648,7 @@ impl Config {
                         provider: s.name.to_string(),
                         id: id.to_string(),
                         context: *ctx,
-                        thinking: *th,
+                        effort: *th,
                         price_in: Some(*pin),
                         price_out: Some(*pout),
                     });
@@ -785,17 +788,36 @@ mod tests {
     }
 
     #[test]
-    fn thinking_accepts_string_and_legacy_bool() {
+    fn effort_accepts_string_and_legacy_bool() {
         #[derive(Deserialize)]
         struct T {
-            thinking: ThinkingLevel,
+            effort: EffortLevel,
         }
-        let t: T = toml::from_str("thinking = false").unwrap();
-        assert_eq!(t.thinking, ThinkingLevel::Off);
-        let t: T = toml::from_str("thinking = true").unwrap();
-        assert_eq!(t.thinking, ThinkingLevel::High);
-        let t: T = toml::from_str("thinking = \"max\"").unwrap();
-        assert_eq!(t.thinking, ThinkingLevel::Max);
+        let t: T = toml::from_str("effort = false").unwrap();
+        assert_eq!(t.effort, EffortLevel::Off);
+        let t: T = toml::from_str("effort = true").unwrap();
+        assert_eq!(t.effort, EffortLevel::High);
+        let t: T = toml::from_str("effort = \"max\"").unwrap();
+        assert_eq!(t.effort, EffortLevel::Max);
+    }
+
+    /// configs written before the slider was renamed say `thinking`; they must
+    /// keep loading, including the `thinking = true/false` spelling that
+    /// predates the levels.
+    #[test]
+    fn legacy_thinking_keys_still_load() {
+        let m: ModelConfig = toml::from_str(
+            "provider = \"anthropic\"\nid = \"claude-sonnet-5\"\ncontext = 1000000\nthinking = \"max\"\n",
+        )
+        .unwrap();
+        assert_eq!(m.effort, EffortLevel::Max);
+        let m: ModelConfig = toml::from_str(
+            "provider = \"openai\"\nid = \"gpt-5.6\"\ncontext = 922000\nthinking = true\n",
+        )
+        .unwrap();
+        assert_eq!(m.effort, EffortLevel::High);
+        let cfg: Config = toml::from_str("default_thinking = \"low\"\n").unwrap();
+        assert_eq!(cfg.default_effort, EffortLevel::Low);
     }
 
     #[test]
