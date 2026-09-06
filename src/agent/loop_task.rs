@@ -274,14 +274,13 @@ fn subagent_tasks_from_args(args: &serde_json::Value) -> Result<Vec<String>, Str
                 .collect()
         })
         .unwrap_or_default();
-    if tasks.is_empty() {
-        if let Some(task) = args["task"]
+    if tasks.is_empty()
+        && let Some(task) = args["task"]
             .as_str()
             .map(str::trim)
             .filter(|task| !task.is_empty())
-        {
-            tasks.push(task.to_string());
-        }
+    {
+        tasks.push(task.to_string());
     }
     if tasks.is_empty() {
         return Err("subagent task is required".into());
@@ -294,6 +293,7 @@ fn subagent_tasks_from_args(args: &serde_json::Value) -> Result<Vec<String>, Str
     Ok(tasks)
 }
 
+#[allow(clippy::too_many_arguments)] // all parameters are required for subagent configuration
 async fn run_subagent(
     call: &ToolCallReq,
     parent_tx: &mpsc::Sender<AgentEvent>,
@@ -475,31 +475,6 @@ fn next_subagent_id() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-#[cfg(test)]
-mod subagent_tests {
-    use super::*;
-
-    #[test]
-    fn accepts_one_or_many_subagent_tasks() {
-        assert_eq!(
-            subagent_tasks_from_args(&serde_json::json!({"task":" inspect "})).unwrap(),
-            vec!["inspect"]
-        );
-        assert_eq!(
-            subagent_tasks_from_args(&serde_json::json!({"tasks":["one","two"]})).unwrap(),
-            vec!["one", "two"]
-        );
-    }
-
-    #[test]
-    fn rejects_more_than_eight_subagents() {
-        let tasks: Vec<String> = (0..9).map(|n| format!("task {n}")).collect();
-        let error = subagent_tasks_from_args(&serde_json::json!({"tasks":tasks})).unwrap_err();
-        assert!(error.contains("maximum is 8"));
-        assert_eq!(MAX_PARALLEL_SUBAGENTS, 4);
-    }
-}
-
 pub fn spawn_agent(input: AgentInput) -> AgentHandle {
     let (tx, rx) = mpsc::channel::<AgentEvent>(256);
     let (ctl_tx, ctl_rx) = mpsc::channel::<ControlMsg>(32);
@@ -643,20 +618,20 @@ async fn run_agent(
             true,
         )
         .await;
-        if let Some((_, _, summarized)) = outcome.as_ref() {
-            if let Some(writer) = compaction_journal.as_mut() {
-                let _ = writer.append(
-                    "compaction",
-                    serde_json::json!({
-                        "phase": "end",
-                        "dropped_msgs": message_count_before.saturating_sub(messages.len()),
-                        "kept_msgs": messages.len(),
-                        "anchor_tokens": context::anchor(&root, &session_id).len().div_ceil(4),
-                        "diary_written": true,
-                        "summarized": summarized,
-                    }),
-                );
-            }
+        if let Some((_, _, summarized)) = outcome.as_ref()
+            && let Some(writer) = compaction_journal.as_mut()
+        {
+            let _ = writer.append(
+                "compaction",
+                serde_json::json!({
+                    "phase": "end",
+                    "dropped_msgs": message_count_before.saturating_sub(messages.len()),
+                    "kept_msgs": messages.len(),
+                    "anchor_tokens": context::anchor(&root, &session_id).len().div_ceil(4),
+                    "diary_written": true,
+                    "summarized": summarized,
+                }),
+            );
         }
         if let Some((before, after, summarized)) = outcome {
             let _ = tx
@@ -906,7 +881,7 @@ async fn run_agent(
                 ))
             } else {
                 match call.name.as_str() {
-                    "ask_user" => ask_user(&call, &tx, &mut ctl, &mut next_id).await,
+                    "ask_user" => ask_user(call, &tx, &mut ctl, &mut next_id).await,
                     "bash" => {
                         bash_call(
                             call,
@@ -1006,17 +981,15 @@ async fn run_agent(
                         let mut args = call.args.clone();
                         args["context_limit"] = serde_json::json!(context_limit);
                         let outcome = run_tool_blocking(&mut ctx, "plan", &args).await;
-                        if outcome.ok {
-                            if let Ok(Some(saved)) = plan::open_active(&root) {
-                                plan_todos = saved
-                                    .steps
-                                    .iter()
-                                    .map(|step| {
-                                        format!("[{}] {}", step.status.as_str(), step.title)
-                                    })
-                                    .collect();
-                                let _ = tx.send(AgentEvent::Todos(plan_todos.clone())).await;
-                            }
+                        if outcome.ok
+                            && let Ok(Some(saved)) = plan::open_active(&root)
+                        {
+                            plan_todos = saved
+                                .steps
+                                .iter()
+                                .map(|step| format!("[{}] {}", step.status.as_str(), step.title))
+                                .collect();
+                            let _ = tx.send(AgentEvent::Todos(plan_todos.clone())).await;
                         }
                         outcome
                     }
@@ -1044,40 +1017,39 @@ async fn run_agent(
                 }
             };
 
-            if outcome.ok && matches!(call.name.as_str(), "write" | "edit" | "multi_edit") {
-                if let Some(manager) = lsp_manager.as_mut() {
-                    if let Some(path) = call.args.get("file_path").and_then(|v| v.as_str()) {
-                        let path = root.join(path);
-                        if let Ok(text) = tokio::fs::read_to_string(&path).await {
-                            let _ = manager.did_change(&path, &text).await;
-                            let _ = manager.did_save(&path).await;
-                            tokio::task::yield_now().await;
-                            let diagnostics =
-                                manager.collect_diagnostics().await.unwrap_or_default();
-                            let diagnostic_count = diagnostics
-                                .iter()
-                                .map(|item| item.diagnostics.len())
-                                .sum::<usize>();
-                            let _ = tx
-                                .send(AgentEvent::Diagnostics {
-                                    count: diagnostic_count,
-                                })
-                                .await;
-                            if !diagnostics.is_empty() {
-                                outcome.output.push_str("\nLSP diagnostics:\n");
-                                for item in diagnostics {
-                                    for diagnostic in item.diagnostics {
-                                        outcome.output.push_str(&format!(
-                                            "- {}:{}: {}\n",
-                                            item.uri,
-                                            diagnostic.range.start.line + 1,
-                                            diagnostic.message
-                                        ));
-                                    }
-                                }
-                                outcome.ok = false;
+            if outcome.ok
+                && matches!(call.name.as_str(), "write" | "edit" | "multi_edit")
+                && let Some(manager) = lsp_manager.as_mut()
+                && let Some(path) = call.args.get("file_path").and_then(|v| v.as_str())
+            {
+                let path = root.join(path);
+                if let Ok(text) = tokio::fs::read_to_string(&path).await {
+                    let _ = manager.did_change(&path, &text).await;
+                    let _ = manager.did_save(&path).await;
+                    tokio::task::yield_now().await;
+                    let diagnostics = manager.collect_diagnostics().await.unwrap_or_default();
+                    let diagnostic_count = diagnostics
+                        .iter()
+                        .map(|item| item.diagnostics.len())
+                        .sum::<usize>();
+                    let _ = tx
+                        .send(AgentEvent::Diagnostics {
+                            count: diagnostic_count,
+                        })
+                        .await;
+                    if !diagnostics.is_empty() {
+                        outcome.output.push_str("\nLSP diagnostics:\n");
+                        for item in diagnostics {
+                            for diagnostic in item.diagnostics {
+                                outcome.output.push_str(&format!(
+                                    "- {}:{}: {}\n",
+                                    item.uri,
+                                    diagnostic.range.start.line + 1,
+                                    diagnostic.message
+                                ));
                             }
                         }
+                        outcome.ok = false;
                     }
                 }
             }
@@ -1134,13 +1106,17 @@ async fn run_agent(
                         }),
                     )
                     .ok();
-                if call.name == "plan" && outcome.ok {
-                    if let Some(seq) = result_seq {
-                        let _ = writer.append("plan_evidence", serde_json::json!({
+                if call.name == "plan"
+                    && outcome.ok
+                    && let Some(seq) = result_seq
+                {
+                    let _ = writer.append(
+                        "plan_evidence",
+                        serde_json::json!({
                             "op": call.args.get("op").and_then(|v| v.as_str()).unwrap_or("unknown"),
                             "evidence": [seq],
-                        }));
-                    }
+                        }),
+                    );
                 }
                 if let Some(metadata) = outcome.file_diff.as_ref() {
                     let _ = writer.append_evidence(
@@ -1597,4 +1573,29 @@ async fn run_tool_blocking(
     ctx.journal = exec_ctx.journal;
     ctx.files_read = exec_ctx.files_read;
     outcome
+}
+
+#[cfg(test)]
+mod subagent_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_one_or_many_subagent_tasks() {
+        assert_eq!(
+            subagent_tasks_from_args(&serde_json::json!({"task":" inspect "})).unwrap(),
+            vec!["inspect"]
+        );
+        assert_eq!(
+            subagent_tasks_from_args(&serde_json::json!({"tasks":["one","two"]})).unwrap(),
+            vec!["one", "two"]
+        );
+    }
+
+    #[test]
+    fn rejects_more_than_eight_subagents() {
+        let tasks: Vec<String> = (0..9).map(|n| format!("task {n}")).collect();
+        let error = subagent_tasks_from_args(&serde_json::json!({"tasks":tasks})).unwrap_err();
+        assert!(error.contains("maximum is 8"));
+        assert_eq!(MAX_PARALLEL_SUBAGENTS, 4);
+    }
 }

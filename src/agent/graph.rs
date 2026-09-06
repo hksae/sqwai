@@ -1,3 +1,5 @@
+#![allow(dead_code)] // Cozo prototype: the store API is unused until the SQLite port (§2.4, item I1)
+
 //! Project knowledge graph foundation.
 //!
 //! The backend is intentionally hidden behind a small universal model. Indexers,
@@ -320,7 +322,7 @@ impl GraphStore for CozoGraphStore {
             "?[stable_key, kind, name, path, language, line_start, line_end, signature, properties, content_hash] := *graph_nodes[stable_key, kind, name, path, language, line_start, line_end, signature, properties, content_hash], stable_key == $stable_key",
             params([("stable_key", DataValue::from(stable_key))]),
         )?;
-        rows.rows.first().map(row_to_node).transpose()
+        rows.rows.first().map(|r| row_to_node(r)).transpose()
     }
 
     fn neighbors(&self, stable_key: &str, query: NeighborQuery) -> Result<GraphProjection> {
@@ -502,7 +504,7 @@ fn properties(value: &DataValue) -> Result<BTreeMap<String, Value>> {
     serde_json::from_str(&encoded).context("decode graph properties")
 }
 
-fn row_to_node(row: &Vec<DataValue>) -> Result<Node> {
+fn row_to_node(row: &[DataValue]) -> Result<Node> {
     if row.len() != 10 {
         bail!("invalid graph node row");
     }

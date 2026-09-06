@@ -52,6 +52,7 @@ impl Journal {
         })
     }
 
+    #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -62,6 +63,7 @@ impl Journal {
         self.agent = agent.to_string();
     }
 
+    #[allow(dead_code)]
     pub fn attribution(&self) -> (Option<String>, Option<String>) {
         (self.step.clone(), self.plan.clone())
     }
@@ -110,6 +112,7 @@ impl Journal {
         Ok(seq)
     }
 
+    #[allow(dead_code)]
     pub fn next_seq(&self) -> u64 {
         self.next_seq
     }
@@ -344,11 +347,11 @@ fn repair_tail(path: &Path) -> Result<()> {
         }
         offset += bytes as u64;
         if line.ends_with('\n') {
-            if !line[..line.len() - 1].trim().is_empty() {
-                if serde_json::from_str::<Record>(line.trim_end()).is_err() {
-                    last_complete = offset - bytes as u64;
-                    break;
-                }
+            if !line[..line.len() - 1].trim().is_empty()
+                && serde_json::from_str::<Record>(line.trim_end()).is_err()
+            {
+                last_complete = offset - bytes as u64;
+                break;
             }
             last_complete = offset;
         } else {

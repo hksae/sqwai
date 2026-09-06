@@ -101,8 +101,9 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
                 in_code = false;
             } else {
                 in_code = true;
-                let label = trimmed_start[3..]
-                    .trim()
+                let label = trimmed_start
+                    .strip_prefix("```")
+                    .unwrap_or("")
                     .split_whitespace()
                     .next()
                     .unwrap_or("");
@@ -233,7 +234,7 @@ fn emit_table(out: &mut Vec<Line<'static>>, rows: Vec<Vec<String>>, width: u16) 
     // shrink to fit
     loop {
         let total: usize = widths.iter().sum::<usize>() + widths.len();
-        let max_total = avail as usize * 1;
+        let max_total = avail as usize;
         if total <= max_total {
             break;
         }
@@ -340,8 +341,8 @@ fn emit_table(out: &mut Vec<Line<'static>>, rows: Vec<Vec<String>>, width: u16) 
         (0..h)
             .map(|li| {
                 let mut spans = vec![bar()];
-                for i in 0..ncols {
-                    match cols[i].get(li) {
+                for (i, col) in cols.iter().enumerate() {
+                    match col.get(li) {
                         Some(cell) => spans.extend(cell.iter().cloned()),
                         None => spans.push(Span::styled(" ".repeat(w(i)), st)),
                     }

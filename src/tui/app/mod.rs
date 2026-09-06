@@ -231,6 +231,8 @@ pub struct App {
     /// per-segment render cache: (content key at render time, width used,
     /// content lines). Segments nested in an activity group render narrower,
     /// so the width has to be part of the check.
+    #[allow(clippy::type_complexity)]
+    // tuple structure matches render pipeline; aliasing adds indirection
     seg_cache: Vec<Option<(usize, u16, Vec<(Line<'static>, Option<usize>)>)>>,
     /// stable order/identity of segments used to invalidate positional caches
     seg_layout: Vec<u64>,
@@ -337,7 +339,7 @@ impl App {
             &root,
             &self.session.id.to_string(),
         )));
-        if self.session.messages.len() > 0
+        if !self.session.messages.is_empty()
             && let Some(notice) =
                 crate::agent::context::resume_notice(&root, &self.session.id.to_string())
         {
@@ -502,7 +504,7 @@ impl App {
                         // must begin folded, even if it ended with an error.
                         let saved = activity.next().cloned();
                         let derived = self.build_activity_group((seg_start, answer));
-                        let saved = saved.unwrap_or_else(|| ActivitySummary {
+                        let saved = saved.unwrap_or(ActivitySummary {
                             calls: derived.calls,
                             thinking: derived.thinking,
                             duration_ms: 0,
@@ -539,11 +541,10 @@ impl App {
                 Role::Tool => {
                     if let Some(call_id) = m.tool_call_id.as_ref()
                         && let Some(idx) = pending_tools.remove(call_id)
+                        && let Some(Segment::Tool { ok, output, .. }) = self.segments.get_mut(idx)
                     {
-                        if let Some(Segment::Tool { ok, output, .. }) = self.segments.get_mut(idx) {
-                            *ok = Some(!m.is_error);
-                            *output = m.content.clone();
-                        }
+                        *ok = Some(!m.is_error);
+                        *output = m.content.clone();
                     }
                 }
                 Role::System => {}
@@ -704,7 +705,8 @@ impl App {
             .min((self.last_input.y as usize).saturating_sub(2).max(3));
         let max_scroll = items.len().saturating_sub(shown);
         let next = if delta < 0 {
-            self.popup_scroll.saturating_sub(delta.unsigned_abs() as usize)
+            self.popup_scroll
+                .saturating_sub(delta.unsigned_abs() as usize)
         } else {
             self.popup_scroll.saturating_add(delta as usize)
         };
@@ -1008,7 +1010,7 @@ impl App {
         match self
             .cfg
             .resolve_provider(&mc)
-            .and_then(|rp| providers::create(&rp).map(|p| p))
+            .and_then(|rp| providers::create(&rp))
         {
             Ok(p) => {
                 self.model_cfg = mc;
@@ -1392,10 +1394,9 @@ impl App {
             .segments
             .iter()
             .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
+            && let Some(Segment::Assistant { text, .. }) = self.segments.get_mut(pos)
         {
-            if let Some(Segment::Assistant { text, .. }) = self.segments.get_mut(pos) {
-                text.push_str(&chunk);
-            }
+            text.push_str(&chunk);
         }
         !chunk.is_empty()
     }
@@ -1763,13 +1764,13 @@ impl App {
             );
             self.thinking_idx = Some(pos);
         }
-        if let Some(i) = self.thinking_idx {
-            if let Some(Segment::Thinking { text, started, .. }) = self.segments.get_mut(i) {
-                if started.is_none() {
-                    *started = Some(std::time::Instant::now());
-                }
-                text.push_str(&t);
+        if let Some(i) = self.thinking_idx
+            && let Some(Segment::Thinking { text, started, .. }) = self.segments.get_mut(i)
+        {
+            if started.is_none() {
+                *started = Some(std::time::Instant::now());
             }
+            text.push_str(&t);
         }
         self.dirty = true;
     }
@@ -2152,19 +2153,18 @@ impl App {
         self.finalize_activity_group(turn_failed);
         // Persist the presentation summary only after the group was finalized.
         // Saving earlier lost it across a restart and restored bare tool rows.
-        if let Some((text, is_error)) = turn_note {
-            if let Some(user_index) = self
+        if let Some((text, is_error)) = turn_note
+            && let Some(user_index) = self
                 .session
                 .messages
                 .iter()
                 .rposition(|message| message.role == Role::User)
-            {
-                self.session.turn_notes.push(TurnNote {
-                    user_index,
-                    text,
-                    is_error,
-                });
-            }
+        {
+            self.session.turn_notes.push(TurnNote {
+                user_index,
+                text,
+                is_error,
+            });
         }
         self.session.activity = self
             .activity_groups
@@ -2454,13 +2454,13 @@ impl App {
         };
 
         let mut warnings = Vec::new();
-        if let Some(pc) = cfg.providers.get(&model_cfg.provider) {
-            if pc.effective_api_key(&model_cfg.provider).is_none() {
-                let env_name = pc
-                    .key_env_name(&model_cfg.provider)
-                    .unwrap_or_else(|| "API_KEY".into());
-                warnings.push(format!("no API key: set {env_name} or run /settings"));
-            }
+        if let Some(pc) = cfg.providers.get(&model_cfg.provider)
+            && pc.effective_api_key(&model_cfg.provider).is_none()
+        {
+            let env_name = pc
+                .key_env_name(&model_cfg.provider)
+                .unwrap_or_else(|| "API_KEY".into());
+            warnings.push(format!("no API key: set {env_name} or run /settings"));
         }
         if git_branch.is_none() {
             warnings.push("git not found: undo for shell commands disabled".to_string());
@@ -2518,12 +2518,7 @@ pub(super) fn collect_git_info(root: &std::path::Path) -> (Option<String>, Optio
     let modified = repo
         .statuses(Some(&mut opts))
         .ok()
-        .map(|statuses| {
-            statuses
-                .iter()
-                .filter(|s| !s.status().is_ignored())
-                .count()
-        })
+        .map(|statuses| statuses.iter().filter(|s| !s.status().is_ignored()).count())
         .unwrap_or(0);
     (Some(branch), Some(modified))
 }

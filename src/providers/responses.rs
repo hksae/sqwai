@@ -143,14 +143,18 @@ impl Provider for ResponsesProvider {
                         }
                         match ev.event.as_str() {
                             "response.output_text.delta" => {
-                                if let Some(t) = v.get("delta").and_then(|x| x.as_str()) {
-                                    if !t.is_empty() { yield Ok(StreamEvent::Text(t.to_string())); }
+                                if let Some(t) = v.get("delta").and_then(|x| x.as_str())
+                                    && !t.is_empty()
+                                {
+                                    yield Ok(StreamEvent::Text(t.to_string()));
                                 }
                             }
                             "response.reasoning_text.delta"
                             | "response.reasoning_summary_text.delta" => {
-                                if let Some(t) = v.get("delta").and_then(|x| x.as_str()) {
-                                    if !t.is_empty() { yield Ok(StreamEvent::Reasoning(t.to_string())); }
+                                if let Some(t) = v.get("delta").and_then(|x| x.as_str())
+                                    && !t.is_empty()
+                                {
+                                    yield Ok(StreamEvent::Reasoning(t.to_string()));
                                 }
                             }
                             "response.completed" | "response.incomplete" => {

@@ -197,8 +197,14 @@ mod tests {
     fn stable_prefix_carries_no_volatile_facts() {
         let p = stable_prefix();
         assert!(p.contains("<process_environment>"));
-        assert!(!p.contains("<session_environment>"), "session env lives in B");
-        assert!(!p.contains("Date:"), "the clock must not enter the process prefix");
+        assert!(
+            !p.contains("<session_environment>"),
+            "session env lives in B"
+        );
+        assert!(
+            !p.contains("Date:"),
+            "the clock must not enter the process prefix"
+        );
 
         // per-turn runtime context is empty to preserve prompt cache
         let v = runtime_context();
