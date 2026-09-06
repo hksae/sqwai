@@ -10,5 +10,6 @@ pub mod memory;
 pub mod notify;
 pub mod safety;
 pub mod secrets;
+pub mod shadow;
 pub mod shell;
 pub mod tools;

@@ -730,8 +730,9 @@ async fn run_agent(
         return;
     }
 
-    let mut ctx =
-        ToolCtx::with_read_only(&root, read_only).with_plan_limits(plan_limits, context_limit);
+    let mut ctx = ToolCtx::with_read_only(&root, read_only)
+        .in_session(&session_id)
+        .with_plan_limits(plan_limits, context_limit);
     let mut journal = if enable_tools && !read_only {
         crate::agent::journal::Journal::open(&root, &session_id).ok()
     } else {
@@ -2006,7 +2007,14 @@ async fn bash_call(
             }
         }
         // checkpoint before a dangerous (approved) command
-        if let Ok(sha) = checkpoints::snapshot(&ctx.root, &format!("bash(approved) {command}")) {
+        // §2.5: bash is the one case whose targets cannot be known in
+        // advance, so this is where layer 2 earns its existence.
+        if let Ok(Some(sha)) = checkpoints::snapshot_session(
+            &ctx.root,
+            crate::config::ShadowStore::Local,
+            &ctx.session_id,
+            &format!("pre_bash {command}"),
+        ) {
             ctx.journal.push((sha, format!("bash {command}")));
         }
     }

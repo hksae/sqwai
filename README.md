@@ -55,10 +55,12 @@ byte, in a content-addressed store under `.sqwai/checkpoints/blobs/` — so
 `/undo [n]` puts back exactly what the agent wrote and **does not need git at
 all**. A file you edited yourself in the meantime is reported and left alone
 rather than overwritten. `/undo step N` reverts one plan step and reopens it, refusing by
-name any file a later step has rewritten since. Undoing a `bash` command still
-needs a worktree snapshot, which today is a dangling commit in your
-repository; the separate shadow repository from DESIGN.md §2.5 is
-**[in development]**.
+name any file a later step has rewritten since. Undoing a `bash` command needs a worktree
+snapshot, which is taken in a shadow repository of sqwai's own under
+`.sqwai/checkpoints/git` — your `.git` is never written to, so your branches,
+index, hooks and `git gc` are unaffected, and snapshots work in a project
+that is not a repository at all. It needs the `git` binary; without it,
+file reverts still work and `bash` runs uninsured.
 
 **Graph. [in development]** An index of files, symbols, documents and memory,
 with `resolve_ref` as a fact rather than a suggestion: plan steps and edits
@@ -92,9 +94,9 @@ cargo install --git https://github.com/hksae/sqwai
 Prebuilt binaries are not published yet.
 
 The git tools (`git_status`, `git_diff`, `git_log`, `git_commit`,
-`git_branch`) shell out to `git`, so they need it on `PATH`. Everything else,
-including checkpoints, works without it — but checkpoints do need the project
-to be a git repository.
+`git_branch`) shell out to `git`, so they need it on `PATH`, and so do the
+worktree snapshots taken around `bash`. Neither needs the project to *be* a
+repository, and file reverts need no git at all.
 
 ## Quick start
 
