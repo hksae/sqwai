@@ -3,6 +3,7 @@ use async_stream::stream;
 use eventsource_stream::Eventsource;
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 use super::{ChatRequest, Provider, Role, StreamEvent, StreamResult};
 use crate::config::{EffortLevel, ResolvedProvider};
@@ -14,38 +15,54 @@ pub struct ResponsesProvider {
     api_key: Option<String>,
 }
 
-pub fn build_body(req: &ChatRequest) -> Value {
-    let system: Vec<Value> = req
-        .system
-        .iter()
-        .map(|part| {
-            json!({
-                "role": "system",
-                "content": [{"type": "input_text", "text": part.text}],
-            })
-        })
-        .collect();
+/// One input item per transcript entry, in the shapes the Responses API
+/// documents (see `openai.types.responses`): messages carry plain string
+/// content, a model's tool call is a `function_call` item keyed by `call_id`,
+/// and its result is a separate `function_call_output` item referring to that
+/// same id. Before this, results rode as ordinary user turns, so the model had
+/// nothing to match them against.
+fn input_items(req: &ChatRequest) -> Vec<Value> {
     // the system block leads the input; it is rebuilt per request and never
     // stored in the transcript
-    let mut input = system;
-    input.extend(req.messages.iter().map(|m| {
-        let ty = match m.role {
-            // legacy: a persisted system message would still map correctly
-            Role::System => "system",
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            // tool results ride as user turns until full support lands
-            Role::Tool => "user",
-        };
-        json!({
-            "role": ty,
-            "content": [{"type": "input_text", "text": m.content}],
-        })
-    }));
+    let mut input: Vec<Value> = req
+        .system
+        .iter()
+        .map(|part| json!({"role": "system", "content": part.text}))
+        .collect();
 
+    for m in &req.messages {
+        match m.role {
+            // legacy: a persisted system message would still map correctly
+            Role::System => input.push(json!({"role": "system", "content": m.content})),
+            Role::User => input.push(json!({"role": "user", "content": m.content})),
+            Role::Assistant => {
+                if !m.content.is_empty() {
+                    input.push(json!({"role": "assistant", "content": m.content}));
+                }
+                for call in &m.tool_calls {
+                    input.push(json!({
+                        "type": "function_call",
+                        "call_id": call.id,
+                        "name": call.name,
+                        // arguments travel as a JSON *string*, as on the way out
+                        "arguments": call.args.to_string(),
+                    }));
+                }
+            }
+            Role::Tool => input.push(json!({
+                "type": "function_call_output",
+                "call_id": m.tool_call_id.clone().unwrap_or_default(),
+                "output": m.content,
+            })),
+        }
+    }
+    input
+}
+
+pub fn build_body(req: &ChatRequest) -> Value {
     let mut body = json!({
         "model": req.model_id,
-        "input": input,
+        "input": input_items(req),
         "stream": true,
     });
     if let Some(level) = req.effort.filter(|l| *l != EffortLevel::Off)
@@ -53,12 +70,54 @@ pub fn build_body(req: &ChatRequest) -> Value {
     {
         body["reasoning"] = json!({"effort": e});
     }
+    if !req.tools.is_empty() {
+        body["tools"] = json!(
+            req.tools
+                .iter()
+                .map(|t| json!({
+                    "type": "function",
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                    // the field is required by the schema and nullable; we do
+                    // not generate strict schemas, so it is explicitly false
+                    "strict": false,
+                }))
+                .collect::<Vec<_>>()
+        );
+    }
     // Only set when the provider documented the field: sanitize() has already
     // cleared it for providers that did not.
     if let Some(id) = &req.previous_response_id {
         body["previous_response_id"] = json!(id);
     }
     body
+}
+
+/// A function call being assembled from the stream, keyed by the item id the
+/// events carry. `call_id` is what the result must quote later, and it is not
+/// the same value as the item id.
+#[derive(Default)]
+struct PartialCall {
+    call_id: String,
+    name: String,
+    args: String,
+}
+
+impl PartialCall {
+    fn finish(self) -> Option<super::ToolCallReq> {
+        if self.name.is_empty() {
+            return None;
+        }
+        let args: Value = if self.args.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(&self.args).unwrap_or_else(
+                |_| json!({ "_raw": self.args, "_error": "arguments were not valid JSON" }),
+            )
+        };
+        Some(super::ToolCallReq::new(self.call_id, self.name, args))
+    }
 }
 
 impl ResponsesProvider {
@@ -97,10 +156,6 @@ impl Provider for ResponsesProvider {
         stream! {
             let mut req = req;
             this.sanitize(&mut req);
-            if !req.tools.is_empty() {
-                yield Err(anyhow!("responses format: tools are not supported yet (use openai or anthropic)"));
-                return;
-            }
             let body = build_body(&req);
             let mut r = this.http.post(&this.url);
             if let Some(k) = &this.api_key { r = r.bearer_auth(k); }
@@ -123,6 +178,8 @@ impl Provider for ResponsesProvider {
             let mut es = resp.bytes_stream().eventsource();
             // the Responses API echoes the response object on every event
             let mut response_id_sent = false;
+            // item id -> call being assembled
+            let mut partials: BTreeMap<String, PartialCall> = BTreeMap::new();
             while let Some(ev) = es.next().await {
                 match ev {
                     Ok(ev) => {
@@ -164,6 +221,63 @@ impl Provider for ResponsesProvider {
                                     yield Ok(StreamEvent::Reasoning(t.to_string()));
                                 }
                             }
+                            // A call arrives as three events: the item is
+                            // announced, its arguments stream in fragments,
+                            // and the item is closed. Only the last one is a
+                            // complete call.
+                            "response.output_item.added" => {
+                                if v.pointer("/item/type").and_then(|t| t.as_str()) == Some("function_call")
+                                    && let Some(id) = v.pointer("/item/id").and_then(|x| x.as_str())
+                                {
+                                    let slot = partials.entry(id.to_string()).or_default();
+                                    if let Some(call_id) = v.pointer("/item/call_id").and_then(|x| x.as_str()) {
+                                        slot.call_id = call_id.to_string();
+                                    }
+                                    if let Some(name) = v.pointer("/item/name").and_then(|x| x.as_str()) {
+                                        slot.name = name.to_string();
+                                    }
+                                    if let Some(args) = v.pointer("/item/arguments").and_then(|x| x.as_str()) {
+                                        slot.args.push_str(args);
+                                    }
+                                }
+                            }
+                            "response.function_call_arguments.delta" => {
+                                if let Some(id) = v.get("item_id").and_then(|x| x.as_str())
+                                    && let Some(delta) = v.get("delta").and_then(|x| x.as_str())
+                                {
+                                    partials.entry(id.to_string()).or_default().args.push_str(delta);
+                                }
+                            }
+                            "response.function_call_arguments.done" => {
+                                // authoritative full string; replaces whatever
+                                // the fragments accumulated
+                                if let Some(id) = v.get("item_id").and_then(|x| x.as_str())
+                                    && let Some(args) = v.get("arguments").and_then(|x| x.as_str())
+                                {
+                                    partials.entry(id.to_string()).or_default().args = args.to_string();
+                                }
+                            }
+                            "response.output_item.done" => {
+                                if v.pointer("/item/type").and_then(|t| t.as_str()) == Some("function_call")
+                                    && let Some(id) = v.pointer("/item/id").and_then(|x| x.as_str())
+                                {
+                                    let mut slot = partials.remove(id).unwrap_or_default();
+                                    if let Some(call_id) = v.pointer("/item/call_id").and_then(|x| x.as_str()) {
+                                        slot.call_id = call_id.to_string();
+                                    }
+                                    if let Some(name) = v.pointer("/item/name").and_then(|x| x.as_str()) {
+                                        slot.name = name.to_string();
+                                    }
+                                    if let Some(args) = v.pointer("/item/arguments").and_then(|x| x.as_str())
+                                        && !args.is_empty()
+                                    {
+                                        slot.args = args.to_string();
+                                    }
+                                    if let Some(call) = slot.finish() {
+                                        yield Ok(StreamEvent::ToolCall(call));
+                                    }
+                                }
+                            }
                             "response.completed" | "response.incomplete" => {
                                 if let Some(u) = v.pointer("/response/usage") {
                                     yield Ok(StreamEvent::Usage(super::Usage {
@@ -172,6 +286,14 @@ impl Provider for ResponsesProvider {
                                         cached_tokens: u.pointer("/input_tokens_details/cached_tokens").and_then(|x| x.as_u64()),
                                         reasoning_tokens: u.pointer("/output_tokens_details/reasoning_tokens").and_then(|x| x.as_u64()),
                                     }));
+                                }
+                                // safety net: a server that closes the
+                                // response without an output_item.done must
+                                // not swallow the call
+                                for (_, p) in std::mem::take(&mut partials) {
+                                    if let Some(call) = p.finish() {
+                                        yield Ok(StreamEvent::ToolCall(call));
+                                    }
                                 }
                                 if ev.event.as_str() == "response.completed" { break; }
                             }
@@ -204,6 +326,77 @@ fn short(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::providers::Message;
+
+    /// Serves one canned SSE body and closes. Named events, unlike the Chat
+    /// Completions stream, so the helper writes `event:` lines verbatim.
+    fn sse_server(body: String) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let h = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            let mut len = 0usize;
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line
+                    .to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .and_then(|s| s.trim().parse::<usize>().ok())
+                {
+                    len = v;
+                }
+            }
+            // the request body must be drained or the client sees a reset
+            let mut buf = vec![0u8; len];
+            reader.read_exact(&mut buf).ok();
+            let mut out = stream;
+            write!(
+                out,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            let _ = out.flush();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        });
+        (format!("http://{addr}/v1"), h)
+    }
+
+    async fn collect(url: String) -> Vec<StreamEvent> {
+        let p = ResponsesProvider::new(&ResolvedProvider {
+            name: "p".into(),
+            format: crate::config::WireFormat::Responses,
+            base_url: url,
+            api_key: Some("k".into()),
+        })
+        .unwrap();
+        let req = ChatRequest {
+            model_id: "gpt-x".into(),
+            system: vec![],
+            messages: vec![Message::new(Role::User, "go")],
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: None,
+            tools: vec![crate::providers::ToolSpec {
+                name: "read".into(),
+                description: "read a file".into(),
+                parameters: json!({"type": "object"}),
+            }],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        p.stream_chat(req)
+            .filter_map(|e| async move { e.ok() })
+            .collect()
+            .await
+    }
 
     fn request_at(level: EffortLevel, control: crate::config::EffortControl) -> ChatRequest {
         ChatRequest {
@@ -258,8 +451,163 @@ mod tests {
         assert_eq!(b["model"], "gpt-x");
         assert_eq!(b["reasoning"]["effort"], "medium");
         assert_eq!(b["input"][0]["role"], "system");
-        assert_eq!(b["input"][0]["content"][0]["type"], "input_text");
         assert_eq!(b["input"][1]["role"], "user");
+        // Content is a plain string now. The structured form this used to
+        // build tagged *every* role with `input_text`, which is only correct
+        // for input roles — an assistant item takes `output_text`, so the
+        // moment assistant turns had to be replayed for a tool loop the old
+        // shape was wrong. A string is documented for every role and has no
+        // such trap.
+        assert_eq!(b["input"][0]["content"], "s");
+        assert_eq!(b["input"][1]["content"], "hi");
+    }
+
+    /// The round trip that #47 was about: a call the model made and the result
+    /// we send back have to be two items joined by `call_id`. As user turns
+    /// (what this did before) the model has nothing to match a result against.
+    #[test]
+    fn a_tool_call_and_its_result_are_joined_by_call_id() {
+        let req = ChatRequest {
+            model_id: "gpt-x".into(),
+            system: vec![],
+            messages: vec![
+                Message::new(Role::User, "read the file"),
+                Message::new(Role::Assistant, "on it").with_tool_calls(vec![
+                    crate::providers::ToolCallReq::new(
+                        "call_1",
+                        "read",
+                        json!({"file_path": "a.rs"}),
+                    ),
+                ]),
+                Message::tool_result("call_1", "fn main() {}", false),
+            ],
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: None,
+            tools: vec![crate::providers::ToolSpec {
+                name: "read".into(),
+                description: "read a file".into(),
+                parameters: json!({"type": "object", "properties": {}}),
+            }],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        let b = build_body(&req);
+
+        // tools are flat here, not nested under `function` as in Chat Completions
+        assert_eq!(b["tools"][0]["type"], "function");
+        assert_eq!(b["tools"][0]["name"], "read");
+        assert!(b["tools"][0].get("parameters").is_some());
+        assert_eq!(b["tools"][0]["strict"], false);
+
+        let input = b["input"].as_array().unwrap();
+        assert_eq!(
+            input.len(),
+            4,
+            "user, assistant text, call, output: {input:#?}"
+        );
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(input[2]["type"], "function_call");
+        assert_eq!(input[2]["call_id"], "call_1");
+        assert_eq!(input[2]["name"], "read");
+        // arguments are a JSON string on the wire, not an object
+        assert_eq!(input[2]["arguments"], "{\"file_path\":\"a.rs\"}");
+        assert_eq!(input[3]["type"], "function_call_output");
+        assert_eq!(input[3]["call_id"], "call_1");
+        assert_eq!(input[3]["output"], "fn main() {}");
+    }
+
+    /// An assistant turn that is only a tool call must not produce an empty
+    /// message item: a blank assistant message is a wasted item at best and
+    /// rejected at worst.
+    #[test]
+    fn a_silent_tool_call_produces_no_empty_message() {
+        let req = ChatRequest {
+            model_id: "gpt-x".into(),
+            system: vec![],
+            messages: vec![Message::new(Role::Assistant, "").with_tool_calls(vec![
+                crate::providers::ToolCallReq::new("c1", "ls", json!({})),
+            ])],
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        let input = build_body(&req)["input"].as_array().unwrap().clone();
+        assert_eq!(input.len(), 1, "{input:#?}");
+        assert_eq!(input[0]["type"], "function_call");
+        // and a request without tools carries no `tools` key at all
+        assert!(build_body(&req).get("tools").is_none());
+    }
+
+    /// Assembling a call from the three events the API sends for it. The item
+    /// id and the `call_id` are different values, and it is the `call_id` the
+    /// result has to quote — mixing them up breaks the loop on the next turn.
+    #[tokio::test]
+    async fn a_streamed_function_call_is_assembled_from_its_events() {
+        let body = concat!(
+            "event: response.created\n",
+            "data: {\"response\":{\"id\":\"resp_1\"}}\n\n",
+            "event: response.output_item.added\n",
+            "data: {\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_9\",\"name\":\"read\",\"arguments\":\"\"}}\n\n",
+            "event: response.function_call_arguments.delta\n",
+            "data: {\"item_id\":\"fc_1\",\"delta\":\"{\\\"file_path\\\":\"}\n\n",
+            "event: response.function_call_arguments.delta\n",
+            "data: {\"item_id\":\"fc_1\",\"delta\":\"\\\"src/main.rs\\\"}\"}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_9\",\"name\":\"read\",\"arguments\":\"{\\\"file_path\\\":\\\"src/main.rs\\\"}\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\n",
+        )
+        .to_string();
+        let (url, h) = sse_server(body);
+        let events = collect(url).await;
+        h.join().unwrap();
+
+        let calls: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ToolCall(c) => Some(c.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls.len(), 1, "exactly one call: {events:?}");
+        assert_eq!(calls[0].name, "read");
+        assert_eq!(
+            calls[0].id, "call_9",
+            "the result must quote call_id, not the item id"
+        );
+        assert_eq!(calls[0].args["file_path"], "src/main.rs");
+    }
+
+    /// A server that closes the response without an `output_item.done` must
+    /// not swallow the call it already announced.
+    #[tokio::test]
+    async fn a_call_left_open_at_completion_is_still_emitted() {
+        let body = concat!(
+            "event: response.output_item.added\n",
+            "data: {\"item\":{\"type\":\"function_call\",\"id\":\"fc_2\",\"call_id\":\"call_7\",\"name\":\"ls\",\"arguments\":\"\"}}\n\n",
+            "event: response.function_call_arguments.done\n",
+            "data: {\"item_id\":\"fc_2\",\"arguments\":\"{}\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"response\":{\"id\":\"resp_2\"}}\n\n",
+        )
+        .to_string();
+        let (url, h) = sse_server(body);
+        let events = collect(url).await;
+        h.join().unwrap();
+        let calls: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ToolCall(c) => Some(c.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls.len(), 1, "{events:?}");
+        assert_eq!(calls[0].id, "call_7");
+        assert_eq!(calls[0].name, "ls");
     }
 
     #[test]

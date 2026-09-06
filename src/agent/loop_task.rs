@@ -252,17 +252,27 @@ fn backoff(attempt: u32) -> Duration {
 /// Only a documented continuation reference shortens it: the provider already
 /// holds those turns, and resending them would duplicate the remote history.
 /// The system block travels separately and is always sent.
+/// What a request carries under each transport.
+///
+/// Continuing from a previous response means the provider already holds
+/// everything up to and including its own last message, so we send only what
+/// it has not seen: the trailing run of tool results and user turns after the
+/// last assistant message.
+///
+/// This used to send "the last user message", which is right for a plain
+/// exchange and wrong the moment tools are in play: a tool result is
+/// `Role::Tool`, so the run of results the model is waiting for was dropped
+/// and the turn continued as if the tools had never been called.
 fn request_messages(messages: &[Message], transport: ContextTransport) -> Vec<Message> {
     if transport != ContextTransport::PreviousResponse {
         return messages.to_vec();
     }
-    messages
+    let unseen = messages
         .iter()
         .rev()
-        .find(|m| m.role == Role::User)
-        .cloned()
-        .into_iter()
-        .collect()
+        .take_while(|m| matches!(m.role, Role::Tool | Role::User))
+        .count();
+    messages[messages.len() - unseen..].to_vec()
 }
 
 struct TurnOutcome {
@@ -1966,6 +1976,93 @@ mod subagent_tests {
         let error = subagent_tasks_from_args(&serde_json::json!({"tasks":tasks})).unwrap_err();
         assert!(error.contains("maximum is 8"));
         assert_eq!(MAX_PARALLEL_SUBAGENTS, 4);
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    fn roles(messages: &[Message]) -> Vec<Role> {
+        messages.iter().map(|m| m.role).collect()
+    }
+
+    /// Continuing from a previous response, the provider holds everything up
+    /// to its own last message; we send what it has not seen.
+    #[test]
+    fn a_continuation_sends_the_tool_results_the_provider_is_waiting_for() {
+        let messages = vec![
+            Message::new(Role::User, "read the file"),
+            Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+                "c1",
+                "read",
+                serde_json::json!({}),
+            )]),
+            Message::tool_result("c1", "fn main() {}", false),
+        ];
+        assert_eq!(
+            roles(&request_messages(
+                &messages,
+                ContextTransport::PreviousResponse
+            )),
+            vec![Role::Tool],
+            "the result of the call must reach the model"
+        );
+
+        // several calls in one turn: every result travels
+        let mut many = messages.clone();
+        many.push(Message::tool_result("c2", "other", false));
+        assert_eq!(
+            roles(&request_messages(&many, ContextTransport::PreviousResponse)),
+            vec![Role::Tool, Role::Tool]
+        );
+
+        // a plain exchange still sends just the new user turn
+        let plain = vec![
+            Message::new(Role::User, "hi"),
+            Message::new(Role::Assistant, "hello"),
+            Message::new(Role::User, "again"),
+        ];
+        assert_eq!(
+            roles(&request_messages(
+                &plain,
+                ContextTransport::PreviousResponse
+            )),
+            vec![Role::User]
+        );
+
+        // and a user turn that follows tool results keeps both, in order
+        let mixed = vec![
+            Message::new(Role::Assistant, "done"),
+            Message::tool_result("c1", "out", false),
+            Message::new(Role::User, "now this"),
+        ];
+        assert_eq!(
+            roles(&request_messages(
+                &mixed,
+                ContextTransport::PreviousResponse
+            )),
+            vec![Role::Tool, Role::User]
+        );
+    }
+
+    /// Stateless is the default for a reason: everything is resent, and the
+    /// shortening above must never leak into it.
+    #[test]
+    fn a_stateless_request_carries_the_whole_transcript() {
+        let messages = vec![
+            Message::new(Role::User, "one"),
+            Message::new(Role::Assistant, "two"),
+            Message::new(Role::User, "three"),
+        ];
+        assert_eq!(
+            request_messages(&messages, ContextTransport::Stateless).len(),
+            3
+        );
+        assert_eq!(
+            request_messages(&messages, ContextTransport::ServerConversation).len(),
+            3
+        );
     }
 }
 
