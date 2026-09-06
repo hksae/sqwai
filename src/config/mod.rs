@@ -670,6 +670,36 @@ pub fn write_template(path: &PathBuf) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// The config example in the README must actually load.
+    ///
+    /// It did not: it used a `preset = "..."` key that does not exist and
+    /// omitted `format` and `base_url`, which are required, so anyone who
+    /// copied it got a parse error instead of an agent. Documentation that
+    /// claims to be runnable should be run.
+    #[test]
+    fn readme_config_example_parses() {
+        let readme = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"),
+        )
+        .expect("README.md");
+        let block = readme
+            .split("```toml")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("README has a ```toml block");
+        let cfg: Config = toml::from_str(block)
+            .unwrap_or_else(|e| panic!("README config example does not parse: {e}\n{block}"));
+        assert!(
+            cfg.providers.values().all(|p| !p.base_url.is_empty()),
+            "every provider in the example needs a base_url"
+        );
+        assert!(
+            cfg.models.contains_key(&cfg.default_model),
+            "default_model {:?} must be one of the example's models",
+            cfg.default_model
+        );
+    }
+
     #[test]
     fn thinking_accepts_string_and_legacy_bool() {
         #[derive(Deserialize)]
