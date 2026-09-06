@@ -412,6 +412,7 @@ file_diff	path, added, removed, hash_before, hash_after, mode, checkpoint	after 
 checkpoint	layer, id, reason (`pre_mutation`|`pre_bash`|`post_bash`), blobs, shadow_commit?	after a layer-1 snapshot or shadow-Git snapshot
 undo	to_checkpoint|step, files, reopened_steps	/undo or /undo step N
 diagnostics	path, errors, warnings, server, digest	LSP publishDiagnostics after a change
+effort_ignored	level, model, `source: observed|rejected`, reasoning_tokens, by: host	the provider counted zero reasoning tokens for a request that asked for effort, or refused the parameter (once per session)
 approval	cmd_digest, `decision: once	session
 note	by: model, `note: decision|rejected|assumption|lesson|blocker	model
 external_change	path, mtime, hash_before, hash_after, last_known_seq, by: host	before a file tool when mtime/hash differs from last known
@@ -1524,6 +1525,7 @@ max_proposals_per_turn = 2
 
 [diary]
 token_budget = 1500
+effort = "off"                 # effort for the diary's own model call
 timeout_secs = 30
 batch_steps = 3
 batch_minutes = 20

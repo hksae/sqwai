@@ -35,21 +35,28 @@ impl Journal {
         let dir = root.join(".sqwai").join("journal");
         fs::create_dir_all(&dir).context("creating journal directory")?;
         let path = dir.join(format!("{session_id}.jsonl"));
-        repair_tail(&path)?;
+        let repaired = repair_tail(&path)?;
         let next_seq = last_seq(&path)?.saturating_add(1);
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .with_context(|| format!("opening journal {}", path.display()))?;
-        Ok(Self {
+        let mut journal = Self {
             path,
             file,
             next_seq,
             step: None,
             plan: None,
             agent: "main".to_string(),
-        })
+        };
+        if repaired > 0 {
+            journal.append(
+                "journal_repair",
+                json!({"truncated_bytes": repaired, "by": "host"}),
+            )?;
+        }
+        Ok(journal)
     }
 
     #[allow(dead_code)]
@@ -411,9 +418,15 @@ fn last_seq(path: &Path) -> Result<u64> {
     Ok(last)
 }
 
-fn repair_tail(path: &Path) -> Result<()> {
+/// Truncate a partial trailing line, reporting how many bytes went.
+///
+/// A crash mid-append leaves half a record; §2.2.1 has the reader drop it. It
+/// also has the host write a `journal_repair` record, which is the part that
+/// was missing: an append-only log that exists for auditing was quietly losing
+/// bytes with nothing to show it happened.
+fn repair_tail(path: &Path) -> Result<u64> {
     let Ok(mut file) = OpenOptions::new().read(true).write(true).open(path) else {
-        return Ok(());
+        return Ok(0);
     };
     let mut reader = BufReader::new(&file);
     let mut offset = 0u64;
@@ -445,8 +458,9 @@ fn repair_tail(path: &Path) -> Result<()> {
         file.set_len(last_complete)
             .context("truncating journal tail")?;
         file.flush().context("flushing journal repair")?;
+        return Ok(len - last_complete);
     }
-    Ok(())
+    Ok(0)
 }
 
 #[cfg(test)]
@@ -666,20 +680,33 @@ mod tests {
     }
 
     #[test]
-    fn repairs_partial_tail_and_continues_sequence() {
+    fn repairs_partial_tail_and_records_that_it_did() {
         let root = root();
         let path = root.join(".sqwai").join("journal").join("session.jsonl");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "{\"seq\":1,\"ts\":\"1\",\"step\":null,\"plan\":null,\"agent\":\"main\",\"kind\":\"note\",\"text\":\"ok\"}\n{\"seq\":2").unwrap();
         let mut journal = Journal::open(&root, "session").unwrap();
-        assert_eq!(journal.next_seq(), 2);
-        assert_eq!(journal.append("note", json!({"text": "next"})).unwrap(), 2);
-        let lines: Vec<_> = fs::read_to_string(journal.path())
-            .unwrap()
-            .lines()
-            .map(str::to_string)
-            .collect();
-        assert_eq!(lines.len(), 2);
+
+        // §2.2.1: the partial line goes, and the host says so. Truncating an
+        // append-only log in silence is the one thing an audit record cannot do.
+        let records = Journal::records_for(&root, "session").unwrap();
+        assert_eq!(records.len(), 2, "{records:?}");
+        assert_eq!(records[1].kind, "journal_repair");
+        assert!(
+            records[1]
+                .fields
+                .get("truncated_bytes")
+                .and_then(Value::as_u64)
+                .is_some_and(|bytes| bytes > 0)
+        );
+
+        // and the sequence continues past it
+        assert_eq!(journal.next_seq(), 3);
+        assert_eq!(journal.append("note", json!({"text": "next"})).unwrap(), 3);
+        assert_eq!(
+            fs::read_to_string(journal.path()).unwrap().lines().count(),
+            3
+        );
         fs::remove_dir_all(root).ok();
     }
 

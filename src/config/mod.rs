@@ -27,9 +27,10 @@ impl WireFormat {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, PartialOrd, Ord, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum EffortLevel {
+    #[default]
     Off,
     Low,
     Medium,
@@ -478,6 +479,13 @@ impl Default for MemoryConfig {
 pub struct DiaryConfig {
     #[serde(default = "default_diary_token_budget")]
     pub token_budget: u32,
+    /// Effort for the diary's own model call. §5.1 assigns effort per internal
+    /// role and puts the diary writer at `low`; §2.3.4 describes the same call
+    /// as running with effort off. The default keeps the cheaper reading — the
+    /// entry is a summary of facts the host already extracted — and the key
+    /// exists so the other one costs a line of config rather than a patch.
+    #[serde(default)]
+    pub effort: EffortLevel,
     #[serde(default = "default_diary_timeout_secs")]
     pub timeout_secs: u64,
     #[serde(default = "default_diary_batch_steps")]
@@ -602,6 +610,7 @@ impl Default for DiaryConfig {
     fn default() -> Self {
         Self {
             token_budget: default_diary_token_budget(),
+            effort: EffortLevel::Off,
             timeout_secs: default_diary_timeout_secs(),
             batch_steps: default_diary_batch_steps(),
             batch_minutes: default_diary_batch_minutes(),

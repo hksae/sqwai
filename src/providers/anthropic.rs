@@ -271,6 +271,10 @@ impl Provider for AnthropicProvider {
                                     prompt_tokens: total_prompt,
                                     completion_tokens: 0,
                                     cached_tokens: cached,
+                                    // the Messages API bills thinking inside
+                                    // output_tokens and reports no separate
+                                    // counter, so there is nothing to claim
+                                    reasoning_tokens: None,
                                 }));
                             }
                             "content_block_start" => {
@@ -329,6 +333,7 @@ impl Provider for AnthropicProvider {
                                         prompt_tokens: 0,
                                         completion_tokens: out_tokens,
                                         cached_tokens: None,
+                                        reasoning_tokens: None,
                                     }));
                                 }
                             }

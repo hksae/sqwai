@@ -170,6 +170,7 @@ impl Provider for ResponsesProvider {
                                         prompt_tokens: u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
                                         completion_tokens: u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
                                         cached_tokens: u.pointer("/input_tokens_details/cached_tokens").and_then(|x| x.as_u64()),
+                                        reasoning_tokens: u.pointer("/output_tokens_details/reasoning_tokens").and_then(|x| x.as_u64()),
                                     }));
                                 }
                                 if ev.event.as_str() == "response.completed" { break; }

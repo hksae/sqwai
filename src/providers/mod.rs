@@ -117,6 +117,11 @@ pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cached_tokens: Option<u64>,
+    /// Tokens the model spent reasoning, when the provider counts them.
+    /// `Some(0)` is the only positive evidence that a request for effort was
+    /// not acted on — `None` means the provider said nothing, which is not
+    /// the same thing and must never be read as zero (§5.1).
+    pub reasoning_tokens: Option<u64>,
 }
 
 impl Usage {

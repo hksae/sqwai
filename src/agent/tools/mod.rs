@@ -13,7 +13,7 @@ pub(crate) mod web;
 use crate::agent::safety;
 use crate::plan;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// whether a tool may run in parallel with others
@@ -36,10 +36,21 @@ pub struct ToolCtx {
     root_canon: PathBuf,
     /// secondary project instances can inspect but not mutate project state
     pub read_only: bool,
-    /// files successfully read this session (guards edit/write)
-    pub files_read: HashSet<PathBuf>,
+    /// Files read this session and the content hash they had at the time,
+    /// keyed by canonical path. §4 calls for the guard to be hash-tracked: a
+    /// file changed by `bash` since the last read has to be read again, and
+    /// with paths alone the model could edit it blind. The canonical key also
+    /// stops `read("src/x.rs")` followed by `edit("./src/x.rs")` from being
+    /// refused as unread.
+    pub files_read: HashMap<PathBuf, String>,
     /// journal of checkpoints created by this session's mutations
     pub journal: Vec<(String, String)>,
+    /// Host limits on the plan, and the model context they are derived from.
+    /// The budget used to come from a `context_limit` the model passed in its
+    /// own tool arguments (§2.1.2 makes it a host value).
+    pub plan_limits: crate::config::PlanConfig,
+    /// context window of the model driving this session, in tokens
+    pub context_limit: u64,
 }
 
 impl ToolCtx {
@@ -56,9 +67,22 @@ impl ToolCtx {
             root,
             root_canon,
             read_only,
-            files_read: HashSet::new(),
+            files_read: HashMap::new(),
             journal: Vec::new(),
+            plan_limits: crate::config::PlanConfig::default(),
+            context_limit: 0,
         }
+    }
+
+    /// Adopt the host's plan limits and the driving model's context window.
+    pub fn with_plan_limits(
+        mut self,
+        plan_limits: crate::config::PlanConfig,
+        context_limit: u64,
+    ) -> Self {
+        self.plan_limits = plan_limits;
+        self.context_limit = context_limit;
+        self
     }
 
     /// resolve a user-supplied path inside the project; rejects escapes and
@@ -116,14 +140,56 @@ impl ToolCtx {
         Ok(joined)
     }
 
-    fn mark_read(&mut self, p: &Path) {
-        self.files_read.insert(p.to_path_buf());
+    fn read_key(p: &Path) -> PathBuf {
+        p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
     }
 
-    fn was_read(&self, p: &Path) -> bool {
-        self.files_read.contains(p)
+    fn mark_read(&mut self, p: &Path) {
+        let hash = file_hash(p);
+        self.files_read.insert(Self::read_key(p), hash);
+    }
+
+    /// Whether the file may be edited: it was read, and it still holds what it
+    /// held then.
+    fn read_state(&self, p: &Path) -> ReadState {
+        match self.files_read.get(&Self::read_key(p)) {
+            None => ReadState::Unread,
+            Some(seen) if *seen == file_hash(p) => ReadState::Current,
+            Some(_) => ReadState::Stale,
+        }
     }
 }
+
+/// What the read guard knows about a file the model wants to edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadState {
+    /// never read in this session
+    Unread,
+    /// read, and unchanged since
+    Current,
+    /// read, but something changed it afterwards — `bash`, a formatter, the
+    /// user's editor
+    Stale,
+}
+
+/// Content hash of a file, matching what `file_diff` records. A missing or
+/// unreadable file hashes to the empty string, which never equals a recorded
+/// hash, so it reads as stale rather than as current.
+fn file_hash(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            format!("{:x}", hasher.finalize())
+        }
+        Err(_) => String::new(),
+    }
+}
+
+/// Smallest plan budget the host will use, however small the context. A plan
+/// that cannot hold its own goal line is worse than an unbudgeted one.
+const MIN_PLAN_BUDGET_TOKENS: u64 = 256;
 
 /// The agent's own state directory. File tools see only `skills/` and
 /// `config.toml` inside it; plan, journal, memory and graph are host-owned and
@@ -465,8 +531,7 @@ acceptance status and evidence: you can only propose a goal revision, never appl
                     "summary": {"type": "string", "description": "finish: what changed and where"},
                     "reason": {"type": "string", "description": "block / cancel / propose_goal_revision"},
                     "confirm": {"type": "boolean", "description": "start: re-read a stale step"},
-                    "evidence": {"type": "array", "items": {"type": "integer"}, "description": "deprecated informational field; host ignores it"},
-                    "context_limit": {"type": "integer", "description": "model context in tokens"}
+                    "evidence": {"type": "array", "items": {"type": "integer"}, "description": "deprecated informational field; host ignores it"}
                 },
                 "required": ["op"]
             }),
@@ -574,10 +639,24 @@ pub fn tool_specs(plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
     let mut specs: Vec<crate::providers::ToolSpec> = defs()
         .into_iter()
         .filter(|d| !plan_mode || d.kind == Kind::ReadOnly || d.name == "plan")
-        .map(|d| crate::providers::ToolSpec {
-            name: d.name.to_string(),
-            description: d.description.to_string(),
-            parameters: d.parameters,
+        .map(|d| {
+            let mut spec = crate::providers::ToolSpec {
+                name: d.name.to_string(),
+                description: d.description.to_string(),
+                parameters: d.parameters,
+            };
+            // `git_branch` is read-only as a tool but its `create` and
+            // `switch` actions are not, and the dispatcher refuses them in
+            // PLAN mode. Advertising them anyway costs a turn to find that
+            // out, so the schema says what the mode allows.
+            if plan_mode && spec.name == "git_branch" {
+                spec.parameters["properties"]["action"]["enum"] = json!(["list", "current"]);
+                spec.description =
+                    "List local branches, or show the current one. Creating and switching \
+                     branches is an ACT-mode action."
+                        .to_string();
+            }
+            spec
         })
         .collect();
     specs.sort_by(|a, b| a.name.cmp(&b.name));
@@ -718,7 +797,9 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             ));
         }
     };
-    let limits = plan::Limits::default();
+    let limits = plan::Limits {
+        max_steps: ctx.plan_limits.max_steps,
+    };
 
     let gate = if matches!(op, plan::Op::Complete) {
         validate_complete(ctx)
@@ -742,7 +823,14 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 hint: "use /plan to continue, complete or abandon it first".to_string(),
             }),
             Ok(None) => {
-                let budget_limit = (args["context_limit"].as_u64().unwrap_or(32_000) / 10).max(256);
+                // Host value, from the model's context and [plan].budget_ratio.
+                // It used to be read out of the model's own tool arguments,
+                // which let it raise its own ceiling and skip the folding in
+                // §2.1.5.
+                let budget_limit = ctx
+                    .plan_limits
+                    .budget_tokens(ctx.context_limit)
+                    .max(MIN_PLAN_BUDGET_TOKENS);
                 match plan::create(goal, constraints, acceptance, steps, budget_limit, &limits) {
                     Ok(created) => {
                         let id = created.id.clone();
@@ -1476,6 +1564,203 @@ mod tests {
         assert!(!names.contains(&"write".to_string()));
         assert!(!names.contains(&"edit".to_string()));
         assert!(!names.contains(&"bash".to_string()));
+    }
+
+    /// §2.1.2 makes the plan budget a host value: model context times
+    /// [plan].budget_ratio. It used to be read out of the model's own tool
+    /// arguments — `args["context_limit"]` — so the model could raise its own
+    /// ceiling and skip the folding in §2.1.5. The field is no longer even
+    /// advertised.
+    #[test]
+    fn the_plan_budget_comes_from_the_host_not_the_model() {
+        let (mut ctx, dir) = proj();
+        ctx = ctx.with_plan_limits(
+            crate::config::PlanConfig {
+                budget_ratio: 0.10,
+                ..Default::default()
+            },
+            200_000,
+        );
+
+        // the model asks for a huge budget in its arguments; it is ignored
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "budget from the host",
+                "acceptance": [],
+                "steps": [{"title": "one"}],
+                "context_limit": 100_000_000u64,
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan = plan::open_active(&dir).unwrap().unwrap();
+        assert_eq!(plan.budget.limit, 20_000, "0.10 of a 200k context");
+
+        assert!(
+            !tool_specs(false)
+                .iter()
+                .find(|spec| spec.name == "plan")
+                .unwrap()
+                .parameters["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("context_limit"),
+            "the model is not asked for its own context any more"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A tiny context still leaves room for a plan rather than a budget of
+    /// zero, which would fold everything on the first injection.
+    #[test]
+    fn the_plan_budget_has_a_floor() {
+        let (mut ctx, dir) = proj();
+        ctx = ctx.with_plan_limits(crate::config::PlanConfig::default(), 100);
+        assert!(
+            plan_op(
+                &mut ctx,
+                &json!({"op": "create", "goal": "tiny context", "acceptance": [],
+                        "steps": [{"title": "one"}]}),
+            )
+            .ok
+        );
+        assert_eq!(
+            plan::open_active(&dir).unwrap().unwrap().budget.limit,
+            MIN_PLAN_BUDGET_TOKENS
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [plan].max_steps is the host's limit, not a constant.
+    #[test]
+    fn max_steps_comes_from_the_config() {
+        let (mut ctx, dir) = proj();
+        ctx = ctx.with_plan_limits(
+            crate::config::PlanConfig {
+                max_steps: 2,
+                ..Default::default()
+            },
+            100_000,
+        );
+        let steps: Vec<_> = (0..3)
+            .map(|i| json!({"title": format!("step {i}")}))
+            .collect();
+        let refused = plan_op(
+            &mut ctx,
+            &json!({"op": "create", "goal": "over the limit", "acceptance": [], "steps": steps}),
+        );
+        assert!(!refused.ok, "{}", refused.output);
+        assert!(
+            refused.output.contains("too_many_steps") || refused.output.contains("2"),
+            "{}",
+            refused.output
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// PLAN mode refuses `git_branch create|switch` at dispatch already; the
+    /// schema should not invite the model to spend a turn discovering that.
+    #[test]
+    fn plan_mode_advertises_git_branch_without_its_mutating_actions() {
+        let actions = |plan_mode: bool| {
+            tool_specs(plan_mode)
+                .into_iter()
+                .find(|spec| spec.name == "git_branch")
+                .expect("git_branch stays available for inspection")
+                .parameters["properties"]["action"]["enum"]
+                .clone()
+        };
+        assert_eq!(actions(true), json!(["list", "current"]));
+        assert_eq!(
+            actions(false),
+            json!(["list", "current", "create", "switch"])
+        );
+    }
+
+    /// §4: the guard is hash-tracked, so a file changed by `bash` since the
+    /// last read has to be read again. With paths alone the model could edit
+    /// content that was already gone.
+    #[test]
+    fn a_file_changed_after_reading_it_must_be_read_again() {
+        let (mut ctx, dir) = proj();
+        assert!(execute(&mut ctx, "read", &json!({"file_path": "src/main.rs"})).ok);
+
+        // something else changes it: bash, a formatter, the user's editor
+        fs::write(dir.join("src/main.rs"), "fn main() { /* moved on */ }\n").unwrap();
+
+        let refused = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "src/main.rs", "old_string": "fn main() {}", "new_string": "x"}),
+        );
+        assert!(!refused.ok, "{}", refused.output);
+        assert!(
+            refused.output.contains("changed since you read it"),
+            "{}",
+            refused.output
+        );
+
+        // reading again clears it
+        assert!(execute(&mut ctx, "read", &json!({"file_path": "src/main.rs"})).ok);
+        let accepted = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "src/main.rs", "old_string": "moved on", "new_string": "here"}),
+        );
+        assert!(accepted.ok, "{}", accepted.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The guard is keyed on the canonical path, so the same file spelled two
+    /// ways is the same file. It used to key on the string the model passed,
+    /// which refused a legitimate edit as unread.
+    #[test]
+    fn the_read_guard_does_not_care_how_the_path_is_spelled() {
+        let (mut ctx, dir) = proj();
+        assert!(execute(&mut ctx, "read", &json!({"file_path": "src/main.rs"})).ok);
+        let accepted = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "./src/main.rs", "old_string": "fn main() {}", "new_string": "fn main() { }"}),
+        );
+        assert!(accepted.ok, "{}", accepted.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// §2.1.4 lets a verify step close on "diagnostics with zero errors". The
+    /// record was defined in §2.2.2 and never written, so that branch was
+    /// unreachable — this is the evidence path, now that it exists.
+    #[test]
+    fn clean_diagnostics_close_a_verify_step() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({"op": "create", "goal": "diagnostics as evidence", "acceptance": [],
+                    "steps": [{"title": "check", "kind": "verify"}]}),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+
+        let mut journal = crate::agent::journal::Journal::open(&dir, "diagnostics").unwrap();
+        journal.set_attribution(Some("1".into()), Some(plan_id), "main");
+        journal
+            .append("plan", json!({"op": "start", "id": "1"}))
+            .unwrap();
+        journal
+            .append_evidence(
+                "diagnostics",
+                json!({"path": "src/main.rs", "errors": 0, "warnings": 2, "server": "rust-analyzer"}),
+            )
+            .unwrap();
+
+        let finished = plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "1", "summary": "no errors reported"}),
+        );
+        assert!(finished.ok, "{}", finished.output);
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

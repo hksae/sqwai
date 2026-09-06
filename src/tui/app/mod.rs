@@ -297,6 +297,10 @@ pub struct App {
     /// live filter typed inside the sessions menu
     sessions_filter: String,
     ef_click: Option<(u16, u16)>,
+    /// What the provider told us about the effort level, as opposed to what
+    /// the config claims: (model id, level, reason). Cleared when either the
+    /// model or the level changes, since the observation was about that pair.
+    effort_observed_ignored: Option<(String, EffortLevel, String)>,
     agents_click: Option<(u16, u16)>,
     status_y: u16,
 
@@ -481,6 +485,7 @@ impl App {
             sessions: Vec::new(),
             sessions_filter: String::new(),
             ef_click: None,
+            effort_observed_ignored: None,
             agents_click: None,
             status_y: 0,
             press: None,
@@ -778,8 +783,25 @@ impl App {
         crate::providers::effort::plan(level, self.effort_support())
     }
 
+    /// The plan for the level in force, with anything the *provider* told us
+    /// taking precedence over what the config claims. A declaration is a
+    /// claim; a zero reasoning-token count is evidence.
     pub(super) fn effort_plan(&self) -> crate::providers::effort::Plan {
-        self.effort_plan_for(self.model_cfg.effort)
+        let mut plan = self.effort_plan_for(self.model_cfg.effort);
+        if let Some((model, level, why)) = &self.effort_observed_ignored
+            && *model == self.model_cfg.id
+            && *level == self.model_cfg.effort
+        {
+            plan.status = crate::providers::effort::Status::Ignored {
+                why: match why.as_str() {
+                    "the provider rejected the effort parameter" => {
+                        "the provider rejected the effort parameter"
+                    }
+                    _ => "the provider reported zero reasoning tokens",
+                },
+            };
+        }
+        plan
     }
 
     fn rebuild_provider(&mut self) {
@@ -1528,6 +1550,15 @@ impl App {
                 }
                 AgentEvent::Usage(u) => {
                     self.session.add_usage(&u);
+                    self.dirty = true;
+                }
+                AgentEvent::EffortIgnored { level, why } => {
+                    self.status(
+                        &format!("effort: {level} (ignored by model — {why})"),
+                        StatusKind::Warn,
+                    );
+                    self.effort_observed_ignored =
+                        Some((self.model_cfg.id.clone(), self.model_cfg.effort, why));
                     self.dirty = true;
                 }
                 AgentEvent::ResponseId(id) => {

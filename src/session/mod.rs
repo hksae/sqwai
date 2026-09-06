@@ -421,6 +421,7 @@ mod tests {
             prompt_tokens: 500,
             completion_tokens: 600,
             cached_tokens: None,
+            reasoning_tokens: None,
         });
         assert_eq!(s.context_tokens_used(), 500);
         assert_eq!(s.context_percent(), 50.0);
@@ -432,6 +433,7 @@ mod tests {
             prompt_tokens: 36_267,
             completion_tokens: 10,
             cached_tokens: None,
+            reasoning_tokens: None,
         });
         assert_eq!(s.context_tokens_used(), 36_267);
         assert_eq!(s.context_percent(), 100.0);
@@ -447,6 +449,7 @@ mod tests {
                 prompt_tokens: 1_000,
                 completion_tokens: 100,
                 cached_tokens: None,
+                reasoning_tokens: None,
             });
         }
         // five identical requests: the context holds one request, not five
@@ -461,12 +464,14 @@ mod tests {
             prompt_tokens: 2_000,
             completion_tokens: 0,
             cached_tokens: None,
+            reasoning_tokens: None,
         });
         // anthropic-style second event: output only, zero input
         s.add_usage(&Usage {
             prompt_tokens: 0,
             completion_tokens: 250,
             cached_tokens: None,
+            reasoning_tokens: None,
         });
         assert_eq!(s.context_tokens_used(), 2_000);
         assert_eq!(s.last_usage.unwrap().completion_tokens, 250);
@@ -497,6 +502,7 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 1,
             cached_tokens: Some(0),
+            reasoning_tokens: None,
         });
         assert!(!s.cache_confirmed, "a zero-cache report proves nothing");
 
@@ -504,6 +510,7 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 1,
             cached_tokens: Some(7),
+            reasoning_tokens: None,
         });
         assert!(s.cache_confirmed);
         assert_eq!(s.usage.cached_tokens, Some(7));

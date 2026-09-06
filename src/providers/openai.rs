@@ -40,6 +40,9 @@ impl OpenAiProvider {
             cached_tokens: u
                 .pointer("/prompt_tokens_details/cached_tokens")
                 .and_then(|c| c.as_u64()),
+            reasoning_tokens: u
+                .pointer("/completion_tokens_details/reasoning_tokens")
+                .and_then(|c| c.as_u64()),
         })
     }
 
@@ -447,6 +450,27 @@ mod tests {
         assert_eq!(
             replayed["tool_calls"][0]["extra_content"]["google"]["thought_signature"],
             "SIG_A"
+        );
+    }
+
+    /// The counter the observed-ignored check reads. `0` is a claim the
+    /// provider made; a missing field must stay `None` rather than become 0,
+    /// or every non-reasoning gateway would look like it ignored the request.
+    #[test]
+    fn reasoning_tokens_are_read_when_the_provider_reports_them() {
+        let with = json!({"usage": {"prompt_tokens": 10, "completion_tokens": 5,
+            "completion_tokens_details": {"reasoning_tokens": 0}}});
+        assert_eq!(
+            OpenAiProvider::map_usage(&with).unwrap().reasoning_tokens,
+            Some(0)
+        );
+        let without = json!({"usage": {"prompt_tokens": 10, "completion_tokens": 5}});
+        assert_eq!(
+            OpenAiProvider::map_usage(&without)
+                .unwrap()
+                .reasoning_tokens,
+            None,
+            "no counter is not the same as a zero counter"
         );
     }
 
