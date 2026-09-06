@@ -1,82 +1,94 @@
 #![allow(dead_code)]
-//! Shadow git checkpoints taken before every mutating action (design §2.5).
+//! Checkpoints taken before mutating actions (§2.5), across two layers.
 //!
-//! Implemented on libgit2 (`git2` crate), no shell-outs. A checkpoint is a
-//! dangling commit whose tree mirrors the whole worktree (tracked + untracked,
-//! gitignore respected), built through an isolated in-memory index — the
-//! user's staging area and branches are never touched.
+//! Layer 1 ([`crate::agent::blobs`]) keeps the pre-image of every file the
+//! host is about to write, needs no git, and powers `/undo step N`.
+//!
+//! Layer 2 ([`crate::agent::shadow`]) is the tree snapshot `bash` needs,
+//! taken in a shadow repository of our own. It used to be taken as a dangling
+//! commit in the *user's* repository, which §2.5 forbids and which a routine
+//! `git gc` in their project silently invalidated (#17). Nothing here touches
+//! their `.git` any more, and `git2` is gone from the dependency list per
+//! §5.10 — git is a binary invoked with an explicit `--git-dir`.
 //!
 //! Restoring is path-scoped: the caller passes the paths the host recorded as
 //! its own writes, each with the hash the agent left it at. A path whose
 //! content no longer matches that hash was changed outside sqwai and is left
 //! alone. Undo must not be able to discard work it did not do.
 //!
-//! Every function takes the repository root explicitly — the agent works on
-//! the project directory, never on whatever cwd the process happens to have.
+//! Every function takes the project root explicitly — the agent works on the
+//! project directory, never on whatever cwd the process happens to have.
 
 use anyhow::{Context as _, Result};
-use git2::{IndexAddOption, Oid, Repository, Signature};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-/// true when checkpoints are possible in this directory
+use crate::agent::shadow::Shadow;
+use crate::config::ShadowStore;
+
+/// Open the shadow repository, or `None` when layer 2 is unavailable (no git
+/// binary, or `[undo].shadow = "off"`). Layer 1 does not go through here.
+fn shadow(root: &Path, store: ShadowStore) -> Option<Shadow> {
+    Shadow::open(root, store).ok().flatten()
+}
+
+/// True when a *tree* snapshot is possible — that is, when layer 2 could
+/// operate here. It no longer means "this is a git repository": the shadow
+/// repository is ours, so a snapshot needs the `git` binary and nothing else.
+/// File reverts do not need even that, so callers must not read this as
+/// "undo is available".
+///
+/// Deliberately does not create anything: an availability check that
+/// initialised a repository as a side effect would litter every directory the
+/// TUI asks about.
 pub fn available(root: &Path) -> bool {
-    Repository::open(root).is_ok()
+    crate::agent::shadow::git_available()
+        && crate::agent::shadow::dir_for(root, ShadowStore::Local).is_some()
 }
 
-/// create a shadow commit of the whole worktree (tracked + untracked),
-/// returning its sha; HEAD, branches and the index stay untouched
+/// Snapshot the worktree onto this session's chain in the shadow repository
+/// (§2.5), returning the commit.
+///
+/// The session id keys the chain (`refs/sessions/<id>`), so two sessions in
+/// the same project do not interleave their history. An unchanged tree
+/// produces no commit and returns `Ok(None)`.
+pub fn snapshot_session(
+    root: &Path,
+    store: ShadowStore,
+    session_id: &str,
+    label: &str,
+) -> Result<Option<String>> {
+    let Some(shadow) = shadow(root, store) else {
+        anyhow::bail!("no shadow repository: git is unavailable or [undo].shadow is off");
+    };
+    shadow.snapshot(session_id, label)
+}
+
+/// Snapshot with the default store and no session key.
+///
+/// Kept for the call sites that have no session id to hand; they land on a
+/// shared chain, which is worse for retention but never wrong.
 pub fn snapshot(root: &Path, label: &str) -> Result<String> {
-    let repo = Repository::open(root).context("not a git repository")?;
-
-    // build the worktree tree using the repo's index in memory only: add_all
-    // gathers tracked+untracked (gitignore-respecting), write_tree_to emits a
-    // tree object; the on-disk index is never written, so the user's staging
-    // area is untouched.
-    let mut idx = repo.index().context("open repo index")?;
-    idx.add_all(["."], IndexAddOption::DEFAULT, None)
-        .with_context(|| format!("index-add worktree in {}", root.display()))?;
-    let tree_oid = idx.write_tree_to(&repo).context("write tree")?;
-    let tree = repo.find_tree(tree_oid).context("find tree")?;
-
-    let sig = Signature::now("sqwai", "sqwai@local").context("signature")?;
-    let parents: Vec<git2::Commit> = repo
-        .head()
-        .ok()
-        .and_then(|h| h.peel_to_commit().ok())
-        .into_iter()
-        .collect();
-    let parents_refs: Vec<&git2::Commit> = parents.iter().collect();
-
-    // `None` ref => dangling commit, no branch/HEAD move
-    let oid = repo
-        .commit(
-            None,
-            &sig,
-            &sig,
-            &format!("sqwai checkpoint: {label}"),
-            &tree,
-            &parents_refs,
-        )
-        .context("create checkpoint commit")?;
-
-    Ok(oid.to_string())
+    match snapshot_session(root, ShadowStore::Local, "shared", label)? {
+        Some(sha) => Ok(sha),
+        // Nothing changed since the previous snapshot, so the previous one
+        // already describes this state and is the honest thing to return.
+        None => {
+            let Some(shadow) = shadow(root, ShadowStore::Local) else {
+                anyhow::bail!("no shadow repository");
+            };
+            shadow
+                .snapshot("shared", label)?
+                .context("the tree is unchanged and no previous snapshot exists")
+        }
+    }
 }
 
-/// Return paths changed when restoring to a snapshot.
 pub fn changed_files(root: &Path, sha: &str) -> Result<Vec<String>> {
-    let repo = Repository::open(root).context("not a git repository")?;
-    let oid: Oid = sha.parse().context("invalid snapshot sha")?;
-    let commit = repo.find_commit(oid).context("snapshot commit not found")?;
-    let tree = commit.tree().context("snapshot tree")?;
-    let diff = repo
-        .diff_tree_to_workdir(Some(&tree), None)
-        .context("diff snapshot vs workdir")?;
-    Ok(diff
-        .deltas()
-        .filter_map(|delta| delta.new_file().path().or(delta.old_file().path()))
-        .map(|path| path.to_string_lossy().replace('\\', "/"))
-        .collect())
+    let Some(shadow) = shadow(root, ShadowStore::Local) else {
+        anyhow::bail!("no shadow repository");
+    };
+    shadow.changed_files(sha)
 }
 
 /// One path to put back, with the hash the agent left it at when the host
@@ -194,19 +206,12 @@ pub fn restore_from_blobs(
 /// The index and HEAD are never touched, and no path outside `targets` is read
 /// or written.
 pub fn restore_paths(root: &Path, sha: &str, targets: &[Target]) -> Result<RestoreReport> {
-    let repo = Repository::open(root).context("not a git repository")?;
-    let oid: Oid = sha
-        .parse()
-        .with_context(|| format!("invalid snapshot sha: {sha}"))?;
-    let commit = repo
-        .find_commit(oid)
-        .with_context(|| format!("snapshot commit not found: {sha}"))?;
-    let snap_tree = commit.tree().context("snapshot tree")?;
-
+    let Some(shadow) = shadow(root, ShadowStore::Local) else {
+        anyhow::bail!("no shadow repository: git is unavailable or [undo].shadow is off");
+    };
     let mut report = RestoreReport::default();
     for target in targets {
-        let relative = Path::new(&target.path);
-        let absolute = root.join(relative);
+        let absolute = root.join(&target.path);
         let live = current_hash(&absolute);
 
         // Only skip when the host knows what it left behind AND the file is
@@ -218,21 +223,18 @@ pub fn restore_paths(root: &Path, sha: &str, targets: &[Target]) -> Result<Resto
             continue;
         }
 
-        match snap_tree.get_path(relative) {
-            Ok(entry) => {
-                let blob = repo
-                    .find_blob(entry.id())
-                    .with_context(|| format!("snapshot blob for {}", target.path))?;
+        match shadow.show(sha, &target.path)? {
+            Some(content) => {
                 if let Some(parent) = absolute.parent() {
                     std::fs::create_dir_all(parent)
                         .with_context(|| format!("creating {}", parent.display()))?;
                 }
                 // bytes as recorded, no git filters (§2.5: core.autocrlf = false)
-                std::fs::write(&absolute, blob.content())
+                std::fs::write(&absolute, &content)
                     .with_context(|| format!("restoring {}", target.path))?;
                 report.restored.push(target.path.clone());
             }
-            Err(_) => {
+            None => {
                 // not in the snapshot: it appeared after, so undo removes it
                 if absolute.exists() {
                     std::fs::remove_file(&absolute)
@@ -260,7 +262,10 @@ mod tests {
             .tempdir()
             .unwrap();
         let root = dir.path();
-        assert!(!available(root), "the fixture must not be a repository");
+        assert!(
+            !root.join(".git").exists(),
+            "the fixture must not be a repository"
+        );
 
         // a file the agent edited: its pre-image is in the store
         let edited = root.join("src/main.rs");
@@ -706,12 +711,25 @@ mod tests {
     }
 
     #[test]
-    fn available_detects_repo() {
+    /// This used to assert that a snapshot needs the user's repository. It
+    /// does not any more, and that is the change #17 asked for: the shadow
+    /// repository is ours, so layer 2 works in a plain directory too. What it
+    /// still needs is the `git` binary.
+    fn available_wherever_git_is_installed() {
         let repo = tmp_repo();
         let dir = repo.path();
         assert!(available(dir));
         let plain = dir.join("nested");
         fs::create_dir_all(&plain).unwrap();
-        assert!(!available(&plain));
+        assert_eq!(
+            available(&plain),
+            crate::agent::shadow::git_available(),
+            "a plain directory is as snapshot-able as any other"
+        );
+        // and asking must not have created anything
+        assert!(
+            !plain.join(".sqwai").exists(),
+            "an availability check initialised a shadow repository"
+        );
     }
 }

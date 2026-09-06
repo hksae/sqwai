@@ -36,6 +36,11 @@ pub struct ToolCtx {
     root_canon: PathBuf,
     /// secondary project instances can inspect but not mutate project state
     pub read_only: bool,
+    /// Session this context belongs to. §2.5 keys the shadow snapshot chain
+    /// on it (`refs/sessions/<id>`), so two sessions in one project do not
+    /// interleave their checkpoint history — and retention can truncate one
+    /// session's chain without touching another's.
+    pub session_id: String,
     /// Files read this session and the content hash they had at the time,
     /// keyed by canonical path. §4 calls for the guard to be hash-tracked: a
     /// file changed by `bash` since the last read has to be read again, and
@@ -67,11 +72,18 @@ impl ToolCtx {
             root,
             root_canon,
             read_only,
+            session_id: "shared".into(),
             files_read: HashMap::new(),
             journal: Vec::new(),
             plan_limits: crate::config::PlanConfig::default(),
             context_limit: 0,
         }
+    }
+
+    /// Name the session whose checkpoint chain this context appends to.
+    pub fn in_session(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = session_id.into();
+        self
     }
 
     /// Adopt the host's plan limits and the driving model's context window.

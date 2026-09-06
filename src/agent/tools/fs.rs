@@ -180,15 +180,7 @@ pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome
         return Outcome::err(format!("mkdir failed: {e}"));
     }
     // checkpoint before mutation
-    match crate::agent::checkpoints::snapshot(
-        &ctx.root,
-        &format!("write {}", rel_label(&ctx.root, &p)),
-    ) {
-        Ok(sha) => ctx
-            .journal
-            .push((sha, format!("write {}", rel_label(&ctx.root, &p)))),
-        Err(_) => { /* outside git: proceed without insurance */ }
-    }
+    checkpoint(ctx, &p, "write");
     if let Err(e) = fs::write(&p, content) {
         return Outcome::err(format!("write failed: {e}"));
     }
@@ -494,9 +486,18 @@ fn json_out_no_matches(pattern: &str) -> String {
 
 fn checkpoint(ctx: &mut ToolCtx, p: &Path, what: &str) {
     let label = format!("{what} {}", rel_label(&ctx.root, p));
-    match crate::agent::checkpoints::snapshot(&ctx.root, &label) {
-        Ok(sha) => ctx.journal.push((sha, label)),
-        Err(_) => { /* not a git repo: run uninsured like design allows */ }
+    // Layer 2 is best-effort by design: layer 1 already holds this file's
+    // pre-image, so a missing git binary costs the tree snapshot and nothing
+    // else (§2.5's degradation table).
+    // An unchanged tree needs no commit, and no git binary means no layer 2 —
+    // neither is a reason to fail the edit.
+    if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
+        &ctx.root,
+        crate::config::ShadowStore::Local,
+        &ctx.session_id,
+        &label,
+    ) {
+        ctx.journal.push((sha, label));
     }
 }
 

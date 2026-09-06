@@ -115,7 +115,12 @@ pub fn commit(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         return Outcome::err("git_commit message is too long (maximum 2000 bytes)");
     }
     let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
-    if let Ok(sha) = crate::agent::checkpoints::snapshot(&ctx.root, "git_commit") {
+    if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
+        &ctx.root,
+        crate::config::ShadowStore::Local,
+        &ctx.session_id,
+        "git_commit",
+    ) {
         ctx.journal.push((sha, "git_commit".to_string()));
     }
     if all {
@@ -135,8 +140,12 @@ pub fn branch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             if name.is_empty() {
                 Outcome::err("git_branch create requires a name")
             } else {
-                if let Ok(sha) = crate::agent::checkpoints::snapshot(&ctx.root, "git_branch create")
-                {
+                if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
+                    &ctx.root,
+                    crate::config::ShadowStore::Local,
+                    &ctx.session_id,
+                    "git_branch create",
+                ) {
                     ctx.journal.push((sha, "git_branch create".to_string()));
                 }
                 run_git(ctx, &["branch", name])
@@ -146,8 +155,12 @@ pub fn branch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             if name.is_empty() {
                 Outcome::err("git_branch switch requires a name")
             } else {
-                if let Ok(sha) = crate::agent::checkpoints::snapshot(&ctx.root, "git_branch switch")
-                {
+                if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
+                    &ctx.root,
+                    crate::config::ShadowStore::Local,
+                    &ctx.session_id,
+                    "git_branch switch",
+                ) {
                     ctx.journal.push((sha, "git_branch switch".to_string()));
                 }
                 run_git(ctx, &["switch", name])
@@ -191,7 +204,12 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         return Outcome::err(format!("patch rejected: {}", truncate(error.trim())));
     }
 
-    if let Ok(sha) = crate::agent::checkpoints::snapshot(&ctx.root, "patch") {
+    if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
+        &ctx.root,
+        crate::config::ShadowStore::Local,
+        &ctx.session_id,
+        "patch",
+    ) {
         ctx.journal.push((sha, "patch".to_string()));
     }
 

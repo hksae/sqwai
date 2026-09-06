@@ -2937,21 +2937,39 @@ pub(super) fn shorten_path(path: &std::path::Path) -> String {
     path_str
 }
 
+/// Branch and dirty-file count for the status bar, read through the `git`
+/// binary rather than libgit2 (§5.10).
+///
+/// This is the user's own repository, so it is read and never written: two
+/// plumbing commands, no index, no locks. `--porcelain` output is stable
+/// across git versions, which is the point of asking for it.
 pub(super) fn collect_git_info(root: &std::path::Path) -> (Option<String>, Option<usize>) {
-    let Ok(repo) = git2::Repository::discover(root) else {
+    let git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    // `--abbrev-ref HEAD` prints `HEAD` on a detached head, which is what the
+    // libgit2 version reported too
+    let Some(branch) = git(&["rev-parse", "--abbrev-ref", "HEAD"]) else {
+        // not a repository, or no git binary: the bar simply shows no branch
         return (None, None);
     };
-    let branch = repo
-        .head()
-        .ok()
-        .and_then(|h| h.shorthand().ok().map(|s| s.to_string()))
-        .unwrap_or_else(|| "HEAD".into());
-    let mut opts = git2::StatusOptions::new();
-    opts.include_untracked(true);
-    let modified = repo
-        .statuses(Some(&mut opts))
-        .ok()
-        .map(|statuses| statuses.iter().filter(|s| !s.status().is_ignored()).count())
+    let branch = branch.trim().to_string();
+    if branch.is_empty() {
+        return (None, None);
+    }
+    let modified = git(&["status", "--porcelain", "--untracked-files=all"])
+        .map(|out| out.lines().filter(|line| !line.trim().is_empty()).count())
         .unwrap_or(0);
     (Some(branch), Some(modified))
 }

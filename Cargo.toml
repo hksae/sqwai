@@ -21,7 +21,6 @@ globset = "0.4"
 ignore = "0.4"
 tree-sitter = "0.26"
 tree-sitter-bash = "0.25"
-git2 = "0.21"
 ratatui = "0.29"
 regex = "1"
 reqwest = { version = "0.12", features = ["json", "stream"] }
