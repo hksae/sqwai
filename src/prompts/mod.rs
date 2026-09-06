@@ -82,11 +82,6 @@ pub fn stable_prefix() -> String {
     prompt
 }
 
-/// Minimal prompt for requests that need no tools and no project context.
-pub fn concise_prompt() -> String {
-    "You are an AI coding agent hosted inside the sqwai CLI application. Reply in the user's language. For trivial requests, answer directly and briefly. Do not claim to use tools or inspect files unless the request requires it.".into()
-}
-
 /// Per-turn environment context is intentionally empty to preserve history cache.
 pub fn runtime_context() -> String {
     env::runtime_context()

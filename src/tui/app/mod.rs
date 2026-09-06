@@ -320,11 +320,8 @@ impl App {
     /// Order matters: the stable prefix comes first, the durable plan next
     /// (it only changes when the agent rewrites it), and everything that moves
     /// while the agent works goes last so it cannot invalidate the prefix.
-    fn system_block(&self, with_tools: bool) -> Vec<crate::providers::SystemPart> {
+    fn system_block(&self) -> Vec<crate::providers::SystemPart> {
         use crate::providers::SystemPart;
-        if !with_tools {
-            return vec![SystemPart::volatile(crate::prompts::concise_prompt())];
-        }
         let mut parts = vec![SystemPart::cached(self.stable_prefix.clone())];
         if !self.session_environment.is_empty() {
             parts.push(SystemPart::cached(self.session_environment.clone()));
@@ -794,10 +791,9 @@ impl App {
         self.segments.push(Segment::User(text.clone()));
         self.session.push(Role::User, &text);
 
-        let with_tools = self.context_bootstrap_pending || !Self::is_trivial_request(&text);
         // The system block is assembled per request and travels separately
         // from the transcript: nothing here is ever written to the session.
-        let system = self.system_block(with_tools);
+        let system = self.system_block();
         let msgs: Vec<PMessage> = self.session.messages.clone();
         let root = std::env::current_dir().unwrap_or_default();
         let input = crate::agent::loop_task::AgentInput {
@@ -816,7 +812,7 @@ impl App {
             blocked_patterns: self.cfg.safety.blocked_patterns.clone(),
             plan_mode: self.mode == Mode::Plan,
             context_limit: self.session.context_limit,
-            enable_tools: with_tools,
+            enable_tools: true,
             read_only: self.read_only,
             mcp: self.cfg.mcp.clone(),
             lsp: self.cfg.lsp.clone(),
@@ -909,14 +905,6 @@ impl App {
         self.aborted = false;
         self.assistant_buf.clear();
         self.status("compacting context…", StatusKind::Info);
-    }
-
-    fn is_trivial_request(text: &str) -> bool {
-        let t = text.trim().to_lowercase();
-        matches!(
-            t.as_str(),
-            "hello" | "hi" | "hey" | "2 + 2" | "2+2"
-        )
     }
 
     fn apply_session(&mut self, mut s: Session) {
