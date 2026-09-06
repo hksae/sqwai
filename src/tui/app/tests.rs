@@ -2516,10 +2516,11 @@ mod tests {
             }
         }
     }
-    /// The working spinner reads as part of the model group: the same chip
-    /// style as PLAN/ACT, immediately right of the model name.
+    /// The working spinner reads as part of the model group, right of the
+    /// model name, in the chip's accent colour but without its inverted
+    /// background.
     #[test]
-    fn working_spinner_sits_right_of_the_model_in_chip_style() {
+    fn working_spinner_sits_right_of_the_model_without_chip_background() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
         app.streaming = true;
@@ -2547,8 +2548,8 @@ mod tests {
         );
         assert_eq!(
             spans[spinner_at].style,
-            crate::tui::theme::Theme::status_chip(),
-            "spinner shares the PLAN/ACT chip style"
+            ratatui::style::Style::new().fg(crate::tui::theme::Theme::ACCENT_SOFT()),
+            "spinner uses the chip accent without its background block"
         );
     }
     /// `/undo step 3` used to parse as `/undo 1`: `nth(1)` yielded "step",
