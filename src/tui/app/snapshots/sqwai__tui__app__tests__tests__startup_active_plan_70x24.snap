@@ -1,0 +1,28 @@
+---
+source: src/tui/app/tests.rs
+expression: s
+---
+
+
+
+
+
+  sqwai 1.2.3 · /home/user/projects/myapp · main ✓
+
+  ▸ active plan   "Refactor auth module"
+    step 2/5 In progress
+    memory  graph ready
+
+  enter  continue plan
+  tab    plan / act
+  ctrl+s sessions
+  ?      help
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────
+ ACT                   cache 0% · 0% · 0 · test-model  th:off [CWD]

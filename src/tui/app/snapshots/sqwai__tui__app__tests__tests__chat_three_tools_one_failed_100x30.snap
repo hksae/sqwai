@@ -1,0 +1,34 @@
+---
+source: src/tui/app/tests.rs
+expression: s
+---
+
+
+ › Do the thing.
+
+
+   ✓ read_file  {"path":"src/main.rs"}
+   ✗ bash  {"cmd":"cargo build"}
+   ✓ write_file  {"path":"out.txt"}
+ Done, though one step failed.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ ACT                                                 cache 0% · 0% · 0 · test-model  th:off [CWD]

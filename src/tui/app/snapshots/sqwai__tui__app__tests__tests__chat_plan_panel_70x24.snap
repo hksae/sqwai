@@ -1,0 +1,28 @@
+---
+source: src/tui/app/tests.rs
+expression: s
+---
+
+
+ › What is the plan?
+
+
+ See the plan panel.
+
+
+
+  ┌  to-do  ───────────────────────────────────────────────────────┐
+  │ agent to-do list                                               │
+  │  1. Step 1: Analyse requirements                               │
+  │  2. Step 2: Implement feature                                  │
+  │  3. Step 3: Write tests                                        │
+  └────────────────────────────────────────────────────────────────┘
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────
+ ACT                   cache 0% · 0% · 0 · test-model  th:off [CWD]

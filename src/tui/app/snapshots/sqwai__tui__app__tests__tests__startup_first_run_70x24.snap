@@ -1,0 +1,28 @@
+---
+source: src/tui/app/tests.rs
+expression: s
+---
+
+
+
+
+
+  sqwai 1.2.3 · /home/user/projects/myapp · main ✓
+
+  this project has no .sqwai yet
+  /init create AGENTS.md and memory or just type a task
+
+  tab    plan / act
+  ctrl+s sessions
+  ?      help
+  /init  set up project
+
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────
+ ACT                   cache 0% · 0% · 0 · test-model  th:off [CWD]
