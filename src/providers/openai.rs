@@ -174,7 +174,7 @@ impl Provider for OpenAiProvider {
                 Ok(r) => r,
                 Err(e) => {
                     super::log_http(&format!("POST {url} failed: {e}"));
-                    yield Err(anyhow!("request failed: {e}"));
+                    yield Err(super::network_error(e));
                     return;
                 }
             };
@@ -182,7 +182,7 @@ impl Provider for OpenAiProvider {
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
                 super::log_http(&format!("POST {url} -> {status}: {body}"));
-                yield Err(anyhow!("provider returned {status}: {}", truncate(&body, 2000)));
+                yield Err(super::response_error(status.as_u16(), &truncate(&body, 2000)));
                 return;
             }
 

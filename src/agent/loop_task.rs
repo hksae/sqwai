@@ -256,6 +256,8 @@ fn request_messages(messages: &[Message], transport: ContextTransport) -> Vec<Me
 struct TurnOutcome {
     text: String,
     calls: Vec<ToolCallReq>,
+    /// how many retries it took to get this answer, for the journal
+    retries: u32,
 }
 
 const MAX_SUBAGENTS_PER_CALL: usize = 8;
@@ -707,6 +709,10 @@ async fn run_agent(
     let mut next_id: u64 = 0;
     // prompt size of the last request, as reported by the provider
     let mut prompt_size: u64 = 0;
+    // One forced compaction per oversized request, reset after every turn that
+    // gets through: without the guard a request that stays too large would
+    // compact in a loop.
+    let mut compacted_for_overflow = false;
 
     loop {
         // The proposal limit applies to one model request/turn, not the whole
@@ -801,12 +807,75 @@ async fn run_agent(
         )
         .await
         {
-            Ok(t) => t,
-            Err(e) => {
-                let _ = tx.send(AgentEvent::Completed(Err(e))).await;
+            Ok(turn) => {
+                if turn.retries > 0
+                    && let Some(writer) = journal.as_mut()
+                {
+                    // The turn only succeeded because the host waited and
+                    // asked again; "what happened?" should be able to say so.
+                    let _ = writer.append(
+                        "provider_error",
+                        serde_json::json!({
+                            "class": "retried",
+                            "retries": turn.retries,
+                            "recovered": true,
+                        }),
+                    );
+                }
+                turn
+            }
+            Err(failure) => {
+                use crate::providers::ErrorClass;
+                if let Some(writer) = journal.as_mut() {
+                    let _ = writer.append(
+                        "provider_error",
+                        serde_json::json!({
+                            "class": failure.class.map(|c| c.as_str()).unwrap_or("unclassified"),
+                            "retries": failure.retries,
+                            "recovered": false,
+                        }),
+                    );
+                }
+                // A request that does not fit gets one compaction and one more
+                // try, which is the only thing that can make it fit (§5.1).
+                // Asking the same oversized request again cannot.
+                if failure.class == Some(ErrorClass::ContextOverflow) && !compacted_for_overflow {
+                    compacted_for_overflow = true;
+                    if let Some((before, after, summarized)) = compact_history(
+                        &provider,
+                        &model_id,
+                        &mut messages,
+                        &mut summary,
+                        &policy,
+                        prompt_size,
+                        true,
+                    )
+                    .await
+                    {
+                        let _ = tx
+                            .send(AgentEvent::Compaction {
+                                summarized,
+                                before,
+                                after,
+                            })
+                            .await;
+                        continue;
+                    }
+                    // Nothing left to compact: the request is oversized on its
+                    // own, so say that rather than looping.
+                    let _ = tx
+                        .send(AgentEvent::Completed(Err(format!(
+                            "{} — nothing left to compact; the request is too large on its own",
+                            failure.message
+                        ))))
+                        .await;
+                    break;
+                }
+                let _ = tx.send(AgentEvent::Completed(Err(failure.message))).await;
                 break;
             }
         };
+        compacted_for_overflow = false;
 
         if turn.calls.is_empty() {
             // final answer
@@ -1294,8 +1363,33 @@ async fn collect_text(provider: &SharedProvider, req: &ChatRequest) -> Result<St
     }
 }
 
-/// stream one request, retrying clean failures with backoff until it succeeds
-/// or the retry window elapses
+/// Why a turn could not be completed, and what class of failure it was.
+///
+/// The class is what lets the caller tell "compact and try again" from "stop
+/// and tell the user", instead of both arriving as the same string.
+pub struct TurnFailure {
+    pub message: String,
+    pub class: Option<crate::providers::ErrorClass>,
+    /// how many times the request was retried before giving up
+    pub retries: u32,
+}
+
+impl TurnFailure {
+    fn new(
+        message: impl Into<String>,
+        class: Option<crate::providers::ErrorClass>,
+        retries: u32,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            class,
+            retries,
+        }
+    }
+}
+
+/// stream one request, retrying failures that waiting can fix, with backoff,
+/// until it succeeds or the retry window elapses
 async fn run_turn(
     provider: &SharedProvider,
     req: &ChatRequest,
@@ -1303,7 +1397,7 @@ async fn run_turn(
     _ctl: &mut mpsc::Receiver<ControlMsg>,
     response_id: &mut Option<String>,
     prompt_size: &mut u64,
-) -> Result<TurnOutcome, String> {
+) -> Result<TurnOutcome, TurnFailure> {
     use futures::StreamExt;
 
     let mut attempt: u32 = 0;
@@ -1311,7 +1405,7 @@ async fn run_turn(
 
     loop {
         let mut got_delta = false;
-        let mut failed: Option<String> = None;
+        let mut failed: Option<anyhow::Error> = None;
         let mut text = String::new();
         let mut calls: Vec<ToolCallReq> = Vec::new();
 
@@ -1323,7 +1417,7 @@ async fn run_turn(
                         got_delta = true;
                         text.push_str(&t);
                         if tx.send(AgentEvent::TextDelta(t)).await.is_err() {
-                            return Err("tui closed".into());
+                            return Err(TurnFailure::new("tui closed", None, attempt));
                         }
                     }
                 }
@@ -1331,7 +1425,7 @@ async fn run_turn(
                     if !t.is_empty() {
                         got_delta = true;
                         if tx.send(AgentEvent::ThinkingDelta(t)).await.is_err() {
-                            return Err("tui closed".into());
+                            return Err(TurnFailure::new("tui closed", None, attempt));
                         }
                     }
                 }
@@ -1343,7 +1437,7 @@ async fn run_turn(
                         *prompt_size = u.prompt_tokens;
                     }
                     if tx.send(AgentEvent::Usage(u)).await.is_err() {
-                        return Err("tui closed".into());
+                        return Err(TurnFailure::new("tui closed", None, attempt));
                     }
                 }
                 Ok(StreamEvent::ResponseId(id)) => {
@@ -1359,37 +1453,68 @@ async fn run_turn(
                         calls.push(tc);
                     }
                 }
-                Err(e) => failed = Some(format!("{e:#}")),
+                Err(e) => failed = Some(e),
             }
             if failed.is_some() {
                 break;
             }
         }
 
-        let Some(err) = failed else {
-            return Ok(TurnOutcome { text, calls });
+        let Some(error) = failed else {
+            return Ok(TurnOutcome {
+                text,
+                calls,
+                retries: attempt,
+            });
         };
+        let class = crate::providers::class_of(&error);
+        let err = format!("{error:#}");
 
-        // A deterministic 4xx request/schema error cannot be fixed by retrying.
-        // In particular, some OpenAI-compatible chat endpoints reject
-        // function tools together with reasoning_effort and require /responses
-        // or reasoning disabled.
-        if err.contains("provider returned 400 Bad Request")
+        // Decide from the class, not from the prose. Retrying an expired key
+        // or an exhausted quota for an hour is as wrong as giving up on a 503.
+        if let Some(class) = class {
+            use crate::providers::ErrorClass;
+            if !class.retryable() {
+                // ContextOverflow lands here too: asking the same oversized
+                // request again cannot help, so the caller compacts and runs
+                // the turn once more.
+                let advice = match class {
+                    ErrorClass::Auth => " — check the API key for this provider",
+                    ErrorClass::Quota => " — the account is out of quota or credit",
+                    _ => "",
+                };
+                return Err(TurnFailure::new(
+                    format!("{err}{advice}"),
+                    Some(class),
+                    attempt,
+                ));
+            }
+        } else if err.contains("provider returned 400 Bad Request")
             || err.contains("invalid_request_error")
             || err.contains("Function tools with reasoning_effort are not supported")
         {
-            return Err(err);
+            // Unclassified, but recognisably deterministic: a gateway that
+            // answers 200 with an error body lands here.
+            return Err(TurnFailure::new(err, None, attempt));
         }
 
         if got_delta {
             // partial answer already streamed; a retry would duplicate it
-            return Err(format!("{err} — partial answer kept, not retried"));
+            return Err(TurnFailure::new(
+                format!("{err} — partial answer kept, not retried"),
+                class,
+                attempt,
+            ));
         }
 
         let now = Instant::now();
         let dl = *deadline.get_or_insert(now + RETRY_WINDOW);
         if now >= dl {
-            return Err(format!("{err} — giving up after 1h of retries"));
+            return Err(TurnFailure::new(
+                format!("{err} — giving up after 1h of retries"),
+                class,
+                attempt,
+            ));
         }
         let delay = backoff(attempt);
         attempt += 1;
@@ -1402,7 +1527,7 @@ async fn run_turn(
             .await
             .is_err()
         {
-            return Err("tui closed".into());
+            return Err(TurnFailure::new("tui closed", class, attempt));
         }
         tokio::time::sleep(delay).await;
     }

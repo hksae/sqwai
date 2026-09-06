@@ -2545,4 +2545,89 @@ mod tests {
             "nothing may be reverted for an argument we cannot honour"
         );
     }
+
+    /// A server that answers every request with the same status and body.
+    fn mock_status_server(status: u16, reason: &str, body: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let reason = reason.to_string();
+        let body = body.to_string();
+        std::thread::spawn(move || {
+            // Serve for as long as anyone asks. If the retry policy is wrong
+            // this loop is what would keep answering for an hour.
+            for stream in listener.incoming().take(16) {
+                let Ok(stream) = stream else { break };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                let mut content_length = 0usize;
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) if line == "\r\n" => break,
+                        Ok(_) => {
+                            if let Some(value) = line
+                                .to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|rest| rest.trim().parse::<usize>().ok())
+                            {
+                                content_length = value;
+                            }
+                        }
+                    }
+                }
+                // Drain the request body before answering: closing the socket
+                // while the client is still writing looks like a network
+                // failure, which is retryable — and the test would then be
+                // exercising the wrong path entirely.
+                let mut discard = vec![0u8; content_length];
+                let _ = reader.read_exact(&mut discard);
+                let mut out = stream;
+                let _ = write!(
+                    out,
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = out.flush();
+                // Same reason as mock_sse_server: do not tear the socket down
+                // in the same instant, the client must be able to read it all.
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
+        format!("http://{addr}/v1")
+    }
+
+    /// An expired key cannot be fixed by waiting, so the turn has to end now.
+    ///
+    /// The retry policy used to be a substring match on the error message, and
+    /// a 401 matched nothing — so it was retried with backoff for a full hour
+    /// while the user watched. This test would hang under that behaviour, which
+    /// is what makes it a regression test: it is bounded by a timeout.
+    #[tokio::test]
+    async fn an_auth_failure_ends_the_turn_instead_of_retrying() {
+        let url = mock_status_server(401, "Unauthorized", r#"{"error":"invalid x-api-key"}"#);
+        let mut app = test_app(url);
+        app.startup = false;
+        app.input = App::fresh_input("hi".into());
+        app.submit();
+
+        // Two seconds is generous: the first backoff alone is one second, and a
+        // retrying implementation would still be sleeping when this expires.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while app.streaming && std::time::Instant::now() < deadline {
+            app.poll_agent();
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert!(
+            !app.streaming,
+            "an auth failure must end the turn, not retry it"
+        );
+        let reported = app.bar_error.clone().unwrap_or_default();
+        assert!(
+            reported.contains("API key") || reported.contains("401"),
+            "the user should be told what to fix: {reported:?}"
+        );
+    }
 }
