@@ -1678,6 +1678,39 @@ mod tests {
         );
     }
 
+    /// #14: a label must never advertise what the gate would refuse. The
+    /// dispatcher decides by action (`is_mutating_call`), so a `ReadOnly`
+    /// label on a mixed tool cannot execute — but the PLAN-mode schema is
+    /// built from the label, and a tool that outgrows it would silently
+    /// offer mutations. This walks every advertised `(tool, action)` pair
+    /// and requires the advertised surface to agree with the gate.
+    /// Tools without an `action` enum have nothing to cross-check.
+    #[test]
+    fn plan_mode_never_advertises_a_mutating_action() {
+        for plan_mode in [false, true] {
+            for spec in tool_specs(plan_mode) {
+                let actions: Vec<String> = spec
+                    .parameters
+                    .pointer("/properties/action/enum")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for action in actions {
+                    let args = json!({"action": action});
+                    assert!(
+                        !plan_mode || !is_mutating_call(&spec.name, &args),
+                        "PLAN mode advertises {} with mutating action {action:?}",
+                        spec.name
+                    );
+                }
+            }
+        }
+    }
+
     /// §4: the guard is hash-tracked, so a file changed by `bash` since the
     /// last read has to be read again. With paths alone the model could edit
     /// content that was already gone.
