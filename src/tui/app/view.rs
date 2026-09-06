@@ -1614,30 +1614,19 @@ impl App {
 
         // 2. State section
         if let Some(plan) = &data.active_plan {
-            if is_narrow {
+            raw_lines.push(Line::from(vec![
+                Span::styled("▸ active plan   ", Theme::accent()),
+                Span::styled(format!("\"{}\"", plan.title), Theme::base().add_modifier(Modifier::BOLD)),
+            ]));
+            raw_lines.push(Line::from(vec![
+                Span::styled(format!("  step {}/{} {}", plan.current_step, plan.total_steps, plan.status_text), Theme::dim()),
+            ]));
+            if let Some(ls) = &data.last_session {
+                let prefix = if is_narrow { "  last    " } else { "  last session  " };
                 raw_lines.push(Line::from(vec![
-                    Span::styled("▸ ", Theme::accent()),
-                    Span::styled(plan.title.clone(), Theme::base().add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("   step {}/{}", plan.current_step, plan.total_steps), Theme::dim()),
+                    Span::styled(prefix, Theme::dim()),
+                    Span::styled(format!("{} · {}", ls.date, ls.outcome), Theme::dim()),
                 ]));
-                if let Some(ls) = &data.last_session {
-                    raw_lines.push(Line::from(vec![
-                        Span::styled("  last  ", Theme::dim()),
-                        Span::styled(format!("{} · {}", ls.date, ls.outcome), Theme::dim()),
-                    ]));
-                }
-            } else {
-                raw_lines.push(Line::from(vec![
-                    Span::styled("▸ active plan   ", Theme::accent()),
-                    Span::styled(format!("\"{}\"", plan.title), Theme::base().add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("     step {}/{} {}", plan.current_step, plan.total_steps, plan.status_text), Theme::dim()),
-                ]));
-                if let Some(ls) = &data.last_session {
-                    raw_lines.push(Line::from(vec![
-                        Span::styled("  last session  ", Theme::dim()),
-                        Span::styled(format!("{} · {}", ls.date, ls.outcome), Theme::dim()),
-                    ]));
-                }
             }
 
             // Memory line
@@ -1804,43 +1793,43 @@ impl App {
             }
         }
 
-        // Layout padding and clamping
+        // Layout padding and wrapping
         let left_pad = if is_narrow {
             1u16
         } else {
             ((chat.width as i32 - 84) / 2).max(2) as u16
         };
         let pad_str = " ".repeat(left_pad as usize);
-        let max_content_width = (chat.width as usize).saturating_sub(left_pad as usize);
+        let max_content_width = (chat.width as usize).saturating_sub(left_pad as usize + 1).max(10);
 
-        let padded_lines: Vec<Line<'static>> = raw_lines
+        let tagged_raw: Vec<(Line<'static>, Option<usize>)> = raw_lines
+            .into_iter()
+            .map(|l| (l, None))
+            .collect();
+        let (wrapped_lines, _) = crate::tui::markdown::wrap_tagged(tagged_raw, max_content_width as u16);
+
+        let padded_lines: Vec<Line<'static>> = wrapped_lines
             .into_iter()
             .map(|line| {
-                let mut spans = vec![Span::styled(pad_str.clone(), Theme::base())];
-                let mut rem = max_content_width;
-                for span in line.spans {
-                    if rem == 0 {
-                        break;
-                    }
-                    let text_len = span.content.chars().count();
-                    if text_len <= rem {
-                        rem -= text_len;
-                        spans.push(span);
-                    } else {
-                        let truncated: String = span.content.chars().take(rem.saturating_sub(1)).collect();
-                        spans.push(Span::styled(format!("{truncated}…"), span.style));
-                        rem = 0;
-                    }
+                if line.spans.is_empty()
+                    || (line.spans.len() == 1 && line.spans[0].content.is_empty())
+                {
+                    Line::default()
+                } else {
+                    let mut spans = vec![Span::styled(pad_str.clone(), Theme::base())];
+                    spans.extend(line.spans);
+                    Line::from(spans)
                 }
-                Line::from(spans)
             })
             .collect();
 
         let total_lines = padded_lines.len() as u16;
         let top_pad = if chat.height > total_lines + 3 {
             (chat.height / 4).max(1)
-        } else {
+        } else if chat.height > total_lines {
             1
+        } else {
+            0
         };
 
         let available_height = chat.height.saturating_sub(top_pad) as usize;

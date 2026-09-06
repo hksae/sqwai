@@ -753,9 +753,9 @@ impl App {
                         s.status == crate::plan::StepStatus::InProgress
                             || s.status == crate::plan::StepStatus::Pending
                     }) {
-                        format!("Продолжи следующий шаг плана: {}", step.title)
+                        format!("Continue next plan step: {}", step.title)
                     } else {
-                        "Продолжи следующий шаг плана".to_string()
+                        "Continue next plan step".to_string()
                     };
                 } else {
                     return;

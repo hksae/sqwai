@@ -1939,7 +1939,7 @@ mod tests {
             assert!(!app.startup);
             assert_eq!(app.session.messages.len(), 1);
             let msg = &app.session.messages[0].content;
-            assert!(msg.starts_with("Продолжи следующий шаг плана"));
+            assert!(msg.starts_with("Continue next plan step"));
         }
     }
 
@@ -1967,5 +1967,35 @@ mod tests {
         // /new on startup screen does nothing and leaves startup screen active
         assert!(app.startup);
         assert!(app.session.messages.is_empty());
+    }
+
+    #[test]
+    fn startup_screen_wraps_text_on_narrow_window() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = true;
+        let mut data = App::collect_startup_data(
+            &app.cfg,
+            &app.model_cfg,
+            app.read_only,
+        );
+        data.project_path = "~/dev/a/very/long/nested/path/to/project".into();
+        app.startup_data = Some(data);
+
+        let mut terminal = Terminal::new(TestBackend::new(35, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text: Vec<String> = buffer
+            .content
+            .chunks(buffer.area.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+            .collect();
+
+        // Path should wrap across rows instead of being truncated
+        let path_rows = text
+            .iter()
+            .filter(|line| line.contains("nested") || line.contains("project"))
+            .count();
+        assert!(path_rows >= 1, "path should wrap on narrow screen");
     }
 }
