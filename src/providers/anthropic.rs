@@ -6,6 +6,10 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 use super::{ChatRequest, Provider, Role, StreamEvent, StreamResult, ToolCallReq};
+
+/// Anthropic accepts at most four `cache_control` markers in one request and
+/// rejects the request beyond that.
+const MAX_CACHE_BREAKPOINTS: usize = 4;
 use crate::config::{ResolvedProvider, ThinkingLevel};
 
 #[derive(Clone)]
@@ -62,14 +66,32 @@ fn content_blocks(m: &super::Message) -> Vec<Value> {
 /// cache key. Breakpoints land on the stable prefix
 /// ([`SystemPart::cacheable`](super::SystemPart)); volatile parts follow them
 /// so a changed date or git status cannot invalidate the cached prefix.
-pub fn build_body(req: &ChatRequest, base_max_tokens: u32, cache_breakpoints: bool) -> Value {
+pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints: bool) -> Value {
+    // What the caller asked for, falling back to the provider default. This
+    // used to ignore `req.max_tokens` entirely and always send the default, so
+    // a request for a larger answer was silently capped.
+    let base_max_tokens = req.max_tokens.unwrap_or(default_max_tokens);
+
+    // Anthropic accepts at most MAX_CACHE_BREAKPOINTS `cache_control` markers
+    // per request and answers 400 beyond that. Tools sit at the very front of
+    // the cached prefix, so they get the first one; the stable system parts
+    // take what is left. Today that is tools plus three cached parts — exactly
+    // the limit — so the budget is what keeps a future fourth cached part from
+    // turning into a rejected request instead of a missed cache.
+    let mut breakpoints = MAX_CACHE_BREAKPOINTS;
+    let tools_breakpoint = cache_breakpoints && !req.tools.is_empty();
+    if tools_breakpoint {
+        breakpoints -= 1;
+    }
+
     let system: Vec<Value> = req
         .system
         .iter()
         .map(|part| {
             let mut block = json!({"type": "text", "text": part.text});
-            if cache_breakpoints && part.cacheable {
+            if cache_breakpoints && part.cacheable && breakpoints > 0 {
                 block["cache_control"] = json!({"type": "ephemeral"});
+                breakpoints -= 1;
             }
             block
         })
@@ -125,14 +147,26 @@ pub fn build_body(req: &ChatRequest, base_max_tokens: u32, cache_breakpoints: bo
     }
 
     if !req.tools.is_empty() {
+        let last = req.tools.len() - 1;
         body["tools"] = json!(
             req.tools
                 .iter()
-                .map(|t| json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "input_schema": t.parameters,
-                }))
+                .enumerate()
+                .map(|(index, t)| {
+                    let mut tool = json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.parameters,
+                    });
+                    // §3.2 puts the tool schemas in the stable prefix with a
+                    // breakpoint after them. A marker on the last tool caches
+                    // the whole array: they are byte-identical every turn, and
+                    // without this they were re-sent uncached on every request.
+                    if tools_breakpoint && index == last {
+                        tool["cache_control"] = json!({"type": "ephemeral"});
+                    }
+                    tool
+                })
                 .collect::<Vec<_>>()
         );
     }
@@ -324,6 +358,123 @@ fn short(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::providers::Message;
+
+    /// The caller's own `max_tokens` has to reach the wire. It used to be
+    /// ignored: `build_body` read only its default argument, so a request for
+    /// a longer answer was silently capped at 8192.
+    #[test]
+    fn requested_max_tokens_is_honoured() {
+        let req = ChatRequest {
+            model_id: "m".into(),
+            system: vec![],
+            messages: vec![],
+            thinking: None,
+            max_tokens: Some(32_000),
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        assert_eq!(build_body(&req, 8192, false)["max_tokens"], 32_000);
+
+        // no request of its own: the provider default still applies
+        let mut without = req.clone();
+        without.max_tokens = None;
+        assert_eq!(build_body(&without, 8192, false)["max_tokens"], 8192);
+
+        // with thinking on, the budget is added to what the caller asked for,
+        // not to the default
+        let mut thinking = req.clone();
+        thinking.thinking = Some(ThinkingLevel::Medium);
+        let with_thinking = build_body(&thinking, 8192, false);
+        let budget = with_thinking["thinking"]["budget_tokens"].as_u64().unwrap();
+        assert_eq!(
+            with_thinking["max_tokens"].as_u64().unwrap(),
+            (32_000 + budget).min(64_000)
+        );
+    }
+
+    /// §3.2 puts the tool schemas in the stable prefix with a breakpoint after
+    /// them. They are byte-identical every turn, and without a marker they were
+    /// re-sent uncached on every request.
+    #[test]
+    fn tool_schemas_carry_the_first_cache_breakpoint() {
+        let tool = |name: &str| crate::providers::ToolSpec {
+            name: name.into(),
+            description: "d".into(),
+            parameters: json!({"type": "object"}),
+        };
+        let req = ChatRequest {
+            model_id: "m".into(),
+            system: vec![
+                crate::providers::SystemPart::cached("stable"),
+                crate::providers::SystemPart::volatile("anchor"),
+            ],
+            messages: vec![],
+            thinking: None,
+            max_tokens: None,
+            tools: vec![tool("read"), tool("write"), tool("bash")],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+
+        let body = build_body(&req, 8192, true);
+        let tools = body["tools"].as_array().unwrap();
+        assert!(
+            tools[0].get("cache_control").is_none() && tools[1].get("cache_control").is_none(),
+            "only the last tool carries the marker: {tools:?}"
+        );
+        assert_eq!(tools[2]["cache_control"]["type"], "ephemeral");
+        // the cached system part still gets one, the volatile one still does not
+        let system = body["system"].as_array().unwrap();
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+        assert!(system[1].get("cache_control").is_none());
+
+        // and nothing is marked for a provider without a documented cache
+        let uncached = build_body(&req, 8192, false);
+        assert!(
+            uncached["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|t| t.get("cache_control").is_none())
+        );
+    }
+
+    /// Anthropic rejects a request with more than four markers. A fourth cached
+    /// system part must cost a cache hit, not the whole request.
+    #[test]
+    fn cache_breakpoints_stay_within_the_provider_limit() {
+        let req = ChatRequest {
+            model_id: "m".into(),
+            system: (0..6)
+                .map(|i| crate::providers::SystemPart::cached(format!("part {i}")))
+                .collect(),
+            messages: vec![],
+            thinking: None,
+            max_tokens: None,
+            tools: vec![crate::providers::ToolSpec {
+                name: "read".into(),
+                description: "d".into(),
+                parameters: json!({"type": "object"}),
+            }],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        let body = build_body(&req, 8192, true);
+        let marked = body["system"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|part| part.get("cache_control").is_some())
+            .count()
+            + body["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|tool| tool.get("cache_control").is_some())
+                .count();
+        assert_eq!(marked, MAX_CACHE_BREAKPOINTS, "{body}");
+    }
 
     #[test]
     fn body_has_cache_control_and_thinking() {
