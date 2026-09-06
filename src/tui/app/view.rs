@@ -1526,19 +1526,27 @@ impl App {
         } else {
             String::new()
         };
-        let mut right_len: usize = 1
-            + agents_label.chars().count()
-            + ctx_metrics_label.chars().count()
-            + working_label.chars().count()
-            + model_label.chars().count()
-            + th_label.chars().count()
-            + lsp_label.chars().count(); // mode chip always present
-        if !dir.is_empty() {
-            right_len += truncate_chars(&dir, 20).chars().count() + 1;
-        }
+        // The status bar is laid out in terminal columns, so every measurement
+        // here is a column count. `chars().count()` undercounts any wide glyph
+        // — a project directory such as `~/仕事/proj` made the padding too
+        // wide, pushed the right-hand group past the edge and shifted every
+        // click target computed below.
+        let dir_label = if dir.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", truncate_display_width(&dir, 20))
+        };
+        let right_len: usize = 1
+            + cols(&agents_label)
+            + cols(&ctx_metrics_label)
+            + cols(&working_label)
+            + cols(&model_label)
+            + cols(&th_label)
+            + cols(&lsp_label)
+            + cols(&dir_label); // mode chip always present
 
         let left = format!(" {}  {}", self.mode.label(), plan_label);
-        let lw = left.chars().count() as u16;
+        let lw = cols(&left) as u16;
         let mut spans = vec![Span::styled(
             format!(" {} ", self.mode.label()),
             Theme::status_chip(),
@@ -1559,32 +1567,27 @@ impl App {
                 Theme::dim()
             };
             spans.push(Span::styled(agents_label.clone(), agents_style));
-            self.agents_click = Some((agents_x0, agents_x0 + agents_label.chars().count() as u16));
+            self.agents_click = Some((agents_x0, agents_x0 + cols(&agents_label) as u16));
         }
         spans.push(Span::styled(ctx_metrics_label.clone(), Theme::dim()));
-        let model_x0 = agents_x0
-            + agents_label.chars().count() as u16
-            + ctx_metrics_label.chars().count() as u16;
+        let model_x0 = agents_x0 + cols(&agents_label) as u16 + cols(&ctx_metrics_label) as u16;
         if !working_label.is_empty() {
             spans.push(Span::styled(working_label, Theme::accent()));
         }
         spans.push(Span::styled(model_label, Theme::dim()));
-        let th_x0 = model_x0 + self.model_cfg.id.chars().count() as u16 + 2;
+        let th_x0 = model_x0 + cols(&self.model_cfg.id) as u16 + 2;
         let th_style = if self.model_cfg.thinking == ThinkingLevel::Off {
             Theme::dim()
         } else {
             Style::new().fg(Theme::ACCENT_SOFT())
         };
         spans.push(Span::styled(th_label.clone(), th_style));
-        self.th_click = Some((th_x0, th_x0 + th_label.chars().count() as u16));
+        self.th_click = Some((th_x0, th_x0 + cols(&th_label) as u16));
         if !lsp_label.is_empty() {
             spans.push(Span::styled(lsp_label, Theme::warn()));
         }
-        if !dir.is_empty() {
-            spans.push(Span::styled(
-                format!("{} ", truncate_chars(&dir, 20)),
-                Theme::dim(),
-            ));
+        if !dir_label.is_empty() {
+            spans.push(Span::styled(dir_label, Theme::dim()));
         }
         spans
     }
@@ -1941,12 +1944,42 @@ mod tests {
             );
         }
     }
+
+    /// The status bar budgets its right-hand group in terminal columns. These
+    /// two helpers are that measurement, so they must not fall back to
+    /// counting characters: a directory such as `~/仕事/proj` is 9 characters
+    /// but 11 columns, and undercounting it pushes the whole group off screen
+    /// and shifts every click target.
+    #[test]
+    fn status_bar_measures_columns_not_characters() {
+        use super::{cols, truncate_display_width};
+
+        assert_eq!(cols(" model "), 7);
+        assert_eq!("~/仕事/proj".chars().count(), 9, "9 characters");
+        assert_eq!(cols("~/仕事/proj"), 11, "but 11 columns");
+        assert_eq!(cols("~/Проекты"), 9, "cyrillic is one column per char");
+
+        // truncation stays inside the column budget for wide text
+        for budget in [4usize, 8, 20] {
+            let wide = truncate_display_width("日本語のプロジェクト", budget);
+            assert!(
+                UnicodeWidthStr::width(wide.as_str()) <= budget,
+                "budget {budget}: {wide:?} is {} columns",
+                UnicodeWidthStr::width(wide.as_str())
+            );
+        }
+    }
 }
 
 #[allow(dead_code)]
 fn pad_display(s: &str, width: usize) -> String {
     let used = UnicodeWidthStr::width(s);
     format!("{s}{}", " ".repeat(width.saturating_sub(used)))
+}
+
+/// Terminal columns a status-bar label occupies.
+fn cols(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
 }
 
 fn truncate_display_width(s: &str, width: usize) -> String {
