@@ -1,0 +1,28 @@
+---
+source: src/tui/app/tests.rs
+expression: s
+---
+
+
+
+
+
+  sqwai 1.2.3 · /home/user/projects/myapp · main ✓
+
+  no active plan
+  memory  graph ready
+
+  tab    plan / act
+  ctrl+s sessions
+  ?      help
+
+
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────
+ ACT                   cache 0% · 0% · 0 · test-model  th:off [CWD]

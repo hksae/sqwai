@@ -2008,4 +2008,486 @@ mod tests {
             .count();
         assert!(path_rows >= 1, "path should wrap on narrow screen");
     }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Render-fixture helpers and snapshot suite (§12)
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// Build a terminal, draw the app, and return all rows joined by '\n'.
+    /// Trailing spaces on every row are trimmed so snapshots stay readable.
+    fn render_to_string(app: &mut App, w: u16, h: u16) -> String {
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        buffer
+            .content
+            .chunks(buffer.area.width as usize)
+            .map(|row| {
+                let s: String = row.iter().map(|cell| cell.symbol()).collect();
+                s.trim_end().to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Shared insta filter set: neutralises CWD (only the last component is
+    /// shown in the status bar) and the cargo package version.
+    /// The status bar renders the *name of the checkout directory*, taken from
+    /// `std::env::current_dir()`. That is the one machine-dependent thing in a
+    /// full-frame snapshot: it reads `sqwai` here and in CI, but `my-fork` for
+    /// anyone who cloned under a different name. Normalise it from the actual
+    /// cwd so the snapshots do not depend on what the directory is called.
+    ///
+    /// Nothing else needs a filter: every startup fixture supplies its own
+    /// `StartupData`, so the version and project path are literals owned by
+    /// the test rather than values read out of the environment.
+    fn cwd_filter() -> Vec<(&'static str, &'static str)> {
+        static PATTERN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        let pattern = PATTERN.get_or_init(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .filter(|name| !name.is_empty())
+                // Anchored at end of line on purpose: the directory label is
+                // the last thing on the status row. A bare word match would
+                // also rewrite the product name on the startup screen, since
+                // this repository happens to be named after it.
+                .map(|name| format!(r"(?m){}\s*$", regex_lite_escape(&name)))
+        });
+        match pattern {
+            Some(pattern) => vec![(pattern.as_str(), "[CWD]")],
+            None => Vec::new(),
+        }
+    }
+
+    /// Escape the handful of regex metacharacters a directory name can contain.
+    fn regex_lite_escape(s: &str) -> String {
+        s.chars()
+            .flat_map(|c| {
+                if r"\.+*?()|[]{}^$".contains(c) {
+                    vec!['\\', c]
+                } else {
+                    vec![c]
+                }
+            })
+            .collect()
+    }
+
+    macro_rules! snap {
+        ($name:expr, $rendered:expr) => {
+            insta::with_settings!({ filters => cwd_filter() }, {
+                insta::assert_snapshot!($name, $rendered);
+            });
+        };
+    }
+
+    fn make_startup_data() -> StartupData {
+        StartupData {
+            version: "1.2.3",
+            project_path: "/home/user/projects/myapp".into(),
+            git_branch: Some("main".into()),
+            git_modified: Some(0),
+            model: "test-model".into(),
+            active_plan: None,
+            last_session: None,
+            memory: MemoryInfo {
+                has_memory_md: false,
+                latest_diary: None,
+                graph_ready: true,
+            },
+            recent: Vec::new(),
+            warnings: Vec::new(),
+            has_sqwai_dir: true,
+        }
+    }
+
+    // ── Chat fixtures ──────────────────────────────────────────────────────
+
+    #[test]
+    fn snap_chat_empty() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        for w_h in [(100u16, 30u16), (70, 24)] {
+            let s = render_to_string(&mut app, w_h.0, w_h.1);
+            snap!(format!("chat_empty_{}x{}", w_h.0, w_h.1), s);
+        }
+    }
+
+    #[test]
+    fn snap_chat_long_assistant_with_code_block() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.segments
+            .push(Segment::User("Explain this snippet.".into()));
+        app.segments.push(Segment::Assistant {
+            text: "Here is the explanation:\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\nThe `main` function is the program entry point. It calls `println!` which writes to stdout. This is very idiomatic Rust and the canonical hello-world example.".into(),
+            live: false,
+        });
+        for w_h in [(100u16, 30u16), (70, 24)] {
+            let s = render_to_string(&mut app, w_h.0, w_h.1);
+            snap!(format!("chat_code_block_{}x{}", w_h.0, w_h.1), s);
+        }
+    }
+
+    #[test]
+    fn snap_chat_three_tool_calls_one_failed() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.segments.push(Segment::User("Do the thing.".into()));
+        app.segments.push(Segment::Tool {
+            name: "read_file".into(),
+            args: r#"{"path":"src/main.rs"}"#.into(),
+            ok: Some(true),
+            output: "fn main() {}".into(),
+            diff: None,
+            expanded: false,
+        });
+        app.segments.push(Segment::Tool {
+            name: "bash".into(),
+            args: r#"{"cmd":"cargo build"}"#.into(),
+            ok: Some(false),
+            output: "error[E0425]: cannot find value `foo`".into(),
+            diff: None,
+            expanded: false,
+        });
+        app.segments.push(Segment::Tool {
+            name: "write_file".into(),
+            args: r#"{"path":"out.txt"}"#.into(),
+            ok: Some(true),
+            output: "written".into(),
+            diff: None,
+            expanded: false,
+        });
+        app.segments.push(Segment::Assistant {
+            text: "Done, though one step failed.".into(),
+            live: false,
+        });
+        for w_h in [(100u16, 30u16), (70, 24)] {
+            let s = render_to_string(&mut app, w_h.0, w_h.1);
+            snap!(
+                format!("chat_three_tools_one_failed_{}x{}", w_h.0, w_h.1),
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn snap_chat_twelve_successful_tool_calls_collapsed() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.segments.push(Segment::User("Do many things.".into()));
+        let seg_start = app.segments.len();
+        for i in 0..12 {
+            app.segments.push(Segment::Tool {
+                name: format!("tool_{i}"),
+                args: r#"{}"#.into(),
+                ok: Some(true),
+                output: format!("output {i}"),
+                diff: None,
+                expanded: false,
+            });
+        }
+        let seg_end = app.segments.len();
+        app.activity_groups.push(ActivityGroup {
+            seg_start,
+            seg_end,
+            calls: 12,
+            thinking: 0,
+            duration_ms: 3000,
+            errors: 0,
+            rejected: 0,
+            expanded: false,
+        });
+        app.segments.push(Segment::Assistant {
+            text: "All done!".into(),
+            live: false,
+        });
+        for w_h in [(100u16, 30u16), (70, 24)] {
+            let s = render_to_string(&mut app, w_h.0, w_h.1);
+            snap!(
+                format!("chat_twelve_tools_collapsed_{}x{}", w_h.0, w_h.1),
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn snap_chat_bash_tool_still_running() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.segments.push(Segment::User("Run the tests.".into()));
+        app.segments.push(Segment::Tool {
+            name: "bash".into(),
+            args: r#"{"cmd":"cargo test"}"#.into(),
+            ok: None, // still running
+            output: String::new(),
+            diff: None,
+            expanded: false,
+        });
+        app.streaming = true;
+        for w_h in [(100u16, 30u16), (70, 24)] {
+            let s = render_to_string(&mut app, w_h.0, w_h.1);
+            snap!(format!("chat_bash_running_{}x{}", w_h.0, w_h.1), s);
+        }
+        app.streaming = false;
+    }
+
+    #[test]
+    fn snap_chat_activity_group_collapsed() {
+        // Activity group: 6 calls, 2 thinking blocks, 1 error — collapsed by default
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.segments.push(Segment::User("Complex task.".into()));
+        let seg_start = app.segments.len();
+        app.segments.push(Segment::Thinking {
+            text: "Let me think about this carefully.".into(),
+            expanded: false,
+            started: None,
+            duration_ms: 800,
+            live: false,
+        });
+        app.segments.push(Segment::Thinking {
+            text: "More reasoning here.".into(),
+            expanded: false,
+            started: None,
+            duration_ms: 400,
+            live: false,
+        });
+        for i in 0..4 {
+            app.segments.push(Segment::Tool {
+                name: format!("tool_{i}"),
+                args: r#"{}"#.into(),
+                ok: Some(true),
+                output: format!("ok {i}"),
+                diff: None,
+                expanded: false,
+            });
+        }
+        app.segments.push(Segment::Tool {
+            name: "risky_tool".into(),
+            args: r#"{"x":1}"#.into(),
+            ok: Some(false),
+            output: "Error: permission denied".into(),
+            diff: None,
+            expanded: false,
+        });
+        app.segments.push(Segment::Tool {
+            name: "cleanup".into(),
+            args: r#"{}"#.into(),
+            ok: Some(true),
+            output: "cleaned".into(),
+            diff: None,
+            expanded: false,
+        });
+        let seg_end = app.segments.len();
+        app.activity_groups.push(ActivityGroup {
+            seg_start,
+            seg_end,
+            calls: 6,
+            thinking: 2,
+            duration_ms: 5200,
+            errors: 1,
+            rejected: 0,
+            expanded: false, // collapsed by default
+        });
+        app.segments.push(Segment::Assistant {
+            text: "Completed with one error.".into(),
+            live: false,
+        });
+        for w_h in [(100u16, 30u16), (70, 24)] {
+            let s = render_to_string(&mut app, w_h.0, w_h.1);
+            snap!(
+                format!("chat_activity_group_collapsed_{}x{}", w_h.0, w_h.1),
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn snap_chat_models_picker_popup() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.segments.push(Segment::User("Hello".into()));
+        app.segments.push(Segment::Assistant {
+            text: "Hi there!".into(),
+            live: false,
+        });
+        app.open_menu(Menu::Models {
+            provider: "p".into(),
+        });
+        for w_h in [(100u16, 30u16), (70, 24)] {
+            let s = render_to_string(&mut app, w_h.0, w_h.1);
+            snap!(format!("chat_models_popup_{}x{}", w_h.0, w_h.1), s);
+        }
+    }
+
+    #[test]
+    fn snap_chat_plan_panel_open() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.todos = vec![
+            "Step 1: Analyse requirements".into(),
+            "Step 2: Implement feature".into(),
+            "Step 3: Write tests".into(),
+        ];
+        app.segments.push(Segment::User("What is the plan?".into()));
+        app.segments.push(Segment::Assistant {
+            text: "See the plan panel.".into(),
+            live: false,
+        });
+        app.open_menu(Menu::Todo);
+        for w_h in [(100u16, 30u16), (70, 24)] {
+            let s = render_to_string(&mut app, w_h.0, w_h.1);
+            snap!(format!("chat_plan_panel_{}x{}", w_h.0, w_h.1), s);
+        }
+    }
+
+    // ── Startup-screen fixtures ────────────────────────────────────────────
+
+    #[test]
+    fn snap_startup_active_plan() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = true;
+        let mut data = make_startup_data();
+        data.active_plan = Some(ActivePlanInfo {
+            title: "Refactor auth module".into(),
+            current_step: 2,
+            total_steps: 5,
+            status_text: "In progress".into(),
+        });
+        app.startup_data = Some(data);
+        for w_h in [(100u16, 30u16), (70, 24)] {
+            let s = render_to_string(&mut app, w_h.0, w_h.1);
+            snap!(format!("startup_active_plan_{}x{}", w_h.0, w_h.1), s);
+        }
+    }
+
+    #[test]
+    fn snap_startup_no_plan_with_history() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = true;
+        let mut data = make_startup_data();
+        data.active_plan = None;
+        data.last_session = Some(RecentSessionInfo {
+            date: "2025-01-15".into(),
+            title: "Fix login bug".into(),
+            outcome: "Completed successfully".into(),
+        });
+        data.recent = vec![
+            RecentSessionInfo {
+                date: "2025-01-15".into(),
+                title: "Fix login bug".into(),
+                outcome: "Completed".into(),
+            },
+            RecentSessionInfo {
+                date: "2025-01-14".into(),
+                title: "Add dark mode".into(),
+                outcome: "Completed".into(),
+            },
+        ];
+        app.startup_data = Some(data);
+        for w_h in [(100u16, 30u16), (70, 24)] {
+            let s = render_to_string(&mut app, w_h.0, w_h.1);
+            snap!(
+                format!("startup_no_plan_with_history_{}x{}", w_h.0, w_h.1),
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn snap_startup_first_run() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = true;
+        let mut data = make_startup_data();
+        data.active_plan = None;
+        data.last_session = None;
+        data.recent = Vec::new();
+        data.has_sqwai_dir = false;
+        data.memory = MemoryInfo {
+            has_memory_md: false,
+            latest_diary: None,
+            graph_ready: false,
+        };
+        app.startup_data = Some(data);
+        for w_h in [(100u16, 30u16), (70, 24)] {
+            let s = render_to_string(&mut app, w_h.0, w_h.1);
+            snap!(format!("startup_first_run_{}x{}", w_h.0, w_h.1), s);
+        }
+    }
+
+    #[test]
+    fn snap_startup_api_key_warning() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = true;
+        let mut data = make_startup_data();
+        data.warnings = vec![
+            "API key not set for provider 'openai'. Set OPENAI_API_KEY or add api_key to config."
+                .into(),
+        ];
+        app.startup_data = Some(data);
+        for w_h in [(100u16, 30u16), (70, 24)] {
+            let s = render_to_string(&mut app, w_h.0, w_h.1);
+            snap!(format!("startup_api_key_warning_{}x{}", w_h.0, w_h.1), s);
+        }
+    }
+
+    #[test]
+    fn snap_startup_graph_not_ready() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = true;
+        let mut data = make_startup_data();
+        data.memory = MemoryInfo {
+            has_memory_md: true,
+            latest_diary: Some("2025-01-14".into()),
+            graph_ready: false,
+        };
+        app.startup_data = Some(data);
+        for w_h in [(100u16, 30u16), (70, 24)] {
+            let s = render_to_string(&mut app, w_h.0, w_h.1);
+            snap!(format!("startup_graph_not_ready_{}x{}", w_h.0, w_h.1), s);
+        }
+    }
+
+    // ── Behavioural tests (no snapshot) ───────────────────────────────────
+
+    #[tokio::test]
+    async fn after_first_message_startup_info_block_gone() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = true;
+        app.startup_data = Some(make_startup_data());
+
+        // Startup screen is shown before the first message
+        assert!(app.startup, "startup should be true before first message");
+
+        // Simulate submitting a message — startup becomes false
+        app.input = App::fresh_input("hello".into());
+        app.submit();
+
+        assert!(!app.startup, "startup should be false after first message");
+    }
+
+    #[tokio::test]
+    async fn session_save_called_only_after_first_message() {
+        // The session starts with no messages; after submit the user message is added.
+        // (In cfg(test) save() is a no-op, so we verify the message count instead.)
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+
+        // Before any submit, session has no messages
+        assert!(
+            app.session.messages.is_empty(),
+            "no messages before first submit"
+        );
+
+        app.input = App::fresh_input("first message".into());
+        app.submit();
+
+        // After submit, the user message has been recorded
+        assert!(
+            !app.session.messages.is_empty(),
+            "session should have at least one message after submit"
+        );
+    }
 }

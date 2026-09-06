@@ -1,0 +1,34 @@
+---
+source: src/tui/app/tests.rs
+expression: s
+---
+
+
+
+
+
+
+        sqwai 1.2.3 · /home/user/projects/myapp · main ✓ clean · test-model
+
+        no active plan
+        memory        MEMORY.md · diary 2025-01-14
+
+        type a task to start      tab  plan / act         ctrl+s  sessions
+        ?  help
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ ACT                                                 cache 0% · 0% · 0 · test-model  th:off [CWD]
