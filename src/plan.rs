@@ -179,6 +179,31 @@ pub struct Acceptance {
     pub reason: Option<String>,
 }
 
+/// How the host is meant to settle an acceptance item (§2.1.2).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AcceptanceKind<'a> {
+    /// `cmd: <command>` — the host runs it and the result is the verification
+    Command(&'a str),
+    /// `manual: <text>` — no command can settle it; the user waives it
+    Manual(&'a str),
+    /// free text — settled by host-recorded evidence from a verify step
+    Text(&'a str),
+}
+
+impl Acceptance {
+    /// Classify by prefix. Unprefixed text is `Text`, per §2.1.2.
+    pub fn kind(&self) -> AcceptanceKind<'_> {
+        let text = self.text.trim();
+        if let Some(command) = text.strip_prefix("cmd:") {
+            AcceptanceKind::Command(command.trim())
+        } else if let Some(rest) = text.strip_prefix("manual:") {
+            AcceptanceKind::Manual(rest.trim())
+        } else {
+            AcceptanceKind::Text(text)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
     pub id: String,
@@ -660,10 +685,13 @@ pub fn apply(plan: &mut Plan, op: Op, limits: &Limits) -> Result<Applied, Reject
             refs,
         } => add(plan, after.as_deref(), title, kind, refs, limits),
         Op::Split { id, into } => split(plan, &id, into, limits),
+        // The host prepares the evidence (and runs `cmd:` items) before
+        // applying a verify; reaching it through `apply` alone means there is
+        // none, which `verify_acceptance` rejects for anything but `cmd:`.
         Op::Verify {
             acceptance,
             evidence,
-        } => verify(plan, acceptance, !evidence.is_empty()),
+        } => verify_acceptance(plan, acceptance, Vec::new(), !evidence.is_empty()),
         Op::Complete => complete(plan),
         Op::ProposeGoalRevision { goal, reason } => propose_goal_revision(plan, goal, reason),
     }
@@ -970,7 +998,25 @@ fn split(
     accept(plan, format!("step {id} split into {}", ids.join(", ")))
 }
 
-fn verify(plan: &mut Plan, index: usize, supplied_evidence: bool) -> Result<Applied, Rejection> {
+/// Mark an acceptance item verified on the host's terms.
+///
+/// `evidence` is what the host is prepared to stand behind for *this* item:
+/// the scoped journal references for a `Text` item, and empty for a `Command`
+/// item, whose verification is the host having just run the command (and
+/// running it again at `complete`).
+///
+/// This used to take no evidence at all and dig out `steps.iter().find(kind ==
+/// Verify && !evidence.is_empty())` — the first verify step with anything
+/// attached, regardless of which acceptance item was being verified. One
+/// successful command let every acceptance item pass in turn, reusing the same
+/// record, so "complete requires every acceptance criterion verified" meant
+/// "something succeeded once".
+pub fn verify_acceptance(
+    plan: &mut Plan,
+    index: usize,
+    evidence: Vec<EvidenceRef>,
+    supplied_evidence: bool,
+) -> Result<Applied, Rejection> {
     if index >= plan.acceptance.len() {
         return reject(
             plan,
@@ -979,15 +1025,59 @@ fn verify(plan: &mut Plan, index: usize, supplied_evidence: bool) -> Result<Appl
             "call plan show to see the acceptance list",
         );
     }
-    // Evidence is attached by the host before this operation runs. Copy the
-    // verified step's scoped references onto the acceptance item so completion
-    // can re-check the same host records later.
-    let evidence = plan
-        .steps
-        .iter()
-        .find(|step| step.kind == StepKind::Verify && !step.evidence.is_empty())
-        .map(|step| step.evidence.clone())
-        .unwrap_or_default();
+    match plan.acceptance[index].kind() {
+        AcceptanceKind::Manual(text) => {
+            return reject(
+                plan,
+                "manual_acceptance",
+                format!("acceptance {index} is manual: {text}"),
+                "no command settles this one; ask the user to waive it with \
+                 /plan waive",
+            );
+        }
+        AcceptanceKind::Command(_) => {
+            // the host ran it before calling this; nothing to point at, and
+            // `complete` runs it again rather than trusting an old record
+        }
+        AcceptanceKind::Text(_) => {
+            if evidence.is_empty() {
+                return reject(
+                    plan,
+                    "no_evidence",
+                    format!("acceptance {index} has no host evidence of its own"),
+                    "close a verify step whose evidence is not already \
+                     spent on another acceptance item, or prefix the item \
+                     with cmd: so the host can run it",
+                );
+            }
+            // Two items cannot lean on the same record: that is the reuse
+            // this function exists to prevent.
+            let spent: Vec<&EvidenceRef> = plan
+                .acceptance
+                .iter()
+                .enumerate()
+                .filter(|(other, item)| {
+                    *other != index && item.status == AcceptanceStatus::Verified
+                })
+                .flat_map(|(_, item)| item.evidence.iter())
+                .collect();
+            if let Some(clash) = evidence.iter().find(|reference| {
+                spent
+                    .iter()
+                    .any(|used| used.session == reference.session && used.seq == reference.seq)
+            }) {
+                return reject(
+                    plan,
+                    "evidence_spent",
+                    format!(
+                        "journal record {}:{} already verifies another acceptance item",
+                        clash.session, clash.seq
+                    ),
+                    "run the check for this item so it has evidence of its own",
+                );
+            }
+        }
+    }
     let item = &mut plan.acceptance[index];
     item.status = AcceptanceStatus::Verified;
     item.evidence = evidence;

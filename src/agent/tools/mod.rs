@@ -10,6 +10,7 @@ mod fs;
 mod git;
 pub(crate) mod web;
 
+use crate::agent::safety;
 use crate::plan;
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -719,7 +720,12 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     };
     let limits = plan::Limits::default();
 
-    if let Err(message) = validate_evidence(&ctx.root, &op) {
+    let gate = if matches!(op, plan::Op::Complete) {
+        validate_complete(ctx)
+    } else {
+        validate_evidence(&ctx.root, &op)
+    };
+    if let Err(message) = gate {
         return Outcome::err(message);
     }
 
@@ -751,6 +757,10 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             }
             Err(e) => Outcome::err(format!("plan store unreadable: {e:#}")),
         },
+        plan::Op::Verify {
+            acceptance,
+            evidence,
+        } => verify_acceptance(ctx, acceptance, !evidence.is_empty()),
         other => {
             let mut active = match plan::open_active(&ctx.root) {
                 Ok(Some(p)) => p,
@@ -788,54 +798,164 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     }
 }
 
-fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
-    if matches!(op, plan::Op::Complete) {
-        return validate_complete(root);
-    }
-    let id: &str = match op {
-        plan::Op::Finish { id, .. } => id.as_str(),
-        plan::Op::Verify { .. } => "acceptance",
-        _ => return Ok(()),
+/// Longer than the tool default: an acceptance command is usually a test or
+/// lint run, and cutting one off at two minutes would report a failure that is
+/// really a timeout.
+const ACCEPTANCE_TIMEOUT_SECS: u64 = 900;
+
+/// `plan verify <index>` — the host settles the item, on its own terms.
+///
+/// A `cmd:` item is run here and now (§2.1.2: "host runs it on `plan verify`
+/// and on `complete`"). A `Text` item needs host-recorded evidence that no
+/// other acceptance item has already spent. A `manual:` item is refused: only
+/// the user waives those.
+fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome {
+    let mut active = match plan::open_active(&ctx.root) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => return Outcome::err("no active plan: create one with op=create first"),
+        Err(e) => return Outcome::err(format!("plan store unreadable: {e:#}")),
     };
-    if matches!(op, plan::Op::Verify { .. }) {
-        let active = plan::open_active(root)
-            .map_err(|e| format!("evidence_unreadable: {e:#}"))?
-            .ok_or_else(|| "invalid_evidence: no active plan".to_string())?;
-        let Some(step) = active
-            .steps
-            .iter()
-            .find(|step| step.kind == plan::StepKind::Verify && !step.evidence.is_empty())
-        else {
-            return Err("no_evidence: no host-recorded verify evidence".to_string());
-        };
-        return validate_attached_records(
-            root,
-            &active.id,
-            &step.id,
-            plan::StepKind::Verify,
-            &step.evidence,
-        );
-    }
-    if let plan::Op::Finish { .. } = op {
-        let status = plan::open_active(root)
-            .ok()
-            .flatten()
-            .and_then(|p| p.step(id).map(|s| s.status));
-        if status != Some(plan::StepStatus::InProgress) {
-            return Ok(());
+    let Some(item) = active.acceptance.get(index) else {
+        return rejection(plan::Rejection {
+            code: "unknown_acceptance",
+            reason: format!("no acceptance item {index}"),
+            hint: "call plan show to see the acceptance list".to_string(),
+        });
+    };
+
+    let evidence = match item.kind() {
+        plan::AcceptanceKind::Manual(_) => Vec::new(),
+        plan::AcceptanceKind::Command(command) => {
+            let command = command.to_string();
+            // The acceptance text arrives from the model on `plan create`, so
+            // it is model-controlled input that the host is about to execute.
+            // It goes through the same classifier as `bash`, and anything that
+            // would need approval is refused rather than silently run: an
+            // acceptance criterion is not the place to ask.
+            if let safety::Verdict::NeedsApproval(reason) = safety::classify(&command) {
+                return rejection(plan::Rejection {
+                    code: "unsafe_acceptance",
+                    reason: format!("acceptance {index} would run a {reason} command: {command}"),
+                    hint: "acceptance commands run without asking, so they must be safe;                            rewrite it or have the user waive the item"
+                        .to_string(),
+                });
+            }
+            let run = exec::bash(ctx, &command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
+            if !run.ok {
+                return rejection(plan::Rejection {
+                    code: "acceptance_failed",
+                    reason: format!("acceptance {index} command failed: {command}"),
+                    hint: format!(
+                        "fix what it reports, then verify again — {}",
+                        run.output.lines().take(6).collect::<Vec<_>>().join(" / ")
+                    ),
+                });
+            }
+            Vec::new()
         }
+        plan::AcceptanceKind::Text(_) => {
+            let Some((step_id, evidence)) = unspent_verify_evidence(&active, index) else {
+                return rejection(plan::Rejection {
+                    code: "no_evidence",
+                    reason: format!("acceptance {index} has no host evidence of its own"),
+                    hint: "close a verify step whose evidence is not already spent on \
+                           another acceptance item, or prefix the item with cmd: so the \
+                           host can run it"
+                        .to_string(),
+                });
+            };
+            // The evidence still has to be what a verify step needs: a
+            // successful exec or clean diagnostics. Removing the plan-wide
+            // gate must not remove that.
+            if let Err(message) = validate_attached_records(
+                &ctx.root,
+                &active.id,
+                &step_id,
+                plan::StepKind::Verify,
+                &evidence,
+            ) {
+                return Outcome::err(message);
+            }
+            evidence
+        }
+    };
+
+    match plan::verify_acceptance(&mut active, index, evidence, supplied) {
+        Ok(applied) => {
+            if let Err(e) = plan::store(&ctx.root, &active) {
+                return Outcome::err(format!("plan write failed: {e:#}"));
+            }
+            match applied {
+                plan::Applied::Updated { message } => Outcome::ok(message),
+                _ => Outcome::ok(format!("acceptance {index} verified")),
+            }
+        }
+        Err(r) => {
+            let _ = plan::store(&ctx.root, &active);
+            rejection(r)
+        }
+    }
+}
+
+/// A verify step whose evidence no acceptance item has spent yet, with that
+/// evidence. `None` when every verify step's records are already accounted
+/// for — which is the case this whole function exists to catch.
+fn unspent_verify_evidence(
+    active: &plan::Plan,
+    index: usize,
+) -> Option<(String, Vec<plan::EvidenceRef>)> {
+    let spent: Vec<&plan::EvidenceRef> = active
+        .acceptance
+        .iter()
+        .enumerate()
+        .filter(|(other, item)| *other != index && item.status == plan::AcceptanceStatus::Verified)
+        .flat_map(|(_, item)| item.evidence.iter())
+        .collect();
+    active
+        .steps
+        .iter()
+        .filter(|step| step.kind == plan::StepKind::Verify)
+        .find_map(|step| {
+            let fresh: Vec<plan::EvidenceRef> = step
+                .evidence
+                .iter()
+                .filter(|reference| {
+                    !spent
+                        .iter()
+                        .any(|used| used.session == reference.session && used.seq == reference.seq)
+                })
+                .cloned()
+                .collect();
+            (!fresh.is_empty()).then(|| (step.id.clone(), fresh))
+        })
+}
+
+/// The gate on `plan finish`: the step must have host-recorded evidence of the
+/// right kind since it started.
+///
+/// `verify` is not handled here — `verify_acceptance` settles an acceptance
+/// item on its own terms, per item, and this function used to short-circuit
+/// that with a plan-wide "is there any verify evidence anywhere" check.
+fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
+    let plan::Op::Finish { id, .. } = op else {
+        return Ok(());
+    };
+    let status = plan::open_active(root)
+        .ok()
+        .flatten()
+        .and_then(|p| p.step(id).map(|s| s.status));
+    if status != Some(plan::StepStatus::InProgress) {
+        // `finish` on a step that is not in progress is rejected by the
+        // validator with a clearer reason than a missing-evidence error.
+        return Ok(());
     }
     let active = plan::open_active(root)
         .map_err(|e| format!("evidence_unreadable: {e:#}"))?
         .ok_or_else(|| "invalid_evidence: no active plan".to_string())?;
-    let required_kind = match op {
-        plan::Op::Finish { id, .. } => active
-            .step(id)
-            .map(|step| step.kind)
-            .ok_or_else(|| format!("unknown_step: no step {id}"))?,
-        plan::Op::Verify { .. } => plan::StepKind::Verify,
-        _ => unreachable!(),
-    };
+    let required_kind = active
+        .step(id)
+        .map(|step| step.kind)
+        .ok_or_else(|| format!("unknown_step: no step {id}"))?;
     let evidence = active
         .step(id)
         .map(|step| step.evidence.clone())
@@ -843,8 +963,17 @@ fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
     validate_attached_records(root, &active.id, id, required_kind, &evidence)
 }
 
-fn validate_complete(root: &Path) -> Result<(), String> {
-    let active = plan::open_active(root)
+/// The gate on `plan complete`.
+///
+/// Every done step is re-checked against the journal, and every acceptance
+/// item is settled again on its own terms: a `cmd:` item is **re-run** rather
+/// than trusted from an earlier verify (§2.1.2 has the host run it "on `plan
+/// verify` and on `complete`"; §2.4.11 makes the same point for the full test
+/// suite), and a `Text` item is re-checked against the records it was verified
+/// with. A waived item is the user's call and is left alone.
+fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
+    let root = ctx.root.clone();
+    let active = plan::open_active(&root)
         .map_err(|e| format!("evidence_unreadable: {e:#}"))?
         .ok_or_else(|| "invalid_evidence: no active plan".to_string())?;
     for step in active
@@ -852,18 +981,44 @@ fn validate_complete(root: &Path) -> Result<(), String> {
         .iter()
         .filter(|step| step.status == plan::StepStatus::Done)
     {
-        validate_attached_records(root, &active.id, &step.id, step.kind, &step.evidence)?;
+        validate_attached_records(&root, &active.id, &step.id, step.kind, &step.evidence)?;
     }
     for (index, acceptance) in active.acceptance.iter().enumerate() {
-        if acceptance.status == plan::AcceptanceStatus::Verified {
-            validate_attached_records(
-                root,
-                &active.id,
-                "acceptance",
-                plan::StepKind::Verify,
-                &acceptance.evidence,
-            )
-            .map_err(|message| format!("acceptance {index}: {message}"))?;
+        if acceptance.status != plan::AcceptanceStatus::Verified {
+            continue;
+        }
+        match acceptance.kind() {
+            plan::AcceptanceKind::Command(command) => {
+                if let safety::Verdict::NeedsApproval(reason) = safety::classify(command) {
+                    return Err(format!(
+                        "unsafe_acceptance: acceptance {index} would run a {reason} command                          at completion: {command}"
+                    ));
+                }
+                let run = exec::bash(ctx, command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
+                if !run.ok {
+                    return Err(format!(
+                        "acceptance_failed: acceptance {index} no longer passes: {command} — {}",
+                        run.output.lines().take(6).collect::<Vec<_>>().join(" / ")
+                    ));
+                }
+            }
+            plan::AcceptanceKind::Manual(text) => {
+                // Verified rather than waived: it should not have been possible
+                // to get here, so say so instead of letting it slide.
+                return Err(format!(
+                    "invalid_evidence: acceptance {index} is manual ({text}) and can only be                      waived by the user"
+                ));
+            }
+            plan::AcceptanceKind::Text(_) => {
+                validate_attached_records(
+                    &root,
+                    &active.id,
+                    "acceptance",
+                    plan::StepKind::Verify,
+                    &acceptance.evidence,
+                )
+                .map_err(|message| format!("acceptance {index}: {message}"))?;
+            }
         }
     }
     Ok(())
@@ -1467,15 +1622,82 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// A `cmd:` acceptance item is settled by the host running the command,
+    /// not by pointing at a journal record. This test used to pass a fabricated
+    /// `bash` result as evidence for `cmd: cargo test` and see the item
+    /// verified — the suite never ran.
     #[test]
-    fn verify_requires_successful_exec_evidence() {
+    fn cmd_acceptance_is_verified_by_running_the_command() {
         let (mut ctx, dir) = proj();
         let created = plan_op(
             &mut ctx,
             &json!({
                 "op": "create",
-                "goal": "verify evidence",
-                "acceptance": ["cmd: cargo test"],
+                "goal": "verify acceptance",
+                "acceptance": ["cmd: exit 3", "cmd: exit 0"],
+                "steps": [{"title": "verify", "kind": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+
+        let failed = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!failed.ok, "{}", failed.output);
+        assert!(
+            failed.output.contains("acceptance_failed"),
+            "a failing command must not verify: {}",
+            failed.output
+        );
+        assert_eq!(
+            plan::open_active(&dir).unwrap().unwrap().acceptance[0].status,
+            plan::AcceptanceStatus::Pending
+        );
+
+        let passed = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 1}));
+        assert!(passed.ok, "{}", passed.output);
+        assert_eq!(
+            plan::open_active(&dir).unwrap().unwrap().acceptance[1].status,
+            plan::AcceptanceStatus::Verified
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The acceptance text comes from the model on `plan create`, so it is
+    /// model-controlled input the host is about to execute. It goes through the
+    /// same classifier as `bash`, and anything that would need approval is
+    /// refused rather than run without asking.
+    #[test]
+    fn cmd_acceptance_refuses_a_command_that_would_need_approval() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "sneak a command in",
+                "acceptance": ["cmd: rm -rf /"],
+                "steps": [{"title": "verify", "kind": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+
+        let out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!out.ok, "{}", out.output);
+        assert!(out.output.contains("unsafe_acceptance"), "{}", out.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// One host record cannot settle two acceptance items. Before this, verify
+    /// took `steps.iter().find(kind == Verify && !evidence.is_empty())` — the
+    /// first verify step with anything attached — so a single successful
+    /// command let every item pass in turn on the same record.
+    #[test]
+    fn text_acceptance_cannot_reuse_another_items_evidence() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "two criteria, one check",
+                "acceptance": ["the suite is green", "the linter is clean"],
                 "steps": [{"title": "verify", "kind": "verify"}]
             }),
         );
@@ -1483,28 +1705,121 @@ mod tests {
         let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
         let mut journal = crate::agent::journal::Journal::open(&dir, "verify-rules").unwrap();
         journal.set_attribution(Some("1".into()), Some(plan_id), "main");
-        let failed = journal
+        journal
+            .append_evidence("tool_result", json!({"tool": "bash", "ok": true}))
+            .unwrap();
+
+        let first = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(first.ok, "{}", first.output);
+
+        let second = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 1}));
+        assert!(!second.ok, "the same record must not verify both");
+        assert!(
+            second.output.contains("no_evidence") || second.output.contains("evidence_spent"),
+            "{}",
+            second.output
+        );
+        assert_eq!(
+            plan::open_active(&dir).unwrap().unwrap().acceptance[1].status,
+            plan::AcceptanceStatus::Pending
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A failed exec is not evidence of anything passing.
+    #[test]
+    fn text_acceptance_rejects_a_failed_exec_record() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "verify evidence",
+                "acceptance": ["the suite is green"],
+                "steps": [{"title": "verify", "kind": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        let mut journal = crate::agent::journal::Journal::open(&dir, "verify-rules").unwrap();
+        journal.set_attribution(Some("1".into()), Some(plan_id), "main");
+        journal
             .append_evidence("tool_result", json!({"tool": "bash", "ok": false}))
             .unwrap();
-        let rejected = plan_op(
-            &mut ctx,
-            &json!({"op": "verify", "acceptance": 0, "evidence": [failed]}),
-        );
+
+        let rejected = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
         assert!(!rejected.ok);
         assert!(
             rejected.output.contains("wrong_evidence"),
             "{}",
             rejected.output
         );
+        fs::remove_dir_all(&dir).ok();
+    }
 
-        let passed = journal
-            .append_evidence("tool_result", json!({"tool": "bash", "ok": true}))
-            .unwrap();
-        let accepted = plan_op(
+    /// `manual:` items are the user's call. Verify has to refuse them rather
+    /// than quietly accept whatever evidence is lying around.
+    #[test]
+    fn manual_acceptance_is_refused_by_verify() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
             &mut ctx,
-            &json!({"op": "verify", "acceptance": 0, "evidence": [passed]}),
+            &json!({
+                "op": "create",
+                "goal": "manual check",
+                "acceptance": ["manual: the panel looks right"],
+                "steps": [{"title": "verify", "kind": "verify"}]
+            }),
         );
-        assert!(accepted.ok, "{}", accepted.output);
+        assert!(created.ok, "{}", created.output);
+
+        let out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!out.ok, "{}", out.output);
+        assert!(out.output.contains("manual_acceptance"), "{}", out.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `complete` runs `cmd:` items again instead of trusting the verify that
+    /// happened earlier: a criterion that stopped passing must block
+    /// completion (§2.1.2).
+    #[test]
+    fn complete_reruns_cmd_acceptance_and_refuses_when_it_now_fails() {
+        let (mut ctx, dir) = proj();
+        let flag = dir.join("gate.txt");
+        fs::write(&flag, "ok").unwrap();
+        let command = format!("test -f {}", flag.display());
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "completion re-checks",
+                "acceptance": [format!("cmd: {command}")],
+                "steps": [{"title": "verify", "kind": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+
+        let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(verified.ok, "{}", verified.output);
+
+        // the world changed after the verify
+        fs::remove_file(&flag).unwrap();
+        assert!(
+            plan_op(
+                &mut ctx,
+                &json!({"op": "cancel", "id": "1", "reason": "done here"})
+            )
+            .ok
+        );
+
+        let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
+        assert!(!completed.ok, "{}", completed.output);
+        assert!(
+            completed.output.contains("acceptance_failed"),
+            "{}",
+            completed.output
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
