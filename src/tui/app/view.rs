@@ -127,18 +127,19 @@ fn user_box(text: &str, w: u16, hl: &Highlighter) -> Vec<Line<'static>> {
     let surface = Style::new().fg(Theme::FG()).bg(Theme::USER_SURFACE());
     let mut out = Vec::with_capacity(inner.len() + 2);
     // One blank surface line above and below keeps the message from adhering to
-    // the strip's edge. The prefix is intentionally repeated on continuation
-    // lines rather than relying solely on a possibly-invisible background.
+    // the strip's edge. `›` marks only the first line; continuation lines
+    // align under it with blank space of the same width.
     out.push(Line::from(Span::styled(
         " ".repeat(usize::from(w)),
         surface,
     )));
-    for line in inner {
+    for (index, line) in inner.into_iter().enumerate() {
         let text = line_text(&line);
         let used = UnicodeWidthStr::width(text.as_str());
         let pad = " ".repeat(usize::from(inner_w).saturating_sub(used));
+        let prefix = if index == 0 { "› " } else { "  " };
         out.push(Line::from(vec![
-            Span::styled("› ".to_string(), surface),
+            Span::styled(prefix.to_string(), surface),
             Span::styled(text, surface),
             Span::styled(pad, surface),
         ]));

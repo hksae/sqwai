@@ -1272,7 +1272,11 @@ mod tests {
             .collect();
         assert_eq!(text.len(), 4, "one blank row above and below");
         assert!(text[0].trim().is_empty() && text[3].trim().is_empty());
-        assert!(text[1].starts_with("› ") && text[2].starts_with("› "));
+        assert!(text[1].starts_with("› "), "first line carries the marker");
+        assert!(
+            text[2].starts_with("  ") && !text[2].starts_with("›"),
+            "continuation aligns under the marker: {text:?}"
+        );
         assert!(
             text.iter()
                 .all(|line| !line.contains(['╭', '╮', '╰', '╯', '│'])),
