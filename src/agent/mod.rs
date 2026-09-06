@@ -1,3 +1,4 @@
+pub mod blobs;
 pub mod checkpoints;
 pub mod context;
 pub mod diary;

@@ -230,6 +230,13 @@ pub struct FileDiff {
     pub hash_after: String,
     pub mode: String,
     pub checkpoint: Option<String>,
+    /// blake3 name of the pre-image in the layer-1 blob store (§2.5), when it
+    /// was stored. `None` for a file that did not exist yet, and for a store
+    /// that could not be written — the edit still happens, uninsured, which
+    /// is the same trade the git snapshot already made.
+    pub blob_before: Option<String>,
+    /// blake3 name of the content that was written
+    pub blob_after: Option<String>,
 }
 
 pub struct Outcome {

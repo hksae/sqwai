@@ -50,13 +50,14 @@ model-written decisions, rejected approaches, and corrections. A curated
 Another model, another day, another session picks up exactly where things
 stopped.
 
-**Undo.** A snapshot of the worktree before every mutating action, taken as a
-dangling commit that leaves your branches, `HEAD` and staging area untouched.
-`/undo [n]` restores the files and reopens the plan steps whose evidence was
-reverted. Requires the project to be a git repository. The two-layer scheme
-from DESIGN.md §2.5 — a content-addressed per-file blob store plus a separate
-shadow repository, so undo also works outside git — is **[in development]**,
-and so is `/undo step N`.
+**Undo.** Every file the agent is about to change is kept first, byte for
+byte, in a content-addressed store under `.sqwai/checkpoints/blobs/` — so
+`/undo [n]` puts back exactly what the agent wrote and **does not need git at
+all**. A file you edited yourself in the meantime is reported and left alone
+rather than overwritten. Undoing a `bash` command still needs a worktree
+snapshot, which today is a dangling commit in your repository; the separate
+shadow repository from DESIGN.md §2.5 and `/undo step N` are
+**[in development]**.
 
 **Graph. [in development]** An index of files, symbols, documents and memory,
 with `resolve_ref` as a fact rather than a suggestion: plan steps and edits

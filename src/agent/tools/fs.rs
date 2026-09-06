@@ -76,6 +76,19 @@ fn file_diff(
     diff: &str,
 ) -> FileDiff {
     let (added, removed) = diff_counts(diff);
+    // Layer 1 (§2.5): keep the bytes this edit is about to replace, so a
+    // single step can be reverted without a tree snapshot and without git.
+    // A store that cannot be written must not block the edit — the same
+    // decision the git snapshot already makes a few lines up.
+    let blobs = crate::agent::blobs::dir(root);
+    let blob_before = before.and_then(|bytes| crate::agent::blobs::put(root, bytes).ok());
+    let blob_after = crate::agent::blobs::put(root, after).ok();
+    if blob_before.is_none() && before.is_some() {
+        crate::providers::log_http(&format!(
+            "blob store unavailable at {}: this edit is not revertible on its own",
+            blobs.display()
+        ));
+    }
     FileDiff {
         path: rel_label(root, path),
         added,
@@ -84,6 +97,8 @@ fn file_diff(
         hash_after: content_hash(after),
         mode: mode.to_string(),
         checkpoint,
+        blob_before,
+        blob_after,
     }
 }
 

@@ -90,6 +90,7 @@ mod tests {
             compaction: Default::default(),
             plan: Default::default(),
             secrets: Default::default(),
+            undo: Default::default(),
         };
         let session = Session::new("m".into(), 1000);
         App::new(cfg, session, false, false).unwrap()
@@ -187,6 +188,7 @@ mod tests {
             compaction: Default::default(),
             plan: Default::default(),
             secrets: Default::default(),
+            undo: Default::default(),
         };
         let mut app = App::new(cfg, Session::new("m".into(), 1_000_000), false, false).unwrap();
         app.input = App::fresh_input("say hi in 3 words".into());

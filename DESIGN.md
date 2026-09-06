@@ -408,7 +408,7 @@ user_msg	hash, chars, goal_like: bool	user message accepted
 mode_change	from, to, by: user	Tab / /mode
 tool_call	tool, args_digest (path, cmd, pattern — never file contents), call_id	before dispatch
 tool_result	tool, call_id, ok, exit, duration_ms, summary (≤ 200 chars host-derived: test counts, error class), spill_path, trust: high|low	after dispatch
-file_diff	path, added, removed, hash_before, hash_after, mode, checkpoint	after any mutating file tool, and after bash if the status/tree check reports changes (one record per changed file; hashes reference checkpoint blobs)
+file_diff	path, added, removed, hash_before, hash_after, blob_before, blob_after, mode, checkpoint	after any mutating file tool, and after bash if the status/tree check reports changes (one record per changed file; hashes reference checkpoint blobs)
 checkpoint	layer, id, reason (`pre_mutation`|`pre_bash`|`post_bash`), blobs, shadow_commit?	after a layer-1 snapshot or shadow-Git snapshot
 undo	to_checkpoint|step, files, reopened_steps	/undo or /undo step N
 diagnostics	path, errors, warnings, server, digest	LSP publishDiagnostics after a change
