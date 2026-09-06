@@ -268,6 +268,62 @@ impl Shadow {
     }
 }
 
+impl Shadow {
+    /// Session chains present in the shadow repository.
+    pub fn sessions(&self) -> Result<Vec<String>> {
+        let out = self.git(&["for-each-ref", "--format=%(refname)", "refs/sessions/"])?;
+        Ok(out
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("refs/sessions/"))
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Drop one session's chain. The commits become unreachable, which is what
+    /// makes them collectable — nothing is freed until [`Shadow::gc`] runs.
+    pub fn drop_session(&self, session_id: &str) -> Result<()> {
+        self.git(&["update-ref", "-d", &session_ref(session_id)])
+            .map(|_| ())
+    }
+
+    /// How many commits one session's chain holds.
+    pub fn chain_len(&self, session_id: &str) -> Result<usize> {
+        match self.git(&["rev-list", "--count", &session_ref(session_id)]) {
+            Ok(out) => Ok(out.trim().parse().unwrap_or(0)),
+            // no such ref: an empty chain, not a failure
+            Err(_) => Ok(0),
+        }
+    }
+
+    /// Collect what no session ref reaches any more.
+    ///
+    /// `--prune=now` because the default two-week grace would keep every
+    /// dropped session alive far longer than any of our retention windows.
+    pub fn gc(&self) -> Result<()> {
+        self.git(&["gc", "--prune=now", "--quiet"]).map(|_| ())
+    }
+
+    /// Size of the shadow repository on disk, for `[undo].shadow_max_bytes`.
+    pub fn size_bytes(&self) -> u64 {
+        dir_size(&self.git_dir)
+    }
+}
+
+fn dir_size(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.metadata() {
+            Ok(meta) if meta.is_dir() => dir_size(&entry.path()),
+            Ok(meta) => meta.len(),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
 fn session_ref(session_id: &str) -> String {
     format!("refs/sessions/{session_id}")
 }
