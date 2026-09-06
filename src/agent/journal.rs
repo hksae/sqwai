@@ -308,6 +308,18 @@ impl Journal {
             bail!("journal fields must be a JSON object");
         }
         let mut fields = fields.as_object().cloned().unwrap_or_default();
+        // §2.2.2: "no secrets (the same screening as §2.3.6 applies to
+        // `summary` and `text`)". Those two carry command output and model
+        // prose; everything else is a path, a hash or a count the host built
+        // itself, and screening those would only mangle facts.
+        for name in ["summary", "text"] {
+            if let Some(Value::String(raw)) = fields.get(name) {
+                let screened = crate::agent::secrets::screen(raw);
+                if screened.redacted {
+                    fields.insert(name.to_string(), Value::String(screened.text));
+                }
+            }
+        }
         fields.remove("seq");
         fields.remove("ts");
         fields.remove("step");
@@ -475,6 +487,51 @@ mod tests {
         assert_eq!(records[0].seq, 1);
         assert_eq!(records[1].kind, "tool_result");
         assert_eq!(records[0].step.as_deref(), Some("2"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// §2.2.2 forbids secrets in the journal. The filter existed and was wired
+    /// to the diary and to MEMORY.md, but not here — so a command that echoed
+    /// a token wrote it verbatim into `.sqwai/journal/*.jsonl`, and from there
+    /// into the diary host block and the compaction anchor, both of which are
+    /// built from these records.
+    #[test]
+    fn secrets_are_screened_out_of_summaries_and_notes() {
+        let root = root();
+        let mut journal = Journal::open(&root, "session").unwrap();
+        journal
+            .append(
+                "tool_result",
+                json!({
+                    "tool": "bash",
+                    "ok": true,
+                    "summary": "export ANTHROPIC_API_KEY=sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345",
+                }),
+            )
+            .unwrap();
+        journal
+            .append(
+                "note",
+                json!({"by": "model", "note": "lesson", "text": "the token is ghp_abcdefghijklmnopqrstuvwxyz0123456789"}),
+            )
+            .unwrap();
+        // a path is not a secret and has to survive, or the record stops being
+        // able to say what happened
+        journal
+            .append(
+                "tool_result",
+                json!({"tool": "write", "ok": true, "summary": "wrote .sqwai/plans/01M1V0GK22W0PFVYBM0501N1FJ.json (+31/-31)"}),
+            )
+            .unwrap();
+
+        let raw = fs::read_to_string(root.join(".sqwai/journal/session.jsonl")).unwrap();
+        assert!(!raw.contains("sk-ant-api03"), "the key reached the journal");
+        assert!(!raw.contains("ghp_abcdef"), "the token reached the journal");
+        assert!(raw.contains("[redacted]"));
+        assert!(
+            raw.contains("01M1V0GK22W0PFVYBM0501N1FJ.json"),
+            "the plan path must survive screening: {raw}"
+        );
         fs::remove_dir_all(root).ok();
     }
 

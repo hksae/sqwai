@@ -19,68 +19,7 @@ const DEFAULT_DIARY_TIMEOUT_SECS: u64 = 30;
 
 pub const WRITER_SYSTEM: &str = "You write a concise coding-agent diary entry. Return only Markdown using these headings when needed: ### Done, ### Decisions, ### Rejected, ### Open, ### Corrections. Copy the host block verbatim and do not invent or restate unverified numbers. Never include secrets.";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Screened {
-    pub text: String,
-    pub redacted: bool,
-}
-
-/// Screen text before it reaches durable diary or summary storage.
-pub fn screen(text: &str) -> Screened {
-    let patterns = [
-        Regex::new(r"(?i)\bAKIA[0-9A-Z]{16}\b").unwrap(),
-        Regex::new(r"\bsk-[A-Za-z0-9_-]{16,}\b").unwrap(),
-        Regex::new(r"\bghp_[A-Za-z0-9]{20,}\b").unwrap(),
-        Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----").unwrap(),
-        Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}").unwrap(),
-        Regex::new(r"(?i)https?://[^\s/@:]+:[^\s/@]+@[^\s]+\b").unwrap(),
-        Regex::new(r"(?i)\b[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)[A-Z0-9_]*\s*=\s*[^\s]+\b").unwrap(),
-    ];
-    let mut output = text.to_string();
-    let mut redacted = false;
-    for pattern in patterns {
-        let replaced = pattern.replace_all(&output, "[redacted]");
-        if replaced != output {
-            redacted = true;
-            output = replaced.into_owned();
-        }
-    }
-    let token_re = Regex::new(r##"[^\s`\"']{20,}"##).unwrap();
-    let mut replacements = Vec::new();
-    for found in token_re.find_iter(&output) {
-        let token = found.as_str();
-        if shannon_entropy(token) > 4.0 {
-            replacements.push((found.start(), found.end()));
-        }
-    }
-    for (start, end) in replacements.into_iter().rev() {
-        output.replace_range(start..end, "[redacted]");
-        redacted = true;
-    }
-    Screened {
-        text: output,
-        redacted,
-    }
-}
-
-fn shannon_entropy(value: &str) -> f64 {
-    if value.is_empty() {
-        return 0.0;
-    }
-    let mut counts = [0usize; 256];
-    for byte in value.bytes() {
-        counts[byte as usize] += 1;
-    }
-    let len = value.len() as f64;
-    counts
-        .into_iter()
-        .filter(|count| *count > 0)
-        .map(|count| {
-            let p = count as f64 / len;
-            -p * p.log2()
-        })
-        .sum()
-}
+pub use crate::agent::secrets::screen;
 
 pub fn memory_dir(root: &Path) -> PathBuf {
     root.join(".sqwai").join("memory")
@@ -105,6 +44,74 @@ pub fn read_day(root: &Path, date: &str) -> Result<String, String> {
 }
 
 /// Build deterministic host facts from a session journal.
+/// How much of a tool's recorded summary the host block carries per command.
+const HOST_SUMMARY_CHARS: usize = 80;
+
+/// Collapse whitespace and clip, so one command stays one line.
+fn one_line(text: &str, limit: usize) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match collapsed.char_indices().nth(limit) {
+        Some((cut, _)) => format!("{}…", &collapsed[..cut]),
+        None => collapsed,
+    }
+}
+
+/// Result claims the host block is the only source for (§2.3.2).
+///
+/// Deliberately narrow: only numbers that describe an outcome the host
+/// recorded. Step counts and "added two tests" are the model's own reading of
+/// the plan and stay untouched.
+fn claim_patterns() -> Vec<Regex> {
+    [
+        r"(?i)\d+\s+passed",
+        r"(?i)\d+\s+failed",
+        r"(?i)\d+\s+ignored",
+        r"(?i)\d+\s+errors?",
+        r"(?i)\d+\s+warnings?",
+        r"(?i)exit\s+code\s+\d+",
+        r"(?i)exit\s+\d+",
+    ]
+    .iter()
+    .map(|pattern| Regex::new(pattern).unwrap())
+    .collect()
+}
+
+/// Remove lines that state a result the host block does not contain.
+///
+/// §2.3.2 asks for this in code, not in the prompt: "a post-check rejects an
+/// entry that contains a number pattern like `\d+ passed` not present in the
+/// host block". The writer prompt says the same thing in words, and §1.1 is
+/// explicit that whatever can be decided by code is decided by code — the
+/// model is never asked to verify its own claims.
+fn strip_unverified_claims(prose: &str, host: &str) -> (String, bool) {
+    let haystack = one_line(host, usize::MAX).to_ascii_lowercase();
+    let patterns = claim_patterns();
+    let mut removed = false;
+    let kept: Vec<&str> = prose
+        .lines()
+        .filter(|line| {
+            let unverified = patterns.iter().any(|pattern| {
+                pattern.find_iter(line).any(|claim| {
+                    let normalized = one_line(claim.as_str(), usize::MAX).to_ascii_lowercase();
+                    !haystack.contains(&normalized)
+                })
+            });
+            if unverified {
+                removed = true;
+            }
+            !unverified
+        })
+        .collect();
+    let mut out = kept.join("\n");
+    if removed {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("[host: removed unverified claim]");
+    }
+    (out, removed)
+}
+
 pub fn host_block(root: &Path, session_id: &str, trigger: &str) -> Result<String> {
     let path = root
         .join(".sqwai")
@@ -194,7 +201,20 @@ fn render_host_block(records: &[Record], trigger: &str) -> Result<String> {
                         .get("ok")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    commands.push(format!("{tool} {}", if ok { "✓" } else { "✗" }));
+                    // Carry the host-derived summary, not just the tick. The
+                    // block is the only source of numbers the entry may use
+                    // (§2.3.2), and without this it had none — so the
+                    // post-check below would delete every true test count
+                    // along with the invented ones.
+                    let detail = record
+                        .fields
+                        .get("summary")
+                        .and_then(Value::as_str)
+                        .map(|summary| one_line(summary, HOST_SUMMARY_CHARS))
+                        .filter(|summary| !summary.is_empty())
+                        .map(|summary| format!(" ({summary})"))
+                        .unwrap_or_default();
+                    commands.push(format!("{tool} {}{detail}", if ok { "✓" } else { "✗" }));
                 }
             }
             "checkpoint" => {
@@ -353,10 +373,12 @@ fn append_host_entry(
         "## {} · session {session_id} · trigger {trigger}\n",
         Local::now().format("%H:%M")
     );
-    let body = prose.map(|text| screen(text).text).unwrap_or_else(|| {
-        "\nmode: host_only\n\n### Done\n- Host-only entry; no model summary was available.\n"
-            .to_string()
-    });
+    let body = prose
+        .map(|text| screen(&strip_unverified_claims(text, host).0).text)
+        .unwrap_or_else(|| {
+            "\nmode: host_only\n\n### Done\n- Host-only entry; no model summary was available.\n"
+                .to_string()
+        });
     let entry = format!("\n{heading}{host}\n{body}\n");
     let mut file = OpenOptions::new()
         .create(true)
@@ -394,18 +416,85 @@ mod tests {
     }
 
     #[test]
-    fn redacts_known_secret_shapes_and_entropy_tokens() {
-        let value =
-            screen("AKIA1234567890ABCDEF Bearer abcdefghijklmnop qwertyuiopasdfghjklzxcvbnm");
-        assert!(value.redacted);
-        assert!(!value.text.contains("AKIA"));
-        assert!(!value.text.contains("Bearer"));
-    }
-
-    #[test]
     fn memory_read_rejects_path_traversal_dates() {
         let error = read_day(&root(), "../2026-09-04").unwrap_err();
         assert!(error.contains("YYYY-MM-DD"));
+    }
+
+    /// §2.3.2 asks for this in code, and it was only in the prompt: the writer
+    /// was told "do not invent or restate unverified numbers" and nothing
+    /// checked. §1.1 is explicit that the model is never asked to verify its
+    /// own claims.
+    #[test]
+    fn a_result_the_host_block_does_not_contain_is_removed() {
+        let host = "<!-- host -->\nfiles: src/a.rs (+3/-1)\n\
+                    commands: bash ✓ ((exit code 0) test result: ok. 253 passed; 0 failed)\n";
+        let prose = "### Done\n\
+                     - Wired the validator; the suite is green with 253 passed.\n\
+                     - Also fixed the flake, 61 passed after the change.\n\
+                     - Steps 1-3 done, step 4 blocked on a keybinding.\n";
+
+        let (kept, removed) = strip_unverified_claims(prose, host);
+        assert!(removed);
+        assert!(
+            kept.contains("253 passed"),
+            "a number the host block does contain must stay: {kept}"
+        );
+        assert!(
+            !kept.contains("61 passed"),
+            "a number it does not contain must go: {kept}"
+        );
+        assert!(
+            kept.contains("Steps 1-3 done"),
+            "plan facts are not result claims and must survive: {kept}"
+        );
+        assert!(kept.contains("[host: removed unverified claim]"));
+    }
+
+    /// Nothing to remove means nothing is marked: the marker has to mean
+    /// something when it shows up.
+    #[test]
+    fn an_entry_within_the_host_block_is_left_alone() {
+        let host = "commands: bash ✓ ((exit code 0) 253 passed)\n";
+        let prose = "### Done\n- 253 passed after the change.\n";
+        let (kept, removed) = strip_unverified_claims(prose, host);
+        assert!(!removed);
+        assert_eq!(kept, prose.trim_end());
+        assert!(!kept.contains("[host:"));
+    }
+
+    /// The block is the source of those numbers, so it has to carry them. It
+    /// used to record only the tool name and a tick, which would have made the
+    /// post-check delete every true test count in the entry.
+    #[test]
+    fn host_block_carries_the_recorded_summary() {
+        let records = vec![Record {
+            seq: 1,
+            ts: String::new(),
+            step: None,
+            plan: None,
+            agent: "main".into(),
+            kind: "tool_result".into(),
+            fields: serde_json::json!({
+                "tool": "bash",
+                "ok": true,
+                "summary": "(exit code 0)\ntest result: ok. 253 passed; 0 failed; 1 ignored",
+            })
+            .as_object()
+            .cloned()
+            .unwrap(),
+        }];
+        let block = render_host_block(&records, "compaction").unwrap();
+        assert!(block.contains("bash ✓"), "{block}");
+        assert!(block.contains("253 passed"), "{block}");
+        assert_eq!(
+            block
+                .lines()
+                .filter(|line| line.contains("commands:"))
+                .count(),
+            1,
+            "{block}"
+        );
     }
 
     #[tokio::test]
