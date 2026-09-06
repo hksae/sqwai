@@ -5,7 +5,7 @@ use futures::{StreamExt, stream::BoxStream};
 use serde_json::{Value, json};
 
 use super::{ChatRequest, Provider, Role, StreamEvent, StreamResult};
-use crate::config::{ResolvedProvider, ThinkingLevel};
+use crate::config::{EffortLevel, ResolvedProvider};
 
 #[derive(Clone)]
 pub struct ResponsesProvider {
@@ -14,13 +14,13 @@ pub struct ResponsesProvider {
     api_key: Option<String>,
 }
 
-/// Map thinking level to the `reasoning.effort` parameter.
-pub fn effort(level: ThinkingLevel) -> Option<&'static str> {
+/// Map effort level to the `reasoning.effort` parameter.
+pub fn effort(level: EffortLevel) -> Option<&'static str> {
     match level {
-        ThinkingLevel::Off => None,
-        ThinkingLevel::Low => Some("low"),
-        ThinkingLevel::Medium => Some("medium"),
-        ThinkingLevel::High | ThinkingLevel::Max => Some("high"),
+        EffortLevel::Off => None,
+        EffortLevel::Low => Some("low"),
+        EffortLevel::Medium => Some("medium"),
+        EffortLevel::High | EffortLevel::Max => Some("high"),
     }
 }
 
@@ -58,7 +58,7 @@ pub fn build_body(req: &ChatRequest) -> Value {
         "input": input,
         "stream": true,
     });
-    if let Some(e) = req.thinking.and_then(effort) {
+    if let Some(e) = req.effort.and_then(effort) {
         body["reasoning"] = json!({"effort": e});
     }
     // Only set when the provider documented the field: sanitize() has already
@@ -129,16 +129,31 @@ impl Provider for ResponsesProvider {
             }
 
             let mut es = resp.bytes_stream().eventsource();
+            // the Responses API echoes the response object on every event
+            let mut response_id_sent = false;
             while let Some(ev) = es.next().await {
                 match ev {
                     Ok(ev) => {
                         if ev.data == "[DONE]" { break; }
                         let v: Value = match serde_json::from_str(&ev.data) {
                             Ok(v) => v,
-                            Err(_) => continue,
+                            // eventsource-stream already reassembled the frame, so
+                            // this is a syntactically invalid payload, not a partial
+                            // one. Dropping it silently loses whatever it carried —
+                            // a tool-call delta included.
+                            Err(e) => {
+                                super::log_http(&format!(
+                                    "responses: dropped unparsable SSE payload ({e}): {}",
+                                    ev.data.chars().take(200).collect::<String>()
+                                ));
+                                continue;
+                            }
                         };
                         let response_id = v.pointer("/response/id").and_then(|x| x.as_str());
-                        if let Some(id) = response_id {
+                        if let Some(id) = response_id
+                            && !response_id_sent
+                        {
+                            response_id_sent = true;
                             yield Ok(StreamEvent::ResponseId(id.to_string()));
                         }
                         match ev.event.as_str() {
@@ -199,9 +214,9 @@ mod tests {
 
     #[test]
     fn effort_mapping() {
-        assert_eq!(effort(ThinkingLevel::Off), None);
-        assert_eq!(effort(ThinkingLevel::Low), Some("low"));
-        assert_eq!(effort(ThinkingLevel::Max), Some("high"));
+        assert_eq!(effort(EffortLevel::Off), None);
+        assert_eq!(effort(EffortLevel::Low), Some("low"));
+        assert_eq!(effort(EffortLevel::Max), Some("high"));
     }
 
     #[test]
@@ -210,7 +225,7 @@ mod tests {
             model_id: "gpt-x".into(),
             system: vec![crate::providers::SystemPart::cached("s")],
             messages: vec![Message::new(Role::User, "hi")],
-            thinking: Some(ThinkingLevel::Medium),
+            effort: Some(EffortLevel::Medium),
             max_tokens: None,
             tools: vec![],
             previous_response_id: None,
@@ -230,7 +245,7 @@ mod tests {
             model_id: "gpt-x".into(),
             system: vec![],
             messages: vec![Message::new(Role::User, "hi")],
-            thinking: None,
+            effort: None,
             max_tokens: None,
             tools: vec![],
             previous_response_id: Some("resp_1".into()),

@@ -11,14 +11,14 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tui_textarea::TextArea;
 
 use crate::agent::loop_task::AgentEvent;
-use crate::config::{Config, ModelConfig, ThinkingLevel, WireFormat};
+use crate::config::{Config, EffortLevel, ModelConfig, WireFormat};
 use crate::providers::{self, ChatRequest, Message as PMessage, Role, SharedProvider};
 use crate::session::Session;
 use crate::tui::markdown::{Highlighter, render, wrap_tagged};
 use crate::tui::theme::Theme;
 
 const FORMAT_OPTS: &[&str] = &["openai", "anthropic", "responses"];
-const THINKING_OPTS: &[&str] = &["off", "low", "medium", "high", "max"];
+const EFFORT_OPTS: &[&str] = &["off", "low", "medium", "high", "max"];
 
 pub(super) enum FormField {
     /// free text edited through a real textarea (cursor, word jumps, paste)
@@ -112,27 +112,27 @@ impl App {
             Some(Menu::EditModel { key, .. }) => {
                 match key.as_ref().and_then(|k| self.cfg.models.get(k)) {
                     Some(mc) => {
-                        let th_sel = THINKING_OPTS
+                        let ef_sel = EFFORT_OPTS
                             .iter()
-                            .position(|s| *s == mc.thinking.as_str())
+                            .position(|s| *s == mc.effort.as_str())
                             .unwrap_or(0);
                         self.form_fields = vec![
                             FormField::text("key", key.clone().unwrap_or_default()),
                             FormField::text("request id", mc.id.clone()),
                             FormField::text("context", mc.context.to_string()),
-                            FormField::choice("thinking", THINKING_OPTS, th_sel),
+                            FormField::choice("effort", EFFORT_OPTS, ef_sel),
                         ];
                     }
                     _ => {
-                        let th_sel = THINKING_OPTS
+                        let ef_sel = EFFORT_OPTS
                             .iter()
-                            .position(|s| *s == self.cfg.default_thinking.as_str())
+                            .position(|s| *s == self.cfg.default_effort.as_str())
                             .unwrap_or(0);
                         self.form_fields = vec![
                             FormField::text("key", String::new()),
                             FormField::text("request id", String::new()),
                             FormField::text("context", "128000".into()),
-                            FormField::choice("thinking", THINKING_OPTS, th_sel),
+                            FormField::choice("effort", EFFORT_OPTS, ef_sel),
                         ];
                     }
                 }
@@ -394,7 +394,7 @@ impl App {
                     self.status("context must be a number", StatusKind::Err);
                     return;
                 };
-                let thinking = ThinkingLevel::from_str(&th).unwrap_or(ThinkingLevel::Off);
+                let effort = EffortLevel::from_str(&th).unwrap_or(EffortLevel::Off);
                 if key.is_none() && self.cfg.models.contains_key(&new_key) {
                     self.status(
                         &format!("model '{new_key}' already exists"),
@@ -414,7 +414,7 @@ impl App {
                     provider: provider.clone(),
                     id,
                     context,
-                    thinking,
+                    effort,
                     price_in: None,
                     price_out: None,
                 };

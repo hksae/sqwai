@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tui_textarea::TextArea;
 
 use crate::agent::loop_task::AgentEvent;
-use crate::config::{Config, ModelConfig, ThinkingLevel, WireFormat};
+use crate::config::{Config, EffortLevel, ModelConfig, WireFormat};
 use crate::providers::{self, ChatRequest, Message as PMessage, Role, SharedProvider};
 use crate::session::Session;
 use crate::tui::markdown::{Highlighter, render, wrap_tagged};

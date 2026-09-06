@@ -13,7 +13,7 @@ use tui_textarea::TextArea;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::agent::loop_task::AgentEvent;
-use crate::config::{Config, ModelConfig, ThinkingLevel, WireFormat};
+use crate::config::{Config, EffortLevel, ModelConfig, WireFormat};
 use crate::providers::{self, ChatRequest, Message as PMessage, Role, SharedProvider};
 use crate::session::Session;
 use crate::tui::markdown::{Highlighter, render, wrap_tagged};
@@ -211,13 +211,13 @@ impl App {
             self.open_menu(Menu::Subagents);
             return;
         }
-        if let Some((x0, x1)) = self.th_click
+        if let Some((x0, x1)) = self.ef_click
             && row == self.status_y
             && col >= x0
             && col <= x1
             && self.menu_stack.is_empty()
         {
-            self.open_menu(Menu::Thinking);
+            self.open_menu(Menu::Effort);
             return;
         }
         let pressed = self.press.take();
@@ -1477,7 +1477,7 @@ impl App {
         } else {
             String::new()
         };
-        let th_label = format!(" th:{} ", self.model_cfg.thinking.as_str());
+        let ef_label = format!(" ef:{} ", self.model_cfg.effort.as_str());
         let running = self
             .subagents
             .iter()
@@ -1502,7 +1502,7 @@ impl App {
         } else {
             format!(" agents:{} ", self.subagents.len())
         };
-        self.th_click = None;
+        self.ef_click = None;
         self.agents_click = None;
 
         // right side: [agents] [ctx metrics] [model] [working] [folder] [th:level] [MODE chip]
@@ -1530,7 +1530,7 @@ impl App {
             + cols(&ctx_metrics_label)
             + cols(&working_label)
             + cols(&model_label)
-            + cols(&th_label)
+            + cols(&ef_label)
             + cols(&lsp_label); // mode chip always present
         let dir_budget = (w as usize)
             .saturating_sub(lw as usize + fixed_len)
@@ -1571,21 +1571,21 @@ impl App {
         // model name, in the chip's accent colour — but without the chip's
         // inverted background: a highlight block around a spinning glyph reads
         // as a selection. Click targets below are measured from the same
-        // numbers, so `th_x0` accounts for its width.
-        let th_x0 = model_x0 + cols(&self.model_cfg.id) as u16 + 2 + cols(&working_label) as u16;
+        // numbers, so `ef_x0` accounts for its width.
+        let ef_x0 = model_x0 + cols(&self.model_cfg.id) as u16 + 2 + cols(&working_label) as u16;
         if !working_label.is_empty() {
             spans.push(Span::styled(
                 working_label,
                 Style::new().fg(Theme::ACCENT_SOFT()),
             ));
         }
-        let th_style = if self.model_cfg.thinking == ThinkingLevel::Off {
+        let ef_style = if self.model_cfg.effort == EffortLevel::Off {
             Theme::dim()
         } else {
             Style::new().fg(Theme::ACCENT_SOFT())
         };
-        spans.push(Span::styled(th_label.clone(), th_style));
-        self.th_click = Some((th_x0, th_x0 + cols(&th_label) as u16));
+        spans.push(Span::styled(ef_label.clone(), ef_style));
+        self.ef_click = Some((ef_x0, ef_x0 + cols(&ef_label) as u16));
         if !lsp_label.is_empty() {
             spans.push(Span::styled(lsp_label, Theme::warn()));
         }

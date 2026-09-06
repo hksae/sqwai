@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use sha2::Digest;
 use tokio::sync::mpsc;
 
-use crate::config::ThinkingLevel;
+use crate::config::EffortLevel;
 use crate::providers::{
     ChatRequest, ContextTransport, Message, RequestBreakdown, Role, SharedProvider, StreamEvent,
     SystemPart, ToolCallReq, Usage,
@@ -175,7 +175,7 @@ impl Drop for AgentHandle {
 pub struct AgentInput {
     pub provider: SharedProvider,
     pub model_id: String,
-    pub thinking: Option<ThinkingLevel>,
+    pub effort: Option<EffortLevel>,
     pub max_tokens: Option<u32>,
     /// System block for this request, ordered and split into stable/volatile
     /// parts. It is rebuilt by the caller for every turn and is never stored
@@ -305,7 +305,7 @@ async fn run_subagent(
     blocked_patterns: &[String],
     plan_mode: bool,
     context_limit: u64,
-    thinking: Option<ThinkingLevel>,
+    effort: Option<EffortLevel>,
     max_tokens: Option<u32>,
     system: Vec<SystemPart>,
     mcp: crate::config::McpConfig,
@@ -335,7 +335,7 @@ async fn run_subagent(
                         blocked_patterns,
                         plan_mode,
                         context_limit,
-                        thinking,
+                        effort,
                         max_tokens,
                         system.clone(),
                         mcp.clone(),
@@ -378,7 +378,7 @@ async fn run_subagent(
     let child = spawn_agent(AgentInput {
         provider: provider.clone(),
         model_id: model_id.to_string(),
-        thinking,
+        effort,
         max_tokens,
         system,
         messages: vec![Message::new(Role::User, task)],
@@ -496,7 +496,7 @@ async fn run_agent(
     let AgentInput {
         provider,
         model_id,
-        thinking,
+        effort,
         max_tokens,
         system,
         mut messages,
@@ -779,7 +779,7 @@ async fn run_agent(
             model_id: model_id.clone(),
             system: turn_system.clone(),
             messages: request_messages.clone(),
-            thinking,
+            effort,
             max_tokens,
             tools: tools.clone(),
             previous_response_id: previous_response_id.clone(),
@@ -794,7 +794,7 @@ async fn run_agent(
                 model_id: model_id.clone(),
                 system: turn_system,
                 messages: request_messages,
-                thinking,
+                effort,
                 max_tokens,
                 tools: tools.clone(),
                 previous_response_id: previous_response_id.clone(),
@@ -975,7 +975,7 @@ async fn run_agent(
                             &blocked_patterns,
                             plan_mode,
                             context_limit,
-                            thinking,
+                            effort,
                             max_tokens,
                             system.clone(),
                             mcp.clone(),
@@ -1311,7 +1311,7 @@ async fn compact_history(
                 Role::User,
                 context::summary_input(&older, summary.as_deref()),
             )],
-            thinking: None,
+            effort: None,
             max_tokens: Some(SUMMARY_MAX_TOKENS),
             // a summarization request needs no tools
             tools: Vec::new(),

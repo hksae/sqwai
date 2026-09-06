@@ -68,14 +68,14 @@ mod tests {
                 provider: "p".into(),
                 id: "test-model".into(),
                 context: 1000,
-                thinking: ThinkingLevel::Off,
+                effort: EffortLevel::Off,
                 price_in: None,
                 price_out: None,
             },
         );
         let cfg = Config {
             default_model: "m".into(),
-            default_thinking: crate::config::ThinkingLevel::Off,
+            default_effort: crate::config::EffortLevel::Off,
             providers,
             models,
             safety: Default::default(),
@@ -161,14 +161,14 @@ mod tests {
                 provider: "zen".into(),
                 id: "x-preview-f-free".into(),
                 context: 1_000_000,
-                thinking: ThinkingLevel::Off,
+                effort: EffortLevel::Off,
                 price_in: None,
                 price_out: None,
             },
         );
         let cfg = Config {
             default_model: "m".into(),
-            default_thinking: crate::config::ThinkingLevel::Off,
+            default_effort: crate::config::EffortLevel::Off,
             providers,
             models,
             safety: Default::default(),
@@ -702,7 +702,7 @@ mod tests {
                 provider: "p".into(),
                 id: "test-model-2".into(),
                 context: 2000,
-                thinking: ThinkingLevel::Off,
+                effort: EffortLevel::Off,
                 price_in: None,
                 price_out: None,
             },
@@ -1138,8 +1138,8 @@ mod tests {
 
     #[test]
     fn thinking_levels_include_off_for_status_bar_and_model_settings() {
-        assert!(ThinkingLevel::SELECTABLE.contains(&ThinkingLevel::Off));
-        assert_eq!(ThinkingLevel::SELECTABLE, ThinkingLevel::ALL);
+        assert!(EffortLevel::SELECTABLE.contains(&EffortLevel::Off));
+        assert_eq!(EffortLevel::SELECTABLE, EffortLevel::ALL);
     }
 
     #[test]
@@ -2504,7 +2504,7 @@ mod tests {
                     "{label:?} at width {w}: status bar is {used} columns: {text:?}"
                 );
 
-                for (what, click) in [("model", app.th_click), ("agents", app.agents_click)] {
+                for (what, click) in [("model", app.ef_click), ("agents", app.agents_click)] {
                     if let Some((from, to)) = click {
                         assert!(
                             to <= w && from <= to,

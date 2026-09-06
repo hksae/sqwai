@@ -7,7 +7,7 @@ use std::sync::Arc;
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ResolvedProvider, ThinkingLevel, WireFormat};
+use crate::config::{EffortLevel, ResolvedProvider, WireFormat};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -371,7 +371,7 @@ pub struct ChatRequest {
     pub messages: Vec<Message>,
     /// sent only when the model supports it; mapping per provider (phase 1)
     #[allow(dead_code)]
-    pub thinking: Option<ThinkingLevel>,
+    pub effort: Option<EffortLevel>,
     pub max_tokens: Option<u32>,
     /// tools available to the model this turn (empty = no tool support needed)
     pub tools: Vec<ToolSpec>,

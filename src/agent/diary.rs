@@ -310,7 +310,7 @@ pub async fn write_entry(
             model_id: model_id.to_string(),
             system: vec![SystemPart::volatile(WRITER_SYSTEM)],
             messages: vec![Message::new(crate::providers::Role::User, prompt)],
-            thinking: None,
+            effort: None,
             max_tokens: Some(token_budget.unwrap_or(DEFAULT_DIARY_TOKEN_BUDGET)),
             tools: Vec::new(),
             previous_response_id: None,

@@ -11,7 +11,7 @@ use tui_textarea::TextArea;
 use crate::agent::loop_task::{
     AgentEvent, AgentHandle, AgentOutcome, ApprovalDecision, ControlMsg, spawn_agent,
 };
-use crate::config::{Config, ModelConfig, ThinkingLevel};
+use crate::config::{Config, EffortLevel, ModelConfig};
 use crate::plan;
 use crate::providers::{self, Message as PMessage, Role, SharedProvider};
 use crate::session::{ActivitySummary, Session, TurnNote};
@@ -296,7 +296,7 @@ pub struct App {
     sessions: Vec<Session>,
     /// live filter typed inside the sessions menu
     sessions_filter: String,
-    th_click: Option<(u16, u16)>,
+    ef_click: Option<(u16, u16)>,
     agents_click: Option<(u16, u16)>,
     status_y: u16,
 
@@ -394,7 +394,7 @@ impl App {
                 provider: String::new(),
                 id: model_key.clone(),
                 context: session.context_limit,
-                thinking: ThinkingLevel::Off,
+                effort: EffortLevel::Off,
                 price_in: None,
                 price_out: None,
             });
@@ -478,7 +478,7 @@ impl App {
             form_focus: 0,
             sessions: Vec::new(),
             sessions_filter: String::new(),
-            th_click: None,
+            ef_click: None,
             agents_click: None,
             status_y: 0,
             press: None,
@@ -842,10 +842,10 @@ impl App {
         let input = crate::agent::loop_task::AgentInput {
             provider: self.provider.clone(),
             model_id: self.model_cfg.id.clone(),
-            thinking: if self.model_cfg.thinking == ThinkingLevel::Off {
+            effort: if self.model_cfg.effort == EffortLevel::Off {
                 None
             } else {
-                Some(self.model_cfg.thinking)
+                Some(self.model_cfg.effort)
             },
             max_tokens: None,
             system,
@@ -921,7 +921,7 @@ impl App {
         let input = crate::agent::loop_task::AgentInput {
             provider: self.provider.clone(),
             model_id: self.model_cfg.id.clone(),
-            thinking: None,
+            effort: None,
             max_tokens: None,
             // compaction needs no system block and no tools
             system: Vec::new(),

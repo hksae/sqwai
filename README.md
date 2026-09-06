@@ -130,7 +130,7 @@ api_key_env = "ANTHROPIC_API_KEY"           # optional: <PROVIDER>_API_KEY by de
 provider = "anthropic"
 id = "claude-sonnet-5"
 context = 1000000
-thinking = "high"                           # off | low | medium | high | max
+effort = "high"                             # off | low | medium | high | max
 ```
 
 Local models: point `base_url` at the server, set `format = "openai"` and leave
