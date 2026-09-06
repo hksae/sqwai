@@ -194,10 +194,23 @@ Counters only grow, so the largest value seen in a turn wins — a trailing stub
 of zeros cannot erase a real count.
 
 `reasoning_tokens=not reported` and `reasoning_tokens=0` mean different things:
-the first is a provider that says nothing about reasoning, the second is
-evidence that the level was ignored, and only the second is acted on.
+the first is a provider that says nothing about reasoning, the second is a
+measurement. Even a zero is only reported after several turns in a row, and it
+is worded as what was measured — API relays that translate between protocols
+have been seen pinning both `cached` and `reasoning` at zero while the model
+was demonstrably working.
 
 Successful request and response bodies are not logged.
+
+### Relays and API proxies
+
+A relay that accepts one protocol and forwards another can drop everything that
+is not the answer itself: `reasoning_effort` on the way in, reasoning and cache
+counters on the way out. If `cached` stays at 0 across turns with an identical
+prompt prefix, prompt caching is not reaching the upstream provider, and the
+prefix work in DESIGN.md §3.2 buys nothing there. Check the model's documented
+protocol on the relay and configure that `format`, not whichever one happens to
+answer.
 
 ## Design
 

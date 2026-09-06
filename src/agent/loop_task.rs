@@ -745,6 +745,8 @@ async fn run_agent(
     let mut compacted_for_overflow = false;
     // one record and one status line per session, not per turn
     let mut effort_ignored_reported = false;
+    // consecutive turns that asked for effort and came back with no reasoning
+    let mut zero_reasoning_turns: u32 = 0;
 
     loop {
         // The proposal limit applies to one model request/turn, not the whole
@@ -849,9 +851,14 @@ async fn run_agent(
                 // does not land. Everything the config can tell us is a claim;
                 // these two are evidence, so they are recorded like any other
                 // fact the host observed (§2.2.2) and reported once.
+                if turn_shows_no_reasoning(&turn) {
+                    zero_reasoning_turns += 1;
+                } else {
+                    zero_reasoning_turns = 0;
+                }
                 if let Some(level) = effort
                     && !effort_ignored_reported
-                    && let Some(why) = effort_ignored_reason(&turn)
+                    && let Some(why) = effort_ignored_reason(&turn, zero_reasoning_turns)
                 {
                     effort_ignored_reported = true;
                     if let Some(writer) = journal.as_mut() {
@@ -866,6 +873,7 @@ async fn run_agent(
                                     "observed"
                                 },
                                 "reasoning_tokens": turn.reasoning_tokens,
+                                "zero_reasoning_turns": zero_reasoning_turns,
                                 "by": "host",
                             }),
                         );
@@ -873,7 +881,7 @@ async fn run_agent(
                     let _ = tx
                         .send(AgentEvent::EffortIgnored {
                             level: level.as_str().to_string(),
-                            why: why.to_string(),
+                            why: why.clone(),
                         })
                         .await;
                     // A rejected parameter must not be sent again: the next
@@ -1507,18 +1515,41 @@ impl TurnFailure {
 /// there is none. The distinction that matters: `reasoning_tokens: None` means
 /// the provider said nothing about reasoning, which is not the same as saying
 /// it did none — only an explicit zero is evidence (§5.1, §1.1).
-fn effort_ignored_reason(turn: &TurnOutcome) -> Option<&'static str> {
+/// How many consecutive zero-reasoning turns it takes before the host says
+/// anything. One is not enough: a reasoning model may legitimately spend
+/// nothing on a trivial question, and a gateway may stub its usage details.
+const MIN_ZERO_TURNS_BEFORE_REPORTING: u32 = 2;
+
+/// True when this turn asked for effort and came back with no reasoning at all.
+fn turn_shows_no_reasoning(turn: &TurnOutcome) -> bool {
+    // Streamed reasoning content contradicts a zero count whatever the usage
+    // block says, so it clears the turn outright.
+    turn.reasoning_tokens == Some(0) && !turn.saw_reasoning
+}
+
+/// What the host can honestly say about a level that did not land, or `None`
+/// when the evidence is not there yet.
+///
+/// The two sources are not equally strong and are no longer worded as if they
+/// were. A refused parameter is proof: the provider said so. A zero counter is
+/// an observation that can also mean "the model chose not to think here" or
+/// "this gateway stubs the details block" — field data from a third-party
+/// OpenAI-compatible gateway showed both `cached` and `reasoning` pinned at
+/// zero on a 10k-token prompt, alongside a 24-second turn that produced six
+/// output tokens. So it is reported only after several turns, and phrased as
+/// what was measured rather than as a verdict about the model.
+fn effort_ignored_reason(turn: &TurnOutcome, consecutive_zero_turns: u32) -> Option<String> {
     if turn.effort_rejected {
-        Some("the provider rejected the effort parameter")
-    } else if turn.reasoning_tokens == Some(0) && !turn.saw_reasoning {
-        // A zero count next to streamed reasoning content is a reporting
-        // artifact, not an ignored request. Field data from an
-        // OpenAI-compatible gateway: the same model at the same level reported
-        // no counter on one turn and zero on the next.
-        Some("the provider reported zero reasoning tokens")
-    } else {
-        None
+        return Some("the provider rejected the effort parameter".to_string());
     }
+    // The run has to include this turn: a turn that produced reasoning ends
+    // the run, and the caller resets the count for exactly that reason.
+    if turn_shows_no_reasoning(turn) && consecutive_zero_turns >= MIN_ZERO_TURNS_BEFORE_REPORTING {
+        return Some(format!(
+            "no reasoning reported on {consecutive_zero_turns} turns in a row"
+        ));
+    }
+    None
 }
 
 fn rejects_effort_parameter(err: &str) -> bool {
@@ -2099,22 +2130,38 @@ mod effort_tests {
         }
     }
 
-    /// The whole point of doing this from the response rather than from the
-    /// config: silence is not evidence. A provider that reports no reasoning
-    /// counter at all (Anthropic) must never be read as "it ignored you".
+    /// Silence is not evidence: a provider that reports no reasoning counter
+    /// at all (Anthropic) must never be read as "it ignored you".
     #[test]
-    fn only_an_explicit_zero_counts_as_evidence() {
-        assert_eq!(effort_ignored_reason(&turn(None, false)), None);
-        assert_eq!(effort_ignored_reason(&turn(Some(1), false)), None);
-        assert_eq!(effort_ignored_reason(&turn(Some(4096), false)), None);
+    fn a_missing_or_positive_counter_is_never_evidence() {
+        for tokens in [None, Some(1), Some(4096)] {
+            assert!(!turn_shows_no_reasoning(&turn(tokens, false)), "{tokens:?}");
+            assert_eq!(effort_ignored_reason(&turn(tokens, false), 9), None);
+        }
+        assert!(turn_shows_no_reasoning(&turn(Some(0), false)));
+    }
+
+    /// One zero turn says nothing: a reasoning model may spend nothing on a
+    /// trivial question, and a relay may stub the usage details. Only a run of
+    /// them is worth reporting, and the wording says what was measured rather
+    /// than passing a verdict on the model.
+    #[test]
+    fn one_zero_turn_is_not_enough_to_report() {
+        let t = turn(Some(0), false);
+        assert_eq!(effort_ignored_reason(&t, 1), None);
         assert_eq!(
-            effort_ignored_reason(&turn(Some(0), false)),
-            Some("the provider reported zero reasoning tokens")
+            effort_ignored_reason(&t, MIN_ZERO_TURNS_BEFORE_REPORTING),
+            Some("no reasoning reported on 2 turns in a row".to_string())
         );
-        // a refusal is evidence regardless of the counters
+    }
+
+    /// A refusal is the provider saying so out loud, so it needs no run-up and
+    /// keeps the stronger wording.
+    #[test]
+    fn a_refused_parameter_is_reported_at_once() {
         assert_eq!(
-            effort_ignored_reason(&turn(None, true)),
-            Some("the provider rejected the effort parameter")
+            effort_ignored_reason(&turn(None, true), 0),
+            Some("the provider rejected the effort parameter".to_string())
         );
     }
 
@@ -2214,10 +2261,9 @@ mod effort_tests {
             Some(1088),
             "the stub event must not erase the real count"
         );
-        assert_eq!(
-            effort_ignored_reason(&outcome),
-            None,
-            "and the level must not be reported as ignored"
+        assert!(
+            !turn_shows_no_reasoning(&outcome),
+            "and the turn must not count as a zero-reasoning turn"
         );
         assert_eq!(
             prompt_size, 30,
@@ -2229,21 +2275,21 @@ mod effort_tests {
     fn a_zero_count_beside_streamed_reasoning_is_not_evidence() {
         let mut t = turn(Some(0), false);
         t.saw_reasoning = true;
-        assert_eq!(effort_ignored_reason(&t), None);
-
-        // with no reasoning content, the same zero still counts
-        let t = turn(Some(0), false);
-        assert_eq!(
-            effort_ignored_reason(&t),
-            Some("the provider reported zero reasoning tokens")
+        assert!(
+            !turn_shows_no_reasoning(&t),
+            "streamed reasoning content contradicts the counter"
         );
+        assert_eq!(effort_ignored_reason(&t, 9), None);
+
+        // with no reasoning content, the same zero does count towards the run
+        assert!(turn_shows_no_reasoning(&turn(Some(0), false)));
 
         // and a refusal is evidence either way
         let mut t = turn(None, true);
         t.saw_reasoning = true;
         assert_eq!(
-            effort_ignored_reason(&t),
-            Some("the provider rejected the effort parameter")
+            effort_ignored_reason(&t, 0),
+            Some("the provider rejected the effort parameter".to_string())
         );
     }
 
