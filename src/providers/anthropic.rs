@@ -196,7 +196,7 @@ impl Provider for AnthropicProvider {
                 Ok(r) => r,
                 Err(e) => {
                     super::log_http(&format!("POST {} failed: {e}", this.url));
-                    yield Err(anyhow!("request failed: {e}"));
+                    yield Err(super::network_error(e));
                     return;
                 }
             };
@@ -204,7 +204,7 @@ impl Provider for AnthropicProvider {
             if !status.is_success() {
                 let t = resp.text().await.unwrap_or_default();
                 super::log_http(&format!("POST {} -> {status}: {t}", this.url));
-                yield Err(anyhow!("provider returned {status}: {}", short(&t)));
+                yield Err(super::response_error(status.as_u16(), &short(&t)));
                 return;
             }
 

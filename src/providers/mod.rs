@@ -249,6 +249,119 @@ pub enum StreamEvent {
 
 pub type StreamResult = anyhow::Result<StreamEvent>;
 
+/// Why a provider request failed (§5.1).
+///
+/// Decided from the response — status and body — and attached to the error, so
+/// the retry policy is a decision about a class rather than a substring match
+/// on an error message. "Retry for an hour" and "give up now" are opposite
+/// answers, and telling them apart from prose does not work: a 401 and a 503
+/// both read as "provider returned N: ...".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorClass {
+    /// bad or missing key — waiting cannot help
+    Auth,
+    /// out of credit or over a hard quota — waiting cannot help either
+    Quota,
+    /// rate limited; the whole point of backing off
+    RateLimit,
+    /// the request does not fit the context window; compaction can help
+    ContextOverflow,
+    /// malformed or unsupported request — deterministic, never retry
+    BadRequest,
+    /// provider-side failure, worth retrying
+    Server,
+    /// the request never got an answer, worth retrying
+    Network,
+}
+
+impl ErrorClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auth => "auth",
+            Self::Quota => "quota",
+            Self::RateLimit => "rate_limit",
+            Self::ContextOverflow => "context_overflow",
+            Self::BadRequest => "bad_request",
+            Self::Server => "server",
+            Self::Network => "network",
+        }
+    }
+
+    /// Whether waiting and asking again can plausibly succeed.
+    pub fn retryable(self) -> bool {
+        matches!(self, Self::RateLimit | Self::Server | Self::Network)
+    }
+}
+
+impl std::fmt::Display for ErrorClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Classify an HTTP response from its status and body.
+pub fn classify_response(status: u16, body: &str) -> ErrorClass {
+    let lower = body.to_ascii_lowercase();
+    // Providers disagree on the status for "your prompt is too long": OpenAI
+    // uses 400 with a typed code, Anthropic 400 with prose, some gateways 413.
+    let overflow = [
+        "context_length_exceeded",
+        "context length",
+        "maximum context",
+        "prompt is too long",
+        "too many tokens",
+        "reduce the length",
+        "exceed context limit",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    let out_of_credit = [
+        "insufficient_quota",
+        "insufficient credit",
+        "credit balance",
+        "billing",
+        "exceeded your current quota",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+
+    match status {
+        401 | 403 => ErrorClass::Auth,
+        402 => ErrorClass::Quota,
+        413 => ErrorClass::ContextOverflow,
+        429 => {
+            // A 429 that is really "you have no money" never clears on its own.
+            if out_of_credit {
+                ErrorClass::Quota
+            } else {
+                ErrorClass::RateLimit
+            }
+        }
+        s if s >= 500 => ErrorClass::Server,
+        _ if overflow => ErrorClass::ContextOverflow,
+        _ if out_of_credit => ErrorClass::Quota,
+        _ => ErrorClass::BadRequest,
+    }
+}
+
+/// The class attached to a provider error, when there is one.
+pub fn class_of(error: &anyhow::Error) -> Option<ErrorClass> {
+    // anyhow keeps context objects downcastable, which is the point of
+    // attaching the class as context rather than formatting it into the text.
+    error.downcast_ref::<ErrorClass>().copied()
+}
+
+/// Build a classified provider error for a failed HTTP response.
+pub fn response_error(status: u16, body: &str) -> anyhow::Error {
+    let class = classify_response(status, body);
+    anyhow::anyhow!("provider returned {status}: {body}").context(class)
+}
+
+/// Build a classified provider error for a request that never completed.
+pub fn network_error(error: impl std::fmt::Display) -> anyhow::Error {
+    anyhow::anyhow!("request failed: {error}").context(ErrorClass::Network)
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ChatRequest {
     pub model_id: String,
@@ -339,5 +452,96 @@ pub fn create(p: &ResolvedProvider) -> anyhow::Result<SharedProvider> {
         WireFormat::Openai => Ok(Arc::new(openai::OpenAiProvider::new(p)?)),
         WireFormat::Anthropic => Ok(Arc::new(anthropic::AnthropicProvider::new(p)?)),
         WireFormat::Responses => Ok(Arc::new(responses::ResponsesProvider::new(p)?)),
+    }
+}
+
+#[cfg(test)]
+mod error_class_tests {
+    use super::*;
+
+    /// The retry policy is a decision about a class. These are the cases where
+    /// retrying is wrong, and they used to be retried for an hour because the
+    /// policy matched on the words of an error message.
+    #[test]
+    fn hopeless_failures_are_not_retryable() {
+        for (status, body, expected) in [
+            (401u16, "invalid x-api-key", ErrorClass::Auth),
+            (403, "forbidden", ErrorClass::Auth),
+            (402, "payment required", ErrorClass::Quota),
+            (
+                429,
+                r#"{"error":{"type":"insufficient_quota","message":"You exceeded your current quota"}}"#,
+                ErrorClass::Quota,
+            ),
+            (
+                400,
+                r#"{"error":{"code":"context_length_exceeded"}}"#,
+                ErrorClass::ContextOverflow,
+            ),
+            (
+                400,
+                "prompt is too long: 210000 tokens",
+                ErrorClass::ContextOverflow,
+            ),
+            (413, "payload too large", ErrorClass::ContextOverflow),
+            (
+                400,
+                "invalid_request_error: unknown field",
+                ErrorClass::BadRequest,
+            ),
+        ] {
+            let class = classify_response(status, body);
+            assert_eq!(class, expected, "status {status}, body {body:?}");
+            assert!(
+                !class.retryable(),
+                "{class} must not be retried: {status} {body:?}"
+            );
+        }
+    }
+
+    /// And the cases where waiting is exactly right.
+    #[test]
+    fn transient_failures_are_retryable() {
+        for (status, body, expected) in [
+            (429u16, "slow down", ErrorClass::RateLimit),
+            (500, "internal server error", ErrorClass::Server),
+            (502, "bad gateway", ErrorClass::Server),
+            (529, "overloaded_error", ErrorClass::Server),
+        ] {
+            let class = classify_response(status, body);
+            assert_eq!(class, expected, "status {status}");
+            assert!(class.retryable(), "{class} must be retried: {status}");
+        }
+    }
+
+    /// A rate limit that is really "out of credit" never clears on its own, so
+    /// it must not be treated as one.
+    #[test]
+    fn a_429_about_credit_is_a_quota_failure() {
+        assert_eq!(
+            classify_response(429, "Your credit balance is too low to access the API"),
+            ErrorClass::Quota
+        );
+        assert_eq!(
+            classify_response(429, "rate_limit_error"),
+            ErrorClass::RateLimit
+        );
+    }
+
+    /// The class has to survive the trip through anyhow, otherwise the caller
+    /// is back to reading error text.
+    #[test]
+    fn the_class_survives_the_error_chain() {
+        let error = response_error(401, "invalid x-api-key");
+        assert_eq!(class_of(&error), Some(ErrorClass::Auth));
+        // and the message a human reads is still the provider's own
+        assert!(format!("{error:#}").contains("invalid x-api-key"));
+
+        let network = network_error("connection reset by peer");
+        assert_eq!(class_of(&network), Some(ErrorClass::Network));
+        assert!(class_of(&network).unwrap().retryable());
+
+        // an error with no class attached must not be mistaken for one
+        assert_eq!(class_of(&anyhow::anyhow!("something else")), None);
     }
 }
