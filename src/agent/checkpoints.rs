@@ -97,6 +97,10 @@ pub struct RestoreReport {
     pub deleted: Vec<String>,
     /// changed outside sqwai since the agent wrote them; left untouched
     pub skipped: Vec<String>,
+    /// the host wrote them, but no pre-image is available to put back — a
+    /// record from before the blob store, or a store that could not be
+    /// written. Reported rather than guessed at.
+    pub no_pre_image: Vec<String>,
 }
 
 impl RestoreReport {
@@ -118,6 +122,66 @@ fn current_hash(path: &Path) -> Option<String> {
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     Some(format!("sha256:{:x}", hasher.finalize()))
+}
+
+/// Restore files from the layer-1 blob store, with no git involved at all.
+///
+/// This is what §2.5 means by "the constraint 'undo unavailable outside git
+/// repositories' is lifted": every file the host wrote through
+/// `write | edit | multi_edit | patch` has its pre-image in the store, keyed
+/// from the journal, so putting it back is a copy.
+///
+/// The same outside-edit rule as the git path applies: a file whose current
+/// content is not what the host last left is reported as skipped, never
+/// overwritten. A pre-image of `None` means the file did not exist before the
+/// undone window, so reverting it means removing it.
+pub fn restore_from_blobs(
+    root: &Path,
+    pre_images: &[crate::agent::journal::PreImage],
+) -> Result<RestoreReport> {
+    let mut report = RestoreReport::default();
+    for item in pre_images {
+        let path = root.join(&item.path);
+        let current = current_hash(&path);
+        // Only skip when we know both what it should be and what it is, and
+        // they disagree. A file that is already gone cannot be clobbered.
+        if let (Some(expected), Some(actual)) = (item.agent_hash.as_deref(), current.as_deref())
+            && expected != actual
+        {
+            report.skipped.push(item.path.clone());
+            continue;
+        }
+        match &item.blob_before {
+            _ if item.blob_before.is_none() && item.existed_before => {
+                // The file was edited, not created, and its pre-image is not
+                // here. Deleting it would destroy the user's file; leaving it
+                // silently would report a revert that did not happen.
+                report.no_pre_image.push(item.path.clone());
+            }
+            Some(id) => {
+                let content = crate::agent::blobs::get(root, id)
+                    .with_context(|| format!("restoring {}", item.path))?;
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("recreating {}", parent.display()))?;
+                }
+                std::fs::write(&path, &content)
+                    .with_context(|| format!("writing {}", path.display()))?;
+                report.restored.push(item.path.clone());
+            }
+            None => {
+                // created inside the window: reverting means it should not exist
+                match std::fs::remove_file(&path) {
+                    Ok(()) => report.deleted.push(item.path.clone()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(e).with_context(|| format!("removing {}", path.display()));
+                    }
+                }
+            }
+        }
+    }
+    Ok(report)
 }
 
 /// Restore exactly `targets` from a snapshot, and nothing else.
@@ -185,6 +249,149 @@ pub fn restore_paths(root: &Path, sha: &str, targets: &[Target]) -> Result<Resto
 mod tests {
     use super::*;
     use std::fs;
+
+    /// §2.5's headline promise: undo works in a project that is not a git
+    /// repository at all. No `git init` anywhere in this test.
+    #[test]
+    fn a_project_without_git_can_still_be_reverted() {
+        use crate::agent::journal::PreImage;
+        let dir = tempfile::Builder::new()
+            .prefix("sqwai-blob-undo")
+            .tempdir()
+            .unwrap();
+        let root = dir.path();
+        assert!(!available(root), "the fixture must not be a repository");
+
+        // a file the agent edited: its pre-image is in the store
+        let edited = root.join("src/main.rs");
+        fs::create_dir_all(edited.parent().unwrap()).unwrap();
+        let original = b"fn main() { println!(\"one\"); }";
+        let blob = crate::agent::blobs::put(root, original).unwrap();
+        fs::write(&edited, b"fn main() { println!(\"two\"); }").unwrap();
+
+        // a file the agent created: reverting means removing it
+        let created = root.join("src/extra.rs");
+        fs::write(&created, b"// new").unwrap();
+
+        let report = restore_from_blobs(
+            root,
+            &[
+                PreImage {
+                    path: "src/main.rs".into(),
+                    blob_before: Some(blob),
+                    existed_before: true,
+                    agent_hash: None,
+                },
+                PreImage {
+                    path: "src/extra.rs".into(),
+                    blob_before: None,
+                    existed_before: false,
+                    agent_hash: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&edited).unwrap(), original, "byte-for-byte");
+        assert!(!created.exists(), "a file created in the window is removed");
+        assert_eq!(report.restored, vec!["src/main.rs".to_string()]);
+        assert_eq!(report.deleted, vec!["src/extra.rs".to_string()]);
+        assert!(report.skipped.is_empty());
+    }
+
+    /// The same rule as the git path: a file the user changed after the agent
+    /// wrote it is reported, never overwritten.
+    #[test]
+    fn a_file_edited_outside_sqwai_is_left_alone() {
+        use crate::agent::journal::PreImage;
+        let dir = tempfile::Builder::new()
+            .prefix("sqwai-blob-skip")
+            .tempdir()
+            .unwrap();
+        let root = dir.path();
+        let path = root.join("notes.md");
+
+        let original = b"# notes\n";
+        let blob = crate::agent::blobs::put(root, original).unwrap();
+        // what the host left, recorded in the journal
+        fs::write(&path, b"# notes, by the agent\n").unwrap();
+        let agent_hash = current_hash(&path);
+        // ...and then the user edited it themselves
+        fs::write(&path, b"# notes, by me\n").unwrap();
+
+        let report = restore_from_blobs(
+            root,
+            &[PreImage {
+                path: "notes.md".into(),
+                blob_before: Some(blob),
+                existed_before: true,
+                agent_hash,
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(report.skipped, vec!["notes.md".to_string()]);
+        assert!(report.restored.is_empty());
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"# notes, by me\n",
+            "the user's edit survives"
+        );
+    }
+
+    /// The trap my own first version walked into: a record written before the
+    /// blob store existed has no pre-image, and treating that as "the agent
+    /// created this file" would delete a file it had merely edited.
+    #[test]
+    fn a_record_without_a_pre_image_is_reported_not_deleted() {
+        use crate::agent::journal::PreImage;
+        let dir = tempfile::Builder::new()
+            .prefix("sqwai-blob-legacy")
+            .tempdir()
+            .unwrap();
+        let root = dir.path();
+        let path = root.join("legacy.rs");
+        fs::write(&path, b"// edited by the agent, pre-image never stored").unwrap();
+
+        let report = restore_from_blobs(
+            root,
+            &[PreImage {
+                path: "legacy.rs".into(),
+                blob_before: None,
+                existed_before: true,
+                agent_hash: None,
+            }],
+        )
+        .unwrap();
+
+        assert!(path.exists(), "the file must survive");
+        assert_eq!(report.no_pre_image, vec!["legacy.rs".to_string()]);
+        assert!(report.deleted.is_empty(), "nothing may be deleted");
+        assert!(report.restored.is_empty());
+    }
+
+    /// A blob the store never got cannot be silently treated as "nothing to
+    /// do": the file would stay modified while undo reported success.
+    #[test]
+    fn a_missing_blob_fails_loudly() {
+        use crate::agent::journal::PreImage;
+        let dir = tempfile::Builder::new()
+            .prefix("sqwai-blob-missing")
+            .tempdir()
+            .unwrap();
+        let err = restore_from_blobs(
+            dir.path(),
+            &[PreImage {
+                path: "gone.rs".into(),
+                blob_before: Some("blake3:0000".into()),
+                existed_before: true,
+                agent_hash: None,
+            }],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("restoring gone.rs"), "{err}");
+    }
 
     /// Run git against the fixture repository in an isolated environment.
     ///

@@ -1,0 +1,196 @@
+//! Layer 1 of §2.5: a content-addressed store of file pre-images.
+//!
+//! The point of this layer is that it has **no dependency on git at all**. For
+//! `write | edit | multi_edit | patch` the file about to change is known in
+//! advance, so its bytes are kept before the mutation and `/undo` for that
+//! file becomes a copy, not a tree operation. That is what lifts the old
+//! restriction "undo is unavailable outside a git repository", and it is what
+//! makes reverting a single step possible at all — a tree snapshot cannot say
+//! which of several files belonged to which step, and the journal can.
+//!
+//! Blobs are named by their blake3 hash (§5.10 assigns blake3 to this layer
+//! and keeps sha2 for the hashes the journal already records), stored under
+//! `.sqwai/checkpoints/blobs/<first two hex>/<hash>` and deduplicated by that
+//! name: writing the same content twice costs one existence check.
+//!
+//! The journal's `file_diff` keeps recording `hash_before` / `hash_after` as
+//! sha256 — his scoped-undo matching reads that format — and gains
+//! `blob_before` / `blob_after`, which are the blake3 names *in this store*.
+//! Two algorithms sound like an accident; it is the alternative that is worse.
+//! Renaming the journal's hashes would silently invalidate every record
+//! written before the change, and dropping blake3 would contradict §5.10. So
+//! the record carries both, and the link is explicit rather than implied.
+
+use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
+
+/// Content stored above this size is compressed. Below it, zstd's frame header
+/// and the CPU cost buy nothing: source files that small are dominated by the
+/// filesystem's block size either way.
+const COMPRESS_ABOVE_BYTES: usize = 4096;
+
+/// zstd level 3 — its default. Level 19 spends roughly ten times the CPU for a
+/// few percent on source text, and this runs in the path of every edit.
+const COMPRESS_LEVEL: i32 = 3;
+
+/// Marker of a compressed blob. A plain blob starts with its own bytes, so the
+/// store cannot guess; the flag is one byte at the front rather than a second
+/// file or a name suffix.
+const RAW: u8 = b'0';
+const ZSTD: u8 = b'1';
+
+pub fn dir(root: &Path) -> PathBuf {
+    root.join(".sqwai").join("checkpoints").join("blobs")
+}
+
+/// blake3 of `content`, as the store names it.
+pub fn id(content: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(content).to_hex())
+}
+
+fn path_for(root: &Path, id: &str) -> PathBuf {
+    let hex = id.strip_prefix("blake3:").unwrap_or(id);
+    // one level of fan-out: a long session can write thousands of blobs, and
+    // some filesystems slow down badly on a single huge directory
+    let (shard, _) = hex.split_at(2.min(hex.len()));
+    dir(root).join(shard).join(hex)
+}
+
+/// Store `content` and return its id. Storing the same content again is a
+/// no-op — the id is the name, so identical bytes are one file.
+pub fn put(root: &Path, content: &[u8]) -> Result<String> {
+    let id = id(content);
+    let path = path_for(root, &id);
+    if path.exists() {
+        return Ok(id);
+    }
+    let parent = path
+        .parent()
+        .context("blob path has no parent directory")?
+        .to_path_buf();
+    std::fs::create_dir_all(&parent).context("creating the blob directory")?;
+
+    let mut body = Vec::with_capacity(content.len() + 1);
+    if content.len() > COMPRESS_ABOVE_BYTES {
+        body.push(ZSTD);
+        body.extend(zstd::encode_all(content, COMPRESS_LEVEL).context("compressing a blob")?);
+    } else {
+        body.push(RAW);
+        body.extend_from_slice(content);
+    }
+
+    // Write to a temporary name in the same directory and rename: a blob is
+    // named by its own hash, so a half-written file under the final name would
+    // be a lie that survives restarts.
+    let tmp = parent.join(format!(".{}.tmp", std::process::id()));
+    std::fs::write(&tmp, &body).context("writing a blob")?;
+    std::fs::rename(&tmp, &path).context("publishing a blob")?;
+    Ok(id)
+}
+
+/// Read a blob back. Verifies the content against the id it was asked for:
+/// this is the data `/undo` writes over a user's file, so a silent mismatch
+/// would be the worst possible failure.
+pub fn get(root: &Path, id: &str) -> Result<Vec<u8>> {
+    let path = path_for(root, id);
+    let stored = std::fs::read(&path)
+        .with_context(|| format!("blob {id} is not in the store ({})", path.display()))?;
+    let (flag, body) = stored.split_first().context("blob is empty")?;
+    let content = match *flag {
+        ZSTD => zstd::decode_all(body).context("decompressing a blob")?,
+        RAW => body.to_vec(),
+        other => anyhow::bail!("blob {id} has an unknown storage flag {other:#x}"),
+    };
+    let actual = self::id(&content);
+    if actual != id.strip_prefix("blake3:").map_or(id, |_| id) {
+        anyhow::bail!("blob {id} does not hash to its name (got {actual})");
+    }
+    Ok(content)
+}
+
+pub fn has(root: &Path, id: &str) -> bool {
+    path_for(root, id).exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn root() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("sqwai-blobs")
+            .tempdir()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_blob_round_trips_at_both_sides_of_the_compression_threshold() {
+        let dir = root();
+        for content in [
+            b"fn main() {}".to_vec(),
+            // over the threshold, so it takes the compressed path
+            "x".repeat(COMPRESS_ABOVE_BYTES + 1).into_bytes(),
+            // bytes that are not text at all
+            (0u8..=255).cycle().take(9000).collect::<Vec<u8>>(),
+            // and the empty file, which has a hash like anything else
+            Vec::new(),
+        ] {
+            let id = put(dir.path(), &content).unwrap();
+            assert!(has(dir.path(), &id));
+            assert_eq!(get(dir.path(), &id).unwrap(), content, "id {id}");
+        }
+    }
+
+    /// The id is the name, so the same content cannot occupy two files. This
+    /// is what keeps a long session's store proportional to distinct contents
+    /// rather than to the number of edits.
+    #[test]
+    fn identical_content_is_stored_once() {
+        let dir = root();
+        let a = put(dir.path(), b"same").unwrap();
+        let b = put(dir.path(), b"same").unwrap();
+        assert_eq!(a, b);
+        let files: Vec<_> = walk(&super::dir(dir.path()));
+        assert_eq!(files.len(), 1, "{files:?}");
+
+        let c = put(dir.path(), b"different").unwrap();
+        assert_ne!(a, c);
+        assert_eq!(walk(&super::dir(dir.path())).len(), 2);
+    }
+
+    /// `/undo` writes this content over the user's file. Serving something
+    /// that does not match the requested id would be worse than failing.
+    #[test]
+    fn a_corrupted_blob_is_refused_rather_than_served() {
+        let dir = root();
+        let id = put(dir.path(), b"original").unwrap();
+        let path = path_for(dir.path(), &id);
+        std::fs::write(&path, [RAW, b'w', b'r', b'o', b'n', b'g']).unwrap();
+        let err = get(dir.path(), &id).unwrap_err().to_string();
+        assert!(err.contains("does not hash to its name"), "{err}");
+    }
+
+    #[test]
+    fn a_blob_asked_for_but_never_stored_names_itself_in_the_error() {
+        let dir = root();
+        let err = get(dir.path(), "blake3:deadbeef").unwrap_err().to_string();
+        assert!(err.contains("blake3:deadbeef"), "{err}");
+        assert!(err.contains("not in the store"), "{err}");
+    }
+
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(walk(&path));
+            } else {
+                out.push(path);
+            }
+        }
+        out
+    }
+}

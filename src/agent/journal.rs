@@ -29,6 +29,22 @@ pub struct Journal {
     agent: String,
 }
 
+/// What one file looked like before an undone window touched it (§2.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreImage {
+    pub path: String,
+    /// layer-1 blob to write back, when one was stored
+    pub blob_before: Option<String>,
+    /// whether the file existed before this window at all. Without it, a
+    /// record that has no blob is ambiguous: it could be a file the agent
+    /// created (revert = delete) or a record written before the blob store
+    /// existed (revert = impossible). Deleting in the second case would
+    /// destroy a file the agent had merely edited.
+    pub existed_before: bool,
+    /// `hash_after` of the host's last write, for the outside-edit check
+    pub agent_hash: Option<String>,
+}
+
 impl Journal {
     /// Open or create `journal/<session-id>.jsonl`, repairing a partial tail.
     pub fn open(root: &Path, session_id: &str) -> Result<Self> {
@@ -230,6 +246,54 @@ impl Journal {
             match out.iter_mut().find(|(known, _)| known == path) {
                 Some(slot) => slot.1 = hash,
                 None => out.push((path.to_string(), hash)),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The layer-1 pre-image of every file the host wrote in `checkpoints`,
+    /// oldest first per path — that is the content the file had *before* the
+    /// undone window started, so a scoped revert writes the earliest blob and
+    /// not the latest.
+    ///
+    /// Returned per path: the blob id to write back (`None` when the file did
+    /// not exist before the window, i.e. it was created and should be
+    /// removed), and the hash the host last left it at, so a file edited
+    /// outside sqwai afterwards can be skipped instead of overwritten.
+    pub fn recorded_pre_images(root: &Path, checkpoints: &[String]) -> Result<Vec<PreImage>> {
+        let mut out: Vec<PreImage> = Vec::new();
+        for record in Self::records(root)? {
+            if record.kind != "file_diff" {
+                continue;
+            }
+            let belongs = record
+                .fields
+                .get("checkpoint")
+                .and_then(Value::as_str)
+                .is_some_and(|sha| checkpoints.iter().any(|wanted| wanted == sha));
+            if !belongs {
+                continue;
+            }
+            let Some(path) = record.fields.get("path").and_then(Value::as_str) else {
+                continue;
+            };
+            let field = |name: &str| {
+                record
+                    .fields
+                    .get(name)
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            };
+            match out.iter_mut().find(|found| found.path == path) {
+                // The first record for a path holds the state to return to;
+                // later ones only move the "as the host left it" hash forward.
+                Some(slot) => slot.agent_hash = field("hash_after"),
+                None => out.push(PreImage {
+                    path: path.to_string(),
+                    blob_before: field("blob_before"),
+                    existed_before: field("hash_before").is_some(),
+                    agent_hash: field("hash_after"),
+                }),
             }
         }
         Ok(out)
@@ -596,6 +660,64 @@ mod tests {
             );
         }
         fs::remove_dir_all(root).ok();
+    }
+
+    /// The pre-image to return to is the state *before* the window, so a file
+    /// written twice must revert to the first record's blob, not the last —
+    /// while the outside-edit check still compares against the newest hash the
+    /// host left. Getting this backwards would restore an intermediate state
+    /// and call it done.
+    #[test]
+    fn a_file_written_twice_reverts_to_the_state_before_the_window() {
+        let root = root();
+        let mut journal = Journal::open(&root, "session").unwrap();
+        for (blob, hash) in [
+            ("blake3:first", "sha256:one"),
+            ("blake3:second", "sha256:two"),
+        ] {
+            journal
+                .append(
+                    "file_diff",
+                    serde_json::json!({
+                        "path": "src/main.rs",
+                        "checkpoint": "cp1",
+                        "blob_before": blob,
+                        "hash_after": hash,
+                    }),
+                )
+                .unwrap();
+        }
+        let pre = Journal::recorded_pre_images(&root, &["cp1".to_string()]).unwrap();
+        assert_eq!(pre.len(), 1, "one entry per path: {pre:?}");
+        assert_eq!(pre[0].blob_before.as_deref(), Some("blake3:first"));
+        assert_eq!(pre[0].agent_hash.as_deref(), Some("sha256:two"));
+    }
+
+    /// A record from before the blob store existed has no pre-image. It must
+    /// not be read as "this file was created" — that would delete a file the
+    /// agent merely edited.
+    #[test]
+    fn a_record_without_a_blob_is_not_mistaken_for_a_created_file() {
+        let root = root();
+        let mut journal = Journal::open(&root, "session").unwrap();
+        journal
+            .append(
+                "file_diff",
+                serde_json::json!({
+                    "path": "legacy.rs",
+                    "checkpoint": "cp1",
+                    "hash_before": "sha256:old",
+                    "hash_after": "sha256:new",
+                }),
+            )
+            .unwrap();
+        let pre = Journal::recorded_pre_images(&root, &["cp1".to_string()]).unwrap();
+        assert_eq!(pre[0].blob_before, None);
+        assert!(
+            pre[0].existed_before,
+            "the file existed, so a revert cannot mean deleting it"
+        );
+        assert_eq!(pre[0].agent_hash.as_deref(), Some("sha256:new"));
     }
 
     /// What scopes `/undo`: only the paths this checkpoint's own `file_diff`

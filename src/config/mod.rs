@@ -506,6 +506,67 @@ pub struct DiaryConfig {
     pub batch_minutes: u16,
 }
 
+/// `[undo]` — retention and storage for the two checkpoint layers (§2.5).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoConfig {
+    /// commits of a session's shadow chain to keep
+    #[serde(default = "default_undo_keep_per_session")]
+    pub keep_per_session: u32,
+    /// above this many files, a pre-snapshot runs only for commands the
+    /// classifier calls mutating
+    #[serde(default = "default_undo_max_tree_files")]
+    pub max_tree_files: u64,
+    /// how long a layer-1 blob outlives the journal that references it
+    #[serde(default = "default_undo_blob_grace_secs")]
+    pub blob_grace_secs: u64,
+    /// where the shadow repository lives; `off` disables layer 2 and leaves
+    /// layer-1 file reverts working, which is the point of two layers
+    #[serde(default = "default_undo_shadow")]
+    pub shadow: ShadowStore,
+    #[serde(default = "default_undo_shadow_max_bytes")]
+    pub shadow_max_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ShadowStore {
+    /// `.sqwai/checkpoints/git` inside the project
+    #[default]
+    Local,
+    /// `~/.local/share/sqwai/checkpoints/<project-hash>/`
+    User,
+    /// no shadow repository; bash runs uninsured and says so
+    Off,
+}
+
+fn default_undo_keep_per_session() -> u32 {
+    50
+}
+fn default_undo_max_tree_files() -> u64 {
+    100_000
+}
+fn default_undo_blob_grace_secs() -> u64 {
+    86_400
+}
+fn default_undo_shadow() -> ShadowStore {
+    ShadowStore::Local
+}
+fn default_undo_shadow_max_bytes() -> u64 {
+    1_073_741_824
+}
+
+impl Default for UndoConfig {
+    fn default() -> Self {
+        Self {
+            keep_per_session: default_undo_keep_per_session(),
+            max_tree_files: default_undo_max_tree_files(),
+            blob_grace_secs: default_undo_blob_grace_secs(),
+            shadow: default_undo_shadow(),
+            shadow_max_bytes: default_undo_shadow_max_bytes(),
+        }
+    }
+}
+
 /// `[plan]` — the host's own limits on the structured plan (§5.9).
 ///
 /// These are host values on purpose. The plan budget used to be computed from
@@ -697,6 +758,8 @@ pub struct Config {
     pub plan: PlanConfig,
     #[serde(default)]
     pub secrets: SecretsConfig,
+    #[serde(default)]
+    pub undo: UndoConfig,
 }
 
 fn default_model_name() -> String {
@@ -753,6 +816,7 @@ impl Default for Config {
             compaction: CompactionConfig::default(),
             plan: PlanConfig::default(),
             secrets: SecretsConfig::default(),
+            undo: UndoConfig::default(),
         };
         cfg.ensure_seeds();
         cfg

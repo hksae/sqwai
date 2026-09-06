@@ -2408,10 +2408,7 @@ impl App {
         let idx = self.session.checkpoints.len().saturating_sub(n);
         let (sha, label) = self.session.checkpoints[idx].clone();
         let root = std::env::current_dir().unwrap_or_default();
-        if !crate::agent::checkpoints::available(&root) {
-            self.status("not a git repo — undo unavailable", StatusKind::Warn);
-            return;
-        }
+        let git_snapshots = crate::agent::checkpoints::available(&root);
         // Scope the restore to what the host recorded as its own writes across
         // the checkpoints being undone. Without this, undo reverts the whole
         // tree to the snapshot and silently discards anything the user edited
@@ -2437,6 +2434,30 @@ impl App {
         } else {
             0
         };
+        // Layer 1 (§2.5): the pre-images the host stored before each write.
+        // No git needed, and it is the only path that works in a project that
+        // is not a repository at all.
+        let pre_images =
+            crate::agent::journal::Journal::recorded_pre_images(&root, &undone).unwrap_or_default();
+        let have_blobs = pre_images.iter().any(|item| {
+            item.blob_before
+                .as_deref()
+                .is_some_and(|id| crate::agent::blobs::has(&root, id))
+        });
+        if !git_snapshots && !have_blobs {
+            self.status(
+                "nothing to undo from: no shadow snapshot and no stored pre-images",
+                StatusKind::Warn,
+            );
+            return;
+        }
+        if !git_snapshots || (scoped && have_blobs) {
+            // Prefer the blob store when it covers the window: it reverts
+            // exactly the recorded writes, needs no repository, and cannot be
+            // invalidated by the user's own `git gc`.
+            self.undo_from_blobs(&root, idx, &label, &pre_images, unrecorded);
+            return;
+        }
         let targets: Vec<crate::agent::checkpoints::Target> = if scoped {
             recorded
                 .into_iter()
@@ -2485,6 +2506,70 @@ impl App {
                     StatusKind::Warn
                 } else if !scoped {
                     note.push_str("; scope not narrowed (no file records for this checkpoint)");
+                    StatusKind::Warn
+                } else if unrecorded > 0 {
+                    note.push_str(&format!(
+                        "; {unrecorded} checkpoint(s) had no file records, their effects remain"
+                    ));
+                    StatusKind::Warn
+                } else {
+                    StatusKind::Ok
+                };
+                self.status(&note, kind);
+                self.dirty = true;
+            }
+            Err(e) => self.status(&format!("undo failed: {e:#}"), StatusKind::Err),
+        }
+    }
+
+    /// Undo through layer 1: write back the pre-images the host stored, remove
+    /// what the window created, and leave anything edited outside sqwai alone.
+    fn undo_from_blobs(
+        &mut self,
+        root: &std::path::Path,
+        idx: usize,
+        label: &str,
+        pre_images: &[crate::agent::journal::PreImage],
+        unrecorded: usize,
+    ) {
+        match crate::agent::checkpoints::restore_from_blobs(root, pre_images) {
+            Ok(report) => {
+                let touched = report.touched();
+                let sha = self
+                    .session
+                    .checkpoints
+                    .get(idx)
+                    .map(|(sha, _)| sha.clone())
+                    .unwrap_or_default();
+                let reopened_steps =
+                    reopen_undone_steps(root, &self.session.id.to_string(), &touched, &sha);
+                self.session.checkpoints.truncate(idx);
+                self.context_bootstrap_pending = true;
+                self.session.save().ok();
+
+                let mut note = format!(
+                    "undo: reverted '{label}' from stored pre-images ({} file(s)",
+                    touched.len()
+                );
+                if !report.deleted.is_empty() {
+                    note.push_str(&format!(", {} removed", report.deleted.len()));
+                }
+                note.push(')');
+                if !reopened_steps.is_empty() {
+                    note.push_str(&format!("; reopened {} step(s)", reopened_steps.len()));
+                }
+                let kind = if !report.skipped.is_empty() {
+                    note.push_str(&format!(
+                        "; left alone, changed outside sqwai: {}",
+                        report.skipped.join(", ")
+                    ));
+                    StatusKind::Warn
+                } else if !report.no_pre_image.is_empty() {
+                    // written by the host but with nothing stored to put back
+                    note.push_str(&format!(
+                        "; not revertible, no stored pre-image: {}",
+                        report.no_pre_image.join(", ")
+                    ));
                     StatusKind::Warn
                 } else if unrecorded > 0 {
                     note.push_str(&format!(

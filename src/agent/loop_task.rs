@@ -1390,6 +1390,11 @@ async fn run_agent(
                             "hash_after": metadata.hash_after,
                             "mode": metadata.mode,
                             "checkpoint": metadata.checkpoint,
+                            // links into the layer-1 blob store (§2.5), so a
+                            // single step can be reverted from the journal
+                            // alone; absent when nothing was stored
+                            "blob_before": metadata.blob_before,
+                            "blob_after": metadata.blob_after,
                         }),
                     );
                 }
