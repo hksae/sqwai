@@ -1218,12 +1218,24 @@ impl App {
                 if self.streaming {
                     self.show_busy_status();
                 } else {
-                    let n = rest
-                        .split_whitespace()
-                        .nth(1)
-                        .and_then(|x| x.parse::<usize>().ok())
-                        .unwrap_or(1);
-                    self.undo(n);
+                    match rest.split_whitespace().nth(1) {
+                        None => self.undo(1),
+                        Some(arg) => match arg.parse::<usize>() {
+                            Ok(n) => self.undo(n),
+                            // `/undo step 3` used to parse as `/undo 1`: the
+                            // argument was dropped and the last checkpoint was
+                            // reverted instead, reported as a success. Per-step
+                            // undo is not built yet (§7 F7), so say that
+                            // instead of undoing the wrong thing.
+                            Err(_) => self.status(
+                                &format!(
+                                    "/undo takes a count: /undo or /undo 3. \
+                                     Cannot undo {arg:?} — per-step undo is not implemented yet."
+                                ),
+                                StatusKind::Warn,
+                            ),
+                        },
+                    }
                 }
             }
             other if COMMANDS.contains(&other) => {
@@ -2270,24 +2282,84 @@ impl App {
             self.status("not a git repo — undo unavailable", StatusKind::Warn);
             return;
         }
-        let files = crate::agent::checkpoints::changed_files(&root, &sha).unwrap_or_default();
-        match crate::agent::checkpoints::restore(&root, &sha) {
-            Ok(()) => {
+        // Scope the restore to what the host recorded as its own writes across
+        // the checkpoints being undone. Without this, undo reverts the whole
+        // tree to the snapshot and silently discards anything the user edited
+        // in their own editor while the agent was working (§2.5).
+        let undone: Vec<String> = self.session.checkpoints[idx..]
+            .iter()
+            .map(|(sha, _)| sha.clone())
+            .collect();
+        let recorded =
+            crate::agent::journal::Journal::recorded_writes(&root, &undone).unwrap_or_default();
+        let scoped = !recorded.is_empty();
+        // A window can mix file edits with a `bash` call. Scoping to the
+        // journal then silently leaves the shell command's effects in place,
+        // so count the checkpoints that contributed nothing and say so.
+        let unrecorded = if scoped {
+            let with_records =
+                crate::agent::journal::Journal::checkpoints_with_writes(&root, &undone)
+                    .unwrap_or_default();
+            undone
+                .iter()
+                .filter(|sha| !with_records.contains(*sha))
+                .count()
+        } else {
+            0
+        };
+        let targets: Vec<crate::agent::checkpoints::Target> = if scoped {
+            recorded
+                .into_iter()
+                .map(|(path, agent_hash)| crate::agent::checkpoints::Target { path, agent_hash })
+                .collect()
+        } else {
+            // Nothing recorded — a `bash` mutation, whose effects the host
+            // cannot enumerate. Fall back to the snapshot-vs-worktree diff and
+            // say so, rather than pretending the scope is known.
+            crate::agent::checkpoints::changed_files(&root, &sha)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|path| crate::agent::checkpoints::Target {
+                    path,
+                    agent_hash: None,
+                })
+                .collect()
+        };
+
+        match crate::agent::checkpoints::restore_paths(&root, &sha, &targets) {
+            Ok(report) => {
+                let touched = report.touched();
                 let reopened_steps =
-                    reopen_undone_steps(&root, &self.session.id.to_string(), &files, &sha);
+                    reopen_undone_steps(&root, &self.session.id.to_string(), &touched, &sha);
                 self.session.checkpoints.truncate(idx);
                 self.session.save().ok();
-                self.status(
-                    &format!(
-                        "undo: reverted '{label}'{}",
-                        if reopened_steps.is_empty() {
-                            String::new()
-                        } else {
-                            format!("; reopened {} step(s)", reopened_steps.len())
-                        }
-                    ),
-                    StatusKind::Ok,
-                );
+
+                let mut note = format!("undo: reverted '{label}' ({} file(s)", touched.len());
+                if !report.deleted.is_empty() {
+                    note.push_str(&format!(", {} removed", report.deleted.len()));
+                }
+                note.push(')');
+                if !reopened_steps.is_empty() {
+                    note.push_str(&format!("; reopened {} step(s)", reopened_steps.len()));
+                }
+                let kind = if !report.skipped.is_empty() {
+                    note.push_str(&format!(
+                        "; left alone, changed outside sqwai: {}",
+                        report.skipped.join(", ")
+                    ));
+                    StatusKind::Warn
+                } else if !scoped {
+                    note.push_str("; scope not narrowed (no file records for this checkpoint)");
+                    StatusKind::Warn
+                } else if unrecorded > 0 {
+                    note.push_str(&format!(
+                        "; {unrecorded} checkpoint(s) had no file records, their effects remain"
+                    ));
+                    StatusKind::Warn
+                } else {
+                    StatusKind::Ok
+                };
+                self.status(&note, kind);
                 self.dirty = true;
             }
             Err(e) => self.status(&format!("undo failed: {e:#}"), StatusKind::Err),

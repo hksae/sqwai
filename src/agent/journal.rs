@@ -182,6 +182,73 @@ impl Journal {
         }))
     }
 
+    /// Paths the host recorded as its own writes for the given checkpoints,
+    /// each with the hash the agent left the file at.
+    ///
+    /// This is what scopes `/undo`: the file tools journal a `file_diff` per
+    /// mutation carrying the checkpoint it belongs to and `hash_after`, so undo
+    /// can put back exactly those files and leave everything else — including
+    /// whatever the user edited meanwhile — alone.
+    ///
+    /// Returns an empty list when nothing is recorded, which is the honest
+    /// answer for a `bash` mutation: the host cannot enumerate what a shell
+    /// command touched, so there is nothing to narrow the scope with.
+    pub fn recorded_writes(
+        root: &Path,
+        checkpoints: &[String],
+    ) -> Result<Vec<(String, Option<String>)>> {
+        let mut out: Vec<(String, Option<String>)> = Vec::new();
+        for record in Self::records(root)? {
+            if record.kind != "file_diff" {
+                continue;
+            }
+            let belongs = record
+                .fields
+                .get("checkpoint")
+                .and_then(Value::as_str)
+                .is_some_and(|sha| checkpoints.iter().any(|wanted| wanted == sha));
+            if !belongs {
+                continue;
+            }
+            let Some(path) = record.fields.get("path").and_then(Value::as_str) else {
+                continue;
+            };
+            let hash = record
+                .fields
+                .get("hash_after")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            // Later records win: a file written twice in the undone window was
+            // last left at the newest hash.
+            match out.iter_mut().find(|(known, _)| known == path) {
+                Some(slot) => slot.1 = hash,
+                None => out.push((path.to_string(), hash)),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Which of `checkpoints` have at least one recorded write.
+    ///
+    /// The complement is what `/undo` cannot account for: a `bash` checkpoint
+    /// produces no `file_diff`, so its effects survive a scoped restore and the
+    /// user has to be told rather than left to find out.
+    pub fn checkpoints_with_writes(root: &Path, checkpoints: &[String]) -> Result<Vec<String>> {
+        let mut found: Vec<String> = Vec::new();
+        for record in Self::records(root)? {
+            if record.kind != "file_diff" {
+                continue;
+            }
+            if let Some(sha) = record.fields.get("checkpoint").and_then(Value::as_str)
+                && checkpoints.iter().any(|wanted| wanted == sha)
+                && !found.iter().any(|known| known == sha)
+            {
+                found.push(sha.to_string());
+            }
+        }
+        Ok(found)
+    }
+
     /// Return the journal sequence of a step's host-recorded start operation.
     pub fn step_started_at(root: &Path, plan: &str, step: &str) -> Result<Option<u64>> {
         Ok(Self::records(root)?
@@ -457,6 +524,60 @@ mod tests {
                 "record {index} must not qualify as evidence"
             );
         }
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// What scopes `/undo`: only the paths this checkpoint's own `file_diff`
+    /// records name, each with the hash the agent left the file at.
+    #[test]
+    fn recorded_writes_scopes_undo_to_the_hosts_own_writes() {
+        let root = root();
+        let mut journal = Journal::open(&root, "session").unwrap();
+        journal
+            .append(
+                "file_diff",
+                json!({"path": "src/a.rs", "hash_after": "aaa", "checkpoint": "sha-1"}),
+            )
+            .unwrap();
+        journal
+            .append(
+                "file_diff",
+                json!({"path": "src/b.rs", "hash_after": "bbb", "checkpoint": "sha-2"}),
+            )
+            .unwrap();
+        // same file written twice inside the undone window: the newest hash is
+        // the one it was left at
+        journal
+            .append(
+                "file_diff",
+                json!({"path": "src/a.rs", "hash_after": "aaa2", "checkpoint": "sha-2"}),
+            )
+            .unwrap();
+        // a record belonging to a checkpoint that is not being undone
+        journal
+            .append(
+                "file_diff",
+                json!({"path": "src/untouched.rs", "hash_after": "zzz", "checkpoint": "sha-9"}),
+            )
+            .unwrap();
+
+        let writes =
+            Journal::recorded_writes(&root, &["sha-1".to_string(), "sha-2".to_string()]).unwrap();
+        assert_eq!(
+            writes,
+            vec![
+                ("src/a.rs".to_string(), Some("aaa2".to_string())),
+                ("src/b.rs".to_string(), Some("bbb".to_string())),
+            ]
+        );
+
+        // a checkpoint with no file records — a bash mutation — cannot narrow
+        // the scope, and says so by returning nothing
+        assert!(
+            Journal::recorded_writes(&root, &["sha-bash".to_string()])
+                .unwrap()
+                .is_empty()
+        );
         fs::remove_dir_all(root).ok();
     }
 
