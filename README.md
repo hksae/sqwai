@@ -206,11 +206,21 @@ Successful request and response bodies are not logged.
 
 A relay that accepts one protocol and forwards another can drop everything that
 is not the answer itself: `reasoning_effort` on the way in, reasoning and cache
-counters on the way out. If `cached` stays at 0 across turns with an identical
-prompt prefix, prompt caching is not reaching the upstream provider, and the
-prefix work in DESIGN.md §3.2 buys nothing there. Check the model's documented
-protocol on the relay and configure that `format`, not whichever one happens to
-answer.
+counters on the way out. Check the model's documented protocol on the relay and
+configure that `format`, not whichever one happens to answer.
+
+Read the counters carefully before concluding anything from them, because two
+harmless situations look exactly like a broken provider:
+
+- **`cached=0` on a turn.** Automatic prefix caches expire in minutes, so the
+  first turn after a pause misses by design. A cache hit only proves itself on
+  a turn that closely follows another with the same prefix; a single zero proves
+  nothing. Measured on a relay: `cached=0` twelve minutes after the previous
+  turn, `cached=9728` of 10580 seven seconds after it.
+- **`reasoning=0` on a turn.** A reasoning model spends nothing on a trivial
+  question even at `effort = high`, and that is the model working as intended,
+  not the level being dropped. Same session: `reasoning=0` for a three-byte
+  question, `reasoning=29` for the next one.
 
 ## Design
 
