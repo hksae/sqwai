@@ -1048,15 +1048,15 @@ mod tests {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         // a previously completed turn: user + assistant answer (both in the
         // session and in the visible transcript)
-        app.session.push(Role::User, "привет");
-        app.session.push(Role::Assistant, "привет!");
-        app.segments.push(Segment::User("привет".into()));
+        app.session.push(Role::User, "hello");
+        app.session.push(Role::Assistant, "hello!");
+        app.segments.push(Segment::User("hello".into()));
         app.segments.push(Segment::Assistant {
-            text: "привет!".into(),
+            text: "hello!".into(),
             live: false,
         });
         app.streaming = true;
-        app.segments.push(Segment::User("как дела".into()));
+        app.segments.push(Segment::User("how are you".into()));
         app.segments.push(Segment::Assistant {
             text: String::new(),
             live: true,
@@ -1076,7 +1076,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let dupes = answers.iter().filter(|a| *a == &"привет!").count();
+        let dupes = answers.iter().filter(|a| *a == &"hello!").count();
         assert_eq!(
             dupes, 1,
             "abort must not duplicate the prior answer: {answers:?}"

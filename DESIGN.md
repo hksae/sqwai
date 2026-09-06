@@ -795,40 +795,41 @@ at Level 1 → `coverage: unknown`, full suite; `complete` after green impact ru
 still runs the full suite.
 
 ### 2.5 Checkpoints and undo
-Схема — два слоя вместо одного. Слой 1 обязателен и не зависит от git; слой 2 —
-теневой репозиторий только вокруг bash. Ни один слой не трогает пользовательский
-`.git`: ни `index.lock`, ни refs, ни gc/hooks/worktree пользователя.
+Architecture: two layers instead of one. Layer 1 is mandatory and completely
+independent of git; Layer 2 is a shadow repository wrapped exclusively around
+bash. Neither layer ever touches the user's `.git`: no `index.lock`, no refs,
+and no interference with the user's gc/hooks/worktree.
 
-**Слой 1 — per-file copy-on-write (без git вообще).**
-Для `write|edit|multi_edit|patch` заранее известно, какой файл сейчас изменится.
-Перед мутацией:
+**Layer 1 — per-file copy-on-write (zero git dependency).**
+For `write|edit|multi_edit|patch`, the file about to be modified is known in advance.
+Prior to mutation:
 
 ```text
-blob = read(path)                      // уже в памяти: read-guard требовал read
+blob = read(path)                      // already in memory: read-guard required read
 hash = blake3(blob)
-write_if_absent(.sqwai/checkpoints/blobs/<hash>, blob)   // zstd, дедуп по хешу
+write_if_absent(.sqwai/checkpoints/blobs/<hash>, blob)   // zstd, deduplicated by hash
 journal file_diff { path, hash_before, hash_after, mode }
 ```
 
-Это микросекунды, точные байты, нет зависимости от git, работает везде. И это
-ровно то, что нужно для `/undo step N` и отката одного файла: журнал уже содержит
-`hash_before` для каждого `file_diff`. Полный снапшот дерева для правок
-инструментами не нужен.
+This takes microseconds, preserves exact bytes, has zero dependency on git, and
+works everywhere. This is precisely what powers `/undo step N` and single-file
+reversion: the journal already contains `hash_before` for every `file_diff`. A full
+tree snapshot is never needed for tool-driven file edits.
 
-**Слой 2 — теневой репозиторий только вокруг bash.**
-Bash — единственный случай, когда заранее неизвестно, что изменится. Здесь нужен
-снапшот дерева, но не в пользовательском `.git`, а в отдельном теневом
-репозитории:
+**Layer 2 — shadow repository scoped only to bash.**
+Bash is the only case where mutations cannot be predicted in advance. A tree
+snapshot is required here, but stored in a separate shadow repository rather than
+the user's `.git`:
 
 ```text
-.sqwai/checkpoints/git/        # отдельный GIT_DIR
+.sqwai/checkpoints/git/        # dedicated GIT_DIR
   config: core.worktree = <project root>
           core.autocrlf = false, core.symlinks = true, core.longpaths = true
           core.untrackedCache = true, core.fsmonitor = false
-  info/exclude: содержимое всех .gitignore проекта + .sqwai/ + nested .git/ + *.lfs-паттерны
+  info/exclude: contents of all project .gitignore files + .sqwai/ + nested .git/ + *.lfs patterns
 ```
 
-Команды — через git CLI в `tokio::process`, не через git2:
+Commands run via the git CLI using `tokio::process`, not via git2:
 
 ```text
 git --git-dir=… --work-tree=… add -A
@@ -837,62 +838,60 @@ git --git-dir=… --work-tree=… commit-tree <tree> -p <prev> -m "session a8f2 
 git --git-dir=… --work-tree=… update-ref refs/sessions/<id> <commit>
 ```
 
-Что это даёт: пользовательский `.git` не тронут вообще (нет `index.lock`, нет
-мусора в refs, gc/hooks/worktree пользователя ни при чём); работает в проектах без
-git; `core.autocrlf = false` — снапшот хранит байты как есть; git сам делает
-дельта-сжатие, дедуп, `.gitignore` и переименования; CLI асинхронен по природе —
-никаких блокировок TUI; зависимость — бинарник git, который есть у ~99% целевой
-аудитории, а libgit2 исчезает из Cargo.toml.
+What this achieves: the user's `.git` is untouched (no `index.lock`, no clutter in
+refs, user's gc/hooks/worktree are bypassed); it works in projects without git;
+`core.autocrlf = false` guarantees snapshots preserve raw bytes; git handles delta
+compression, deduplication, `.gitignore`, and renames automatically; the CLI is
+asynchronous by nature, avoiding TUI freezes; the dependency is the git binary
+present on ~99% of developer machines, allowing libgit2 to be removed from Cargo.toml.
 
-Пре-чекпоинт делается только если дерево изменилось после предыдущего:
-`git status --porcelain=v2 -uall` на теневом репо с `untrackedCache` — десятки мс
-даже на больших проектах. Пост-чекпоинт — если status показал изменения после
-команды. Заодно status даёт список изменённых файлов для записей `file_diff` и для
-инвалидации графа — собственный mtime-сканер не нужен.
+A pre-checkpoint is created only if the tree has changed since the previous one:
+running `git status --porcelain=v2 -uall` on the shadow repo with `untrackedCache`
+takes tens of milliseconds even on large projects. A post-checkpoint runs if status
+reports changes after the command finishes. Additionally, status yields the list of
+modified files for `file_diff` records and graph cache invalidation, eliminating the
+need for a custom mtime scanner.
 
-**Восстановление — без `checkout .`.**
-Никогда `git checkout <sha> -- .` и тем более `git clean`. Алгоритм:
+**Restoration — without `checkout .`.**
+Never run `git checkout <sha> -- .` and never run `git clean`. Algorithm:
 
-1. Снять снапшот текущего состояния (чтобы undo был обратим).
-2. `git diff-tree -r --name-status <target> <current>` — точный список: `A`
-   (появился после) → удалить, `M`/`D` → `git show <target>:<path>` → записать.
-3. Применить только эти операции; журнал undo с полным списком.
-4. Файлы, которых нет ни в одном из деревьев (например, свежие в `.sqwai/`), не
-   трогаются.
+1. Snapshot current state first (ensuring undo itself is reversible).
+2. `git diff-tree -r --name-status <target> <current>` gives the exact diff: `A`
+   (appeared later) → delete, `M`/`D` → `git show <target>:<path>` → write out.
+3. Apply only these operations; log the undo action to the journal with the full list.
+4. Files not present in either tree (e.g. freshly created in `.sqwai/`) are left untouched.
 
-Для отката одного шага без bash достаточно слоя 1: восстановить `hash_before` из
-блобов, если файл с тех пор менялся только этим шагом (проверка по цепочке
-`file_diff` в журнале).
+Reverting a single step without bash only requires Layer 1: restore `hash_before`
+from the blob store if the file has not been touched by any other steps since (verified
+via the journal's `file_diff` chain).
 
-**Деградация.**
+**Degradation.**
 
-| Ситуация | Поведение |
+| Situation | Behavior |
 | --- | --- |
-| нет бинарника git | слой 1 работает полностью; bash-чекпоинты выключены; предупреждение при старте; bash с командами класса «мутирующие» помечается в результате `no_snapshot: true` |
-| проект > `undo.max_tree_files` (например 100k) | пре-снапшот перед bash только для команд, которые классификатор считает мутирующими (`cargo fmt`, `git checkout`, генераторы, `sed -i`); для остальных — пост-проверка status |
-| вложенные `.git` (submodules, vendored репо) | исключаются в `info/exclude`; отдельно журналируется предупреждение |
+| git binary missing | Layer 1 works fully; bash checkpoints are disabled; warning on startup; bash commands classified as mutating are flagged in output with `no_snapshot: true` |
+| project > `undo.max_tree_files` (e.g. 100k) | pre-snapshot before bash only for commands classified as mutating (`cargo fmt`, `git checkout`, generators, `sed -i`); post-status check for others |
+| nested `.git` (submodules, vendored repos) | excluded in `info/exclude`; warning logged to journal |
 
-**Обслуживание.**
-Ветка на сессию `refs/sessions/<id>`, чекпоинты — цепочка коммитов. Retention:
-держать последние N коммитов сессии (`undo.keep_per_session`, 50) и всё, на что
-ссылается evidence активного плана; на `/new` и `/exit` — `update-ref` на
-усечённую цепочку, раз в M сессий `git gc --prune=now` в теневом репо. Блобы слоя 1 — тоже
-по ссылкам из журналов активных планов (`undo.blob_grace_secs`); чистка вместе с
-журналом сессии. Теневой репо можно держать не в проекте, а в
-`~/.local/share/sqwai/checkpoints/<project-hash>/` — тогда `.sqwai/` меньше и
-удаление проекта не тянет за собой историю; но проще отлаживать локально.
-Выбор — конфигом `[undo].shadow` (local | user | off), дефолт local.
+**Maintenance.**
+One branch per session `refs/sessions/<id>`, with checkpoints forming a commit chain.
+Retention: keep the last N commits of the session (`undo.keep_per_session`, 50) along with
+everything referenced by active plan evidence; on `/new` and `/exit`, run `update-ref` on
+the truncated chain, and every M sessions trigger `git gc --prune=now` in the shadow repo.
+Layer 1 blobs are retained based on references in active plan journals (`undo.blob_grace_secs`);
+purged together with the session journal. The shadow repo can be stored either in the project
+or under `~/.local/share/sqwai/checkpoints/<project-hash>/` — keeping `.sqwai/` smaller and
+preventing project deletion from wiping history, though local storage is simpler to inspect.
+Configured via `[undo].shadow` (local | user | off), default local.
 
-**Отличие от прежней редакции §2.5.**
+**Differences from previous §2.5 revision.**
 
-- `git2` убран из стека (§5.10): git вызывается как CLI через `tokio::process`.
-- Чекпоинты = слой 1 (обязательный) + слой 2 (теневой репо при наличии git).
-- `file_diff.hash_before`/`hash_after` — ссылки в blob-store, а не только
-  метаданные.
-- `/undo step N` — новая возможность, появляется бесплатно из слоя 1.
-- Restore — через `diff-tree`, не через checkout.
-- Ограничение «вне git-репозитория undo недоступен» снимается: недоступен только
-  откат последствий bash.
+- `git2` removed from stack (§5.10): git is invoked as a CLI via `tokio::process`.
+- Checkpoints = Layer 1 (mandatory) + Layer 2 (shadow repo when git is available).
+- `file_diff.hash_before`/`hash_after` are links into blob-store, not just metadata.
+- `/undo step N` — new capability, available for free via Layer 1.
+- Restore operates via `diff-tree`, never via checkout.
+- The constraint "undo unavailable outside git repositories" is lifted: only bash reverts require git.
 
 ### 2.6 Browser **[planned — last phase]**
 

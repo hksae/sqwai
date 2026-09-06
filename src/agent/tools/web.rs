@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn truncates_by_unicode_character_count_and_marks_output() {
-        let output = truncate(&"Ж".repeat(MAX_OUTPUT_CHARS + 10));
+        let output = truncate(&"€".repeat(MAX_OUTPUT_CHARS + 10));
         assert!(output.ends_with("[webfetch output truncated]"));
         assert!(output.chars().count() <= MAX_OUTPUT_CHARS + 30);
         assert_eq!(

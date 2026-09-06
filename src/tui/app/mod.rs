@@ -915,7 +915,7 @@ impl App {
         let t = text.trim().to_lowercase();
         matches!(
             t.as_str(),
-            "привет" | "привет!" | "hello" | "hi" | "2 + 2" | "2+2"
+            "hello" | "hi" | "hey" | "2 + 2" | "2+2"
         )
     }
 

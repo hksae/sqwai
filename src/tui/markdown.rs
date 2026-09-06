@@ -678,7 +678,7 @@ mod tests {
         let lines = render("```rust\nfn main() {}\n```\ntext", 80, &hl);
         assert!(lines.len() >= 3);
         let narrow = render(
-            "```cpp\nstd::cout << \"Привет, мир!\" << std::endl;\n```",
+            "```cpp\nstd::cout << \"Hello, world!\" << std::endl;\n```",
             24,
             &hl,
         );
@@ -715,14 +715,14 @@ mod tests {
     #[test]
     fn headings_render_marker_and_emphasis() {
         let hl = Highlighter::new();
-        let lines = render("# Каталог\nописание\n# Дополнительный пример", 80, &hl);
+        let lines = render("# Catalog\ndescription\n# Additional example", 80, &hl);
         assert_eq!(lines.len(), 3);
         let first: String = lines[0]
             .spans
             .iter()
             .map(|s| s.content.to_string())
             .collect();
-        assert_eq!(first, "Каталог");
+        assert_eq!(first, "Catalog");
         assert!(
             lines[0]
                 .spans
@@ -767,10 +767,10 @@ mod tests {
     }
 
     #[test]
-    fn bold_cyrillic_parses() {
-        let spans = inline("**Управление памятью**", Theme::base());
+    fn bold_inline_parses() {
+        let spans = inline("**Memory management**", Theme::base());
         let text: String = spans.iter().map(|s| s.content.to_string()).collect();
-        assert_eq!(text, "Управление памятью");
+        assert_eq!(text, "Memory management");
         assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
     }
 

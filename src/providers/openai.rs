@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn truncate_respects_char_boundaries() {
-        let s = "привет мир";
+        let s = "héllò wörld";
         let t = truncate(s, 8);
         assert!(t.ends_with('…'));
         // no partial multibyte sequence: must round-trip as valid UTF-8

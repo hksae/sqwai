@@ -359,7 +359,7 @@ mod tests {
 
     #[tokio::test]
     async fn frames_messages_by_utf8_bytes() {
-        let value = serde_json::json!({"method":"x", "params":"Привет"});
+        let value = serde_json::json!({"method":"x", "params":"Café"});
         let mut bytes = Vec::new();
         write_message(&mut bytes, &value).await.unwrap();
         let mut reader = BufReader::new(bytes.as_slice());
