@@ -274,6 +274,9 @@ struct TurnOutcome {
     /// them at all. `Some(0)` is evidence that a requested effort level was
     /// not acted on; `None` says nothing either way.
     reasoning_tokens: Option<u64>,
+    /// reasoning content was streamed in this turn, which contradicts a zero
+    /// count whatever the usage block says
+    saw_reasoning: bool,
     /// the provider rejected the effort parameter outright, so the turn was
     /// retried without it and the session must stop sending it
     effort_rejected: bool,
@@ -1507,7 +1510,11 @@ impl TurnFailure {
 fn effort_ignored_reason(turn: &TurnOutcome) -> Option<&'static str> {
     if turn.effort_rejected {
         Some("the provider rejected the effort parameter")
-    } else if turn.reasoning_tokens == Some(0) {
+    } else if turn.reasoning_tokens == Some(0) && !turn.saw_reasoning {
+        // A zero count next to streamed reasoning content is a reporting
+        // artifact, not an ignored request. Field data from an
+        // OpenAI-compatible gateway: the same model at the same level reported
+        // no counter on one turn and zero on the next.
         Some("the provider reported zero reasoning tokens")
     } else {
         None
@@ -1551,6 +1558,8 @@ async fn run_turn(
 
     loop {
         let mut reasoning_tokens: Option<u64> = None;
+        // reasoning content actually arrived in this turn
+        let mut saw_reasoning = false;
         let mut got_delta = false;
         let mut failed: Option<anyhow::Error> = None;
         let mut text = String::new();
@@ -1571,6 +1580,7 @@ async fn run_turn(
                 Ok(StreamEvent::Reasoning(t)) => {
                     if !t.is_empty() {
                         got_delta = true;
+                        saw_reasoning = true;
                         if tx.send(AgentEvent::ThinkingDelta(t)).await.is_err() {
                             return Err(TurnFailure::new("tui closed", None, attempt));
                         }
@@ -1583,9 +1593,21 @@ async fn run_turn(
                     if u.prompt_tokens > 0 {
                         *prompt_size = u.prompt_tokens;
                     }
-                    if u.reasoning_tokens.is_some() {
-                        reasoning_tokens = u.reasoning_tokens;
+                    // Same hazard as the line above, and the one that bit us:
+                    // a gateway can send a second usage event whose
+                    // `completion_tokens_details` is a stub of zeros. Taking
+                    // the last value let a real count decay to 0, and the host
+                    // then reported the level as ignored. These counters only
+                    // grow, so keep the largest one seen.
+                    if let Some(n) = u.reasoning_tokens {
+                        reasoning_tokens = Some(reasoning_tokens.unwrap_or(0).max(n));
                     }
+                    // no-op unless the http log is on; this is the line that
+                    // makes an inconsistent gateway diagnosable at all
+                    crate::providers::log_http(&format!(
+                        "usage event: prompt={} completion={} cached={:?} reasoning={:?}",
+                        u.prompt_tokens, u.completion_tokens, u.cached_tokens, u.reasoning_tokens
+                    ));
                     if tx.send(AgentEvent::Usage(u)).await.is_err() {
                         return Err(TurnFailure::new("tui closed", None, attempt));
                     }
@@ -1638,6 +1660,7 @@ async fn run_turn(
                 text,
                 calls,
                 reasoning_tokens,
+                saw_reasoning,
                 effort_rejected,
                 retries: attempt,
             });
@@ -2071,6 +2094,7 @@ mod effort_tests {
             calls: Vec::new(),
             retries: 0,
             reasoning_tokens,
+            saw_reasoning: false,
             effort_rejected,
         }
     }
@@ -2090,6 +2114,135 @@ mod effort_tests {
         // a refusal is evidence regardless of the counters
         assert_eq!(
             effort_ignored_reason(&turn(None, true)),
+            Some("the provider rejected the effort parameter")
+        );
+    }
+
+    /// Field data from a third-party OpenAI-compatible gateway: the same
+    /// model (`gpt-5.6-terra`, which reasons) at the same level reported no
+    /// counter on one turn and zero on the next, 40 seconds apart. A zero that
+    /// arrives next to streamed reasoning content is the gateway's bookkeeping,
+    /// not an ignored request, and must not be reported as one.
+    /// The root cause of the false positive: two usage events in one turn,
+    /// the second a stub of zeros. Taking the last value let a real count of
+    /// 1088 decay to 0 and the host called the level ignored.
+    #[tokio::test]
+    async fn a_later_zero_usage_event_cannot_erase_a_real_count() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            let mut len = 0usize;
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line
+                    .to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .and_then(|s| s.trim().parse::<usize>().ok())
+                {
+                    len = v;
+                }
+            }
+            let mut buf = vec![0u8; len];
+            reader.read_exact(&mut buf).ok();
+            // first the real numbers, then the stub a gateway can append
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"4\"}}]}\n\n\
+                        data: {\"choices\":[],\"usage\":{\"prompt_tokens\":30,\"completion_tokens\":900,\
+                        \"completion_tokens_details\":{\"reasoning_tokens\":1088}}}\n\n\
+                        data: {\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":900,\
+                        \"completion_tokens_details\":{\"reasoning_tokens\":0}}}\n\n\
+                        data: [DONE]\n\n";
+            let mut out = stream;
+            write!(
+                out,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            let _ = out.flush();
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        });
+
+        let provider = crate::providers::create(&crate::config::ResolvedProvider {
+            name: "p".into(),
+            format: crate::config::WireFormat::Openai,
+            base_url: format!("http://{addr}/v1"),
+            api_key: Some("k".into()),
+        })
+        .unwrap();
+        let req = ChatRequest {
+            model_id: "m".into(),
+            system: vec![],
+            messages: vec![Message::new(Role::User, "2+2")],
+            effort: Some(crate::config::EffortLevel::High),
+            effort_support: Default::default(),
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        let (tx, mut rx) = mpsc::channel(64);
+        let (_ctl_tx, mut ctl) = mpsc::channel(4);
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let mut response_id = None;
+        let mut prompt_size = 0u64;
+        let outcome = run_turn(
+            &provider,
+            &req,
+            &tx,
+            &mut ctl,
+            &mut response_id,
+            &mut prompt_size,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("turn failed: {}", e.message));
+        drop(tx);
+        drain.await.unwrap();
+        server.join().unwrap();
+
+        assert_eq!(
+            outcome.reasoning_tokens,
+            Some(1088),
+            "the stub event must not erase the real count"
+        );
+        assert_eq!(
+            effort_ignored_reason(&outcome),
+            None,
+            "and the level must not be reported as ignored"
+        );
+        assert_eq!(
+            prompt_size, 30,
+            "the same must hold for the prompt meter it sits next to"
+        );
+    }
+
+    #[test]
+    fn a_zero_count_beside_streamed_reasoning_is_not_evidence() {
+        let mut t = turn(Some(0), false);
+        t.saw_reasoning = true;
+        assert_eq!(effort_ignored_reason(&t), None);
+
+        // with no reasoning content, the same zero still counts
+        let t = turn(Some(0), false);
+        assert_eq!(
+            effort_ignored_reason(&t),
+            Some("the provider reported zero reasoning tokens")
+        );
+
+        // and a refusal is evidence either way
+        let mut t = turn(None, true);
+        t.saw_reasoning = true;
+        assert_eq!(
+            effort_ignored_reason(&t),
             Some("the provider rejected the effort parameter")
         );
     }

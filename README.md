@@ -182,6 +182,17 @@ turn: effort requested=high sent=Level("high") reasoning_tokens=1088
 turn: effort requested=max sent=nothing (parameter refused by the provider) reasoning_tokens=0
 ```
 
+Every usage event is logged too, which is how an inconsistent gateway becomes
+visible:
+
+```
+usage event: prompt=30 completion=900 cached=None reasoning=Some(1088)
+usage event: prompt=0 completion=900 cached=None reasoning=Some(0)
+```
+
+Counters only grow, so the largest value seen in a turn wins — a trailing stub
+of zeros cannot erase a real count.
+
 `reasoning_tokens=not reported` and `reasoning_tokens=0` mean different things:
 the first is a provider that says nothing about reasoning, the second is
 evidence that the level was ignored, and only the second is acted on.
