@@ -9,11 +9,11 @@ expression: s
 
  Hi there!
 
-
   ┌  p models  ────────────────────────────────────────────────────┐
   │ m *  test-model · ctx 1000 · ef:off                            │
   │ + add model                                                    │
   │ · switch active model                                          │
+  │ · check connection                                             │
   │ · edit provider                                                │
   │ · delete model                                                 │
   │ · delete provider                                              │

@@ -160,6 +160,17 @@ impl Mode {
 
 const WORKING_SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/// Connection-check state for one provider, rendered on its menu rows.
+#[derive(Clone)]
+pub(super) enum ProviderCheck {
+    /// worker thread running; row shows a spinner text
+    Checking,
+    /// reachable; carries the short detail (`"3 models"`, `"ok"`)
+    Ok(String),
+    /// unreachable; carries the trimmed reason
+    Err(String),
+}
+
 pub struct App {
     cfg: Config,
     model_cfg: ModelConfig,
@@ -297,6 +308,12 @@ pub struct App {
     /// live filter typed inside the sessions menu
     sessions_filter: String,
     ef_click: Option<(u16, u16)>,
+    /// Connection-check results per provider, shown on the provider's menu
+    /// rows: green on success, red with the reason on failure.
+    provider_checks: std::collections::HashMap<String, ProviderCheck>,
+    /// In-flight check and the channel its worker thread reports back on,
+    /// polled on the UI tick so the check never blocks rendering.
+    provider_check_rx: Option<(String, std::sync::mpsc::Receiver<Result<String, String>>)>,
     /// What the provider told us about the effort level, as opposed to what
     /// the config claims: (model id, level, reason). Cleared when either the
     /// model or the level changes, since the observation was about that pair.
@@ -485,6 +502,8 @@ impl App {
             sessions: Vec::new(),
             sessions_filter: String::new(),
             ef_click: None,
+            provider_checks: std::collections::HashMap::new(),
+            provider_check_rx: None,
             effort_observed_ignored: None,
             agents_click: None,
             status_y: 0,
@@ -657,6 +676,7 @@ impl App {
             }
             self.poll_input(&ev_rx)?;
             self.poll_agent();
+            self.poll_provider_check();
             // typewriter: reveal queued answer text gradually, catching up when
             // the queue grows faster than the reveal speed
             if !self.pending_reveal.is_empty() {
@@ -1509,6 +1529,35 @@ impl App {
             text.push_str(&chunk);
         }
         !chunk.is_empty()
+    }
+
+    /// Collect a finished provider connection check, if any. The worker thread
+    /// reports through a channel so the check never blocks the 50 ms tick;
+    /// arrival rebuilds the open menu so the row lights up immediately.
+    fn poll_provider_check(&mut self) {
+        let Some((name, rx)) = self.provider_check_rx.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(outcome) => {
+                let state = match outcome {
+                    Ok(detail) => ProviderCheck::Ok(detail),
+                    Err(reason) => ProviderCheck::Err(reason),
+                };
+                self.provider_checks.insert(name, state);
+                self.build_menu_rows();
+                self.dirty = true;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.provider_check_rx = Some((name, rx));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.provider_checks
+                    .insert(name, ProviderCheck::Err("check task ended".to_string()));
+                self.build_menu_rows();
+                self.dirty = true;
+            }
+        }
     }
 
     fn poll_agent(&mut self) {

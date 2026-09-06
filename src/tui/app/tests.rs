@@ -2712,6 +2712,74 @@ mod tests {
             "spinner uses the chip accent without its background block"
         );
     }
+    /// The provider menu carries a connection probe: dispatching it marks the
+    /// provider as checking, and the worker thread reports back without
+    /// blocking the UI tick.
+    #[test]
+    fn provider_check_marks_checking_then_reports_refused() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.run_action(MenuAction::CheckProvider("p".into()));
+        assert!(
+            matches!(app.provider_checks.get("p"), Some(ProviderCheck::Checking)),
+            "dispatch must mark the provider as checking"
+        );
+        // nothing listens on port 9: the refusal lands fast and red
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while matches!(app.provider_checks.get("p"), Some(ProviderCheck::Checking)) {
+            app.poll_provider_check();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a refused connection must settle, not hang the menu"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            matches!(app.provider_checks.get("p"), Some(ProviderCheck::Err(_))),
+            "a refused connection lights red"
+        );
+    }
+    /// The check row renders the outcome: green with the detail on success,
+    /// red with the reason on failure, and stays a button for a re-check.
+    #[test]
+    fn provider_check_row_lights_green_or_red() {
+        use crate::tui::theme::Theme;
+
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::Models {
+            provider: "p".into(),
+        });
+        let row_style = |app: &App, needle: &str| {
+            app.menu_rows
+                .iter()
+                .flat_map(|(line, _)| line.spans.iter())
+                .find(|span| span.content.contains(needle))
+                .map(|span| span.style)
+        };
+
+        app.provider_checks
+            .insert("p".into(), ProviderCheck::Ok("2 models".into()));
+        app.build_menu_rows();
+        assert_eq!(
+            row_style(&app, "connection ok"),
+            Some(Theme::ok()),
+            "success lights green"
+        );
+
+        app.provider_checks
+            .insert("p".into(), ProviderCheck::Err("401 Unauthorized".into()));
+        app.build_menu_rows();
+        assert_eq!(
+            row_style(&app, "connection failed"),
+            Some(Theme::err()),
+            "failure lights red"
+        );
+
+        let still_button = app.menu_rows.iter().any(|(line, action)| {
+            line.spans.iter().any(|s| s.content.contains("connection"))
+                && matches!(action, MenuAction::CheckProvider(_))
+        });
+        assert!(still_button, "the row stays clickable for a re-check");
+    }
     /// `/undo step 3` used to parse as `/undo 1`: `nth(1)` yielded "step",
     /// `parse::<usize>()` failed and `unwrap_or(1)` reverted the most recent
     /// checkpoint instead — a destructive command acting on the wrong target

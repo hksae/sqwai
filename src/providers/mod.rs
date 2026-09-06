@@ -487,6 +487,177 @@ pub fn create(p: &ResolvedProvider) -> anyhow::Result<SharedProvider> {
     }
 }
 
+/// Probe that a provider answers with the configured credentials, without
+/// spending tokens: `GET {base_url}/models`.
+///
+/// Returns a short human-readable detail on success (`"3 models"`, `"ok"`).
+/// Anything else — missing key, unreachable host, non-2xx — is an `Err` with
+/// the reason trimmed to one short line for status-bar and menu display.
+pub async fn check_connection(p: &ResolvedProvider) -> Result<String, String> {
+    let key = p
+        .api_key
+        .clone()
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| "no API key configured for this provider".to_string())?;
+    let url = format!("{}/models", p.base_url.trim_end_matches('/'));
+    let http = reqwest::ClientBuilder::new()
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let mut request = http.get(&url);
+    request = match p.format {
+        WireFormat::Anthropic => request
+            .header("x-api-key", &key)
+            .header("anthropic-version", "2023-06-01"),
+        WireFormat::Openai | WireFormat::Responses => request.bearer_auth(&key),
+    };
+    let response = request.send().await.map_err(|e| {
+        // transport failure: DNS, refused, TLS, timeout — one line, no URL dump
+        let first: String = e
+            .to_string()
+            .lines()
+            .next()
+            .unwrap_or("request failed")
+            .chars()
+            .take(120)
+            .collect();
+        first
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let first = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let snippet: String = first.chars().take(100).collect();
+        return Err(if snippet.is_empty() {
+            format!("{status}")
+        } else {
+            format!("{status}: {snippet}")
+        });
+    }
+    let detail = response
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|body| body.get("data")?.as_array().cloned())
+        .map(|models| format!("{} models", models.len()));
+    Ok(detail.unwrap_or_else(|| "ok".to_string()))
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    /// Serve one canned response and record the request head for assertions.
+    fn mock_models_server(
+        status: u16,
+        reason: &str,
+        body: &str,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<String>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let head = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let head_writer = head.clone();
+        let body = body.to_string();
+        let reason = reason.to_string();
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut seen = String::new();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                seen.push_str(&line);
+            }
+            *head_writer.lock().unwrap() = seen;
+            let mut out = stream;
+            write!(
+                out,
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            let _ = out.flush();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        });
+        (format!("http://{addr}/v1"), head, handle)
+    }
+
+    fn resolved(base_url: String, format: WireFormat, api_key: Option<String>) -> ResolvedProvider {
+        ResolvedProvider {
+            name: "test".into(),
+            format,
+            base_url,
+            api_key,
+        }
+    }
+
+    #[tokio::test]
+    async fn reachable_provider_reports_its_model_count() {
+        let (url, head, handle) =
+            mock_models_server(200, "OK", r#"{"data":[{"id":"a"},{"id":"b"}]}"#);
+        let outcome = check_connection(&resolved(url, WireFormat::Openai, Some("k".into()))).await;
+        assert_eq!(outcome, Ok("2 models".to_string()));
+        let seen = head.lock().unwrap();
+        assert!(
+            seen.contains("GET /v1/models "),
+            "probe hits the models endpoint: {seen:?}"
+        );
+        assert!(
+            seen.contains("authorization: Bearer k"),
+            "key travels as a bearer token: {seen:?}"
+        );
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn anthropic_probe_carries_its_own_headers() {
+        let (url, head, handle) = mock_models_server(200, "OK", r#"{"data":[]}"#);
+        let outcome =
+            check_connection(&resolved(url, WireFormat::Anthropic, Some("k".into()))).await;
+        assert_eq!(outcome, Ok("0 models".to_string()));
+        let seen = head.lock().unwrap();
+        assert!(seen.contains("x-api-key: k"), "{seen:?}");
+        assert!(seen.contains("anthropic-version: 2023-06-01"), "{seen:?}");
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn wrong_key_comes_back_red() {
+        let (url, _, handle) =
+            mock_models_server(401, "Unauthorized", r#"{"error":"invalid x-api-key"}"#);
+        let outcome =
+            check_connection(&resolved(url, WireFormat::Openai, Some("bad".into()))).await;
+        let reason = outcome.expect_err("a 401 must fail the check");
+        assert!(reason.contains("401"), "{reason:?}");
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_key_fails_without_touching_the_network() {
+        let outcome = check_connection(&resolved(
+            "http://127.0.0.1:9/v1".into(),
+            WireFormat::Openai,
+            None,
+        ))
+        .await;
+        assert!(
+            outcome.expect_err("no key must fail").contains("API key"),
+            "must say what to fix"
+        );
+    }
+}
+
 #[cfg(test)]
 mod error_class_tests {
     use super::*;

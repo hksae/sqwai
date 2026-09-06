@@ -126,6 +126,8 @@ pub(super) enum MenuAction {
     AddProvider,
     EditProvider(String),
     DeleteProvider(String),
+    /// check that the provider answers with the configured credentials
+    CheckProvider(String),
     AddModel(String),
     EditModel(String, String),
     DeleteModel(String, String),
@@ -462,6 +464,41 @@ impl App {
                 // stored unwrapped; build_menu_rows adds the single Confirm layer
                 action: MenuAction::DeleteProvider(p),
             }),
+            MenuAction::CheckProvider(name) => {
+                let Some(pc) = self.cfg.providers.get(&name).cloned() else {
+                    self.status(&format!("unknown provider '{name}'"), StatusKind::Err);
+                    return;
+                };
+                if matches!(
+                    self.provider_checks.get(&name),
+                    Some(ProviderCheck::Checking)
+                ) {
+                    return;
+                }
+                let resolved = crate::config::ResolvedProvider {
+                    name: name.clone(),
+                    format: pc.format,
+                    base_url: pc.base_url.clone(),
+                    api_key: pc.effective_api_key(&name),
+                };
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.provider_check_rx = Some((name.clone(), rx));
+                self.provider_checks.insert(name, ProviderCheck::Checking);
+                // A thread, not the tick: the probe waits on the network.
+                // It builds its own single-thread runtime so it works no
+                // matter which context the menu runs in.
+                std::thread::spawn(move || {
+                    let outcome = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(rt) => rt.block_on(crate::providers::check_connection(&resolved)),
+                        Err(e) => Err(format!("runtime: {e}")),
+                    };
+                    let _ = tx.send(outcome);
+                });
+                self.build_menu_rows();
+            }
             MenuAction::AddModel(p) => self.open_menu(Menu::EditModel {
                 provider: p,
                 key: None,
@@ -1281,6 +1318,24 @@ impl App {
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled(" · switch active model", Theme::FG())]),
                     MenuAction::PickModelList(provider.clone()),
+                ));
+                // Connection probe: lights green with the detail on success,
+                // red with the trimmed reason on failure.
+                let (check_text, check_style) = match self.provider_checks.get(provider.as_str()) {
+                    None => (" · check connection".to_string(), Theme::FG().into()),
+                    Some(ProviderCheck::Checking) => (" · checking…".to_string(), Theme::dim()),
+                    Some(ProviderCheck::Ok(detail)) => {
+                        (format!(" · connection ok ({detail})"), Theme::ok())
+                    }
+                    Some(ProviderCheck::Err(reason)) => {
+                        (format!(" · connection failed: {reason}"), Theme::err())
+                    }
+                };
+                // keep narrow terminals usable: one line, bounded width
+                let shown: String = check_text.chars().take(64).collect();
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(shown, check_style)]),
+                    MenuAction::CheckProvider(provider.clone()),
                 ));
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled(" · edit provider", Theme::FG())]),
