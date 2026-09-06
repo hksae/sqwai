@@ -1543,6 +1543,10 @@ async fn run_turn(
     // The request can lose its effort parameter mid-flight (see below), so the
     // loop works on its own copy rather than on the caller's.
     let mut req = req.clone();
+    // what the user asked for, kept separately: the parameter can be stripped
+    // mid-flight, and a turn that only succeeded without it is exactly the
+    // turn worth reporting
+    let requested_effort = req.effort;
     let mut effort_rejected = false;
 
     loop {
@@ -1611,12 +1615,19 @@ async fn run_turn(
             // was asked for, what went on the wire, and what the provider
             // counted. Without it, "the level was honoured" and "the provider
             // says nothing about reasoning" look identical from outside.
-            if let Some(level) = req.effort {
-                let wire = crate::providers::effort::plan(level, req.effort_support).wire;
+            if let Some(level) = requested_effort {
+                let sent = match req.effort {
+                    Some(still) => format!(
+                        "{:?}",
+                        crate::providers::effort::plan(still, req.effort_support).wire
+                    ),
+                    // stripped by the rejection retry above
+                    None => "nothing (parameter refused by the provider)".to_string(),
+                };
                 crate::providers::log_http(&format!(
-                    "turn: effort requested={} sent={:?} reasoning_tokens={}",
+                    "turn: effort requested={} sent={} reasoning_tokens={}",
                     level.as_str(),
-                    wire,
+                    sent,
                     match reasoning_tokens {
                         Some(n) => n.to_string(),
                         None => "not reported".into(),
