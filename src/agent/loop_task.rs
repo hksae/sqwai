@@ -215,6 +215,8 @@ pub struct AgentInput {
     pub memory: crate::config::MemoryConfig,
     /// compaction thresholds and summary policy copied from configuration
     pub compaction: crate::config::CompactionConfig,
+    /// host limits on the structured plan copied from configuration
+    pub plan_limits: crate::config::PlanConfig,
     /// nesting guard for delegated subagents; the first generation may create
     /// children, but children cannot recursively create more children.
     pub subagent_depth: u8,
@@ -397,6 +399,7 @@ async fn run_subagent(
         diary: crate::config::DiaryConfig::default(),
         memory: crate::config::MemoryConfig::default(),
         compaction: crate::config::CompactionConfig::default(),
+        plan_limits: crate::config::PlanConfig::default(),
         subagent_depth: 1,
     });
     let mut child = child;
@@ -513,6 +516,7 @@ async fn run_agent(
         diary,
         memory,
         compaction,
+        plan_limits,
         mcp,
         lsp,
         subagent_depth,
@@ -664,7 +668,8 @@ async fn run_agent(
         return;
     }
 
-    let mut ctx = ToolCtx::with_read_only(&root, read_only);
+    let mut ctx =
+        ToolCtx::with_read_only(&root, read_only).with_plan_limits(plan_limits, context_limit);
     let mut journal = if enable_tools && !read_only {
         crate::agent::journal::Journal::open(&root, &session_id).ok()
     } else {
@@ -771,7 +776,9 @@ async fn run_agent(
         }
 
         let mut turn_system = system.clone();
-        if let Ok(Some(nudge)) = crate::agent::journal::Journal::nudge(&root, 8) {
+        if let Ok(Some(nudge)) =
+            crate::agent::journal::Journal::nudge(&root, plan_limits.nudge_after)
+        {
             turn_system.push(crate::providers::SystemPart::volatile(nudge));
         }
         let request_messages = request_messages(&messages, transport);
@@ -1101,11 +1108,42 @@ async fn run_agent(
                         .iter()
                         .map(|item| item.diagnostics.len())
                         .sum::<usize>();
+                    // LSP severity 1 is an error, 2 a warning; anything else
+                    // is information or a hint and is not an outcome.
+                    let severity = |item: &crate::lsp::PublishDiagnosticsParams, want: u8| {
+                        item.diagnostics
+                            .iter()
+                            .filter(|d| d.severity == Some(want))
+                            .count()
+                    };
+                    let errors: usize = diagnostics.iter().map(|i| severity(i, 1)).sum();
+                    let warnings: usize = diagnostics.iter().map(|i| severity(i, 2)).sum();
                     let _ = tx
                         .send(AgentEvent::Diagnostics {
                             count: diagnostic_count,
                         })
                         .await;
+                    // §2.2.2 defines this record and nothing was writing it,
+                    // which left §2.1.4's "diagnostics with zero errors" route
+                    // to closing a verify step unreachable: the branch existed
+                    // on the read side only.
+                    if let Some(writer) = journal.as_mut() {
+                        let _ = writer.append_evidence(
+                            "diagnostics",
+                            serde_json::json!({
+                                "path": path.strip_prefix(&root).unwrap_or(&path)
+                                    .to_string_lossy()
+                                    .replace('\\', "/"),
+                                "errors": errors,
+                                "warnings": warnings,
+                                "server": diagnostics
+                                    .iter()
+                                    .flat_map(|item| item.diagnostics.iter())
+                                    .find_map(|d| d.source.clone())
+                                    .unwrap_or_else(|| "lsp".to_string()),
+                            }),
+                        );
+                    }
                     if !diagnostics.is_empty() {
                         outcome.output.push_str("\nLSP diagnostics:\n");
                         for item in diagnostics {
