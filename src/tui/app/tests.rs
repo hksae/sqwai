@@ -2008,4 +2008,43 @@ mod tests {
             .count();
         assert!(path_rows >= 1, "path should wrap on narrow screen");
     }
+
+    /// The status bar is laid out in terminal columns and its click targets are
+    /// derived from the same numbers. Now that the directory label and the plan
+    /// label are state rather than calls into the environment, the layout can
+    /// be driven from a test — including with a wide-character project
+    /// directory, which is what actually broke it.
+    #[test]
+    fn status_bar_fits_and_keeps_click_targets_inside_a_wide_directory() {
+        for (label, plan) in [
+            ("sqwai", ""),
+            ("仕事プロジェクト", "step 2/5"),
+            ("Проекты-агента", "step 12/12"),
+        ] {
+            for w in [70u16, 100, 120] {
+                let mut app = test_app("http://127.0.0.1:9/v1".into());
+                app.startup = false;
+                app.cwd_label = label.to_string();
+                app.plan_step_label = plan.to_string();
+
+                let spans = app.status_bar_spans(w);
+                let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+                let used = unicode_width::UnicodeWidthStr::width(text.as_str());
+                assert!(
+                    used <= w as usize,
+                    "{label:?} at width {w}: status bar is {used} columns: {text:?}"
+                );
+
+                for (what, click) in [("model", app.th_click), ("agents", app.agents_click)] {
+                    if let Some((from, to)) = click {
+                        assert!(
+                            to <= w && from <= to,
+                            "{label:?} at width {w}: {what} click target {from}..{to} \
+                             falls outside the row"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

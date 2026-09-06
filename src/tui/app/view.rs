@@ -1432,20 +1432,7 @@ impl App {
 
     pub(super) fn status_bar_spans(&mut self, w: u16) -> Vec<Span<'static>> {
         // a live retry overrides everything else on the left side
-        let plan_label = crate::plan::open_active(&std::env::current_dir().unwrap_or_default())
-            .ok()
-            .flatten()
-            .map(|plan| {
-                let current = plan
-                    .steps
-                    .iter()
-                    .position(|step| step.status == crate::plan::StepStatus::InProgress);
-                match current {
-                    Some(index) => format!("step {}/{}", index + 1, plan.steps.len()),
-                    None => String::new(),
-                }
-            })
-            .unwrap_or_default();
+        let plan_label = self.plan_step_label.clone();
         let (activity, activity_style) = if let Some(line) = &self.retry_line {
             (format!(" {line}"), Theme::warn())
         } else {
@@ -1461,10 +1448,7 @@ impl App {
                 },
             }
         };
-        let dir = std::env::current_dir()
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
-            .unwrap_or_default();
+        let dir = self.cwd_label.clone();
 
         let context_used = self.session.context_tokens_used();
         let ctx_pct = (self.session.context_percent() as u64).min(100);
@@ -1531,22 +1515,32 @@ impl App {
         // — a project directory such as `~/仕事/proj` made the padding too
         // wide, pushed the right-hand group past the edge and shifted every
         // click target computed below.
-        let dir_label = if dir.is_empty() {
-            String::new()
-        } else {
-            format!("{} ", truncate_display_width(&dir, 20))
-        };
-        let right_len: usize = 1
+        let left = format!(" {}  {}", self.mode.label(), plan_label);
+        let lw = cols(&left) as u16;
+
+        // Everything except the directory, which is the least important item
+        // and therefore the one that yields when the row is too narrow. `pad`
+        // below saturates at zero, so without this the row simply grew past
+        // the terminal: at width 70 a directory named `仕事プロジェクト`
+        // produced a 72-column status bar, and the click targets derived from
+        // these same numbers landed outside the row.
+        let fixed_len: usize = 1
             + cols(&agents_label)
             + cols(&ctx_metrics_label)
             + cols(&working_label)
             + cols(&model_label)
             + cols(&th_label)
-            + cols(&lsp_label)
-            + cols(&dir_label); // mode chip always present
-
-        let left = format!(" {}  {}", self.mode.label(), plan_label);
-        let lw = cols(&left) as u16;
+            + cols(&lsp_label); // mode chip always present
+        let dir_budget = (w as usize)
+            .saturating_sub(lw as usize + fixed_len)
+            .min(DIR_MAX_COLS);
+        let dir_label = if dir.is_empty() || dir_budget == 0 {
+            String::new()
+        } else {
+            // one trailing space, so the label itself gets one column less
+            format!("{} ", truncate_display_width(&dir, dir_budget - 1))
+        };
+        let right_len = fixed_len + cols(&dir_label);
         let mut spans = vec![Span::styled(
             format!(" {} ", self.mode.label()),
             Theme::status_chip(),
@@ -1976,6 +1970,10 @@ fn pad_display(s: &str, width: usize) -> String {
     let used = UnicodeWidthStr::width(s);
     format!("{s}{}", " ".repeat(width.saturating_sub(used)))
 }
+
+/// Widest the project directory may get in the status bar before it is
+/// truncated. It shrinks further when the rest of the row needs the space.
+const DIR_MAX_COLS: usize = 20;
 
 /// Terminal columns a status-bar label occupies.
 fn cols(s: &str) -> usize {
