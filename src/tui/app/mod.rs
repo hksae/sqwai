@@ -786,6 +786,38 @@ impl App {
     /// turn without restarting the app. The agent clones this handle per turn,
     /// so a key edited mid-turn is picked up when the next turn starts (after a
     /// normal Esc stop, or simply the next message).
+    /// The host rewrote the transcript. A continuation reference points at the
+    /// provider's copy of the history that was *not* rewritten, so continuing
+    /// from it would hand the model the very context compaction removed
+    /// (§3.3) while the host accounts for the compacted one.
+    pub(super) fn note_compaction(&mut self, summarized: bool, before: u64, after: u64) {
+        self.context_bootstrap_pending = true;
+        self.rebuild_session_environment();
+        let verb = if summarized { "summarized" } else { "trimmed" };
+        self.status(
+            &format!(
+                "context compacted ({verb}): {} → {} tok",
+                fmt_k(before),
+                fmt_k(after)
+            ),
+            if summarized {
+                StatusKind::Ok
+            } else {
+                StatusKind::Info
+            },
+        );
+    }
+
+    /// Whether this provider may be asked to continue from its own copy of the
+    /// conversation. Off means the transcript is resent every request, which
+    /// is what §1.1 and §2.2 assume: the host owns the context.
+    pub(super) fn continuation_enabled(&self) -> bool {
+        self.cfg
+            .providers
+            .get(&self.model_cfg.provider)
+            .is_none_or(|p| p.continuation)
+    }
+
     /// What the current model does with the effort slider. The wire format is
     /// the fallback declaration, so an unknown provider is treated as the
     /// conservative case rather than as full support.
@@ -926,8 +958,10 @@ impl App {
             mcp: self.cfg.mcp.clone(),
             lsp: self.cfg.lsp.clone(),
             // A continuation reference only travels with the model that
-            // produced it, and only for providers that document the field.
-            previous_response_id: if self.context_bootstrap_pending {
+            // produced it, for providers that document the field, and only
+            // while the user has not turned it off for this provider.
+            previous_response_id: if self.context_bootstrap_pending || !self.continuation_enabled()
+            {
                 None
             } else {
                 self.session.response_id_for(&self.session.model_key)
@@ -1622,22 +1656,7 @@ impl App {
                     summarized,
                     before,
                     after,
-                } => {
-                    self.rebuild_session_environment();
-                    let verb = if summarized { "summarized" } else { "trimmed" };
-                    self.status(
-                        &format!(
-                            "context compacted ({verb}): {} → {} tok",
-                            fmt_k(before),
-                            fmt_k(after)
-                        ),
-                        if summarized {
-                            StatusKind::Ok
-                        } else {
-                            StatusKind::Info
-                        },
-                    );
-                }
+                } => self.note_compaction(summarized, before, after),
                 AgentEvent::RequestBreakdown(b) => {
                     crate::providers::log_http(&format!(
                         "request breakdown: system={}B history={}B user={}B tools={}B total={}B",
@@ -2443,6 +2462,11 @@ impl App {
                 let reopened_steps =
                     reopen_undone_steps(&root, &self.session.id.to_string(), &touched, &sha);
                 self.session.checkpoints.truncate(idx);
+                // The provider's copy of the conversation still contains the
+                // work that was just reverted, and a continuation reference
+                // would carry the model straight back to it. The next request
+                // sends the transcript the host owns instead.
+                self.context_bootstrap_pending = true;
                 self.session.save().ok();
 
                 let mut note = format!("undo: reverted '{label}' ({} file(s)", touched.len());

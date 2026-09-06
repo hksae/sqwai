@@ -125,6 +125,10 @@ default_model = "sonnet"
 format = "anthropic"                        # anthropic | openai | responses
 base_url = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"           # optional: <PROVIDER>_API_KEY by default
+continuation = true                         # let the provider continue from its own
+                                            # copy of the conversation when the format
+                                            # documents a reference for it; set false
+                                            # to always resend the transcript
 
 [models.sonnet]
 provider = "anthropic"

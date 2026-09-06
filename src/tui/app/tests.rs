@@ -59,6 +59,7 @@ mod tests {
                 base_url: url,
                 api_key: Some("test-key".into()),
                 api_key_env: None,
+                continuation: true,
             },
         );
         let mut models = BTreeMap::new();
@@ -156,6 +157,7 @@ mod tests {
                 base_url: "https://opencode.ai/zen/v1".into(),
                 api_key: std::env::var("SQWAI_API_KEY").ok(),
                 api_key_env: None,
+                continuation: true,
             },
         );
         let mut models = BTreeMap::new();
@@ -1597,6 +1599,53 @@ mod tests {
     /// and nothing in the UI opened it — it was reachable from tests only, so
     /// every setting in it was effectively config-file-only. Every section
     /// offered by `/settings` must open a menu that has rows.
+    /// §3.3 exists so that after compaction the model works from the anchor
+    /// the host assembled. A continuation reference points at the provider's
+    /// copy of the history compaction just removed, so it cannot survive one.
+    #[test]
+    fn compaction_invalidates_the_continuation_reference() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.session.last_response_id = Some("resp_1".into());
+        app.session.last_response_model = Some(app.session.model_key.clone());
+        app.context_bootstrap_pending = false;
+
+        app.note_compaction(true, 90_000, 30_000);
+
+        assert!(
+            app.context_bootstrap_pending,
+            "the next request must carry the transcript the host owns"
+        );
+    }
+
+    /// Same reasoning for undo: the provider still remembers the work that was
+    /// just reverted on disk.
+    #[test]
+    fn undo_invalidates_the_continuation_reference() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.context_bootstrap_pending = false;
+        // no checkpoints: undo refuses, and must not clear anything
+        app.undo(1);
+        assert!(
+            !app.context_bootstrap_pending,
+            "an undo that did nothing must not invalidate anything"
+        );
+    }
+
+    /// The switch from #50: a provider whose endpoint does not really keep the
+    /// conversation can be told to stop being asked.
+    #[test]
+    fn continuation_can_be_turned_off_per_provider() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        assert!(app.continuation_enabled(), "default is on");
+        let provider = app.model_cfg.provider.clone();
+        app.cfg
+            .providers
+            .get_mut(&provider)
+            .expect("the test provider exists")
+            .continuation = false;
+        assert!(!app.continuation_enabled());
+    }
+
     #[test]
     fn every_settings_section_opens_a_menu_with_rows() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());

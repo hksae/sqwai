@@ -833,6 +833,10 @@ async fn run_agent(
         )
         .await
         {
+            // Same rule as the overflow retry below: the transcript the host
+            // owns has changed, so the provider's copy of it is no longer the
+            // context this turn is about (§3.3).
+            previous_response_id = None;
             let _ = tx
                 .send(AgentEvent::Compaction {
                     summarized,
@@ -1004,6 +1008,10 @@ async fn run_agent(
                     )
                     .await
                     {
+                        // The transcript this turn resends is not the one the
+                        // provider holds any more, so the reference cannot be
+                        // reused for the retry either (§3.3).
+                        previous_response_id = None;
                         let _ = tx
                             .send(AgentEvent::Compaction {
                                 summarized,
