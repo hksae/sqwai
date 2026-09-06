@@ -2015,7 +2015,16 @@ mod tests {
 
     /// Build a terminal, draw the app, and return all rows joined by '\n'.
     /// Trailing spaces on every row are trimmed so snapshots stay readable.
+    ///
+    /// The status bar labels are pinned here so fixtures never read the
+    /// checkout they happen to run in: `cwd_label` would otherwise render
+    /// the real directory name — including its width, which no output
+    /// filter can normalise back — and `plan_step_label` would leak an
+    /// active plan from the checkout's live `.sqwai/` state. The literal
+    /// `sqwai` keeps the layout byte-identical to the committed snapshots.
     fn render_to_string(app: &mut App, w: u16, h: u16) -> String {
+        app.cwd_label = "sqwai".to_string();
+        app.plan_step_label = String::new();
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
@@ -2031,47 +2040,21 @@ mod tests {
             .join("\n")
     }
 
-    /// Shared insta filter set: neutralises CWD (only the last component is
-    /// shown in the status bar) and the cargo package version.
-    /// The status bar renders the *name of the checkout directory*, taken from
-    /// `std::env::current_dir()`. That is the one machine-dependent thing in a
-    /// full-frame snapshot: it reads `sqwai` here and in CI, but `my-fork` for
-    /// anyone who cloned under a different name. Normalise it from the actual
-    /// cwd so the snapshots do not depend on what the directory is called.
+    /// Shared insta filter: normalises the fixture directory label.
+    ///
+    /// Fixtures always render with the literal label `sqwai` (pinned in
+    /// `render_to_string`, not read from the environment), so the pattern
+    /// is a constant rather than built from the actual checkout directory.
+    /// Anchored at end of line on purpose: the directory label is the last
+    /// thing on the status row. A bare word match would also rewrite the
+    /// product name on the startup screen, since this repository happens
+    /// to be named after it.
     ///
     /// Nothing else needs a filter: every startup fixture supplies its own
     /// `StartupData`, so the version and project path are literals owned by
     /// the test rather than values read out of the environment.
     fn cwd_filter() -> Vec<(&'static str, &'static str)> {
-        static PATTERN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-        let pattern = PATTERN.get_or_init(|| {
-            std::env::current_dir()
-                .ok()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-                .filter(|name| !name.is_empty())
-                // Anchored at end of line on purpose: the directory label is
-                // the last thing on the status row. A bare word match would
-                // also rewrite the product name on the startup screen, since
-                // this repository happens to be named after it.
-                .map(|name| format!(r"(?m){}\s*$", regex_lite_escape(&name)))
-        });
-        match pattern {
-            Some(pattern) => vec![(pattern.as_str(), "[CWD]")],
-            None => Vec::new(),
-        }
-    }
-
-    /// Escape the handful of regex metacharacters a directory name can contain.
-    fn regex_lite_escape(s: &str) -> String {
-        s.chars()
-            .flat_map(|c| {
-                if r"\.+*?()|[]{}^$".contains(c) {
-                    vec!['\\', c]
-                } else {
-                    vec![c]
-                }
-            })
-            .collect()
+        vec![(r"(?m)sqwai\s*$", "[CWD]")]
     }
 
     macro_rules! snap {
