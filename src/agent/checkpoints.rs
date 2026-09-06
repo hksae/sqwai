@@ -107,13 +107,17 @@ impl RestoreReport {
     }
 }
 
-/// Sha-256 of a file's bytes, matching what the file tools record in
-/// `file_diff.hash_after`. `None` when the file is gone.
+/// Sha-256 of a file's bytes, in the same `sha256:`-prefixed format the file
+/// tools record in `file_diff.hash_after`. `None` when the file is gone.
+///
+/// The prefix matters: comparing a raw hex digest against a journal record
+/// never matches, which silently turned every scoped restore into a row of
+/// skips while hand-rolled test hashes stayed green.
 fn current_hash(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    Some(format!("{:x}", hasher.finalize()))
+    Some(format!("sha256:{:x}", hasher.finalize()))
 }
 
 /// Restore exactly `targets` from a snapshot, and nothing else.
@@ -246,11 +250,66 @@ mod tests {
         dir
     }
 
-    /// Sha-256 as the file tools record it in `file_diff.hash_after`.
+    /// Hash in exactly the format a journal `file_diff` record carries in
+    /// `hash_after` (`sha256:`-prefixed). Earlier this helper returned raw
+    /// hex while production records are prefixed, so the tests passed and
+    /// production skipped everything — every `agent_hash` below must go
+    /// through here, never hand-rolled.
     fn hash_of(path: &Path) -> String {
         let mut hasher = Sha256::new();
         hasher.update(std::fs::read(path).unwrap());
-        format!("{:x}", hasher.finalize())
+        format!("sha256:{:x}", hasher.finalize())
+    }
+
+    /// The live hash and the journal hash are compared for equality, so they
+    /// must share a format. If either side drops the `sha256:` prefix, every
+    /// scoped restore degrades to reporting skips.
+    #[test]
+    fn live_and_journal_hashes_share_a_format() {
+        let repo = tmp_repo();
+        let target = repo.path().join("a.txt");
+        assert_eq!(current_hash(&target).unwrap(), hash_of(&target));
+    }
+
+    /// End to end across the module boundary: a hash that went through a real
+    /// journal `file_diff` record must come back out and restore, not skip.
+    /// Unit hashes on both sides used to match each other while production
+    /// prefixed only the journal side, so every scoped undo skipped every
+    /// file and no test saw it.
+    #[test]
+    fn restore_accepts_hashes_read_back_from_the_journal() {
+        use crate::agent::journal::Journal;
+        use serde_json::json;
+
+        let repo = tmp_repo();
+        let dir = repo.path();
+        let sha = snapshot(dir, "pre_mutation").expect("snapshot");
+        std::fs::write(dir.join("a.txt"), "agent edit\n").unwrap();
+
+        let mut journal = Journal::open(dir, "session").unwrap();
+        journal
+            .append(
+                "file_diff",
+                json!({
+                    "path": "a.txt",
+                    "hash_after": hash_of(&dir.join("a.txt")),
+                    "checkpoint": sha,
+                }),
+            )
+            .unwrap();
+        let targets: Vec<Target> = Journal::recorded_writes(dir, &[sha.clone()])
+            .unwrap()
+            .into_iter()
+            .map(|(path, agent_hash)| Target { path, agent_hash })
+            .collect();
+
+        let report = restore_paths(dir, &sha, &targets).expect("restore");
+        assert_eq!(report.restored, vec!["a.txt".to_string()]);
+        assert!(report.skipped.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "hello\n"
+        );
     }
 
     /// Undo must not be able to discard work it did not do.
