@@ -1449,7 +1449,7 @@ completion (Enter expands); diffs shown post hoc; thinking collapsed.
 Indicators: compacting…, checkpoint…, graph: building|stale,
 [verified] …, background jobs, retries. Panic hook restores the terminal.
 
-Popups: models (Ctrl+P), sessions (Ctrl+S), subagents (Ctrl+A, read-only
+Popups: models (Ctrl+P), sessions (Ctrl+S), subagents (Ctrl+B, read-only
 child chat), help (?), graph-view (Ctrl+G), undo (Ctrl+U), todo panel
 (Ctrl+T), settings hub (/settings) with Appearance, Providers, MCP, LSP,
 Skills.

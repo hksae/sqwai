@@ -228,8 +228,10 @@ impl Provider for AnthropicProvider {
                                 }
                                 let inp = v.pointer("/message/usage/input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
                                 let cached = v.pointer("/message/usage/cache_read_input_tokens").and_then(|x| x.as_u64());
+                                let created = v.pointer("/message/usage/cache_creation_input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+                                let total_prompt = inp + cached.unwrap_or(0) + created;
                                 yield Ok(StreamEvent::Usage(super::Usage {
-                                    prompt_tokens: inp,
+                                    prompt_tokens: total_prompt,
                                     completion_tokens: 0,
                                     cached_tokens: cached,
                                 }));

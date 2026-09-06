@@ -1584,4 +1584,242 @@ mod tests {
         let seg = Segment::User("hello".into());
         assert_eq!(app.seg_key(&seg), app.seg_key(&seg));
     }
+
+    #[test]
+    fn form_popup_titles_have_no_parentheses_and_support_mouse_selection() {
+        use crate::tui::app::forms::FormField;
+        use ratatui::layout::Rect;
+
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::EditProvider {
+            name: Some("anthropic".into()),
+        });
+        let title = app.menu_title();
+        assert!(!title.contains('(') && !title.contains(')'), "title has parens: {title}");
+        assert!(title.contains("edit provider: anthropic"));
+
+        app.open_menu_replace(Menu::EditModel {
+            provider: "anthropic".into(),
+            key: Some("sonnet".into()),
+        });
+        let mtitle = app.menu_title();
+        assert!(!mtitle.contains('(') && !mtitle.contains(')'), "mtitle has parens: {mtitle}");
+        assert!(mtitle.contains("model @ anthropic"));
+
+        // Simulate form rect and mouse interaction
+        app.menu_rect = Rect {
+            x: 10,
+            y: 10,
+            width: 60,
+            height: 10,
+        };
+        assert_eq!(app.form_focus, 0);
+
+        // Click on row 12 (field index 1: request id)
+        app.form_mouse_down(12, 15);
+        assert_eq!(app.form_focus, 1);
+
+        // Click inside the text area of field 1
+        let text_x = app.menu_rect.x + 1 + 16;
+        app.form_mouse_down(12, text_x + 2);
+        assert!(app.form_is_selecting());
+
+        // Drag to select text
+        app.form_mouse_drag(12, text_x + 5);
+        assert!(app.form_is_selecting());
+        app.form_mouse_up();
+
+        // Click on field 2 (context)
+        app.form_mouse_down(13, 15);
+        assert_eq!(app.form_focus, 2);
+    }
+
+    #[test]
+    fn text_combo_select_all_undo_redo() {
+        use crate::tui::app::events::{
+            handle_text_combo, is_redo_key, is_select_all_key, is_undo_key, select_all,
+        };
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use tui_textarea::TextArea;
+
+        let mut ta = TextArea::new(vec!["hello world".to_string()]);
+        select_all(&mut ta);
+        assert!(ta.is_selecting());
+        ta.copy();
+        assert_eq!(ta.yank_text(), "hello world");
+
+        // Test key matchers
+        let ctrl_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert!(is_select_all_key(&ctrl_a));
+
+        let ctrl_z = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert!(is_undo_key(&ctrl_z));
+        assert!(!is_redo_key(&ctrl_z));
+
+        // Ctrl+Shift+Z with Shift modifier
+        let ctrl_shift_z =
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        assert!(!is_undo_key(&ctrl_shift_z));
+        assert!(is_redo_key(&ctrl_shift_z));
+
+        // Ctrl+Shift+Z as uppercase Z
+        let ctrl_cap_z = KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::CONTROL);
+        assert!(!is_undo_key(&ctrl_cap_z));
+        assert!(is_redo_key(&ctrl_cap_z));
+
+        // Ctrl+Y
+        let ctrl_y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
+        assert!(is_redo_key(&ctrl_y));
+
+        // Test undo and redo actions
+        let mut ta2 = TextArea::new(vec![String::new()]);
+        ta2.insert_str("first");
+        ta2.insert_str(" second");
+        assert_eq!(ta2.lines().join(""), "first second");
+
+        handle_text_combo(&mut ta2, ctrl_z);
+        assert_eq!(ta2.lines().join(""), "first");
+
+        handle_text_combo(&mut ta2, ctrl_shift_z);
+        assert_eq!(ta2.lines().join(""), "first second");
+
+        handle_text_combo(&mut ta2, ctrl_z);
+        assert_eq!(ta2.lines().join(""), "first");
+
+        handle_text_combo(&mut ta2, ctrl_y);
+        assert_eq!(ta2.lines().join(""), "first second");
+    }
+
+    #[test]
+    fn subagents_shortcut_remapped_to_ctrl_b_and_ctrl_shift_a() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        // Ctrl+B opens subagents
+        tx.send(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+        )))
+        .unwrap();
+        app.poll_input(&rx).unwrap();
+        assert!(matches!(app.cur_menu(), Some(Menu::Subagents)));
+        app.menu_back();
+        assert!(app.cur_menu().is_none());
+
+        // Ctrl+Shift+A opens subagents
+        tx.send(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )))
+        .unwrap();
+        app.poll_input(&rx).unwrap();
+        assert!(matches!(app.cur_menu(), Some(Menu::Subagents)));
+        app.menu_back();
+        assert!(app.cur_menu().is_none());
+
+        // Ctrl+A does NOT open subagents, but selects all in app.input
+        app.input.insert_str("select me completely");
+        tx.send(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL,
+        )))
+        .unwrap();
+        app.poll_input(&rx).unwrap();
+        assert!(app.cur_menu().is_none());
+        assert!(app.input.is_selecting());
+        app.input.copy();
+        assert_eq!(app.input.yank_text(), "select me completely");
+    }
+
+    #[test]
+    fn paste_burst_undoes_completely_with_single_ctrl_z() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        // Simulate terminal injecting pasted characters as key events
+        for ch in "https://example.com/api".chars() {
+            tx.send(crossterm::event::Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::empty(),
+            )))
+            .unwrap();
+        }
+        app.poll_input(&rx).unwrap();
+        assert_eq!(app.input_text(), "https://example.com/api");
+
+        // Ctrl+Z should undo the ENTIRE pasted text, not just the last letter
+        tx.send(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL,
+        )))
+        .unwrap();
+        app.poll_input(&rx).unwrap();
+        assert_eq!(app.input_text(), "");
+
+        // Multi-line paste burst
+        for ch in "line1\nline2\nline3".chars() {
+            let key = match ch {
+                '\n' => KeyCode::Enter,
+                c => KeyCode::Char(c),
+            };
+            tx.send(crossterm::event::Event::Key(KeyEvent::new(
+                key,
+                KeyModifiers::empty(),
+            )))
+            .unwrap();
+        }
+        app.poll_input(&rx).unwrap();
+        assert_eq!(app.input_text(), "line1\nline2\nline3");
+
+        // Ctrl+Z should undo the entire multi-line paste
+        tx.send(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL,
+        )))
+        .unwrap();
+        app.poll_input(&rx).unwrap();
+        assert_eq!(app.input_text(), "");
+    }
+
+    #[test]
+    fn form_paste_burst_undoes_completely() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        // Open a form menu (e.g. EditProvider)
+        app.open_menu(Menu::EditProvider { name: None });
+        assert!(app.is_form_menu());
+
+        // Simulate terminal injecting pasted characters into the focused text field
+        for ch in "pasted-model-name".chars() {
+            tx.send(crossterm::event::Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::empty(),
+            )))
+            .unwrap();
+        }
+        app.poll_input(&rx).unwrap();
+        if let Some(FormField::Text { ta, .. }) = app.form_fields.get(app.form_focus) {
+            assert_eq!(ta.lines().join(""), "pasted-model-name");
+        } else {
+            panic!("expected focused form field to be text");
+        }
+
+        // Ctrl+Z should undo the entire pasted text
+        tx.send(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL,
+        )))
+        .unwrap();
+        app.poll_input(&rx).unwrap();
+        if let Some(FormField::Text { ta, .. }) = app.form_fields.get(app.form_focus) {
+            assert_eq!(ta.lines().join(""), "");
+        }
+    }
 }

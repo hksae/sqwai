@@ -257,6 +257,11 @@ impl App {
         if is_form {
             let n = self.form_fields.len();
             if n > 0 {
+                if let Some(FormField::Text { ta, .. }) =
+                    self.form_fields.get_mut(self.form_focus)
+                {
+                    ta.cancel_selection();
+                }
                 self.form_focus = if dir < 0 {
                     (self.form_focus + n - 1) % n
                 } else {
@@ -743,11 +748,11 @@ impl App {
             Some(Menu::PickModel { provider }) => format!(" switch model: {provider} "),
             Some(Menu::DeleteModelList { provider }) => format!(" delete model @ {provider} "),
             Some(Menu::EditProvider { name }) => match name {
-                Some(n) => format!(" edit provider: {n} (enter: save, esc: cancel) "),
-                None => " new provider (enter: save, esc: cancel) ".into(),
+                Some(n) => format!(" edit provider: {n} "),
+                None => " new provider ".into(),
             },
             Some(Menu::EditModel { provider, .. }) => {
-                format!(" model @ {provider} (enter: save, esc: cancel) ")
+                format!(" model @ {provider} ")
             }
             Some(Menu::Sessions) => {
                 if self.sessions_filter.is_empty() {

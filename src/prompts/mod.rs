@@ -4,7 +4,11 @@
 /// 1. built-in text from `src/prompts/system.md` (embedded at compile time),
 ///    overridable by `system.md` in the config directory without recompiling;
 /// 2. project instructions from `AGENTS.md` in the working directory;
-/// 3. stable environment block (OS, shell, working directory).
+/// 3. process environment (OS, shell, working directory), captured once;
+/// 4. durable user/project memory.
+///
+/// Session environment is a separate cacheable block built by the TUI on
+/// startup and after compaction. There is no per-turn environment block.
 ///
 /// The system block is assembled per request as ordered *parts*: the stable
 /// prefix above, then the durable plan, then whatever changes while the agent
@@ -70,7 +74,7 @@ fn truncate_chars(text: &str, max: usize) -> String {
 pub fn stable_prefix() -> String {
     let mut prompt = compose(&builtin_prompt(), project_agents().as_deref());
     prompt.push_str("\n\n");
-    prompt.push_str(&env::stable_block());
+    prompt.push_str(&env::process_block());
     if let Some(memory) = memory_block(&std::env::current_dir().unwrap_or_default()) {
         prompt.push_str("\n\n");
         prompt.push_str(&memory);
@@ -83,9 +87,9 @@ pub fn concise_prompt() -> String {
     "You are an AI coding agent hosted inside the sqwai CLI application. Reply in the user's language. For trivial requests, answer directly and briefly. Do not claim to use tools or inspect files unless the request requires it.".into()
 }
 
-/// Volatile runtime context: re-read once per user turn, never cached.
+/// Per-turn environment context is intentionally empty to preserve history cache.
 pub fn runtime_context() -> String {
-    env::volatile_block()
+    env::runtime_context()
 }
 
 /// The durable plan, when the project has one. It changes only when the agent
@@ -197,13 +201,12 @@ mod tests {
     #[test]
     fn stable_prefix_carries_no_volatile_facts() {
         let p = stable_prefix();
-        assert!(p.contains("<environment>"));
-        assert!(!p.contains("<runtime_context>"), "git/tree live elsewhere");
-        assert!(!p.contains("Date:"), "the clock must not enter the prefix");
+        assert!(p.contains("<process_environment>"));
+        assert!(!p.contains("<session_environment>"), "session env lives in B");
+        assert!(!p.contains("Date:"), "the clock must not enter the process prefix");
 
-        // volatile facts are a separate part, appended after the prefix
+        // per-turn runtime context is empty to preserve prompt cache
         let v = runtime_context();
-        assert!(v.contains("<runtime_context>"));
-        assert!(v.contains("Date:"));
+        assert!(v.is_empty());
     }
 }

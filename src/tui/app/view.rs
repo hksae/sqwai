@@ -1235,21 +1235,40 @@ impl App {
         }
 
         f.render_widget(Clear, rect);
+        let mut block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Plain)
+            .border_style(Theme::border_dim())
+            .title(Span::styled(
+                format!(" {} ", self.menu_title()),
+                Theme::dim(),
+            ));
+        if matches!(self.cur_menu(), Some(Menu::Sessions)) {
+            block = block.title_bottom(
+                Line::from(Span::styled(
+                    " p: pin · d: delete ",
+                    Theme::dim(),
+                ))
+                .right_aligned(),
+            );
+        } else if matches!(
+            self.cur_menu(),
+            Some(
+                Menu::EditProvider { .. }
+                    | Menu::EditModel { .. }
+                    | Menu::EditSessionTitle { .. }
+            )
+        ) {
+            block = block.title_bottom(
+                Line::from(Span::styled(
+                    " enter: save · esc: cancel ",
+                    Theme::dim(),
+                ))
+                .right_aligned(),
+            );
+        }
         f.render_widget(
-            Paragraph::new(rows).style(Theme::base()).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Plain)
-                    .border_style(Theme::border_dim())
-                    .title(Span::styled(
-                        format!(" {} ", self.menu_title()),
-                        Theme::dim(),
-                    ))
-                    .title_bottom(Line::from(Span::styled(
-                        " p: pin · d: delete ",
-                        Theme::dim(),
-                    )).right_aligned()),
-            ),
+            Paragraph::new(rows).style(Theme::base()).block(block),
             rect,
         );
 
@@ -1484,6 +1503,23 @@ impl App {
             .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
             .unwrap_or_default();
 
+        let context_used = self.session.context_tokens_used();
+        let ctx_pct = (self.session.context_percent() as u64).min(100);
+        let tok_str = fmt_k(context_used);
+
+        let cached_tokens = self
+            .session
+            .last_usage
+            .and_then(|u| u.cached_tokens)
+            .or(self.session.usage.cached_tokens)
+            .unwrap_or(0);
+        let cp = if context_used > 0 {
+            (cached_tokens.saturating_mul(100) / context_used).min(100)
+        } else {
+            0
+        };
+        let ctx_metrics_label = format!(" cache {cp}% · {ctx_pct}% · {tok_str} ·");
+
         let model_label = format!(" {} ", self.model_cfg.id);
         let working_label = if self.streaming {
             format!(
@@ -1521,7 +1557,7 @@ impl App {
         self.th_click = None;
         self.agents_click = None;
 
-        // right side: [agents] [folder] [th:level] [MODE chip]
+        // right side: [agents] [ctx metrics] [working] [model] [folder] [th:level] [MODE chip]
         let lsp_label = if self.lsp_diagnostics > 0 {
             format!(" LSP:{} ", self.lsp_diagnostics)
         } else {
@@ -1529,6 +1565,7 @@ impl App {
         };
         let mut right_len: usize = 1
             + agents_label.chars().count()
+            + ctx_metrics_label.chars().count()
             + working_label.chars().count()
             + model_label.chars().count()
             + th_label.chars().count()
@@ -1561,7 +1598,8 @@ impl App {
             spans.push(Span::styled(agents_label.clone(), agents_style));
             self.agents_click = Some((agents_x0, agents_x0 + agents_label.chars().count() as u16));
         }
-        let model_x0 = agents_x0 + agents_label.chars().count() as u16;
+        spans.push(Span::styled(ctx_metrics_label.clone(), Theme::dim()));
+        let model_x0 = agents_x0 + agents_label.chars().count() as u16 + ctx_metrics_label.chars().count() as u16;
         if !working_label.is_empty() {
             spans.push(Span::styled(working_label, Theme::accent()));
         }

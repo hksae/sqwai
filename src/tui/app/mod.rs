@@ -134,6 +134,8 @@ pub struct App {
     stable_prefix: String,
     /// This instance is read-only because another sqwai process owns the project lock.
     read_only: bool,
+    /// Session-scoped environment facts, rebuilt only at startup and compaction.
+    session_environment: String,
     /// Whether the current prompt still needs the full tool-oriented context.
     context_bootstrap_pending: bool,
     active_skills: Vec<crate::prompts::skills::Skill>,
@@ -201,6 +203,8 @@ pub struct App {
     paste_enter_guard: bool,
     /// Classifies ordinary Windows Enter events as submit vs pasted newlines.
     enter_gate: events::EnterGate,
+    /// Pending events queued during burst detection.
+    pending_events: std::collections::VecDeque<crossterm::event::Event>,
 
     /// Deadline for the single transient busy notice.
     busy_until: Option<Instant>,
@@ -267,6 +271,11 @@ impl App {
         prompt
     }
 
+    fn rebuild_session_environment(&mut self) {
+        let root = std::env::current_dir().unwrap_or_default();
+        self.session_environment = crate::prompts::env::session_block(&root);
+    }
+
     /// Assemble the system block for one request.
     ///
     /// Order matters: the stable prefix comes first, the durable plan next
@@ -278,6 +287,9 @@ impl App {
             return vec![SystemPart::volatile(crate::prompts::concise_prompt())];
         }
         let mut parts = vec![SystemPart::cached(self.stable_prefix.clone())];
+        if !self.session_environment.is_empty() {
+            parts.push(SystemPart::cached(self.session_environment.clone()));
+        }
         let root = std::env::current_dir().unwrap_or_default();
         if let Some(plan) = crate::prompts::plan_block(&root) {
             parts.push(SystemPart::cached(plan));
@@ -295,8 +307,10 @@ impl App {
         {
             parts.push(SystemPart::volatile(notice));
         }
-        // re-read once per submitted turn, never cached
-        parts.push(SystemPart::volatile(crate::prompts::runtime_context()));
+        let runtime = crate::prompts::runtime_context();
+        if !runtime.is_empty() {
+            parts.push(SystemPart::volatile(runtime));
+        }
         parts
     }
 
@@ -324,6 +338,7 @@ impl App {
             session,
             hl: Highlighter::new(),
             stable_prefix: String::new(),
+            session_environment: String::new(),
             context_bootstrap_pending: true,
             active_skills: Vec::new(),
             cfg,
@@ -385,6 +400,7 @@ impl App {
             pasted_clipboard: None,
             paste_enter_guard: false,
             enter_gate: events::EnterGate::default(),
+            pending_events: std::collections::VecDeque::new(),
             busy_until: None,
             activity_groups: Vec::new(),
             turn_started: None,
@@ -401,6 +417,7 @@ impl App {
                     .map(|plan| plan.id);
         }
         app.stable_prefix = app.stable_prefix();
+        app.rebuild_session_environment();
         app.context_bootstrap_pending = true;
         Ok(app)
     }
@@ -520,6 +537,7 @@ impl App {
         input.set_style(Theme::base());
         input.set_cursor_line_style(Style::new().bg(Theme::SURFACE()));
         input.set_cursor_style(Style::new().bg(Theme::ACCENT_SOFT()).fg(Theme::BG()));
+        input.set_selection_style(Style::new().bg(Theme::ACCENT()).fg(Theme::BG()));
         input
     }
 
@@ -873,6 +891,7 @@ impl App {
         self.seg_cache.clear();
         // the transcript is replaced: old group ranges point nowhere
         self.activity_groups.clear();
+        self.rebuild_session_environment();
         self.load_history_segments();
         self.menu_home();
         self.follow = true;
@@ -908,6 +927,7 @@ impl App {
         self.segments.clear();
         self.seg_cache.clear();
         self.activity_groups.clear();
+        self.rebuild_session_environment();
         self.follow = true;
         self.view_top = 0;
         self.menu_home();
@@ -1376,6 +1396,7 @@ impl App {
                     before,
                     after,
                 } => {
+                    self.rebuild_session_environment();
                     let verb = if summarized { "summarized" } else { "trimmed" };
                     self.status(
                         &format!(

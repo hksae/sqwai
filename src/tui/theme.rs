@@ -269,7 +269,7 @@ impl Theme {
     pub fn status_chip() -> Style {
         Style::new()
             .fg(Self::BG())
-            .bg(Self::ACCENT())
+            .bg(Self::ACCENT_SOFT())
             .add_modifier(Modifier::BOLD)
     }
     pub fn ok() -> Style {

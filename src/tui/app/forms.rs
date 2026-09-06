@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-use super::events::text_combo;
+use super::events::handle_text_combo;
 use super::*;
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
@@ -39,7 +39,8 @@ impl FormField {
         let mut ta = Box::new(TextArea::new(vec![value]));
         ta.set_style(Theme::base());
         ta.set_cursor_line_style(Style::new().bg(Theme::SURFACE()));
-        ta.set_cursor_style(Style::new().bg(Theme::ACCENT()).fg(Theme::BG()));
+        ta.set_cursor_style(Style::new().bg(Theme::ACCENT_SOFT()).fg(Theme::BG()));
+        ta.set_selection_style(Style::new().bg(Theme::ACCENT()).fg(Theme::BG()));
         Self::Text {
             label: label.into(),
             ta,
@@ -199,11 +200,7 @@ impl App {
             return;
         }
         if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus) {
-            if k.modifiers
-                .contains(crossterm::event::KeyModifiers::CONTROL)
-                && let KeyCode::Char(c) = k.code
-                && text_combo(ta, c)
-            {
+            if handle_text_combo(ta, k) {
                 self.dirty = true;
                 return;
             }
@@ -224,6 +221,78 @@ impl App {
             };
             self.dirty = true;
         }
+    }
+
+    pub(super) fn form_is_selecting(&self) -> bool {
+        match self.form_fields.get(self.form_focus) {
+            Some(FormField::Text { ta, .. }) => ta.is_selecting(),
+            _ => false,
+        }
+    }
+
+    pub(super) fn form_mouse_down(&mut self, row: u16, col: u16) {
+        let top_y = self.menu_rect.y + 1;
+        if row >= top_y {
+            let idx = (row - top_y) as usize;
+            if idx < self.form_fields.len() {
+                if self.form_focus != idx {
+                    if let Some(FormField::Text { ta, .. }) =
+                        self.form_fields.get_mut(self.form_focus)
+                    {
+                        ta.cancel_selection();
+                    }
+                    self.form_focus = idx;
+                }
+                let label_w = 16u16;
+                let text_x = self.menu_rect.x + 1 + label_w;
+                match self.form_fields.get_mut(idx) {
+                    Some(FormField::Text { ta, .. }) => {
+                        if col >= text_x {
+                            let char_col = (col.saturating_sub(text_x)) as usize;
+                            ta.move_cursor(tui_textarea::CursorMove::Jump(0, char_col as u16));
+                            ta.start_selection();
+                        } else {
+                            ta.cancel_selection();
+                            ta.move_cursor(tui_textarea::CursorMove::End);
+                        }
+                    }
+                    Some(FormField::Choice { .. }) => {
+                        if col >= text_x {
+                            self.choice_cycle(1);
+                        }
+                    }
+                    None => {}
+                }
+                self.dirty = true;
+            }
+        }
+    }
+
+    pub(super) fn form_mouse_drag(&mut self, _row: u16, col: u16) {
+        if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus) {
+            if ta.is_selecting() {
+                let label_w = 16u16;
+                let text_x = self.menu_rect.x + 1 + label_w;
+                let char_col = (col.saturating_sub(text_x)) as usize;
+                ta.move_cursor(tui_textarea::CursorMove::Jump(0, char_col as u16));
+                self.dirty = true;
+            }
+        }
+    }
+
+    pub(super) fn form_mouse_up(&mut self) {
+        if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus) {
+            if ta.is_selecting() {
+                ta.copy();
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    let text = ta.yank_text();
+                    if !text.is_empty() {
+                        let _ = clipboard.set_text(text);
+                    }
+                }
+            }
+        }
+        self.dirty = true;
     }
 
     pub(super) fn form_save(&mut self) {

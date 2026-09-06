@@ -79,15 +79,28 @@ impl EnterGate {
 }
 
 impl App {
+    pub(super) fn is_text_input_focused(&self) -> bool {
+        if self.startup {
+            return false;
+        }
+        if !self.menu_stack.is_empty() {
+            if self.is_inline_ask_free() {
+                return true;
+            }
+            if self.is_form_menu() {
+                return matches!(
+                    self.form_fields.get(self.form_focus),
+                    Some(FormField::Text { .. })
+                );
+            }
+            return false;
+        }
+        true
+    }
+
     fn paste_text(&mut self, text: &str) {
         self.jump_to_bottom_on_typing();
-        for (i, line) in text.split('\n').enumerate() {
-            if i > 0 {
-                self.input.insert_newline();
-            }
-            self.input
-                .insert_str(line.strip_suffix('\r').unwrap_or(line));
-        }
+        self.input.insert_str(text);
         self.dirty = true;
     }
 
@@ -98,7 +111,11 @@ impl App {
         use crossterm::event::{
             Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
         };
-        while let Ok(ev) = ev_rx.try_recv() {
+        while let Some(ev) = self
+            .pending_events
+            .pop_front()
+            .or_else(|| ev_rx.try_recv().ok())
+        {
             if self.startup && self.menu_stack.is_empty() {
                 if let Event::Key(k) = ev {
                     if k.kind == KeyEventKind::Press && k.modifiers.is_empty() {
@@ -129,6 +146,62 @@ impl App {
                         self.paste_enter_guard = false;
                         continue;
                     }
+                    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+                    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+                    let alt = k.modifiers.contains(KeyModifiers::ALT);
+
+                    if self.is_text_input_focused()
+                        && self.pasted_clipboard.is_none()
+                        && !ctrl
+                        && !alt
+                    {
+                        if let KeyCode::Char(c) = k.code {
+                            let mut text_batch = String::new();
+                            text_batch.push(c);
+                            while let Some(next_ev) = self
+                                .pending_events
+                                .pop_front()
+                                .or_else(|| ev_rx.try_recv().ok())
+                            {
+                                if let Some(next_c) = is_paste_key(&next_ev) {
+                                    text_batch.push(next_c);
+                                } else {
+                                    self.pending_events.push_back(next_ev);
+                                    break;
+                                }
+                            }
+                            if text_batch.chars().count() > 1 {
+                                while let Ok(next_ev) =
+                                    ev_rx.recv_timeout(std::time::Duration::from_millis(5))
+                                {
+                                    if let Some(next_c) = is_paste_key(&next_ev) {
+                                        text_batch.push(next_c);
+                                    } else {
+                                        self.pending_events.push_back(next_ev);
+                                        break;
+                                    }
+                                }
+                                if !self.menu_stack.is_empty() {
+                                    if self.is_inline_ask_free() {
+                                        self.jump_to_bottom_on_typing();
+                                        self.paste_text(&text_batch);
+                                    } else if self.is_form_menu() {
+                                        let p = text_batch.replace(['\r', '\n'], " ");
+                                        if let Some(FormField::Text { ta, .. }) =
+                                            self.form_fields.get_mut(self.form_focus)
+                                        {
+                                            ta.insert_str(p);
+                                        }
+                                    }
+                                } else {
+                                    self.paste_text(&text_batch);
+                                }
+                                self.dirty = true;
+                                continue;
+                            }
+                        }
+                    }
+
                     // Ctrl+V is handled below through the clipboard API.
                     // Without bracketed paste, PowerShell cannot inject an
                     // embedded newline as a separate submit event.
@@ -144,9 +217,6 @@ impl App {
                     if !is_enter {
                         self.enter_gate.note_key(now);
                     }
-                    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-                    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
-                    let alt = k.modifiers.contains(KeyModifiers::ALT);
                     // Handle paste as a complete, terminal-independent action. In
                     // particular, do not pass Ctrl+V through to TextArea::input:
                     // some Windows terminal/keymap combinations interpret it as
@@ -161,11 +231,49 @@ impl App {
                         let txt = normalize_paste(&txt);
                         self.pasted_clipboard = Some(txt.clone());
                         self.paste_enter_guard = true;
+                        if !self.menu_stack.is_empty() {
+                            let p = txt.replace(['\r', '\n'], " ");
+                            if let Some(FormField::Text { ta, .. }) =
+                                self.form_fields.get_mut(self.form_focus)
+                            {
+                                ta.insert_str(p);
+                            }
+                            self.dirty = true;
+                            continue;
+                        }
                         self.paste_text(&txt);
                         continue;
                     }
                     match k.code {
                         KeyCode::Char('c') if ctrl => {
+                            if self.is_form_menu() {
+                                if let Some(FormField::Text { ta, .. }) =
+                                    self.form_fields.get_mut(self.form_focus)
+                                {
+                                    if ta.is_selecting() {
+                                        ta.copy();
+                                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                            let text = ta.yank_text();
+                                            if !text.is_empty() {
+                                                let _ = clipboard.set_text(text);
+                                            }
+                                        }
+                                        self.dirty = true;
+                                    }
+                                }
+                                continue;
+                            }
+                            if self.input.is_selecting() {
+                                self.input.copy();
+                                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                    let text = self.input.yank_text();
+                                    if !text.is_empty() {
+                                        let _ = clipboard.set_text(text);
+                                    }
+                                }
+                                self.dirty = true;
+                                continue;
+                            }
                             // exit is only /exit; ctrl+c copies selection or clears the line
                             if let Some(sel) = self.sel {
                                 self.copy_selection(&sel);
@@ -280,12 +388,19 @@ impl App {
                         KeyCode::Char('t') if ctrl && self.menu_stack.is_empty() => {
                             self.open_menu(Menu::Todo)
                         }
-                        KeyCode::Char('a') if ctrl && self.menu_stack.is_empty() => {
-                            self.open_menu(Menu::Subagents)
+                        KeyCode::Char('b') | KeyCode::Char('B')
+                            if ctrl && self.menu_stack.is_empty() =>
+                        {
+                            self.open_menu(Menu::Subagents);
+                        }
+                        KeyCode::Char('a') | KeyCode::Char('A')
+                            if ctrl && shift && self.menu_stack.is_empty() =>
+                        {
+                            self.open_menu(Menu::Subagents);
                         }
                         KeyCode::Char('r')
                             if matches!(self.cur_menu(), Some(Menu::Sessions))
-                                && self.sessions_filter.is_empty() =>
+                                 && self.sessions_filter.is_empty() =>
                         {
                             if let Some(id) = self.selected_session_id() {
                                 self.run_action(MenuAction::RenameSession(id));
@@ -323,11 +438,22 @@ impl App {
                         KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
                             if !self.menu_stack.is_empty() =>
                         {
-                            self.form_edit_key(k)
+                            if self.is_inline_ask_free() {
+                                if ctrl && handle_text_combo(&mut self.input, k) {
+                                    self.jump_to_bottom_on_typing();
+                                    self.dirty = true;
+                                } else {
+                                    self.jump_to_bottom_on_typing();
+                                    self.bar_error = None;
+                                    self.input.input(k);
+                                }
+                            } else {
+                                self.form_edit_key(k);
+                            }
                         }
-                        KeyCode::Char(c) if ctrl && TEXT_COMBOS.contains(&c) => {
+                        _ if ctrl && handle_text_combo(&mut self.input, k) => {
                             self.jump_to_bottom_on_typing();
-                            text_combo(&mut self.input, c);
+                            self.dirty = true;
                         }
                         KeyCode::Char('j') if ctrl => self.input.insert_newline(),
                         KeyCode::PageUp if self.menu_stack.is_empty() => self.page(-1),
@@ -421,15 +547,40 @@ impl App {
                             self.scroll(-4);
                         }
                     }
-                    MouseEventKind::Down(MouseButton::Left) if !self.menu_stack.is_empty() => {}
-                    MouseEventKind::Drag(MouseButton::Left) if !self.menu_stack.is_empty() => {}
+                    MouseEventKind::Down(MouseButton::Left) if !self.menu_stack.is_empty() => {
+                        if self.is_form_menu() {
+                            if self.in_menu_rect(m.row, m.column) {
+                                self.form_mouse_down(m.row, m.column);
+                            } else {
+                                if let Some(FormField::Text { ta, .. }) =
+                                    self.form_fields.get_mut(self.form_focus)
+                                {
+                                    ta.cancel_selection();
+                                }
+                            }
+                        }
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) if !self.menu_stack.is_empty() => {
+                        if self.is_form_menu() && self.form_is_selecting() {
+                            self.form_mouse_drag(m.row, m.column);
+                        }
+                    }
                     MouseEventKind::Up(MouseButton::Left) if !self.menu_stack.is_empty() => {
-                        // inside: pick a row; outside: act like esc
-                        if self.in_menu_rect(m.row, m.column) {
-                            self.menu_click(m.row);
+                        if self.is_form_menu() {
+                            if !self.in_menu_rect(m.row, m.column) {
+                                self.sel = None;
+                                self.menu_back();
+                            } else if self.form_is_selecting() {
+                                self.form_mouse_up();
+                            }
                         } else {
-                            self.sel = None;
-                            self.menu_back();
+                            // inside: pick a row; outside: act like esc
+                            if self.in_menu_rect(m.row, m.column) {
+                                self.menu_click(m.row);
+                            } else {
+                                self.sel = None;
+                                self.menu_back();
+                            }
                         }
                     }
                     MouseEventKind::Moved if !self.menu_stack.is_empty() => self.menu_hover(m.row),
@@ -528,6 +679,7 @@ impl App {
         let Ok(txt) = cb.get_text() else {
             return;
         };
+        let txt = normalize_paste(&txt);
         if !self.menu_stack.is_empty() {
             // form fields stay single-line
             let text = txt.replace(['\r', '\n'], " ");
@@ -537,16 +689,27 @@ impl App {
             }
             return;
         }
-        self.jump_to_bottom_on_typing();
-        for (i, line) in txt.split('\n').enumerate() {
-            if i > 0 {
-                self.input.insert_newline();
-            }
-            self.input
-                .insert_str(line.strip_suffix('\r').unwrap_or(line));
-        }
-        self.dirty = true;
+        self.paste_text(&txt);
     }
+}
+
+fn is_paste_key(ev: &crossterm::event::Event) -> Option<char> {
+    if let crossterm::event::Event::Key(k) = ev {
+        if k.kind == crossterm::event::KeyEventKind::Press
+            && !k
+                .modifiers
+                .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT)
+        {
+            match k.code {
+                crossterm::event::KeyCode::Enter
+                | crossterm::event::KeyCode::Char('\r')
+                | crossterm::event::KeyCode::Char('\n') => return Some('\n'),
+                crossterm::event::KeyCode::Char(c) => return Some(c),
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 fn normalize_paste(text: &str) -> String {
@@ -651,30 +814,91 @@ mod tests {
     }
 }
 
-pub(super) fn text_combo(ta: &mut TextArea<'static>, c: char) -> bool {
-    use tui_textarea::CursorMove;
-    match c {
-        'z' => {
-            let _ = ta.undo();
-        }
-        'y' => {
-            let _ = ta.redo();
-        }
-        'a' => ta.move_cursor(CursorMove::Head),
-        'e' => ta.move_cursor(CursorMove::End),
-        'k' => {
-            let _ = ta.delete_line_by_end();
-        }
-        'u' => {
-            let _ = ta.delete_line_by_head();
-        }
-        'w' => {
-            let _ = ta.delete_word();
-        }
-        'd' => {
-            let _ = ta.delete_char();
-        }
-        _ => return false,
+pub(super) fn is_redo_key(k: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+    if !ctrl {
+        return false;
     }
-    true
+    if (shift && matches!(k.code, KeyCode::Char('z') | KeyCode::Char('Z')))
+        || k.code == KeyCode::Char('Z')
+        || matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y'))
+    {
+        return true;
+    }
+    false
+}
+
+pub(super) fn is_undo_key(k: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+    if !ctrl {
+        return false;
+    }
+    !shift && k.code == KeyCode::Char('z')
+}
+
+pub(super) fn is_select_all_key(k: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+    ctrl && !shift && matches!(k.code, KeyCode::Char('a') | KeyCode::Char('A'))
+}
+
+pub(super) fn select_all(ta: &mut TextArea<'static>) {
+    ta.cancel_selection();
+    ta.move_cursor(tui_textarea::CursorMove::Top);
+    ta.move_cursor(tui_textarea::CursorMove::Head);
+    ta.start_selection();
+    ta.move_cursor(tui_textarea::CursorMove::Bottom);
+    ta.move_cursor(tui_textarea::CursorMove::End);
+}
+
+pub(super) fn handle_text_combo(
+    ta: &mut TextArea<'static>,
+    k: crossterm::event::KeyEvent,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use tui_textarea::CursorMove;
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    if !ctrl {
+        return false;
+    }
+    if is_select_all_key(&k) {
+        select_all(ta);
+        return true;
+    }
+    if is_undo_key(&k) {
+        let _ = ta.undo();
+        return true;
+    }
+    if is_redo_key(&k) {
+        let _ = ta.redo();
+        return true;
+    }
+    match k.code {
+        KeyCode::Char('e') => {
+            ta.move_cursor(CursorMove::End);
+            true
+        }
+        KeyCode::Char('k') => {
+            let _ = ta.delete_line_by_end();
+            true
+        }
+        KeyCode::Char('u') => {
+            let _ = ta.delete_line_by_head();
+            true
+        }
+        KeyCode::Char('w') => {
+            let _ = ta.delete_word();
+            true
+        }
+        KeyCode::Char('d') => {
+            let _ = ta.delete_char();
+            true
+        }
+        _ => false,
+    }
 }
