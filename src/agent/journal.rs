@@ -29,6 +29,16 @@ pub struct Journal {
     agent: String,
 }
 
+/// What a per-step revert can and cannot put back (§2.5).
+#[derive(Debug, Default, Clone)]
+pub struct StepRevert {
+    /// pre-images that can be restored without disturbing another step
+    pub files: Vec<PreImage>,
+    /// paths this step wrote that a later step wrote again; reverting them
+    /// alone would undo that later step too, so they are refused by name
+    pub written_since: Vec<String>,
+}
+
 /// What one file looked like before an undone window touched it (§2.5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreImage {
@@ -297,6 +307,89 @@ impl Journal {
             }
         }
         Ok(out)
+    }
+
+    /// Pre-images for one plan step, and what stands in the way of using them.
+    ///
+    /// §2.5: reverting a single step needs layer 1 only — *"restore
+    /// `hash_before` from the blob store if the file has not been touched by
+    /// any other steps since (verified via the journal's `file_diff` chain)"*.
+    /// That proviso is the whole difficulty: a file the step wrote and a later
+    /// step then rewrote cannot be reverted in isolation, because putting the
+    /// old bytes back would silently undo the later step as well.
+    ///
+    /// Returns the revertible pre-images and, separately, the paths a later
+    /// step has since written, so the caller can refuse and say which.
+    pub fn step_pre_images(root: &Path, step: &str) -> Result<StepRevert> {
+        let records = Self::records(root)?;
+        let mut revert = StepRevert::default();
+        let mut last_seq_of_step = 0u64;
+
+        for record in &records {
+            if record.kind != "file_diff" || record.step.as_deref() != Some(step) {
+                continue;
+            }
+            last_seq_of_step = last_seq_of_step.max(record.seq);
+            let Some(path) = record.fields.get("path").and_then(Value::as_str) else {
+                continue;
+            };
+            let field = |name: &str| {
+                record
+                    .fields
+                    .get(name)
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            };
+            match revert.files.iter_mut().find(|found| found.path == path) {
+                // first record wins for the pre-image, last for the hash the
+                // host left the file at
+                Some(slot) => slot.agent_hash = field("hash_after"),
+                None => revert.files.push(PreImage {
+                    path: path.to_string(),
+                    blob_before: field("blob_before"),
+                    existed_before: field("hash_before").is_some(),
+                    agent_hash: field("hash_after"),
+                }),
+            }
+        }
+
+        // Anything written after this step's last record, by a different step,
+        // makes that path un-revertible on its own.
+        for record in &records {
+            if record.kind != "file_diff"
+                || record.seq <= last_seq_of_step
+                || record.step.as_deref() == Some(step)
+            {
+                continue;
+            }
+            if let Some(path) = record.fields.get("path").and_then(Value::as_str)
+                && revert.files.iter().any(|item| item.path == path)
+                && !revert.written_since.iter().any(|known| known == path)
+            {
+                revert.written_since.push(path.to_string());
+            }
+        }
+        revert
+            .files
+            .retain(|item| !revert.written_since.contains(&item.path));
+        Ok(revert)
+    }
+
+    /// Record a per-step revert (§2.2.2's `undo` kind, `step` variant).
+    pub fn append_undo_step(
+        &mut self,
+        step: &str,
+        files: &[String],
+        reopened_steps: &[String],
+    ) -> Result<u64> {
+        self.append(
+            "undo",
+            json!({
+                "step": step,
+                "files": files,
+                "reopened_steps": reopened_steps,
+            }),
+        )
     }
 
     /// Which of `checkpoints` have at least one recorded write.
@@ -718,6 +811,115 @@ mod tests {
             "the file existed, so a revert cannot mean deleting it"
         );
         assert_eq!(pre[0].agent_hash.as_deref(), Some("sha256:new"));
+    }
+
+    /// §2.5's proviso for per-step undo: a file may be reverted alone only if
+    /// no later step has written it since. Reverting it anyway would put back
+    /// bytes from before the *later* step, silently undoing that step too —
+    /// which is worse than refusing, because the plan would still call it done.
+    #[test]
+    fn a_step_whose_file_a_later_step_rewrote_is_refused_by_name() {
+        let root = root();
+        let mut journal = Journal::open(&root, "session").unwrap();
+
+        journal.set_attribution(Some("1".into()), Some("plan".into()), "main");
+        journal
+            .append(
+                "file_diff",
+                serde_json::json!({
+                    "path": "src/a.rs",
+                    "blob_before": "blake3:a-before-step-1",
+                    "hash_before": "sha256:a0",
+                    "hash_after": "sha256:a1",
+                }),
+            )
+            .unwrap();
+        journal
+            .append(
+                "file_diff",
+                serde_json::json!({
+                    "path": "src/untouched.rs",
+                    "blob_before": "blake3:u-before-step-1",
+                    "hash_before": "sha256:u0",
+                    "hash_after": "sha256:u1",
+                }),
+            )
+            .unwrap();
+
+        // a later step rewrites one of the two files
+        journal.set_attribution(Some("2".into()), Some("plan".into()), "main");
+        journal
+            .append(
+                "file_diff",
+                serde_json::json!({
+                    "path": "src/a.rs",
+                    "blob_before": "blake3:a-before-step-2",
+                    "hash_before": "sha256:a1",
+                    "hash_after": "sha256:a2",
+                }),
+            )
+            .unwrap();
+
+        let revert = Journal::step_pre_images(&root, "1").unwrap();
+        assert_eq!(
+            revert.written_since,
+            vec!["src/a.rs".to_string()],
+            "the contested file has to be named, not silently dropped"
+        );
+        assert_eq!(
+            revert.files.len(),
+            1,
+            "the other file is still revertible: {:?}",
+            revert.files
+        );
+        assert_eq!(revert.files[0].path, "src/untouched.rs");
+        assert_eq!(
+            revert.files[0].blob_before.as_deref(),
+            Some("blake3:u-before-step-1")
+        );
+
+        // and step 2 itself, being the latest writer, reverts freely
+        let revert = Journal::step_pre_images(&root, "2").unwrap();
+        assert!(revert.written_since.is_empty());
+        assert_eq!(
+            revert.files[0].blob_before.as_deref(),
+            Some("blake3:a-before-step-2"),
+            "step 2 goes back to the state step 1 left, not to the original"
+        );
+    }
+
+    /// Records from other steps must not leak into a step's own revert, and a
+    /// step that wrote nothing has nothing to put back.
+    #[test]
+    fn a_step_reverts_only_its_own_writes() {
+        let root = root();
+        let mut journal = Journal::open(&root, "session").unwrap();
+        journal.set_attribution(Some("7".into()), Some("plan".into()), "main");
+        journal
+            .append(
+                "file_diff",
+                serde_json::json!({"path": "mine.rs", "blob_before": "blake3:mine"}),
+            )
+            .unwrap();
+        journal.set_attribution(None, Some("plan".into()), "main");
+        journal
+            .append(
+                "file_diff",
+                serde_json::json!({"path": "unattributed.rs", "blob_before": "blake3:other"}),
+            )
+            .unwrap();
+
+        let revert = Journal::step_pre_images(&root, "7").unwrap();
+        assert_eq!(revert.files.len(), 1);
+        assert_eq!(revert.files[0].path, "mine.rs");
+
+        assert!(
+            Journal::step_pre_images(&root, "9")
+                .unwrap()
+                .files
+                .is_empty(),
+            "a step with no records reverts nothing"
+        );
     }
 
     /// What scopes `/undo`: only the paths this checkpoint's own `file_diff`

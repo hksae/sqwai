@@ -1322,19 +1322,22 @@ impl App {
                 if self.streaming {
                     self.show_busy_status();
                 } else {
-                    match rest.split_whitespace().nth(1) {
-                        None => self.undo(1),
-                        Some(arg) => match arg.parse::<usize>() {
+                    let mut args = rest.split_whitespace().skip(1);
+                    match (args.next(), args.next()) {
+                        (None, _) => self.undo(1),
+                        // `/undo step 3` — revert one plan step through the
+                        // layer-1 pre-images (§2.5), not the last checkpoint
+                        (Some("step"), Some(id)) => self.undo_step(id),
+                        (Some("step"), None) => self
+                            .status("/undo step needs a step id: /undo step 3", StatusKind::Warn),
+                        (Some(arg), _) => match arg.parse::<usize>() {
                             Ok(n) => self.undo(n),
-                            // `/undo step 3` used to parse as `/undo 1`: the
-                            // argument was dropped and the last checkpoint was
-                            // reverted instead, reported as a success. Per-step
-                            // undo is not built yet (§7 F7), so say that
-                            // instead of undoing the wrong thing.
+                            // Never guess: this used to parse as `/undo 1` and
+                            // revert the last checkpoint, reported as success.
                             Err(_) => self.status(
                                 &format!(
-                                    "/undo takes a count: /undo or /undo 3. \
-                                     Cannot undo {arg:?} — per-step undo is not implemented yet."
+                                    "/undo takes a count or a step: /undo, /undo 3, \
+                                     /undo step 3. Cannot undo {arg:?}."
                                 ),
                                 StatusKind::Warn,
                             ),
@@ -2519,6 +2522,97 @@ impl App {
                 self.dirty = true;
             }
             Err(e) => self.status(&format!("undo failed: {e:#}"), StatusKind::Err),
+        }
+    }
+
+    /// Revert one plan step (§2.5, `/undo step N`).
+    ///
+    /// Only layer 1 is involved: the journal knows which `file_diff` records
+    /// belong to the step and the blob store holds their pre-images. A file a
+    /// later step has since written is refused by name rather than reverted,
+    /// because putting the old bytes back would undo that later step too.
+    fn undo_step(&mut self, step: &str) {
+        let root = std::env::current_dir().unwrap_or_default();
+        let revert = match crate::agent::journal::Journal::step_pre_images(&root, step) {
+            Ok(revert) => revert,
+            Err(e) => {
+                self.status(&format!("undo step {step}: {e:#}"), StatusKind::Err);
+                return;
+            }
+        };
+        if revert.files.is_empty() {
+            let note = if revert.written_since.is_empty() {
+                format!("undo step {step}: this step recorded no file writes")
+            } else {
+                format!(
+                    "undo step {step}: nothing revertible — later steps rewrote {}",
+                    revert.written_since.join(", ")
+                )
+            };
+            self.status(&note, StatusKind::Warn);
+            return;
+        }
+
+        match crate::agent::checkpoints::restore_from_blobs(&root, &revert.files) {
+            Ok(report) => {
+                let touched = report.touched();
+                let mut reopened: Vec<String> = Vec::new();
+                if let Ok(Some(mut active)) = crate::plan::open_active(&root)
+                    && crate::plan::reopen_for_undo(
+                        &mut active,
+                        step,
+                        format!("reopened by undo of step {step}"),
+                    )
+                    .is_ok()
+                {
+                    if crate::plan::store(&root, &active).is_ok() {
+                        reopened.push(step.to_string());
+                    }
+                    self.refresh_plan_label();
+                }
+                if let Ok(mut journal) =
+                    crate::agent::journal::Journal::open(&root, &self.session.id.to_string())
+                {
+                    // host-written, like every other undo record (§2.2.2)
+                    journal.set_attribution(None, None, "host");
+                    let _ = journal.append_undo_step(step, &touched, &reopened);
+                }
+                // The provider's copy of the conversation still contains the
+                // reverted work (§3.3, #50).
+                self.context_bootstrap_pending = true;
+
+                let mut note = format!("undo step {step}: {} file(s)", touched.len());
+                if !report.deleted.is_empty() {
+                    note.push_str(&format!(", {} removed", report.deleted.len()));
+                }
+                if !reopened.is_empty() {
+                    note.push_str("; step reopened");
+                }
+                let kind = if !revert.written_since.is_empty() {
+                    note.push_str(&format!(
+                        "; left alone, rewritten by a later step: {}",
+                        revert.written_since.join(", ")
+                    ));
+                    StatusKind::Warn
+                } else if !report.skipped.is_empty() {
+                    note.push_str(&format!(
+                        "; left alone, changed outside sqwai: {}",
+                        report.skipped.join(", ")
+                    ));
+                    StatusKind::Warn
+                } else if !report.no_pre_image.is_empty() {
+                    note.push_str(&format!(
+                        "; not revertible, no stored pre-image: {}",
+                        report.no_pre_image.join(", ")
+                    ));
+                    StatusKind::Warn
+                } else {
+                    StatusKind::Ok
+                };
+                self.status(&note, kind);
+                self.dirty = true;
+            }
+            Err(e) => self.status(&format!("undo step {step} failed: {e:#}"), StatusKind::Err),
         }
     }
 
