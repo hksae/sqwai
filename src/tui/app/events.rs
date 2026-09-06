@@ -80,9 +80,6 @@ impl EnterGate {
 
 impl App {
     pub(super) fn is_text_input_focused(&self) -> bool {
-        if self.startup {
-            return false;
-        }
         if !self.menu_stack.is_empty() {
             if self.is_inline_ask_free() {
                 return true;
@@ -116,21 +113,6 @@ impl App {
             .pop_front()
             .or_else(|| ev_rx.try_recv().ok())
         {
-            if self.startup && self.menu_stack.is_empty() {
-                if let Event::Key(k) = ev {
-                    if k.kind == KeyEventKind::Press && k.modifiers.is_empty() {
-                        match k.code {
-                            KeyCode::Char('q') => self.quit = true,
-                            KeyCode::Char('n') => {
-                                self.start_new_session();
-                            }
-                            KeyCode::Enter => self.open_menu(Menu::Sessions),
-                            _ => {}
-                        }
-                    }
-                }
-                continue;
-            }
             crate::tui::event_log::log("RX", crate::tui::event_log::describe(&ev));
             match ev {
                 Event::Key(k) => {
@@ -156,6 +138,17 @@ impl App {
                         && !alt
                     {
                         if let KeyCode::Char(c) = k.code {
+                            if c == '?'
+                                && self.input_text().trim().is_empty()
+                                && self.menu_stack.is_empty()
+                            {
+                                self.status(
+                                    "commands: /settings, /plan, /sessions, /undo, /init, /exit",
+                                    StatusKind::Info,
+                                );
+                                self.dirty = true;
+                                continue;
+                            }
                             let mut text_batch = String::new();
                             text_batch.push(c);
                             while let Some(next_ev) = self
@@ -274,11 +267,23 @@ impl App {
                                 self.dirty = true;
                                 continue;
                             }
-                            // exit is only /exit; ctrl+c copies selection or clears the line
                             if let Some(sel) = self.sel {
                                 self.copy_selection(&sel);
+                            } else if self.input_text().is_empty() {
+                                if self.last_ctrl_c.is_some_and(|t| t.elapsed() < Duration::from_millis(1500)) {
+                                    self.quit = true;
+                                } else {
+                                    self.last_ctrl_c = Some(Instant::now());
+                                    self.status("press Ctrl+C again to exit", StatusKind::Info);
+                                }
                             } else {
                                 self.input = Self::fresh_input(String::new());
+                                self.last_ctrl_c = None;
+                            }
+                        }
+                        KeyCode::Char('d') if ctrl && self.menu_stack.is_empty() => {
+                            if self.input_text().trim().is_empty() {
+                                self.quit = true;
                             }
                         }
                         KeyCode::Esc => {
@@ -316,17 +321,6 @@ impl App {
                                     a.abort();
                                 }
                             }
-                        }
-                        KeyCode::Char('q') if self.startup && self.menu_stack.is_empty() => {
-                            self.quit = true;
-                        }
-                        KeyCode::Char('n') if self.startup && self.menu_stack.is_empty() => {
-                            self.start_new_session();
-                        }
-                        KeyCode::Enter
-                            if !ctrl && !shift && self.startup && self.menu_stack.is_empty() =>
-                        {
-                            self.open_menu(Menu::Sessions)
                         }
                         KeyCode::Enter if !ctrl && !shift && self.menu_stack.is_empty() => {
                             if self.enter_gate.on_enter(now) == EnterDecision::Newline {

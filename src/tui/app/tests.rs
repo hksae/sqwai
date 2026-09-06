@@ -1822,4 +1822,150 @@ mod tests {
             assert_eq!(ta.lines().join(""), "");
         }
     }
+
+    #[test]
+    fn startup_screen_renders_identification_and_state_wide() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = true;
+        app.startup_data = Some(App::collect_startup_data(
+            &app.cfg,
+            &app.model_cfg,
+            app.read_only,
+        ));
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text: Vec<String> = buffer
+            .content
+            .chunks(buffer.area.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+            .collect();
+
+        // Must contain sqwai version from cargo
+        let has_version = text
+            .iter()
+            .any(|line| line.contains(&format!("sqwai {}", env!("CARGO_PKG_VERSION"))));
+        assert!(has_version, "startup screen must show cargo version");
+
+        // Must show hints
+        let has_hints = text.iter().any(|line| line.contains("tab") && line.contains("plan / act"));
+        assert!(has_hints, "startup screen must show tab hint");
+    }
+
+    #[test]
+    fn startup_screen_renders_narrow_layout() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = true;
+        app.startup_data = Some(App::collect_startup_data(
+            &app.cfg,
+            &app.model_cfg,
+            app.read_only,
+        ));
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text: Vec<String> = buffer
+            .content
+            .chunks(buffer.area.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+            .collect();
+
+        // Identification line must NOT contain model in narrow layout
+        let id_line = text
+            .iter()
+            .find(|line| line.contains("sqwai"))
+            .expect("identification line");
+        assert!(!id_line.contains(&app.model_cfg.id), "narrow layout omits model from line 1");
+    }
+
+    #[test]
+    fn startup_keys_q_and_n_type_into_input() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = true;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::empty(),
+        )))
+        .unwrap();
+        tx.send(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::empty(),
+        )))
+        .unwrap();
+
+        app.poll_input(&rx).unwrap();
+
+        // Must NOT quit and must NOT reset session
+        assert!(!app.quit);
+        assert_eq!(app.input_text(), "qn");
+    }
+
+    #[test]
+    fn startup_ctrl_s_opens_sessions_menu() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = true;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        )))
+        .unwrap();
+
+        app.poll_input(&rx).unwrap();
+        assert!(matches!(app.cur_menu(), Some(Menu::Sessions)));
+    }
+
+    #[tokio::test]
+    async fn startup_empty_enter_with_plan_continues_plan() {
+        let (_url, _h) = mock_sse_server("x", "y");
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = true;
+        assert!(app.input_text().trim().is_empty());
+
+        let root = std::env::current_dir().unwrap_or_default();
+        if crate::plan::open_active(&root).ok().flatten().is_some() {
+            app.submit();
+            assert!(!app.startup);
+            assert_eq!(app.session.messages.len(), 1);
+            let msg = &app.session.messages[0].content;
+            assert!(msg.starts_with("Продолжи следующий шаг плана"));
+        }
+    }
+
+    #[test]
+    fn startup_command_dismisses_startup_screen() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = true;
+        app.input = App::fresh_input("/themes".into());
+
+        app.submit();
+
+        // /themes command dismisses startup and opens Themes menu
+        assert!(!app.startup);
+        assert!(matches!(app.cur_menu(), Some(Menu::Themes)));
+    }
+
+    #[test]
+    fn startup_new_command_does_nothing_on_startup() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = true;
+        app.input = App::fresh_input("/new".into());
+
+        app.submit();
+
+        // /new on startup screen does nothing and leaves startup screen active
+        assert!(app.startup);
+        assert!(app.session.messages.is_empty());
+    }
 }

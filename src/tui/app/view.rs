@@ -19,48 +19,7 @@ use crate::session::Session;
 use crate::tui::markdown::{Highlighter, render, wrap_tagged};
 use crate::tui::theme::Theme;
 
-const STARTUP_LOGO: &str = "███████╗ ██████╗ ██╗    ██╗ █████╗ ██╗
-██╔════╝██╔═══██╗██║    ██║██╔══██╗██║
-███████╗██║   ██║██║ █╗ ██║███████║██║
-╚════██║██║▄▄ ██║██║███╗██║██╔══██║██║
-███████║╚██████╔╝╚███╔███╔╝██║  ██║██║
-╚══════╝ ╚══▀▀═╝  ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝";
 
-fn startup_logo(width: u16, height: u16) -> Vec<String> {
-    let source: Vec<Vec<char>> = STARTUP_LOGO
-        .lines()
-        .map(|line| line.chars().collect())
-        .collect();
-    let natural_width = source.iter().map(Vec::len).max().unwrap_or(0);
-    let natural_height = source.len();
-    let target_width = usize::from(width).max(1);
-    let target_height = usize::from(height).max(1);
-    let scale = (target_width as f32 / natural_width.max(1) as f32)
-        .min(target_height as f32 / natural_height.max(1) as f32)
-        .min(1.0);
-
-    // Downscaling uses nearest-neighbor sampling to keep the original art
-    // intact as much as possible within a smaller terminal.
-
-    let output_width = ((natural_width as f32 * scale).round() as usize).max(1);
-    let output_height = ((natural_height as f32 * scale).round() as usize).max(1);
-
-    (0..output_height)
-        .map(|row| {
-            let source_row = row * natural_height / output_height;
-            (0..output_width)
-                .map(|column| {
-                    let source_column = column * natural_width / output_width;
-                    source
-                        .get(source_row)
-                        .and_then(|line| line.get(source_column))
-                        .copied()
-                        .unwrap_or(' ')
-                })
-                .collect()
-        })
-        .collect()
-}
 
 #[derive(Debug, Clone)]
 pub(super) enum Segment {
@@ -848,14 +807,6 @@ impl App {
             }
         }
         self.seg_cache.truncate(self.segments.len());
-
-        if self.segments.is_empty() {
-            let logo = startup_logo(w, 9);
-            logical.clear();
-            for line in logo {
-                logical.push((Line::from(Span::styled(line, Theme::accent_bold())), None));
-            }
-        }
         let (lines, rowseg) = wrap_tagged(logical, w);
         self.cache_lines = lines;
         self.cache_rowseg = rowseg;
@@ -912,105 +863,97 @@ impl App {
         f.render_widget(Block::new().style(Theme::base()), area);
 
         if self.startup && self.menu_stack.is_empty() {
-            let logo = startup_logo(chat.width, chat.height);
-            let logo_widget = Paragraph::new(
-                logo.into_iter()
-                    .map(|line| Line::from(Span::styled(line, Theme::accent_bold())))
-                    .collect::<Vec<_>>(),
-            )
-            .style(Theme::base());
-            f.render_widget(logo_widget, chat);
-            return;
-        }
-
-        let top = self.chat_top(chat.height);
-        // User-message surface strips intentionally extend beyond the chat
-        // gutter, all the way to the terminal edges. Paint these rows first;
-        // the transcript below supplies the prefix and text over that fill.
-        for (screen_row, abs_row) in (top..top + chat.height as usize).enumerate() {
-            let is_user = self
-                .cache_rowseg
-                .get(abs_row)
-                .and_then(|tag| *tag)
-                .is_some_and(|idx| matches!(self.segments.get(idx), Some(Segment::User(_))));
-            if is_user {
-                let strip = Rect {
-                    x: area.x,
-                    y: chat.y + screen_row as u16,
-                    width: area.width,
-                    height: 1,
-                };
-                f.render_widget(
-                    Paragraph::new(" ".repeat(area.width as usize))
-                        .style(Style::new().bg(Theme::USER_SURFACE())),
-                    strip,
-                );
-            }
-        }
-        let sel = self.sel;
-        let visible: Vec<Line> = self
-            .cache_lines
-            .iter()
-            .enumerate()
-            .skip(top)
-            .take(chat.height as usize)
-            .map(|(abs, l)| match sel {
-                Some(s) if abs >= s.rows().0 && abs <= s.rows().1 => {
-                    let chars = line_text(l).chars().count();
-                    if chars == 0 {
-                        // empty row inside the selection: full-width highlight
-                        return Line::from(vec![Span::styled(
-                            " ".repeat(chat.width as usize),
-                            Style::new().add_modifier(Modifier::REVERSED),
-                        )]);
-                    }
-                    let cs = if abs == s.rows().0 {
-                        s.a.col.min(s.b.col).min(chars)
-                    } else {
-                        0
-                    };
-                    let ce = if abs == s.rows().1 {
-                        s.a.col.max(s.b.col).min(chars)
-                    } else {
-                        chars
-                    };
-                    apply_sel(l, cs, ce.max(cs))
-                }
-                _ => l.clone(),
-            })
-            .collect();
-        // Lines carry their own styles. Do not apply the base background at
-        // widget level: it would override USER_SURFACE on user-strip rows.
-        f.render_widget(Paragraph::new(visible), chat);
-        // The transcript widget repaints its own rectangle, so apply the
-        // full-width fill again afterwards to restore the two outer gutters.
-        for (screen_row, abs_row) in (top..top + chat.height as usize).enumerate() {
-            let is_user = self
-                .cache_rowseg
-                .get(abs_row)
-                .and_then(|tag| *tag)
-                .is_some_and(|idx| matches!(self.segments.get(idx), Some(Segment::User(_))));
-            if is_user {
-                let y = chat.y + screen_row as u16;
-                let fill = Paragraph::new(" ").style(Style::new().bg(Theme::USER_SURFACE()));
-                f.render_widget(
-                    fill.clone(),
-                    Rect {
+            self.render_startup_screen(f, chat);
+        } else {
+            let top = self.chat_top(chat.height);
+            // User-message surface strips intentionally extend beyond the chat
+            // gutter, all the way to the terminal edges. Paint these rows first;
+            // the transcript below supplies the prefix and text over that fill.
+            for (screen_row, abs_row) in (top..top + chat.height as usize).enumerate() {
+                let is_user = self
+                    .cache_rowseg
+                    .get(abs_row)
+                    .and_then(|tag| *tag)
+                    .is_some_and(|idx| matches!(self.segments.get(idx), Some(Segment::User(_))));
+                if is_user {
+                    let strip = Rect {
                         x: area.x,
-                        y,
-                        width: 1,
+                        y: chat.y + screen_row as u16,
+                        width: area.width,
                         height: 1,
-                    },
-                );
-                f.render_widget(
-                    fill,
-                    Rect {
-                        x: area.x + area.width.saturating_sub(1),
-                        y,
-                        width: 1,
-                        height: 1,
-                    },
-                );
+                    };
+                    f.render_widget(
+                        Paragraph::new(" ".repeat(area.width as usize))
+                            .style(Style::new().bg(Theme::USER_SURFACE())),
+                        strip,
+                    );
+                }
+            }
+            let sel = self.sel;
+            let visible: Vec<Line> = self
+                .cache_lines
+                .iter()
+                .enumerate()
+                .skip(top)
+                .take(chat.height as usize)
+                .map(|(abs, l)| match sel {
+                    Some(s) if abs >= s.rows().0 && abs <= s.rows().1 => {
+                        let chars = line_text(l).chars().count();
+                        if chars == 0 {
+                            // empty row inside the selection: full-width highlight
+                            return Line::from(vec![Span::styled(
+                                " ".repeat(chat.width as usize),
+                                Style::new().add_modifier(Modifier::REVERSED),
+                            )]);
+                        }
+                        let cs = if abs == s.rows().0 {
+                            s.a.col.min(s.b.col).min(chars)
+                        } else {
+                            0
+                        };
+                        let ce = if abs == s.rows().1 {
+                            s.a.col.max(s.b.col).min(chars)
+                        } else {
+                            chars
+                        };
+                        apply_sel(l, cs, ce.max(cs))
+                    }
+                    _ => l.clone(),
+                })
+                .collect();
+            // Lines carry their own styles. Do not apply the base background at
+            // widget level: it would override USER_SURFACE on user-strip rows.
+            f.render_widget(Paragraph::new(visible), chat);
+            // The transcript widget repaints its own rectangle, so apply the
+            // full-width fill again afterwards to restore the two outer gutters.
+            for (screen_row, abs_row) in (top..top + chat.height as usize).enumerate() {
+                let is_user = self
+                    .cache_rowseg
+                    .get(abs_row)
+                    .and_then(|tag| *tag)
+                    .is_some_and(|idx| matches!(self.segments.get(idx), Some(Segment::User(_))));
+                if is_user {
+                    let y = chat.y + screen_row as u16;
+                    let fill = Paragraph::new(" ").style(Style::new().bg(Theme::USER_SURFACE()));
+                    f.render_widget(
+                        fill.clone(),
+                        Rect {
+                            x: area.x,
+                            y,
+                            width: 1,
+                            height: 1,
+                        },
+                    );
+                    f.render_widget(
+                        fill,
+                        Rect {
+                            x: area.x + area.width.saturating_sub(1),
+                            y,
+                            width: 1,
+                            height: 1,
+                        },
+                    );
+                }
             }
         }
 
@@ -1623,59 +1566,308 @@ impl App {
         }
         spans
     }
+
+    pub(super) fn render_startup_screen(&self, f: &mut ratatui::Frame, chat: Rect) {
+        if chat.width < 20 || chat.height < 4 {
+            return;
+        }
+        let fallback_data;
+        let data = if let Some(d) = &self.startup_data {
+            d
+        } else {
+            fallback_data = Self::collect_startup_data(&self.cfg, &self.model_cfg, self.read_only);
+            &fallback_data
+        };
+
+        let is_narrow = chat.width < 80;
+        let mut raw_lines: Vec<Line<'static>> = Vec::new();
+
+        // 1. Identification line
+        let mut id_spans = Vec::new();
+        id_spans.push(Span::styled(format!("sqwai {}", data.version), Theme::base()));
+        id_spans.push(Span::styled(" · ", Theme::dim()));
+        id_spans.push(Span::styled(data.project_path.clone(), Theme::base()));
+        id_spans.push(Span::styled(" · ", Theme::dim()));
+        if let Some(branch) = &data.git_branch {
+            id_spans.push(Span::styled(branch.clone(), Theme::base()));
+            id_spans.push(Span::styled(" ", Theme::base()));
+            match data.git_modified {
+                Some(0) => {
+                    let label = if is_narrow { "✓" } else { "✓ clean" };
+                    id_spans.push(Span::styled(label, Theme::ok()));
+                }
+                Some(n) => {
+                    let label = if is_narrow { format!("● {n}") } else { format!("● {n} modified") };
+                    id_spans.push(Span::styled(label, Theme::warn()));
+                }
+                None => {}
+            }
+        } else {
+            id_spans.push(Span::styled("no git", Theme::dim()));
+        }
+        if !is_narrow {
+            id_spans.push(Span::styled(" · ", Theme::dim()));
+            id_spans.push(Span::styled(data.model.clone(), Theme::base()));
+        }
+        raw_lines.push(Line::from(id_spans));
+        raw_lines.push(Line::default()); // blank line
+
+        // 2. State section
+        if let Some(plan) = &data.active_plan {
+            if is_narrow {
+                raw_lines.push(Line::from(vec![
+                    Span::styled("▸ ", Theme::accent()),
+                    Span::styled(plan.title.clone(), Theme::base().add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("   step {}/{}", plan.current_step, plan.total_steps), Theme::dim()),
+                ]));
+                if let Some(ls) = &data.last_session {
+                    raw_lines.push(Line::from(vec![
+                        Span::styled("  last  ", Theme::dim()),
+                        Span::styled(format!("{} · {}", ls.date, ls.outcome), Theme::dim()),
+                    ]));
+                }
+            } else {
+                raw_lines.push(Line::from(vec![
+                    Span::styled("▸ active plan   ", Theme::accent()),
+                    Span::styled(format!("\"{}\"", plan.title), Theme::base().add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("     step {}/{} {}", plan.current_step, plan.total_steps, plan.status_text), Theme::dim()),
+                ]));
+                if let Some(ls) = &data.last_session {
+                    raw_lines.push(Line::from(vec![
+                        Span::styled("  last session  ", Theme::dim()),
+                        Span::styled(format!("{} · {}", ls.date, ls.outcome), Theme::dim()),
+                    ]));
+                }
+            }
+
+            // Memory line
+            let mut mem_parts = Vec::new();
+            if data.memory.has_memory_md {
+                mem_parts.push("MEMORY.md".to_string());
+            }
+            if let Some(diary) = &data.memory.latest_diary {
+                mem_parts.push(format!("diary {diary}"));
+            }
+            if data.memory.graph_ready {
+                mem_parts.push("graph ready".to_string());
+            }
+            if !mem_parts.is_empty() {
+                let prefix = if is_narrow { "  memory  " } else { "  memory        " };
+                raw_lines.push(Line::from(vec![
+                    Span::styled(prefix, Theme::dim()),
+                    Span::styled(mem_parts.join(" · "), Theme::dim()),
+                ]));
+            }
+        } else if data.has_sqwai_dir {
+            // No active plan, but has .sqwai history
+            if is_narrow {
+                raw_lines.push(Line::from(vec![Span::styled("no active plan", Theme::dim())]));
+            } else {
+                let mut spans = vec![Span::styled("no active plan", Theme::dim())];
+                if let Some(ls) = &data.last_session {
+                    spans.push(Span::styled(format!(" · last session {}", ls.date), Theme::dim()));
+                }
+                raw_lines.push(Line::from(spans));
+            }
+
+            // Memory line
+            let mut mem_parts = Vec::new();
+            if data.memory.has_memory_md {
+                mem_parts.push("MEMORY.md".to_string());
+            }
+            if let Some(diary) = &data.memory.latest_diary {
+                mem_parts.push(format!("diary {diary}"));
+            }
+            if data.memory.graph_ready {
+                mem_parts.push("graph ready".to_string());
+            }
+            if !mem_parts.is_empty() {
+                let prefix = if is_narrow { "memory  " } else { "memory        " };
+                raw_lines.push(Line::from(vec![
+                    Span::styled(prefix, Theme::dim()),
+                    Span::styled(mem_parts.join(" · "), Theme::dim()),
+                ]));
+            }
+        } else {
+            // First run: no .sqwai
+            raw_lines.push(Line::from(vec![Span::styled("this project has no .sqwai yet", Theme::dim())]));
+            raw_lines.push(Line::from(vec![
+                Span::styled("/init", Theme::base()),
+                Span::styled(" create AGENTS.md and memory or just type a task", Theme::dim()),
+            ]));
+        }
+
+        // 3. Warnings (maximum 2 lines)
+        for w in data.warnings.iter().take(2) {
+            raw_lines.push(Line::from(vec![Span::styled(w.clone(), Theme::warn())]));
+        }
+
+        // 4. Recent (only wide, if non-empty)
+        if !is_narrow && !data.recent.is_empty() {
+            raw_lines.push(Line::default()); // blank line
+            for (i, session) in data.recent.iter().take(3).enumerate() {
+                let prefix = if i == 0 { "recent        " } else { "              " };
+                raw_lines.push(Line::from(vec![
+                    Span::styled(prefix, Theme::dim()),
+                    Span::styled(format!("{:<16}", session.date), Theme::dim()),
+                    Span::styled(format!("{:<24}", truncate_chars(&session.title, 22)), Theme::base()),
+                    Span::styled(session.outcome.clone(), Theme::dim()),
+                ]));
+            }
+        }
+
+        // 5. Hints
+        raw_lines.push(Line::default()); // blank line
+        if is_narrow {
+            let mut hint_items: Vec<(&str, &str)> = Vec::new();
+            if data.active_plan.is_some() {
+                hint_items.push(("enter", "continue plan"));
+            }
+            hint_items.push(("tab", "plan / act"));
+            hint_items.push(("ctrl+s", "sessions"));
+            hint_items.push(("?", "help"));
+            if !data.has_sqwai_dir {
+                hint_items.push(("/init", "set up project"));
+            }
+            for (k, d) in hint_items {
+                raw_lines.push(Line::from(vec![
+                    Span::styled(format!("{:<7}", k), Theme::base()),
+                    Span::styled(d, Theme::dim()),
+                ]));
+            }
+        } else {
+            let mut col1_items: Vec<(&str, &str)> = Vec::new();
+            let mut col2_items: Vec<(&str, &str)> = Vec::new();
+            let mut col3_items: Vec<(&str, &str)> = Vec::new();
+
+            if data.active_plan.is_some() {
+                col1_items.push(("enter", "continue plan"));
+                col2_items.push(("tab", "plan / act"));
+                col3_items.push(("ctrl+s", "sessions"));
+
+                col1_items.push(("type a task to start", ""));
+                col2_items.push(("?", "help"));
+                if !data.has_sqwai_dir {
+                    col3_items.push(("/init", "set up project"));
+                }
+            } else {
+                col1_items.push(("type a task to start", ""));
+                col2_items.push(("tab", "plan / act"));
+                col3_items.push(("ctrl+s", "sessions"));
+
+                col1_items.push(("?", "help"));
+                if !data.has_sqwai_dir {
+                    col2_items.push(("/init", "set up project"));
+                }
+            }
+
+            let num_rows = col1_items.len().max(col2_items.len()).max(col3_items.len());
+            for r in 0..num_rows {
+                let mut row_spans = Vec::new();
+                if let Some(&(k, d)) = col1_items.get(r) {
+                    let pair_text = if d.is_empty() { k.to_string() } else { format!("{k}  {d}") };
+                    let pad = 26usize.saturating_sub(pair_text.chars().count());
+                    if d.is_empty() {
+                        row_spans.push(Span::styled(k, Theme::dim()));
+                    } else {
+                        row_spans.push(Span::styled(k, Theme::base()));
+                        row_spans.push(Span::styled(format!("  {d}"), Theme::dim()));
+                    }
+                    row_spans.push(Span::styled(" ".repeat(pad), Theme::base()));
+                } else {
+                    row_spans.push(Span::styled(" ".repeat(26), Theme::base()));
+                }
+
+                if let Some(&(k, d)) = col2_items.get(r) {
+                    let pair_text = if d.is_empty() { k.to_string() } else { format!("{k}  {d}") };
+                    let pad = 24usize.saturating_sub(pair_text.chars().count());
+                    if d.is_empty() {
+                        row_spans.push(Span::styled(k, Theme::dim()));
+                    } else {
+                        row_spans.push(Span::styled(k, Theme::base()));
+                        row_spans.push(Span::styled(format!("  {d}"), Theme::dim()));
+                    }
+                    row_spans.push(Span::styled(" ".repeat(pad), Theme::base()));
+                } else {
+                    row_spans.push(Span::styled(" ".repeat(24), Theme::base()));
+                }
+
+                if let Some(&(k, d)) = col3_items.get(r) {
+                    if d.is_empty() {
+                        row_spans.push(Span::styled(k, Theme::dim()));
+                    } else {
+                        row_spans.push(Span::styled(k, Theme::base()));
+                        row_spans.push(Span::styled(format!("  {d}"), Theme::dim()));
+                    }
+                }
+                raw_lines.push(Line::from(row_spans));
+            }
+        }
+
+        // Layout padding and clamping
+        let left_pad = if is_narrow {
+            1u16
+        } else {
+            ((chat.width as i32 - 84) / 2).max(2) as u16
+        };
+        let pad_str = " ".repeat(left_pad as usize);
+        let max_content_width = (chat.width as usize).saturating_sub(left_pad as usize);
+
+        let padded_lines: Vec<Line<'static>> = raw_lines
+            .into_iter()
+            .map(|line| {
+                let mut spans = vec![Span::styled(pad_str.clone(), Theme::base())];
+                let mut rem = max_content_width;
+                for span in line.spans {
+                    if rem == 0 {
+                        break;
+                    }
+                    let text_len = span.content.chars().count();
+                    if text_len <= rem {
+                        rem -= text_len;
+                        spans.push(span);
+                    } else {
+                        let truncated: String = span.content.chars().take(rem.saturating_sub(1)).collect();
+                        spans.push(Span::styled(format!("{truncated}…"), span.style));
+                        rem = 0;
+                    }
+                }
+                Line::from(spans)
+            })
+            .collect();
+
+        let total_lines = padded_lines.len() as u16;
+        let top_pad = if chat.height > total_lines + 3 {
+            (chat.height / 4).max(1)
+        } else {
+            1
+        };
+
+        let available_height = chat.height.saturating_sub(top_pad) as usize;
+        let render_lines: Vec<Line<'static>> = padded_lines.into_iter().take(available_height).collect();
+        let render_rect = Rect {
+            x: chat.x,
+            y: chat.y + top_pad,
+            width: chat.width,
+            height: render_lines.len() as u16,
+        };
+        f.render_widget(Paragraph::new(render_lines).style(Theme::base()), render_rect);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{STARTUP_LOGO, startup_logo};
     use unicode_width::UnicodeWidthStr;
 
     #[test]
-    fn startup_logo_keeps_native_size_when_it_fits() {
-        let logo = startup_logo(40, 6);
-        assert_eq!(logo.len(), 6);
-        assert_eq!(
-            logo.iter()
-                .map(|line| UnicodeWidthStr::width(line.as_str()))
-                .max(),
-            Some(38)
-        );
-    }
-
-    #[test]
-    fn startup_logo_scales_to_width_and_height() {
-        let logo = startup_logo(20, 4);
-        assert!(logo.len() <= 4);
-        assert!(
-            logo.iter()
-                .all(|line| UnicodeWidthStr::width(line.as_str()) <= 20)
-        );
-        assert_eq!(logo.len(), 3);
-        assert_eq!(
-            logo.iter()
-                .map(|line| UnicodeWidthStr::width(line.as_str()))
-                .max(),
-            Some(20)
-        );
-    }
-
-    #[test]
-    fn startup_logo_stays_native_size_in_large_terminal() {
-        let logo = startup_logo(100, 24);
-        assert_eq!(logo.len(), 6);
-        assert_eq!(
-            logo.iter()
-                .map(|line| UnicodeWidthStr::width(line.as_str()))
-                .max(),
-            Some(38)
-        );
-    }
-
-    #[test]
-    fn startup_logo_handles_tiny_terminal() {
-        let logo = startup_logo(1, 1);
-        assert_eq!(logo.len(), 1);
-        assert_eq!(UnicodeWidthStr::width(logo[0].as_str()), 1);
+    fn shorten_path_shortens_user_home() {
+        use crate::tui::app::shorten_path;
+        use std::path::Path;
+        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            let path = Path::new(&home).join("dev").join("sqwai");
+            let shortened = shorten_path(&path);
+            assert!(shortened.starts_with("~/"), "must start with ~/: {shortened}");
+        }
     }
 }
 

@@ -91,6 +91,43 @@ use view::{ActivityGroup, CellPos, Segment, Selection};
 
 use menus::COMMANDS;
 
+#[derive(Debug, Clone)]
+pub(super) struct StartupData {
+    pub version: &'static str,
+    pub project_path: String,
+    pub git_branch: Option<String>,
+    pub git_modified: Option<usize>,
+    pub model: String,
+    pub active_plan: Option<ActivePlanInfo>,
+    pub last_session: Option<RecentSessionInfo>,
+    pub memory: MemoryInfo,
+    pub recent: Vec<RecentSessionInfo>,
+    pub warnings: Vec<String>,
+    pub has_sqwai_dir: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ActivePlanInfo {
+    pub title: String,
+    pub current_step: usize,
+    pub total_steps: usize,
+    pub status_text: String,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct RecentSessionInfo {
+    pub date: String,
+    pub title: String,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct MemoryInfo {
+    pub has_memory_md: bool,
+    pub latest_diary: Option<String>,
+    pub graph_ready: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum StatusKind {
     Info,
@@ -164,6 +201,8 @@ pub struct App {
     mode: Mode,
     /// true while showing the no-session startup screen
     startup: bool,
+    pub(super) startup_data: Option<StartupData>,
+    pub(super) last_ctrl_c: Option<Instant>,
     /// last request error, shown in the status bar until the next action
     bar_error: Option<String>,
     /// previous turn ended successfully — gates retry notifications
@@ -331,6 +370,12 @@ impl App {
         let resolved = cfg.resolve_provider(&model_cfg)?;
         let provider = providers::create(&resolved)?;
 
+        let startup_data = if startup {
+            Some(Self::collect_startup_data(&cfg, &model_cfg, read_only))
+        } else {
+            None
+        };
+
         let mut app = Self {
             input: Self::fresh_input(String::new()),
             model_cfg,
@@ -357,6 +402,8 @@ impl App {
             thinking_idx: None,
             mode: Mode::Act,
             startup,
+            startup_data,
+            last_ctrl_c: None,
             read_only,
             bar_error: None,
             prev_turn_ok: false,
@@ -697,10 +744,25 @@ impl App {
         self.retry_notified = false;
         self.retry_line = None;
         self.last_checkpoint = None;
-        let text = self.input_text();
-        let text = text.trim().to_string();
+        let mut text = self.input_text().trim().to_string();
         if text.is_empty() {
-            return;
+            if self.startup {
+                let root = std::env::current_dir().unwrap_or_default();
+                if let Ok(Some(active)) = crate::plan::open_active(&root) {
+                    text = if let Some(step) = active.steps.iter().find(|s| {
+                        s.status == crate::plan::StepStatus::InProgress
+                            || s.status == crate::plan::StepStatus::Pending
+                    }) {
+                        format!("Продолжи следующий шаг плана: {}", step.title)
+                    } else {
+                        "Продолжи следующий шаг плана".to_string()
+                    };
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            }
         }
         if self.streaming {
             self.show_busy_status();
@@ -710,9 +772,14 @@ impl App {
         self.popup_dismiss = false;
         self.hover = None;
         if let Some(rest) = text.strip_prefix('/') {
+            let cmd_name = rest.split_whitespace().next().unwrap_or("");
+            if cmd_name != "new" {
+                self.startup = false;
+            }
             self.command(rest);
             return;
         }
+        self.startup = false;
         if let Some(pc) = self.cfg.providers.get(&self.model_cfg.provider)
             && pc.effective_api_key(&self.model_cfg.provider).is_none()
         {
@@ -911,6 +978,9 @@ impl App {
     }
 
     fn start_new_session(&mut self) -> bool {
+        if self.startup {
+            return false;
+        }
         self.startup = false;
         if self.streaming {
             self.show_busy_status();
@@ -2213,6 +2283,278 @@ impl App {
             self.view_top = next;
         }
         self.dirty = true;
+    }
+
+    pub(super) fn collect_startup_data(
+        cfg: &Config,
+        model_cfg: &ModelConfig,
+        read_only: bool,
+    ) -> StartupData {
+        let root = std::env::current_dir().unwrap_or_default();
+        let version = env!("CARGO_PKG_VERSION");
+        let project_path = shorten_path(&root);
+        let (git_branch, git_modified) = collect_git_info(&root);
+        let model = model_cfg.id.clone();
+
+        let active_plan_raw = crate::plan::open_active(&root).ok().flatten();
+        let has_sqwai_dir = root.join(".sqwai").exists();
+
+        // Memory info
+        let has_memory_md = root.join("MEMORY.md").exists();
+        let diary_dir = root.join(".sqwai").join("memory");
+        let latest_diary = if diary_dir.exists() {
+            let mut dates = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&diary_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.ends_with(".md") && name != "MEMORY.md" {
+                        let date_str = name.trim_end_matches(".md");
+                        if chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").is_ok() {
+                            dates.push(date_str.to_string());
+                        }
+                    }
+                }
+            }
+            dates.sort();
+            dates.pop()
+        } else {
+            None
+        };
+        let graph_ready = root.join(".sqwai").join("graph").join("graph.db").exists();
+        let memory = MemoryInfo {
+            has_memory_md,
+            latest_diary,
+            graph_ready,
+        };
+
+        // Saved sessions
+        let sessions = Session::list_visible(10).unwrap_or_default();
+
+        let (active_plan, last_session, recent) = if let Some(plan) = active_plan_raw {
+            let in_prog = plan
+                .steps
+                .iter()
+                .position(|s| s.status == crate::plan::StepStatus::InProgress);
+            let (curr, st) = if let Some(i) = in_prog {
+                (i + 1, "in progress".to_string())
+            } else if let Some(i) = plan
+                .steps
+                .iter()
+                .position(|s| s.status == crate::plan::StepStatus::Pending)
+            {
+                (i + 1, "pending".to_string())
+            } else if !plan.steps.is_empty()
+                && plan
+                    .steps
+                    .iter()
+                    .all(|s| s.status == crate::plan::StepStatus::Done)
+            {
+                (plan.steps.len(), "all completed".to_string())
+            } else {
+                (1, "in progress".to_string())
+            };
+
+            let plan_info = ActivePlanInfo {
+                title: plan.goal.text.clone(),
+                current_step: curr,
+                total_steps: plan.steps.len(),
+                status_text: st,
+            };
+
+            let done = plan
+                .steps
+                .iter()
+                .filter(|s| s.status == crate::plan::StepStatus::Done)
+                .count();
+            let blocked = plan
+                .steps
+                .iter()
+                .filter(|s| s.status == crate::plan::StepStatus::Blocked)
+                .count();
+            let mut stats = Vec::new();
+            if done > 0 {
+                stats.push(format!("{done} steps done"));
+            }
+            if blocked > 0 {
+                stats.push(format!("{blocked} blocked"));
+            }
+            let stats_str = if stats.is_empty() {
+                format!("{} steps", plan.steps.len())
+            } else {
+                stats.join(" · ")
+            };
+
+            let last_sess_obj = sessions
+                .iter()
+                .find(|s| {
+                    plan.sessions.contains(&s.id.to_string())
+                        || s.plan_id.as_deref() == Some(&plan.id)
+                })
+                .or_else(|| sessions.first());
+
+            let last_session_info = last_sess_obj.map(|s| RecentSessionInfo {
+                date: fmt_relative_time(s.last_activity()),
+                title: s.title.clone(),
+                outcome: stats_str,
+            });
+
+            let outside_sessions: Vec<RecentSessionInfo> = sessions
+                .iter()
+                .filter(|s| {
+                    !plan.sessions.contains(&s.id.to_string())
+                        && s.plan_id.as_deref() != Some(&plan.id)
+                })
+                .take(3)
+                .map(|s| {
+                    let calls: usize = s.activity.iter().map(|a| a.calls).sum();
+                    let errors: usize = s.activity.iter().map(|a| a.errors).sum();
+                    let outcome = if calls > 0 || errors > 0 {
+                        let mut parts = Vec::new();
+                        if calls > 0 {
+                            parts.push(format!("{calls} done"));
+                        }
+                        if errors > 0 {
+                            parts.push(format!("{errors} blocked"));
+                        }
+                        parts.join(" · ")
+                    } else {
+                        "complete".to_string()
+                    };
+                    RecentSessionInfo {
+                        date: fmt_relative_time(s.last_activity()),
+                        title: s.title.clone(),
+                        outcome,
+                    }
+                })
+                .collect();
+
+            (Some(plan_info), last_session_info, outside_sessions)
+        } else {
+            let last_session_info = sessions.first().map(|s| RecentSessionInfo {
+                date: fmt_relative_time(s.last_activity()),
+                title: s.title.clone(),
+                outcome: String::new(),
+            });
+
+            let recent_sessions: Vec<RecentSessionInfo> = sessions
+                .iter()
+                .take(3)
+                .map(|s| {
+                    let calls: usize = s.activity.iter().map(|a| a.calls).sum();
+                    let errors: usize = s.activity.iter().map(|a| a.errors).sum();
+                    let outcome = if calls > 0 || errors > 0 {
+                        let mut parts = Vec::new();
+                        if calls > 0 {
+                            parts.push(format!("{calls} done"));
+                        }
+                        if errors > 0 {
+                            parts.push(format!("{errors} blocked"));
+                        }
+                        parts.join(" · ")
+                    } else {
+                        "complete".to_string()
+                    };
+                    RecentSessionInfo {
+                        date: fmt_relative_time(s.last_activity()),
+                        title: s.title.clone(),
+                        outcome,
+                    }
+                })
+                .collect();
+
+            (None, last_session_info, recent_sessions)
+        };
+
+        let mut warnings = Vec::new();
+        if let Some(pc) = cfg.providers.get(&model_cfg.provider) {
+            if pc.effective_api_key(&model_cfg.provider).is_none() {
+                let env_name = pc
+                    .key_env_name(&model_cfg.provider)
+                    .unwrap_or_else(|| "API_KEY".into());
+                warnings.push(format!("no API key: set {env_name} or run /settings"));
+            }
+        }
+        if git_branch.is_none() {
+            warnings.push("git not found: undo for shell commands disabled".to_string());
+        }
+        if read_only {
+            warnings.push("another sqwai instance holds this project — read-only".to_string());
+        }
+        warnings.truncate(2);
+
+        StartupData {
+            version,
+            project_path,
+            git_branch,
+            git_modified,
+            model,
+            active_plan,
+            last_session,
+            memory,
+            recent,
+            warnings,
+            has_sqwai_dir,
+        }
+    }
+}
+
+pub(super) fn shorten_path(path: &std::path::Path) -> String {
+    let path_str = path.to_string_lossy().replace('\\', "/");
+    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        let home_str = home.replace('\\', "/");
+        if path_str.starts_with(&home_str) {
+            let rest = &path_str[home_str.len()..];
+            if rest.is_empty() {
+                return "~".to_string();
+            }
+            if rest.starts_with('/') {
+                return format!("~{rest}");
+            }
+            return format!("~/{rest}");
+        }
+    }
+    path_str
+}
+
+pub(super) fn collect_git_info(root: &std::path::Path) -> (Option<String>, Option<usize>) {
+    let Ok(repo) = git2::Repository::discover(root) else {
+        return (None, None);
+    };
+    let branch = repo
+        .head()
+        .ok()
+        .and_then(|h| h.shorthand().ok().map(|s| s.to_string()))
+        .unwrap_or_else(|| "HEAD".into());
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(true);
+    let modified = repo
+        .statuses(Some(&mut opts))
+        .ok()
+        .map(|statuses| {
+            statuses
+                .iter()
+                .filter(|s| !s.status().is_ignored())
+                .count()
+        })
+        .unwrap_or(0);
+    (Some(branch), Some(modified))
+}
+
+pub(super) fn fmt_relative_time(dt: chrono::DateTime<chrono::Utc>) -> String {
+    let local = dt.with_timezone(&chrono::Local);
+    let now = chrono::Local::now();
+    let duration = now.signed_duration_since(local);
+    if duration.num_minutes() < 1 {
+        "just now".to_string()
+    } else if duration.num_hours() < 24 && now.date_naive() == local.date_naive() {
+        local.format("%H:%M").to_string()
+    } else if (now.date_naive() - local.date_naive()).num_days() == 1 {
+        format!("yesterday {}", local.format("%H:%M"))
+    } else if duration.num_days() < 7 {
+        let days = duration.num_days().max(2);
+        format!("{days} days ago")
+    } else {
+        local.format("%d.%m %H:%M").to_string()
     }
 }
 
