@@ -325,7 +325,7 @@ impl Provider for AnthropicProvider {
                                             json!({"_raw": args, "_error": "arguments were not valid JSON"})
                                         })
                                     };
-                                    yield Ok(StreamEvent::ToolCall(ToolCallReq { id, name, args: args_v }));
+                                    yield Ok(StreamEvent::ToolCall(ToolCallReq::new(id, name, args_v)));
                                 }
                             }
                             "message_delta" => {
@@ -568,11 +568,11 @@ mod tests {
             system: vec![],
             messages: vec![
                 Message::new(Role::User, "list"),
-                Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq {
-                    id: "tu_1".into(),
-                    name: "ls".into(),
-                    args: json!({"path": "."}),
-                }]),
+                Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+                    "tu_1",
+                    "ls",
+                    json!({"path": "."}),
+                )]),
                 Message::tool_result("tu_1", "a.txt", false),
             ],
             effort: None,
@@ -614,16 +614,8 @@ mod tests {
             system: vec![],
             messages: vec![
                 Message::new(Role::Assistant, "").with_tool_calls(vec![
-                    ToolCallReq {
-                        id: "a".into(),
-                        name: "t".into(),
-                        args: json!({}),
-                    },
-                    ToolCallReq {
-                        id: "b".into(),
-                        name: "t".into(),
-                        args: json!({}),
-                    },
+                    ToolCallReq::new("a", "t", json!({})),
+                    ToolCallReq::new("b", "t", json!({})),
                 ]),
                 Message::tool_result("a", "res-a", false),
                 Message::tool_result("b", "res-b", false),

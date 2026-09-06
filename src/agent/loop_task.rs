@@ -998,10 +998,10 @@ async fn run_agent(
                                     "Approve this durable memory proposal?\n{}\nChoose: accept, edit, or reject.",
                                     proposal.output
                                 );
-                                let question = ToolCallReq {
-                                    id: call.id.clone(),
-                                    name: "ask_user".into(),
-                                    args: serde_json::json!({
+                                let question = ToolCallReq::new(
+                                    call.id.clone(),
+                                    "ask_user",
+                                    serde_json::json!({
                                         "question": prompt,
                                         "options": [
                                             {"label": "accept", "description": "write the proposal"},
@@ -1011,7 +1011,7 @@ async fn run_agent(
                                         "multiple": false,
                                         "allow_free": true
                                     }),
-                                };
+                                );
                                 let answer = ask_user(&question, &tx, &mut ctl, &mut next_id).await;
                                 let answer_text = answer.output.trim().to_ascii_lowercase();
                                 if answer.ok && answer_text == "accept" {

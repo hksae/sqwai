@@ -57,7 +57,7 @@ impl OpenAiProvider {
                     .tool_calls
                     .iter()
                     .map(|c| {
-                        json!({
+                        let mut call = json!({
                             "id": c.id,
                             "type": "function",
                             "function": {
@@ -65,7 +65,13 @@ impl OpenAiProvider {
                                 // arguments must be a JSON *string* on the wire
                                 "arguments": c.args.to_string(),
                             },
-                        })
+                        });
+                        // replayed verbatim: Gemini validates it, other
+                        // providers never sent one and so never see the field
+                        if let Some(extra) = &c.extra_content {
+                            call["extra_content"] = extra.clone();
+                        }
+                        call
                     })
                     .collect();
                 let content = if m.content.is_empty() {
@@ -86,6 +92,8 @@ struct PartialCall {
     id: String,
     name: String,
     args: String,
+    /// provider state carried alongside this call (Gemini: thought_signature)
+    extra_content: Option<Value>,
 }
 
 impl PartialCall {
@@ -100,11 +108,7 @@ impl PartialCall {
                 |_| json!({ "_raw": self.args, "_error": "arguments were not valid JSON" }),
             )
         };
-        Some(ToolCallReq {
-            id: self.id,
-            name: self.name,
-            args,
-        })
+        Some(ToolCallReq::new(self.id, self.name, args).with_extra_content(self.extra_content))
     }
 }
 
@@ -244,6 +248,15 @@ impl Provider for OpenAiProvider {
                                 let slot = partials.entry(idx).or_default();
                                 if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
                                     slot.id.push_str(id);
+                                }
+                                // Gemini sends this once, on the delta that
+                                // opens the call; never overwrite it with a
+                                // later delta that does not carry it
+                                if let Some(extra) = tc.get("extra_content")
+                                    && !extra.is_null()
+                                    && slot.extra_content.is_none()
+                                {
+                                    slot.extra_content = Some(extra.clone());
                                 }
                                 if let Some(f) = tc.get("function") {
                                     if let Some(n) = f.get("name").and_then(|n| n.as_str()) {
@@ -397,6 +410,64 @@ mod tests {
         assert_eq!(text, "abc", "text must still stream in full");
     }
 
+    /// Gemini 3 attaches a `thought_signature` to the first function call of a
+    /// turn and rejects the next request of that same turn with a 400 when it
+    /// is missing. The host cannot regenerate it, so the only correct
+    /// behaviour is to carry it through untouched.
+    #[tokio::test]
+    async fn a_tool_call_keeps_the_provider_state_attached_to_it() {
+        let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"fc_1\",\"type\":\"function\",\"extra_content\":{\"google\":{\"thought_signature\":\"SIG_A\"}},\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n\
+                    data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\\\"a.rs\\\"}\"}}]}}]}\n\n\
+                    data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
+                    data: [DONE]\n\n"
+            .to_string();
+        let (url, h) = sse_server(body);
+        let events = collect(url).await;
+        h.join().unwrap();
+        let call = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::ToolCall(c) => Some(c.clone()),
+                _ => None,
+            })
+            .expect("a tool call was streamed");
+        assert_eq!(call.args["path"], "a.rs", "arguments still accumulate");
+        assert_eq!(
+            call.extra_content
+                .as_ref()
+                .and_then(|e| e.pointer("/google/thought_signature"))
+                .and_then(|s| s.as_str()),
+            Some("SIG_A"),
+            "the signature must survive the stream: {:?}",
+            call.extra_content
+        );
+
+        // and it must go back out on the wire, verbatim, in the assistant turn
+        let replayed = OpenAiProvider::message_json(
+            &Message::new(Role::Assistant, "").with_tool_calls(vec![call]),
+        );
+        assert_eq!(
+            replayed["tool_calls"][0]["extra_content"]["google"]["thought_signature"],
+            "SIG_A"
+        );
+    }
+
+    /// A provider that never sent state must not grow an empty field: Gemini is
+    /// the only one that validates it, and other gateways reject unknown keys.
+    #[test]
+    fn a_call_without_provider_state_carries_no_extra_content() {
+        let m = Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+            "c1",
+            "ls",
+            json!({}),
+        )]);
+        let v = OpenAiProvider::message_json(&m);
+        assert!(
+            v["tool_calls"][0].get("extra_content").is_none(),
+            "unexpected extra_content: {v}"
+        );
+    }
+
     /// An invalid payload is dropped (there is nothing else to do with it), but
     /// it must not end the stream: the deltas after it still arrive.
     #[tokio::test]
@@ -426,11 +497,11 @@ mod tests {
             system: vec![],
             messages: vec![
                 Message::new(Role::User, "list files"),
-                Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq {
-                    id: "call_1".into(),
-                    name: "ls".into(),
-                    args: json!({"path": "."}),
-                }]),
+                Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+                    "call_1",
+                    "ls",
+                    json!({"path": "."}),
+                )]),
                 Message::tool_result("call_1", "a.txt\nb.txt", false),
             ],
             effort: None,

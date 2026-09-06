@@ -26,6 +26,30 @@ pub struct ToolCallReq {
     pub name: String,
     /// parsed JSON arguments
     pub args: serde_json::Value,
+    /// Opaque per-call state the provider hands out and demands back verbatim
+    /// on the next request of the same turn. Gemini 3 puts its
+    /// `thought_signature` here — on the first call of a parallel batch only —
+    /// and rejects the request with a 400 when it is missing from a turn that
+    /// is still unfinished. Kept as the whole `extra_content` object so the
+    /// host never has to understand, or keep up with, what is inside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_content: Option<serde_json::Value>,
+}
+
+impl ToolCallReq {
+    pub fn new(id: impl Into<String>, name: impl Into<String>, args: serde_json::Value) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            args,
+            extra_content: None,
+        }
+    }
+
+    pub fn with_extra_content(mut self, extra: Option<serde_json::Value>) -> Self {
+        self.extra_content = extra;
+        self
+    }
 }
 
 /// static definition of a tool exposed to the model
