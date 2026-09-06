@@ -141,6 +141,22 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
             .map(|seq| format!("successful exec j#{seq}"))
             .unwrap_or_else(|| "none".to_string())
     ));
+    // §2.1.4 asks the anchor to surface open assumptions: compaction is
+    // exactly when an unresolved assumption would otherwise vanish from the
+    // conversation while still holding up the work.
+    let open = crate::agent::journal::Journal::open_assumptions(root, None).unwrap_or_default();
+    if open.is_empty() {
+        out.push_str("open assumptions: none\n");
+    } else {
+        out.push_str(&format!(
+            "open assumptions: {}\n",
+            open.iter()
+                .take(6)
+                .map(|item| item.label(120))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        ));
+    }
     out
 }
 

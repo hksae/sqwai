@@ -1349,11 +1349,18 @@ async fn run_agent(
             }
             if let Some(writer) = journal.as_mut() {
                 if call.name == "note" && outcome.ok {
-                    let _ = writer.append("note", serde_json::json!({
-                        "by": "model",
-                        "note": call.args.get("kind").and_then(|v| v.as_str()).unwrap_or("lesson"),
-                        "text": call.args.get("note").and_then(|v| v.as_str()).unwrap_or_default(),
-                    }));
+                    let _ = writer.append(
+                        "note",
+                        serde_json::json!({
+                            "by": "model",
+                            "note": call.args.get("kind").and_then(|v| v.as_str()).unwrap_or("lesson"),
+                            "text": call.args.get("note").and_then(|v| v.as_str()).unwrap_or_default(),
+                            // present only when this note closes an assumption
+                            // (§2.1.4); the dispatcher has already checked that
+                            // the target is open
+                            "resolves": call.args.get("resolves").and_then(|v| v.as_u64()),
+                        }),
+                    );
                 }
                 let result_seq = writer
                     .append_evidence(

@@ -55,6 +55,25 @@ pub struct PreImage {
     pub agent_hash: Option<String>,
 }
 
+/// An assumption the model recorded and nothing has resolved (§7 U).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assumption {
+    pub seq: u64,
+    pub step: Option<String>,
+    pub text: String,
+}
+
+impl Assumption {
+    /// One-line form for the finish warning, the anchor and the diary.
+    pub fn label(&self, limit: usize) -> String {
+        let mut text: String = self.text.chars().take(limit).collect();
+        if self.text.chars().count() > limit {
+            text.push('…');
+        }
+        format!("j#{}: {text}", self.seq)
+    }
+}
+
 impl Journal {
     /// Open or create `journal/<session-id>.jsonl`, repairing a partial tail.
     pub fn open(root: &Path, session_id: &str) -> Result<Self> {
@@ -431,6 +450,48 @@ impl Journal {
                     .flatten()
             })
             .collect()
+    }
+
+    /// Assumption notes that nothing has closed yet (§2.1.4, §7 U).
+    ///
+    /// A `note { note: "assumption" }` opens one; a later note carrying
+    /// `resolves: <seq>` closes the note with that sequence number. Without
+    /// this the `assumption` kind can be written but never settled — the model
+    /// states an assumption, the step finishes, and nobody ever learns whether
+    /// it held.
+    ///
+    /// `step` narrows the result to one plan step, which is what `finish`
+    /// needs; `None` returns the session's open assumptions, which is what the
+    /// anchor and the diary need.
+    pub fn open_assumptions(root: &Path, step: Option<&str>) -> Result<Vec<Assumption>> {
+        let records = Self::records(root)?;
+        let resolved: std::collections::HashSet<u64> = records
+            .iter()
+            .filter(|record| record.kind == "note")
+            .filter_map(|record| record.fields.get("resolves").and_then(Value::as_u64))
+            .collect();
+        Ok(records
+            .iter()
+            .filter(|record| {
+                record.kind == "note"
+                    && record.fields.get("note").and_then(Value::as_str) == Some("assumption")
+                    && !resolved.contains(&record.seq)
+                    // a note that resolves another is a closure, not a new
+                    // assumption, even when it carries the same kind
+                    && record.fields.get("resolves").is_none()
+                    && step.is_none_or(|wanted| record.step.as_deref() == Some(wanted))
+            })
+            .map(|record| Assumption {
+                seq: record.seq,
+                step: record.step.clone(),
+                text: record
+                    .fields
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+            .collect())
     }
 
     /// Which of `checkpoints` have at least one recorded write.
@@ -961,6 +1022,93 @@ mod tests {
                 .is_empty(),
             "a step with no records reverts nothing"
         );
+    }
+
+    /// §2.1.4 / §7 U: an assumption is open until a note closes it by seq.
+    /// Without the closure the kind exists but never settles.
+    #[test]
+    fn an_assumption_is_open_until_a_note_resolves_it_by_seq() {
+        let root = root();
+        let mut journal = Journal::open(&root, "session").unwrap();
+        journal.set_attribution(Some("2".into()), Some("plan".into()), "main");
+        let first = journal
+            .append(
+                "note",
+                serde_json::json!({"by": "model", "note": "assumption", "text": "the API returns UTF-8"}),
+            )
+            .unwrap();
+        let second = journal
+            .append(
+                "note",
+                serde_json::json!({"by": "model", "note": "assumption", "text": "the cache is warm"}),
+            )
+            .unwrap();
+        // an unrelated note must not close anything
+        journal
+            .append(
+                "note",
+                serde_json::json!({"by": "model", "note": "decision", "text": "use blake3"}),
+            )
+            .unwrap();
+
+        let open = Journal::open_assumptions(&root, None).unwrap();
+        assert_eq!(
+            open.iter().map(|item| item.seq).collect::<Vec<_>>(),
+            vec![first, second]
+        );
+
+        // closing the first leaves exactly the second
+        journal
+            .append(
+                "note",
+                serde_json::json!({
+                    "by": "model",
+                    "note": "assumption",
+                    "text": "confirmed by the test",
+                    "resolves": first,
+                }),
+            )
+            .unwrap();
+        let open = Journal::open_assumptions(&root, None).unwrap();
+        assert_eq!(open.len(), 1, "{open:?}");
+        assert_eq!(open[0].seq, second);
+        assert!(
+            open[0]
+                .label(80)
+                .starts_with(&format!("j#{second}: the cache"))
+        );
+    }
+
+    /// `finish` warns about the step it is finishing, not about the whole
+    /// session: an assumption belonging to another step is not this step's
+    /// business.
+    #[test]
+    fn open_assumptions_can_be_narrowed_to_one_step() {
+        let root = root();
+        let mut journal = Journal::open(&root, "session").unwrap();
+        journal.set_attribution(Some("1".into()), Some("plan".into()), "main");
+        journal
+            .append(
+                "note",
+                serde_json::json!({"by": "model", "note": "assumption", "text": "step one's"}),
+            )
+            .unwrap();
+        journal.set_attribution(Some("2".into()), Some("plan".into()), "main");
+        journal
+            .append(
+                "note",
+                serde_json::json!({"by": "model", "note": "assumption", "text": "step two's"}),
+            )
+            .unwrap();
+
+        let one = Journal::open_assumptions(&root, Some("1")).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].text, "step one's");
+        assert_eq!(
+            Journal::open_assumptions(&root, Some("3")).unwrap().len(),
+            0
+        );
+        assert_eq!(Journal::open_assumptions(&root, None).unwrap().len(), 2);
     }
 
     /// What scopes `/undo`: only the paths this checkpoint's own `file_diff`

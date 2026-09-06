@@ -481,7 +481,7 @@ long-running commands.",
             name: "note",
             kind: Kind::ReadOnly,
             description: "Record a concise model note in the host journal.",
-            parameters: json!({"type":"object","properties":{"note":{"type":"string"},"kind":{"type":"string","enum":["decision","rejected","assumption","lesson","blocker"]}},"required":["note","kind"]}),
+            parameters: json!({"type":"object","properties":{"note":{"type":"string"},"kind":{"type":"string","enum":["decision","rejected","assumption","lesson","blocker"]},"resolves":{"type":"integer","description":"journal seq of an assumption this note closes (§2.1.4)"}},"required":["note","kind"]}),
         },
         ToolDef {
             name: "memory_read",
@@ -796,6 +796,20 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
                 "decision" | "rejected" | "assumption" | "lesson" | "blocker"
             ) {
                 Outcome::err("note kind is invalid")
+            } else if let Some(resolves) = args.get("resolves").and_then(Value::as_u64) {
+                // Closing an assumption is only meaningful against one that is
+                // actually open: a `resolves` pointing anywhere else would look
+                // like closure while leaving the assumption standing.
+                let open = crate::agent::journal::Journal::open_assumptions(&ctx.root, None)
+                    .unwrap_or_default();
+                if open.iter().any(|item| item.seq == resolves) {
+                    Outcome::ok(format!("note recorded: {kind}, resolves j#{resolves}"))
+                } else {
+                    Outcome::err(format!(
+                        "j#{resolves} is not an open assumption — call plan show or note without \
+                         `resolves` to record this on its own"
+                    ))
+                }
             } else {
                 Outcome::ok(format!("note recorded: {kind}"))
             }
@@ -878,6 +892,13 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 }
                 Err(e) => return Outcome::err(format!("plan store unreadable: {e:#}")),
             };
+            // §2.1.4: finishing a step that still carries open assumptions is
+            // allowed, but the model has to be told — this is the closure
+            // moment the `assumption` note kind never had.
+            let finishing = match &other {
+                plan::Op::Finish { id, .. } => Some(id.clone()),
+                _ => None,
+            };
             match plan::apply(&mut active, other, &limits) {
                 Ok(applied) => {
                     if let Err(e) = plan::store(&ctx.root, &active) {
@@ -885,7 +906,9 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     }
                     match applied {
                         plan::Applied::Created(_) => Outcome::ok("plan created".to_string()),
-                        plan::Applied::Updated { message } => Outcome::ok(message),
+                        plan::Applied::Updated { message } => {
+                            Outcome::ok(with_assumption_warning(ctx, finishing.as_deref(), message))
+                        }
                         plan::Applied::Proposed { goal, reason } => Outcome::ok(format!(
                             "goal revision proposed for the user to confirm: \"{goal}\" ({reason})"
                         )),
@@ -1002,6 +1025,33 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
             rejection(r)
         }
     }
+}
+
+/// Append the open-assumption warning to a successful `finish` (§2.1.4).
+///
+/// Non-blocking on purpose: the step is already finished when this runs. The
+/// point is that an assumption cannot quietly outlive the step that made it —
+/// the model either resolves it with `note { resolves }` or carries it
+/// forward knowingly.
+fn with_assumption_warning(ctx: &ToolCtx, finished_step: Option<&str>, message: String) -> String {
+    let Some(step) = finished_step else {
+        return message;
+    };
+    let open =
+        crate::agent::journal::Journal::open_assumptions(&ctx.root, Some(step)).unwrap_or_default();
+    if open.is_empty() {
+        return message;
+    }
+    let list = open
+        .iter()
+        .map(|item| item.label(80))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "{message}\nwarning: step {step} has {} open assumption(s) ({list}) — resolve with \
+         note {{ kind: \"assumption\", resolves: <seq> }} or convert before completing",
+        open.len()
+    )
 }
 
 /// A verify step whose evidence no acceptance item has spent yet, with that
@@ -1886,6 +1936,76 @@ mod tests {
         assert!(!invalid.ok);
         assert!(invalid.output.contains("YYYY-MM-DD"), "{}", invalid.output);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// §2.1.4's closure moment: finishing a step with an open assumption
+    /// succeeds and says so. A silent finish is how an assumption outlives the
+    /// work that depended on it.
+    #[test]
+    fn finishing_a_step_warns_about_its_open_assumptions() {
+        let (mut ctx, dir) = proj();
+        let created = execute(
+            &mut ctx,
+            "plan",
+            &json!({
+                "op": "create",
+                "goal": "close the assumption loop",
+                "steps": [{"title": "make the change", "kind": "change"}],
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        let mut journal = crate::agent::journal::Journal::open(&dir, "assumption").unwrap();
+        journal.set_attribution(Some("1".into()), Some(plan_id), "main");
+        let seq = journal
+            .append(
+                "note",
+                json!({"by": "model", "note": "assumption", "text": "the config key is stable"}),
+            )
+            .unwrap();
+        // evidence for the change step, so `finish` is not rejected for that
+        journal
+            .append_evidence("file_diff", json!({"path": "src/main.rs"}))
+            .unwrap();
+
+        let finished = plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "1", "summary": "changed it"}),
+        );
+        assert!(
+            finished.ok,
+            "the warning must not block: {}",
+            finished.output
+        );
+        assert!(
+            finished.output.contains("open assumption")
+                && finished.output.contains(&format!("j#{seq}")),
+            "{}",
+            finished.output
+        );
+
+        // and a note that closes it is accepted, while a bogus target is not
+        let bogus = execute(
+            &mut ctx,
+            "note",
+            &json!({"note": "nothing to close", "kind": "assumption", "resolves": 9999}),
+        );
+        assert!(!bogus.ok, "{}", bogus.output);
+        assert!(
+            bogus.output.contains("not an open assumption"),
+            "{}",
+            bogus.output
+        );
+
+        let closing = execute(
+            &mut ctx,
+            "note",
+            &json!({"note": "verified against the config", "kind": "assumption", "resolves": seq}),
+        );
+        assert!(closing.ok, "{}", closing.output);
+        assert!(closing.output.contains(&format!("resolves j#{seq}")));
     }
 
     #[test]

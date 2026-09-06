@@ -175,6 +175,9 @@ fn render_host_block(records: &[Record], trigger: &str) -> Result<String> {
     let mut checkpoints = Vec::new();
     let mut diagnostics = 0usize;
     let mut notes = [0usize; 5];
+    // (seq, text) of every assumption note, and the seqs a later note closed
+    let mut assumptions: Vec<(u64, String)> = Vec::new();
+    let mut resolved: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut compactions = 0usize;
     let mut undo = 0usize;
     let mut first_seq = None;
@@ -232,17 +235,48 @@ fn render_host_block(records: &[Record], trigger: &str) -> Result<String> {
             "diagnostics" => diagnostics += 1,
             "compaction" => compactions += 1,
             "undo" => undo += 1,
-            "note" => match record.fields.get("note").and_then(Value::as_str) {
-                Some("decision") => notes[0] += 1,
-                Some("rejected") => notes[1] += 1,
-                Some("assumption") => notes[2] += 1,
-                Some("lesson") => notes[3] += 1,
-                Some("blocker") => notes[4] += 1,
-                _ => {}
-            },
+            "note" => {
+                if let Some(seq) = record.fields.get("resolves").and_then(Value::as_u64) {
+                    resolved.insert(seq);
+                }
+                match record.fields.get("note").and_then(Value::as_str) {
+                    Some("decision") => notes[0] += 1,
+                    Some("rejected") => notes[1] += 1,
+                    Some("assumption") => {
+                        notes[2] += 1;
+                        if record.fields.get("resolves").is_none() {
+                            assumptions.push((
+                                record.seq,
+                                record
+                                    .fields
+                                    .get("text")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    Some("lesson") => notes[3] += 1,
+                    Some("blocker") => notes[4] += 1,
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
+    let open_assumptions: Vec<String> = assumptions
+        .iter()
+        .filter(|(seq, _)| !resolved.contains(seq))
+        .take(6)
+        .map(|(seq, text)| {
+            let mut short: String = text.chars().take(120).collect();
+            if text.chars().count() > 120 {
+                short.push('…');
+            }
+            format!("j#{seq}: {short}")
+        })
+        .collect();
+
     let mut output = String::new();
     output.push_str("<!-- host -->\n");
     output.push_str(&format!(
@@ -278,6 +312,18 @@ fn render_host_block(records: &[Record], trigger: &str) -> Result<String> {
     output.push_str(&format!(
         "notes: {} decision · {} rejected · {} assumption · {} lesson · {} blocker\n",
         notes[0], notes[1], notes[2], notes[3], notes[4]
+    ));
+    // §2.1.4: the host block surfaces open assumptions, so tomorrow's session
+    // inherits them as facts rather than as something to rediscover. Counting
+    // them is not enough — an assumption nobody can read is not one anyone
+    // will resolve.
+    output.push_str(&format!(
+        "open assumptions: {}\n",
+        if open_assumptions.is_empty() {
+            "none".to_string()
+        } else {
+            open_assumptions.join(" · ")
+        }
     ));
     output.push_str(&format!("trigger: {trigger}\n<!-- /host -->"));
     Ok(output)

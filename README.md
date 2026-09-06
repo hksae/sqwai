@@ -39,6 +39,12 @@ recorded by the host. Rejections come with a reason and a hint. The goal
 changes only via `/goal`. Executable acceptance criteria — the host running a
 `cmd:` item itself and attaching the result — are **[in development]**.
 
+**Assumptions.** A `note` of kind `assumption` stays open until another note
+closes it by sequence number. Finishing a step that still carries one succeeds
+with a warning naming it, and the compaction anchor and the diary carry open
+assumptions forward — so an assumption cannot quietly outlive the work that
+depended on it.
+
 **Journal.** An append-only event log written by the host at tool dispatch:
 calls, results, diffs, checkpoints, approvals, compactions. The model has one
 labeled write path, `note`. The journal is what the plan validator and the
