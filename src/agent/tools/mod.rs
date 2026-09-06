@@ -1292,7 +1292,6 @@ mod tests {
         journal.append("plan", json!({"op": "start"})).unwrap();
         let wrong_type = journal
             .append_evidence("tool_result", json!({"tool": "read", "ok": true}))
-            .unwrap()
             .unwrap();
         let rejected = plan_op(
             &mut ctx,
@@ -1325,7 +1324,6 @@ mod tests {
         journal.set_attribution(Some("1".into()), Some(plan_id), "main");
         let failed = journal
             .append_evidence("tool_result", json!({"tool": "bash", "ok": false}))
-            .unwrap()
             .unwrap();
         let rejected = plan_op(
             &mut ctx,
@@ -1340,7 +1338,6 @@ mod tests {
 
         let passed = journal
             .append_evidence("tool_result", json!({"tool": "bash", "ok": true}))
-            .unwrap()
             .unwrap();
         let accepted = plan_op(
             &mut ctx,
@@ -1370,7 +1367,6 @@ mod tests {
         journal.append("plan", json!({"op": "start"})).unwrap();
         let evidence = journal
             .append_evidence("file_diff", json!({"path": "src/main.rs"}))
-            .unwrap()
             .unwrap();
         let finished = plan_op(
             &mut ctx,

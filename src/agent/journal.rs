@@ -66,14 +66,20 @@ impl Journal {
         (self.step.clone(), self.plan.clone())
     }
 
-    pub fn append_evidence(&mut self, kind: &str, fields: Value) -> Result<Option<u64>> {
+    /// Append a host-owned record and, when a step is in progress, atomically
+    /// attach it to that step's evidence (§2.1.4).
+    ///
+    /// The record is written either way. With nothing in progress it carries
+    /// `step: null` and counts as a session fact — for the diary host block and
+    /// the compaction anchor — but never as evidence (§2.2.3).
+    pub fn append_evidence(&mut self, kind: &str, fields: Value) -> Result<u64> {
+        let seq = self.append(kind, fields)?;
         let (Some(step_id), Some(plan_id)) = (self.step.clone(), self.plan.clone()) else {
-            return Ok(None);
+            return Ok(seq);
         };
         if !matches!(kind, "tool_result" | "file_diff" | "diagnostics") {
-            return Ok(None);
+            return Ok(seq);
         }
-        let seq = self.append(kind, fields)?;
         let root = self
             .path
             .parent()
@@ -82,7 +88,7 @@ impl Journal {
             .context("journal path has no project root")?;
         let mut active = match crate::plan::open_active(root)? {
             Some(plan) if plan.id == plan_id => plan,
-            _ => return Ok(Some(seq)),
+            _ => return Ok(seq),
         };
         let session = self
             .path
@@ -101,7 +107,7 @@ impl Journal {
             active.revision += 1;
             crate::plan::store(root, &active)?;
         }
-        Ok(Some(seq))
+        Ok(seq)
     }
 
     pub fn next_seq(&self) -> u64 {
@@ -399,6 +405,55 @@ mod tests {
         assert_eq!(records[0].seq, 1);
         assert_eq!(records[1].kind, "tool_result");
         assert_eq!(records[0].step.as_deref(), Some("2"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// §2.2.3: a record taken while nothing is in progress carries `step: null`
+    /// and is still a session fact. Dropping it emptied the diary host block
+    /// and the compaction anchor for every session without an active plan.
+    #[test]
+    fn unattributed_results_are_recorded_as_session_facts() {
+        let root = root();
+        let mut journal = Journal::open(&root, "session").unwrap();
+        // no set_attribution: no active plan, nothing in progress
+        assert_eq!(
+            journal
+                .append_evidence("tool_result", json!({"tool": "bash", "ok": true}))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            journal
+                .append_evidence("file_diff", json!({"path": "src/main.rs", "added": 3}))
+                .unwrap(),
+            2
+        );
+
+        let records = Journal::records_for(&root, "session").unwrap();
+        assert_eq!(records.len(), 2, "records must reach the journal");
+        assert_eq!(records[0].kind, "tool_result");
+        assert_eq!(records[1].kind, "file_diff");
+        for record in &records {
+            assert!(
+                record.step.is_none(),
+                "unattributed record needs step: null"
+            );
+            assert!(record.plan.is_none());
+        }
+
+        // ... and are never usable as evidence
+        for (index, record) in records.iter().enumerate() {
+            let reference = crate::plan::EvidenceRef {
+                session: "session".to_string(),
+                seq: record.seq,
+            };
+            assert!(
+                Journal::evidence(&root, "any-plan", Some("1"), &reference, None)
+                    .unwrap()
+                    .is_none(),
+                "record {index} must not qualify as evidence"
+            );
+        }
         fs::remove_dir_all(root).ok();
     }
 
