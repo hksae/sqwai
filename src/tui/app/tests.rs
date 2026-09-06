@@ -2529,4 +2529,37 @@ mod tests {
             }
         }
     }
+    /// `/undo step 3` used to parse as `/undo 1`: `nth(1)` yielded "step",
+    /// `parse::<usize>()` failed and `unwrap_or(1)` reverted the most recent
+    /// checkpoint instead — a destructive command acting on the wrong target
+    /// and reporting success. Per-step undo is not built yet, so an argument
+    /// that is not a count has to be refused.
+    #[test]
+    fn undo_refuses_an_argument_that_is_not_a_count() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.session
+            .checkpoints
+            .push(("deadbeef".into(), "write src/a.rs".into()));
+
+        app.command("undo step 3");
+        let status = app
+            .segments
+            .iter()
+            .rev()
+            .find_map(|segment| match segment {
+                Segment::Status { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert!(
+            status.contains("takes a count") && status.contains("not implemented"),
+            "must explain instead of undoing the wrong thing: {status:?}"
+        );
+        assert_eq!(
+            app.session.checkpoints.len(),
+            1,
+            "nothing may be reverted for an argument we cannot honour"
+        );
+    }
 }
