@@ -299,7 +299,8 @@ mod tests {
     fn patch_rejects_modifying_host_owned_state() {
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = ToolCtx::new(dir.path());
-        let forbidden_patch = "--- a/.sqwai/plan.json\n+++ b/.sqwai/plan.json\n@@ -1 +1 @@\n-old\n+new\n";
+        let forbidden_patch =
+            "--- a/.sqwai/plan.json\n+++ b/.sqwai/plan.json\n@@ -1 +1 @@\n-old\n+new\n";
         let outcome = patch(&mut ctx, &json!({"patch": forbidden_patch}));
         assert!(!outcome.ok);
         assert!(outcome.output.contains("forbidden path"));

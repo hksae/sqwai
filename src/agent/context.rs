@@ -921,11 +921,13 @@ mod tests {
     fn hard_trim_never_starts_with_tool_role() {
         let messages = vec![
             user("run command"),
-            Message::new(Role::Assistant, "").with_tool_calls(vec![crate::providers::ToolCallReq::new(
-                "c1",
-                "bash",
-                serde_json::json!({"command": "ls"}),
-            )]),
+            Message::new(Role::Assistant, "").with_tool_calls(vec![
+                crate::providers::ToolCallReq::new(
+                    "c1",
+                    "bash",
+                    serde_json::json!({"command": "ls"}),
+                ),
+            ]),
             Message::tool_result("c1", "file.txt", false),
         ];
         // Budget is 0, forcing fallback
