@@ -368,25 +368,18 @@ impl App {
                         // options are picked by mouse or digits 1-9, arrows
                         // stay with the composer
                         KeyCode::Tab
-                            if self.menu_stack.is_empty()
-                                && self.active_ask_seg().is_some() =>
+                            if self.menu_stack.is_empty() && self.active_ask_seg().is_some() =>
                         {
                             let (q, n) = self
                                 .active_ask_seg()
                                 .and_then(|s| match self.segments.get(s) {
                                     Some(Segment::AskUser {
-                                        focus,
-                                        questions,
-                                        ..
+                                        focus, questions, ..
                                     }) => Some((*focus, questions.len().max(1))),
                                     _ => None,
                                 })
                                 .unwrap_or((0, 1));
-                            let next = if shift {
-                                (q + n - 1) % n
-                            } else {
-                                (q + 1) % n
-                            };
+                            let next = if shift { (q + n - 1) % n } else { (q + 1) % n };
                             self.inline_ask_focus(next);
                         }
                         KeyCode::Up if !self.menu_stack.is_empty() => self.menu_nav(-1),
@@ -407,9 +400,7 @@ impl App {
                             let text = self.input_text();
                             self.ask_answer(text);
                         }
-                        KeyCode::Enter
-                            if !self.menu_stack.is_empty() && self.is_inline_ask() =>
-                        {
+                        KeyCode::Enter if !self.menu_stack.is_empty() && self.is_inline_ask() => {
                             self.menu_activate()
                         }
                         KeyCode::Enter if !self.menu_stack.is_empty() => self.menu_activate(),
@@ -430,9 +421,7 @@ impl App {
                             };
                             let (q, multiple, n) = match self.segments.get(seg) {
                                 Some(Segment::AskUser {
-                                    focus,
-                                    questions,
-                                    ..
+                                    focus, questions, ..
                                 }) => {
                                     let qq = questions.get(*focus);
                                     (
@@ -469,8 +458,7 @@ impl App {
                         }
                         // plan/act is switched by the user only (design §5)
                         KeyCode::Tab
-                            if self.menu_stack.is_empty()
-                                && self.active_ask_seg().is_none() =>
+                            if self.menu_stack.is_empty() && self.active_ask_seg().is_none() =>
                         {
                             self.mode = self.mode.toggle()
                         }
@@ -578,11 +566,7 @@ impl App {
                                 && let Some(slot) = custom.get_mut(q)
                             {
                                 match k.code {
-                                    KeyCode::Char(c)
-                                        if !ctrl && !alt =>
-                                    {
-                                        slot.push(c)
-                                    }
+                                    KeyCode::Char(c) if !ctrl && !alt => slot.push(c),
                                     KeyCode::Backspace => {
                                         slot.pop();
                                     }

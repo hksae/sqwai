@@ -906,9 +906,13 @@ impl App {
 
     /// single-choice: pick exactly this option in question q
     pub(super) fn inline_ask_select(&mut self, q: usize, opt: usize) {
-        let Some(seg) = self.active_ask_seg() else { return };
+        let Some(seg) = self.active_ask_seg() else {
+            return;
+        };
         if let Some(Segment::AskUser { picked, focus, .. }) = self.segments.get_mut(seg) {
-            let Some(opts) = picked.get_mut(q) else { return };
+            let Some(opts) = picked.get_mut(q) else {
+                return;
+            };
             if opt >= opts.len() {
                 return;
             }
@@ -924,7 +928,9 @@ impl App {
 
     /// multi-choice: toggle one option in question q
     pub(super) fn inline_ask_toggle(&mut self, q: usize, opt: usize) {
-        let Some(seg) = self.active_ask_seg() else { return };
+        let Some(seg) = self.active_ask_seg() else {
+            return;
+        };
         if let Some(Segment::AskUser { picked, focus, .. }) = self.segments.get_mut(seg) {
             let Some(v) = picked.get_mut(q).and_then(|v| v.get_mut(opt)) else {
                 return;
@@ -939,16 +945,15 @@ impl App {
 
     /// switch the focused question (Tab / Shift+Tab / click)
     pub(super) fn inline_ask_focus(&mut self, q: usize) {
-        let Some(seg) = self.active_ask_seg() else { return };
+        let Some(seg) = self.active_ask_seg() else {
+            return;
+        };
         if let Some(Segment::AskUser {
-            questions,
-            focus,
-            ..
+            questions, focus, ..
         }) = self.segments.get_mut(seg)
+            && q < questions.len()
         {
-            if q < questions.len() {
-                *focus = q;
-            }
+            *focus = q;
         }
         self.ask_custom_focus = None;
         self.dirty = true;
@@ -956,7 +961,9 @@ impl App {
 
     /// confirm the whole inline ask and send it to the agent
     pub(super) fn inline_ask_confirm(&mut self) {
-        let Some(seg) = self.active_ask_seg() else { return };
+        let Some(seg) = self.active_ask_seg() else {
+            return;
+        };
         let text = self.inline_ask_text(seg);
         self.inline_ask_answer(text);
     }
@@ -974,7 +981,9 @@ impl App {
 
     /// freeze the active inline segment and deliver the text to the agent
     fn inline_ask_answer(&mut self, text: String) {
-        let Some(seg) = self.active_ask_seg() else { return };
+        let Some(seg) = self.active_ask_seg() else {
+            return;
+        };
         let id = match self.segments.get(seg) {
             Some(Segment::AskUser { id, .. }) => *id,
             _ => return,

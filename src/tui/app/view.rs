@@ -323,10 +323,7 @@ impl App {
 
     /// contiguous absolute-row range of one segment in the wrapped cache
     fn ask_block_range(&self, seg_idx: usize) -> Option<(usize, usize)> {
-        let start = self
-            .cache_rowseg
-            .iter()
-            .position(|t| *t == Some(seg_idx))?;
+        let start = self.cache_rowseg.iter().position(|t| *t == Some(seg_idx))?;
         let mut end = start;
         while end < self.cache_rowseg.len() && self.cache_rowseg[end] == Some(seg_idx) {
             end += 1;
@@ -370,7 +367,10 @@ impl App {
             line += 1;
             for o_idx in 0..q.options.len() {
                 if offset == line {
-                    return Some(AskRow::Option { q: q_idx, opt: o_idx });
+                    return Some(AskRow::Option {
+                        q: q_idx,
+                        opt: o_idx,
+                    });
                 }
                 line += 1;
             }
@@ -767,7 +767,11 @@ impl App {
                     out.push((
                         Line::from(vec![Span::styled(
                             truncate_display_width(&format!(" ? {}", q.question), width),
-                            if live { Theme::accent_bold() } else { Theme::dim() },
+                            if live {
+                                Theme::accent_bold()
+                            } else {
+                                Theme::dim()
+                            },
                         )]),
                         Some(idx),
                     ));
@@ -786,9 +790,11 @@ impl App {
                         let hovered = live
                             && is_active_seg
                             && self.ask_hover
-                                == Some(AskRow::Option { q: q_idx, opt: o_idx });
-                        let mut text =
-                            format!("{marker}{}. {}", o_idx + 1, opt.label);
+                                == Some(AskRow::Option {
+                                    q: q_idx,
+                                    opt: o_idx,
+                                });
+                        let mut text = format!("{marker}{}. {}", o_idx + 1, opt.label);
                         if opt.recommended {
                             text.push_str(" (Recommended)");
                         }
@@ -814,9 +820,8 @@ impl App {
                     }
                     if q.allow_free {
                         let c = custom.get(q_idx).map(|s| s.as_str()).unwrap_or("");
-                        let custom_focused = live
-                            && is_active_seg
-                            && self.ask_custom_focus == Some(q_idx);
+                        let custom_focused =
+                            live && is_active_seg && self.ask_custom_focus == Some(q_idx);
                         let hovered = live
                             && is_active_seg
                             && self.ask_hover == Some(AskRow::Custom { q: q_idx });
@@ -866,8 +871,7 @@ impl App {
                         Some(idx),
                     ));
                 } else {
-                    let hovered =
-                        live && is_active_seg && self.ask_hover == Some(AskRow::Confirm);
+                    let hovered = live && is_active_seg && self.ask_hover == Some(AskRow::Confirm);
                     let style = if hovered {
                         Style::new()
                             .fg(Theme::BG())
