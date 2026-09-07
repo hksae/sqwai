@@ -1,0 +1,19 @@
+﻿version: 2
+updates:
+  # Maintain Rust dependencies in Cargo.toml / Cargo.lock weekly
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Maintain GitHub Actions workflows in .github/workflows weekly
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci(actions)"
