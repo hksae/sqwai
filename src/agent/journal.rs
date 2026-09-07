@@ -548,6 +548,7 @@ impl Journal {
                     && r.step.as_deref() == Some(step)
                     && r.kind == "plan"
                     && r.fields.get("op").and_then(Value::as_str) == Some("start")
+                    && r.fields.get("ok").and_then(Value::as_bool) == Some(true)
             })
             .filter_map(|r| chrono::DateTime::parse_from_rfc3339(&r.ts).ok())
             .min();
