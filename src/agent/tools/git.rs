@@ -178,6 +178,16 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     if patch.len() > 2_000_000 {
         return Outcome::err("patch is too large (maximum 2 MB)");
     }
+    // Inspect files touched by the patch and ensure none escape or touch host-owned state (.sqwai/)
+    let touched_files = extract_patch_files(&ctx.root, patch);
+    let mut resolved_paths = Vec::new();
+    for f in &touched_files {
+        match ctx.resolve(f) {
+            Ok(p) => resolved_paths.push(p),
+            Err(e) => return Outcome::err(format!("patch touches forbidden path '{f}': {e}")),
+        }
+    }
+
     let check = Command::new("git")
         .current_dir(&ctx.root)
         .args(["apply", "--check", "--whitespace=error", "-"])
@@ -231,11 +241,67 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         }
     }
     match apply.wait_with_output() {
-        Ok(output) if output.status.success() => Outcome::ok("patch applied"),
+        Ok(output) if output.status.success() => {
+            // Keep ToolCtx read_state in sync so subsequent edits do not fail as stale
+            for path in &resolved_paths {
+                ctx.mark_read(path);
+            }
+            Outcome::ok("patch applied")
+        }
         Ok(output) => Outcome::err(format!(
             "patch failed: {}",
             truncate(String::from_utf8_lossy(&output.stderr).trim())
         )),
         Err(error) => Outcome::err(format!("patch failed: {error}")),
+    }
+}
+
+fn extract_patch_files(root: &std::path::Path, patch: &str) -> Vec<String> {
+    use std::io::Write;
+    let mut cmd = match Command::new("git")
+        .current_dir(root)
+        .args(["apply", "--numstat", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    if let Some(stdin) = cmd.stdin.as_mut() {
+        let _ = stdin.write_all(patch.as_bytes());
+    }
+    let output = match cmd.wait_with_output() {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() >= 3 {
+                Some(parts[2].to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn patch_rejects_modifying_host_owned_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        let forbidden_patch = "--- a/.sqwai/plan.json\n+++ b/.sqwai/plan.json\n@@ -1 +1 @@\n-old\n+new\n";
+        let outcome = patch(&mut ctx, &json!({"patch": forbidden_patch}));
+        assert!(!outcome.ok);
+        assert!(outcome.output.contains("forbidden path"));
     }
 }
