@@ -528,8 +528,10 @@ pub fn hard_trim(messages: &[Message], budget: u64) -> Vec<Message> {
         start += 1;
     }
     if start >= messages.len() {
-        // nothing can be cut safely: keep the newest turn alone
-        return messages.last().cloned().into_iter().collect();
+        if let Some(pos) = messages.iter().rposition(|m| m.role == Role::User) {
+            return messages[pos..].to_vec();
+        }
+        return vec![Message::new(Role::User, "Continue.")];
     }
     messages[start..].to_vec()
 }
@@ -913,5 +915,22 @@ mod tests {
             trimmed.last().unwrap().content,
             messages.last().unwrap().content
         );
+    }
+
+    #[test]
+    fn hard_trim_never_starts_with_tool_role() {
+        let messages = vec![
+            user("run command"),
+            Message::new(Role::Assistant, "").with_tool_calls(vec![crate::providers::ToolCallReq::new(
+                "c1",
+                "bash",
+                serde_json::json!({"command": "ls"}),
+            )]),
+            Message::tool_result("c1", "file.txt", false),
+        ];
+        // Budget is 0, forcing fallback
+        let trimmed = hard_trim(&messages, 0);
+        assert!(!trimmed.is_empty());
+        assert_eq!(trimmed[0].role, Role::User);
     }
 }
