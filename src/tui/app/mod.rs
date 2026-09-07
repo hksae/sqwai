@@ -1493,6 +1493,9 @@ impl App {
             self.show_busy_status();
             return false;
         }
+        if self.session_has_messages() {
+            self.session.save().ok();
+        }
         // §2.5 runs retention when a session ends. Doing it here rather than
         // on the way out means it also happens for a session the user simply
         // walks away from, and the new session's own chain is protected by
