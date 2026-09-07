@@ -524,6 +524,64 @@ impl Journal {
         Ok(None)
     }
 
+    /// Per-session timestamp check as **warn** (not `invalid_evidence`).
+    ///
+    /// If evidence predates the earliest `plan op start` for this step, it is
+    /// still accepted (see `step_started_at`), but the host notes it: the
+    /// evidence was recorded before the step existed in any session, so it
+    /// may be stale or from a reused `seq`. One line per stale ref, capped.
+    pub fn stale_evidence_warnings(
+        root: &Path,
+        plan: &str,
+        step: &str,
+        evidence: &[crate::plan::EvidenceRef],
+    ) -> Vec<String> {
+        let records = match Self::records(root) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        // earliest start timestamp for this plan/step across all sessions
+        let earliest = records
+            .iter()
+            .filter(|r| {
+                r.plan.as_deref() == Some(plan)
+                    && r.step.as_deref() == Some(step)
+                    && r.kind == "plan"
+                    && r.fields.get("op").and_then(Value::as_str) == Some("start")
+            })
+            .filter_map(|r| chrono::DateTime::parse_from_rfc3339(&r.ts).ok())
+            .min();
+        let Some(start) = earliest else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for reference in evidence {
+            // precise session lookup to avoid seq collision across files
+            let precise = Self::evidence(root, plan, Some(step), reference, None)
+                .ok()
+                .flatten();
+            let Some(rec) = precise else {
+                continue;
+            };
+            if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&rec.ts)
+                && ts < start
+            {
+                out.push(format!(
+                    "evidence {}:{} predates step {} start ({} < {})",
+                    reference.session,
+                    reference.seq,
+                    step,
+                    rec.ts,
+                    start.to_rfc3339()
+                ));
+                if out.len() >= 3 {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
     /// Return a non-blocking reminder when a step has accumulated actions
     /// since its last plan operation.
     pub fn nudge(root: &Path, threshold: usize) -> Result<Option<String>> {

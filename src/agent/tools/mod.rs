@@ -944,7 +944,10 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     match applied {
                         plan::Applied::Created(_) => Outcome::ok("plan created".to_string()),
                         plan::Applied::Updated { message } => {
-                            Outcome::ok(with_assumption_warning(ctx, finishing.as_deref(), message))
+                            let msg = with_assumption_warning(ctx, finishing.as_deref(), message);
+                            let msg =
+                                with_evidence_ts_warning(ctx, finishing.as_deref(), &active, msg);
+                            Outcome::ok(msg)
                         }
                         plan::Applied::Proposed { goal, reason } => Outcome::ok(format!(
                             "goal revision proposed for the user to confirm: \"{goal}\" ({reason})"
@@ -1089,6 +1092,30 @@ fn with_assumption_warning(ctx: &ToolCtx, finished_step: Option<&str>, message: 
          note {{ kind: \"assumption\", resolves: <seq> }} or convert before completing",
         open.len()
     )
+}
+
+fn with_evidence_ts_warning(
+    ctx: &ToolCtx,
+    finished_step: Option<&str>,
+    active: &plan::Plan,
+    message: String,
+) -> String {
+    let Some(step) = finished_step else {
+        return message;
+    };
+    let Some(s) = active.step(step) else {
+        return message;
+    };
+    let warns = crate::agent::journal::Journal::stale_evidence_warnings(
+        &ctx.root,
+        &active.id,
+        step,
+        &s.evidence,
+    );
+    if warns.is_empty() {
+        return message;
+    }
+    format!("{message}\nwarning: {}", warns.join("; "))
 }
 
 /// A verify step whose evidence no acceptance item has spent yet, with that
