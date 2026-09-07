@@ -83,7 +83,8 @@ pub fn put(root: &Path, content: &[u8]) -> Result<String> {
     // Write to a temporary name in the same directory and rename: a blob is
     // named by its own hash, so a half-written file under the final name would
     // be a lie that survives restarts.
-    let tmp = parent.join(format!(".{}.tmp", std::process::id()));
+    let hex = id.strip_prefix("blake3:").unwrap_or(&id);
+    let tmp = parent.join(format!(".{}.{}.tmp", std::process::id(), hex));
     std::fs::write(&tmp, &body).context("writing a blob")?;
     std::fs::rename(&tmp, &path).context("publishing a blob")?;
     Ok(id)
@@ -103,7 +104,12 @@ pub fn get(root: &Path, id: &str) -> Result<Vec<u8>> {
         other => anyhow::bail!("blob {id} has an unknown storage flag {other:#x}"),
     };
     let actual = self::id(&content);
-    if actual != id.strip_prefix("blake3:").map_or(id, |_| id) {
+    let expected = if id.starts_with("blake3:") {
+        id.to_string()
+    } else {
+        format!("blake3:{id}")
+    };
+    if actual != expected {
         anyhow::bail!("blob {id} does not hash to its name (got {actual})");
     }
     Ok(content)
