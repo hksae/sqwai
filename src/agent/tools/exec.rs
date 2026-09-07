@@ -65,6 +65,22 @@ fn kill_and_reap(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// Join the pipe-reader threads, but not forever. The pipes close when the
+/// tree dies, which lets the readers return — but a grandchild that somehow
+/// survives the kill must not wedge the tool call: after the grace period the
+/// handles are dropped (detached) and whatever is still blocked exits on its
+/// own when its pipes finally close.
+fn join_readers(readers: Vec<std::thread::JoinHandle<()>>) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut pending = readers;
+    while !pending.is_empty() && std::time::Instant::now() < deadline {
+        pending.retain(|handle| !handle.is_finished());
+        if !pending.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+}
+
 /// End the child and everything it started. `Child::kill` takes down only the
 /// direct child, but a `cmd /C` shell command usually means grandchildren —
 /// `ping`, `cargo`, compilers — that inherit the pipes and keep mutating the
@@ -158,9 +174,7 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
             kill_and_reap(&mut child);
             // the readers still hold the pipe ends; joining them is what
             // notices the pipes closed and lets them return
-            for r in readers {
-                let _ = r.join();
-            }
+            join_readers(readers);
             return Outcome::cancelled();
         }
         if std::time::Instant::now() >= deadline {
