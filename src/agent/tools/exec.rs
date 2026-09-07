@@ -263,9 +263,9 @@ fn tail_of(text: &str, wanted: usize) -> String {
     if text.len() <= wanted {
         text.to_string()
     } else {
-        let mut cut = wanted;
-        while cut > 0 && !text.is_char_boundary(cut) {
-            cut -= 1;
+        let mut cut = text.len().saturating_sub(wanted);
+        while cut < text.len() && !text.is_char_boundary(cut) {
+            cut += 1;
         }
         format!("…(output truncated, showing tail)\n{}", &text[cut..])
     }
@@ -419,5 +419,13 @@ mod tests {
         assert!(outcome.ok);
         assert!(!outcome.cancelled);
         assert!(outcome.output.contains("hi"));
+    }
+
+    #[test]
+    fn tail_of_returns_requested_number_of_trailing_bytes() {
+        let text = "0123456789abcdefghij";
+        let tail = tail_of(text, 5);
+        assert!(tail.ends_with("fghij"));
+        assert!(tail.contains("output truncated"));
     }
 }
