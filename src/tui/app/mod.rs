@@ -909,8 +909,29 @@ impl App {
             }
         }
         if self.streaming {
-            self.show_busy_status();
-            return;
+            // Whitelist of commands that are safe to run while the agent is
+            // streaming: read-only UI, menus, and viewing the plan. Mutating
+            // commands (graph rebuild, plan edits, undo, etc.) stay blocked and
+            // show the busy notice. User messages (non-commands) are always
+            // blocked while streaming.
+            let allowed = if let Some(rest) = text.strip_prefix('/') {
+                let mut parts = rest.split_whitespace();
+                match parts.next().unwrap_or("") {
+                    "settings" | "debug" | "theme" | "mcp" | "lsp" | "skill" | "skills"
+                    | "providers" | "models" | "sessions" | "exit" => true,
+                    "plan" => {
+                        let sub = parts.next().unwrap_or("show");
+                        matches!(sub, "show")
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+            if !allowed {
+                self.show_busy_status();
+                return;
+            }
         }
         self.input = Self::fresh_input(String::new());
         self.popup_dismiss = false;
