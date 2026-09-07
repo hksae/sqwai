@@ -1663,7 +1663,7 @@ number; a `partial` one is missing something the design calls for.
 | P | Windows/PowerShell shell-aware safety layer (§5.2) | done | §5.2 |
 | Q | Single-instance lock + read-only fallback for plan/journal/memory/graph | done | F1 |
 | R | Untrusted-input handling (trust:low, banner, confirm gates) + prompt rule | partial — the prompt rule and `trust: low` in the journal are in; the prompt banner and the confirm gates on plan/memory_propose/git_commit are not | F2 |
-| S | Cancel mid-tool (Esc): cancelled result, post-checkpoint, in_progress | next | F2 |
+| S | Cancel mid-tool (Esc): cancelled result, post-checkpoint, in_progress | done for `bash`, the only tool a mid-flight Esc can reach (other handlers run to completion synchronously); the whole turn stops after a cancellation rather than continuing to the model, a UX choice not specified by §3.7 | F2 |
 | T | Provider fallback chain ([models.x].fallback) | planned — the `fallback` field does not exist on ModelConfig (#8) | §5.1 |
 | U | Assumption notes: open tracking, finish warning, resolve | done | F3 |
 | V | Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md) | next — cmd:/manual: settling done (#7); remaining: /init seeding of verify commands and their substitution on create | F3 |

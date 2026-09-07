@@ -56,6 +56,12 @@ pub struct ToolCtx {
     pub plan_limits: crate::config::PlanConfig,
     /// context window of the model driving this session, in tokens
     pub context_limit: u64,
+    /// §3.7 (§7 S): set from the TUI when the user presses Esc during a
+    /// running tool. Long-running handlers poll it at their existing
+    /// wait/retry points and stop cooperatively — nothing here can reach into
+    /// a handler and pull it out mid-syscall, so a handler that never checks
+    /// this is a handler Esc cannot interrupt.
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ToolCtx {
@@ -77,6 +83,7 @@ impl ToolCtx {
             journal: Vec::new(),
             plan_limits: crate::config::PlanConfig::default(),
             context_limit: 0,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -84,6 +91,18 @@ impl ToolCtx {
     pub fn in_session(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = session_id.into();
         self
+    }
+
+    /// Share a cancellation flag across this context and its clones. The
+    /// caller keeps the `Arc` and flips it; every clone taken afterwards
+    /// (including the one moved into a `spawn_blocking` closure) observes it.
+    pub fn with_cancel(mut self, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    pub fn cancel_requested(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Adopt the host's plan limits and the driving model's context window.
@@ -259,6 +278,10 @@ pub struct Outcome {
     pub diff: Option<String>,
     /// host-derived metadata for the journal
     pub file_diff: Option<FileDiff>,
+    /// §3.7: the user pressed Esc while this tool was running. Distinct from
+    /// an ordinary failure — the journal records `code: "cancelled"` rather
+    /// than folding it into an error the model is expected to react to.
+    pub cancelled: bool,
 }
 
 impl Outcome {
@@ -268,6 +291,7 @@ impl Outcome {
             output: output.into(),
             diff: None,
             file_diff: None,
+            cancelled: false,
         }
     }
     pub fn err(output: impl Into<String>) -> Self {
@@ -276,6 +300,19 @@ impl Outcome {
             output: output.into(),
             diff: None,
             file_diff: None,
+            cancelled: false,
+        }
+    }
+    /// §3.7: `tool_result ok:false code:cancelled`. The step stays
+    /// `in_progress` and nothing prior is reverted — this only marks the one
+    /// call that was interrupted.
+    pub fn cancelled() -> Self {
+        Self {
+            ok: false,
+            output: "cancelled by user (Esc)".to_string(),
+            diff: None,
+            file_diff: None,
+            cancelled: true,
         }
     }
     /// attach a unified diff, keeping the short summary
@@ -2006,6 +2043,7 @@ mod tests {
         );
         assert!(closing.ok, "{}", closing.output);
         assert!(closing.output.contains(&format!("resolves j#{seq}")));
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

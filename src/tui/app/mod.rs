@@ -2141,6 +2141,16 @@ impl App {
             || matches!(segment, Segment::Tool { name, .. } if name == "subagent")
     }
 
+    /// True while a tool call is executing right now — the row `ToolStart`
+    /// opened and `ToolNotice` has not yet closed. Only one tool runs at a
+    /// time (mutating calls run alone; §3.1), so the most recent segment is
+    /// enough to check. This is what Esc uses to decide between a cooperative
+    /// per-tool cancel (§3.7) and the hard whole-turn abort: there is nothing
+    /// "mid-tool" to cancel while the model is only streaming text.
+    fn tool_running(&self) -> bool {
+        matches!(self.segments.last(), Some(Segment::Tool { ok: None, .. }))
+    }
+
     fn clear_busy_statuses(&mut self) {
         self.segments.retain(
             |segment| !matches!(segment, Segment::Status { text, .. } if text == Self::BUSY_STATUS),

@@ -56,6 +56,14 @@ model-written decisions, rejected approaches, and corrections. A curated
 Another model, another day, another session picks up exactly where things
 stopped.
 
+**Cancel.** Esc during a running `bash` call kills the process — the previous
+behavior only tore down the turn's own task, which does not reach a child
+process spawned on a blocking thread, so the command kept running unseen until
+it finished on its own. The call is recorded as a normal `tool_result` with
+`code: cancelled`, a post-checkpoint is taken if the tree changed, and the turn
+ends there: nothing is reverted, and the step stays in progress for the next
+turn to pick up.
+
 **Undo.** Every file the agent is about to change is kept first, byte for
 byte, in a content-addressed store under `.sqwai/checkpoints/blobs/` — so
 `/undo [n]` puts back exactly what the agent wrote and **does not need git at

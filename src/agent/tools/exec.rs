@@ -57,6 +57,47 @@ pub(super) fn bash(
     run_blocking(ctx, command, timeout_secs)
 }
 
+/// Kill a child and drain its wait, ignoring errors: by the time this runs the
+/// process may already be gone (it finished a moment before the flag was
+/// checked), and that race is not a failure worth reporting.
+fn kill_and_reap(child: &mut std::process::Child) {
+    kill_tree(child);
+    let _ = child.wait();
+}
+
+/// End the child and everything it started. `Child::kill` takes down only the
+/// direct child, but a `cmd /C` shell command usually means grandchildren —
+/// `ping`, `cargo`, compilers — that inherit the pipes and keep mutating the
+/// project after the shell is gone, and keep our own pipe-reader join blocked
+/// waiting on them. `taskkill /T` ends the whole tree instead.
+#[cfg(windows)]
+fn kill_tree(child: &mut std::process::Child) {
+    // Only when it is still running: the pid could otherwise be recycled for
+    // an unrelated process between the check and the kill.
+    let running = child.try_wait().map(|s| s.is_none()).unwrap_or(true);
+    if running {
+        let done = std::process::Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !done {
+            let _ = child.kill();
+        }
+    }
+}
+
+/// Unix shells usually `exec` a lone command, so the direct child is the
+/// whole tree. Pipelines and background jobs can still outlive it — that
+/// needs a process group (`setpgid` + `kill(-pgid)`), which is a follow-up,
+/// not this change.
+#[cfg(not(windows))]
+fn kill_tree(child: &mut std::process::Child) {
+    let _ = child.kill();
+}
+
 fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
     use std::io::Read;
     use std::sync::{Arc, Mutex};
@@ -105,9 +146,25 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
         if status.is_some() {
             break;
         }
+        // §3.7 / §7 S: Esc sets this from the TUI. Checked at the same
+        // cadence as the timeout, because this loop is the only place a
+        // long-running `bash` call can be interrupted at all — the tokio task
+        // running the agent loop can be aborted, but that does not reach a
+        // child process spawned on this blocking thread; without this check,
+        // pressing Esc during `bash` gave the *illusion* of cancelling while
+        // the command kept mutating the project unseen until it finished on
+        // its own.
+        if ctx.cancel_requested() {
+            kill_and_reap(&mut child);
+            // the readers still hold the pipe ends; joining them is what
+            // notices the pipes closed and lets them return
+            for r in readers {
+                let _ = r.join();
+            }
+            return Outcome::cancelled();
+        }
         if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_and_reap(&mut child);
             return Outcome::err(format!(
                 "command timed out after {timeout_secs}s — output discarded"
             ));
@@ -143,6 +200,7 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
         output: format!("{status_line}\n{body}"),
         diff: None,
         file_diff: None,
+        cancelled: false,
     }
 }
 
@@ -211,4 +269,141 @@ fn spill(contents: &str) -> PathBuf {
     ));
     let _ = std::fs::File::create(&path).and_then(|mut f| f.write_all(contents.as_bytes()));
     path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx() -> ToolCtx {
+        ToolCtx::new(std::env::temp_dir())
+    }
+
+    /// A command that blocks well past any test deadline on this platform.
+    /// `sleep` is POSIX-only, and `timeout` exits immediately with the
+    /// redirected stdin the child gets — so Windows paces 30 seconds of
+    /// `ping` instead. Either way a single process the kill ends.
+    #[cfg(unix)]
+    fn long_sleep_command() -> String {
+        "sleep 30".to_string()
+    }
+
+    #[cfg(windows)]
+    fn long_sleep_command() -> String {
+        "ping -n 31 127.0.0.1".to_string()
+    }
+
+    /// A loop that appends a timestamp line to `marker` about twenty times a
+    /// second. Same platform split: `cmd` has no `sleep`/`seq`/`date`, so it
+    /// loops with `for /L` and paces with `ping`. Single `%i` (a command
+    /// line, not a batch file); the path is quoted for spaces.
+    #[cfg(unix)]
+    fn marker_loop_command(marker: &std::path::Path) -> String {
+        format!(
+            "for i in $(seq 1 200); do date +%s%N >> {}; sleep 0.05; done",
+            marker.display()
+        )
+    }
+
+    #[cfg(windows)]
+    fn marker_loop_command(marker: &std::path::Path) -> String {
+        format!(
+            "for /L %i in (1,1,200) do @echo %time%>>\"{}\" & @ping -n 1 -w 40 127.0.0.1",
+            marker.display()
+        )
+    }
+
+    /// The bug this exists to fix: before the poll loop checked the cancel
+    /// flag, aborting the surrounding tokio task did not reach a child
+    /// process spawned on a `spawn_blocking` thread at all — `bash` kept
+    /// running, invisibly, until its own timeout. This drives a command whose
+    /// timeout is far longer than the test, flips the flag from another
+    /// thread partway through, and asserts the call returns promptly with a
+    /// cancelled outcome rather than only after the long timeout.
+    #[test]
+    fn cancelling_a_running_command_returns_promptly_as_cancelled() {
+        let mut c = ctx();
+        let cancel = c.cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        let started = std::time::Instant::now();
+        // a command that would otherwise run far longer than this test
+        let outcome = bash(&mut c, &long_sleep_command(), Some(60), false);
+        let elapsed = started.elapsed();
+
+        assert!(
+            outcome.cancelled,
+            "ok={} output={:?}",
+            outcome.ok, outcome.output
+        );
+        assert!(!outcome.ok);
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "cancellation did not interrupt the command: took {elapsed:?}"
+        );
+    }
+
+    /// The point of killing the child rather than only giving up on it: a
+    /// process left running after "cancellation" is worse than no
+    /// cancellation at all, because nothing in the UI shows it is still
+    /// mutating the project. Proven here by having the child write to a file
+    /// repeatedly and checking that it stops the moment it is cancelled.
+    #[test]
+    fn the_child_process_is_actually_killed_not_abandoned() {
+        let dir = tempfile::Builder::new()
+            .prefix("sqwai-cancel")
+            .tempdir()
+            .unwrap();
+        let marker = dir.path().join("alive");
+        let mut c = ToolCtx::new(dir.path());
+        let cancel = c.cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        let command = marker_loop_command(&marker);
+        let started = std::time::Instant::now();
+        let outcome = bash(&mut c, &command, Some(60), false);
+        let elapsed = started.elapsed();
+        assert!(
+            outcome.cancelled,
+            "ok={} output={:?}",
+            outcome.ok, outcome.output
+        );
+        // The real proof: `bash` must not block until the child exits on its
+        // own (the loop runs for up to 10s). If the process were merely
+        // abandoned rather than killed, the pipe readers this call joins on
+        // would keep it waiting for the full 10s regardless of the flag.
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "bash() blocked until the child finished on its own: {elapsed:?}"
+        );
+
+        let count_after_cancel = std::fs::read_to_string(&marker)
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let count_later = std::fs::read_to_string(&marker)
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        assert_eq!(
+            count_after_cancel, count_later,
+            "the marker kept growing after cancellation — the child is still running"
+        );
+    }
+
+    /// Without a cancellation, ordinary completion is unaffected: the flag
+    /// starting `false` must not itself do anything.
+    #[test]
+    fn an_uncancelled_command_completes_normally() {
+        let mut c = ctx();
+        let outcome = bash(&mut c, "echo hi", Some(10), false);
+        assert!(outcome.ok);
+        assert!(!outcome.cancelled);
+        assert!(outcome.output.contains("hi"));
+    }
 }
