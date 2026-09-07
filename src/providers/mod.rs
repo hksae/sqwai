@@ -525,6 +525,12 @@ pub async fn check_connection(p: &ResolvedProvider) -> Result<String, String> {
         first
     })?;
     let status = response.status();
+    if status.as_u16() == 404 {
+        // No models endpoint — common for Anthropic and relays that still
+        // accept the key. A 404 here means the host is reachable and the
+        // path simply doesn't exist, not that the key is bad (that is 401).
+        return Ok("ok".to_string());
+    }
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         let first = body.split_whitespace().collect::<Vec<_>>().join(" ");
