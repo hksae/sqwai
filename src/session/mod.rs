@@ -122,7 +122,9 @@ impl Session {
     pub fn fork_upto(&self, last_idx: usize) -> Self {
         let mut f = Session::new(self.model_key.clone(), self.context_limit);
         f.title = self.title.clone();
-        f.messages = self.messages[..=(last_idx.min(self.messages.len() - 1))].to_vec();
+        if !self.messages.is_empty() {
+            f.messages = self.messages[..=(last_idx.min(self.messages.len() - 1))].to_vec();
+        }
         f.estimated_tokens = f
             .messages
             .iter()
@@ -561,5 +563,13 @@ mod tests {
         assert_eq!(v[0].id, pinned_old.id, "pinned first");
         assert_eq!(v[1].id, mid.id, "then latest activity");
         assert_eq!(v[2].id, old.id);
+    }
+
+    #[test]
+    fn fork_empty_session_does_not_panic() {
+        let s = Session::new("m".into(), 1000);
+        let f = s.fork_upto(usize::MAX);
+        assert!(f.messages.is_empty());
+        assert_eq!(f.forked_from_id.as_deref(), Some(s.id.to_string().as_str()));
     }
 }
