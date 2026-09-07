@@ -107,6 +107,8 @@ pub(super) enum Menu {
     },
     /// the active plan's visible steps, opened with Ctrl+T
     Todo,
+    /// full plan overview, opened with /plan
+    Plan,
     /// all delegated child agents, opened with Ctrl+A
     Subagents,
 }
@@ -855,6 +857,7 @@ impl App {
             Some(Menu::Approval { .. }) => " confirm command ".into(),
             Some(Menu::AskFree { .. }) => " type your answer (enter: send, esc: cancel) ".into(),
             Some(Menu::Todo) => " to-do ".into(),
+            Some(Menu::Plan) => " plan ".into(),
             Some(Menu::Subagents) => " subagents ".into(),
             None => String::new(),
         }
@@ -1590,6 +1593,123 @@ impl App {
                     }
                 }
                 self.menu_footer_text = Some("esc: close · ctrl+t: toggle".into());
+            }
+            Menu::Plan => {
+                let root = std::env::current_dir().unwrap_or_default();
+                let Some(plan) = crate::plan::open_active(&root).ok().flatten() else {
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled("  no active plan", Theme::dim())]),
+                        MenuAction::None,
+                    ));
+                    self.menu_footer_text = Some("esc: close".into());
+                    // fall through to sel clamp
+                    self.menu_sel = self.menu_sel.min(self.menu_rows.len().saturating_sub(1));
+                    return;
+                };
+                let c = plan.counts();
+                self.menu_rows.push(row(
+                    Line::from(vec![
+                        Span::styled(format!("  plan {}", plan.id), Theme::accent_bold()),
+                        Span::styled(
+                            format!(
+                                " · {}",
+                                match plan.status {
+                                    plan::PlanStatus::Active => "active",
+                                    plan::PlanStatus::Completed => "completed",
+                                    plan::PlanStatus::Abandoned => "abandoned",
+                                }
+                            ),
+                            Theme::dim(),
+                        ),
+                    ]),
+                    MenuAction::None,
+                ));
+                self.menu_rows.push(row(
+                    Line::from(vec![
+                        Span::styled("  goal: ", Theme::accent()),
+                        Span::styled(plan.goal.text.clone(), Theme::base()),
+                    ]),
+                    MenuAction::None,
+                ));
+                if !plan.constraints.is_empty() {
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled(
+                            format!("  constraints: {}", plan.constraints.join(" · ")),
+                            Theme::dim(),
+                        )]),
+                        MenuAction::None,
+                    ));
+                }
+                if !plan.acceptance.is_empty() {
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled("  acceptance:", Theme::accent())]),
+                        MenuAction::None,
+                    ));
+                    for (i, a) in plan.acceptance.iter().enumerate() {
+                        let st = match a.status {
+                            plan::AcceptanceStatus::Pending => Theme::dim(),
+                            plan::AcceptanceStatus::Verified => Theme::ok(),
+                            plan::AcceptanceStatus::Waived => Theme::warn(),
+                        };
+                        self.menu_rows.push(row(
+                            Line::from(vec![
+                                Span::styled(format!("    [{i}] "), st),
+                                Span::styled(a.status.as_str().to_string(), st),
+                                Span::styled(format!(" {}", a.text), Theme::base()),
+                            ]),
+                            MenuAction::None,
+                        ));
+                    }
+                }
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(
+                        format!(
+                            "  steps: {} done · {} in progress · {} blocked · {} pending · {} cancelled",
+                            c.done, c.in_progress, c.blocked, c.pending, c.cancelled
+                        ),
+                        Theme::base(),
+                    )]),
+                    MenuAction::None,
+                ));
+                for s in &plan.steps {
+                    let (marker, style) = match s.status {
+                        plan::StepStatus::Done => ("[x]", Theme::ok()),
+                        plan::StepStatus::InProgress => ("[>]", Theme::accent()),
+                        plan::StepStatus::Blocked => ("[!]", Theme::err()),
+                        plan::StepStatus::Cancelled => ("[-]", Theme::dim()),
+                        plan::StepStatus::Pending | plan::StepStatus::Reopened => {
+                            ("[ ]", Theme::dim())
+                        }
+                    };
+                    let mut title =
+                        format!("  {} {} ({}) {}", marker, s.id, s.kind.as_str(), s.title);
+                    if s.stale_goal == Some(true) {
+                        title.push_str("  [stale goal]");
+                    }
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled(title, style)]),
+                        MenuAction::None,
+                    ));
+                    if let Some(reason) = &s.reason {
+                        self.menu_rows.push(row(
+                            Line::from(vec![Span::styled(
+                                format!("      reason: {reason}"),
+                                Theme::dim(),
+                            )]),
+                            MenuAction::None,
+                        ));
+                    }
+                    if let Some(summary) = &s.summary {
+                        self.menu_rows.push(row(
+                            Line::from(vec![Span::styled(
+                                format!("      {summary}"),
+                                Theme::dim(),
+                            )]),
+                            MenuAction::None,
+                        ));
+                    }
+                }
+                self.menu_footer_text = Some("up/down: scroll · esc: close".into());
             }
         }
         if self.menu_sel >= self.menu_rows.len() {

@@ -1437,11 +1437,10 @@ impl App {
         let root = std::env::current_dir().unwrap_or_default();
         let args: Vec<&str> = rest.split_whitespace().skip(1).collect();
         let result = match args.first().copied() {
-            None | Some("show") => plan::open_active(&root)
-                .ok()
-                .flatten()
-                .map(|p| plan::render(&p))
-                .unwrap_or_else(|| "no active plan".to_string()),
+            None | Some("show") => {
+                self.open_menu(Menu::Plan);
+                return;
+            }
             Some("history") => {
                 let plans = plan::list(&root);
                 if plans.is_empty() {
