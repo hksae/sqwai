@@ -407,21 +407,43 @@ fn emit_code(
     // lines are wrapped into additional framed rows below, rather than being
     // passed to the outer wrapper where the right border could be split away.
     let max_w = width.saturating_sub(4) as usize;
+
+    // top border with the language embedded: ╭─ rust ────╮
+    // If language text is longer than the content, expand iw so that
+    // the top border, body lines, and bottom border all have identical width (iw + 4).
+    let lang_txt = match lang {
+        Some(l) if !l.is_empty() => {
+            // Truncate language label if it would overflow max_w + 2
+            let available = max_w.saturating_add(2);
+            let mut s = format!("─ {l} ");
+            if UnicodeWidthStr::width(s.as_str()) > available {
+                let mut truncated = String::new();
+                for ch in format!("─ {l}").chars() {
+                    if UnicodeWidthStr::width(format!("{truncated}{ch}… ").as_str()) > available {
+                        break;
+                    }
+                    truncated.push(ch);
+                }
+                s = format!("{truncated}… ");
+            }
+            s
+        }
+        _ => String::new(),
+    };
+    let lang_w = UnicodeWidthStr::width(lang_txt.as_str());
+    let min_iw_for_lang = lang_w.saturating_sub(2);
+
     let iw = lines
         .iter()
         .map(|l| UnicodeWidthStr::width(line_text_pub(l).as_str()))
         .max()
         .unwrap_or(0)
+        .max(min_iw_for_lang)
         .min(max_w)
         .max(1);
     // Code frame is intentionally a little quieter than the accent text.
     let b = Style::new().fg(Theme::code_border()).bg(Theme::BG());
 
-    // top border with the language embedded: ╭─ rust ────╮
-    let lang_txt = match lang {
-        Some(l) if !l.is_empty() => format!("─ {l} "),
-        _ => String::new(),
-    };
     let rest = (iw + 2).saturating_sub(UnicodeWidthStr::width(lang_txt.as_str()));
     out.push(Line::from(vec![
         Span::styled("╭".to_string(), b),
@@ -865,6 +887,19 @@ mod tests {
             .take(5)
             .map(|l| l.spans.iter().map(|s| s.content.chars().count()).sum())
             .collect();
+        assert!(widths.iter().all(|&w| w == widths[0]), "{widths:?}");
+    }
+
+    #[test]
+    fn code_box_borders_align_with_long_language() {
+        let hl = Highlighter::new();
+        let lines = render("```javascript\n1\n```\n", 60, &hl);
+        let widths: Vec<usize> = lines
+            .iter()
+            .take(3)
+            .map(|l| UnicodeWidthStr::width(line_text_pub(l).as_str()))
+            .collect();
+        assert_eq!(widths.len(), 3);
         assert!(widths.iter().all(|&w| w == widths[0]), "{widths:?}");
     }
 }
