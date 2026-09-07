@@ -100,6 +100,7 @@ impl Shadow {
             // a global `init.templateDir`, hooks path or signing setup must not
             // decide what our snapshots look like
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", self.git_dir.join("absent.gitconfig"))
             .env("GIT_TERMINAL_PROMPT", "0")
             .current_dir(&self.root)
             .output()
@@ -125,6 +126,7 @@ impl Shadow {
                 .arg("--quiet")
                 .arg(&self.git_dir)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", self.git_dir.join("absent.gitconfig"))
                 // `init.templateDir` in a user's global config can install
                 // hooks into every repository it creates, including this one
                 .env("GIT_TEMPLATE_DIR", "")
@@ -252,6 +254,8 @@ impl Shadow {
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", self.git_dir.join("absent.gitconfig"))
+            .env("GIT_TERMINAL_PROMPT", "0")
             .current_dir(&self.root)
             .output()
             .context("reading a file from a snapshot")?;
