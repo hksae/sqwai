@@ -1,0 +1,22 @@
+﻿# Default line ending normalization for all text files
+* text=auto eol=lf
+
+# Explicit LF for code, configs, and documentation
+*.rs text eol=lf diff=rust
+*.toml text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.sh text eol=lf
+
+# Windows-specific files
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
