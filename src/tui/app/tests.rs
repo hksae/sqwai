@@ -3194,24 +3194,8 @@ mod tests {
     }
 
     fn push_inline_ask(app: &mut App, questions: Vec<crate::agent::loop_task::AskQuestion>) {
-        let picked = questions
-            .iter()
-            .map(|q| vec![false; q.options.len()])
-            .collect();
-        let custom = vec![String::new(); questions.len()];
-        let cursor = vec![0; questions.len()];
-        app.segments.push(Segment::AskUser {
-            id: 7,
-            questions,
-            picked,
-            custom,
-            focus: 0,
-            cursor,
-            answered: None,
-        });
-        app.active_ask = Some(app.segments.len() - 1);
-        app.ask_hover = None;
-        app.ask_custom_focus = None;
+        // exercise the real insertion path (before the live answer)
+        app.push_ask_segment(7, questions);
     }
 
     #[test]
@@ -3372,5 +3356,75 @@ mod tests {
         );
         assert!(summary.contains("first?"), "summary must not be empty: {summary:?}");
         assert!(summary.contains("second?"), "all questions visible: {summary:?}");
+    }
+
+    #[test]
+    fn inline_ask_lands_before_the_answer_inside_activity() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        // a running turn: thinking, a tool, the live answer slot
+        app.segments.push(Segment::Thinking {
+            text: "hmm".to_string(),
+            expanded: false,
+            started: None,
+            duration_ms: 0,
+            live: false,
+        });
+        app.handle_tool_start("read".to_string(), "a.rs".to_string());
+        app.segments.push(Segment::Assistant {
+            text: String::new(),
+            live: true,
+        });
+        push_inline_ask(&mut app, ask_fixture());
+        let ask = app.active_ask_seg().expect("ask must be active");
+        let answer = app
+            .segments
+            .iter()
+            .position(|s| matches!(s, Segment::Assistant { live: true, .. }))
+            .expect("live answer");
+        assert!(
+            ask < answer,
+            "the question must sit before the answer, with the tools: ask={ask} answer={answer}"
+        );
+        // the work run covers tools and the question together…
+        let (start, end) = app.trailing_work_run().expect("a work run must exist");
+        assert!(start <= ask && ask < end, "ask must fold into activity");
+        // …and a successful turn folds it collapsed, not below the answer
+        app.finalize_activity_group(false);
+        let g = app.activity_groups.last().expect("group must be frozen");
+        assert!(!g.expanded, "successful turns fold by default");
+        assert!(g.seg_start <= ask && ask < g.seg_end, "ask must be inside the group");
+        assert_eq!(g.calls, 2, "read + ask_user count as calls");
+    }
+
+    #[test]
+    fn active_ask_survives_index_shifts() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.segments.push(Segment::Thinking {
+            text: String::new(),
+            expanded: false,
+            started: None,
+            duration_ms: 0,
+            live: false,
+        });
+        app.segments.push(Segment::Assistant {
+            text: String::new(),
+            live: true,
+        });
+        push_inline_ask(&mut app, ask_fixture());
+        assert_eq!(app.active_ask_seg(), Some(1));
+        // finish_turn drops empty thinking rows, shifting every later index
+        // — index-based tracking would now point at the answer slot
+        app.segments.remove(0);
+        let after = app.active_ask_seg().expect("ask must survive the shift");
+        assert_eq!(after, 0);
+        match &app.segments[after] {
+            Segment::AskUser { id: 7, .. } => {}
+            other => panic!("wrong segment resolved: {other:?}"),
+        }
+        app.inline_ask_select(0, 0);
+        match &app.segments[after] {
+            Segment::AskUser { picked, .. } => assert_eq!(picked[0], vec![true, false]),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

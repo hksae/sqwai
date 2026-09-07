@@ -46,8 +46,6 @@ pub(super) enum Segment {
         picked: Vec<Vec<bool>>,
         custom: Vec<String>,
         focus: usize,
-        /// keyboard cursor per question (which option Up/Down/Space acts on)
-        cursor: Vec<usize>,
         /// frozen answer text once the user confirmed/skipped; None = active
         answered: Option<String>,
     },
@@ -571,7 +569,6 @@ impl App {
                 picked,
                 custom,
                 focus,
-                cursor,
                 answered,
                 ..
             } => {
@@ -583,9 +580,6 @@ impl App {
                     k += c.len();
                 }
                 k += focus * 101;
-                for (i, c) in cursor.iter().enumerate() {
-                    k += c * (i + 7) * 13;
-                }
                 if let Some(a) = answered {
                     k += a.len() * 3 + 1_000_000;
                 }
@@ -666,7 +660,6 @@ impl App {
                 picked,
                 custom,
                 focus,
-                cursor,
                 answered,
                 ..
             } => {
@@ -713,10 +706,6 @@ impl App {
                         } else {
                             " ○ "
                         };
-                        let cursor_here = live
-                            && is_active_seg
-                            && is_focused
-                            && cursor.get(q_idx).copied().unwrap_or(0) == o_idx;
                         let hovered = live
                             && is_active_seg
                             && self.ask_hover
@@ -732,7 +721,7 @@ impl App {
                         let text = truncate_display_width(&text, width);
                         let base = if !live {
                             Theme::dim()
-                        } else if hovered || cursor_here {
+                        } else if hovered {
                             Style::new()
                                 .fg(Theme::BG())
                                 .bg(Theme::ACCENT())

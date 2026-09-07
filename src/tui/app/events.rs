@@ -364,38 +364,9 @@ impl App {
                                 self.input.insert_newline();
                             }
                         }
-                        // inline ask (chat, no menu): Up/Down moves the cursor
-                        // inside the focused question, Tab switches questions
-                        KeyCode::Up
-                            if self.menu_stack.is_empty()
-                                && self.active_ask_seg().is_some()
-                                && !alt
-                                && !ctrl =>
-                        {
-                            let q = self
-                                .active_ask_seg()
-                                .and_then(|s| match self.segments.get(s) {
-                                    Some(Segment::AskUser { focus, .. }) => Some(*focus),
-                                    _ => None,
-                                })
-                                .unwrap_or(0);
-                            self.inline_ask_cursor(q, -1);
-                        }
-                        KeyCode::Down
-                            if self.menu_stack.is_empty()
-                                && self.active_ask_seg().is_some()
-                                && !alt
-                                && !ctrl =>
-                        {
-                            let q = self
-                                .active_ask_seg()
-                                .and_then(|s| match self.segments.get(s) {
-                                    Some(Segment::AskUser { focus, .. }) => Some(*focus),
-                                    _ => None,
-                                })
-                                .unwrap_or(0);
-                            self.inline_ask_cursor(q, 1);
-                        }
+                        // inline ask (chat, no menu): Tab switches questions;
+                        // options are picked by mouse or digits 1-9, arrows
+                        // stay with the composer
                         KeyCode::Tab
                             if self.menu_stack.is_empty()
                                 && self.active_ask_seg().is_some() =>
@@ -442,39 +413,9 @@ impl App {
                             self.menu_activate()
                         }
                         KeyCode::Enter if !self.menu_stack.is_empty() => self.menu_activate(),
-                        // digits & space answer the inline question directly
+                        // digits answer the inline question directly
                         // (no overlay to click); custom-editor focus keeps
                         // typing for the free-text field instead
-                        KeyCode::Char(' ')
-                            if self.menu_stack.is_empty()
-                                && self.active_ask_seg().is_some()
-                                && self.ask_custom_focus.is_none()
-                                && !ctrl
-                                && !alt =>
-                        {
-                            let Some(seg) = self.active_ask_seg() else {
-                                continue;
-                            };
-                            let (q, cur, multiple) = match self.segments.get(seg) {
-                                Some(Segment::AskUser {
-                                    focus,
-                                    cursor,
-                                    questions,
-                                    ..
-                                }) => {
-                                    let multiple = questions
-                                        .get(*focus)
-                                        .is_some_and(|qq| qq.multiple);
-                                    (*focus, cursor.get(*focus).copied().unwrap_or(0), multiple)
-                                }
-                                _ => continue,
-                            };
-                            if multiple {
-                                self.inline_ask_toggle(q, cur);
-                            } else {
-                                self.inline_ask_select(q, cur);
-                            }
-                        }
                         KeyCode::Char(c)
                             if self.menu_stack.is_empty()
                                 && self.active_ask_seg().is_some()

@@ -224,9 +224,11 @@ pub struct App {
     ask_focus: usize,
     /// which question's custom field is being edited, if any
     ask_custom_focus: Option<usize>,
-    /// index into `segments` of the AskUser awaiting an answer, if any.
-    /// While `Some`, the chat itself is the interactive surface (no overlay).
-    active_ask: Option<usize>,
+    /// id of the AskUser awaiting an answer, if any. Tracked by id rather
+    /// than index: tool/thinking rows inserted later shift indices, but the
+    /// live question is always found by lookup. While `Some`, the chat
+    /// itself is the interactive surface (no overlay).
+    active_ask_id: Option<u64>,
     /// mouse hover target inside the active inline AskUser, for highlight
     ask_hover: Option<AskRow>,
     assistant_buf: String,
@@ -478,7 +480,7 @@ impl App {
             ask_custom: Vec::new(),
             ask_focus: 0,
             ask_custom_focus: None,
-            active_ask: None,
+            active_ask_id: None,
             ask_hover: None,
             assistant_buf: String::new(),
             pending_reveal: String::new(),
@@ -764,7 +766,7 @@ impl App {
     }
 
     pub(super) fn is_inline_ask(&self) -> bool {
-        self.active_ask.is_some()
+        self.active_ask_seg().is_some()
             || matches!(
                 self.cur_menu(),
                 Some(Menu::AskUser { .. }) | Some(Menu::AskFree { .. })
@@ -775,14 +777,58 @@ impl App {
         matches!(self.cur_menu(), Some(Menu::AskFree { .. }))
     }
 
-    /// the live AskUser segment awaiting an answer, if it still exists
+    /// the live AskUser segment awaiting an answer, if it still exists.
+    /// Resolved by tool-call id: rows inserted later shift indices.
     pub(super) fn active_ask_seg(&self) -> Option<usize> {
-        self.active_ask.filter(|i| {
+        let id = self.active_ask_id?;
+        self.segments.iter().position(|s| {
             matches!(
-                self.segments.get(*i),
-                Some(Segment::AskUser { answered: None, .. })
+                s,
+                Segment::AskUser {
+                    id: qid,
+                    answered: None,
+                    ..
+                } if *qid == id
             )
         })
+    }
+
+    /// insert an inline AskUser segment in execution order — before the live
+    /// answer, like tool rows — so the finished turn folds it into its
+    /// activity group (collapsed by default) instead of leaving the whole
+    /// questionnaire rendered below the answer.
+    pub(super) fn push_ask_segment(
+        &mut self,
+        id: u64,
+        questions: Vec<crate::agent::loop_task::AskQuestion>,
+    ) {
+        // a previous unanswered ask (e.g. after abort) is frozen first so at
+        // most one segment stays active
+        self.freeze_active_ask("(no answer — superseded)");
+        let picked = questions
+            .iter()
+            .map(|q| vec![false; q.options.len()])
+            .collect();
+        let custom = vec![String::new(); questions.len()];
+        let seg = Segment::AskUser {
+            id,
+            questions,
+            picked,
+            custom,
+            focus: 0,
+            answered: None,
+        };
+        let pos = self
+            .segments
+            .iter()
+            .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
+            .unwrap_or(self.segments.len());
+        self.segments.insert(pos, seg);
+        self.active_ask_id = Some(id);
+        self.ask_hover = None;
+        self.ask_custom_focus = None;
+        self.follow = true;
+        self.dirty = true;
     }
 
     /// build the answer string for an inline AskUser segment, same shape as
@@ -855,14 +901,7 @@ impl App {
     /// single-choice: pick exactly this option in question q
     pub(super) fn inline_ask_select(&mut self, q: usize, opt: usize) {
         let Some(seg) = self.active_ask_seg() else { return };
-        if let Some(Segment::AskUser {
-            questions,
-            picked,
-            focus,
-            cursor,
-            ..
-        }) = self.segments.get_mut(seg)
-        {
+        if let Some(Segment::AskUser { picked, focus, .. }) = self.segments.get_mut(seg) {
             let Some(opts) = picked.get_mut(q) else { return };
             if opt >= opts.len() {
                 return;
@@ -871,10 +910,6 @@ impl App {
                 *v = i == opt;
             }
             *focus = q;
-            if let Some(c) = cursor.get_mut(q) {
-                *c = opt;
-            }
-            let _ = questions;
         }
         self.ask_custom_focus = None;
         self.follow = true;
@@ -884,53 +919,15 @@ impl App {
     /// multi-choice: toggle one option in question q
     pub(super) fn inline_ask_toggle(&mut self, q: usize, opt: usize) {
         let Some(seg) = self.active_ask_seg() else { return };
-        if let Some(Segment::AskUser {
-            picked,
-            focus,
-            cursor,
-            ..
-        }) = self.segments.get_mut(seg)
-        {
+        if let Some(Segment::AskUser { picked, focus, .. }) = self.segments.get_mut(seg) {
             let Some(v) = picked.get_mut(q).and_then(|v| v.get_mut(opt)) else {
                 return;
             };
             *v = !*v;
             *focus = q;
-            if let Some(c) = cursor.get_mut(q) {
-                *c = opt;
-            }
         }
         self.ask_custom_focus = None;
         self.follow = true;
-        self.dirty = true;
-    }
-
-    /// move the keyboard cursor inside question q by delta (±1)
-    pub(super) fn inline_ask_cursor(&mut self, q: usize, delta: i32) {
-        let Some(seg) = self.active_ask_seg() else { return };
-        if let Some(Segment::AskUser {
-            questions,
-            focus,
-            cursor,
-            ..
-        }) = self.segments.get_mut(seg)
-        {
-            let Some(question) = questions.get(q) else {
-                return;
-            };
-            let n = question.options.len().max(1);
-            let cur = cursor.get(q).copied().unwrap_or(0).min(n - 1);
-            // wrap around at the ends; callers only ever pass ±1
-            let next = if delta < 0 {
-                (cur + n - 1) % n
-            } else {
-                (cur + 1) % n
-            };
-            if let Some(c) = cursor.get_mut(q) {
-                *c = next;
-            }
-            *focus = q;
-        }
         self.dirty = true;
     }
 
@@ -982,7 +979,7 @@ impl App {
         if let Some(agent) = &self.agent {
             let _ = agent.control.try_send(ControlMsg::AskAnswer { id, text });
         }
-        self.active_ask = None;
+        self.active_ask_id = None;
         self.ask_hover = None;
         self.ask_custom_focus = None;
         self.follow = true;
@@ -993,13 +990,13 @@ impl App {
     /// never leave a ghost active segment behind.
     fn freeze_active_ask(&mut self, note: &str) {
         let Some(seg) = self.active_ask_seg() else {
-            self.active_ask = None;
+            self.active_ask_id = None;
             return;
         };
         if let Some(Segment::AskUser { answered, .. }) = self.segments.get_mut(seg) {
             *answered = Some(note.to_string());
         }
-        self.active_ask = None;
+        self.active_ask_id = None;
         self.ask_hover = None;
         self.ask_custom_focus = None;
         self.dirty = true;
@@ -1368,7 +1365,7 @@ impl App {
         self.seg_cache.clear();
         // the transcript is replaced: old group ranges point nowhere
         self.activity_groups.clear();
-        self.active_ask = None;
+        self.active_ask_id = None;
         self.ask_hover = None;
         self.ask_custom_focus = None;
         self.rebuild_session_environment();
@@ -1415,7 +1412,7 @@ impl App {
         self.segments.clear();
         self.seg_cache.clear();
         self.activity_groups.clear();
-        self.active_ask = None;
+        self.active_ask_id = None;
         self.ask_hover = None;
         self.ask_custom_focus = None;
         self.rebuild_session_environment();
@@ -2179,29 +2176,7 @@ impl App {
                     // Inline in chat as an ordinary message: no overlay, no
                     // modal menu, so a small window never covers the history
                     // and the mouse target is the chat row itself.
-                    // A previous unanswered ask (e.g. after abort) is frozen
-                    // first so at most one segment stays active.
-                    self.freeze_active_ask("(no answer — superseded)");
-                    let picked = questions
-                        .iter()
-                        .map(|q| vec![false; q.options.len()])
-                        .collect();
-                    let custom = vec![String::new(); questions.len()];
-                    let cursor = vec![0; questions.len()];
-                    self.segments.push(Segment::AskUser {
-                        id,
-                        questions,
-                        picked,
-                        custom,
-                        focus: 0,
-                        cursor,
-                        answered: None,
-                    });
-                    self.active_ask = Some(self.segments.len() - 1);
-                    self.ask_hover = None;
-                    self.ask_custom_focus = None;
-                    self.follow = true;
-                    self.dirty = true;
+                    self.push_ask_segment(id, questions);
                 }
                 AgentEvent::Approval {
                     id,
@@ -2574,7 +2549,7 @@ impl App {
         while start > floor
             && matches!(
                 segs[start - 1],
-                Segment::Thinking { .. } | Segment::Tool { .. }
+                Segment::Thinking { .. } | Segment::Tool { .. } | Segment::AskUser { .. }
             )
         {
             start -= 1;
@@ -2600,6 +2575,9 @@ impl App {
                     errors += 1;
                 }
                 Segment::Tool { .. } => calls += 1,
+                // a question is a tool call awaiting the user; it folds with
+                // the rest of the turn's work
+                Segment::AskUser { .. } => calls += 1,
                 Segment::Thinking { .. } => thinking += 1,
                 _ => {}
             }
