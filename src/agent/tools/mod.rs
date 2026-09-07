@@ -699,7 +699,35 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             .unwrap_or_else(|| s("task")),
         "memory_read" => s("date"),
         "memory_propose" => format!("{}: {}", s("scope"), s("text")),
-        "ask_user" => s("question"),
+        "ask_user" => {
+            let single = s("question");
+            if !single.is_empty() {
+                return single;
+            }
+            // multi-question mode: compact one-line summary for the chat row
+            // and the history expansion (live asks use the inline segment)
+            let Some(qs) = args.get("questions").and_then(|v| v.as_array()) else {
+                return String::new();
+            };
+            let mut parts = Vec::new();
+            for q in qs {
+                let qq = q.get("question").and_then(|v| v.as_str()).unwrap_or("");
+                if qq.is_empty() {
+                    continue;
+                }
+                let header = q.get("header").and_then(|v| v.as_str()).unwrap_or("");
+                if header.is_empty() {
+                    parts.push(qq.to_string());
+                } else {
+                    parts.push(format!("{header}: {qq}"));
+                }
+            }
+            if parts.len() > 2 {
+                format!("{} (+{} more)", parts[..2].join(" | "), parts.len() - 2)
+            } else {
+                parts.join(" | ")
+            }
+        }
         "plan" => format!("plan {}", s("op")),
         _ => String::new(),
     }

@@ -88,6 +88,8 @@ pub(super) enum Menu {
     },
     Effort,
     /// the model asked the user structured questions (ask_user)
+    /// legacy modal path; live asks render inline in the chat instead
+    #[allow(dead_code)]
     AskUser {
         id: u64,
         questions: Vec<crate::agent::loop_task::AskQuestion>,

@@ -3151,4 +3151,226 @@ mod tests {
             "the user should be told what to fix: {reported:?}"
         );
     }
+
+    fn ask_fixture() -> Vec<crate::agent::loop_task::AskQuestion> {
+        vec![
+            crate::agent::loop_task::AskQuestion {
+                header: "Q1".to_string(),
+                question: "Pick one".to_string(),
+                options: vec![
+                    crate::agent::loop_task::AskOption {
+                        label: "alpha".to_string(),
+                        description: None,
+                        recommended: false,
+                    },
+                    crate::agent::loop_task::AskOption {
+                        label: "beta".to_string(),
+                        description: Some("second".to_string()),
+                        recommended: true,
+                    },
+                ],
+                multiple: false,
+                allow_free: true,
+            },
+            crate::agent::loop_task::AskQuestion {
+                header: "Q2".to_string(),
+                question: "Pick many".to_string(),
+                options: vec![
+                    crate::agent::loop_task::AskOption {
+                        label: "x".to_string(),
+                        description: None,
+                        recommended: false,
+                    },
+                    crate::agent::loop_task::AskOption {
+                        label: "y".to_string(),
+                        description: None,
+                        recommended: false,
+                    },
+                ],
+                multiple: true,
+                allow_free: false,
+            },
+        ]
+    }
+
+    fn push_inline_ask(app: &mut App, questions: Vec<crate::agent::loop_task::AskQuestion>) {
+        let picked = questions
+            .iter()
+            .map(|q| vec![false; q.options.len()])
+            .collect();
+        let custom = vec![String::new(); questions.len()];
+        let cursor = vec![0; questions.len()];
+        app.segments.push(Segment::AskUser {
+            id: 7,
+            questions,
+            picked,
+            custom,
+            focus: 0,
+            cursor,
+            answered: None,
+        });
+        app.active_ask = Some(app.segments.len() - 1);
+        app.ask_hover = None;
+        app.ask_custom_focus = None;
+    }
+
+    #[test]
+    fn inline_ask_select_and_confirm_freezes_with_answer() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        push_inline_ask(&mut app, ask_fixture());
+        assert!(app.active_ask_seg().is_some(), "ask must be active");
+        assert!(app.menu_stack.is_empty(), "no overlay menu for inline ask");
+
+        app.inline_ask_select(0, 1);
+        assert_eq!(app.inline_ask_text(app.active_ask_seg().unwrap()), "Q1: beta | Q2: (no answer)");
+
+        app.inline_ask_toggle(1, 0);
+        app.inline_ask_toggle(1, 1);
+        assert_eq!(
+            app.inline_ask_text(app.active_ask_seg().unwrap()),
+            "Q1: beta | Q2: x, y"
+        );
+
+        app.inline_ask_confirm();
+        assert!(app.active_ask_seg().is_none(), "confirm closes the ask");
+        match app.segments.last() {
+            Some(Segment::AskUser {
+                answered: Some(a),
+                ..
+            }) => assert_eq!(a, "Q1: beta | Q2: x, y"),
+            other => panic!("ask must freeze with the answer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inline_ask_single_choice_replaces_previous_pick() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        push_inline_ask(&mut app, ask_fixture());
+        app.inline_ask_select(0, 0);
+        app.inline_ask_select(0, 1);
+        let seg = app.active_ask_seg().unwrap();
+        match &app.segments[seg] {
+            Segment::AskUser { picked, .. } => {
+                assert_eq!(picked[0], vec![false, true], "single pick replaces");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inline_ask_skip_blurs_custom_first_then_freezes() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        push_inline_ask(&mut app, ask_fixture());
+        app.ask_custom_focus = Some(0);
+        app.inline_ask_skip();
+        assert!(app.active_ask_seg().is_some(), "first Esc only blurs");
+        assert!(app.ask_custom_focus.is_none());
+        app.inline_ask_skip();
+        assert!(app.active_ask_seg().is_none(), "second Esc skips");
+    }
+
+    #[test]
+    fn ask_user_tool_rows_are_suppressed_live() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let before = app.segments.len();
+        app.handle_tool_start("ask_user".to_string(), "anything".to_string());
+        assert_eq!(app.segments.len(), before, "no Tool row for ask_user");
+        app.handle_tool_notice("ask_user".to_string(), "answer".to_string(), true, None);
+        assert_eq!(app.segments.len(), before, "no Tool row on notice either");
+        // ordinary tools are unaffected
+        app.handle_tool_start("read".to_string(), "a.rs".to_string());
+        assert_eq!(app.segments.len(), before + 1);
+    }
+
+    #[test]
+    fn inline_ask_rows_respect_narrow_width() {
+        use unicode_width::UnicodeWidthStr;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        push_inline_ask(&mut app, ask_fixture());
+        for width in [20u16, 40, 80] {
+            app.rebuild_cache(width);
+            for line in &app.cache_lines {
+                let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+                assert!(
+                    UnicodeWidthStr::width(text.as_str()) <= width as usize,
+                    "row overflows width {width}: {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inline_ask_click_targets_decode_options_custom_confirm() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        push_inline_ask(&mut app, ask_fixture());
+        app.rebuild_cache(80);
+        // layout for the fixture: header, question, 2 options, custom,
+        // separator, header, question, 2 options, confirm
+        let seg = app.active_ask_seg().unwrap();
+        let (start, _) = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(seg))
+            .map(|s| {
+                let mut e = s;
+                while e < app.cache_rowseg.len() && app.cache_rowseg[e] == Some(seg) {
+                    e += 1;
+                }
+                (s, e)
+            })
+            .expect("ask block must be cached");
+        let at = |off: usize| app.ask_row_at(start + off);
+        assert_eq!(at(0), None, "header is not clickable");
+        assert_eq!(at(1), None, "question is not clickable");
+        assert_eq!(
+            at(2),
+            Some((seg, super::view::AskRow::Option { q: 0, opt: 0 }))
+        );
+        assert_eq!(
+            at(3),
+            Some((seg, super::view::AskRow::Option { q: 0, opt: 1 }))
+        );
+        assert_eq!(at(4), Some((seg, super::view::AskRow::Custom { q: 0 })));
+        assert_eq!(at(5), None, "separator is not clickable");
+        assert_eq!(
+            at(9),
+            Some((seg, super::view::AskRow::Option { q: 1, opt: 1 }))
+        );
+        assert_eq!(at(10), Some((seg, super::view::AskRow::Confirm)));
+    }
+
+    #[test]
+    fn inline_ask_click_selects_instead_of_dismissing() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        push_inline_ask(&mut app, ask_fixture());
+        app.rebuild_cache(80);
+        let seg = app.active_ask_seg().unwrap();
+        let start = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(seg))
+            .expect("ask block");
+        // click the second option of Q1 (offset 3 in the layout above)
+        app.click(start + 3);
+        assert!(app.active_ask_seg().is_some(), "click must not dismiss the ask");
+        match &app.segments[seg] {
+            Segment::AskUser { picked, .. } => assert_eq!(picked[0], vec![false, true]),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ask_user_summary_covers_multi_question_mode() {
+        let summary = crate::agent::tools::call_summary(
+            "ask_user",
+            &serde_json::json!({
+                "questions": [
+                    {"header": "Q1", "question": "first?", "options": [{"label": "a"}, {"label": "b"}]},
+                    {"header": "Q2", "question": "second?", "options": [{"label": "c"}]}
+                ]
+            }),
+        );
+        assert!(summary.contains("first?"), "summary must not be empty: {summary:?}");
+        assert!(summary.contains("second?"), "all questions visible: {summary:?}");
+    }
 }

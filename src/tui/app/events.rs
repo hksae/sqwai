@@ -301,9 +301,12 @@ impl App {
                                     self.dirty = true;
                                     continue;
                                 }
-                                // inline ask_user still uses the session stream, but Esc answers it
-                                // before ordinary popup/menu navigation.
-                                if self.is_inline_ask() {
+                                // legacy menu ask (no longer opened for new
+                                // asks, kept for compatibility)
+                                if matches!(
+                                    self.cur_menu(),
+                                    Some(Menu::AskUser { .. }) | Some(Menu::AskFree { .. })
+                                ) {
                                     self.menu_back();
                                     continue;
                                 }
@@ -321,6 +324,11 @@ impl App {
                             } else if self.popup_visible() {
                                 self.popup_dismiss = true;
                                 self.hover = None;
+                            } else if self.active_ask_seg().is_some() {
+                                // inline ask lives in the chat, not in a menu:
+                                // Esc blurs a custom editor, otherwise skips
+                                // (empty answer) — never aborts the turn here
+                                self.inline_ask_skip();
                             } else if self.streaming {
                                 if self.tool_running() {
                                     // §3.7 / §7 S: a tool is mid-flight —
@@ -347,12 +355,69 @@ impl App {
                             }
                         }
                         KeyCode::Enter if !ctrl && !shift && self.menu_stack.is_empty() => {
-                            if self.enter_gate.on_enter(now) == EnterDecision::Newline {
+                            // an open inline question owns plain Enter
+                            // (confirm); the composer still submits via the
+                            // gate only once the question is answered
+                            if self.active_ask_seg().is_some() {
+                                self.inline_ask_confirm();
+                            } else if self.enter_gate.on_enter(now) == EnterDecision::Newline {
                                 self.input.insert_newline();
                             }
                         }
-                        KeyCode::Up if self.is_inline_ask() => self.menu_nav(-1),
-                        KeyCode::Down if self.is_inline_ask() => self.menu_nav(1),
+                        // inline ask (chat, no menu): Up/Down moves the cursor
+                        // inside the focused question, Tab switches questions
+                        KeyCode::Up
+                            if self.menu_stack.is_empty()
+                                && self.active_ask_seg().is_some()
+                                && !alt
+                                && !ctrl =>
+                        {
+                            let q = self
+                                .active_ask_seg()
+                                .and_then(|s| match self.segments.get(s) {
+                                    Some(Segment::AskUser { focus, .. }) => Some(*focus),
+                                    _ => None,
+                                })
+                                .unwrap_or(0);
+                            self.inline_ask_cursor(q, -1);
+                        }
+                        KeyCode::Down
+                            if self.menu_stack.is_empty()
+                                && self.active_ask_seg().is_some()
+                                && !alt
+                                && !ctrl =>
+                        {
+                            let q = self
+                                .active_ask_seg()
+                                .and_then(|s| match self.segments.get(s) {
+                                    Some(Segment::AskUser { focus, .. }) => Some(*focus),
+                                    _ => None,
+                                })
+                                .unwrap_or(0);
+                            self.inline_ask_cursor(q, 1);
+                        }
+                        KeyCode::Tab
+                            if self.menu_stack.is_empty()
+                                && self.active_ask_seg().is_some() =>
+                        {
+                            let (q, n) = self
+                                .active_ask_seg()
+                                .and_then(|s| match self.segments.get(s) {
+                                    Some(Segment::AskUser {
+                                        focus,
+                                        questions,
+                                        ..
+                                    }) => Some((*focus, questions.len().max(1))),
+                                    _ => None,
+                                })
+                                .unwrap_or((0, 1));
+                            let next = if shift {
+                                (q + n - 1) % n
+                            } else {
+                                (q + 1) % n
+                            };
+                            self.inline_ask_focus(next);
+                        }
                         KeyCode::Up if !self.menu_stack.is_empty() => self.menu_nav(-1),
                         KeyCode::Down if !self.menu_stack.is_empty() => self.menu_nav(1),
                         KeyCode::PageUp if !self.menu_stack.is_empty() => self.menu_nav(-2),
@@ -371,10 +436,85 @@ impl App {
                             let text = self.input_text();
                             self.ask_answer(text);
                         }
-                        KeyCode::Enter if self.is_inline_ask() => self.menu_activate(),
+                        KeyCode::Enter
+                            if !self.menu_stack.is_empty() && self.is_inline_ask() =>
+                        {
+                            self.menu_activate()
+                        }
                         KeyCode::Enter if !self.menu_stack.is_empty() => self.menu_activate(),
+                        // digits & space answer the inline question directly
+                        // (no overlay to click); custom-editor focus keeps
+                        // typing for the free-text field instead
+                        KeyCode::Char(' ')
+                            if self.menu_stack.is_empty()
+                                && self.active_ask_seg().is_some()
+                                && self.ask_custom_focus.is_none()
+                                && !ctrl
+                                && !alt =>
+                        {
+                            let Some(seg) = self.active_ask_seg() else {
+                                continue;
+                            };
+                            let (q, cur, multiple) = match self.segments.get(seg) {
+                                Some(Segment::AskUser {
+                                    focus,
+                                    cursor,
+                                    questions,
+                                    ..
+                                }) => {
+                                    let multiple = questions
+                                        .get(*focus)
+                                        .is_some_and(|qq| qq.multiple);
+                                    (*focus, cursor.get(*focus).copied().unwrap_or(0), multiple)
+                                }
+                                _ => continue,
+                            };
+                            if multiple {
+                                self.inline_ask_toggle(q, cur);
+                            } else {
+                                self.inline_ask_select(q, cur);
+                            }
+                        }
+                        KeyCode::Char(c)
+                            if self.menu_stack.is_empty()
+                                && self.active_ask_seg().is_some()
+                                && self.ask_custom_focus.is_none()
+                                && !ctrl
+                                && !alt
+                                && ('1'..='9').contains(&c) =>
+                        {
+                            let digit = (c as usize) - ('0' as usize);
+                            let Some(seg) = self.active_ask_seg() else {
+                                continue;
+                            };
+                            let (q, multiple, n) = match self.segments.get(seg) {
+                                Some(Segment::AskUser {
+                                    focus,
+                                    questions,
+                                    ..
+                                }) => {
+                                    let qq = questions.get(*focus);
+                                    (
+                                        *focus,
+                                        qq.is_some_and(|qq| qq.multiple),
+                                        qq.map(|qq| qq.options.len()).unwrap_or(0),
+                                    )
+                                }
+                                _ => continue,
+                            };
+                            if digit >= 1 && digit <= n {
+                                if multiple {
+                                    self.inline_ask_toggle(q, digit - 1);
+                                } else {
+                                    self.inline_ask_select(q, digit - 1);
+                                }
+                            }
+                        }
                         // plan/act is switched by the user only (design §5)
-                        KeyCode::Tab if self.menu_stack.is_empty() => {
+                        KeyCode::Tab
+                            if self.menu_stack.is_empty()
+                                && self.active_ask_seg().is_none() =>
+                        {
                             self.mode = self.mode.toggle()
                         }
                         KeyCode::Tab if matches!(self.cur_menu(), Some(Menu::AskUser { .. })) => {
@@ -468,6 +608,35 @@ impl App {
                             self.menu_sel = 0;
                             self.build_menu_rows();
                             self.dirty = true;
+                        }
+                        KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
+                            if self.menu_stack.is_empty() && self.ask_custom_focus.is_some() =>
+                        {
+                            // free-text editor inside the inline question:
+                            // typing lands in the segment, never the composer
+                            if let Some(q) = self.ask_custom_focus
+                                && let Some(seg) = self.active_ask_seg()
+                                && let Some(Segment::AskUser { custom, .. }) =
+                                    self.segments.get_mut(seg)
+                                && let Some(slot) = custom.get_mut(q)
+                            {
+                                match k.code {
+                                    KeyCode::Char(c)
+                                        if !ctrl && !alt =>
+                                    {
+                                        slot.push(c)
+                                    }
+                                    KeyCode::Backspace => {
+                                        slot.pop();
+                                    }
+                                    KeyCode::Delete => {
+                                        slot.clear();
+                                    }
+                                    _ => {}
+                                }
+                                self.follow = true;
+                                self.dirty = true;
+                            }
                         }
                         KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
                             if !self.menu_stack.is_empty() =>

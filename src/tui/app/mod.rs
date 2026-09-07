@@ -88,7 +88,7 @@ mod view;
 
 use forms::FormField;
 use menus::{Menu, MenuAction};
-use view::{ActivityGroup, CellPos, Segment, Selection};
+use view::{ActivityGroup, AskRow, CellPos, Segment, Selection};
 
 use menus::COMMANDS;
 
@@ -216,13 +216,19 @@ pub struct App {
     /// child transcript currently replacing the main chat on screen
     active_subagent: Option<u64>,
     /// checked options in the current multi-select ask_user, per question
+    /// (legacy menu path; the inline segment below is the source of truth)
     ask_picked: Vec<Vec<bool>>,
-    /// custom text per question for ask_user
+    /// custom text per question for ask_user (legacy menu path)
     ask_custom: Vec<String>,
-    /// which question is focused (for Tab switching)
+    /// which question is focused (for Tab switching) (legacy menu path)
     ask_focus: usize,
     /// which question's custom field is being edited, if any
     ask_custom_focus: Option<usize>,
+    /// index into `segments` of the AskUser awaiting an answer, if any.
+    /// While `Some`, the chat itself is the interactive surface (no overlay).
+    active_ask: Option<usize>,
+    /// mouse hover target inside the active inline AskUser, for highlight
+    ask_hover: Option<AskRow>,
     assistant_buf: String,
     /// arrived text not yet revealed to the screen (typewriter effect)
     pending_reveal: String,
@@ -472,6 +478,8 @@ impl App {
             ask_custom: Vec::new(),
             ask_focus: 0,
             ask_custom_focus: None,
+            active_ask: None,
+            ask_hover: None,
             assistant_buf: String::new(),
             pending_reveal: String::new(),
             thinking_open: false,
@@ -756,14 +764,245 @@ impl App {
     }
 
     pub(super) fn is_inline_ask(&self) -> bool {
-        matches!(
-            self.cur_menu(),
-            Some(Menu::AskUser { .. }) | Some(Menu::AskFree { .. })
-        )
+        self.active_ask.is_some()
+            || matches!(
+                self.cur_menu(),
+                Some(Menu::AskUser { .. }) | Some(Menu::AskFree { .. })
+            )
     }
 
     pub(super) fn is_inline_ask_free(&self) -> bool {
         matches!(self.cur_menu(), Some(Menu::AskFree { .. }))
+    }
+
+    /// the live AskUser segment awaiting an answer, if it still exists
+    pub(super) fn active_ask_seg(&self) -> Option<usize> {
+        self.active_ask.filter(|i| {
+            matches!(
+                self.segments.get(*i),
+                Some(Segment::AskUser { answered: None, .. })
+            )
+        })
+    }
+
+    /// build the answer string for an inline AskUser segment, same shape as
+    /// the legacy menu confirm (`"label1, label2; custom"` per question,
+    /// `"H: answer"` joined with `" | "`, `"(no answer)"` when empty)
+    pub(super) fn inline_ask_text(&self, seg_idx: usize) -> String {
+        let Some(Segment::AskUser {
+            questions,
+            picked,
+            custom,
+            ..
+        }) = self.segments.get(seg_idx)
+        else {
+            return String::new();
+        };
+        let single_no_header = questions.len() == 1 && questions[0].header.is_empty();
+        let mut parts = Vec::new();
+        for (q_idx, q) in questions.iter().enumerate() {
+            let labels: Vec<String> = picked
+                .get(q_idx)
+                .map(|v| {
+                    v.iter()
+                        .enumerate()
+                        .filter(|(_, p)| **p)
+                        .filter_map(|(i, _)| q.options.get(i))
+                        .map(|o| o.label.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let free = custom
+                .get(q_idx)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            let mut answer = String::new();
+            if !labels.is_empty() {
+                answer.push_str(&labels.join(", "));
+            }
+            if !free.is_empty() {
+                if !answer.is_empty() {
+                    answer.push_str("; ");
+                }
+                answer.push_str(&free);
+            }
+            if single_no_header {
+                parts.push(if answer.is_empty() {
+                    "(no answer)".to_string()
+                } else {
+                    answer
+                });
+            } else {
+                let header = if q.header.is_empty() {
+                    format!("Q{}", q_idx + 1)
+                } else {
+                    q.header.clone()
+                };
+                parts.push(format!(
+                    "{}: {}",
+                    header,
+                    if answer.is_empty() {
+                        "(no answer)".to_string()
+                    } else {
+                        answer
+                    }
+                ));
+            }
+        }
+        parts.join(" | ")
+    }
+
+    /// single-choice: pick exactly this option in question q
+    pub(super) fn inline_ask_select(&mut self, q: usize, opt: usize) {
+        let Some(seg) = self.active_ask_seg() else { return };
+        if let Some(Segment::AskUser {
+            questions,
+            picked,
+            focus,
+            cursor,
+            ..
+        }) = self.segments.get_mut(seg)
+        {
+            let Some(opts) = picked.get_mut(q) else { return };
+            if opt >= opts.len() {
+                return;
+            }
+            for (i, v) in opts.iter_mut().enumerate() {
+                *v = i == opt;
+            }
+            *focus = q;
+            if let Some(c) = cursor.get_mut(q) {
+                *c = opt;
+            }
+            let _ = questions;
+        }
+        self.ask_custom_focus = None;
+        self.follow = true;
+        self.dirty = true;
+    }
+
+    /// multi-choice: toggle one option in question q
+    pub(super) fn inline_ask_toggle(&mut self, q: usize, opt: usize) {
+        let Some(seg) = self.active_ask_seg() else { return };
+        if let Some(Segment::AskUser {
+            picked,
+            focus,
+            cursor,
+            ..
+        }) = self.segments.get_mut(seg)
+        {
+            let Some(v) = picked.get_mut(q).and_then(|v| v.get_mut(opt)) else {
+                return;
+            };
+            *v = !*v;
+            *focus = q;
+            if let Some(c) = cursor.get_mut(q) {
+                *c = opt;
+            }
+        }
+        self.ask_custom_focus = None;
+        self.follow = true;
+        self.dirty = true;
+    }
+
+    /// move the keyboard cursor inside question q by delta (±1)
+    pub(super) fn inline_ask_cursor(&mut self, q: usize, delta: i32) {
+        let Some(seg) = self.active_ask_seg() else { return };
+        if let Some(Segment::AskUser {
+            questions,
+            focus,
+            cursor,
+            ..
+        }) = self.segments.get_mut(seg)
+        {
+            let Some(question) = questions.get(q) else {
+                return;
+            };
+            let n = question.options.len().max(1);
+            let cur = cursor.get(q).copied().unwrap_or(0).min(n - 1);
+            // wrap around at the ends; callers only ever pass ±1
+            let next = if delta < 0 {
+                (cur + n - 1) % n
+            } else {
+                (cur + 1) % n
+            };
+            if let Some(c) = cursor.get_mut(q) {
+                *c = next;
+            }
+            *focus = q;
+        }
+        self.dirty = true;
+    }
+
+    /// switch the focused question (Tab / Shift+Tab / click)
+    pub(super) fn inline_ask_focus(&mut self, q: usize) {
+        let Some(seg) = self.active_ask_seg() else { return };
+        if let Some(Segment::AskUser {
+            questions,
+            focus,
+            ..
+        }) = self.segments.get_mut(seg)
+        {
+            if q < questions.len() {
+                *focus = q;
+            }
+        }
+        self.ask_custom_focus = None;
+        self.dirty = true;
+    }
+
+    /// confirm the whole inline ask and send it to the agent
+    pub(super) fn inline_ask_confirm(&mut self) {
+        let Some(seg) = self.active_ask_seg() else { return };
+        let text = self.inline_ask_text(seg);
+        self.inline_ask_answer(text);
+    }
+
+    /// Esc on an inline ask: blur a custom editor first, otherwise skip
+    /// (empty answer, as before) but freeze the segment visibly.
+    pub(super) fn inline_ask_skip(&mut self) {
+        if self.ask_custom_focus.is_some() {
+            self.ask_custom_focus = None;
+            self.dirty = true;
+            return;
+        }
+        self.inline_ask_answer("(no answer)".to_string());
+    }
+
+    /// freeze the active inline segment and deliver the text to the agent
+    fn inline_ask_answer(&mut self, text: String) {
+        let Some(seg) = self.active_ask_seg() else { return };
+        let id = match self.segments.get(seg) {
+            Some(Segment::AskUser { id, .. }) => *id,
+            _ => return,
+        };
+        if let Some(Segment::AskUser { answered, .. }) = self.segments.get_mut(seg) {
+            *answered = Some(text.clone());
+        }
+        if let Some(agent) = &self.agent {
+            let _ = agent.control.try_send(ControlMsg::AskAnswer { id, text });
+        }
+        self.active_ask = None;
+        self.ask_hover = None;
+        self.ask_custom_focus = None;
+        self.follow = true;
+        self.dirty = true;
+    }
+
+    /// the agent turn ended (or was aborted) while a question was open:
+    /// never leave a ghost active segment behind.
+    fn freeze_active_ask(&mut self, note: &str) {
+        let Some(seg) = self.active_ask_seg() else {
+            self.active_ask = None;
+            return;
+        };
+        if let Some(Segment::AskUser { answered, .. }) = self.segments.get_mut(seg) {
+            *answered = Some(note.to_string());
+        }
+        self.active_ask = None;
+        self.ask_hover = None;
+        self.ask_custom_focus = None;
+        self.dirty = true;
     }
 
     fn popup_visible(&self) -> bool {
@@ -1129,6 +1368,9 @@ impl App {
         self.seg_cache.clear();
         // the transcript is replaced: old group ranges point nowhere
         self.activity_groups.clear();
+        self.active_ask = None;
+        self.ask_hover = None;
+        self.ask_custom_focus = None;
         self.rebuild_session_environment();
         self.load_history_segments();
         self.menu_home();
@@ -1173,6 +1415,9 @@ impl App {
         self.segments.clear();
         self.seg_cache.clear();
         self.activity_groups.clear();
+        self.active_ask = None;
+        self.ask_hover = None;
+        self.ask_custom_focus = None;
         self.rebuild_session_environment();
         self.follow = true;
         self.view_top = 0;
@@ -1931,22 +2176,31 @@ impl App {
                     self.dirty = true;
                 }
                 AgentEvent::AskUser { id, questions } => {
-                    // Inline in chat, not a popup — avoids covering the history on small windows.
+                    // Inline in chat as an ordinary message: no overlay, no
+                    // modal menu, so a small window never covers the history
+                    // and the mouse target is the chat row itself.
+                    // A previous unanswered ask (e.g. after abort) is frozen
+                    // first so at most one segment stays active.
+                    self.freeze_active_ask("(no answer — superseded)");
                     let picked = questions
                         .iter()
                         .map(|q| vec![false; q.options.len()])
                         .collect();
                     let custom = vec![String::new(); questions.len()];
+                    let cursor = vec![0; questions.len()];
                     self.segments.push(Segment::AskUser {
                         id,
-                        questions: questions.clone(),
+                        questions,
                         picked,
                         custom,
                         focus: 0,
+                        cursor,
+                        answered: None,
                     });
-                    // Also open as menu for keyboard nav (Tab/Enter) — but not as overlay
-                    // The inline segment is the primary, the menu is secondary for focus
-                    self.open_menu(Menu::AskUser { id, questions });
+                    self.active_ask = Some(self.segments.len() - 1);
+                    self.ask_hover = None;
+                    self.ask_custom_focus = None;
+                    self.follow = true;
                     self.dirty = true;
                 }
                 AgentEvent::Approval {
@@ -2076,6 +2330,12 @@ impl App {
     /// reasoning block, so the next ThinkingDelta opens its own row instead of
     /// piling onto the previous one.
     fn handle_tool_start(&mut self, name: String, summary: String) {
+        // ask_user has its own inline Q&A segment (AgentEvent::AskUser); a
+        // parallel Tool row would duplicate it and its expansion used to be
+        // empty because `args` here is only a one-line summary, not the JSON.
+        if name == "ask_user" {
+            return;
+        }
         if self.thinking_open {
             if let Some(i) = self.thinking_idx.take() {
                 self.freeze_thinking(i);
@@ -2118,6 +2378,10 @@ impl App {
         ok: bool,
         diff: Option<String>,
     ) {
+        // answered inline above; no Tool row exists for it by design
+        if name == "ask_user" {
+            return;
+        }
         // close the row opened by ToolStart; fall back to a new one
         let hit = self
             .segments
@@ -2377,6 +2641,18 @@ impl App {
 
     fn finish_turn(&mut self, res: Result<(), String>) {
         self.clear_busy_statuses();
+        // an aborted/errored turn can leave a question with nobody waiting
+        // for its answer — freeze it instead of leaving a live ghost
+        if res.is_err() {
+            let note = if res.as_ref().is_err_and(|e| e == "aborted") {
+                "(no answer — stopped)"
+            } else {
+                "(no answer — turn failed)"
+            };
+            self.freeze_active_ask(note);
+        } else if self.active_ask_seg().is_some() {
+            self.freeze_active_ask("(no answer)");
+        }
         if res.as_ref().is_err_and(|error| error == "aborted") {
             self.clear_subagent_ui_on_stop();
         }

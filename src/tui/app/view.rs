@@ -34,15 +34,22 @@ pub(super) enum Segment {
         output: String,
         expanded: bool,
     },
-    /// ask_user with up to 4 questions, inline in chat
+    /// ask_user with up to 4 questions, inline in chat.
+    /// This is the primary (and only) interactive surface: no overlay, no
+    /// modal menu. While `answered` is `None` the agent is blocked waiting
+    /// for the user; after the answer it freezes into a plain Q&A record.
     AskUser {
         #[allow(dead_code)]
         id: u64,
         questions: Vec<crate::agent::loop_task::AskQuestion>,
-        // per-question picked and custom, synchronized with App state
+        // per-question picked and custom answers, edited in place
         picked: Vec<Vec<bool>>,
         custom: Vec<String>,
         focus: usize,
+        /// keyboard cursor per question (which option Up/Down/Space acts on)
+        cursor: Vec<usize>,
+        /// frozen answer text once the user confirmed/skipped; None = active
+        answered: Option<String>,
     },
     /// one reasoning block; the model may emit several across a turn
     Thinking {
@@ -96,6 +103,15 @@ pub(super) struct ActivityGroup {
 /// Real segment indices never reach this range, so it cleanly separates a
 /// group header (toggle the whole block) from a normal segment (toggle itself).
 pub(super) const GROUP_BASE: usize = 1 << 40;
+
+/// One interactive row inside an inline AskUser segment, used for mouse
+/// hover/click mapping. Headers, questions and separators are not targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AskRow {
+    Option { q: usize, opt: usize },
+    Custom { q: usize },
+    Confirm,
+}
 
 /// Indent applied to segments nested inside an activity group. Tool rows are
 /// already inset by two, so this reads as one more level under the header.
@@ -264,12 +280,126 @@ impl App {
                 self.hover = hov;
                 self.dirty = true;
             }
+            return;
         }
+        // hover highlight for the inline ask (chat rows, not an overlay)
+        if self.menu_stack.is_empty() && self.active_ask_seg().is_some() {
+            let abs = self.abs_row(row);
+            let hover = self.ask_row_at(abs).map(|(_, r)| r);
+            if hover != self.ask_hover {
+                self.ask_hover = hover;
+                self.dirty = true;
+            }
+        } else if self.ask_hover.is_some() {
+            self.ask_hover = None;
+            self.dirty = true;
+        }
+    }
+
+    /// contiguous absolute-row range of one segment in the wrapped cache
+    fn ask_block_range(&self, seg_idx: usize) -> Option<(usize, usize)> {
+        let start = self
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(seg_idx))?;
+        let mut end = start;
+        while end < self.cache_rowseg.len() && self.cache_rowseg[end] == Some(seg_idx) {
+            end += 1;
+        }
+        Some((start, end))
+    }
+
+    /// map an absolute cache row onto an interactive AskUser target, if any
+    pub(super) fn ask_row_at(&self, abs_row: usize) -> Option<(usize, AskRow)> {
+        let seg_idx = self.cache_rowseg.get(abs_row).copied()??;
+        if Some(seg_idx) != self.active_ask_seg() {
+            return None;
+        }
+        let Segment::AskUser { answered: None, .. } = self.segments.get(seg_idx)? else {
+            return None;
+        };
+        let (start, _) = self.ask_block_range(seg_idx)?;
+        let offset = abs_row.saturating_sub(start);
+        self.ask_decode(seg_idx, offset).map(|r| (seg_idx, r))
+    }
+
+    /// offset inside the segment's rendered block -> interactive row.
+    /// Must stay in lockstep with `render_segment`'s AskUser branch: every
+    /// logical line there is exactly one visual row (truncated to width).
+    fn ask_decode(&self, seg_idx: usize, offset: usize) -> Option<AskRow> {
+        let Segment::AskUser { questions, .. } = self.segments.get(seg_idx)? else {
+            return None;
+        };
+        let mut line = 0usize;
+        for (q_idx, q) in questions.iter().enumerate() {
+            if !q.header.is_empty() {
+                if offset == line {
+                    return None;
+                }
+                line += 1;
+            }
+            // question text itself is not clickable
+            if offset == line {
+                return None;
+            }
+            line += 1;
+            for o_idx in 0..q.options.len() {
+                if offset == line {
+                    return Some(AskRow::Option { q: q_idx, opt: o_idx });
+                }
+                line += 1;
+            }
+            if q.allow_free {
+                if offset == line {
+                    return Some(AskRow::Custom { q: q_idx });
+                }
+                line += 1;
+            }
+            if q_idx + 1 < questions.len() {
+                // separator
+                if offset == line {
+                    return None;
+                }
+                line += 1;
+            }
+        }
+        if offset == line {
+            return Some(AskRow::Confirm);
+        }
+        None
     }
 
     pub(super) fn click(&mut self, abs_row: usize) {
         if let Some(id) = self.active_subagent {
             self.click_subagent_chat(id, abs_row);
+            return;
+        }
+        // inline AskUser first: a click on an option must select it, never
+        // dismiss the whole question (the old overlay did exactly that via
+        // an outside-rect Esc path).
+        if self.menu_stack.is_empty()
+            && let Some((seg_idx, row)) = self.ask_row_at(abs_row)
+        {
+            match row {
+                AskRow::Option { q, opt } => {
+                    let multiple = matches!(
+                        self.segments.get(seg_idx),
+                        Some(Segment::AskUser { questions, .. })
+                            if questions.get(q).is_some_and(|qq| qq.multiple)
+                    );
+                    if multiple {
+                        self.inline_ask_toggle(q, opt);
+                    } else {
+                        self.inline_ask_select(q, opt);
+                    }
+                }
+                AskRow::Custom { q } => {
+                    self.inline_ask_focus(q);
+                    self.ask_custom_focus = Some(q);
+                    self.dirty = true;
+                }
+                AskRow::Confirm => self.inline_ask_confirm(),
+            }
             return;
         }
         if let Some(Some(tag)) = self.cache_rowseg.get(abs_row).copied() {
@@ -440,6 +570,9 @@ impl App {
                 questions,
                 picked,
                 custom,
+                focus,
+                cursor,
+                answered,
                 ..
             } => {
                 let mut k = questions.len() * 1000;
@@ -448,6 +581,24 @@ impl App {
                 }
                 for c in custom {
                     k += c.len();
+                }
+                k += focus * 101;
+                for (i, c) in cursor.iter().enumerate() {
+                    k += c * (i + 7) * 13;
+                }
+                if let Some(a) = answered {
+                    k += a.len() * 3 + 1_000_000;
+                }
+                // hover highlight is part of the painted row
+                if let Some(hover) = self.ask_hover {
+                    k = k.wrapping_add(match hover {
+                        AskRow::Option { q, opt } => (q + 1) * 1_000_007 + (opt + 1) * 1_009,
+                        AskRow::Custom { q } => (q + 1) * 2_000_033 + 7,
+                        AskRow::Confirm => 3_000_037,
+                    });
+                }
+                if self.ask_custom_focus.is_some() {
+                    k = k.wrapping_add(5_000_021);
                 }
                 k
             }
@@ -515,25 +666,38 @@ impl App {
                 picked,
                 custom,
                 focus,
+                cursor,
+                answered,
                 ..
             } => {
+                let width = usize::from(w).max(1);
+                let live = answered.is_none();
+                let is_active_seg = self.active_ask_seg() == Some(idx);
                 for (q_idx, q) in questions.iter().enumerate() {
-                    let is_focused = q_idx == *focus;
+                    let is_focused = live && is_active_seg && q_idx == *focus;
                     let header_style = if is_focused {
                         Theme::accent_bold()
                     } else {
                         Theme::dim()
                     };
                     if !q.header.is_empty() {
+                        let head = if is_focused {
+                            format!(" {} ●", q.header)
+                        } else {
+                            format!(" {} ", q.header)
+                        };
                         out.push((
-                            Line::from(vec![Span::styled(format!(" {} ", q.header), header_style)]),
+                            Line::from(vec![Span::styled(
+                                truncate_display_width(&head, width),
+                                header_style,
+                            )]),
                             Some(idx),
                         ));
                     }
                     out.push((
                         Line::from(vec![Span::styled(
-                            format!(" ? {}", q.question),
-                            Theme::accent_bold(),
+                            truncate_display_width(&format!(" ? {}", q.question), width),
+                            if live { Theme::accent_bold() } else { Theme::dim() },
                         )]),
                         Some(idx),
                     ));
@@ -544,54 +708,119 @@ impl App {
                             .unwrap_or(false);
                         let marker = if q.multiple {
                             if is_picked { " [x] " } else { " [ ] " }
+                        } else if is_picked {
+                            " ● "
                         } else {
-                            if is_picked { " ● " } else { " ○ " }
+                            " ○ "
                         };
-                        let mut spans = vec![
-                            Span::styled(format!("{marker}{}. ", o_idx + 1), Theme::accent()),
-                            Span::styled(
-                                opt.label.clone(),
-                                if opt.recommended {
-                                    Theme::accent()
-                                } else {
-                                    Theme::base()
-                                },
-                            ),
-                        ];
+                        let cursor_here = live
+                            && is_active_seg
+                            && is_focused
+                            && cursor.get(q_idx).copied().unwrap_or(0) == o_idx;
+                        let hovered = live
+                            && is_active_seg
+                            && self.ask_hover
+                                == Some(AskRow::Option { q: q_idx, opt: o_idx });
+                        let mut text =
+                            format!("{marker}{}. {}", o_idx + 1, opt.label);
                         if opt.recommended {
-                            spans.push(Span::styled(" (Recommended)".to_string(), Theme::accent()));
+                            text.push_str(" (Recommended)");
                         }
                         if let Some(d) = &opt.description {
-                            spans.push(Span::styled(format!(" — {d}"), Theme::dim()));
+                            text.push_str(&format!(" — {d}"));
                         }
-                        out.push((Line::from(spans), Some(idx)));
+                        let text = truncate_display_width(&text, width);
+                        let base = if !live {
+                            Theme::dim()
+                        } else if hovered || cursor_here {
+                            Style::new()
+                                .fg(Theme::BG())
+                                .bg(Theme::ACCENT())
+                                .add_modifier(Modifier::BOLD)
+                        } else if is_picked || opt.recommended {
+                            Theme::accent()
+                        } else {
+                            Theme::base()
+                        };
+                        // keep the leading marker quiet even on a highlighted
+                        // row so the option number stays scannable
+                        out.push((Line::from(vec![Span::styled(text, base)]), Some(idx)));
                     }
                     if q.allow_free {
                         let c = custom.get(q_idx).map(|s| s.as_str()).unwrap_or("");
-                        let line = if c.is_empty() {
-                            Line::from(vec![Span::styled(
-                                "  ✎ Type your own answer…".to_string(),
-                                Theme::dim(),
-                            )])
+                        let custom_focused = live
+                            && is_active_seg
+                            && self.ask_custom_focus == Some(q_idx);
+                        let hovered = live
+                            && is_active_seg
+                            && self.ask_hover == Some(AskRow::Custom { q: q_idx });
+                        let raw = if c.is_empty() {
+                            "  ✎ Type your own answer…".to_string()
+                        } else if custom_focused {
+                            format!("  ✎ {c}▌")
                         } else {
-                            Line::from(vec![Span::styled(format!("  ✎ {c}"), Theme::accent())])
+                            format!("  ✎ {c}")
                         };
-                        out.push((line, Some(idx)));
+                        let style = if !live {
+                            Theme::dim()
+                        } else if custom_focused || hovered {
+                            Style::new()
+                                .fg(Theme::BG())
+                                .bg(Theme::ACCENT())
+                                .add_modifier(Modifier::BOLD)
+                        } else if !c.is_empty() {
+                            Theme::accent()
+                        } else {
+                            Theme::dim()
+                        };
+                        out.push((
+                            Line::from(vec![Span::styled(
+                                truncate_display_width(&raw, width),
+                                style,
+                            )]),
+                            Some(idx),
+                        ));
                     }
                     if q_idx + 1 < questions.len() {
                         out.push((
-                            Line::from(vec![Span::styled("  ──".to_string(), Theme::dim())]),
+                            Line::from(vec![Span::styled(
+                                truncate_display_width("  ──", width),
+                                Theme::dim(),
+                            )]),
                             Some(idx),
                         ));
                     }
                 }
-                out.push((
-                    Line::from(vec![Span::styled(
-                        "  confirm".to_string(),
-                        Theme::ACCENT_SOFT(),
-                    )]),
-                    Some(idx),
-                ));
+                if let Some(answer) = answered {
+                    out.push((
+                        Line::from(vec![Span::styled(
+                            truncate_display_width(&format!("  ✓ {answer}"), width),
+                            Theme::ok(),
+                        )]),
+                        Some(idx),
+                    ));
+                } else {
+                    let hovered =
+                        live && is_active_seg && self.ask_hover == Some(AskRow::Confirm);
+                    let style = if hovered {
+                        Style::new()
+                            .fg(Theme::BG())
+                            .bg(Theme::ACCENT())
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::new().fg(Theme::ACCENT_SOFT())
+                    };
+                    out.push((
+                        Line::from(vec![Span::styled(
+                            truncate_display_width(
+                                "  confirm ⏎ · 1-5 select · tab next question",
+                                width,
+                            ),
+                            style,
+                        )]),
+                        Some(idx),
+                    ));
+                }
             }
             Segment::Thinking {
                 text,
@@ -723,47 +952,21 @@ impl App {
                 let head = Line::from(head_spans);
                 out.push((head, Some(idx)));
                 if *expanded {
-                    // ask_user: show questions and current answers even while still running
+                    // ask_user history rows store only a one-line summary in
+                    // `args` (not the JSON), so never try to parse it: show
+                    // the question summary and the recorded answer instead of
+                    // an empty expansion.
                     let body = if name == "ask_user" {
-                        // args is the question JSON, output is the answer(s)
                         let mut s = String::new();
-                        // Try to parse args as JSON to show questions nicely
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
-                            if let Some(q) = v.get("question").and_then(|x| x.as_str()) {
-                                s.push_str(&format!("Q: {q}\n"));
-                            }
-                            if let Some(qs) = v.get("questions").and_then(|x| x.as_array()) {
-                                for (i, q) in qs.iter().enumerate() {
-                                    let h = q.get("header").and_then(|x| x.as_str()).unwrap_or("");
-                                    let qq =
-                                        q.get("question").and_then(|x| x.as_str()).unwrap_or("");
-                                    s.push_str(&format!("Q{} {}: {qq}\n", i + 1, h));
-                                    if let Some(opts) = q.get("options").and_then(|x| x.as_array())
-                                    {
-                                        for (j, o) in opts.iter().enumerate() {
-                                            let label = o
-                                                .get("label")
-                                                .and_then(|x| x.as_str())
-                                                .unwrap_or("");
-                                            s.push_str(&format!("  {}. {label}\n", j + 1));
-                                        }
-                                    }
-                                }
-                            } else if let Some(opts) = v.get("options").and_then(|x| x.as_array()) {
-                                for (j, o) in opts.iter().enumerate() {
-                                    let label =
-                                        o.get("label").and_then(|x| x.as_str()).unwrap_or("");
-                                    s.push_str(&format!("  {}. {label}\n", j + 1));
-                                }
-                            }
+                        if !args.is_empty() {
+                            s.push_str(&format!("Q: {args}\n"));
                         } else {
-                            s.push_str(args);
-                            s.push('\n');
+                            s.push_str("Q: (question)\n");
                         }
                         if !output.is_empty() {
-                            s.push_str(&format!("\nA: {output}"));
+                            s.push_str(&format!("A: {output}"));
                         } else {
-                            s.push_str("\n(no answer yet)");
+                            s.push_str("A: (no answer yet)");
                         }
                         s
                     } else {
@@ -1158,7 +1361,6 @@ impl App {
         f.render_widget(sb, layout[4]);
 
         self.draw_popup(f, layout[2]);
-        self.draw_inline_ask(f, chat);
         self.draw_menu(f, area);
     }
 
@@ -1219,7 +1421,7 @@ impl App {
 
     pub(super) fn draw_menu(&mut self, f: &mut ratatui::Frame, area: Rect) {
         let menu = self.cur_menu().cloned();
-        if menu.is_none() || self.is_inline_ask() {
+        if menu.is_none() {
             return;
         }
         let is_form = self.is_form_menu();
@@ -1395,100 +1597,6 @@ impl App {
         {
             f.render_widget(ta.as_ref(), field_rect);
         }
-    }
-
-    pub(super) fn draw_inline_ask(&mut self, f: &mut ratatui::Frame, chat: Rect) {
-        let Some(menu) = self.cur_menu().cloned() else {
-            return;
-        };
-        let questions = match menu {
-            Menu::AskUser { questions, .. } => questions,
-            Menu::AskFree { .. } => vec![crate::agent::loop_task::AskQuestion {
-                header: "".to_string(),
-                question: "Your answer".into(),
-                options: Vec::new(),
-                multiple: false,
-                allow_free: true,
-            }],
-            _ => return,
-        };
-        let mut lines: Vec<Line> = Vec::new();
-        for (q_idx, q) in questions.iter().enumerate() {
-            if !q.header.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "{} {}",
-                        q.header,
-                        if q_idx == self.ask_focus { "●" } else { "" }
-                    ),
-                    Theme::dim(),
-                )));
-            }
-            lines.push(Line::from(Span::styled(
-                format!("? {}", q.question),
-                Theme::accent_bold(),
-            )));
-            for (o_idx, opt) in q.options.iter().enumerate() {
-                let picked = self
-                    .ask_picked
-                    .get(q_idx)
-                    .and_then(|v| v.get(o_idx).copied())
-                    .unwrap_or(false);
-                let checked = if q.multiple {
-                    if picked { "[x]" } else { "[ ]" }
-                } else {
-                    if picked { "●" } else { "○" }
-                };
-                let mut spans = vec![
-                    Span::styled(format!("  {checked} {}. ", o_idx + 1), Theme::accent()),
-                    Span::raw(opt.label.clone()),
-                ];
-                if opt.recommended {
-                    spans.push(Span::styled(" (Recommended)".to_string(), Theme::accent()));
-                }
-                if let Some(desc) = &opt.description {
-                    spans.push(Span::styled(format!(" — {desc}"), Theme::dim()));
-                }
-                lines.push(Line::from(spans));
-            }
-            if q.allow_free {
-                let custom = self.ask_custom.get(q_idx).map(|s| s.as_str()).unwrap_or("");
-                let is_focused = self.ask_custom_focus == Some(q_idx);
-                if is_focused || !custom.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        format!(
-                            "  ✎ {}",
-                            if custom.is_empty() {
-                                "Type your answer…"
-                            } else {
-                                custom
-                            }
-                        ),
-                        Theme::accent(),
-                    )));
-                } else {
-                    lines.push(Line::from(Span::styled(
-                        "  ✎ Type your own answer…".to_string(),
-                        Theme::dim(),
-                    )));
-                }
-            }
-            if q_idx + 1 < questions.len() {
-                lines.push(Line::from(Span::styled(" ──".to_string(), Theme::dim())));
-            }
-        }
-        lines.push(Line::from(Span::styled(
-            "enter: confirm · click: select · tab: next question · esc: skip".to_string(),
-            Theme::dim(),
-        )));
-        let h = lines.len().min(chat.height as usize) as u16;
-        let rect = Rect {
-            x: chat.x,
-            y: chat.y + chat.height.saturating_sub(h),
-            width: chat.width,
-            height: h,
-        };
-        f.render_widget(Paragraph::new(lines).style(Theme::base()), rect);
     }
 
     pub(super) fn draw_popup(&mut self, f: &mut ratatui::Frame, input_area: Rect) {
