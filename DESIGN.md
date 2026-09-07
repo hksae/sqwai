@@ -1819,3 +1819,33 @@ policy, not merely deferred:
   of truth".
 - Web UI before the list navigator proves the graph is useful.
 - Scripting-language plugins — MCP already covers extensibility.
+
+---
+
+## 12. Future Capabilities & Architecture Roadmap
+
+The following capabilities are specified as future evolutions, maintaining the core thesis of execution integrity and determinism:
+
+### 12.1 Standardized IDE Protocol (ACP / Agent Client Protocol)
+To allow seamless integration into external IDEs and editors (VS Code, Zed, Neovim, JetBrains) without bespoke adapters:
+- `sqwai serve` implements the emerging **Agent Client Protocol (ACP)** JSON-RPC specification over stdio and WebSocket.
+- Exposes structured session endpoints (`initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/status`).
+- Streams tool execution, diff previews, model reasoning deltas, and structured approval requests (`approval/request` -> `approval/respond`).
+
+### 12.2 Semantic Diff & Syntax-Aware Patching (Tree-sitter Lint on Write)
+To catch structural and syntax mistakes before invoking heavy compiler toolchains:
+- **Pre-mutation Syntax Guard**: File write and edit operations (`write`, `edit`, `multi_edit`, `patch`) run an in-process Tree-sitter syntax validation on modified buffers prior to disk flush.
+- If the mutated syntax tree contains `ERROR` or `MISSING` nodes (such as unmatched brackets, unclosed strings, or broken syntax delimiters), the tool call immediately fails back to the model with an exact structural error description: `Syntax error at line L, col C: unmatched token`.
+- Prevents syntax corruptions from polluting the journal or requiring a full `cargo check` / test escalation cycle.
+
+### 12.3 Smart Context Pruning & Relevance Ranking (BM25 + AST Outline)
+To preserve token context windows on massive codebases:
+- **Outline / Skeleton Mode**: High-level semantic file skeleton extractor providing `pub fn`, `struct`, `enum`, `trait`, and type signatures with bodies trimmed. The agent inspects file topology at 5-10% of the token cost before deciding to fetch full function implementations.
+- **Lexical BM25 ranking**: Hybrid deterministic retrieval over graph node keys, symbol docstrings, and recent journal entries, ranking the most relevant context blocks for injection into turn tail buffers.
+
+### 12.4 Multi-Session Worktrees / Git Isolation
+To enable parallel agent execution without interrupting the developer's working copy:
+- **Isolated task workspaces**: Long-running or unattended agent operations spawn within isolated git worktrees (`.sqwai/worktrees/<task-id>`) branched off the current HEAD.
+- Compiles, tests, and file edits occur in the isolated worktree without touching the user's primary working tree or holding a blocking filesystem lock.
+- Upon plan completion and verification, changes are offered as an atomic squashed branch or clean fast-forward merge into the user's working branch.
+
