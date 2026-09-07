@@ -106,6 +106,33 @@ pub fn log(ctx: &ToolCtx, args: &Value) -> Outcome {
     )
 }
 
+/// `git_show`: what a commit changed, or what a file looked like at a commit.
+/// Read-only mirror of `git show` for the agent: a commit shows the message,
+/// the diff stat and the patch; a `path` shows that file's content at the
+/// revision (`git show <rev>:<path>`).
+pub fn show(ctx: &ToolCtx, args: &Value) -> Outcome {
+    let commit = arg(args, "commit");
+    let commit = if commit.trim().is_empty() {
+        "HEAD"
+    } else {
+        commit.trim()
+    };
+    let path = arg(args, "path").trim();
+    if path.is_empty() {
+        return run_git(ctx, &["show", commit, "--stat=200", "--patch"]);
+    }
+    // git paths are forward-slashed relative to the repo root; host-owned
+    // state is not readable through other tools and not through this one
+    let path = path.replace('\\', "/");
+    if path.split('/').any(|seg| seg == ".sqwai") {
+        return Outcome::err(".sqwai is host-owned state and cannot be read with git_show");
+    }
+    if path.starts_with('/') || path.contains("..") {
+        return Outcome::err(format!("bad path '{path}': use a repo-relative path"));
+    }
+    run_git(ctx, &["show", &format!("{commit}:{path}")])
+}
+
 pub fn commit(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let message = arg(args, "message").trim();
     if message.is_empty() {

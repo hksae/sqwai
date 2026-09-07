@@ -455,9 +455,45 @@ long-running commands.",
                 "properties": {
                     "command": {"type": "string", "description": "the shell command line to run"},
                     "timeout": {"type": "integer", "description": "seconds; kills the process on expiry"},
-                    "background": {"type": "boolean", "description": "detach and return immediately"}
+                    "background": {"type": "boolean", "description": "detach and return immediately with a job id; poll bash_output, stop bash_kill"}
                 },
                 "required": ["command"]
+            }),
+        },
+        ToolDef {
+            name: "bash_output",
+            kind: Kind::ReadOnly,
+            description: "Read a background command's output. With id: the job's status plus the last bytes of its log (a finished job is reported once with its exit code, then cleaned up). Without id: a list of all background jobs with their commands and log paths.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer", "description": "job id from bash background=true"},
+                    "tail": {"type": "integer", "description": "bytes of output to return (default 10000, max 50000)"}
+                }
+            }),
+        },
+        ToolDef {
+            name: "bash_kill",
+            kind: Kind::ReadOnly,
+            description: "Stop a background command started with bash background=true, including everything it spawned. Reports the job's command and final state.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer", "description": "job id"}
+                },
+                "required": ["id"]
+            }),
+        },
+        ToolDef {
+            name: "think",
+            kind: Kind::ReadOnly,
+            description: "A scratchpad with no effects: think through a complex task before acting — the approach, the step order, what could go wrong, which tool fits each step. Use before large refactors, tricky debugging, or when several approaches compete. Returns ok; the value is the reasoning itself.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "thought": {"type": "string", "description": "the reasoning to write down"}
+                },
+                "required": ["thought"]
             }),
         },
         ToolDef {
@@ -477,6 +513,18 @@ long-running commands.",
             kind: Kind::ReadOnly,
             description: "Show recent Git commits.",
             parameters: json!({"type":"object","properties":{"count":{"type":"integer","minimum":1,"maximum":100},"format":{"type":"string"}}}),
+        },
+        ToolDef {
+            name: "git_show",
+            kind: Kind::ReadOnly,
+            description: "Show what a commit changed, or what a file looked like at a revision. With path: the file's content at the revision. Without: the commit message, diff stat and patch.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "commit": {"type": "string", "description": "revision (sha, branch, HEAD~N); default HEAD"},
+                    "path": {"type": "string", "description": "repo-relative file path (forward slashes)"}
+                }
+            }),
         },
         ToolDef {
             name: "git_commit",
@@ -737,6 +785,30 @@ pub fn call_summary(name: &str, args: &Value) -> String {
         "ls" => s("path"),
         "read" | "write" | "edit" | "multi_edit" => s("file_path"),
         "bash" => s("command"),
+        "bash_output" => args["id"]
+            .as_u64()
+            .map(|id| format!("job {id}"))
+            .unwrap_or_else(|| "list".to_string()),
+        "bash_kill" => format!("job {}", args["id"].as_u64().unwrap_or(0)),
+        "think" => {
+            let thought: String = s("thought").chars().take(80).collect();
+            thought
+        }
+        "git_show" => {
+            let commit = s("commit");
+            let path = s("path");
+            if path.is_empty() {
+                if commit.is_empty() {
+                    "HEAD".to_string()
+                } else {
+                    commit
+                }
+            } else if commit.is_empty() {
+                format!("HEAD:{path}")
+            } else {
+                format!("{commit}:{path}")
+            }
+        }
         "glob" | "grep" => s("pattern"),
         "git_diff" => s("target"),
         "git_commit" => s("message"),
@@ -922,6 +994,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         "git_status" => git::status(ctx, args),
         "git_diff" => git::diff(ctx, args),
         "git_log" => git::log(ctx, args),
+        "git_show" => git::show(ctx, args),
         "git_commit" => git::commit(ctx, args),
         "git_branch" => git::branch(ctx, args),
         "patch" => git::patch(ctx, args),
@@ -932,6 +1005,9 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             args["timeout"].as_u64(),
             args["background"].as_bool().unwrap_or(false),
         ),
+        "bash_output" => exec::bash_output(args),
+        "bash_kill" => exec::bash_kill(args),
+        "think" => Outcome::ok("ok — continue with the next step of your plan."),
         "plan" => plan_op(ctx, args),
         "memory_read" => match crate::agent::diary::read_day(
             &ctx.root,
@@ -2061,6 +2137,44 @@ mod tests {
             fs::read_to_string(dir.join("src/main.rs")).unwrap(),
             "fn start() {}\n// DONE\n"
         );
+    }
+
+    #[test]
+    fn git_show_shows_commit_and_file_at_revision() {
+        let (mut ctx, dir) = proj();
+        std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        let first = execute(&mut ctx, "git_commit", &json!({"message": "init"}));
+        assert!(first.ok, "{}", first.output);
+        fs::write(dir.join("README.md"), "# changed\n").unwrap();
+        std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        let second = execute(&mut ctx, "git_commit", &json!({"message": "second"}));
+        assert!(second.ok, "{}", second.output);
+
+        // a commit: message, stat and patch
+        let show = execute(&mut ctx, "git_show", &json!({"commit": "HEAD~1"}));
+        assert!(show.ok, "{}", show.output);
+        assert!(show.output.contains("init"), "{}", show.output);
+        // a file at a revision
+        let file = execute(
+            &mut ctx,
+            "git_show",
+            &json!({"commit": "HEAD~1", "path": "README.md"}),
+        );
+        assert!(file.ok, "{}", file.output);
+        assert!(file.output.contains("# demo"), "{}", file.output);
+        // host-owned state is not readable through git either
+        let blocked = execute(&mut ctx, "git_show", &json!({"path": ".sqwai/plan.json"}));
+        assert!(!blocked.ok, "{}", blocked.output);
+        let think = execute(&mut ctx, "think", &json!({"thought": "step one: read"}));
+        assert!(think.ok, "{}", think.output);
     }
 
     #[test]

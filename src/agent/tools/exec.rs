@@ -11,10 +11,68 @@ use crate::agent::shell::ShellKind;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// bytes beyond which output is spilled to a temp file and only its tail returned
 const MAX_RETURNED: usize = 30_000;
+/// default tail `bash_output` returns for one job
+const BG_TAIL_DEFAULT: usize = 10_000;
+const BG_TAIL_MAX: usize = 50_000;
+
+/// A detached process started with `bash background=true`, kept so its output
+/// can be read later (`bash_output`) and it can be killed or reaped
+/// (`bash_kill`) instead of leaking as a zombie until the app exits.
+pub(super) struct BgJob {
+    pub id: u64,
+    pub command: String,
+    pub log: PathBuf,
+    pub started: std::time::Instant,
+    child: std::process::Child,
+    /// cached once the process exits: the child is reaped (no zombie on
+    /// Unix) but the job stays listed until `bash_output` reports it once
+    exit: Option<std::process::ExitStatus>,
+}
+
+impl BgJob {
+    /// Poll without blocking; caches the exit status when done.
+    fn poll(&mut self) {
+        if self.exit.is_none() {
+            self.exit = self.child.try_wait().ok().flatten();
+        }
+    }
+
+    fn running(&self) -> bool {
+        self.exit.is_none()
+    }
+
+    fn status_line(&self) -> String {
+        match self.exit.as_ref().and_then(|s| s.code()) {
+            Some(code) => format!("finished (exit code {code})"),
+            None if self.exit.is_some() => "finished".to_string(),
+            None => format!("still running ({})", elapsed_of(self)),
+        }
+    }
+}
+
+fn bg_jobs() -> &'static Mutex<Vec<BgJob>> {
+    static JOBS: OnceLock<Mutex<Vec<BgJob>>> = OnceLock::new();
+    JOBS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Poll every job. This reaps exited children (the per-spawn zombie leak on
+/// Unix) without removing them: a finished job stays listed until
+/// `bash_output` reports it once.
+fn poll_jobs() {
+    if let Ok(mut jobs) = bg_jobs().lock() {
+        for job in jobs.iter_mut() {
+            job.poll();
+        }
+    }
+}
 
 fn shell() -> (ShellKind, &'static str, &'static str) {
     let kind = ShellKind::detect();
@@ -247,16 +305,143 @@ fn run_background(ctx: &ToolCtx, command: &str) -> Outcome {
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
     }
+    let id = NEXT_JOB_ID.fetch_add(1, Ordering::Relaxed);
     match cmd.spawn() {
         Ok(child) => {
-            let _ = child.id();
+            let pid = child.id();
+            let command_head: String = command.chars().take(120).collect();
+            bg_jobs().lock().unwrap().push(BgJob {
+                id,
+                command: command_head,
+                log: log.clone(),
+                started: std::time::Instant::now(),
+                child,
+                exit: None,
+            });
             Outcome::ok(format!(
-                "launched in background — logs appended to {}",
+                "launched in background as job {id} (pid {pid}) — logs appended to {}. \
+                 Poll with bash_output(id), stop with bash_kill(id).",
                 log.display()
             ))
         }
         Err(e) => Outcome::err(format!("background spawn failed: {e}")),
     }
+}
+
+/// `bash_output`: the tail of a background job's log, or a status list of all
+/// jobs when no id is given. A finished job is reported once with its exit
+/// code, then removed from the registry.
+pub(super) fn bash_output(args: &serde_json::Value) -> Outcome {
+    poll_jobs();
+    let id = args["id"].as_u64();
+    let mut jobs = match bg_jobs().lock() {
+        Ok(j) => j,
+        Err(_) => return Outcome::err("background job registry is unavailable"),
+    };
+    let Some(id) = id else {
+        if jobs.is_empty() {
+            return Outcome::ok("no background jobs");
+        }
+        let mut lines = Vec::new();
+        for job in jobs.iter() {
+            lines.push(format!(
+                "job {} — {} — `{}` (log: {})",
+                job.id,
+                job.status_line(),
+                job.command,
+                job.log.display()
+            ));
+        }
+        return Outcome::ok(format!(
+            "{} background job(s) (no id given — pass one for the output tail):\n{}",
+            lines.len(),
+            lines.join("\n")
+        ));
+    };
+
+    let Some(job) = jobs.iter_mut().find(|j| j.id == id) else {
+        return Outcome::err(format!(
+            "no background job {id} — use bash_output without an id to list jobs"
+        ));
+    };
+    let status = job.status_line();
+    let tail = args["tail"].as_u64().unwrap_or(BG_TAIL_DEFAULT as u64) as usize;
+    let tail = tail.clamp(200, BG_TAIL_MAX);
+    let body = tail_of_file(&job.log, tail).unwrap_or_else(|| "<no output yet>".to_string());
+    let log = job.log.display().to_string();
+    if !job.running() {
+        jobs.retain(|j| j.id != id);
+    }
+    Outcome::ok(format!(
+        "job {id}: {status} (log: {})\n--- output tail ---\n{body}",
+        log
+    ))
+}
+
+/// `bash_kill`: end a background job's whole process tree and report the
+/// outcome. The job is removed from the registry either way.
+pub(super) fn bash_kill(args: &serde_json::Value) -> Outcome {
+    poll_jobs();
+    let Some(id) = args["id"].as_u64() else {
+        return Outcome::err("bash_kill requires the job id (from bash background=true)");
+    };
+    let mut jobs = match bg_jobs().lock() {
+        Ok(j) => j,
+        Err(_) => return Outcome::err("background job registry is unavailable"),
+    };
+    let Some(mut job) = jobs.iter().position(|j| j.id == id).map(|i| jobs.remove(i)) else {
+        return Outcome::err(format!("no background job {id} to kill"));
+    };
+    job.poll();
+    match job.exit {
+        Some(status) => Outcome::ok(format!(
+            "job {id} had already finished: `{}` (exit code {})",
+            job.command,
+            status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".into())
+        )),
+        None => {
+            kill_tree(&mut job.child);
+            let _ = job.child.wait();
+            Outcome::ok(format!("job {id} killed: `{}`", job.command))
+        }
+    }
+}
+
+fn elapsed_of(job: &BgJob) -> String {
+    let secs = job.started.elapsed().as_secs();
+    if secs >= 60 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+/// Last `max` bytes of a file, cut on a char boundary.
+fn tail_of_file(path: &PathBuf, max: usize) -> Option<String> {
+    let data = std::fs::read(path).ok()?;
+    if data.is_empty() {
+        return None;
+    }
+    let start = if data.len() <= max {
+        0
+    } else {
+        let mut cut = data.len() - max;
+        // walk forward to the next UTF-8 char start (skip continuation bytes)
+        while cut < data.len() && (data[cut] & 0b1100_0000) == 0b1000_0000 {
+            cut += 1;
+        }
+        cut
+    };
+    let truncated = start > 0;
+    let text = String::from_utf8_lossy(&data[start..]).into_owned();
+    Some(if truncated {
+        format!("…(only the last {max} bytes shown)\n{text}")
+    } else {
+        text
+    })
 }
 
 fn tail_of(text: &str, wanted: usize) -> String {
@@ -427,5 +612,85 @@ mod tests {
         let tail = tail_of(text, 5);
         assert!(tail.ends_with("fghij"));
         assert!(tail.contains("output truncated"));
+    }
+
+    /// Background jobs are registered, pollable and killable: the whole point
+    /// of `bash_output`/`bash_kill` is that a detached command is not a
+    /// fire-and-forget leak but something the model can observe and stop.
+    #[test]
+    fn background_jobs_can_be_polled_and_killed() {
+        let mut c = ctx();
+        // a long command whose output lands in the job log steadily; no inner
+        // redirection: cmd under DETACHED_PROCESS dies silently the moment
+        // the command line carries its own `>` redirect (observed on Win11)
+        let started = bash(&mut c, &long_sleep_command(), None, true);
+        assert!(started.ok, "{}", started.output);
+        let id: u64 = started
+            .output
+            .split("job ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|num| num.parse().ok())
+            .expect("spawn result must carry a job id");
+
+        // list without an id shows the job
+        let list = bash_output(&serde_json::json!({}));
+        assert!(list.ok, "{}", list.output);
+        assert!(
+            list.output.contains(&format!("job {id}")),
+            "{}",
+            list.output
+        );
+
+        // give the pings a moment, then read the tail: output grows
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let polled = bash_output(&serde_json::json!({"id": id}));
+        assert!(polled.ok, "{}", polled.output);
+        assert!(
+            polled.output.contains(&format!("job {id}")),
+            "{}",
+            polled.output
+        );
+        assert!(
+            !polled.output.contains("<no output yet>"),
+            "expected ping output in the tail: {}",
+            polled.output
+        );
+
+        // kill; killed jobs are gone from the registry
+        let killed = bash_kill(&serde_json::json!({"id": id}));
+        assert!(killed.ok, "{}", killed.output);
+        let gone = bash_output(&serde_json::json!({"id": id}));
+        assert!(!gone.ok, "{}", gone.output);
+    }
+
+    /// A finished job reports its exit code once, is reaped, and a later
+    /// `bash_kill` on the same id says so instead of pretending to kill.
+    #[test]
+    fn a_finished_job_is_reported_then_reaped() {
+        let mut c = ctx();
+        let started = bash(&mut c, "echo hi", None, true);
+        assert!(started.ok, "{}", started.output);
+        let id: u64 = started
+            .output
+            .split("job ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|num| num.parse().ok())
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(600));
+
+        let polled = bash_output(&serde_json::json!({"id": id}));
+        assert!(polled.ok, "{}", polled.output);
+        assert!(polled.output.contains("finished"), "{}", polled.output);
+        assert!(polled.output.contains("hi"), "{}", polled.output);
+
+        let kill_late = bash_kill(&serde_json::json!({"id": id}));
+        assert!(!kill_late.ok, "{}", kill_late.output);
+        assert!(
+            kill_late.output.contains("no background job"),
+            "{}",
+            kill_late.output
+        );
     }
 }
