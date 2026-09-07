@@ -593,18 +593,19 @@ long-running commands.",
             name: "plan",
             kind: Kind::Mutating,
             description: "Work the structured plan, one operation per call. Ops: create, start, \
-finish, block, unblock, cancel, add, split, verify, complete, propose_goal_revision, show. Call \
+finish, block, unblock, cancel, add, split, verify, complete, show. Call \
 show first if you are unsure of the current step ids. The host owns the goal, the constraints, \
-acceptance status and evidence: you can only propose a goal revision, never apply one.",
+acceptance status and evidence; to change the goal, propose the full updated plan with \
+propose_plan instead.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "op": {"type": "string", "enum": [
                         "create", "start", "finish", "block", "unblock", "cancel",
-                        "add", "split", "verify", "complete", "propose_goal_revision", "show"
+                        "add", "split", "verify", "complete", "show"
                     ]},
                     "id": {"type": "string", "description": "step id"},
-                    "goal": {"type": "string", "description": "create / propose_goal_revision"},
+                    "goal": {"type": "string", "description": "create"},
                     "constraints": {"type": "array", "items": {"type": "string"}},
                     "acceptance": {
                         "type": ["array", "integer"],
@@ -642,7 +643,7 @@ acceptance status and evidence: you can only propose a goal revision, never appl
                     "kind": {"type": "string", "enum": ["research", "change", "verify"]},
                     "refs": {"type": "array", "items": {"type": "string"}},
                     "summary": {"type": "string", "description": "finish: what changed and where"},
-                    "reason": {"type": "string", "description": "block / cancel / propose_goal_revision"},
+                    "reason": {"type": "string", "description": "block / cancel"},
                     "confirm": {"type": "boolean", "description": "start: re-read a stale step"},
                     "evidence": {"type": "array", "items": {"type": "integer"}, "description": "deprecated informational field; host ignores it"}
                 },
@@ -1400,11 +1401,6 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                                 with_evidence_ts_warning(ctx, finishing.as_deref(), &active, msg);
                             Outcome::ok(msg)
                         }
-                        plan::Applied::Proposed { goal, reason } => Outcome::ok(format!(
-                            "goal revision proposals are deprecated: send the full updated plan \
-                             with propose_plan instead (goal: \"{goal}\", reason: {reason}). \
-                             Nothing was written."
-                        )),
                         plan::Applied::Shown { text } => Outcome::ok(text),
                         plan::Applied::Completed => {
                             Outcome::ok(format!("plan {} completed", active.id))

@@ -32,12 +32,16 @@ pub fn stable_block() -> String {
 }
 
 /// Session-scoped facts, captured on startup and after compaction. They are a
-/// cacheable prompt layer: no wall-clock time or per-turn Git status belongs
-/// here. Current changes come from the anchor, FACTS, or an explicit tool call.
+/// cacheable prompt layer: no per-turn Git status belongs here (the date and
+/// clock are close enough to the session start, and the anchor refreshes them
+/// after compaction). Current changes come from the anchor, FACTS, or an
+/// explicit tool call.
 pub fn session_block(root: &Path) -> String {
     let results = run_session_probes(root.to_path_buf());
-    let date = chrono::Local::now().format("%Y-%m-%d");
-    let mut out = format!("<session_environment>\nDate: {date}\n");
+    let now = chrono::Local::now();
+    let date = now.format("%Y-%m-%d (%A)");
+    let time = now.format("%H:%M (UTC%:z)");
+    let mut out = format!("<session_environment>\nDate: {date}\nTime: {time}\n");
     for key in ["os", "git", "toolchains"] {
         if let Some(value) = results.get(key) {
             out.push_str(value);

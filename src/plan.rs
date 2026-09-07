@@ -510,10 +510,6 @@ pub enum Op {
         evidence: Vec<u64>,
     },
     Complete,
-    ProposeGoalRevision {
-        goal: String,
-        reason: String,
-    },
     Show,
 }
 
@@ -542,11 +538,6 @@ pub enum Applied {
     Created(Plan),
     Updated {
         message: String,
-    },
-    /// Needs user confirmation before it takes effect (§2.1.6).
-    Proposed {
-        goal: String,
-        reason: String,
     },
     Shown {
         text: String,
@@ -730,7 +721,6 @@ pub fn apply(plan: &mut Plan, op: Op, limits: &Limits) -> Result<Applied, Reject
             evidence,
         } => verify_acceptance(plan, acceptance, Vec::new(), !evidence.is_empty()),
         Op::Complete => complete(plan),
-        Op::ProposeGoalRevision { goal, reason } => propose_goal_revision(plan, goal, reason),
     }
 }
 
@@ -1167,40 +1157,6 @@ fn complete(plan: &mut Plan) -> Result<Applied, Rejection> {
     plan.revision += 1;
     plan.rejections_in_a_row = 0;
     Ok(Applied::Completed)
-}
-
-fn propose_goal_revision(
-    plan: &mut Plan,
-    goal: String,
-    reason: String,
-) -> Result<Applied, Rejection> {
-    if goal.trim().is_empty() {
-        return reject(
-            plan,
-            "empty_goal",
-            "a goal revision needs the new goal text",
-            "state what must be true when the work is done",
-        );
-    }
-    if goal.trim() == plan.goal.text.trim() {
-        return reject(
-            plan,
-            "identical_goal",
-            "the proposed goal is identical to the current one",
-            "change the goal text, or leave it alone",
-        );
-    }
-    if reason.trim().is_empty() {
-        return reject(
-            plan,
-            "empty_reason",
-            "a goal revision needs a reason",
-            "say why the goal changed",
-        );
-    }
-    plan.rejections_in_a_row = 0;
-    // Applied by the host after the user confirms (§2.1.6).
-    Ok(Applied::Proposed { goal, reason })
 }
 
 fn next_id(plan: &Plan) -> String {
