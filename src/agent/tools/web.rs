@@ -177,12 +177,11 @@ fn unwrap_duckduckgo_url(raw: &str) -> String {
         raw.to_string()
     };
 
-    if let Ok(parsed) = Url::parse(&candidate) {
-        if let Some((_, target)) = parsed.query_pairs().find(|(k, _)| k == "uddg") {
-            if !target.is_empty() {
-                return target.into_owned();
-            }
-        }
+    if let Ok(parsed) = Url::parse(&candidate)
+        && let Some((_, target)) = parsed.query_pairs().find(|(k, _)| k == "uddg")
+        && !target.is_empty()
+    {
+        return target.into_owned();
     }
     raw.to_string()
 }

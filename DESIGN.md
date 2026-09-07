@@ -385,7 +385,12 @@ first. Without this the model routes around the plan for "quick" tasks that grow
 2.2 Journal
 The journal is the factual record of a session. Written only by the host,
 in the tool dispatch layer and in a few lifecycle points. The model has one
-narrow write path (note) that is labeled as such.
+narrow write path (note) that is labeled as such, and one narrow read path:
+the read-only `journal` tool renders a filtered, capped projection of the
+records (kind, step, time range, seq paging, substring query, current or all
+sessions) so the model can answer questions about past actions. It cannot
+read the journal files directly (§2.2 host-owned state) and every line it
+sees was already screened at append time.
 
 2.2.1 File and integrity
 journal/<session-id>.jsonl, one JSON object per line, seq strictly
@@ -1365,6 +1370,7 @@ Whether a tool exists yet is §7's business, not this table's.
 | `subagent` | delegation | inherits mode | subagent |
 | `plan` | planning | plan file | plan |
 | `note` | planning | journal | note |
+| `journal` | planning | no | read-only projection of the session journal |
 | `memory_propose` | memory | MEMORY.md via approval | tool_call/result |
 | `memory_read` | memory | no | tool_call/result |
 | `resolve_ref` | graph | no | tool_call/result |

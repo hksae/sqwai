@@ -521,6 +521,31 @@ long-running commands.",
             parameters: json!({"type":"object","properties":{"note":{"type":"string"},"kind":{"type":"string","enum":["decision","rejected","assumption","lesson","blocker"]},"resolves":{"type":"integer","description":"journal seq of an assumption this note closes (§2.1.4)"}},"required":["note","kind"]}),
         },
         ToolDef {
+            name: "journal",
+            kind: Kind::ReadOnly,
+            description: "Read the host journal: the factual event log of what happened in this \
+             project (user messages, tool calls and results, file diffs, plan ops, notes, \
+             checkpoints). Every line carries j#<seq>, the stable reference used by plan \
+             evidence and note resolves. Times are UTC. Use it to answer questions about \
+             past actions, find which evidence exists for a step, or recall what was already \
+             tried. Output is newest-tail first narrowed by filters and always capped: \
+             narrow with kind/step/from/to/after/query instead of dumping everything.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string", "enum": ["read", "assumptions"], "description": "read journal records (default) or list open assumptions"},
+                    "session": {"type": "string", "enum": ["current", "all"], "description": "whose journal to read: this session (default) or every session in the project"},
+                    "kind": {"type": "string", "description": "exact record kind: user_msg|tool_call|tool_result|file_diff|diagnostics|note|plan|checkpoint|provider_error|compaction"},
+                    "step": {"type": "string", "description": "only records attached to this plan step id"},
+                    "from": {"type": "string", "description": "inclusive lower time bound, UTC: RFC3339 or YYYY-MM-DD"},
+                    "to": {"type": "string", "description": "inclusive upper time bound, UTC: RFC3339 or YYYY-MM-DD (a bare date means through the end of that day)"},
+                    "after": {"type": "integer", "description": "only records with j# greater than this (paging)"},
+                    "last": {"type": "integer", "description": "max records to return, default 40, maximum 200"},
+                    "query": {"type": "string", "description": "case-insensitive substring matched against the rendered line"}
+                }
+            }),
+        },
+        ToolDef {
             name: "memory_read",
             kind: Kind::ReadOnly,
             description: "Read one host-owned daily diary entry. Date must use YYYY-MM-DD.",
@@ -762,6 +787,26 @@ pub fn call_summary(name: &str, args: &Value) -> String {
         }
         "plan" => format!("plan {}", s("op")),
         "propose_plan" => s("goal"),
+        "journal" => {
+            let op = args["op"].as_str().unwrap_or("read");
+            if op == "assumptions" {
+                return "assumptions".to_string();
+            }
+            let mut parts: Vec<String> = Vec::new();
+            for key in ["kind", "step", "query", "from", "to", "session"] {
+                if let Some(v) = args[key].as_str() {
+                    parts.push(format!("{key}={v}"));
+                }
+            }
+            if args["after"].as_u64().is_some() {
+                parts.push("after".to_string());
+            }
+            if parts.is_empty() {
+                "recent records".to_string()
+            } else {
+                parts.join(" ")
+            }
+        }
         _ => String::new(),
     }
 }
@@ -946,8 +991,321 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         "propose_plan" => {
             Outcome::err("propose_plan is served by the agent loop, not by the dispatcher")
         }
+        "journal" => journal_op(ctx, args),
         other => Outcome::err(format!("unknown tool '{other}'")),
     }
+}
+
+/// The `journal` tool: a read-only projection of the host journal (§2.2).
+///
+/// The model never writes here except through `note`, and it cannot read the
+/// journal files directly (host-owned state), so this op is the one window on
+/// past actions. Everything it returns was screened when it was appended; the
+/// output is filtered and capped so a broad query cannot flood the context.
+fn journal_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
+    let op = args["op"].as_str().unwrap_or("read");
+    if op == "assumptions" {
+        let open = match crate::agent::journal::Journal::open_assumptions(&ctx.root, None) {
+            Ok(open) => open,
+            Err(e) => return Outcome::err(format!("journal read failed: {e:#}")),
+        };
+        if open.is_empty() {
+            return Outcome::ok("no open assumptions");
+        }
+        let lines: Vec<String> = open.iter().map(|a| a.label(160)).collect();
+        return Outcome::ok(format!(
+            "open assumptions (j# = journal seq):\n{}",
+            lines.join("\n")
+        ));
+    }
+    if op != "read" {
+        return Outcome::err("journal op must be 'read' or 'assumptions'");
+    }
+
+    let (records, label) = match args["session"].as_str().unwrap_or("current") {
+        "current" | "" => (
+            crate::agent::journal::Journal::records_for(&ctx.root, &ctx.session_id),
+            ctx.session_id.clone(),
+        ),
+        "all" => (
+            crate::agent::journal::Journal::records(&ctx.root),
+            "all sessions".to_string(),
+        ),
+        other => {
+            // a session id is a bare file stem, never a path
+            if other.contains('/') || other.contains('\\') || other.contains("..") {
+                return Outcome::err(format!("bad session id '{other}'"));
+            }
+            (
+                crate::agent::journal::Journal::records_for(&ctx.root, other),
+                other.to_string(),
+            )
+        }
+    };
+    let records = match records {
+        Ok(records) => records,
+        Err(e) => return Outcome::err(format!("journal read failed: {e:#}")),
+    };
+    let total = records.len();
+    let mut records = records;
+    // records() walks session files in filesystem order; chronological order
+    // is the only sane reading order once more than one session is involved.
+    records.sort_by(|a, b| a.ts.cmp(&b.ts).then(a.seq.cmp(&b.seq)));
+
+    let from = match args["from"].as_str() {
+        Some(s) => match parse_time_bound(s, false) {
+            Some(t) => Some(t),
+            None => return Outcome::err("bad 'from': use RFC3339 or YYYY-MM-DD (UTC)"),
+        },
+        None => None,
+    };
+    let to = match args["to"].as_str() {
+        Some(s) => match parse_time_bound(s, true) {
+            Some(t) => Some(t),
+            None => return Outcome::err("bad 'to': use RFC3339 or YYYY-MM-DD (UTC)"),
+        },
+        None => None,
+    };
+    let kind = args["kind"].as_str();
+    let step = args["step"].as_str();
+    let after = args["after"].as_u64();
+    let query = args["query"].as_str().map(str::to_lowercase);
+
+    let rendered: Vec<String> = records
+        .iter()
+        .filter(|r| kind.is_none_or(|k| r.kind == k))
+        .filter(|r| step.is_none_or(|s| r.step.as_deref() == Some(s)))
+        .filter(|r| after.is_none_or(|a| r.seq > a))
+        .filter(|r| match (from, to) {
+            (None, None) => true,
+            _ => match chrono::DateTime::parse_from_rfc3339(&r.ts) {
+                Ok(t) => from.is_none_or(|f| t >= f) && to.is_none_or(|t2| t <= t2),
+                Err(_) => false,
+            },
+        })
+        .map(journal_line)
+        .filter(|line| {
+            query
+                .as_ref()
+                .is_none_or(|q| line.to_lowercase().contains(q.as_str()))
+        })
+        .collect();
+    let matched = rendered.len();
+    if matched == 0 {
+        return Outcome::ok(format!(
+            "journal {label}: {total} records, 0 match the filters"
+        ));
+    }
+
+    let last = args["last"].as_u64().unwrap_or(40).clamp(1, 200) as usize;
+    let start = matched.saturating_sub(last);
+    const OUTPUT_BUDGET: usize = 20_000;
+    let mut lines: Vec<&String> = Vec::new();
+    let mut used = 0usize;
+    for line in rendered[start..].iter().rev() {
+        let cost = line.len() + 1;
+        if used + cost > OUTPUT_BUDGET && !lines.is_empty() {
+            break;
+        }
+        used += cost;
+        lines.push(line);
+    }
+    let dropped_oldest = matched - start - lines.len();
+    lines.reverse();
+
+    let mut out = format!(
+        "journal {label}: {total} records total, {matched} match, showing {} (oldest first, UTC)",
+        lines.len()
+    );
+    if start > 0 {
+        out.push_str(&format!(
+            "; {start} older matches — page with 'after' or raise 'last'"
+        ));
+    }
+    if dropped_oldest > 0 {
+        out.push_str(&format!(
+            "; {dropped_oldest} oldest dropped (20 KB output cap)"
+        ));
+    }
+    out.push('\n');
+    out.push_str(
+        &lines
+            .iter()
+            .map(|l| l.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    Outcome::ok(out)
+}
+
+/// One rendered journal line: `j#<seq> <time> <kind> [step=N] ([agent]) | body`.
+/// Everything after `|` is a kind-specific summary with a generic k=v fallback.
+fn journal_line(r: &crate::agent::journal::Record) -> String {
+    let when = chrono::DateTime::parse_from_rfc3339(&r.ts)
+        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|_| r.ts.clone());
+    let mut line = format!("j#{} {when} {}", r.seq, r.kind);
+    if let Some(step) = &r.step {
+        line.push_str(&format!(" step={step}"));
+    }
+    if r.agent != "main" {
+        line.push_str(&format!(" [{}]", r.agent));
+    }
+    let body = clip(&journal_body(r), 140);
+    if !body.is_empty() {
+        line.push_str(" | ");
+        line.push_str(&body);
+    }
+    line
+}
+
+/// Kind-specific one-line summary of a record's payload fields.
+fn journal_body(r: &crate::agent::journal::Record) -> String {
+    let f = &r.fields;
+    let s = |k: &str| f.get(k).and_then(Value::as_str);
+    let n = |k: &str| f.get(k).and_then(Value::as_u64);
+    match r.kind.as_str() {
+        "tool_call" => match (s("tool"), s("args_digest")) {
+            (Some(tool), Some(digest)) => format!("{tool}({digest})"),
+            (Some(tool), None) => tool.to_string(),
+            _ => String::new(),
+        },
+        "tool_result" => {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(tool) = s("tool") {
+                parts.push(tool.to_string());
+            }
+            if let Some(v) = f.get("ok") {
+                parts.push(format!("ok={v}"));
+            }
+            if let Some(code) = s("code") {
+                parts.push(format!("code={code}"));
+            }
+            parts.join(" ")
+        }
+        "file_diff" => {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(path) = s("path") {
+                parts.push(path.to_string());
+            }
+            if let Some(v) = n("added") {
+                parts.push(format!("+{v}"));
+            }
+            if let Some(v) = n("removed") {
+                parts.push(format!("-{v}"));
+            }
+            parts.join(" ")
+        }
+        "diagnostics" => match s("path") {
+            Some(path) => format!(
+                "{path} errors={} warnings={} {}",
+                n("errors").unwrap_or(0),
+                n("warnings").unwrap_or(0),
+                s("server").unwrap_or("")
+            )
+            .trim_end()
+            .to_string(),
+            None => String::new(),
+        },
+        "note" => {
+            let mut out = match (s("note"), s("text")) {
+                (Some(kind), Some(text)) => format!("{kind}: {text}"),
+                _ => s("text").unwrap_or_default().to_string(),
+            };
+            if let Some(resolves) = n("resolves") {
+                out.push_str(&format!(" (resolves j#{resolves})"));
+            }
+            out
+        }
+        "plan" => {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(v) = s("op") {
+                parts.push(v.to_string());
+            }
+            for key in ["id", "goal", "step", "title", "result"] {
+                if let Some(v) = s(key) {
+                    parts.push(v.to_string());
+                }
+            }
+            parts.join(" ")
+        }
+        "checkpoint" => s("label").unwrap_or_default().to_string(),
+        "provider_error" => {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(class) = s("class") {
+                parts.push(class.to_string());
+            }
+            if let Some(v) = n("retries") {
+                parts.push(format!("retries={v}"));
+            }
+            if let Some(v) = f.get("recovered") {
+                parts.push(format!("recovered={v}"));
+            }
+            parts.join(" ")
+        }
+        "user_msg" => match n("chars") {
+            Some(chars) => format!("{} chars", chars),
+            None => String::new(),
+        },
+        "compaction" => s("phase").unwrap_or_default().to_string(),
+        "resume" => s("notice").unwrap_or_default().to_string(),
+        _ => {
+            // generic fallback: a few short k=v pairs
+            let mut parts: Vec<String> = Vec::new();
+            for (key, value) in f.iter() {
+                if parts.len() == 4 {
+                    break;
+                }
+                let rendered = match value {
+                    Value::String(v) => Some(clip(v, 40)),
+                    Value::Number(v) => Some(v.to_string()),
+                    Value::Bool(v) => Some(v.to_string()),
+                    _ => None,
+                };
+                if let Some(v) = rendered {
+                    parts.push(format!("{key}={v}"));
+                }
+            }
+            parts.join(" ")
+        }
+    }
+}
+
+/// Clip to `max` chars on a char boundary (… marks the cut).
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let taken: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{taken}…")
+}
+
+/// Parse a journal time bound: RFC3339, `YYYY-MM-DDTHH:MM[:SS]`,
+/// `YYYY-MM-DD HH:MM[:SS]`, or a bare `YYYY-MM-DD`. Journal times are UTC; a
+/// bare date used as `to` extends through the end of that day, inclusive.
+fn parse_time_bound(s: &str, end_of_day: bool) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(t);
+    }
+    for fmt in [
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    ] {
+        if let Ok(t) = chrono::NaiveDateTime::parse_from_str(s, fmt) {
+            return Some(t.and_utc().fixed_offset());
+        }
+    }
+    if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        let t = if end_of_day {
+            d.and_hms_opt(23, 59, 59)?
+        } else {
+            d.and_hms_opt(0, 0, 0)?
+        };
+        return Some(t.and_utc().fixed_offset());
+    }
+    None
 }
 
 /// The `plan` tool: one operation per call, validated by the host (§2.1.3).
@@ -2544,5 +2902,191 @@ mod tests {
 
         let o = execute(&mut ctx, "ls", &json!({"path": "src"}));
         assert!(o.ok && o.output.contains("main.rs"), "{}", o.output);
+    }
+
+    /// write a raw journal file with controlled timestamps
+    fn write_journal(dir: &Path, session: &str, lines: &[String]) {
+        let journal_dir = dir.join(".sqwai").join("journal");
+        fs::create_dir_all(&journal_dir).unwrap();
+        fs::write(
+            journal_dir.join(format!("{session}.jsonl")),
+            lines.join("\n") + "\n",
+        )
+        .unwrap();
+    }
+
+    fn rec(seq: u64, ts: &str, kind: &str, extra: &str) -> String {
+        format!(
+            r#"{{"seq":{seq},"ts":"{ts}","step":null,"plan":null,"agent":"main","kind":"{kind}"{extra}}}"#
+        )
+    }
+
+    #[test]
+    fn journal_read_renders_and_filters() {
+        let (mut ctx, dir) = proj();
+        write_journal(
+            &dir,
+            "shared",
+            &[
+                rec(1, "2026-01-01T10:00:00+00:00", "user_msg", r#","chars":42"#),
+                rec(
+                    2,
+                    "2026-02-01T10:00:00+00:00",
+                    "file_diff",
+                    r#","path":"src/main.rs","added":3,"removed":1"#,
+                ),
+                rec(
+                    3,
+                    "2026-03-01T10:00:00+00:00",
+                    "tool_result",
+                    r#","tool":"bash","ok":false,"code":"cancelled""#,
+                ),
+            ],
+        );
+
+        // default: chronological tail with a header
+        let o = execute(&mut ctx, "journal", &json!({}));
+        assert!(o.ok, "{}", o.output);
+        assert!(
+            o.output.contains("3 records total, 3 match"),
+            "{}",
+            o.output
+        );
+        assert!(
+            o.output.contains("j#1 2026-01-01 10:00:00 user_msg"),
+            "{}",
+            o.output
+        );
+        assert!(
+            o.output.contains("j#3 2026-03-01 10:00:00 tool_result"),
+            "{}",
+            o.output
+        );
+        assert!(
+            o.output.contains("bash ok=false code=cancelled"),
+            "{}",
+            o.output
+        );
+
+        // kind filter
+        let o = execute(&mut ctx, "journal", &json!({"kind": "file_diff"}));
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("src/main.rs +3 -1"), "{}", o.output);
+        assert!(!o.output.contains("j#1 "), "{}", o.output);
+
+        // time window: a bare date as `to` covers the whole day
+        let o = execute(
+            &mut ctx,
+            "journal",
+            &json!({"from": "2026-02-01", "to": "2026-02-01"}),
+        );
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("j#2"), "{}", o.output);
+        assert!(!o.output.contains("j#1 "), "{}", o.output);
+        assert!(!o.output.contains("j#3 "), "{}", o.output);
+
+        // paging and tailing
+        let o = execute(&mut ctx, "journal", &json!({"after": 1, "last": 1}));
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("j#3"), "{}", o.output);
+        assert!(!o.output.contains("j#2"), "{}", o.output);
+
+        // substring query over rendered lines
+        let o = execute(&mut ctx, "journal", &json!({"query": "MAIN.RS"}));
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("j#2"), "{}", o.output);
+        assert!(!o.output.contains("j#1 "), "{}", o.output);
+
+        // malformed bounds are rejected, not ignored
+        let o = execute(&mut ctx, "journal", &json!({"from": "not-a-date"}));
+        assert!(!o.ok, "{}", o.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn journal_reads_across_sessions_sorted() {
+        let (mut ctx, dir) = proj();
+        write_journal(
+            &dir,
+            "shared",
+            &[rec(
+                1,
+                "2026-02-01T10:00:00+00:00",
+                "user_msg",
+                r#","chars":7"#,
+            )],
+        );
+        write_journal(
+            &dir,
+            "older",
+            &[
+                rec(
+                    1,
+                    "2026-01-01T10:00:00+00:00",
+                    "plan",
+                    r#","op":"start","id":"p1""#,
+                ),
+                rec(
+                    2,
+                    "2026-03-01T10:00:00+00:00",
+                    "compaction",
+                    r#","phase":"begin""#,
+                ),
+            ],
+        );
+        let o = execute(&mut ctx, "journal", &json!({"session": "all"}));
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("all sessions"), "{}", o.output);
+        // chronological across files, not filesystem order
+        let first = o.output.find("j#1 ").unwrap();
+        let second = o.output.find("j#2 ").unwrap();
+        assert!(first < second, "{}", o.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn journal_rejects_path_like_session_ids() {
+        let (mut ctx, dir) = proj();
+        let o = execute(&mut ctx, "journal", &json!({"session": "../evil"}));
+        assert!(!o.ok, "{}", o.output);
+        let o = execute(&mut ctx, "journal", &json!({"session": "a\\b"}));
+        assert!(!o.ok, "{}", o.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn journal_assumptions_op_lists_only_open() {
+        let (mut ctx, dir) = proj();
+        let journal_dir = dir.join(".sqwai").join("journal");
+        fs::create_dir_all(&journal_dir).unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&dir, "shared").unwrap();
+        let seq = journal
+            .append(
+                "note",
+                json!({"by": "model", "note": "assumption", "text": "the CI is green"}),
+            )
+            .unwrap();
+        journal
+            .append(
+                "note",
+                json!({"by": "model", "note": "lesson", "text": "closed it", "resolves": seq}),
+            )
+            .unwrap();
+
+        let o = execute(&mut ctx, "journal", &json!({"op": "assumptions"}));
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("no open assumptions"), "{}", o.output);
+
+        journal
+            .append(
+                "note",
+                json!({"by": "model", "note": "assumption", "text": "the API is stable"}),
+            )
+            .unwrap();
+        let o = execute(&mut ctx, "journal", &json!({"op": "assumptions"}));
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("the API is stable"), "{}", o.output);
+        assert!(!o.output.contains("the CI is green"), "{}", o.output);
+        fs::remove_dir_all(&dir).ok();
     }
 }

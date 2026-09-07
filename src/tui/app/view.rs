@@ -20,6 +20,7 @@ use crate::tui::markdown::{Highlighter, render, wrap_tagged};
 use crate::tui::theme::Theme;
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // chat rows are short-lived render state
 pub(super) enum Segment {
     User(String),
     Assistant {
@@ -899,14 +900,22 @@ impl App {
                 out.push((
                     Line::from(vec![Span::styled(
                         truncate_display_width(" ▸ proposed plan", width),
-                        if live { Theme::accent_bold() } else { Theme::dim() },
+                        if live {
+                            Theme::accent_bold()
+                        } else {
+                            Theme::dim()
+                        },
                     )]),
                     Some(idx),
                 ));
                 out.push((
                     Line::from(vec![Span::styled(
                         truncate_display_width(&format!(" ? {}", draft.goal.text), width),
-                        if live { Theme::accent_bold() } else { Theme::dim() },
+                        if live {
+                            Theme::accent_bold()
+                        } else {
+                            Theme::dim()
+                        },
                     )]),
                     Some(idx),
                 ));
@@ -947,8 +956,7 @@ impl App {
                     .into_iter()
                     .enumerate()
                     {
-                        let hovered =
-                            live && is_active_seg && self.proposal_hover == Some(target);
+                        let hovered = live && is_active_seg && self.proposal_hover == Some(target);
                         let style = if hovered {
                             Style::new()
                                 .fg(Theme::BG())

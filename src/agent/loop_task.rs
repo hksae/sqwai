@@ -66,6 +66,7 @@ pub struct AgentOutcome {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // the event enum is moved through a channel; boxing the large payloads would force an extra allocation on every event
 pub enum AgentEvent {
     TextDelta(String),
     ThinkingDelta(String),
@@ -133,10 +134,15 @@ pub enum AgentEvent {
     },
     /// the model proposed a full plan draft; accept/decline via ControlMsg.
     /// Nothing is written until the user accepts.
-    PlanProposal { id: u64, draft: plan::Plan },
+    PlanProposal {
+        id: u64,
+        draft: plan::Plan,
+    },
     /// the host stored an accepted proposal; carries the stored plan's id so
     /// the session re-links before the tool outcome is even processed
-    PlanAccepted { id: String },
+    PlanAccepted {
+        id: String,
+    },
     /// a dangerous command needs approval; decide via ControlMsg
     Approval {
         id: u64,
@@ -169,6 +175,7 @@ pub enum AgentEvent {
 }
 
 #[derive(Debug)]
+#[allow(clippy::enum_variant_names)] // the "Answer" suffix reads better at the call sites than a forced rename
 pub enum ControlMsg {
     AskAnswer { id: u64, text: String },
     PlanAnswer { id: u64, accept: bool },
@@ -562,12 +569,15 @@ async fn run_subagent(
                 });
             }
             AgentEvent::Approval { id, .. } => {
-                let _ = child
-                    .control
-                    .try_send(ControlMsg::ApprovalAnswer { id, decision: ApprovalDecision::Deny });
+                let _ = child.control.try_send(ControlMsg::ApprovalAnswer {
+                    id,
+                    decision: ApprovalDecision::Deny,
+                });
             }
             AgentEvent::PlanProposal { id, .. } => {
-                let _ = child.control.try_send(ControlMsg::PlanAnswer { id, accept: false });
+                let _ = child
+                    .control
+                    .try_send(ControlMsg::PlanAnswer { id, accept: false });
             }
             _ => {}
         }
@@ -1255,7 +1265,12 @@ async fn run_agent(
                                 let answer = ask_user(&question, &tx, &mut ctl, &mut next_id).await;
                                 let raw_answer = answer.output.trim();
                                 let answer_lower = raw_answer.to_ascii_lowercase();
-                                if answer.ok && (answer_lower == "accept" || (!raw_answer.is_empty() && answer_lower != "reject" && answer_lower != "edit")) {
+                                if answer.ok
+                                    && (answer_lower == "accept"
+                                        || (!raw_answer.is_empty()
+                                            && answer_lower != "reject"
+                                            && answer_lower != "edit"))
+                                {
                                     let text = if answer_lower == "accept" {
                                         call.args["text"].as_str().unwrap_or_default()
                                     } else {
@@ -2269,9 +2284,7 @@ async fn propose_plan(
             let old = active.id.clone();
             plan::abandon(&mut active);
             if let Err(e) = plan::store(root, &active) {
-                return tools::Outcome::err(format!(
-                    "abandoning the previous plan failed: {e:#}"
-                ));
+                return tools::Outcome::err(format!("abandoning the previous plan failed: {e:#}"));
             }
             Some(old)
         }
@@ -2291,7 +2304,9 @@ async fn propose_plan(
     }
     // tell the TUI the stored plan's id so it re-links the session before the
     // tool outcome is processed (fork must copy the new plan, not the old one)
-    let _ = tx.send(AgentEvent::PlanAccepted { id: new_id.clone() }).await;
+    let _ = tx
+        .send(AgentEvent::PlanAccepted { id: new_id.clone() })
+        .await;
     // the TUI derives its todos panel and plan label from disk; push the new
     // plan's steps so they refresh without waiting for the next plan op
     let plan_todos: Vec<String> = fresh

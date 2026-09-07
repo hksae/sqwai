@@ -44,6 +44,7 @@ pub(super) const COMMANDS: &[&str] = &[
 pub(super) const POPUP_MAX_ROWS: usize = 14;
 
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)] // popup state is rebuilt per frame; form payloads are small in practice
 pub(super) enum Menu {
     /// /settings: top-level settings hub
     Settings,
@@ -1929,7 +1930,8 @@ fn plan_rows(
     rows
 }
 
-fn session_row(s: &Session, is_current: bool, framed: bool) -> (Line<'static>, MenuAction) {    const FRAME_CONTENT: usize = 72;
+fn session_row(s: &Session, is_current: bool, framed: bool) -> (Line<'static>, MenuAction) {
+    const FRAME_CONTENT: usize = 72;
     let badge = if s.forked_from_id.is_some() {
         "[fork] "
     } else {
