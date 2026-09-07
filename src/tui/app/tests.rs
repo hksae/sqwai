@@ -3206,7 +3206,10 @@ mod tests {
         assert!(app.menu_stack.is_empty(), "no overlay menu for inline ask");
 
         app.inline_ask_select(0, 1);
-        assert_eq!(app.inline_ask_text(app.active_ask_seg().unwrap()), "Q1: beta | Q2: (no answer)");
+        assert_eq!(
+            app.inline_ask_text(app.active_ask_seg().unwrap()),
+            "Q1: beta | Q2: (no answer)"
+        );
 
         app.inline_ask_toggle(1, 0);
         app.inline_ask_toggle(1, 1);
@@ -3219,8 +3222,7 @@ mod tests {
         assert!(app.active_ask_seg().is_none(), "confirm closes the ask");
         match app.segments.last() {
             Some(Segment::AskUser {
-                answered: Some(a),
-                ..
+                answered: Some(a), ..
             }) => assert_eq!(a, "Q1: beta | Q2: x, y"),
             other => panic!("ask must freeze with the answer, got {other:?}"),
         }
@@ -3336,7 +3338,10 @@ mod tests {
             .expect("ask block");
         // click the second option of Q1 (offset 3 in the layout above)
         app.click(start + 3);
-        assert!(app.active_ask_seg().is_some(), "click must not dismiss the ask");
+        assert!(
+            app.active_ask_seg().is_some(),
+            "click must not dismiss the ask"
+        );
         match &app.segments[seg] {
             Segment::AskUser { picked, .. } => assert_eq!(picked[0], vec![false, true]),
             other => panic!("unexpected {other:?}"),
@@ -3354,8 +3359,14 @@ mod tests {
                 ]
             }),
         );
-        assert!(summary.contains("first?"), "summary must not be empty: {summary:?}");
-        assert!(summary.contains("second?"), "all questions visible: {summary:?}");
+        assert!(
+            summary.contains("first?"),
+            "summary must not be empty: {summary:?}"
+        );
+        assert!(
+            summary.contains("second?"),
+            "all questions visible: {summary:?}"
+        );
     }
 
     #[test]
@@ -3392,7 +3403,10 @@ mod tests {
         app.finalize_activity_group(false);
         let g = app.activity_groups.last().expect("group must be frozen");
         assert!(!g.expanded, "successful turns fold by default");
-        assert!(g.seg_start <= ask && ask < g.seg_end, "ask must be inside the group");
+        assert!(
+            g.seg_start <= ask && ask < g.seg_end,
+            "ask must be inside the group"
+        );
         assert_eq!(g.calls, 2, "read + ask_user count as calls");
     }
 
