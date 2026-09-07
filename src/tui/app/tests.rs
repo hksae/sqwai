@@ -203,6 +203,9 @@ mod tests {
         }
         for (i, s) in app.segments.iter().enumerate() {
             match s {
+                Segment::AskUser { questions, .. } => {
+                    println!("seg[{i}] ASKUSER {} questions", questions.len())
+                }
                 Segment::Assistant { text, live } => {
                     println!(
                         "seg[{i}] ASSISTANT live={live} len={} {:?}",

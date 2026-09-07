@@ -1931,6 +1931,21 @@ impl App {
                     self.dirty = true;
                 }
                 AgentEvent::AskUser { id, questions } => {
+                    // Inline in chat, not a popup — avoids covering the history on small windows.
+                    let picked = questions
+                        .iter()
+                        .map(|q| vec![false; q.options.len()])
+                        .collect();
+                    let custom = vec![String::new(); questions.len()];
+                    self.segments.push(Segment::AskUser {
+                        id,
+                        questions: questions.clone(),
+                        picked,
+                        custom,
+                        focus: 0,
+                    });
+                    // Also open as menu for keyboard nav (Tab/Enter) — but not as overlay
+                    // The inline segment is the primary, the menu is secondary for focus
                     self.open_menu(Menu::AskUser { id, questions });
                     self.dirty = true;
                 }

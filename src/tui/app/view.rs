@@ -34,6 +34,16 @@ pub(super) enum Segment {
         output: String,
         expanded: bool,
     },
+    /// ask_user with up to 4 questions, inline in chat
+    AskUser {
+        #[allow(dead_code)]
+        id: u64,
+        questions: Vec<crate::agent::loop_task::AskQuestion>,
+        // per-question picked and custom, synchronized with App state
+        picked: Vec<Vec<bool>>,
+        custom: Vec<String>,
+        focus: usize,
+    },
     /// one reasoning block; the model may emit several across a turn
     Thinking {
         text: String,
@@ -426,6 +436,21 @@ impl App {
         match seg {
             Segment::User(t) => t.chars().count(),
             Segment::Assistant { text, .. } => text.chars().count(),
+            Segment::AskUser {
+                questions,
+                picked,
+                custom,
+                ..
+            } => {
+                let mut k = questions.len() * 1000;
+                for (i, p) in picked.iter().enumerate() {
+                    k += p.iter().filter(|v| **v).count() * (i + 1) * 10;
+                }
+                for c in custom {
+                    k += c.len();
+                }
+                k
+            }
             Segment::Subagent {
                 id,
                 task,
@@ -484,6 +509,89 @@ impl App {
                 for l in render(text, w, &self.hl) {
                     out.push((l, Some(idx)));
                 }
+            }
+            Segment::AskUser {
+                questions,
+                picked,
+                custom,
+                focus,
+                ..
+            } => {
+                for (q_idx, q) in questions.iter().enumerate() {
+                    let is_focused = q_idx == *focus;
+                    let header_style = if is_focused {
+                        Theme::accent_bold()
+                    } else {
+                        Theme::dim()
+                    };
+                    if !q.header.is_empty() {
+                        out.push((
+                            Line::from(vec![Span::styled(format!(" {} ", q.header), header_style)]),
+                            Some(idx),
+                        ));
+                    }
+                    out.push((
+                        Line::from(vec![Span::styled(
+                            format!(" ? {}", q.question),
+                            Theme::accent_bold(),
+                        )]),
+                        Some(idx),
+                    ));
+                    for (o_idx, opt) in q.options.iter().enumerate() {
+                        let is_picked = picked
+                            .get(q_idx)
+                            .and_then(|v| v.get(o_idx).copied())
+                            .unwrap_or(false);
+                        let marker = if q.multiple {
+                            if is_picked { " [x] " } else { " [ ] " }
+                        } else {
+                            if is_picked { " ● " } else { " ○ " }
+                        };
+                        let mut spans = vec![
+                            Span::styled(format!("{marker}{}. ", o_idx + 1), Theme::accent()),
+                            Span::styled(
+                                opt.label.clone(),
+                                if opt.recommended {
+                                    Theme::accent()
+                                } else {
+                                    Theme::base()
+                                },
+                            ),
+                        ];
+                        if opt.recommended {
+                            spans.push(Span::styled(" (Recommended)".to_string(), Theme::accent()));
+                        }
+                        if let Some(d) = &opt.description {
+                            spans.push(Span::styled(format!(" — {d}"), Theme::dim()));
+                        }
+                        out.push((Line::from(spans), Some(idx)));
+                    }
+                    if q.allow_free {
+                        let c = custom.get(q_idx).map(|s| s.as_str()).unwrap_or("");
+                        let line = if c.is_empty() {
+                            Line::from(vec![Span::styled(
+                                "  ✎ Type your own answer…".to_string(),
+                                Theme::dim(),
+                            )])
+                        } else {
+                            Line::from(vec![Span::styled(format!("  ✎ {c}"), Theme::accent())])
+                        };
+                        out.push((line, Some(idx)));
+                    }
+                    if q_idx + 1 < questions.len() {
+                        out.push((
+                            Line::from(vec![Span::styled("  ──".to_string(), Theme::dim())]),
+                            Some(idx),
+                        ));
+                    }
+                }
+                out.push((
+                    Line::from(vec![Span::styled(
+                        "  confirm".to_string(),
+                        Theme::ACCENT_SOFT(),
+                    )]),
+                    Some(idx),
+                ));
             }
             Segment::Thinking {
                 text,
@@ -816,6 +924,11 @@ impl App {
             let seg = &self.segments[idx];
             // group spacing rules (cheap, done per assembly pass)
             match seg {
+                Segment::AskUser { .. } => {
+                    in_group = false;
+                    last_block = BlockKind::None;
+                    logical.push((blank(), None));
+                }
                 Segment::User(_) => {
                     in_group = false;
                     last_block = BlockKind::None;
@@ -2150,6 +2263,12 @@ fn segment_layout_key(seg: &Segment) -> u64 {
     std::mem::discriminant(seg).hash(&mut h);
     match seg {
         Segment::User(text) | Segment::Assistant { text, .. } => text.hash(&mut h),
+        Segment::AskUser { questions, .. } => {
+            for q in questions {
+                q.header.hash(&mut h);
+                q.question.hash(&mut h);
+            }
+        }
         Segment::Thinking { .. } => {}
         Segment::Subagent { id, task, .. } => {
             id.hash(&mut h);
