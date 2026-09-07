@@ -148,7 +148,8 @@ fn parse_search_results(html: &str, count: usize) -> String {
         let Some(title) = title_re.captures(body) else {
             continue;
         };
-        let url = decode_entities(&title[1]);
+        let raw_url = decode_entities(&title[1]);
+        let url = unwrap_duckduckgo_url(&raw_url);
         let name = clean_fragment(&title[2]);
         let snippet = snippet_re
             .captures(body)
@@ -163,6 +164,27 @@ fn parse_search_results(html: &str, count: usize) -> String {
         ));
     }
     out.join("\n")
+}
+
+fn unwrap_duckduckgo_url(raw: &str) -> String {
+    // DuckDuckGo redirects typically look like:
+    // /l/?uddg=https%3A%2F%2Fexample.com%2F... or //duckduckgo.com/l/?uddg=...
+    let candidate = if raw.starts_with("//") {
+        format!("https:{raw}")
+    } else if raw.starts_with('/') {
+        format!("https://duckduckgo.com{raw}")
+    } else {
+        raw.to_string()
+    };
+
+    if let Ok(parsed) = Url::parse(&candidate) {
+        if let Some((_, target)) = parsed.query_pairs().find(|(k, _)| k == "uddg") {
+            if !target.is_empty() {
+                return target.into_owned();
+            }
+        }
+    }
+    raw.to_string()
 }
 
 fn clean_fragment(html: &str) -> String {
@@ -260,6 +282,15 @@ mod tests {
             clean_fragment("A useful <b>snippet</b>."),
             "A useful snippet ."
         );
+
+        let ddg_html = r#"
+            <div class="result results_links">
+              <a class="result__a" href="/l/?uddg=https%3A%2F%2Fcrates.io%2Fcrates%2Ftokio&amp;rut=123">Tokio crate</a>
+              <div class="result__snippet">Async runtime.</div>
+            </div>
+        "#;
+        let ddg_output = parse_search_results(ddg_html, 1);
+        assert!(ddg_output.contains("https://crates.io/crates/tokio"));
     }
 
     #[test]
