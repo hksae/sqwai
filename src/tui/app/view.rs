@@ -49,6 +49,14 @@ pub(super) enum Segment {
         /// frozen answer text once the user confirmed/skipped; None = active
         answered: Option<String>,
     },
+    /// propose_plan draft awaiting accept/decline, inline in chat and folded
+    /// into the turn's activity like a tool call. `decided` freezes it.
+    PlanProposal {
+        #[allow(dead_code)]
+        id: u64,
+        draft: crate::plan::Plan,
+        decided: Option<bool>,
+    },
     /// one reasoning block; the model may emit several across a turn
     Thinking {
         text: String,
@@ -109,6 +117,14 @@ pub(super) enum AskRow {
     Option { q: usize, opt: usize },
     Custom { q: usize },
     Confirm,
+}
+
+/// One interactive row inside an inline plan-proposal segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProposalRow {
+    View,
+    Accept,
+    Decline,
 }
 
 /// Indent applied to segments nested inside an activity group. Tool rows are
@@ -281,15 +297,20 @@ impl App {
             return;
         }
         // hover highlight for the inline ask (chat rows, not an overlay)
-        if self.menu_stack.is_empty() && self.active_ask_seg().is_some() {
+        if self.menu_stack.is_empty()
+            && (self.active_ask_seg().is_some() || self.active_proposal_seg().is_some())
+        {
             let abs = self.abs_row(row);
-            let hover = self.ask_row_at(abs).map(|(_, r)| r);
-            if hover != self.ask_hover {
-                self.ask_hover = hover;
+            let ask_hover = self.ask_row_at(abs).map(|(_, r)| r);
+            let proposal_hover = self.proposal_row_at(abs).map(|(_, r)| r);
+            if ask_hover != self.ask_hover || proposal_hover != self.proposal_hover {
+                self.ask_hover = ask_hover;
+                self.proposal_hover = proposal_hover;
                 self.dirty = true;
             }
-        } else if self.ask_hover.is_some() {
+        } else if self.ask_hover.is_some() || self.proposal_hover.is_some() {
             self.ask_hover = None;
+            self.proposal_hover = None;
             self.dirty = true;
         }
     }
@@ -367,9 +388,41 @@ impl App {
         None
     }
 
+    /// map an absolute cache row onto an interactive proposal target, if any
+    pub(super) fn proposal_row_at(&self, abs_row: usize) -> Option<(usize, ProposalRow)> {
+        let seg_idx = self.cache_rowseg.get(abs_row).copied()??;
+        if Some(seg_idx) != self.active_proposal_seg() {
+            return None;
+        }
+        let Segment::PlanProposal { decided: None, .. } = self.segments.get(seg_idx)? else {
+            return None;
+        };
+        let (start, _) = self.ask_block_range(seg_idx)?;
+        // layout from render_segment's PlanProposal branch: header, goal,
+        // counts, view, accept, decline — one visual row each
+        match abs_row.saturating_sub(start) {
+            3 => Some((seg_idx, ProposalRow::View)),
+            4 => Some((seg_idx, ProposalRow::Accept)),
+            5 => Some((seg_idx, ProposalRow::Decline)),
+            _ => None,
+        }
+    }
+
     pub(super) fn click(&mut self, abs_row: usize) {
         if let Some(id) = self.active_subagent {
             self.click_subagent_chat(id, abs_row);
+            return;
+        }
+        // inline plan proposal: view opens the draft popup, accept/decline
+        // answer the tool — a click must never dismiss the question
+        if self.menu_stack.is_empty()
+            && let Some((_, row)) = self.proposal_row_at(abs_row)
+        {
+            match row {
+                ProposalRow::View => self.open_proposal_preview(),
+                ProposalRow::Accept => self.proposal_answer(true),
+                ProposalRow::Decline => self.proposal_answer(false),
+            }
             return;
         }
         // inline AskUser first: a click on an option must select it, never
@@ -596,6 +649,24 @@ impl App {
                 }
                 k
             }
+            Segment::PlanProposal { draft, decided, .. } => {
+                let mut k = draft.goal.text.len() * 3 + draft.steps.len() * 1000;
+                k += draft.constraints.len() * 101 + draft.acceptance.len() * 103;
+                for s in &draft.steps {
+                    k += s.title.len();
+                }
+                if let Some(accepted) = decided {
+                    k += 1_000_000 + usize::from(*accepted) * 7;
+                }
+                if let Some(hover) = self.proposal_hover {
+                    k = k.wrapping_add(match hover {
+                        ProposalRow::View => 7_000_037,
+                        ProposalRow::Accept => 7_000_039,
+                        ProposalRow::Decline => 7_000_043,
+                    });
+                }
+                k
+            }
             Segment::Subagent {
                 id,
                 task,
@@ -809,6 +880,83 @@ impl App {
                         )]),
                         Some(idx),
                     ));
+                }
+            }
+            Segment::PlanProposal { draft, decided, .. } => {
+                let width = usize::from(w).max(1);
+                let live = decided.is_none();
+                let is_active_seg = self.active_proposal_seg() == Some(idx);
+                out.push((
+                    Line::from(vec![Span::styled(
+                        truncate_display_width(" ▸ proposed plan", width),
+                        if live { Theme::accent_bold() } else { Theme::dim() },
+                    )]),
+                    Some(idx),
+                ));
+                out.push((
+                    Line::from(vec![Span::styled(
+                        truncate_display_width(&format!(" ? {}", draft.goal.text), width),
+                        if live { Theme::accent_bold() } else { Theme::dim() },
+                    )]),
+                    Some(idx),
+                ));
+                out.push((
+                    Line::from(vec![Span::styled(
+                        truncate_display_width(
+                            &format!(
+                                "   {} steps · {} acceptance · {} constraints",
+                                draft.steps.len(),
+                                draft.acceptance.len(),
+                                draft.constraints.len()
+                            ),
+                            width,
+                        ),
+                        Theme::dim(),
+                    )]),
+                    Some(idx),
+                ));
+                if let Some(accepted) = decided {
+                    let (mark, style) = if *accepted {
+                        ("✓ accepted", Theme::ok())
+                    } else {
+                        ("✗ declined", Theme::warn())
+                    };
+                    out.push((
+                        Line::from(vec![Span::styled(
+                            truncate_display_width(&format!("  {mark}"), width),
+                            style,
+                        )]),
+                        Some(idx),
+                    ));
+                } else {
+                    for (n, (label, target)) in [
+                        ("посмотреть план", ProposalRow::View),
+                        ("принять", ProposalRow::Accept),
+                        ("отклонить", ProposalRow::Decline),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let hovered =
+                            live && is_active_seg && self.proposal_hover == Some(target);
+                        let style = if hovered {
+                            Style::new()
+                                .fg(Theme::BG())
+                                .bg(Theme::ACCENT())
+                                .add_modifier(Modifier::BOLD)
+                        } else if matches!(target, ProposalRow::Accept) {
+                            Theme::accent()
+                        } else {
+                            Theme::base()
+                        };
+                        out.push((
+                            Line::from(vec![Span::styled(
+                                truncate_display_width(&format!(" ○ {}. {label}", n + 1), width),
+                                style,
+                            )]),
+                            Some(idx),
+                        ));
+                    }
                 }
             }
             Segment::Thinking {
@@ -1116,7 +1264,7 @@ impl App {
             let seg = &self.segments[idx];
             // group spacing rules (cheap, done per assembly pass)
             match seg {
-                Segment::AskUser { .. } => {
+                Segment::AskUser { .. } | Segment::PlanProposal { .. } => {
                     in_group = false;
                     last_block = BlockKind::None;
                     logical.push((blank(), None));
@@ -2365,6 +2513,10 @@ fn segment_layout_key(seg: &Segment) -> u64 {
                 q.header.hash(&mut h);
                 q.question.hash(&mut h);
             }
+        }
+        Segment::PlanProposal { draft, .. } => {
+            draft.goal.text.hash(&mut h);
+            draft.steps.len().hash(&mut h);
         }
         Segment::Thinking { .. } => {}
         Segment::Subagent { id, task, .. } => {

@@ -554,6 +554,43 @@ pub enum Applied {
     Completed,
 }
 
+/// Arguments of a full-plan proposal: the same shape as `Op::Create`
+/// without the active-plan guard. The host validates a draft with
+/// `create` before the user ever sees it, and stores the rebuilt plan on
+/// accept — the agent never writes plan state itself.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlanDraftArgs {
+    #[serde(default)]
+    pub goal: String,
+    #[serde(default)]
+    pub constraints: Vec<String>,
+    #[serde(default)]
+    pub acceptance: Vec<String>,
+    #[serde(default)]
+    pub steps: Vec<NewStep>,
+}
+
+impl PlanDraftArgs {
+    pub fn build(&self, budget_limit: u64, limits: &Limits) -> Result<Plan, Rejection> {
+        create(
+            self.goal.clone(),
+            self.constraints.clone(),
+            self.acceptance.clone(),
+            self.steps.clone(),
+            budget_limit,
+            limits,
+        )
+    }
+}
+
+/// Host-only: retire the active plan when the user accepts a replacement
+/// proposal. The reason travels in the journal; the file keeps no history
+/// of why it was abandoned.
+pub fn abandon(plan: &mut Plan) {
+    plan.status = PlanStatus::Abandoned;
+    plan.revision += 1;
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     pub max_steps: usize,

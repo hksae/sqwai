@@ -131,6 +131,12 @@ pub enum AgentEvent {
         id: u64,
         questions: Vec<AskQuestion>,
     },
+    /// the model proposed a full plan draft; accept/decline via ControlMsg.
+    /// Nothing is written until the user accepts.
+    PlanProposal { id: u64, draft: plan::Plan },
+    /// the host stored an accepted proposal; carries the stored plan's id so
+    /// the session re-links before the tool outcome is even processed
+    PlanAccepted { id: String },
     /// a dangerous command needs approval; decide via ControlMsg
     Approval {
         id: u64,
@@ -165,6 +171,7 @@ pub enum AgentEvent {
 #[derive(Debug)]
 pub enum ControlMsg {
     AskAnswer { id: u64, text: String },
+    PlanAnswer { id: u64, accept: bool },
     ApprovalAnswer { id: u64, decision: ApprovalDecision },
 }
 
@@ -543,6 +550,24 @@ async fn run_subagent(
                     })
                     .await;
                 return result;
+            }
+            // interactive child events have no parent surface; answer them
+            // immediately so the child never blocks on an answer nobody can
+            // give (a declined proposal tells it to ask the user directly)
+            AgentEvent::AskUser { id, .. } => {
+                let _ = child.control.try_send(ControlMsg::AskAnswer {
+                    id,
+                    text: "subagents cannot reach the user; decide yourself and continue"
+                        .to_string(),
+                });
+            }
+            AgentEvent::Approval { id, .. } => {
+                let _ = child
+                    .control
+                    .try_send(ControlMsg::ApprovalAnswer { id, decision: ApprovalDecision::Deny });
+            }
+            AgentEvent::PlanProposal { id, .. } => {
+                let _ = child.control.try_send(ControlMsg::PlanAnswer { id, accept: false });
             }
             _ => {}
         }
@@ -1151,6 +1176,20 @@ async fn run_agent(
             } else {
                 match call.name.as_str() {
                     "ask_user" => ask_user(call, &tx, &mut ctl, &mut next_id).await,
+                    "propose_plan" => {
+                        propose_plan(
+                            call,
+                            &root,
+                            &plan_limits,
+                            context_limit,
+                            read_only,
+                            &mut journal,
+                            &tx,
+                            &mut ctl,
+                            &mut next_id,
+                        )
+                        .await
+                    }
                     "bash" => {
                         bash_call(
                             call,
@@ -2124,6 +2163,144 @@ async fn ask_user(
             None => return tools::Outcome::err("agent cancelled while asking"),
         }
     }
+}
+
+/// `propose_plan`: the agent proposes a full plan draft but writes nothing.
+/// Two-stage host gate: the draft is validated before the user sees it (a
+/// malformed draft rejects this call), then the user accepts or declines.
+/// Accept abandons the active plan (if any) and stores the draft; decline
+/// returns ok so the agent asks what was wrong and continues.
+#[allow(clippy::too_many_arguments)]
+async fn propose_plan(
+    call: &ToolCallReq,
+    root: &std::path::Path,
+    plan_limits: &crate::config::PlanConfig,
+    context_limit: u64,
+    read_only: bool,
+    journal: &mut Option<crate::agent::journal::Journal>,
+    tx: &mpsc::Sender<AgentEvent>,
+    ctl: &mut mpsc::Receiver<ControlMsg>,
+    next_id: &mut u64,
+) -> tools::Outcome {
+    // the call itself writes nothing, but an accepted proposal is stored by
+    // the host — which a read-only session must never do (lock owned elsewhere)
+    if read_only {
+        return tools::Outcome::err(
+            "project is read-only because another sqwai instance owns the lock; \
+             plan proposals cannot be stored — present the plan in your answer instead",
+        );
+    }
+    let id = *next_id;
+    *next_id += 1;
+    let draft_args: plan::PlanDraftArgs = match serde_json::from_value(call.args.clone()) {
+        Ok(args) => args,
+        Err(e) => {
+            return tools::Outcome::err(format!(
+                "plan proposal rejected: bad arguments ({e}) — send goal and steps"
+            ));
+        }
+    };
+    let limits = plan::Limits {
+        max_steps: plan_limits.max_steps,
+    };
+    let budget_limit = plan_limits
+        .budget_tokens(context_limit)
+        .max(tools::MIN_PLAN_BUDGET_TOKENS);
+    let draft = match draft_args.build(budget_limit, &limits) {
+        Ok(draft) => draft,
+        Err(r) => {
+            return tools::Outcome::err(format!(
+                "plan proposal rejected [{}]: {} — {}",
+                r.code, r.reason, r.hint
+            ));
+        }
+    };
+    if let Some(writer) = journal.as_mut() {
+        let _ = writer.append(
+            "plan",
+            serde_json::json!({"op": "propose", "goal": draft.goal.text}),
+        );
+    }
+    if tx
+        .send(AgentEvent::PlanProposal {
+            id,
+            draft: draft.clone(),
+        })
+        .await
+        .is_err()
+    {
+        return tools::Outcome::err("tui closed while proposing");
+    }
+    let accept = loop {
+        match ctl.recv().await {
+            Some(ControlMsg::PlanAnswer { id: aid, accept }) if aid == id => break accept,
+            Some(_) => continue,
+            None => return tools::Outcome::err("agent cancelled while proposing"),
+        }
+    };
+    if !accept {
+        if let Some(writer) = journal.as_mut() {
+            let _ = writer.append("plan", serde_json::json!({"op": "decline_proposal"}));
+        }
+        return tools::Outcome::ok(
+            "the user declined the proposed plan. Ask what was wrong with it, adjust, \
+             and propose again — do not stop working.",
+        );
+    }
+    // Rebuild defensively: same args, same limits, fresh id. An accept can
+    // only fail here on state that changed while the user was deciding.
+    let fresh = match draft_args.build(budget_limit, &limits) {
+        Ok(fresh) => fresh,
+        Err(r) => {
+            return tools::Outcome::err(format!(
+                "accepted plan failed re-validation [{}]: {} — {}",
+                r.code, r.reason, r.hint
+            ));
+        }
+    };
+    let abandoned = match plan::open_active(root) {
+        Ok(Some(mut active)) => {
+            let old = active.id.clone();
+            plan::abandon(&mut active);
+            if let Err(e) = plan::store(root, &active) {
+                return tools::Outcome::err(format!(
+                    "abandoning the previous plan failed: {e:#}"
+                ));
+            }
+            Some(old)
+        }
+        Ok(None) => None,
+        Err(e) => return tools::Outcome::err(format!("plan store unreadable: {e:#}")),
+    };
+    let new_id = fresh.id.clone();
+    let steps = fresh.steps.len();
+    if let Err(e) = plan::store(root, &fresh) {
+        return tools::Outcome::err(format!("plan write failed: {e:#}"));
+    }
+    if let Some(writer) = journal.as_mut() {
+        let _ = writer.append(
+            "plan",
+            serde_json::json!({"op": "accept_proposal", "id": new_id, "abandoned": abandoned}),
+        );
+    }
+    // tell the TUI the stored plan's id so it re-links the session before the
+    // tool outcome is processed (fork must copy the new plan, not the old one)
+    let _ = tx.send(AgentEvent::PlanAccepted { id: new_id.clone() }).await;
+    // the TUI derives its todos panel and plan label from disk; push the new
+    // plan's steps so they refresh without waiting for the next plan op
+    let plan_todos: Vec<String> = fresh
+        .steps
+        .iter()
+        .map(|s| format!("[{}] {}", s.status.as_str(), s.title))
+        .collect();
+    let _ = tx.send(AgentEvent::Todos(plan_todos)).await;
+    tools::Outcome::ok(match abandoned {
+        Some(old) => format!(
+            "plan {new_id} accepted with {steps} steps; previous plan {old} abandoned. \
+             Start its first step."
+        ),
+        None => format!("plan {new_id} accepted with {steps} steps. Start its first step."),
+    })
 }
 
 async fn bash_call(

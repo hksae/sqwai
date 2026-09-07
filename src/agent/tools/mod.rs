@@ -220,7 +220,7 @@ fn file_hash(path: &Path) -> String {
 
 /// Smallest plan budget the host will use, however small the context. A plan
 /// that cannot hold its own goal line is worse than an unbudgeted one.
-const MIN_PLAN_BUDGET_TOKENS: u64 = 256;
+pub(crate) const MIN_PLAN_BUDGET_TOKENS: u64 = 256;
 
 /// The agent's own state directory. File tools see only `skills/` and
 /// `config.toml` inside it; plan, journal, memory and graph are host-owned and
@@ -533,6 +533,38 @@ long-running commands.",
             parameters: json!({"type":"object","properties":{"section":{"type":"string","enum":["Project","Conventions","User","Agreements"]},"scope":{"type":"string","enum":["project","user"]},"text":{"type":"string"},"replaces":{"type":"string"}},"required":["section","text"]}),
         },
         ToolDef {
+            name: "propose_plan",
+            kind: Kind::ReadOnly,
+            description: "Propose a new full plan or a replacement for the active one. \
+             Nothing is written until the user accepts: the host validates the draft first \
+             (format errors reject this call without bothering the user), then shows it \
+             for accept/decline with a preview. If declined, the outcome says so — ask \
+             the user what was wrong and adjust, do not stop. Use for a new goal and for \
+             replacing the active plan; small edits to the active plan use plan add/split.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string", "description": "what must be true when the work is done"},
+                    "constraints": {"type": "array", "items": {"type": "string"}},
+                    "acceptance": {"type": "array", "items": {"type": "string"}},
+                    "steps": {
+                        "type": "array",
+                        "description": "initial steps (3-12)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "kind": {"type": "string", "enum": ["research", "change", "verify"]},
+                                "refs": {"type": "array", "items": {"type": "string"}}
+                            },
+                            "required": ["title"]
+                        }
+                    }
+                },
+                "required": ["goal", "steps"]
+            }),
+        },
+        ToolDef {
             name: "plan",
             kind: Kind::Mutating,
             description: "Work the structured plan, one operation per call. Ops: create, start, \
@@ -729,6 +761,7 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             }
         }
         "plan" => format!("plan {}", s("op")),
+        "propose_plan" => s("goal"),
         _ => String::new(),
     }
 }
@@ -910,6 +943,9 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         }
         // direct dispatch never answers "unknown tool"
         "ask_user" => Outcome::err("ask_user is served by the agent loop, not by the dispatcher"),
+        "propose_plan" => {
+            Outcome::err("propose_plan is served by the agent loop, not by the dispatcher")
+        }
         other => Outcome::err(format!("unknown tool '{other}'")),
     }
 }
@@ -1007,7 +1043,9 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             Outcome::ok(msg)
                         }
                         plan::Applied::Proposed { goal, reason } => Outcome::ok(format!(
-                            "goal revision proposed for the user to confirm: \"{goal}\" ({reason})"
+                            "goal revision proposals are deprecated: send the full updated plan \
+                             with propose_plan instead (goal: \"{goal}\", reason: {reason}). \
+                             Nothing was written."
                         )),
                         plan::Applied::Shown { text } => Outcome::ok(text),
                         plan::Applied::Completed => {

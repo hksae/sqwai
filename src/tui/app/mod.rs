@@ -88,7 +88,7 @@ mod view;
 
 use forms::FormField;
 use menus::{Menu, MenuAction};
-use view::{ActivityGroup, AskRow, CellPos, Segment, Selection};
+use view::{ActivityGroup, AskRow, CellPos, ProposalRow, Segment, Selection};
 
 use menus::COMMANDS;
 
@@ -231,6 +231,10 @@ pub struct App {
     active_ask_id: Option<u64>,
     /// mouse hover target inside the active inline AskUser, for highlight
     ask_hover: Option<AskRow>,
+    /// id of the plan proposal awaiting accept/decline, if any
+    active_proposal_id: Option<u64>,
+    /// mouse hover target inside the active proposal, for highlight
+    proposal_hover: Option<ProposalRow>,
     assistant_buf: String,
     /// arrived text not yet revealed to the screen (typewriter effect)
     pending_reveal: String,
@@ -482,6 +486,8 @@ impl App {
             ask_custom_focus: None,
             active_ask_id: None,
             ask_hover: None,
+            active_proposal_id: None,
+            proposal_hover: None,
             assistant_buf: String::new(),
             pending_reveal: String::new(),
             thinking_open: false,
@@ -1002,6 +1008,95 @@ impl App {
         self.dirty = true;
     }
 
+    /// the live plan proposal awaiting accept/decline, if it still exists.
+    /// Resolved by tool-call id: rows inserted later shift indices.
+    pub(super) fn active_proposal_seg(&self) -> Option<usize> {
+        let id = self.active_proposal_id?;
+        self.segments.iter().position(|s| {
+            matches!(
+                s,
+                Segment::PlanProposal {
+                    id: qid,
+                    decided: None,
+                    ..
+                } if *qid == id
+            )
+        })
+    }
+
+    /// insert a proposal segment in execution order — before the live answer,
+    /// like tool rows — so the finished turn folds it into its activity group
+    /// instead of leaving it rendered below the answer.
+    pub(super) fn push_proposal_segment(&mut self, id: u64, draft: crate::plan::Plan) {
+        self.freeze_active_proposal();
+        let seg = Segment::PlanProposal {
+            id,
+            draft,
+            decided: None,
+        };
+        let pos = self
+            .segments
+            .iter()
+            .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
+            .unwrap_or(self.segments.len());
+        self.segments.insert(pos, seg);
+        self.active_proposal_id = Some(id);
+        self.proposal_hover = None;
+        self.follow = true;
+        self.dirty = true;
+    }
+
+    /// open the draft preview popup (same view as /plan, read-only)
+    pub(super) fn open_proposal_preview(&mut self) {
+        let Some(seg) = self.active_proposal_seg() else {
+            return;
+        };
+        let draft = match self.segments.get(seg) {
+            Some(Segment::PlanProposal { draft, .. }) => draft.clone(),
+            _ => return,
+        };
+        self.open_menu(Menu::PlanPreview { draft });
+    }
+
+    /// freeze the active proposal and deliver the verdict to the agent
+    pub(super) fn proposal_answer(&mut self, accept: bool) {
+        let Some(seg) = self.active_proposal_seg() else {
+            return;
+        };
+        let id = match self.segments.get(seg) {
+            Some(Segment::PlanProposal { id, .. }) => *id,
+            _ => return,
+        };
+        if let Some(Segment::PlanProposal { decided, .. }) = self.segments.get_mut(seg) {
+            *decided = Some(accept);
+        }
+        if let Some(agent) = &self.agent {
+            let _ = agent
+                .control
+                .try_send(ControlMsg::PlanAnswer { id, accept });
+        }
+        self.active_proposal_id = None;
+        self.proposal_hover = None;
+        self.follow = true;
+        self.dirty = true;
+    }
+
+    /// the agent turn ended while a proposal was open: never leave a ghost
+    /// behind. A dangling proposal always freezes as declined — answering
+    /// for the user is not something the host may do (§10).
+    fn freeze_active_proposal(&mut self) {
+        let Some(seg) = self.active_proposal_seg() else {
+            self.active_proposal_id = None;
+            return;
+        };
+        if let Some(Segment::PlanProposal { decided, .. }) = self.segments.get_mut(seg) {
+            *decided = Some(false);
+        }
+        self.active_proposal_id = None;
+        self.proposal_hover = None;
+        self.dirty = true;
+    }
+
     fn popup_visible(&self) -> bool {
         let t = self.input_text();
         !self.popup_dismiss && t.starts_with('/') && !t.contains(' ')
@@ -1367,6 +1462,8 @@ impl App {
         self.activity_groups.clear();
         self.active_ask_id = None;
         self.ask_hover = None;
+        self.active_proposal_id = None;
+        self.proposal_hover = None;
         self.ask_custom_focus = None;
         self.rebuild_session_environment();
         self.load_history_segments();
@@ -1414,6 +1511,8 @@ impl App {
         self.activity_groups.clear();
         self.active_ask_id = None;
         self.ask_hover = None;
+        self.active_proposal_id = None;
+        self.proposal_hover = None;
         self.ask_custom_focus = None;
         self.rebuild_session_environment();
         self.follow = true;
@@ -2178,6 +2277,18 @@ impl App {
                     // and the mouse target is the chat row itself.
                     self.push_ask_segment(id, questions);
                 }
+                AgentEvent::PlanProposal { id, draft } => {
+                    // Same treatment as a question: inline, in execution
+                    // order, folded into the turn's activity afterwards.
+                    self.push_proposal_segment(id, draft);
+                }
+                AgentEvent::PlanAccepted { id } => {
+                    // the loop stored the accepted draft: re-link the session
+                    // so fork copies the new plan instead of the abandoned one
+                    self.session.plan_id = Some(id);
+                    self.refresh_plan_label();
+                    self.dirty = true;
+                }
                 AgentEvent::Approval {
                     id,
                     command,
@@ -2308,7 +2419,8 @@ impl App {
         // ask_user has its own inline Q&A segment (AgentEvent::AskUser); a
         // parallel Tool row would duplicate it and its expansion used to be
         // empty because `args` here is only a one-line summary, not the JSON.
-        if name == "ask_user" {
+        // propose_plan is the same: the PlanProposal segment is the surface.
+        if name == "ask_user" || name == "propose_plan" {
             return;
         }
         if self.thinking_open {
@@ -2354,7 +2466,7 @@ impl App {
         diff: Option<String>,
     ) {
         // answered inline above; no Tool row exists for it by design
-        if name == "ask_user" {
+        if name == "ask_user" || name == "propose_plan" {
             return;
         }
         // close the row opened by ToolStart; fall back to a new one
@@ -2549,7 +2661,10 @@ impl App {
         while start > floor
             && matches!(
                 segs[start - 1],
-                Segment::Thinking { .. } | Segment::Tool { .. } | Segment::AskUser { .. }
+                Segment::Thinking { .. }
+                    | Segment::Tool { .. }
+                    | Segment::AskUser { .. }
+                    | Segment::PlanProposal { .. }
             )
         {
             start -= 1;
@@ -2578,6 +2693,8 @@ impl App {
                 // a question is a tool call awaiting the user; it folds with
                 // the rest of the turn's work
                 Segment::AskUser { .. } => calls += 1,
+                // same for a plan proposal awaiting accept/decline
+                Segment::PlanProposal { .. } => calls += 1,
                 Segment::Thinking { .. } => thinking += 1,
                 _ => {}
             }
@@ -2620,7 +2737,9 @@ impl App {
     fn finish_turn(&mut self, res: Result<(), String>) {
         self.clear_busy_statuses();
         // an aborted/errored turn can leave a question with nobody waiting
-        // for its answer — freeze it instead of leaving a live ghost
+        // for its answer — freeze it instead of leaving a live ghost.
+        // Same for a dangling plan proposal (always declined: the host must
+        // not answer for the user).
         if res.is_err() {
             let note = if res.as_ref().is_err_and(|e| e == "aborted") {
                 "(no answer — stopped)"
@@ -2628,8 +2747,12 @@ impl App {
                 "(no answer — turn failed)"
             };
             self.freeze_active_ask(note);
-        } else if self.active_ask_seg().is_some() {
-            self.freeze_active_ask("(no answer)");
+            self.freeze_active_proposal();
+        } else {
+            if self.active_ask_seg().is_some() {
+                self.freeze_active_ask("(no answer)");
+            }
+            self.freeze_active_proposal();
         }
         if res.as_ref().is_err_and(|error| error == "aborted") {
             self.clear_subagent_ui_on_stop();

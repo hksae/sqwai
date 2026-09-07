@@ -237,6 +237,10 @@ mod tests {
                     ..
                 } => println!("seg[{i}] TOOL {name} ({args}) ok={ok:?}: {output}"),
                 Segment::User(t) => println!("seg[{i}] USER: {t}"),
+                Segment::PlanProposal { draft, decided, .. } => println!(
+                    "seg[{i}] PLANPROPOSAL {} steps decided={decided:?}",
+                    draft.steps.len()
+                ),
             }
         }
         assert!(!app.streaming, "turn still streaming after 180s");

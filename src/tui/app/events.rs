@@ -451,6 +451,22 @@ impl App {
                                 }
                             }
                         }
+                        // digits answer the inline plan proposal the same way:
+                        // 1 opens the preview, 2/3 accept/decline
+                        KeyCode::Char(c)
+                            if self.menu_stack.is_empty()
+                                && self.active_proposal_seg().is_some()
+                                && self.ask_custom_focus.is_none()
+                                && !ctrl
+                                && !alt
+                                && ('1'..='3').contains(&c) =>
+                        {
+                            match c {
+                                '1' => self.open_proposal_preview(),
+                                '2' => self.proposal_answer(true),
+                                _ => self.proposal_answer(false),
+                            }
+                        }
                         // plan/act is switched by the user only (design §5)
                         KeyCode::Tab
                             if self.menu_stack.is_empty()

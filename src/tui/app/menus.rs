@@ -109,6 +109,10 @@ pub(super) enum Menu {
     Todo,
     /// full plan overview, opened with /plan
     Plan,
+    /// a propose_plan draft preview, read-only (same view as Plan)
+    PlanPreview {
+        draft: crate::plan::Plan,
+    },
     /// all delegated child agents, opened with Ctrl+A
     Subagents,
 }
@@ -952,6 +956,7 @@ impl App {
             Some(Menu::AskFree { .. }) => " type your answer (enter: send, esc: cancel) ".into(),
             Some(Menu::Todo) => " to-do ".into(),
             Some(Menu::Plan) => " plan ".into(),
+            Some(Menu::PlanPreview { .. }) => " proposed plan ".into(),
             Some(Menu::Subagents) => " subagents ".into(),
             None => String::new(),
         }
@@ -1764,146 +1769,25 @@ impl App {
                     self.menu_sel = self.menu_sel.min(self.menu_rows.len().saturating_sub(1));
                     return;
                 };
-                // Wrap width for plan text: menu inner is w-4, w is 78 max
-                // so 68 is safe for wide, still reasonable for narrow (will
-                // be truncated to w, but far better than cutting at 78).
-                const WRAP: usize = 68;
-                let push_wrapped = |rows: &mut Vec<(Line<'static>, MenuAction)>,
-                                    prefix: &str,
-                                    text: &str,
-                                    prefix_style: Style,
-                                    text_style: Style| {
-                    let prefix_w = unicode_width::UnicodeWidthStr::width(prefix);
-                    let avail = WRAP.saturating_sub(prefix_w).max(20);
-                    let mut line = String::new();
-                    let mut first = true;
-                    for word in text.split_whitespace() {
-                        let w = unicode_width::UnicodeWidthStr::width(word);
-                        let need = if line.is_empty() { w } else { 1 + w };
-                        if unicode_width::UnicodeWidthStr::width(line.as_str()) + need > avail {
-                            let p = if first { prefix } else { &" ".repeat(prefix_w) };
-                            rows.push(row(
-                                Line::from(vec![
-                                    Span::styled(p.to_string(), prefix_style),
-                                    Span::styled(line.clone(), text_style),
-                                ]),
-                                MenuAction::None,
-                            ));
-                            line.clear();
-                            first = false;
-                        }
-                        if !line.is_empty() {
-                            line.push(' ');
-                        }
-                        line.push_str(word);
-                    }
-                    if !line.is_empty() || first {
-                        let p = if first { prefix } else { &" ".repeat(prefix_w) };
-                        rows.push(row(
-                            Line::from(vec![
-                                Span::styled(p.to_string(), prefix_style),
-                                Span::styled(line, text_style),
-                            ]),
-                            MenuAction::None,
-                        ));
-                    }
+                let status = match plan.status {
+                    plan::PlanStatus::Active => "active",
+                    plan::PlanStatus::Completed => "completed",
+                    plan::PlanStatus::Abandoned => "abandoned",
                 };
-                let c = plan.counts();
-                self.menu_rows.push(row(
-                    Line::from(vec![
-                        Span::styled(format!("  plan {}", plan.id), Theme::accent_bold()),
-                        Span::styled(
-                            format!(
-                                " · {}",
-                                match plan.status {
-                                    plan::PlanStatus::Active => "active",
-                                    plan::PlanStatus::Completed => "completed",
-                                    plan::PlanStatus::Abandoned => "abandoned",
-                                }
-                            ),
-                            Theme::dim(),
-                        ),
-                    ]),
-                    MenuAction::None,
+                self.menu_rows.extend(plan_rows(
+                    &plan,
+                    format!("  plan {}", plan.id),
+                    format!(" · {status}"),
                 ));
-                // goal: may be long, wrap it
-                push_wrapped(
-                    &mut self.menu_rows,
-                    "  goal: ",
-                    &plan.goal.text,
-                    Theme::accent(),
-                    Theme::base(),
-                );
-                if !plan.constraints.is_empty() {
-                    push_wrapped(
-                        &mut self.menu_rows,
-                        "  constraints: ",
-                        &plan.constraints.join(" · "),
-                        Theme::dim(),
-                        Theme::dim(),
-                    );
-                }
-                if !plan.acceptance.is_empty() {
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled("  acceptance:", Theme::accent())]),
-                        MenuAction::None,
-                    ));
-                    for (i, a) in plan.acceptance.iter().enumerate() {
-                        let st = match a.status {
-                            plan::AcceptanceStatus::Pending => Theme::dim(),
-                            plan::AcceptanceStatus::Verified => Theme::ok(),
-                            plan::AcceptanceStatus::Waived => Theme::warn(),
-                        };
-                        let prefix = format!("    [{i}] {} ", a.status.as_str());
-                        push_wrapped(&mut self.menu_rows, &prefix, &a.text, st, Theme::base());
-                    }
-                }
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        format!(
-                            "  steps: {} done · {} in progress · {} blocked · {} pending · {} cancelled",
-                            c.done, c.in_progress, c.blocked, c.pending, c.cancelled
-                        ),
-                        Theme::base(),
-                    )]),
-                    MenuAction::None,
-                ));
-                for s in &plan.steps {
-                    let (marker, style) = match s.status {
-                        plan::StepStatus::Done => ("[x]", Theme::ok()),
-                        plan::StepStatus::InProgress => ("[>]", Theme::accent()),
-                        plan::StepStatus::Blocked => ("[!]", Theme::err()),
-                        plan::StepStatus::Cancelled => ("[-]", Theme::dim()),
-                        plan::StepStatus::Pending | plan::StepStatus::Reopened => {
-                            ("[ ]", Theme::dim())
-                        }
-                    };
-                    let prefix = format!("  {marker} {} ({}) ", s.id, s.kind.as_str());
-                    let mut title = s.title.clone();
-                    if s.stale_goal == Some(true) {
-                        title.push_str("  [stale goal]");
-                    }
-                    push_wrapped(&mut self.menu_rows, &prefix, &title, style, style);
-                    if let Some(reason) = &s.reason {
-                        push_wrapped(
-                            &mut self.menu_rows,
-                            "      reason: ",
-                            reason,
-                            Theme::dim(),
-                            Theme::dim(),
-                        );
-                    }
-                    if let Some(summary) = &s.summary {
-                        push_wrapped(
-                            &mut self.menu_rows,
-                            "      ",
-                            summary,
-                            Theme::dim(),
-                            Theme::dim(),
-                        );
-                    }
-                }
                 self.menu_footer_text = Some("up/down: scroll · esc: close".into());
+            }
+            Menu::PlanPreview { draft } => {
+                self.menu_rows.extend(plan_rows(
+                    &draft,
+                    "  proposed plan".to_string(),
+                    " · not stored".to_string(),
+                ));
+                self.menu_footer_text = Some("up/down: scroll · esc: back".into());
             }
         }
         if self.menu_sel >= self.menu_rows.len() {
@@ -1912,8 +1796,140 @@ impl App {
     }
 }
 
-fn session_row(s: &Session, is_current: bool, framed: bool) -> (Line<'static>, MenuAction) {
-    const FRAME_CONTENT: usize = 72;
+/// Render any plan — the active one from disk or an unstored proposal draft —
+/// as menu rows. Shared by /plan and the propose_plan preview popup.
+fn plan_rows(
+    plan: &crate::plan::Plan,
+    heading_main: String,
+    heading_suffix: String,
+) -> Vec<(Line<'static>, MenuAction)> {
+    let row = |l: Line<'static>, a: MenuAction| (l, a);
+    let mut rows: Vec<(Line<'static>, MenuAction)> = Vec::new();
+    // Wrap width for plan text: menu inner is w-4, w is 78 max
+    // so 68 is safe for wide, still reasonable for narrow (will
+    // be truncated to w, but far better than cutting at 78).
+    const WRAP: usize = 68;
+    let push_wrapped = |rows: &mut Vec<(Line<'static>, MenuAction)>,
+                        prefix: &str,
+                        text: &str,
+                        prefix_style: Style,
+                        text_style: Style| {
+        let prefix_w = unicode_width::UnicodeWidthStr::width(prefix);
+        let avail = WRAP.saturating_sub(prefix_w).max(20);
+        let mut line = String::new();
+        let mut first = true;
+        for word in text.split_whitespace() {
+            let w = unicode_width::UnicodeWidthStr::width(word);
+            let need = if line.is_empty() { w } else { 1 + w };
+            if unicode_width::UnicodeWidthStr::width(line.as_str()) + need > avail {
+                let p = if first { prefix } else { &" ".repeat(prefix_w) };
+                rows.push(row(
+                    Line::from(vec![
+                        Span::styled(p.to_string(), prefix_style),
+                        Span::styled(line.clone(), text_style),
+                    ]),
+                    MenuAction::None,
+                ));
+                line.clear();
+                first = false;
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        if !line.is_empty() || first {
+            let p = if first { prefix } else { &" ".repeat(prefix_w) };
+            rows.push(row(
+                Line::from(vec![
+                    Span::styled(p.to_string(), prefix_style),
+                    Span::styled(line, text_style),
+                ]),
+                MenuAction::None,
+            ));
+        }
+    };
+    let c = plan.counts();
+    rows.push(row(
+        Line::from(vec![
+            Span::styled(heading_main, Theme::accent_bold()),
+            Span::styled(heading_suffix, Theme::dim()),
+        ]),
+        MenuAction::None,
+    ));
+    // goal: may be long, wrap it
+    push_wrapped(
+        &mut rows,
+        "  goal: ",
+        &plan.goal.text,
+        Theme::accent(),
+        Theme::base(),
+    );
+    if !plan.constraints.is_empty() {
+        push_wrapped(
+            &mut rows,
+            "  constraints: ",
+            &plan.constraints.join(" · "),
+            Theme::dim(),
+            Theme::dim(),
+        );
+    }
+    if !plan.acceptance.is_empty() {
+        rows.push(row(
+            Line::from(vec![Span::styled("  acceptance:", Theme::accent())]),
+            MenuAction::None,
+        ));
+        for (i, a) in plan.acceptance.iter().enumerate() {
+            let st = match a.status {
+                plan::AcceptanceStatus::Pending => Theme::dim(),
+                plan::AcceptanceStatus::Verified => Theme::ok(),
+                plan::AcceptanceStatus::Waived => Theme::warn(),
+            };
+            let prefix = format!("    [{i}] {} ", a.status.as_str());
+            push_wrapped(&mut rows, &prefix, &a.text, st, Theme::base());
+        }
+    }
+    rows.push(row(
+        Line::from(vec![Span::styled(
+            format!(
+                "  steps: {} done · {} in progress · {} blocked · {} pending · {} cancelled",
+                c.done, c.in_progress, c.blocked, c.pending, c.cancelled
+            ),
+            Theme::base(),
+        )]),
+        MenuAction::None,
+    ));
+    for s in &plan.steps {
+        let (marker, style) = match s.status {
+            plan::StepStatus::Done => ("[x]", Theme::ok()),
+            plan::StepStatus::InProgress => ("[>]", Theme::accent()),
+            plan::StepStatus::Blocked => ("[!]", Theme::err()),
+            plan::StepStatus::Cancelled => ("[-]", Theme::dim()),
+            plan::StepStatus::Pending | plan::StepStatus::Reopened => ("[ ]", Theme::dim()),
+        };
+        let prefix = format!("  {marker} {} ({}) ", s.id, s.kind.as_str());
+        let mut title = s.title.clone();
+        if s.stale_goal == Some(true) {
+            title.push_str("  [stale goal]");
+        }
+        push_wrapped(&mut rows, &prefix, &title, style, style);
+        if let Some(reason) = &s.reason {
+            push_wrapped(
+                &mut rows,
+                "      reason: ",
+                reason,
+                Theme::dim(),
+                Theme::dim(),
+            );
+        }
+        if let Some(summary) = &s.summary {
+            push_wrapped(&mut rows, "      ", summary, Theme::dim(), Theme::dim());
+        }
+    }
+    rows
+}
+
+fn session_row(s: &Session, is_current: bool, framed: bool) -> (Line<'static>, MenuAction) {    const FRAME_CONTENT: usize = 72;
     let badge = if s.forked_from_id.is_some() {
         "[fork] "
     } else {
