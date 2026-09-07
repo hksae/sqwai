@@ -1604,6 +1604,28 @@ Git is invoked only as a CLI binary through `tokio::process` (§2.5):
 `git --git-dir=… --work-tree=…` against the shadow checkpoint repository.
 `git2`/libgit2 is not a dependency — removed, and must not be reintroduced.
 
+5.11 Core and UI decoupling (Headless / Server / Workspace)
+The agent core (`agent`, `providers`, `session`, `mcp`, `lsp`, `plan`, `prompts`)
+is decoupled by contract from the terminal interface: no module outside `src/tui/`
+may depend on `ratatui`, `crossterm`, or terminal lifecycle state. The boundary
+between host core and UI is strictly message-driven across Tokio MPSC channels:
+`AgentEvent` for outbound telemetry, progress, tool output, and stream deltas;
+`AgentAction` / `ApprovalDecision` for inbound control.
+
+Decoupling roadmap:
+1. **Server / Headless mode (`sqwai serve`)**:
+   Headless entry point supporting stdio or streamable HTTP/JSON-RPC (or NDJSON)
+   transport. IDE extensions (VS Code, Zed, Neovim, JetBrains) or automated pipelines
+   interact with sqwai as an external daemon process without terminal emulation.
+2. **Workspace split (`crates/`)**:
+   Modular cargo workspace partition:
+   - `sqwai-core`: library crate providing agent loop, session persistence, memory,
+     graph indexing, tools, and provider clients.
+   - `sqwai-tui`: standalone interactive terminal client using `sqwai-core`.
+   - `sqwai-server`: protocol bridge (JSON-RPC/ACP/SSE) exposing `sqwai-core` to IDEs
+     and third-party GUI clients.
+
+
 6. System prompt composition
 Content	Lives in	Notes
 Role, output format, tone, language rules	system prompt	one statement per rule; no duplicated sections
@@ -1675,6 +1697,8 @@ number; a `partial` one is missing something the design calls for.
 | AB | /why provenance, step diff + /undo step, /export, /brief | planned | J |
 | AC | bench command (user-facing wrapper over §8.2 regression harness) | planned | G |
 | AD | Bash isolation/sandbox (container/bwrap/WSL) | open question | — |
+| AE | Core and UI decoupling: headless `serve` (stdio/JSON-RPC) + crates workspace split (`sqwai-core`, `sqwai-tui`, `sqwai-server`) (§5.11) | planned | B |
+
 
 Ordering beyond the dependency column: K, L and O are the last passes — the
 canvas graph view, the browser and unattended mode. Order among M, N, O is
