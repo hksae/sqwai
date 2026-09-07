@@ -192,7 +192,7 @@ impl Shadow {
         self.git(&["add", "-A", "--", "."]).map(|_| ())
     }
 
-    fn head_of(&self, session_id: &str) -> Option<String> {
+    pub(crate) fn head_of(&self, session_id: &str) -> Option<String> {
         self.git(&["rev-parse", &session_ref(session_id)])
             .ok()
             .map(|sha| sha.trim().to_string())

@@ -78,7 +78,7 @@ pub fn snapshot(root: &Path, label: &str) -> Result<String> {
                 anyhow::bail!("no shadow repository");
             };
             shadow
-                .snapshot("shared", label)?
+                .head_of("shared")
                 .context("the tree is unchanged and no previous snapshot exists")
         }
     }
