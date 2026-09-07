@@ -5,6 +5,7 @@
 //! receive a [`ToolCtx`] carrying the project root and session-scoped guard
 //! state (which files were read, checkpoint journal).
 
+mod astgrep;
 mod exec;
 mod fs;
 mod git;
@@ -444,6 +445,25 @@ unless replace_all is true. Requires reading the file first.",
             }),
         },
         ToolDef {
+            name: "ast_grep",
+            kind: Kind::ReadOnly,
+            description: "Structural code search with AST patterns: finds code by shape, not text. \
+$NAME captures one node (any kind or size), $$$NAME captures zero or more siblings, uppercase names are metavariables, the rest must match exactly; comments are ignored. \
+Examples: `Ok($E)` finds every Ok(...) wrapping; `let $N = $V;` finds bindings; `f($$$ARGS)` finds calls with any argument list. \
+Use instead of grep when whitespace, line breaks or comments vary.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "code pattern with $NAME / $$$NAME metavariables"},
+                    "path": {"type": "string", "description": "file or directory, default project root"},
+                    "lang": {"type": "string", "enum": ["rust", "python", "javascript", "typescript", "tsx", "go", "bash"], "description": "force a language; default is per-file by extension"},
+                    "include": {"type": "string", "description": "path glob filter, e.g. src/**/*.rs"},
+                    "max": {"type": "integer", "description": "max matches (default 50, max 200)"}
+                },
+                "required": ["pattern"]
+            }),
+        },
+        ToolDef {
             name: "bash",
             kind: Kind::Mutating,
             description: "Run a shell command in the project directory. Destructive or risky commands \
@@ -553,8 +573,8 @@ long-running commands.",
         ToolDef {
             name: "webfetch",
             kind: Kind::ReadOnly,
-            description: "Fetch a bounded HTTP(S) page or text response and return readable text. Use only user-provided or task-relevant URLs.",
-            parameters: json!({"type":"object","properties":{"url":{"type":"string"},"timeout":{"type":"integer","minimum":1,"maximum":60}},"required":["url"]}),
+            description: "Fetch a bounded HTTP(S) page or text response and return readable text. Use only user-provided or task-relevant URLs. On HTML pages pass a CSS selector to extract just the matching elements instead of the whole page.",
+            parameters: json!({"type":"object","properties":{"url":{"type":"string"},"selector":{"type":"string","description":"CSS selector: return only the text of matching elements (HTML pages only)"},"timeout":{"type":"integer","minimum":1,"maximum":60}},"required":["url"]}),
         },
         ToolDef {
             name: "subagent",
@@ -810,6 +830,15 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             }
         }
         "glob" | "grep" => s("pattern"),
+        "ast_grep" => {
+            let pattern = clip(&s("pattern"), 60);
+            let lang = s("lang");
+            if lang.is_empty() {
+                pattern
+            } else {
+                format!("{pattern} @{lang}")
+            }
+        }
         "git_diff" => s("target"),
         "git_commit" => s("message"),
         "git_branch" => {
@@ -998,6 +1027,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         "git_commit" => git::commit(ctx, args),
         "git_branch" => git::branch(ctx, args),
         "patch" => git::patch(ctx, args),
+        "ast_grep" => astgrep::ast_grep(ctx, args),
         "webfetch" | "websearch" => Outcome::err("web tools must run through the async dispatcher"),
         "bash" => exec::bash(
             ctx,
@@ -2994,6 +3024,108 @@ mod tests {
         );
         assert!(!second.ok);
         assert!(second.output.contains("plan_exists"), "{}", second.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ast_grep_matches_by_shape_with_metavariables() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("demo.rs"),
+            "fn main() {\n    let a = Ok(42);\n    let b = Err(\"x\");\n    let c = Ok(Some(7));\n}\n",
+        )
+        .unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+
+        // single metavariable: both Ok(...) calls, not the Err
+        let o = execute(&mut ctx, "ast_grep", &json!({"pattern": "Ok($E)"}));
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("demo.rs:2"), "{}", o.output);
+        assert!(o.output.contains("demo.rs:4"), "{}", o.output);
+        assert!(!o.output.contains("Err"), "{}", o.output);
+        // bindings are reported
+        assert!(o.output.contains("$E"), "{}", o.output);
+
+        // structural: the second argument must be there, so no match
+        let o = execute(&mut ctx, "ast_grep", &json!({"pattern": "Ok($A, $B)"}));
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("0 matches"), "{}", o.output);
+
+        // multi metavariable matches any argument list, only for the right fn
+        fs::write(
+            dir.path().join("calls.rs"),
+            "fn run() {\n    f(1);\n    f(1, 2);\n    g(3);\n}\n",
+        )
+        .unwrap();
+        let o = execute(&mut ctx, "ast_grep", &json!({"pattern": "f($$$ARGS)"}));
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("calls.rs:2"), "{}", o.output);
+        assert!(o.output.contains("calls.rs:3"), "{}", o.output);
+        assert!(!o.output.contains("g(3)"), "{}", o.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ast_grep_ignores_comments_and_filters_by_language() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("c.rs"),
+            "fn f() {\n    let x = Ok( /* why */ 42);\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("p.py"),
+            "print(\"a\")\nprint(\"a\", \"b\")\n",
+        )
+        .unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+
+        // comments do not break a match
+        let o = execute(&mut ctx, "ast_grep", &json!({"pattern": "Ok($E)"}));
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("c.rs:2"), "{}", o.output);
+
+        // language inferred per file: the python pattern only sees the .py
+        let o = execute(&mut ctx, "ast_grep", &json!({"pattern": "print($X)"}));
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("p.py:1"), "{}", o.output);
+        assert!(!o.output.contains("p.py:2"), "{}", o.output);
+
+        // an explicit lang restricts a directory scan
+        let o = execute(
+            &mut ctx,
+            "ast_grep",
+            &json!({"pattern": "print($X)", "lang": "rust"}),
+        );
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("0 matches"), "{}", o.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ast_grep_rejects_bad_patterns_and_escapes() {
+        let (mut ctx, dir) = proj();
+        // unparseable pattern
+        let o = execute(&mut ctx, "ast_grep", &json!({"pattern": "Ok("}));
+        assert!(!o.ok, "{}", o.output);
+        assert!(o.output.contains("does not parse"), "{}", o.output);
+        // lowercase $name is not a metavariable: it cannot parse in Rust
+        let o = execute(&mut ctx, "ast_grep", &json!({"pattern": "Ok($x)"}));
+        assert!(!o.ok, "{}", o.output);
+        // path escapes are rejected like every other tool
+        let o = execute(
+            &mut ctx,
+            "ast_grep",
+            &json!({"pattern": "Ok($E)", "path": "../outside"}),
+        );
+        assert!(!o.ok, "{}", o.output);
+        // unknown lang
+        let o = execute(
+            &mut ctx,
+            "ast_grep",
+            &json!({"pattern": "Ok($E)", "lang": "cobol"}),
+        );
+        assert!(!o.ok, "{}", o.output);
         fs::remove_dir_all(&dir).ok();
     }
 

@@ -71,12 +71,62 @@ pub async fn fetch(args: &Value) -> Outcome {
         Err(e) => return Outcome::err(format!("webfetch read failed: {e}")),
     };
     let raw = String::from_utf8_lossy(&bytes);
-    let text = if is_html || looks_like_html(&raw) {
+    let is_html_page = is_html || looks_like_html(&raw);
+    let selector = args
+        .get("selector")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(selector) = selector {
+        if !is_html_page {
+            return Outcome::err(
+                "webfetch selector requires an HTML page; drop the selector for plain text",
+            );
+        }
+        let fragments = match select_fragments(&raw, selector) {
+            Ok(f) => f,
+            Err(e) => return Outcome::err(format!("webfetch: {e}")),
+        };
+        return Outcome::ok(truncate(&fragments));
+    }
+    let text = if is_html_page {
         html_to_text(&raw)
     } else {
         raw.to_string()
     };
     Outcome::ok(truncate(&text))
+}
+
+/// Extract the text of every element matching a CSS selector, one block per
+/// element. Errors on a malformed selector or when nothing matches, so the
+/// model can retry instead of staring at an empty result.
+fn select_fragments(html: &str, selector: &str) -> Result<String, String> {
+    use scraper::{Html, Selector};
+    let parsed =
+        Selector::parse(selector).map_err(|e| format!("invalid selector '{selector}': {e}"))?;
+    let doc = Html::parse_document(html);
+    let mut blocks: Vec<String> = Vec::new();
+    for element in doc.select(&parsed) {
+        let text: String = element
+            .text()
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !text.is_empty() {
+            blocks.push(text);
+        }
+        if blocks.len() >= 200 {
+            break;
+        }
+    }
+    if blocks.is_empty() {
+        Err(format!(
+            "selector '{selector}' matched nothing (or only empty elements)"
+        ))
+    } else {
+        Ok(blocks.join("\n\n"))
+    }
 }
 
 pub async fn search(args: &Value) -> Outcome {
@@ -301,5 +351,32 @@ mod tests {
             decode_entities("&lt;x&gt; &quot;y&quot; &#39;z&#39;"),
             "<x> \"y\" 'z'"
         );
+    }
+
+    #[test]
+    fn selector_extracts_matching_elements_only() {
+        let html = r#"<html><head><title>t</title></head><body>
+            <table>
+              <tr><td>alpha</td><td>1</td></tr>
+              <tr><td>beta</td><td>2</td></tr>
+            </table>
+            <p>outside text</p>
+        </body></html>"#;
+
+        let out = select_fragments(html, "td").unwrap();
+        assert!(out.contains("alpha"), "{}", out);
+        assert!(out.contains("2"), "{}", out);
+        assert!(!out.contains("outside"), "{}", out);
+        // blocks are separated, not glued into one line
+        assert!(out.contains("\n\n"), "{}", out);
+
+        // attribute selectors work
+        let out = select_fragments(html, "tr td:first-child").unwrap();
+        assert!(out.contains("alpha") && out.contains("beta"), "{}", out);
+        assert!(!out.contains("\n1"), "{}", out);
+
+        // malformed selector and empty match are errors, not empty output
+        assert!(select_fragments(html, "td[").is_err());
+        assert!(select_fragments(html, ".does-not-exist").is_err());
     }
 }

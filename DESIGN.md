@@ -1358,14 +1358,15 @@ Whether a tool exists yet is §7's business, not this table's.
 
 | Tool | Group | Mutates | Journal kinds |
 |---|---|---|---|
-| `read` `ls` `glob` `grep` | files | no | tool_call/result |
+| `read` `ls` `glob` | files | no | tool_call/result |
+| `grep` `ast_grep` | files | no | tool_call/result |
 | `write` `edit` `multi_edit` `patch` | files | yes | + file_diff, checkpoint; pre-edit graph warning per §2.4.8 |
 | `bash` | exec | yes | + checkpoint (pre/post), file_diff on tree change, approval |
 | `bash_output` `bash_kill` | exec | no | tool_call/result; background jobs are registered, reaped on completion |
 | `think` | reasoning | no | tool_call/result |
 | `git_status` `git_diff` `git_log` `git_show` `git_branch` | git | no | tool_call/result |
 | `git_commit` | git | yes | + checkpoint |
-| `webfetch` `websearch` | web | no | tool_call/result (URL digest only) |
+| `webfetch` (optional CSS `selector`) `websearch` | web | no | tool_call/result (URL digest only) |
 | `ask_user` | interaction | no | tool_call/result |
 | `subagent` | delegation | inherits mode | subagent |
 | `plan` | planning | plan file | plan |
