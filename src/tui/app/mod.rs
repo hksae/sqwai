@@ -314,6 +314,10 @@ pub struct App {
     /// In-flight check and the channel its worker thread reports back on,
     /// polled on the UI tick so the check never blocks rendering.
     provider_check_rx: Option<(String, std::sync::mpsc::Receiver<Result<String, String>>)>,
+    /// Background undo maintenance (blobs + shadow GC) — the scan+gc can
+    /// take seconds with many sessions, so `/new` must not block on it.
+    maintain_rx:
+        Option<std::sync::mpsc::Receiver<anyhow::Result<crate::agent::checkpoints::Maintenance>>>,
     /// What the provider told us about the effort level, as opposed to what
     /// the config claims: (model id, level, reason). Cleared when either the
     /// model or the level changes, since the observation was about that pair.
@@ -504,6 +508,7 @@ impl App {
             ef_click: None,
             provider_checks: std::collections::HashMap::new(),
             provider_check_rx: None,
+            maintain_rx: None,
             effort_observed_ignored: None,
             agents_click: None,
             status_y: 0,
@@ -678,6 +683,7 @@ impl App {
             self.poll_input(&ev_rx)?;
             self.poll_agent();
             self.poll_provider_check();
+            self.poll_maintain();
             // typewriter: reveal queued answer text gradually, catching up when
             // the queue grows faster than the reveal speed
             if !self.pending_reveal.is_empty() {
@@ -1153,10 +1159,26 @@ impl App {
     /// something: a maintenance pass that announces "nothing to do" on every
     /// `/new` is noise.
     pub(super) fn run_undo_maintenance(&mut self) {
+        if self.maintain_rx.is_some() {
+            return;
+        }
         let root = std::env::current_dir().unwrap_or_default();
         let session = self.session.id.to_string();
-        match crate::agent::checkpoints::maintain(&root, &self.cfg.undo, &session) {
-            Ok(report) if report.did_anything() => {
+        let cfg = self.cfg.undo.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.maintain_rx = Some(rx);
+        std::thread::spawn(move || {
+            let res = crate::agent::checkpoints::maintain(&root, &cfg, &session);
+            let _ = tx.send(res);
+        });
+    }
+
+    fn poll_maintain(&mut self) {
+        let Some(rx) = self.maintain_rx.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(report)) if report.did_anything() => {
                 let mut note = String::from("undo maintenance:");
                 if report.blobs_removed > 0 {
                     note.push_str(&format!(
@@ -1175,11 +1197,18 @@ impl App {
                     note.push_str(" shadow repository collected");
                 }
                 self.status(&note, StatusKind::Info);
+                self.dirty = true;
             }
-            Ok(_) => {}
-            // Maintenance failing must never block a new session: the cost is
-            // disk, and the user is told rather than stopped.
-            Err(e) => crate::providers::log_http(&format!("undo maintenance failed: {e:#}")),
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                crate::providers::log_http(&format!("undo maintenance failed: {e:#}"));
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.maintain_rx = Some(rx);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                crate::providers::log_http("undo maintenance thread ended");
+            }
         }
     }
 
