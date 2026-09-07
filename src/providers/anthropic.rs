@@ -296,7 +296,7 @@ impl Provider for AnthropicProvider {
                                         }
                                     }
                                     "thinking_delta" => {
-                                        if let Some(t) = v.pointer("/delta/effort").and_then(|x| x.as_str())
+                                        if let Some(t) = v.pointer("/delta/thinking").and_then(|x| x.as_str())
                                             && !t.is_empty()
                                         {
                                             yield Ok(StreamEvent::Reasoning(t.to_string()));
@@ -651,5 +651,15 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["tool_use_id"], "a");
         assert_eq!(arr[1]["tool_use_id"], "b");
+    }
+
+    #[test]
+    fn thinking_delta_pointer_extracts_thinking_field() {
+        let v: Value = serde_json::from_str(
+            r#"{"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "step by step"}}"#,
+        )
+        .unwrap();
+        let thinking = v.pointer("/delta/thinking").and_then(|x| x.as_str());
+        assert_eq!(thinking, Some("step by step"));
     }
 }
