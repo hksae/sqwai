@@ -235,6 +235,9 @@ impl App {
             && col <= x1
             && self.menu_stack.is_empty()
         {
+            self.press = None;
+            self.dragging = false;
+            self.sel = None;
             self.open_menu(Menu::Subagents);
             return;
         }
@@ -244,6 +247,9 @@ impl App {
             && col <= x1
             && self.menu_stack.is_empty()
         {
+            self.press = None;
+            self.dragging = false;
+            self.sel = None;
             self.open_menu(Menu::Effort);
             return;
         }
