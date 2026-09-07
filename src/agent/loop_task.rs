@@ -1214,8 +1214,14 @@ async fn run_agent(
                                     }),
                                 );
                                 let answer = ask_user(&question, &tx, &mut ctl, &mut next_id).await;
-                                let answer_text = answer.output.trim().to_ascii_lowercase();
-                                if answer.ok && answer_text == "accept" {
+                                let raw_answer = answer.output.trim();
+                                let answer_lower = raw_answer.to_ascii_lowercase();
+                                if answer.ok && (answer_lower == "accept" || (!raw_answer.is_empty() && answer_lower != "reject" && answer_lower != "edit")) {
+                                    let text = if answer_lower == "accept" {
+                                        call.args["text"].as_str().unwrap_or_default()
+                                    } else {
+                                        raw_answer
+                                    };
                                     let scope = crate::agent::memory::Scope::parse(
                                         call.args["scope"].as_str().unwrap_or("project"),
                                     );
@@ -1224,7 +1230,7 @@ async fn run_agent(
                                             &root,
                                             scope,
                                             call.args["section"].as_str().unwrap_or("Project"),
-                                            call.args["text"].as_str().unwrap_or_default(),
+                                            text,
                                             call.args["replaces"].as_str(),
                                             &session_id,
                                             memory.max_tokens,
@@ -1235,9 +1241,9 @@ async fn run_agent(
                                         Ok(output) => tools::Outcome::ok(output),
                                         Err(error) => tools::Outcome::err(error),
                                     }
-                                } else if answer.ok && answer_text == "reject" {
+                                } else if answer.ok && answer_lower == "reject" {
                                     tools::Outcome::ok("memory proposal rejected")
-                                } else if answer.ok && answer_text == "edit" {
+                                } else if answer.ok && answer_lower == "edit" {
                                     tools::Outcome::err(
                                         "memory proposal edit requires a follow-up proposal",
                                     )
