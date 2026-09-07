@@ -58,6 +58,9 @@ pub(super) enum Segment {
     Status {
         text: String,
         kind: StatusKind,
+        /// error rows arrive collapsed (a provider dump must not flood the
+        /// chat) and unfold on click; other kinds always show fully
+        expanded: bool,
     },
 }
 
@@ -274,22 +277,14 @@ impl App {
                 }
                 return;
             }
-            // clicking an error line copies its full text to the clipboard
-            let err_text = match self.segments.get(seg_idx) {
-                Some(Segment::Status {
-                    text,
-                    kind: StatusKind::Err,
-                }) => Some(text.clone()),
-                _ => None,
-            };
-            if let Some(text) = err_text {
-                match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
-                    Ok(()) => self.status("error text copied to clipboard", StatusKind::Info),
-                    Err(e) => self.status(&format!("copy failed: {e}"), StatusKind::Err),
-                }
-                return;
-            }
+            // clicking an error line folds/unfolds its full text (it arrives
+            // collapsed); full text stays selectable by drag like any row
             let toggle = match self.segments.get(seg_idx) {
+                Some(Segment::Status {
+                    kind: StatusKind::Err,
+                    expanded,
+                    ..
+                }) => Some(!*expanded),
                 Some(Segment::Thinking { expanded, .. }) => Some(!*expanded),
                 Some(Segment::Subagent { id, .. }) => {
                     self.active_subagent = Some(*id);
@@ -311,6 +306,7 @@ impl App {
                     Some(Segment::Thinking { expanded, .. }) => *expanded = v,
                     Some(Segment::Subagent { expanded, .. }) => *expanded = v,
                     Some(Segment::Tool { expanded, .. }) => *expanded = v,
+                    Some(Segment::Status { expanded, .. }) => *expanded = v,
                     _ => {}
                 }
                 self.dirty = true;
@@ -472,7 +468,7 @@ impl App {
                 };
                 k
             }
-            Segment::Status { .. } => 0,
+            Segment::Status { expanded, .. } => usize::from(*expanded),
         }
     }
 
@@ -663,18 +659,45 @@ impl App {
                     }
                 }
             }
-            Segment::Status { text, kind } => {
+            Segment::Status {
+                text,
+                kind,
+                expanded,
+            } => {
                 let st = match kind {
                     StatusKind::Info => Theme::dim(),
                     StatusKind::Ok => Theme::ok(),
                     StatusKind::Warn => Theme::warn(),
                     StatusKind::Err => Theme::err(),
                 };
-                for part in text.split('\n') {
-                    out.push((
-                        Line::from(vec![Span::styled(format!("  {part}"), st)]),
-                        Some(idx),
-                    ));
+                let parts: Vec<&str> = text.split('\n').collect();
+                // A provider dump must not flood the chat: multi-line errors
+                // — and single lines wider than the row — arrive collapsed to
+                // one width-capped line and unfold on click.
+                let wide = UnicodeWidthStr::width(parts[0]) > (w as usize).saturating_sub(2);
+                let collapsed =
+                    matches!(kind, StatusKind::Err) && !expanded && (parts.len() > 1 || wide);
+                let show: &[&str] = if collapsed { &parts[..1] } else { &parts[..] };
+                for part in show {
+                    // Collapsed is one width-capped line. Expanded rows pass
+                    // through untouched: wrap_tagged downstream wraps them to
+                    // the width, so unfolding never loses text.
+                    let row = if collapsed {
+                        let more = parts.len() - 1;
+                        let suffix = if more > 0 {
+                            format!("… ({} more)", more)
+                        } else {
+                            "…".to_string()
+                        };
+                        let head = truncate_display_width(
+                            part,
+                            (w as usize).saturating_sub(4 + suffix.chars().count()),
+                        );
+                        format!("  {head} {suffix}")
+                    } else {
+                        format!("  {part}")
+                    };
+                    out.push((Line::from(vec![Span::styled(row, st)]), Some(idx)));
                 }
             }
         }
@@ -2060,7 +2083,7 @@ fn segment_layout_key(seg: &Segment) -> u64 {
             name.hash(&mut h);
             args.hash(&mut h);
         }
-        Segment::Status { text, kind } => {
+        Segment::Status { text, kind, .. } => {
             text.hash(&mut h);
             std::mem::discriminant(kind).hash(&mut h);
         }

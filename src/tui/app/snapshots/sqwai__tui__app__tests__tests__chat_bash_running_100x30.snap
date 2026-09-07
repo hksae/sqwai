@@ -7,8 +7,8 @@ expression: s
  › Run the tests.
 
 
-   ⠋ bash  {"cmd":"cargo test"}
-
+   ▾ activity · 1 calls · 0s
+     ⠋ bash  {"cmd":"cargo test"}
 
 
 

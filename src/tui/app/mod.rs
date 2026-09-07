@@ -633,6 +633,7 @@ impl App {
                 } else {
                     StatusKind::Info
                 },
+                expanded: false,
             });
         }
     }
@@ -1578,6 +1579,7 @@ impl App {
             self.segments.push(Segment::Status {
                 text: text.to_string(),
                 kind,
+                expanded: false,
             });
         } else {
             // never pollute the chat from inside a menu: show it in the menu
@@ -1924,10 +1926,11 @@ impl App {
                         self.retry_notified = true;
                         // the full text of the first failure goes into the chat:
                         // the status bar below keeps only a truncated indicator,
-                        // while here it stays readable and copyable (click to copy)
+                        // while here it stays readable and copyable (click to unfold)
                         self.segments.push(Segment::Status {
                             text: format!("request failed — retrying with backoff: {error}"),
                             kind: StatusKind::Err,
+                            expanded: false,
                         });
                         if self.prev_turn_ok {
                             crate::agent::notify::windows_toast(
@@ -2218,13 +2221,36 @@ impl App {
     /// the last assistant answer — the working content of one agent turn.
     /// Thinking and tools are interleaved, so the run is exactly "everything
     /// between the previous turn and this turn's answer".
+    /// Trailing run of work segments (thinking/tool rows) for the activity
+    /// group, as `(start, end)` with `end` exclusive.
+    ///
+    /// Anchored on the work itself, not on the answer: a turn that fails
+    /// before streaming anything has tool rows and no `Assistant` slot (the
+    /// empty live slot is dropped at finish), so anchoring on the answer
+    /// found either nothing or — worse — a previous turn's answer, and the
+    /// new group overlapped the old one. Status notes are skipped over: they
+    /// belong to no group and must neither break the run nor join it.
+    /// `start` never reaches back past the last finalized group.
     fn trailing_work_run(&self) -> Option<(usize, usize)> {
         let segs = &self.segments;
-        let answer = segs
+        let floor = self
+            .activity_groups
             .iter()
-            .rposition(|s| matches!(s, Segment::Assistant { .. }))?;
-        let mut start = answer;
-        while start > 0
+            .map(|g| g.seg_end)
+            .max()
+            .unwrap_or(0)
+            .min(segs.len());
+        let mut end = segs.len();
+        while end > floor && matches!(segs[end - 1], Segment::Status { .. }) {
+            end -= 1;
+        }
+        // an answer closes the run but is not part of it; without one, the
+        // run simply extends to the tail
+        if end > floor && matches!(segs[end - 1], Segment::Assistant { .. }) {
+            end -= 1;
+        }
+        let mut start = end;
+        while start > floor
             && matches!(
                 segs[start - 1],
                 Segment::Thinking { .. } | Segment::Tool { .. }
@@ -2232,11 +2258,11 @@ impl App {
         {
             start -= 1;
         }
-        if start == answer {
-            // the turn produced neither reasoning nor tool calls
+        if start == end {
+            // neither reasoning nor tool calls: a bare answer is not activity
             return None;
         }
-        Some((start, answer))
+        Some((start, end))
     }
 
     /// Summarize one run of working segments into an `ActivityGroup`.

@@ -222,7 +222,7 @@ mod tests {
                         started.is_some()
                     )
                 }
-                Segment::Status { text, kind } => println!("seg[{i}] STATUS {kind:?}: {text}"),
+                Segment::Status { text, kind, .. } => println!("seg[{i}] STATUS {kind:?}: {text}"),
                 Segment::Subagent {
                     id, task, status, ..
                 } => println!("seg[{i}] SUBAGENT {id} {status}: {task}"),
@@ -528,6 +528,126 @@ mod tests {
         assert!(!text.contains("read"), "group stays folded: {text}");
         assert!(!text.contains("subagent"), "subagent row removed: {text}");
         assert!(text.contains("done"), "answer stays visible: {text}");
+    }
+
+    /// A provider dump must not flood the chat: multi-line errors arrive
+    /// collapsed to one width-capped row and unfold on click.
+    #[test]
+    fn error_status_arrives_collapsed_and_unfolds_on_click() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.status("first\nsecond\nthird", StatusKind::Err);
+        let idx = app.segments.len() - 1;
+
+        let rows = app.render_segment(idx, 100);
+        assert_eq!(rows.len(), 1, "collapsed to a single row");
+        let line: String = rows[0]
+            .0
+            .spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        assert!(
+            line.contains("first") && line.contains("… (2 more)"),
+            "first line plus count: {line:?}"
+        );
+        assert!(
+            !line.contains("second") && !line.contains("third"),
+            "rest hidden until unfolded: {line:?}"
+        );
+
+        // a single line wider than the row collapses too
+        app.status(&"x".repeat(200), StatusKind::Err);
+        let wide = app.render_segment(app.segments.len() - 1, 100);
+        assert_eq!(wide.len(), 1, "wide single line capped: {wide:?}");
+
+        // click unfolds the first one back to all three lines
+        app.rebuild_cache(100);
+        let row = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(idx))
+            .expect("collapsed error row tagged");
+        app.click(row);
+        app.rebuild_cache(100);
+        let text = rendered(&app);
+        assert!(
+            text.contains("first") && text.contains("second") && text.contains("third"),
+            "unfolded error shows everything: {text}"
+        );
+        assert!(!text.contains("more)"), "count hint gone once open: {text}");
+    }
+
+    /// A turn that fails before streaming anything has tool rows but no
+    /// answer slot (the empty live slot is dropped at finish): the activity
+    /// group must still cover the tools instead of vanishing.
+    #[test]
+    fn failed_turn_without_an_answer_still_groups_its_tools() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.segments.push(Segment::User("go".into()));
+        for name in ["read", "write"] {
+            app.segments.push(Segment::Tool {
+                name: name.into(),
+                args: "a.rs".into(),
+                ok: Some(true),
+                output: String::new(),
+                diff: None,
+                expanded: false,
+            });
+        }
+        app.finalize_activity_group(true);
+
+        assert_eq!(app.activity_groups.len(), 1);
+        let g = &app.activity_groups[0];
+        assert_eq!((g.seg_start, g.seg_end), (1, 3));
+        assert!(g.expanded, "a failed turn stays open");
+
+        // and the header folds the block on click
+        app.rebuild_cache(80);
+        let header = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(GROUP_BASE))
+            .expect("header row tagged");
+        app.click(header);
+        assert!(!app.activity_groups[0].expanded);
+        app.rebuild_cache(80);
+        assert!(
+            !rendered(&app).contains("a.rs"),
+            "folded group hides tool rows"
+        );
+    }
+
+    /// A group must never overlap the previous one: before the fix, an error
+    /// with no answer slot anchored on an older turn's answer and the new
+    /// group landed on top of the old range.
+    #[test]
+    fn activity_groups_never_overlap_previous_ranges() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        finished_turn(&mut app, true);
+        app.finalize_activity_group(false);
+        // second turn: tools ran, then a provider error with no streamed text
+        app.segments.push(Segment::User("again".into()));
+        app.segments.push(Segment::Tool {
+            name: "read".into(),
+            args: "b.rs".into(),
+            ok: Some(true),
+            output: String::new(),
+            diff: None,
+            expanded: false,
+        });
+        app.finalize_activity_group(true);
+
+        assert_eq!(app.activity_groups.len(), 2);
+        let (first, second) = (&app.activity_groups[0], &app.activity_groups[1]);
+        assert!(
+            second.seg_start >= first.seg_end,
+            "groups overlap: ({},{}) vs ({},{})",
+            first.seg_start,
+            first.seg_end,
+            second.seg_start,
+            second.seg_end
+        );
+        assert_eq!((second.seg_start, second.seg_end), (5, 6));
     }
 
     #[test]
@@ -845,7 +965,7 @@ mod tests {
             .segments
             .iter()
             .filter_map(|s| match s {
-                Segment::Status { text, kind } => Some((text.as_str(), *kind)),
+                Segment::Status { text, kind, .. } => Some((text.as_str(), *kind)),
                 _ => None,
             })
             .collect();
@@ -2417,6 +2537,13 @@ mod tests {
             output: String::new(),
             diff: None,
             expanded: false,
+        });
+        // production always holds the live answer slot while streaming; the
+        // group logic keys off the work rows, not the slot, but the frame
+        // must show what a real running turn looks like
+        app.segments.push(Segment::Assistant {
+            text: String::new(),
+            live: true,
         });
         app.streaming = true;
         for w_h in [(100u16, 30u16), (70, 24)] {
