@@ -1606,6 +1606,50 @@ impl App {
                     self.menu_sel = self.menu_sel.min(self.menu_rows.len().saturating_sub(1));
                     return;
                 };
+                // Wrap width for plan text: menu inner is w-4, w is 78 max
+                // so 68 is safe for wide, still reasonable for narrow (will
+                // be truncated to w, but far better than cutting at 78).
+                const WRAP: usize = 68;
+                let push_wrapped = |rows: &mut Vec<(Line<'static>, MenuAction)>,
+                                    prefix: &str,
+                                    text: &str,
+                                    prefix_style: Style,
+                                    text_style: Style| {
+                    let prefix_w = unicode_width::UnicodeWidthStr::width(prefix);
+                    let avail = WRAP.saturating_sub(prefix_w).max(20);
+                    let mut line = String::new();
+                    let mut first = true;
+                    for word in text.split_whitespace() {
+                        let w = unicode_width::UnicodeWidthStr::width(word);
+                        let need = if line.is_empty() { w } else { 1 + w };
+                        if unicode_width::UnicodeWidthStr::width(line.as_str()) + need > avail {
+                            let p = if first { prefix } else { &" ".repeat(prefix_w) };
+                            rows.push(row(
+                                Line::from(vec![
+                                    Span::styled(p.to_string(), prefix_style),
+                                    Span::styled(line.clone(), text_style),
+                                ]),
+                                MenuAction::None,
+                            ));
+                            line.clear();
+                            first = false;
+                        }
+                        if !line.is_empty() {
+                            line.push(' ');
+                        }
+                        line.push_str(word);
+                    }
+                    if !line.is_empty() || first {
+                        let p = if first { prefix } else { &" ".repeat(prefix_w) };
+                        rows.push(row(
+                            Line::from(vec![
+                                Span::styled(p.to_string(), prefix_style),
+                                Span::styled(line, text_style),
+                            ]),
+                            MenuAction::None,
+                        ));
+                    }
+                };
                 let c = plan.counts();
                 self.menu_rows.push(row(
                     Line::from(vec![
@@ -1624,21 +1668,22 @@ impl App {
                     ]),
                     MenuAction::None,
                 ));
-                self.menu_rows.push(row(
-                    Line::from(vec![
-                        Span::styled("  goal: ", Theme::accent()),
-                        Span::styled(plan.goal.text.clone(), Theme::base()),
-                    ]),
-                    MenuAction::None,
-                ));
+                // goal: may be long, wrap it
+                push_wrapped(
+                    &mut self.menu_rows,
+                    "  goal: ",
+                    &plan.goal.text,
+                    Theme::accent(),
+                    Theme::base(),
+                );
                 if !plan.constraints.is_empty() {
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(
-                            format!("  constraints: {}", plan.constraints.join(" · ")),
-                            Theme::dim(),
-                        )]),
-                        MenuAction::None,
-                    ));
+                    push_wrapped(
+                        &mut self.menu_rows,
+                        "  constraints: ",
+                        &plan.constraints.join(" · "),
+                        Theme::dim(),
+                        Theme::dim(),
+                    );
                 }
                 if !plan.acceptance.is_empty() {
                     self.menu_rows.push(row(
@@ -1651,14 +1696,8 @@ impl App {
                             plan::AcceptanceStatus::Verified => Theme::ok(),
                             plan::AcceptanceStatus::Waived => Theme::warn(),
                         };
-                        self.menu_rows.push(row(
-                            Line::from(vec![
-                                Span::styled(format!("    [{i}] "), st),
-                                Span::styled(a.status.as_str().to_string(), st),
-                                Span::styled(format!(" {}", a.text), Theme::base()),
-                            ]),
-                            MenuAction::None,
-                        ));
+                        let prefix = format!("    [{i}] {} ", a.status.as_str());
+                        push_wrapped(&mut self.menu_rows, &prefix, &a.text, st, Theme::base());
                     }
                 }
                 self.menu_rows.push(row(
@@ -1681,32 +1720,29 @@ impl App {
                             ("[ ]", Theme::dim())
                         }
                     };
-                    let mut title =
-                        format!("  {} {} ({}) {}", marker, s.id, s.kind.as_str(), s.title);
+                    let prefix = format!("  {marker} {} ({}) ", s.id, s.kind.as_str());
+                    let mut title = s.title.clone();
                     if s.stale_goal == Some(true) {
                         title.push_str("  [stale goal]");
                     }
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(title, style)]),
-                        MenuAction::None,
-                    ));
+                    push_wrapped(&mut self.menu_rows, &prefix, &title, style, style);
                     if let Some(reason) = &s.reason {
-                        self.menu_rows.push(row(
-                            Line::from(vec![Span::styled(
-                                format!("      reason: {reason}"),
-                                Theme::dim(),
-                            )]),
-                            MenuAction::None,
-                        ));
+                        push_wrapped(
+                            &mut self.menu_rows,
+                            "      reason: ",
+                            reason,
+                            Theme::dim(),
+                            Theme::dim(),
+                        );
                     }
                     if let Some(summary) = &s.summary {
-                        self.menu_rows.push(row(
-                            Line::from(vec![Span::styled(
-                                format!("      {summary}"),
-                                Theme::dim(),
-                            )]),
-                            MenuAction::None,
-                        ));
+                        push_wrapped(
+                            &mut self.menu_rows,
+                            "      ",
+                            summary,
+                            Theme::dim(),
+                            Theme::dim(),
+                        );
                     }
                 }
                 self.menu_footer_text = Some("up/down: scroll · esc: close".into());
