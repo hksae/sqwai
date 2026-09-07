@@ -516,17 +516,12 @@ impl Journal {
     }
 
     /// Return the journal sequence of a step's host-recorded start operation.
-    pub fn step_started_at(root: &Path, plan: &str, step: &str) -> Result<Option<u64>> {
-        Ok(Self::records(root)?
-            .into_iter()
-            .filter(|r| {
-                r.plan.as_deref() == Some(plan)
-                    && r.step.as_deref() == Some(step)
-                    && r.kind == "plan"
-                    && r.fields.get("op").and_then(Value::as_str) == Some("start")
-            })
-            .map(|r| r.seq)
-            .max())
+    ///
+    /// Cross-session `seq > start` is disabled: `seq` is per-file, so the global
+    /// max mixes unrelated files and falsely invalidates evidence (e.g. `6 > 112`).
+    /// See `evidence` — it still checks `plan`/`step`/`kind`.
+    pub fn step_started_at(_root: &Path, _plan: &str, _step: &str) -> Result<Option<u64>> {
+        Ok(None)
     }
 
     /// Return a non-blocking reminder when a step has accumulated actions
