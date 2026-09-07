@@ -263,6 +263,7 @@ pub(super) fn edit(
     if let Err(e) = fs::write(&p, &updated) {
         return Outcome::err(format!("write failed: {e}"));
     }
+    ctx.mark_read(&p);
     let diff = make_diff(&content, &updated);
     let (add, rem) = diff_counts(&diff);
     let metadata = file_diff(
@@ -313,6 +314,7 @@ pub(super) fn multi_edit(
     if let Err(e) = fs::write(&p, &content) {
         return Outcome::err(format!("write failed: {e}"));
     }
+    ctx.mark_read(&p);
     let diff = make_diff(&before, &content);
     let (add, rem) = diff_counts(&diff);
     let metadata = file_diff(
@@ -428,12 +430,13 @@ pub(super) fn grep(
         },
         None => ctx.root.clone(),
     };
-    let inc = include.map(|g| {
-        globset::GlobBuilder::new(g)
-            .build()
-            .expect("glob")
-            .compile_matcher()
-    });
+    let inc = match include {
+        Some(g) => match globset::GlobBuilder::new(g).build() {
+            Ok(gb) => Some(gb.compile_matcher()),
+            Err(e) => return Outcome::err(format!("bad include glob pattern: {e}")),
+        },
+        None => None,
+    };
 
     let mut out = String::new();
     let mut matches = 0usize;
@@ -512,4 +515,35 @@ fn rel_label(root: &Path, p: &Path) -> String {
 #[allow(unused)]
 fn _touch() -> serde_json::Value {
     json!(null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consecutive_edits_do_not_require_rereading() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello world").unwrap();
+
+        let mut ctx = ToolCtx::new(dir.path());
+        let read_outcome = read(&mut ctx, "test.txt", &json!({}));
+        assert!(read_outcome.ok);
+
+        let edit1 = edit(&mut ctx, "test.txt", "world", "rust", false);
+        assert!(edit1.ok, "first edit failed: {}", edit1.output);
+
+        let edit2 = edit(&mut ctx, "test.txt", "rust", "sqwai", false);
+        assert!(edit2.ok, "second edit failed: {}", edit2.output);
+    }
+
+    #[test]
+    fn grep_invalid_include_glob_returns_error_instead_of_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        let outcome = grep(&mut ctx, "test", None, Some("[unclosed"));
+        assert!(!outcome.ok);
+        assert!(outcome.output.contains("bad include glob pattern"));
+    }
 }
