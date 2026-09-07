@@ -294,6 +294,13 @@ impl App {
                                 self.view_top = 0;
                                 self.dirty = true;
                             } else if !self.menu_stack.is_empty() {
+                                // If custom is focused, Esc blurs it first
+                                if self.ask_custom_focus.is_some() {
+                                    self.ask_custom_focus = None;
+                                    self.build_menu_rows();
+                                    self.dirty = true;
+                                    continue;
+                                }
                                 // inline ask_user still uses the session stream, but Esc answers it
                                 // before ordinary popup/menu navigation.
                                 if self.is_inline_ask() {
@@ -369,6 +376,22 @@ impl App {
                         // plan/act is switched by the user only (design §5)
                         KeyCode::Tab if self.menu_stack.is_empty() => {
                             self.mode = self.mode.toggle()
+                        }
+                        KeyCode::Tab if matches!(self.cur_menu(), Some(Menu::AskUser { .. })) => {
+                            if let Some(Menu::AskUser { questions, .. }) = self.cur_menu() {
+                                let n = questions.len().max(1);
+                                if shift {
+                                    if self.ask_focus == 0 {
+                                        self.ask_focus = n - 1;
+                                    } else {
+                                        self.ask_focus -= 1;
+                                    }
+                                } else {
+                                    self.ask_focus = (self.ask_focus + 1) % n;
+                                }
+                                self.build_menu_rows();
+                                self.dirty = true;
+                            }
                         }
                         KeyCode::Tab if !self.menu_stack.is_empty() => {
                             self.menu_nav(if shift { -1 } else { 1 })
@@ -449,7 +472,22 @@ impl App {
                         KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
                             if !self.menu_stack.is_empty() =>
                         {
-                            if self.is_inline_ask_free() {
+                            if let Some(q) = self.ask_custom_focus {
+                                if let Some(custom) = self.ask_custom.get_mut(q) {
+                                    match k.code {
+                                        KeyCode::Char(c) => custom.push(c),
+                                        KeyCode::Backspace => {
+                                            custom.pop();
+                                        }
+                                        KeyCode::Delete => {
+                                            custom.clear();
+                                        }
+                                        _ => {}
+                                    }
+                                    self.build_menu_rows();
+                                    self.dirty = true;
+                                }
+                            } else if self.is_inline_ask_free() {
                                 if ctrl && handle_text_combo(&mut self.input, k) {
                                     self.jump_to_bottom_on_typing();
                                     self.dirty = true;

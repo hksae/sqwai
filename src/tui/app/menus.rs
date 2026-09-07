@@ -87,13 +87,10 @@ pub(super) enum Menu {
         provider: String,
     },
     Effort,
-    /// the model asked the user a structured question (ask_user)
+    /// the model asked the user structured questions (ask_user)
     AskUser {
         id: u64,
-        question: String,
-        options: Vec<(String, Option<String>)>,
-        multiple: bool,
-        allow_free: bool,
+        questions: Vec<crate::agent::loop_task::AskQuestion>,
     },
     /// a dangerous command needs explicit approval
     Approval {
@@ -101,7 +98,8 @@ pub(super) enum Menu {
         command: String,
         reason: String,
     },
-    /// free-text answer for an open ask_user (single-field form)
+    /// free-text answer for an open ask_user (single-field form) — legacy, now inline
+    #[allow(dead_code)]
     AskFree {
         id: u64,
     },
@@ -162,14 +160,27 @@ pub(super) enum MenuAction {
     Confirm(Box<MenuAction>),
     SetEffort(EffortLevel),
     OpenSubagent(u64),
-    /// ask_user: submit one chosen option's label
-    AskSelect(String),
-    /// ask_user multi: toggle an option by index
-    AskToggle(usize),
-    /// ask_user multi: confirm the toggled selection
+    /// ask_user: select one option (q, idx)
+    AskSelect {
+        q: usize,
+        idx: usize,
+    },
+    /// ask_user multi: toggle an option by index (q, idx)
+    AskToggle {
+        q: usize,
+        idx: usize,
+    },
+    /// ask_user: confirm all questions
     AskConfirm,
-    /// ask_user: open the free-text form
-    AskFree,
+    /// ask_user: focus custom input for question q
+    AskCustom {
+        q: usize,
+    },
+    /// ask_user: switch focus to next/prev question
+    #[allow(dead_code)]
+    AskNext,
+    #[allow(dead_code)]
+    AskPrev,
 }
 
 impl App {
@@ -182,8 +193,14 @@ impl App {
         self.menu_sel = 0;
         self.form_fields.clear();
         self.form_focus = 0;
-        if let Some(Menu::AskUser { options, .. }) = self.cur_menu() {
-            self.ask_picked = vec![false; options.len()];
+        if let Some(Menu::AskUser { questions, .. }) = self.cur_menu().cloned() {
+            self.ask_picked = questions
+                .iter()
+                .map(|q| vec![false; q.options.len()])
+                .collect();
+            self.ask_custom = vec![String::new(); questions.len()];
+            self.ask_focus = 0;
+            self.ask_custom_focus = None;
         }
         // confirmation prompts open with the confirm action highlighted
         if matches!(self.cur_menu(), Some(Menu::ConfirmDelete { .. })) && self.menu_sel == 0 {
@@ -778,38 +795,113 @@ impl App {
                 };
                 self.status(&plan.label(), kind);
             }
-            MenuAction::AskSelect(label) => {
-                self.ask_answer(label);
+            MenuAction::AskSelect { q, idx } => {
+                // Single-choice: pick this option, clear others in same question, focus stays
+                if let Some(picked) = self.ask_picked.get_mut(q) {
+                    for (i, v) in picked.iter_mut().enumerate() {
+                        *v = i == idx;
+                    }
+                }
+                self.ask_focus = q;
+                self.dirty = true;
             }
-            MenuAction::AskToggle(idx) => {
-                if let Some(v) = self.ask_picked.get_mut(idx) {
-                    *v = !*v;
+            MenuAction::AskToggle { q, idx } => {
+                if let Some(picked) = self.ask_picked.get_mut(q).and_then(|v| v.get_mut(idx)) {
+                    *picked = !*picked;
+                }
+                self.ask_focus = q;
+                self.dirty = true;
+            }
+            MenuAction::AskConfirm => {
+                // Collect answers for all questions
+                let text = match self.cur_menu() {
+                    Some(Menu::AskUser { questions, .. }) => {
+                        let mut parts = Vec::new();
+                        let single_no_header =
+                            questions.len() == 1 && questions[0].header.is_empty();
+                        for (q_idx, q) in questions.iter().enumerate() {
+                            let picked: Vec<String> = self
+                                .ask_picked
+                                .get(q_idx)
+                                .map(|v| {
+                                    v.iter()
+                                        .enumerate()
+                                        .filter(|(_, p)| **p)
+                                        .filter_map(|(i, _)| q.options.get(i))
+                                        .map(|o| o.label.clone())
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            let custom = self
+                                .ask_custom
+                                .get(q_idx)
+                                .map(|s| s.trim().to_string())
+                                .unwrap_or_default();
+                            let mut answer = String::new();
+                            if !picked.is_empty() {
+                                answer.push_str(&picked.join(", "));
+                            }
+                            if !custom.is_empty() {
+                                if !answer.is_empty() {
+                                    answer.push_str("; ");
+                                }
+                                answer.push_str(&custom);
+                            }
+                            if answer.is_empty() {
+                                // No selection, try to use first option if single, or empty
+                                answer = String::new();
+                            }
+                            let header = if single_no_header {
+                                "".to_string()
+                            } else if q.header.is_empty() {
+                                format!("Q{}", q_idx + 1)
+                            } else {
+                                q.header.clone()
+                            };
+                            if single_no_header {
+                                parts.push(if answer.is_empty() {
+                                    "(no answer)".to_string()
+                                } else {
+                                    answer
+                                });
+                            } else {
+                                parts.push(format!(
+                                    "{}: {}",
+                                    header,
+                                    if answer.is_empty() {
+                                        "(no answer)".to_string()
+                                    } else {
+                                        answer
+                                    }
+                                ));
+                            }
+                        }
+                        parts.join(" | ")
+                    }
+                    _ => String::new(),
+                };
+                self.ask_answer(text);
+            }
+            MenuAction::AskCustom { q } => {
+                self.ask_custom_focus = Some(q);
+                self.ask_focus = q;
+                self.dirty = true;
+            }
+            MenuAction::AskNext => {
+                if let Some(Menu::AskUser { questions, .. }) = self.cur_menu() {
+                    self.ask_focus = (self.ask_focus + 1) % questions.len().max(1);
                     self.dirty = true;
                 }
             }
-            MenuAction::AskConfirm => {
-                // send the toggled labels (in option order), or a note if none
-                let picked = match self.cur_menu() {
-                    Some(Menu::AskUser { options, .. }) => options
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| self.ask_picked.get(*i).copied().unwrap_or(false))
-                        .map(|(_, (l, _))| l.clone())
-                        .collect::<Vec<_>>(),
-                    _ => vec![],
-                };
-                if picked.is_empty() {
-                    self.ask_answer(String::new());
-                } else {
-                    self.ask_answer(picked.join("; "));
+            MenuAction::AskPrev => {
+                if let Some(Menu::AskUser { questions, .. }) = self.cur_menu() {
+                    if self.ask_focus == 0 {
+                        self.ask_focus = questions.len().saturating_sub(1);
+                    } else {
+                        self.ask_focus -= 1;
+                    }
+                    self.dirty = true;
                 }
-            }
-            MenuAction::AskFree => {
-                let id = match self.cur_menu() {
-                    Some(Menu::AskUser { id, .. }) => *id,
-                    _ => return,
-                };
-                self.open_menu(Menu::AskFree { id });
             }
         }
         self.dirty = true;
@@ -847,8 +939,8 @@ impl App {
             Some(Menu::EditSessionTitle { .. }) => " rename session ".into(),
             Some(Menu::ConfirmDelete { .. }) => " confirm ".into(),
             Some(Menu::Effort) => " effort ".into(),
-            Some(Menu::AskUser { multiple, .. }) => {
-                if *multiple {
+            Some(Menu::AskUser { questions, .. }) => {
+                if questions.iter().any(|q| q.multiple) {
                     " ask · multiple (enter toggles, confirm to finish) ".into()
                 } else {
                     " ask ".into()
@@ -1430,72 +1522,136 @@ impl App {
                     ));
                 }
             }
-            Menu::AskUser {
-                question,
-                options,
-                multiple,
-                allow_free,
-                ..
-            } => {
-                if !options.is_empty() {
+            Menu::AskUser { questions, .. } => {
+                // Render each question with its options. The focused question is highlighted,
+                // and its options are selectable. Custom is inline per question.
+                for (q_idx, q) in questions.iter().enumerate() {
+                    let is_focused = q_idx == self.ask_focus;
+                    let header_style = if is_focused {
+                        Theme::accent_bold()
+                    } else {
+                        Theme::dim()
+                    };
+                    if !q.header.is_empty() {
+                        self.menu_rows.push(row(
+                            Line::from(vec![Span::styled(format!(" {} ", q.header), header_style)]),
+                            MenuAction::None,
+                        ));
+                    }
+                    // Question text — selectable, not an action
                     self.menu_rows.push(row(
                         Line::from(vec![Span::styled(
-                            format!(" {question}"),
+                            format!(" {}", q.question),
                             Theme::accent_bold(),
                         )]),
                         MenuAction::None,
                     ));
-                }
-                for (i, (label, desc)) in options.iter().enumerate() {
-                    let checked = if multiple {
-                        if self.ask_picked.get(i).copied().unwrap_or(false) {
-                            " [x] "
+                    for (o_idx, opt) in q.options.iter().enumerate() {
+                        let is_recommended = opt.recommended;
+                        let label = if is_recommended {
+                            format!("{} (Recommended)", opt.label)
                         } else {
-                            " [ ] "
+                            opt.label.clone()
+                        };
+                        let checked = if q.multiple {
+                            let picked = self
+                                .ask_picked
+                                .get(q_idx)
+                                .and_then(|v| v.get(o_idx).copied())
+                                .unwrap_or(false);
+                            if picked { " [x] " } else { " [ ] " }
+                        } else {
+                            let picked = self
+                                .ask_picked
+                                .get(q_idx)
+                                .and_then(|v| v.get(o_idx).copied())
+                                .unwrap_or(false);
+                            if picked && !q.multiple {
+                                " ● "
+                            } else {
+                                " ○ "
+                            }
+                        };
+                        let mut spans = vec![
+                            Span::styled(format!("{checked}{}. ", o_idx + 1), Theme::accent()),
+                            Span::styled(
+                                label,
+                                if is_recommended {
+                                    Theme::accent()
+                                } else {
+                                    Theme::base()
+                                },
+                            ),
+                        ];
+                        if let Some(d) = &opt.description {
+                            spans.push(Span::styled(format!(" — {d}"), Theme::dim()));
                         }
-                    } else {
-                        " "
-                    };
-                    let mut spans = vec![
-                        Span::styled(format!("{checked}{}. ", i + 1), Theme::accent()),
-                        Span::styled(label.to_string(), Theme::base()),
-                    ];
-                    if let Some(d) = desc {
-                        spans.push(Span::styled(format!(" — {d}"), Theme::dim()));
-                    }
-                    self.menu_rows.push(row(
-                        Line::from(spans),
-                        if multiple {
-                            MenuAction::AskToggle(i)
+                        if is_recommended {
+                            spans.push(Span::styled(" (Recommended)".to_string(), Theme::accent()));
+                        }
+                        let action = if q.multiple {
+                            MenuAction::AskToggle {
+                                q: q_idx,
+                                idx: o_idx,
+                            }
                         } else {
-                            MenuAction::AskSelect(label.clone())
-                        },
-                    ));
+                            MenuAction::AskSelect {
+                                q: q_idx,
+                                idx: o_idx,
+                            }
+                        };
+                        self.menu_rows.push(row(Line::from(spans), action));
+                    }
+                    if q.allow_free {
+                        let custom_text =
+                            self.ask_custom.get(q_idx).map(|s| s.as_str()).unwrap_or("");
+                        let is_custom_focused = self.ask_custom_focus == Some(q_idx);
+                        if is_custom_focused {
+                            // Inline editor for custom answer
+                            self.menu_rows.push(row(
+                                Line::from(vec![Span::styled(
+                                    format!(
+                                        " ✎ {}",
+                                        if custom_text.is_empty() {
+                                            "Type your answer…"
+                                        } else {
+                                            custom_text
+                                        }
+                                    ),
+                                    Theme::accent(),
+                                )]),
+                                MenuAction::AskCustom { q: q_idx },
+                            ));
+                        } else {
+                            let display = if custom_text.is_empty() {
+                                " ✎ Type your own answer…".to_string()
+                            } else {
+                                format!(" ✎ {}", custom_text)
+                            };
+                            self.menu_rows.push(row(
+                                Line::from(vec![Span::styled(display, Theme::FG())]),
+                                MenuAction::AskCustom { q: q_idx },
+                            ));
+                        }
+                    }
+                    // Separator between questions, except after last
+                    if q_idx + 1 < questions.len() {
+                        self.menu_rows.push(row(
+                            Line::from(vec![Span::styled(" ──".to_string(), Theme::dim())]),
+                            MenuAction::None,
+                        ));
+                    }
                 }
-                if multiple {
-                    let n = self.ask_picked.iter().filter(|v| **v).count();
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(
-                            format!(" confirm ({n} selected)",),
-                            Theme::ACCENT_SOFT(),
-                        )]),
-                        MenuAction::AskConfirm,
-                    ));
-                }
-                if allow_free {
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(
-                            " type a custom answer".to_string(),
-                            Theme::FG(),
-                        )]),
-                        MenuAction::AskFree,
-                    ));
-                }
-                self.menu_footer_text = Some(if multiple {
-                    "enter: toggle · confirm row: send · esc: skip".into()
-                } else {
-                    "enter: choose · esc: skip".into()
-                });
+                // Global confirm row
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(
+                        " confirm".to_string(),
+                        Theme::ACCENT_SOFT(),
+                    )]),
+                    MenuAction::AskConfirm,
+                ));
+                self.menu_footer_text =
+                    Some("enter: confirm · click: select · tab: next question · esc: skip".into());
             }
             Menu::Approval {
                 command, reason, ..

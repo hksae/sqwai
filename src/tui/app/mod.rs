@@ -215,8 +215,14 @@ pub struct App {
     subagent_chats: std::collections::BTreeMap<u64, Vec<Segment>>,
     /// child transcript currently replacing the main chat on screen
     active_subagent: Option<u64>,
-    /// checked options in the current multi-select ask_user
-    ask_picked: Vec<bool>,
+    /// checked options in the current multi-select ask_user, per question
+    ask_picked: Vec<Vec<bool>>,
+    /// custom text per question for ask_user
+    ask_custom: Vec<String>,
+    /// which question is focused (for Tab switching)
+    ask_focus: usize,
+    /// which question's custom field is being edited, if any
+    ask_custom_focus: Option<usize>,
     assistant_buf: String,
     /// arrived text not yet revealed to the screen (typewriter effect)
     pending_reveal: String,
@@ -463,6 +469,9 @@ impl App {
             subagent_chats: std::collections::BTreeMap::new(),
             active_subagent: None,
             ask_picked: Vec::new(),
+            ask_custom: Vec::new(),
+            ask_focus: 0,
+            ask_custom_focus: None,
             assistant_buf: String::new(),
             pending_reveal: String::new(),
             thinking_open: false,
@@ -1921,24 +1930,8 @@ impl App {
                     self.refresh_plan_label();
                     self.dirty = true;
                 }
-                AgentEvent::AskUser {
-                    id,
-                    question,
-                    options,
-                    multiple,
-                    allow_free,
-                } => {
-                    let opt = options
-                        .into_iter()
-                        .map(|o| (o.label, o.description))
-                        .collect();
-                    self.open_menu(Menu::AskUser {
-                        id,
-                        question,
-                        options: opt,
-                        multiple,
-                        allow_free,
-                    });
+                AgentEvent::AskUser { id, questions } => {
+                    self.open_menu(Menu::AskUser { id, questions });
                     self.dirty = true;
                 }
                 AgentEvent::Approval {

@@ -31,6 +31,16 @@ const SUMMARY_MAX_TOKENS: u32 = 2_048;
 pub struct AskOption {
     pub label: String,
     pub description: Option<String>,
+    pub recommended: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AskQuestion {
+    pub header: String,
+    pub question: String,
+    pub options: Vec<AskOption>,
+    pub multiple: bool,
+    pub allow_free: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -116,13 +126,10 @@ pub enum AgentEvent {
         ok: bool,
         diff: Option<String>,
     },
-    /// the model asked the user a structured question; answer via ControlMsg
+    /// the model asked the user structured questions; answer via ControlMsg
     AskUser {
         id: u64,
-        question: String,
-        options: Vec<AskOption>,
-        multiple: bool,
-        allow_free: bool,
+        questions: Vec<AskQuestion>,
     },
     /// a dangerous command needs approval; decide via ControlMsg
     Approval {
@@ -1973,41 +1980,136 @@ async fn ask_user(
 ) -> tools::Outcome {
     let id = *next_id;
     *next_id += 1;
-    let question = call.args["question"].as_str().unwrap_or("").to_string();
-    let options: Vec<AskOption> = call.args["options"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .map(|o| AskOption {
-                    label: o["label"].as_str().unwrap_or("").to_string(),
-                    description: o["description"].as_str().map(|s| s.to_string()),
+    // Support both single-question (legacy) and multi-question (questions array) modes.
+    let questions: Vec<AskQuestion> =
+        if let Some(arr) = call.args.get("questions").and_then(|v| v.as_array()) {
+            arr.iter()
+                .map(|q| {
+                    let header = q
+                        .get("header")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let question = q
+                        .get("question")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let options: Vec<AskOption> = q
+                        .get("options")
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .map(|o| AskOption {
+                                    label: o
+                                        .get("label")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    description: o
+                                        .get("description")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string()),
+                                    recommended: o
+                                        .get("recommended")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false)
+                                        || o.get("label")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .contains("(Recommended)"),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let multiple = q.get("multiple").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let allow_free = q
+                        .get("allow_free")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    // Also check top-level custom flag as alias
+                    let allow_free = if q.get("custom").and_then(|v| v.as_bool()).is_some() {
+                        q.get("custom").and_then(|v| v.as_bool()).unwrap()
+                    } else {
+                        allow_free
+                    };
+                    AskQuestion {
+                        header,
+                        question,
+                        options,
+                        multiple,
+                        allow_free,
+                    }
                 })
                 .collect()
-        })
-        .unwrap_or_default();
-    let multiple = call.args["multiple"].as_bool().unwrap_or(false);
-    let allow_free = call.args["allow_free"].as_bool().unwrap_or(true);
+        } else {
+            let question = call
+                .args
+                .get("question")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let options: Vec<AskOption> = call
+                .args
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|o| AskOption {
+                            label: o
+                                .get("label")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            description: o
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            recommended: o
+                                .get("recommended")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false)
+                                || o.get("label")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .contains("(Recommended)"),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let multiple = call
+                .args
+                .get("multiple")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let allow_free = call
+                .args
+                .get("allow_free")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            vec![AskQuestion {
+                header: "".to_string(),
+                question,
+                options,
+                multiple,
+                allow_free,
+            }]
+        };
 
     // Small and open models often emit ask_user with no arguments at all.
     // An empty popup is useless to the user, so refuse the call and hand the
     // model the exact shape to retry with instead of blocking on the UI.
-    if question.is_empty() {
+    if questions.is_empty() || questions.iter().any(|q| q.question.is_empty()) {
         return tools::Outcome::err(
             "ask_user rejected: 'question' is empty. Call it again with a non-empty question, \
              e.g. {\"question\": \"Which web framework should I use?\", \"options\": \
              [{\"label\": \"FastAPI\"}, {\"label\": \"Flask\"}], \"multiple\": false, \
-             \"allow_free\": true}.",
+             \"allow_free\": true} or with \"questions\": [{\"header\": \"Q1\", \"question\": \"...\", \"options\": [...] }].",
         );
     }
 
     if tx
-        .send(AgentEvent::AskUser {
-            id,
-            question,
-            options,
-            multiple,
-            allow_free,
-        })
+        .send(AgentEvent::AskUser { id, questions })
         .await
         .is_err()
     {

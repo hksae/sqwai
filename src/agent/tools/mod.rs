@@ -595,13 +595,39 @@ acceptance status and evidence: you can only propose a goal revision, never appl
         ToolDef {
             name: "ask_user",
             kind: Kind::ReadOnly,
-            description: "Ask the user a structured question with 2-5 answer options (and optional \
-multiple choice). Use only for decisions that materially change the outcome (approach, library, \
-schema), never for trivial clarification. The user can also type a free-text answer.",
+            description: "Ask the user structured questions (1-4) with 2-5 answer options each. Use only for decisions that materially change the outcome (approach, library, schema), never for trivial clarification. The user can pick options (single or multiple per question) and/or type a custom answer per question.",
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "question": {"type": "string"},
+                    "question": {"type": "string", "description": "single question (legacy, use questions for multiple)"},
+                    "questions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "header": {"type": "string", "description": "Very short label (max 30 chars)"},
+                                "question": {"type": "string", "description": "Complete question"},
+                                "options": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": {"type": "string", "description": "Display text (1-5 words, concise)"},
+                                            "description": {"type": "string", "description": "Explanation of choice"}
+                                        },
+                                        "required": ["label"]
+                                    },
+                                    "minItems": 2,
+                                    "maxItems": 5
+                                },
+                                "multiple": {"type": "boolean", "description": "Allow selecting multiple choices"},
+                                "allow_free": {"type": "boolean", "description": "Allow a custom typed answer as an extra option"}
+                            },
+                            "required": ["question", "options"]
+                        },
+                        "minItems": 1,
+                        "maxItems": 4
+                    },
                     "options": {
                         "type": "array",
                         "items": {
@@ -615,10 +641,13 @@ schema), never for trivial clarification. The user can also type a free-text ans
                         "minItems": 2,
                         "maxItems": 5
                     },
-                    "multiple": {"type": "boolean", "description": "allow selecting several options"},
-                    "allow_free": {"type": "boolean", "description": "allow a custom typed answer"}
+                    "multiple": {"type": "boolean", "description": "allow selecting several options (single-question mode)"},
+                    "allow_free": {"type": "boolean", "description": "allow a custom typed answer (single-question mode)"}
                 },
-                "required": ["question", "options"]
+                "anyOf": [
+                    {"required": ["questions"]},
+                    {"required": ["question", "options"]}
+                ]
             }),
         },
     ]

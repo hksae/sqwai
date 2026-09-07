@@ -615,7 +615,52 @@ impl App {
                 let head = Line::from(head_spans);
                 out.push((head, Some(idx)));
                 if *expanded {
-                    let body = diff.clone().unwrap_or_else(|| output.clone());
+                    // ask_user: show questions and current answers even while still running
+                    let body = if name == "ask_user" {
+                        // args is the question JSON, output is the answer(s)
+                        let mut s = String::new();
+                        // Try to parse args as JSON to show questions nicely
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
+                            if let Some(q) = v.get("question").and_then(|x| x.as_str()) {
+                                s.push_str(&format!("Q: {q}\n"));
+                            }
+                            if let Some(qs) = v.get("questions").and_then(|x| x.as_array()) {
+                                for (i, q) in qs.iter().enumerate() {
+                                    let h = q.get("header").and_then(|x| x.as_str()).unwrap_or("");
+                                    let qq =
+                                        q.get("question").and_then(|x| x.as_str()).unwrap_or("");
+                                    s.push_str(&format!("Q{} {}: {qq}\n", i + 1, h));
+                                    if let Some(opts) = q.get("options").and_then(|x| x.as_array())
+                                    {
+                                        for (j, o) in opts.iter().enumerate() {
+                                            let label = o
+                                                .get("label")
+                                                .and_then(|x| x.as_str())
+                                                .unwrap_or("");
+                                            s.push_str(&format!("  {}. {label}\n", j + 1));
+                                        }
+                                    }
+                                }
+                            } else if let Some(opts) = v.get("options").and_then(|x| x.as_array()) {
+                                for (j, o) in opts.iter().enumerate() {
+                                    let label =
+                                        o.get("label").and_then(|x| x.as_str()).unwrap_or("");
+                                    s.push_str(&format!("  {}. {label}\n", j + 1));
+                                }
+                            }
+                        } else {
+                            s.push_str(args);
+                            s.push('\n');
+                        }
+                        if !output.is_empty() {
+                            s.push_str(&format!("\nA: {output}"));
+                        } else {
+                            s.push_str("\n(no answer yet)");
+                        }
+                        s
+                    } else {
+                        diff.clone().unwrap_or_else(|| output.clone())
+                    };
                     const MAX_ROWS: usize = 40;
                     let rows: Vec<&str> = body.lines().collect();
                     let shown = &rows[..rows.len().min(MAX_ROWS)];
@@ -1243,55 +1288,86 @@ impl App {
         let Some(menu) = self.cur_menu().cloned() else {
             return;
         };
-        let (question, options, multiple, allow_free, free_text) = match menu {
-            Menu::AskUser {
-                question,
-                options,
-                multiple,
-                allow_free,
-                ..
-            } => (question, options, multiple, allow_free, false),
-            Menu::AskFree { .. } => ("Your answer".into(), Vec::new(), false, false, true),
+        let questions = match menu {
+            Menu::AskUser { questions, .. } => questions,
+            Menu::AskFree { .. } => vec![crate::agent::loop_task::AskQuestion {
+                header: "".to_string(),
+                question: "Your answer".into(),
+                options: Vec::new(),
+                multiple: false,
+                allow_free: true,
+            }],
             _ => return,
         };
-        let mut lines = vec![Line::from(Span::styled(
-            format!("? {question}"),
-            Theme::accent_bold(),
-        ))];
-        for (i, (label, desc)) in options.iter().enumerate() {
-            let checked = if multiple && self.ask_picked.get(i).copied().unwrap_or(false) {
-                "[x]"
-            } else if multiple {
-                "[ ]"
-            } else {
-                " "
-            };
-            let mut spans = vec![
-                Span::styled(format!("  {checked} {}. ", i + 1), Theme::accent()),
-                Span::raw(label),
-            ];
-            if let Some(desc) = desc {
-                spans.push(Span::styled(format!(" — {desc}"), Theme::dim()));
+        let mut lines: Vec<Line> = Vec::new();
+        for (q_idx, q) in questions.iter().enumerate() {
+            if !q.header.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "{} {}",
+                        q.header,
+                        if q_idx == self.ask_focus { "●" } else { "" }
+                    ),
+                    Theme::dim(),
+                )));
             }
-            lines.push(Line::from(spans));
-        }
-        if allow_free {
             lines.push(Line::from(Span::styled(
-                "  type a custom answer",
-                Theme::dim(),
+                format!("? {}", q.question),
+                Theme::accent_bold(),
             )));
+            for (o_idx, opt) in q.options.iter().enumerate() {
+                let picked = self
+                    .ask_picked
+                    .get(q_idx)
+                    .and_then(|v| v.get(o_idx).copied())
+                    .unwrap_or(false);
+                let checked = if q.multiple {
+                    if picked { "[x]" } else { "[ ]" }
+                } else {
+                    if picked { "●" } else { "○" }
+                };
+                let mut spans = vec![
+                    Span::styled(format!("  {checked} {}. ", o_idx + 1), Theme::accent()),
+                    Span::raw(opt.label.clone()),
+                ];
+                if opt.recommended {
+                    spans.push(Span::styled(" (Recommended)".to_string(), Theme::accent()));
+                }
+                if let Some(desc) = &opt.description {
+                    spans.push(Span::styled(format!(" — {desc}"), Theme::dim()));
+                }
+                lines.push(Line::from(spans));
+            }
+            if q.allow_free {
+                let custom = self.ask_custom.get(q_idx).map(|s| s.as_str()).unwrap_or("");
+                let is_focused = self.ask_custom_focus == Some(q_idx);
+                if is_focused || !custom.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "  ✎ {}",
+                            if custom.is_empty() {
+                                "Type your answer…"
+                            } else {
+                                custom
+                            }
+                        ),
+                        Theme::accent(),
+                    )));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        "  ✎ Type your own answer…".to_string(),
+                        Theme::dim(),
+                    )));
+                }
+            }
+            if q_idx + 1 < questions.len() {
+                lines.push(Line::from(Span::styled(" ──".to_string(), Theme::dim())));
+            }
         }
-        if free_text {
-            lines.push(Line::from(Span::styled(
-                "  › type your answer",
-                Theme::accent(),
-            )));
-        } else {
-            lines.push(Line::from(Span::styled(
-                "  enter choose · esc skip",
-                Theme::dim(),
-            )));
-        }
+        lines.push(Line::from(Span::styled(
+            "enter: confirm · click: select · tab: next question · esc: skip".to_string(),
+            Theme::dim(),
+        )));
         let h = lines.len().min(chat.height as usize) as u16;
         let rect = Rect {
             x: chat.x,
