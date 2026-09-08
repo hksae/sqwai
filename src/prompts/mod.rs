@@ -174,6 +174,12 @@ mod tests {
     }
 
     #[test]
+    fn integrity_section_contains_sqwai_blocking_rule() {
+        let prompt = builtin_prompt();
+        assert!(prompt.contains("If you attempt to modify or delete .sqwai/ state via bash, the command will be blocked. Inform the user and suggest /plan delete (user command) instead."));
+    }
+
+    #[test]
     fn tool_placeholder_renders_exactly_the_registry() {
         let source = "available: {{TOOLS}}";
         let expected = crate::agent::tools::tool_names().join(", ");
