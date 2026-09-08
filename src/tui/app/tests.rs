@@ -3468,4 +3468,17 @@ mod tests {
         assert!(!app.input.is_selecting());
         assert!(!app.input_dragging);
     }
+
+    #[test]
+    fn draw_menu_at_height_6_or_7_does_not_panic() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::Settings);
+        let backend = ratatui::backend::TestBackend::new(80, 6);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+
+        let backend = ratatui::backend::TestBackend::new(80, 7);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+    }
 }

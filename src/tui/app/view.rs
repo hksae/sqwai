@@ -1576,7 +1576,7 @@ impl App {
 
     pub(super) fn draw_menu(&mut self, f: &mut ratatui::Frame, area: Rect) {
         let menu = self.cur_menu().cloned();
-        if menu.is_none() {
+        if menu.is_none() || area.height < 8 || area.width < 20 {
             return;
         }
         let is_form = self.is_form_menu();
@@ -1602,7 +1602,8 @@ impl App {
         } else {
             content_rows + footer_h
         };
-        let h = (inner as u16 + 2).clamp(4, area.height.saturating_sub(4));
+        let max_h = area.height.saturating_sub(4).max(4);
+        let h = (inner as u16 + 2).clamp(4, max_h);
         let w = 78.min(area.width.saturating_sub(4)).max(30);
         let rect = Rect {
             x: area.x + (area.width.saturating_sub(w)) / 2,
