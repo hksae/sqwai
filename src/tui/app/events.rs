@@ -131,6 +131,19 @@ impl App {
                     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
                     let shift = k.modifiers.contains(KeyModifiers::SHIFT);
                     let alt = k.modifiers.contains(KeyModifiers::ALT);
+                    // Ctrl combos are matched against Latin letters, but with a
+                    // Cyrillic (ЙЦУКЕН) layout the terminal reports the layout
+                    // character: Ctrl+C arrives as 'с' and would fall through
+                    // to typing (jumping the viewport to the bottom) instead of
+                    // copying. Translate to the QWERTY key at the same physical
+                    // position so every Ctrl combo works on any layout.
+                    let mut k = k;
+                    if ctrl
+                        && let KeyCode::Char(c) = k.code
+                        && let Some(lat) = qwerty_char(c)
+                    {
+                        k.code = KeyCode::Char(lat);
+                    }
 
                     if self.is_text_input_focused()
                         && self.pasted_clipboard.is_none()
@@ -881,6 +894,51 @@ impl App {
             return;
         }
         self.paste_text(&txt);
+    }
+}
+
+/// QWERTY key at the same physical position for a ЙЦУКЕН character. Latin
+/// characters (and anything else) map to themselves via `None` passthrough at
+/// the call site; only Cyrillic letters need translation.
+fn qwerty_char(c: char) -> Option<char> {
+    let lat = match c {
+        'й' => 'q',
+        'ц' => 'w',
+        'у' => 'e',
+        'к' => 'r',
+        'е' => 't',
+        'н' => 'y',
+        'г' => 'u',
+        'ш' => 'i',
+        'щ' => 'o',
+        'з' => 'p',
+        'ф' => 'a',
+        'ы' => 's',
+        'в' => 'd',
+        'а' => 'f',
+        'п' => 'g',
+        'р' => 'h',
+        'о' => 'j',
+        'л' => 'k',
+        'д' => 'l',
+        'я' => 'z',
+        'ч' => 'x',
+        'с' => 'c',
+        'м' => 'v',
+        'и' => 'b',
+        'т' => 'n',
+        'ь' => 'm',
+        'ё' => '`',
+        'б' => ',',
+        'ю' => '.',
+        'х' => '[',
+        'ъ' => ']',
+        _ => return None,
+    };
+    if c.is_uppercase() {
+        Some(lat.to_ascii_uppercase())
+    } else {
+        Some(lat)
     }
 }
 

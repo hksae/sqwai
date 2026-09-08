@@ -722,6 +722,137 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_copy_keeps_scroll_position() {
+        // selecting text while scrolled up, then Ctrl+C must copy the
+        // selection without jumping to the bottom of the session
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.cache_lines = (0..50).map(|_| blank()).collect();
+        app.last_chat = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 10,
+        };
+        for _ in 0..10 {
+            app.scroll(4);
+        }
+        assert!(!app.follow);
+        let top = app.view_top;
+
+        app.sel = Some(Selection {
+            a: CellPos { row: 5, col: 0 },
+            b: CellPos { row: 8, col: 3 },
+        });
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )))
+        .unwrap();
+        app.poll_input(&rx).unwrap();
+
+        assert!(!app.follow, "Ctrl+C must not re-enable follow");
+        assert_eq!(app.view_top, top, "viewport must not move");
+    }
+
+    #[test]
+    fn drag_copy_then_ctrl_c_keeps_scroll_position() {
+        // full mouse flow: press, drag, release (auto-copy), then Ctrl+C —
+        // the viewport must stay parked where the user scrolled it
+        use crossterm::event::{
+            Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind,
+        };
+
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.cache_lines = (0..50).map(|_| blank()).collect();
+        app.last_chat = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 10,
+        };
+        for _ in 0..10 {
+            app.scroll(4);
+        }
+        assert!(!app.follow);
+        let top = app.view_top;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let me = |kind: MouseEventKind, row: u16| {
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: 10,
+                row,
+                modifiers: KeyModifiers::empty(),
+            })
+        };
+        tx.send(me(MouseEventKind::Down(MouseButton::Left), 4))
+            .unwrap();
+        app.poll_input(&rx).unwrap();
+        tx.send(me(MouseEventKind::Drag(MouseButton::Left), 6))
+            .unwrap();
+        app.poll_input(&rx).unwrap();
+        assert!(app.sel.is_some(), "drag creates a selection");
+        tx.send(me(MouseEventKind::Up(MouseButton::Left), 6))
+            .unwrap();
+        app.poll_input(&rx).unwrap();
+        assert!(app.sel.is_some(), "mouse_up keeps the selection visible");
+        assert_eq!(app.view_top, top, "auto-copy must not move the viewport");
+        tx.send(Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )))
+        .unwrap();
+        app.poll_input(&rx).unwrap();
+
+        assert!(!app.follow, "copy must not re-enable follow");
+        assert_eq!(app.view_top, top, "viewport must not move");
+    }
+
+    #[test]
+    fn ctrl_copy_works_with_cyrillic_layout() {
+        // with a Russian (ЙЦУКЕН) layout the terminal reports Ctrl+C as the
+        // Cyrillic 'с': the app must treat it as the copy combo, not as
+        // typing (which jumps the viewport to the bottom)
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.cache_lines = (0..50).map(|_| blank()).collect();
+        app.last_chat = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 10,
+        };
+        for _ in 0..10 {
+            app.scroll(4);
+        }
+        let top = app.view_top;
+        app.sel = Some(Selection {
+            a: CellPos { row: 5, col: 0 },
+            b: CellPos { row: 8, col: 3 },
+        });
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Char('с'), // U+0441 CYRILLIC SMALL LETTER ES
+            KeyModifiers::CONTROL,
+        )))
+        .unwrap();
+        app.poll_input(&rx).unwrap();
+
+        assert!(
+            app.input_text().is_empty(),
+            "Ctrl+С with a Russian layout must not type into the input"
+        );
+        assert!(!app.follow, "Ctrl+С must not jump to the bottom");
+        assert_eq!(app.view_top, top, "viewport must not move");
+    }
+
+    #[test]
     fn chat_growth_keeps_viewport_stable() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.cache_lines = (0..50).map(|_| blank()).collect();
