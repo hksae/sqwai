@@ -165,6 +165,7 @@ pub(super) enum MenuAction {
     OpenSessions,
     SetTheme(usize),
     Confirm(Box<MenuAction>),
+    DeletePlan,
     SetEffort(EffortLevel),
     OpenSubagent(u64),
     /// ask_user: select one option (q, idx)
@@ -770,6 +771,38 @@ impl App {
                         Err(e) => self.status(&format!("delete session: {e:#}"), StatusKind::Err),
                     }
                 }
+                if matches!(&inner, MenuAction::DeletePlan) {
+                    let root = self.project_root.clone();
+                    match crate::plan::open_active(&root) {
+                        Ok(Some(active)) => {
+                            let plan_path =
+                                crate::plan::plans_dir(&root).join(format!("{}.json", active.id));
+                            let _ = std::fs::remove_file(&plan_path);
+                            self.session.plan_id = None;
+                            if let Ok(mut journal) = crate::agent::journal::Journal::open(
+                                &root,
+                                &self.session.id.to_string(),
+                            ) {
+                                let _ = journal.append(
+                                    "plan_deleted",
+                                    serde_json::json!({ "plan_id": active.id }),
+                                );
+                            }
+                            self.status("plan deleted", StatusKind::Ok);
+                            self.refresh_plan_label();
+                        }
+                        Ok(None) => {
+                            self.session.plan_id = None;
+                            self.refresh_plan_label();
+                            self.status("no active plan", StatusKind::Info);
+                        }
+                        Err(e) => {
+                            self.status(&format!("plan delete failed: {e:#}"), StatusKind::Err)
+                        }
+                    }
+                    self.menu_home();
+                    self.dirty = true;
+                }
                 self.cfg.save().ok();
                 match &inner {
                     // provider gone: land on a fresh providers list
@@ -791,6 +824,9 @@ impl App {
                     }
                     _ => {}
                 }
+            }
+            MenuAction::DeletePlan => {
+                self.run_action(MenuAction::Confirm(Box::new(MenuAction::DeletePlan)));
             }
             MenuAction::OpenSubagent(id) => {
                 self.menu_home();

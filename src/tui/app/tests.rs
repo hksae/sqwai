@@ -4327,4 +4327,69 @@ mod tests {
             Some("another_corrupt_or_deleted_plan_88888")
         );
     }
+
+    #[test]
+    fn plan_delete_user_command_flow() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let temp_dir =
+            std::env::temp_dir().join(format!("sqwai-test-plan-delete-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        app.project_root = temp_dir.clone();
+        app.session.plan_id = None;
+
+        // 1. When no active plan exists:
+        app.plan_command("/plan delete");
+        assert!(
+            app.menu_stack.is_empty(),
+            "menu should not open when no active plan"
+        );
+        assert!(matches!(
+            app.segments.last(),
+            Some(Segment::Status { text, .. }) if text == "no active plan"
+        ));
+
+        // 2. Create an active plan in temp_dir
+        let limits = plan::Limits { max_steps: 10 };
+        let created = plan::create(
+            "test delete goal".into(),
+            vec![],
+            vec![],
+            vec![plan::NewStep {
+                title: "step 1".into(),
+                kind: None,
+                refs: vec![],
+            }],
+            1000,
+            &limits,
+        )
+        .unwrap();
+        plan::store(&temp_dir, &created).unwrap();
+        app.session.plan_id = Some(created.id.clone());
+        let plan_file = plan::plans_dir(&temp_dir).join(format!("{}.json", created.id));
+        assert!(plan_file.exists());
+
+        // 3. /plan delete should open confirmation dialog
+        app.plan_command("/plan delete");
+        assert!(matches!(
+            app.cur_menu(),
+            Some(Menu::ConfirmDelete { label, .. }) if label == "Are you sure? (y/N)"
+        ));
+
+        // 4. Confirming delete removes file, clears session.plan_id, and records journal event
+        app.run_confirm_action();
+        assert!(!plan_file.exists(), "plan file must be deleted");
+        assert_eq!(app.session.plan_id, None, "session plan_id must be cleared");
+
+        // Verify journal has plan_deleted event
+        let records =
+            crate::agent::journal::Journal::records_for(&temp_dir, &app.session.id.to_string())
+                .unwrap();
+        assert!(
+            records.iter().any(|r| r.kind == "plan_deleted"
+                && r.fields.get("plan_id").and_then(|v| v.as_str()) == Some(&created.id)),
+            "journal must record plan_deleted event"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }

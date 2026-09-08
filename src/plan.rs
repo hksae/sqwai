@@ -461,6 +461,13 @@ pub fn list(root: &Path) -> Vec<Plan> {
         .collect()
 }
 
+pub fn list_active(root: &Path) -> Vec<Plan> {
+    list(root)
+        .into_iter()
+        .filter(|p| p.status == PlanStatus::Active)
+        .collect()
+}
+
 // ---------------------------------------------------------------- operations
 
 #[derive(Debug, Clone, Deserialize)]
@@ -505,7 +512,9 @@ pub enum Op {
         id: String,
     },
     Cancel {
-        id: String,
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
         reason: String,
     },
     Add {
@@ -800,7 +809,7 @@ pub fn apply(plan: &mut Plan, op: Op, limits: &Limits) -> Result<Applied, Reject
         } => finish(plan, &id, summary, !evidence.is_empty()),
         Op::Block { id, reason } => block(plan, &id, reason),
         Op::Unblock { id } => unblock(plan, &id),
-        Op::Cancel { id, reason } => cancel(plan, &id, reason),
+        Op::Cancel { id, reason } => cancel(plan, id.as_deref(), reason),
         Op::Add {
             after,
             title,
@@ -963,7 +972,17 @@ fn unblock(plan: &mut Plan, id: &str) -> Result<Applied, Rejection> {
     accept(plan, format!("step {id} unblocked"))
 }
 
-fn cancel(plan: &mut Plan, id: &str, reason: String) -> Result<Applied, Rejection> {
+fn cancel(plan: &mut Plan, id: Option<&str>, reason: String) -> Result<Applied, Rejection> {
+    let Some(id) = id else {
+        plan.status = PlanStatus::Abandoned;
+        plan.revision += 1;
+        return accept(plan, format!("plan {} cancelled", plan.id));
+    };
+    if id == plan.id {
+        plan.status = PlanStatus::Abandoned;
+        plan.revision += 1;
+        return accept(plan, format!("plan {} cancelled", plan.id));
+    }
     let Some((status, _)) = step_status(plan, id) else {
         return unknown_step(plan, id);
     };
@@ -975,17 +994,14 @@ fn cancel(plan: &mut Plan, id: &str, reason: String) -> Result<Applied, Rejectio
             "cancel work that will not happen, not finished work",
         );
     }
-    if reason.trim().is_empty() {
-        return reject(
-            plan,
-            "empty_reason",
-            format!("cancelling step {id} needs a reason"),
-            "say why it will not be done",
-        );
-    }
+    let reason_str = if reason.trim().is_empty() {
+        "cancelled".to_string()
+    } else {
+        reason
+    };
     let step = plan.step_mut(id).expect("checked above");
     step.status = StepStatus::Cancelled;
-    step.reason = Some(reason);
+    step.reason = Some(reason_str);
     accept(plan, format!("step {id} cancelled"))
 }
 

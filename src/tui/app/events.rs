@@ -510,10 +510,13 @@ impl App {
                         KeyCode::Tab if !self.menu_stack.is_empty() => {
                             self.menu_nav(if shift { -1 } else { 1 })
                         }
-                        KeyCode::Char('y') | KeyCode::Char('n')
+                        KeyCode::Char('y')
+                        | KeyCode::Char('Y')
+                        | KeyCode::Char('n')
+                        | KeyCode::Char('N')
                             if matches!(self.cur_menu(), Some(Menu::ConfirmDelete { .. })) =>
                         {
-                            if k.code == KeyCode::Char('y') {
+                            if k.code == KeyCode::Char('y') || k.code == KeyCode::Char('Y') {
                                 self.run_confirm_action();
                             } else {
                                 self.menu_back();

@@ -1931,13 +1931,24 @@ impl App {
     }
 
     fn plan_command(&mut self, rest: &str) {
-        let root = std::env::current_dir().unwrap_or_default();
+        let root = self.project_root.clone();
         let args: Vec<&str> = rest.split_whitespace().skip(1).collect();
         let result = match args.first().copied() {
             None | Some("show") => {
                 self.open_menu(Menu::Plan);
                 return;
             }
+            Some("delete") => match plan::open_active(&root) {
+                Ok(Some(_active)) => {
+                    self.open_menu(Menu::ConfirmDelete {
+                        label: "Are you sure? (y/N)".to_string(),
+                        action: MenuAction::DeletePlan,
+                    });
+                    return;
+                }
+                Ok(None) => "no active plan".to_string(),
+                Err(e) => format!("plan load failed: {e:#}"),
+            },
             Some("history") => {
                 let plans = plan::list(&root);
                 if plans.is_empty() {

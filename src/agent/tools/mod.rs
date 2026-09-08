@@ -1550,6 +1550,72 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             acceptance,
             evidence,
         } => verify_acceptance(ctx, acceptance, !evidence.is_empty()),
+        plan::Op::Cancel { id, reason } => {
+            let active_plans = plan::list_active(&ctx.root);
+            match id {
+                None => {
+                    if active_plans.is_empty() {
+                        return Outcome::err("no active plan: create one with op=create first");
+                    }
+                    if active_plans.len() > 1 {
+                        let list = active_plans
+                            .iter()
+                            .map(|p| format!("{} · {}", p.id, p.goal.text))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        return Outcome::err(format!(
+                            "multiple active plans found ({}), specify id:\n{list}",
+                            active_plans.len()
+                        ));
+                    }
+                    let mut target_plan = active_plans.into_iter().next().unwrap();
+                    target_plan.status = plan::PlanStatus::Abandoned;
+                    target_plan.revision += 1;
+                    if let Err(e) = plan::store(&ctx.root, &target_plan) {
+                        return Outcome::err(format!("plan write failed: {e:#}"));
+                    }
+                    Outcome::ok(format!("plan {} cancelled", target_plan.id))
+                }
+                Some(target_id) => {
+                    if let Some(mut target_plan) =
+                        active_plans.into_iter().find(|p| p.id == target_id)
+                    {
+                        target_plan.status = plan::PlanStatus::Abandoned;
+                        target_plan.revision += 1;
+                        if let Err(e) = plan::store(&ctx.root, &target_plan) {
+                            return Outcome::err(format!("plan write failed: {e:#}"));
+                        }
+                        return Outcome::ok(format!("plan {} cancelled", target_plan.id));
+                    }
+                    let mut active =
+                        match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
+                            Ok(Some(p)) => p,
+                            Ok(None) => {
+                                return Outcome::err(
+                                    "no active plan: create one with op=create first",
+                                );
+                            }
+                            Err(e) => return Outcome::err(format!("plan store unreadable: {e:#}")),
+                        };
+                    let op = plan::Op::Cancel {
+                        id: Some(target_id.clone()),
+                        reason,
+                    };
+                    match plan::apply(&mut active, op, &limits) {
+                        Ok(applied) => {
+                            if let Err(e) = plan::store(&ctx.root, &active) {
+                                return Outcome::err(format!("plan write failed: {e:#}"));
+                            }
+                            match applied {
+                                plan::Applied::Updated { message } => Outcome::ok(message),
+                                _ => Outcome::ok(format!("step {target_id} cancelled")),
+                            }
+                        }
+                        Err(r) => rejection(r),
+                    }
+                }
+            }
+        }
         other => {
             let mut active = match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
                 Ok(Some(p)) => p,
@@ -3976,6 +4042,82 @@ end
         assert!(o.ok, "{}", o.output);
         assert!(o.output.contains("the API is stable"), "{}", o.output);
         assert!(!o.output.contains("the CI is green"), "{}", o.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn plan_cancel_auto_selects_single_active_plan() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "single plan cancel test",
+                "steps": [{"title": "step 1"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+
+        // Cancel with op: "cancel" and missing id when 1 active plan exists
+        let cancelled = plan_op(&mut ctx, &json!({"op": "cancel"}));
+        assert!(cancelled.ok, "{}", cancelled.output);
+        assert!(
+            cancelled.output.contains("cancelled"),
+            "{}",
+            cancelled.output
+        );
+
+        // The active plan is now abandoned
+        assert!(plan::open_active(&dir).unwrap().is_none());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn plan_cancel_demands_id_when_multiple_active_plans() {
+        let (mut ctx, dir) = proj();
+        // Create first active plan
+        let p1 = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "first plan",
+                "steps": [{"title": "step 1"}]
+            }),
+        );
+        assert!(p1.ok);
+
+        // Manually create a second active plan on disk
+        let mut second = plan::open_active(&dir).unwrap().unwrap();
+        second.id = plan::new_id();
+        second.goal.text = "second plan".to_string();
+        plan::store(&dir, &second).unwrap();
+
+        assert_eq!(plan::list_active(&dir).len(), 2);
+
+        // Cancel without id should fail and list active plans
+        let cancelled = plan_op(&mut ctx, &json!({"op": "cancel"}));
+        assert!(!cancelled.ok);
+        assert!(
+            cancelled.output.contains("multiple active plans"),
+            "{}",
+            cancelled.output
+        );
+        assert!(
+            cancelled.output.contains("first plan"),
+            "{}",
+            cancelled.output
+        );
+        assert!(
+            cancelled.output.contains("second plan"),
+            "{}",
+            cancelled.output
+        );
+
+        // Cancel with explicit id succeeds
+        let cancel_second = plan_op(&mut ctx, &json!({"op": "cancel", "id": second.id}));
+        assert!(cancel_second.ok, "{}", cancel_second.output);
+        assert!(cancel_second.output.contains(&second.id));
+
         fs::remove_dir_all(&dir).ok();
     }
 }
