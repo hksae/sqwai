@@ -468,7 +468,18 @@ pub(super) fn grep(
                 matches += 1;
                 let disp = path.strip_prefix(&ctx.root).unwrap_or(path);
                 let shown = disp.display().to_string().replace('\\', "/");
-                out.push_str(&format!("{}:{}: {}\n", shown, i + 1, line.trim_end()));
+                let trimmed = line.trim_end();
+                const MAX_LINE_BYTES: usize = 1024;
+                let display_line = if trimmed.len() > MAX_LINE_BYTES {
+                    let mut cut = MAX_LINE_BYTES;
+                    while cut > 0 && !trimmed.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    format!("{}…(line truncated)", &trimmed[..cut])
+                } else {
+                    trimmed.to_string()
+                };
+                out.push_str(&format!("{}:{}: {}\n", shown, i + 1, display_line));
                 if matches >= 200 {
                     out.push_str("…(more matches truncated)\n");
                     break 'outer;
@@ -545,5 +556,17 @@ mod tests {
         let outcome = grep(&mut ctx, "test", None, Some("[unclosed"));
         assert!(!outcome.ok);
         assert!(outcome.output.contains("bad include glob pattern"));
+    }
+
+    #[test]
+    fn grep_long_line_is_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let long_line = format!("match_{}", "a".repeat(3000));
+        std::fs::write(dir.path().join("long.txt"), &long_line).unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        let outcome = grep(&mut ctx, "match_", None, None);
+        assert!(outcome.ok);
+        assert!(outcome.output.contains("…(line truncated)"));
+        assert!(outcome.output.len() < 2000);
     }
 }
