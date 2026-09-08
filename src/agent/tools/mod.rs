@@ -1432,7 +1432,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let gate = if matches!(op, plan::Op::Complete) {
         validate_complete(ctx)
     } else {
-        validate_evidence(&ctx.root, &op)
+        validate_evidence(&ctx.root, &op, Some(&ctx.session_id))
     };
     if let Err(message) = gate {
         return Outcome::err(message);
@@ -1444,7 +1444,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             constraints,
             acceptance,
             steps,
-        } => match plan::open_active(&ctx.root) {
+        } => match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
             Ok(Some(existing)) => rejection(plan::Rejection {
                 code: "plan_exists",
                 reason: format!("an active plan already exists: {}", existing.id),
@@ -1460,7 +1460,8 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     .budget_tokens(ctx.context_limit)
                     .max(MIN_PLAN_BUDGET_TOKENS);
                 match plan::create(goal, constraints, acceptance, steps, budget_limit, &limits) {
-                    Ok(created) => {
+                    Ok(mut created) => {
+                        created.sessions = vec![ctx.session_id.clone()];
                         let id = created.id.clone();
                         let steps = created.steps.len();
                         match plan::store(&ctx.root, &created) {
@@ -1478,7 +1479,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             evidence,
         } => verify_acceptance(ctx, acceptance, !evidence.is_empty()),
         other => {
-            let mut active = match plan::open_active(&ctx.root) {
+            let mut active = match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
                 Ok(Some(p)) => p,
                 Ok(None) => {
                     return Outcome::err(
@@ -1541,7 +1542,7 @@ const ACCEPTANCE_TIMEOUT_SECS: u64 = 900;
 /// other acceptance item has already spent. A `manual:` item is refused: only
 /// the user waives those.
 fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome {
-    let mut active = match plan::open_active(&ctx.root) {
+    let mut active = match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
         Ok(Some(plan)) => plan,
         Ok(None) => return Outcome::err("no active plan: create one with op=create first"),
         Err(e) => return Outcome::err(format!("plan store unreadable: {e:#}")),
@@ -1735,11 +1736,11 @@ fn unspent_verify_evidence(
 /// `verify` is not handled here — `verify_acceptance` settles an acceptance
 /// item on its own terms, per item, and this function used to short-circuit
 /// that with a plan-wide "is there any verify evidence anywhere" check.
-fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
+fn validate_evidence(root: &Path, op: &plan::Op, session_id: Option<&str>) -> Result<(), String> {
     let plan::Op::Finish { id, .. } = op else {
         return Ok(());
     };
-    let status = plan::open_active(root)
+    let status = plan::open_active_for_session(root, session_id)
         .ok()
         .flatten()
         .and_then(|p| p.step(id).map(|s| s.status));
@@ -1748,7 +1749,7 @@ fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
         // validator with a clearer reason than a missing-evidence error.
         return Ok(());
     }
-    let active = plan::open_active(root)
+    let active = plan::open_active_for_session(root, session_id)
         .map_err(|e| format!("evidence_unreadable: {e:#}"))?
         .ok_or_else(|| "invalid_evidence: no active plan".to_string())?;
     let required_kind = active
@@ -1772,7 +1773,7 @@ fn validate_evidence(root: &Path, op: &plan::Op) -> Result<(), String> {
 /// with. A waived item is the user's call and is left alone.
 fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
     let root = ctx.root.clone();
-    let active = plan::open_active(&root)
+    let active = plan::open_active_for_session(&root, Some(&ctx.session_id))
         .map_err(|e| format!("evidence_unreadable: {e:#}"))?
         .ok_or_else(|| "invalid_evidence: no active plan".to_string())?;
     for step in active

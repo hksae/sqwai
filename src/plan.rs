@@ -408,11 +408,17 @@ pub fn open(root: &Path, id: &str) -> Result<Plan> {
 
 /// At most one active plan per project (§2.1.1).
 pub fn open_active(root: &Path) -> Result<Option<Plan>> {
+    open_active_for_session(root, None)
+}
+
+/// Open the active plan for a specific session, or the most recent active plan.
+pub fn open_active_for_session(root: &Path, session_id: Option<&str>) -> Result<Option<Plan>> {
     let dir = plans_dir(root);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(_) => return Ok(None),
     };
+    let mut active_plans: Vec<Plan> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
@@ -424,10 +430,20 @@ pub fn open_active(root: &Path) -> Result<Option<Plan>> {
         if let Ok(plan) = serde_json::from_str::<Plan>(&text)
             && plan.status == PlanStatus::Active
         {
-            return Ok(Some(plan));
+            active_plans.push(plan);
         }
     }
-    Ok(None)
+    if active_plans.is_empty() {
+        return Ok(None);
+    }
+    if let Some(sid) = session_id {
+        if let Some(plan) = active_plans.iter().find(|p| p.sessions.iter().any(|s| s == sid)) {
+            return Ok(Some(plan.clone()));
+        }
+    }
+    // Deterministic fallback: pick the most recent active plan by created timestamp
+    active_plans.sort_by(|a, b| b.created.cmp(&a.created));
+    Ok(active_plans.into_iter().next())
 }
 
 pub fn list(root: &Path) -> Vec<Plan> {
@@ -1197,7 +1213,12 @@ fn complete(plan: &mut Plan) -> Result<Applied, Rejection> {
     let pending: Vec<String> = plan
         .steps
         .iter()
-        .filter(|s| s.status == StepStatus::Pending || s.status == StepStatus::InProgress)
+        .filter(|s| {
+            matches!(
+                s.status,
+                StepStatus::Pending | StepStatus::InProgress | StepStatus::Reopened
+            )
+        })
         .map(|s| s.id.clone())
         .collect();
     if !pending.is_empty() {
@@ -1700,5 +1721,47 @@ mod tests {
         draft.constraints = vec!["new constraint".into()];
         draft.acceptance = vec!["new acceptance".into()];
         assert!(validate_proposal_invariants(Some(&active), &draft).is_ok());
+    }
+
+    #[test]
+    fn complete_rejects_reopened_steps() {
+        let mut plan = new_plan();
+        plan.steps[0].status = StepStatus::Done;
+        plan.steps[1].status = StepStatus::Reopened;
+        plan.acceptance[0].status = AcceptanceStatus::Verified;
+        let err = complete(&mut plan).unwrap_err();
+        assert_eq!(err.code, "steps_open");
+        assert!(err.reason.contains('2'), "reason: {}", err.reason);
+    }
+
+    #[test]
+    fn fork_and_open_active_resolves_per_session_and_deterministically() {
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-fork-{}", new_id()));
+        let mut parent = new_plan();
+        parent.sessions = vec!["sess-parent".into()];
+        let parent_id = parent.id.clone();
+        store(&dir, &parent).unwrap();
+
+        // Fork plan for child session
+        let forked = fork(&dir, &parent, "sess-child").unwrap();
+        let child_id = forked.id.clone();
+
+        // Querying with sess-parent returns parent plan
+        let resolved_parent = open_active_for_session(&dir, Some("sess-parent"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved_parent.id, parent_id);
+
+        // Querying with sess-child returns forked plan
+        let resolved_child = open_active_for_session(&dir, Some("sess-child"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved_child.id, child_id);
+
+        // Querying without session deterministically picks the newest (child)
+        let resolved_default = open_active(&dir).unwrap().unwrap();
+        assert_eq!(resolved_default.id, child_id);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

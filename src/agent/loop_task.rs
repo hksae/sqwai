@@ -487,7 +487,7 @@ async fn run_subagent(
         plan_mode,
         context_limit,
         enable_tools: true,
-        read_only: false,
+        read_only,
         previous_response_id: None,
         summary: None,
         mcp,
@@ -710,7 +710,7 @@ async fn run_agent(
             "compaction",
             Some(&provider),
             &model_id,
-            plan::open_active(&root)
+            plan::open_active_for_session(&root, Some(&session_id))
                 .ok()
                 .flatten()
                 .map(|plan| plan::render(&plan))
@@ -734,7 +734,10 @@ async fn run_agent(
         if let Some(writer) = compaction_journal.as_mut() {
             writer.set_attribution(
                 None,
-                plan::open_active(&root).ok().flatten().map(|plan| plan.id),
+                plan::open_active_for_session(&root, Some(&session_id))
+                    .ok()
+                    .flatten()
+                    .map(|plan| plan.id),
                 "main",
             );
             let _ = writer.append("compaction", serde_json::json!({"phase": "begin"}));
@@ -804,7 +807,7 @@ async fn run_agent(
         None
     };
     if let Some(writer) = journal.as_mut() {
-        let plan_id = plan::open_active(&root).ok().flatten().map(|p| p.id);
+        let plan_id = plan::open_active_for_session(&root, Some(&session_id)).ok().flatten().map(|p| p.id);
         writer.set_attribution(None, plan_id, "main");
         let resumed_from = context::resume_notice(&root, &session_id).map(|_| "journal");
         let _ = writer.session_start(
@@ -826,7 +829,7 @@ async fn run_agent(
         }
     }
     let todos: Vec<String> = Vec::new();
-    let mut plan_todos: Vec<String> = plan::open_active(&root)
+    let mut plan_todos: Vec<String> = plan::open_active_for_session(&root, Some(&session_id))
         .ok()
         .flatten()
         .map(|active| {
@@ -1126,7 +1129,7 @@ async fn run_agent(
             let journal_mark = ctx.journal.len();
             let tool_started = Instant::now();
             if let Some(writer) = journal.as_mut() {
-                let active = plan::open_active(&root).ok().flatten();
+                let active = plan::open_active_for_session(&root, Some(&session_id)).ok().flatten();
                 let plan_id = active.as_ref().map(|p| p.id.clone());
                 let step = call
                     .args
@@ -1185,7 +1188,13 @@ async fn run_agent(
                 ))
             } else {
                 match call.name.as_str() {
+                    "ask_user" if subagent_depth > 0 => {
+                        tools::Outcome::err("subagents cannot interact with the user; make decisions autonomously")
+                    }
                     "ask_user" => ask_user(call, &tx, &mut ctl, &mut next_id).await,
+                    "propose_plan" if subagent_depth > 0 => {
+                        tools::Outcome::err("subagents cannot propose plans; plans belong to the primary session")
+                    }
                     "propose_plan" => {
                         propose_plan(
                             call,
@@ -1197,6 +1206,7 @@ async fn run_agent(
                             &tx,
                             &mut ctl,
                             &mut next_id,
+                            &session_id,
                         )
                         .await
                     }
@@ -1209,6 +1219,7 @@ async fn run_agent(
                             &mut always_allow,
                             &blocked_patterns,
                             &mut next_id,
+                            subagent_depth,
                         )
                         .await
                     }
@@ -1312,7 +1323,7 @@ async fn run_agent(
                         args["context_limit"] = serde_json::json!(context_limit);
                         let outcome = run_tool_blocking(&mut ctx, "plan", &args).await;
                         if outcome.ok
-                            && let Ok(Some(saved)) = plan::open_active(&root)
+                            && let Ok(Some(saved)) = plan::open_active_for_session(&root, Some(&session_id))
                         {
                             plan_todos = saved
                                 .steps
@@ -1547,7 +1558,7 @@ async fn run_agent(
                             "step_lifecycle",
                             Some(&provider),
                             &model_id,
-                            plan::open_active(&root)
+                            plan::open_active_for_session(&root, Some(&session_id))
                                 .ok()
                                 .flatten()
                                 .map(|plan| plan::render(&plan))
@@ -2202,6 +2213,7 @@ async fn propose_plan(
     tx: &mpsc::Sender<AgentEvent>,
     ctl: &mut mpsc::Receiver<ControlMsg>,
     next_id: &mut u64,
+    session_id: &str,
 ) -> tools::Outcome {
     // the call itself writes nothing, but an accepted proposal is stored by
     // the host — which a read-only session must never do (lock owned elsewhere)
@@ -2227,13 +2239,13 @@ async fn propose_plan(
     let budget_limit = plan_limits
         .budget_tokens(context_limit)
         .max(tools::MIN_PLAN_BUDGET_TOKENS);
-    let active_plan = match plan::open_active(root) {
+    let active_plan = match plan::open_active_for_session(root, Some(session_id)) {
         Ok(plan) => plan,
         Err(e) => return tools::Outcome::err(format!("active plan unreadable: {e:#}")),
     };
     if let Err(r) = plan::validate_proposal_invariants(active_plan.as_ref(), &draft_args) {
         return tools::Outcome::err(format!(
-            "plan proposal rejected [{}]: {} — {}",
+            "plan proposal violates invariants [{}]: {} — {}",
             r.code, r.reason, r.hint
         ));
     }
@@ -2289,7 +2301,7 @@ async fn propose_plan(
             ));
         }
     };
-    let abandoned = match plan::open_active(root) {
+    let abandoned = match plan::open_active_for_session(root, Some(session_id)) {
         Ok(Some(mut active)) => {
             let old = active.id.clone();
             plan::abandon(&mut active);
@@ -2301,6 +2313,8 @@ async fn propose_plan(
         Ok(None) => None,
         Err(e) => return tools::Outcome::err(format!("plan store unreadable: {e:#}")),
     };
+    let mut fresh = fresh;
+    fresh.sessions = vec![session_id.to_string()];
     let new_id = fresh.id.clone();
     let steps = fresh.steps.len();
     if let Err(e) = plan::store(root, &fresh) {
@@ -2342,6 +2356,7 @@ async fn bash_call(
     always_allow: &mut Vec<String>,
     blocked: &[String],
     next_id: &mut u64,
+    subagent_depth: u8,
 ) -> tools::Outcome {
     let command = call.args["command"].as_str().unwrap_or("").to_string();
     let lower = command.to_lowercase();
@@ -2367,6 +2382,11 @@ async fn bash_call(
 
     if let Some(reason) = needs_approval {
         if !always_allow.contains(&command) {
+            if subagent_depth > 0 {
+                return tools::Outcome::err(format!(
+                    "dangerous command requires user approval, but subagents cannot prompt for approval ({reason})"
+                ));
+            }
             let id = *next_id;
             *next_id += 1;
             if tx

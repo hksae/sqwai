@@ -140,16 +140,16 @@ impl Journal {
             .and_then(Path::parent)
             .and_then(Path::parent)
             .context("journal path has no project root")?;
-        let mut active = match crate::plan::open_active(root)? {
-            Some(plan) if plan.id == plan_id => plan,
-            _ => return Ok(seq),
-        };
         let session = self
             .path
             .file_stem()
             .and_then(|name| name.to_str())
             .unwrap_or_default()
             .to_string();
+        let mut active = match crate::plan::open_active_for_session(root, Some(&session))? {
+            Some(plan) if plan.id == plan_id => plan,
+            _ => return Ok(seq),
+        };
         if let Some(step) = active.step_mut(&step_id)
             && !step
                 .evidence
@@ -600,7 +600,9 @@ impl Journal {
                 s.id != finished_step
                     && matches!(
                         s.status,
-                        crate::plan::StepStatus::Pending | crate::plan::StepStatus::InProgress
+                        crate::plan::StepStatus::Pending
+                            | crate::plan::StepStatus::InProgress
+                            | crate::plan::StepStatus::Reopened
                     )
                     && !s.refs.is_empty()
             })

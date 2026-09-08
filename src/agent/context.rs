@@ -86,6 +86,7 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
                     crate::plan::StepStatus::InProgress
                         | crate::plan::StepStatus::Blocked
                         | crate::plan::StepStatus::Pending
+                        | crate::plan::StepStatus::Reopened
                 )
             })
             .take(8)
