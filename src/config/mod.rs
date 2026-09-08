@@ -763,7 +763,7 @@ pub struct Config {
 }
 
 fn default_model_name() -> String {
-    "default".into()
+    "claude-sonnet-5".into()
 }
 fn default_effort() -> EffortLevel {
     EffortLevel::Medium
@@ -802,7 +802,7 @@ impl std::error::Error for LoadError {}
 impl Default for Config {
     fn default() -> Self {
         let mut cfg = Self {
-            default_model: String::new(),
+            default_model: default_model_name(),
             default_effort: EffortLevel::Medium,
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
@@ -875,14 +875,10 @@ impl Config {
         #[allow(unreachable_code)]
         {
             let path = config_path()?;
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(
+            atomic_write(
                 &path,
-                toml::to_string_pretty(self).context("serializing config")?,
-            )
-            .context("writing config")?;
+                &toml::to_string_pretty(self).context("serializing config")?,
+            )?;
             Ok(())
         }
     }
@@ -943,17 +939,38 @@ pub fn data_dir() -> Result<PathBuf> {
     Ok(project_dirs()?.data_dir().to_path_buf())
 }
 
-pub fn write_template(path: &PathBuf) -> Result<()> {
+fn atomic_write(path: &std::path::Path, content: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, toml::to_string_pretty(&Config::default())?)?;
+    let tmp = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+    std::fs::write(&tmp, content).context("writing temp config")?;
+    std::fs::rename(&tmp, path).context("installing config")?;
+    Ok(())
+}
+
+pub fn write_template(path: &PathBuf) -> Result<()> {
+    atomic_write(path, &toml::to_string_pretty(&Config::default())?)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_config_template_has_resolvable_default_model() {
+        let cfg = Config::default();
+        assert!(!cfg.default_model.is_empty());
+        assert!(cfg.default_model_config().is_ok());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_template(&path).unwrap();
+        let loaded: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(loaded.default_model, "claude-sonnet-5");
+        assert!(loaded.default_model_config().is_ok());
+    }
 
     /// The config example in the README must actually load.
     ///
