@@ -1474,6 +1474,10 @@ impl App {
         self.seg_cache.clear();
         // the transcript is replaced: old group ranges point nowhere
         self.activity_groups.clear();
+        self.active_subagent = None;
+        self.subagents.clear();
+        self.subagent_chats.clear();
+        self.todos.clear();
         self.active_ask_id = None;
         self.ask_hover = None;
         self.active_proposal_id = None;
@@ -1526,6 +1530,10 @@ impl App {
         self.segments.clear();
         self.seg_cache.clear();
         self.activity_groups.clear();
+        self.active_subagent = None;
+        self.subagents.clear();
+        self.subagent_chats.clear();
+        self.todos.clear();
         self.active_ask_id = None;
         self.ask_hover = None;
         self.active_proposal_id = None;
@@ -1534,6 +1542,9 @@ impl App {
         self.rebuild_session_environment();
         self.follow = true;
         self.view_top = 0;
+        self.sel = None;
+        self.press = None;
+        self.dragging = false;
         self.menu_home();
         self.dirty = true;
         self.status(

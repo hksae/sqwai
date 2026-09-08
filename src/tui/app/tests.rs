@@ -1279,6 +1279,17 @@ mod tests {
     }
 
     #[test]
+    fn new_session_clears_active_subagent_and_subagent_chats() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.active_subagent = Some(7);
+        app.subagents.push((7, "child".into(), String::new(), String::new(), false));
+        app.start_new_session();
+        assert_eq!(app.active_subagent, None);
+        assert!(app.subagents.is_empty());
+        assert!(app.subagent_chats.is_empty());
+    }
+
+    #[test]
     fn effort_levels_include_off_for_status_bar_and_model_settings() {
         assert!(EffortLevel::SELECTABLE.contains(&EffortLevel::Off));
         assert_eq!(EffortLevel::SELECTABLE, EffortLevel::ALL);
