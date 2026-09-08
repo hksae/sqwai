@@ -922,6 +922,7 @@ mod tests {
     fn stopped_and_failed_turns_append_durable_notes() {
         let mut stopped = test_app("http://127.0.0.1:9/v1".into());
         stopped.session.push(Role::User, "first");
+        stopped.turn_user_index = Some(0);
         stopped.segments.push(Segment::Assistant {
             text: String::new(),
             live: true,
@@ -935,6 +936,7 @@ mod tests {
 
         let mut failed = test_app("http://127.0.0.1:9/v1".into());
         failed.session.push(Role::User, "second");
+        failed.turn_user_index = Some(0);
         failed.segments.push(Segment::Assistant {
             text: String::new(),
             live: true,
@@ -946,6 +948,15 @@ mod tests {
             [crate::session::TurnNote { text, is_error: true, .. }]
                 if text == "error: provider offline"
         ));
+    }
+
+    #[tokio::test]
+    async fn failed_compact_does_not_attach_note_to_previous_turn() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.session.push(Role::User, "earlier user prompt");
+        app.start_compaction();
+        app.finish_turn(Err("compaction model error".into()));
+        assert!(app.session.turn_notes.is_empty(), "must not attach error to earlier user message");
     }
 
     #[test]

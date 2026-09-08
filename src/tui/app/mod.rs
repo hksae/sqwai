@@ -255,6 +255,8 @@ pub struct App {
     retry_line: Option<String>,
     /// label of the last shadow checkpoint (design §10 indicator)
     last_checkpoint: Option<String>,
+    /// user message index pushed for the active turn, if any
+    turn_user_index: Option<usize>,
 
     /// latest diagnostic count reported by the LSP manager
     lsp_diagnostics: usize,
@@ -503,6 +505,7 @@ impl App {
             retry_notified: true, // no toast for the very first turn
             retry_line: None,
             last_checkpoint: None,
+            turn_user_index: None,
             lsp_diagnostics: 0,
             follow: true,
             view_top: 0,
@@ -1310,6 +1313,7 @@ impl App {
         self.rebuild_provider();
         self.segments.push(Segment::User(text.clone()));
         self.session.push(Role::User, &text);
+        self.turn_user_index = Some(self.session.messages.len().saturating_sub(1));
 
         // The system block is assembled per request and travels separately
         // from the transcript: nothing here is ever written to the session.
@@ -1431,6 +1435,7 @@ impl App {
         self.agent = Some(spawn_agent(input));
         self.streaming = true;
         self.aborted = false;
+        self.turn_user_index = None;
         self.assistant_buf.clear();
         self.status("compacting context…", StatusKind::Info);
     }
@@ -1478,6 +1483,7 @@ impl App {
         self.subagents.clear();
         self.subagent_chats.clear();
         self.todos.clear();
+        self.turn_user_index = None;
         self.active_ask_id = None;
         self.ask_hover = None;
         self.active_proposal_id = None;
@@ -1534,6 +1540,7 @@ impl App {
         self.subagents.clear();
         self.subagent_chats.clear();
         self.todos.clear();
+        self.turn_user_index = None;
         self.active_ask_id = None;
         self.ask_hover = None;
         self.active_proposal_id = None;
@@ -2892,11 +2899,7 @@ impl App {
         // Persist the presentation summary only after the group was finalized.
         // Saving earlier lost it across a restart and restored bare tool rows.
         if let Some((text, is_error)) = turn_note
-            && let Some(user_index) = self
-                .session
-                .messages
-                .iter()
-                .rposition(|message| message.role == Role::User)
+            && let Some(user_index) = self.turn_user_index.take()
         {
             self.session.turn_notes.push(TurnNote {
                 user_index,
