@@ -643,21 +643,8 @@ impl App {
                     work_start.get_or_insert(self.segments.len());
                     let trimmed = m.content.trim();
                     if !trimmed.is_empty() {
-                        let summary = trimmed
-                            .lines()
-                            .map(str::trim)
-                            .find(|l| !l.is_empty())
-                            .map(|l| l.trim_start_matches('#').trim())
-                            .unwrap_or("")
-                            .to_string();
-                        self.segments.push(Segment::Tool {
-                            name: "talking".to_string(),
-                            args: summary,
-                            ok: Some(true),
-                            output: trimmed.to_string(),
-                            diff: None,
-                            expanded: false,
-                        });
+                        self.segments
+                            .push(Segment::Commentary(trimmed.to_string()));
                     }
                     for call in &m.tool_calls {
                         let idx = self.segments.len();
@@ -896,7 +883,7 @@ impl App {
         id: u64,
         questions: Vec<crate::agent::loop_task::AskQuestion>,
     ) {
-        self.flush_assistant_preamble_to_talking();
+        self.flush_assistant_preamble_to_commentary();
         // a previous unanswered ask (e.g. after abort) is frozen first so at
         // most one segment stays active
         self.freeze_active_ask("(no answer — superseded)");
@@ -1126,7 +1113,7 @@ impl App {
     /// like tool rows — so the finished turn folds it into its activity group
     /// instead of leaving it rendered below the answer.
     pub(super) fn push_proposal_segment(&mut self, id: u64, draft: crate::plan::Plan) {
-        self.flush_assistant_preamble_to_talking();
+        self.flush_assistant_preamble_to_commentary();
         self.freeze_active_proposal();
         let seg = Segment::PlanProposal {
             id,
@@ -2310,24 +2297,10 @@ impl App {
                                 None
                             };
                             if let Some(p) = preamble {
-                                let summary = p
-                                    .lines()
-                                    .map(str::trim)
-                                    .find(|l| !l.is_empty())
-                                    .map(|l| l.trim_start_matches('#').trim())
-                                    .unwrap_or("")
-                                    .to_string();
-                                chat.insert(
-                                    pos,
-                                    Segment::Tool {
-                                        name: "talking".to_string(),
-                                        args: summary,
-                                        ok: Some(true),
-                                        output: p.trim().to_string(),
-                                        diff: None,
-                                        expanded: false,
-                                    },
-                                );
+                                let trimmed = p.trim();
+                                if !trimmed.is_empty() {
+                                    chat.insert(pos, Segment::Commentary(trimmed.to_string()));
+                                }
                             }
                         }
                         let pos = chat
@@ -2540,7 +2513,7 @@ impl App {
     /// tool calls that follow them (think -> tool -> think -> tool -> answer).
     fn handle_thinking_delta(&mut self, t: String) {
         if !self.thinking_open {
-            self.flush_assistant_preamble_to_talking();
+            self.flush_assistant_preamble_to_commentary();
             self.thinking_open = true;
             // reasoning precedes the answer: insert before the live assistant
             let pos = self
@@ -2572,10 +2545,11 @@ impl App {
     }
 
     /// If the model streamed conversational text/preamble before issuing a tool
-    /// call, fold that text into an activity group row (`talking`) instead of
+    /// call, fold that text into an activity group `Commentary` row instead of
     /// leaving it rendered below the tool activity or letting it be overwritten
-    /// by the final answer.
-    fn flush_assistant_preamble_to_talking(&mut self) {
+    /// by the final answer. Commentary is always visible and never counts as a
+    /// tool call in the activity header.
+    fn flush_assistant_preamble_to_commentary(&mut self) {
         self.reveal_chars(usize::MAX);
         let mut text = std::mem::take(&mut self.assistant_buf);
         let pos = self
@@ -2595,22 +2569,8 @@ impl App {
         let trimmed = text.trim();
         if !trimmed.is_empty() {
             if let Some(pos) = pos {
-                let summary = trimmed
-                    .lines()
-                    .map(str::trim)
-                    .find(|l| !l.is_empty())
-                    .map(|l| l.trim_start_matches('#').trim())
-                    .unwrap_or("")
-                    .to_string();
-                let tool = Segment::Tool {
-                    name: "talking".to_string(),
-                    args: summary,
-                    ok: Some(true),
-                    output: trimmed.to_string(),
-                    diff: None,
-                    expanded: false,
-                };
-                self.segments.insert(pos, tool);
+                self.segments
+                    .insert(pos, Segment::Commentary(trimmed.to_string()));
                 self.dirty = true;
             }
         }
@@ -2634,7 +2594,7 @@ impl App {
             }
             self.thinking_open = false;
         }
-        self.flush_assistant_preamble_to_talking();
+        self.flush_assistant_preamble_to_commentary();
         // ask_user has its own inline Q&A segment (AgentEvent::AskUser); a
         // parallel Tool row would duplicate it and its expansion used to be
         // empty because `args` here is only a one-line summary, not the JSON.
@@ -2695,7 +2655,7 @@ impl App {
                 }
             }
             None => {
-                self.flush_assistant_preamble_to_talking();
+                self.flush_assistant_preamble_to_commentary();
                 let tool = Segment::Tool {
                     name,
                     args: String::new(),
@@ -2873,6 +2833,7 @@ impl App {
                 segs[start - 1],
                 Segment::Thinking { .. }
                     | Segment::Tool { .. }
+                    | Segment::Commentary(_)
                     | Segment::AskUser { .. }
                     | Segment::PlanProposal { .. }
             )
@@ -2881,6 +2842,20 @@ impl App {
         }
         if start == end {
             // neither reasoning nor tool calls: a bare answer is not activity
+            return None;
+        }
+        // Commentary alone (without tools/thinking/questions) is just prose,
+        // not activity — it must not create a `0 calls` group.
+        let has_work = segs[start..end].iter().any(|s| {
+            matches!(
+                s,
+                Segment::Thinking { .. }
+                    | Segment::Tool { .. }
+                    | Segment::AskUser { .. }
+                    | Segment::PlanProposal { .. }
+            )
+        });
+        if !has_work {
             return None;
         }
         Some((start, end))
@@ -2906,6 +2881,9 @@ impl App {
                 // same for a plan proposal awaiting accept/decline
                 Segment::PlanProposal { .. } => calls += 1,
                 Segment::Thinking { .. } => thinking += 1,
+                // Commentary is prose folded into the group for context; it is
+                // always visible and never counts as a tool call.
+                Segment::Commentary(_) => {}
                 _ => {}
             }
         }

@@ -27,6 +27,8 @@ pub(super) enum Segment {
         text: String,
         live: bool,
     },
+    /// Model commentary/thoughts emitted before or between tool calls, folded into activity
+    Commentary(String),
     /// compact subagent row; click to reveal its latest output
     Subagent {
         id: u64,
@@ -660,6 +662,7 @@ impl App {
         match seg {
             Segment::User(t) => t.len(),
             Segment::Assistant { text, .. } => text.len(),
+            Segment::Commentary(text) => text.len(),
             Segment::AskUser {
                 questions,
                 picked,
@@ -771,6 +774,11 @@ impl App {
                 }
             }
             Segment::Assistant { text, .. } => {
+                for l in render(text, w, &self.hl) {
+                    out.push((l, Some(idx)));
+                }
+            }
+            Segment::Commentary(text) => {
                 for l in render(text, w, &self.hl) {
                     out.push((l, Some(idx)));
                 }
@@ -1149,7 +1157,29 @@ impl App {
                 let head = Line::from(head_spans);
                 out.push((head, Some(idx)));
                 if *expanded {
+                    // ask_user history rows store only a one-line summary in
+                    // `args` (not the JSON), so never try to parse it: show
+                    // the question summary and the recorded answer instead of
+                    // an empty expansion.
+                    let body = if name == "ask_user" {
+                        let mut s = String::new();
+                        if !args.is_empty() {
+                            s.push_str(&format!("Q: {args}\n"));
+                        } else {
+                            s.push_str("Q: (question)\n");
+                        }
+                        if !output.is_empty() {
+                            s.push_str(&format!("A: {output}"));
+                        } else {
+                            s.push_str("A: (no answer yet)");
+                        }
+                        s
+                    } else {
+                        diff.clone().unwrap_or_else(|| output.clone())
+                    };
                     const MAX_ROWS: usize = 40;
+                    let rows: Vec<&str> = body.lines().collect();
+                    let shown = &rows[..rows.len().min(MAX_ROWS)];
                     let border = Theme::border_dim();
                     let width = usize::from(w).saturating_sub(6).max(1);
                     // Expanded output has no surrounding box. Keep one quiet
@@ -1159,76 +1189,34 @@ impl App {
                         Line::from(vec![Span::styled("    │".to_string(), border)]),
                         Some(idx),
                     ));
-                    if name == "talking" {
-                        let rendered = render(output, width as u16, &self.hl);
-                        let shown = &rendered[..rendered.len().min(MAX_ROWS)];
-                        for l in shown {
-                            let mut spans = vec![Span::styled("    │ ", border)];
-                            spans.extend(l.spans.clone());
-                            out.push((Line::from(spans), Some(idx)));
-                        }
-                        if rendered.len() > MAX_ROWS {
-                            let more = format!("… {} more lines", rendered.len() - MAX_ROWS);
-                            out.push((
-                                Line::from(vec![
-                                    Span::styled("    │ ", border),
-                                    Span::styled(truncate_display_width(&more, width), Theme::dim()),
-                                ]),
-                                Some(idx),
-                            ));
-                        }
-                    } else {
-                        // ask_user history rows store only a one-line summary in
-                        // `args` (not the JSON), so never try to parse it: show
-                        // the question summary and the recorded answer instead of
-                        // an empty expansion.
-                        let body = if name == "ask_user" {
-                            let mut s = String::new();
-                            if !args.is_empty() {
-                                s.push_str(&format!("Q: {args}\n"));
-                            } else {
-                                s.push_str("Q: (question)\n");
-                            }
-                            if !output.is_empty() {
-                                s.push_str(&format!("A: {output}"));
-                            } else {
-                                s.push_str("A: (no answer yet)");
-                            }
-                            s
+                    for l in shown {
+                        let st = if l.starts_with('+') && !l.starts_with("+++") {
+                            Theme::ok()
+                        } else if l.starts_with('-') && !l.starts_with("---") {
+                            Theme::err()
+                        } else if l.starts_with("@@") {
+                            Theme::accent()
                         } else {
-                            diff.clone().unwrap_or_else(|| output.clone())
+                            Theme::dim()
                         };
-                        let rows: Vec<&str> = body.lines().collect();
-                        let shown = &rows[..rows.len().min(MAX_ROWS)];
-                        for l in shown {
-                            let st = if l.starts_with('+') && !l.starts_with("+++") {
-                                Theme::ok()
-                            } else if l.starts_with('-') && !l.starts_with("---") {
-                                Theme::err()
-                            } else if l.starts_with("@@") {
-                                Theme::accent()
-                            } else {
-                                Theme::dim()
-                            };
-                            let line = truncate_display_width(l, width);
-                            out.push((
-                                Line::from(vec![
-                                    Span::styled("    │ ", border),
-                                    Span::styled(truncate_display_width(&line, width), st),
-                                ]),
-                                Some(idx),
-                            ));
-                        }
-                        if rows.len() > MAX_ROWS {
-                            let more = format!("… {} more lines", rows.len() - MAX_ROWS);
-                            out.push((
-                                Line::from(vec![
-                                    Span::styled("    │ ", border),
-                                    Span::styled(truncate_display_width(&more, width), Theme::dim()),
-                                ]),
-                                Some(idx),
-                            ));
-                        }
+                        let line = truncate_display_width(l, width);
+                        out.push((
+                            Line::from(vec![
+                                Span::styled("    │ ", border),
+                                Span::styled(truncate_display_width(&line, width), st),
+                            ]),
+                            Some(idx),
+                        ));
+                    }
+                    if rows.len() > MAX_ROWS {
+                        let more = format!("… {} more lines", rows.len() - MAX_ROWS);
+                        out.push((
+                            Line::from(vec![
+                                Span::styled("    │ ", border),
+                                Span::styled(truncate_display_width(&more, width), Theme::dim()),
+                            ]),
+                            Some(idx),
+                        ));
                     }
                 }
             }
@@ -1362,6 +1350,12 @@ impl App {
                         logical.push((blank(), None));
                     }
                     last_block = BlockKind::Answer;
+                }
+                Segment::Commentary(_) => {
+                    if !in_group {
+                        logical.push((blank(), None));
+                        in_group = true;
+                    }
                 }
                 Segment::Thinking { expanded, .. } => {
                     if !in_group {
@@ -2640,7 +2634,7 @@ pub(super) fn segment_layout_key(seg: &Segment) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     std::mem::discriminant(seg).hash(&mut h);
     match seg {
-        Segment::User(_) | Segment::Assistant { .. } => {}
+        Segment::User(_) | Segment::Assistant { .. } | Segment::Commentary(_) => {}
         Segment::AskUser { questions, .. } => {
             questions.len().hash(&mut h);
         }

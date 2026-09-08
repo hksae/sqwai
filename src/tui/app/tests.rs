@@ -237,6 +237,7 @@ mod tests {
                     ..
                 } => println!("seg[{i}] TOOL {name} ({args}) ok={ok:?}: {output}"),
                 Segment::User(t) => println!("seg[{i}] USER: {t}"),
+                Segment::Commentary(t) => println!("seg[{i}] COMMENTARY: {t}"),
                 Segment::PlanProposal { draft, decided, .. } => println!(
                     "seg[{i}] PLANPROPOSAL {} steps decided={decided:?}",
                     draft.steps.len()
@@ -4003,7 +4004,7 @@ mod tests {
     }
 
     #[test]
-    fn preamble_before_tool_becomes_talking_row_in_activity() {
+    fn preamble_before_tool_becomes_commentary_row_in_activity() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
         app.streaming = true;
@@ -4056,26 +4057,15 @@ mod tests {
 
         app.finish_turn(Ok(()));
 
-        // Verify segments: User, Tool(talking), Tool(read), Tool(talking), Tool(edit), Assistant
+        // Verify segments: User, Commentary, Tool(read), Commentary, Tool(edit), Assistant
         assert_eq!(app.segments.len(), 6);
         assert!(matches!(app.segments[0], Segment::User(ref u) if u == "fix bug"));
 
         match &app.segments[1] {
-            Segment::Tool {
-                name,
-                args,
-                ok,
-                output,
-                expanded,
-                ..
-            } => {
-                assert_eq!(name, "talking");
-                assert_eq!(args, "Let me inspect the file.");
-                assert_eq!(output, "Let me inspect the file.\nHere is my plan.");
-                assert_eq!(*ok, Some(true));
-                assert!(!expanded);
+            Segment::Commentary(text) => {
+                assert_eq!(text, "Let me inspect the file.\nHere is my plan.");
             }
-            other => panic!("expected talking tool, got {other:?}"),
+            other => panic!("expected commentary, got {other:?}"),
         }
 
         match &app.segments[2] {
@@ -4090,19 +4080,10 @@ mod tests {
         }
 
         match &app.segments[3] {
-            Segment::Tool {
-                name,
-                args,
-                ok,
-                output,
-                ..
-            } => {
-                assert_eq!(name, "talking");
-                assert_eq!(args, "Now I see the issue, editing line 10.");
-                assert_eq!(output, "Now I see the issue, editing line 10.");
-                assert_eq!(*ok, Some(true));
+            Segment::Commentary(text) => {
+                assert_eq!(text, "Now I see the issue, editing line 10.");
             }
-            other => panic!("expected talking tool, got {other:?}"),
+            other => panic!("expected commentary, got {other:?}"),
         }
 
         match &app.segments[4] {
@@ -4124,22 +4105,23 @@ mod tests {
             other => panic!("expected assistant answer, got {other:?}"),
         }
 
-        // Verify activity group encompasses all 4 tools
+        // Verify activity group encompasses commentary + 2 real tool calls.
+        // Commentary never counts as a call.
         assert_eq!(app.activity_groups.len(), 1);
         let g = &app.activity_groups[0];
         assert_eq!(g.seg_start, 1);
         assert_eq!(g.seg_end, 5);
-        assert_eq!(g.calls, 4);
+        assert_eq!(g.calls, 2);
 
         // Rendering check: activity collapsed header
         app.rebuild_cache(80);
         let screen = rendered(&app);
-        assert!(screen.contains("activity · 4 calls"), "header: {screen}");
+        assert!(screen.contains("activity · 2 calls"), "header: {screen}");
         assert!(screen.contains("I have finished the fix."), "answer: {screen}");
     }
 
     #[test]
-    fn talking_row_click_expands_and_renders_with_left_rail() {
+    fn commentary_renders_inside_activity_without_toggle() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
         app.streaming = true;
@@ -4153,33 +4135,34 @@ mod tests {
         app.handle_tool_notice("read".into(), "ok".into(), true, None);
         app.finish_turn(Ok(()));
 
-        // Find talking segment index
-        let talking_idx = app
+        // Commentary segment exists (not a tool row)
+        let commentary_idx = app
             .segments
             .iter()
-            .position(|s| matches!(s, Segment::Tool { name, .. } if name == "talking"))
-            .expect("talking segment must exist");
+            .position(|s| matches!(s, Segment::Commentary(_)))
+            .expect("commentary segment must exist");
 
-        // Expand activity group first so rows are rendered
+        // Expand activity group so rows are rendered
         app.activity_groups[0].expanded = true;
         app.rebuild_cache(80);
-        let screen_collapsed_tool = rendered(&app);
-        assert!(screen_collapsed_tool.contains("talking"));
-        assert!(screen_collapsed_tool.contains("First line of commentary."));
+        let screen = rendered(&app);
+        assert!(!screen.contains("talking"), "no pseudo-tool: {screen}");
+        assert!(screen.contains("First line of commentary."));
+        assert!(screen.contains("Second line of commentary."));
 
-        // Expand talking tool
-        if let Some(Segment::Tool { expanded, .. }) = app.segments.get_mut(talking_idx) {
-            *expanded = true;
-        }
+        // Commentary is not toggleable: no expanded flag, click leaves it alone
+        assert!(matches!(
+            app.segments[commentary_idx],
+            Segment::Commentary(_)
+        ));
         app.rebuild_cache(80);
-        let screen_expanded = rendered(&app);
-        assert!(screen_expanded.contains("│"));
-        assert!(screen_expanded.contains("First line of commentary."));
-        assert!(screen_expanded.contains("Second line of commentary."));
+        let screen_again = rendered(&app);
+        assert!(screen_again.contains("First line of commentary."));
+        assert!(screen_again.contains("Second line of commentary."));
     }
 
     #[test]
-    fn load_history_restores_talking_tool_when_assistant_message_has_content() {
+    fn load_history_restores_commentary_when_assistant_message_has_content() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.session.messages = vec![
             crate::providers::Message::new(crate::providers::Role::User, "inspect"),
@@ -4201,19 +4184,10 @@ mod tests {
         assert_eq!(app.segments.len(), 4);
         assert!(matches!(app.segments[0], Segment::User(ref t) if t == "inspect"));
         match &app.segments[1] {
-            Segment::Tool {
-                name,
-                args,
-                output,
-                ok,
-                ..
-            } => {
-                assert_eq!(name, "talking");
-                assert_eq!(args, "I will read src/lib.rs first.");
-                assert_eq!(output, "I will read src/lib.rs first.\nThen edit it.");
-                assert_eq!(*ok, Some(true));
+            Segment::Commentary(text) => {
+                assert_eq!(text, "I will read src/lib.rs first.\nThen edit it.");
             }
-            other => panic!("expected talking tool, got {other:?}"),
+            other => panic!("expected commentary, got {other:?}"),
         }
         match &app.segments[2] {
             Segment::Tool {
@@ -4227,11 +4201,11 @@ mod tests {
         }
         assert!(matches!(app.segments[3], Segment::Assistant { ref text, .. } if text == "done"));
         assert_eq!(app.activity_groups.len(), 1);
-        assert_eq!(app.activity_groups[0].calls, 2);
+        assert_eq!(app.activity_groups[0].calls, 1);
     }
 
     #[test]
-    fn aborted_turn_during_tool_preserves_talking_row() {
+    fn aborted_turn_during_tool_preserves_commentary_row() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
         app.streaming = true;
@@ -4246,7 +4220,8 @@ mod tests {
         // Abort mid-tool
         app.finish_turn(Err("aborted".into()));
 
-        // Talking and bash tools are preserved
+        // Commentary and bash tool are preserved
+        assert!(matches!(app.segments[0], Segment::Commentary(ref t) if t == "Starting build..."));
         let names: Vec<&str> = app
             .segments
             .iter()
@@ -4255,7 +4230,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(names, vec!["talking", "bash"]);
+        assert_eq!(names, vec!["bash"]);
 
         // No empty assistant segment remains
         assert!(!app.segments.iter().any(|s| matches!(s, Segment::Assistant { .. })));
