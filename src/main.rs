@@ -70,6 +70,14 @@ fn main() -> Result<()> {
     runtime.block_on(run(cfg, resume_id, project_lock.read_only))
 }
 
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = restore_terminal();
+    }
+}
+
 async fn run(cfg: config::Config, resume_id: Option<String>, read_only: bool) -> Result<()> {
     let startup = resume_id.is_none();
     let session = match resume_id {
@@ -81,11 +89,9 @@ async fn run(cfg: config::Config, resume_id: Option<String>, read_only: bool) ->
     };
 
     let terminal = init_terminal()?;
-    let res = tui::app::App::new(cfg, session, startup, read_only)?
-        .run(terminal)
-        .await;
-    restore_terminal()?;
-    res
+    let _guard = TerminalGuard;
+    let app = tui::app::App::new(cfg, session, startup, read_only)?;
+    app.run(terminal).await
 }
 
 fn init_terminal() -> Result<tui::app::Terminal> {
