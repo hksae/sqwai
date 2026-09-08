@@ -561,6 +561,30 @@ long-running commands.",
             parameters: json!({"type":"object","properties":{"message":{"type":"string"},"all":{"type":"boolean"}},"required":["message"]}),
         },
         ToolDef {
+            name: "git_stage",
+            kind: Kind::Mutating,
+            description: "Stage or unstage file changes in the Git index (including untracked files).",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["add", "reset"],
+                        "description": "'add' to stage changes, 'reset' to unstage (default 'add')"
+                    },
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Repo-relative file paths or glob patterns"
+                    },
+                    "all": {
+                        "type": "boolean",
+                        "description": "Stage or reset all files (equivalent to git add -A / git reset)"
+                    }
+                }
+            }),
+        },
+        ToolDef {
             name: "git_branch",
             kind: Kind::ReadOnly,
             description: "List branches or create/switch to a local branch.",
@@ -849,6 +873,21 @@ pub fn call_summary(name: &str, args: &Value) -> String {
         }
         "git_diff" => s("target"),
         "git_commit" => s("message"),
+        "git_stage" => {
+            let action = match args["action"].as_str() {
+                Some("reset") => "reset",
+                _ => "add",
+            };
+            if args["all"].as_bool().unwrap_or(false) {
+                format!("{action} all")
+            } else if let Some(arr) = args["paths"].as_array() {
+                format!("{action} {} paths", arr.len())
+            } else if let Some(p) = args["path"].as_str() {
+                format!("{action} {p}")
+            } else {
+                action.to_string()
+            }
+        }
         "git_branch" => {
             let action = s("action");
             let name = s("name");
@@ -975,6 +1014,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
                 | "edit"
                 | "multi_edit"
                 | "git_commit"
+                | "git_stage"
                 | "git_branch"
                 | "patch"
                 | "bash"
@@ -1033,6 +1073,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         "git_log" => git::log(ctx, args),
         "git_show" => git::show(ctx, args),
         "git_commit" => git::commit(ctx, args),
+        "git_stage" => git::stage(ctx, args),
         "git_branch" => git::branch(ctx, args),
         "patch" => git::patch(ctx, args),
         "ast_grep" => astgrep::ast_grep(ctx, args),
@@ -2297,6 +2338,66 @@ mod tests {
         let result = execute(&mut ctx, "git_commit", &json!({}));
         assert!(!result.ok);
         assert!(result.output.contains("non-empty message"));
+    }
+
+    #[test]
+    fn git_stage_stages_untracked_files_and_supports_reset() {
+        let (mut ctx, dir) = proj();
+        // Initially clean initial commit
+        let stage_init = execute(&mut ctx, "git_stage", &json!({"all": true}));
+        assert!(stage_init.ok, "{}", stage_init.output);
+        let commit_init = execute(&mut ctx, "git_commit", &json!({"message": "init"}));
+        assert!(commit_init.ok, "{}", commit_init.output);
+
+        // 1. Create untracked file and stage via paths
+        fs::write(dir.join("created.txt"), "hello untracked\n").unwrap();
+        let status_before = execute(&mut ctx, "git_status", &json!({}));
+        assert!(status_before.output.contains("?? created.txt"));
+
+        let stage_file = execute(&mut ctx, "git_stage", &json!({"paths": ["created.txt"]}));
+        assert!(stage_file.ok, "{}", stage_file.output);
+        let status_staged = execute(&mut ctx, "git_status", &json!({}));
+        assert!(status_staged.output.contains("A  created.txt"));
+
+        // 2. Unstage via reset
+        let unstage = execute(
+            &mut ctx,
+            "git_stage",
+            &json!({"action": "reset", "paths": ["created.txt"]}),
+        );
+        assert!(unstage.ok, "{}", unstage.output);
+        let status_unstaged = execute(&mut ctx, "git_status", &json!({}));
+        assert!(status_unstaged.output.contains("?? created.txt"));
+
+        // 3. Stage via all: true
+        let stage_all = execute(&mut ctx, "git_stage", &json!({"all": true}));
+        assert!(stage_all.ok, "{}", stage_all.output);
+        let commit = execute(&mut ctx, "git_commit", &json!({"message": "commit created"}));
+        assert!(commit.ok, "{}", commit.output);
+
+        let status_clean = execute(&mut ctx, "git_status", &json!({}));
+        assert!(!status_clean.output.contains("created.txt"));
+
+        // 4. Validation errors
+        let bad_action = execute(&mut ctx, "git_stage", &json!({"action": "invalid", "all": true}));
+        assert!(!bad_action.ok);
+        assert!(bad_action.output.contains("action must be add or reset"));
+
+        let no_args = execute(&mut ctx, "git_stage", &json!({}));
+        assert!(!no_args.ok);
+        assert!(no_args.output.contains("requires either all: true or non-empty paths"));
+
+        let forbidden_sqwai = execute(
+            &mut ctx,
+            "git_stage",
+            &json!({"paths": [".sqwai/something"]}),
+        );
+        assert!(!forbidden_sqwai.ok);
+        assert!(forbidden_sqwai.output.contains("host-owned state"));
+
+        let bad_path = execute(&mut ctx, "git_stage", &json!({"paths": ["../outside"]}));
+        assert!(!bad_path.ok);
+        assert!(bad_path.output.contains("bad path"));
     }
     #[test]
     fn tool_specs_are_stably_sorted() {

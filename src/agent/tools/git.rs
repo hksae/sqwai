@@ -157,6 +157,82 @@ pub fn commit(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     }
 }
 
+pub fn stage(ctx: &ToolCtx, args: &Value) -> Outcome {
+    let action = arg(args, "action");
+    let action = if action.trim().is_empty() {
+        "add"
+    } else {
+        action.trim()
+    };
+    if !matches!(action, "add" | "reset") {
+        return Outcome::err("git_stage action must be add or reset");
+    }
+
+    let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
+
+    let mut raw_paths = Vec::new();
+    if let Some(arr) = args.get("paths").and_then(Value::as_array) {
+        for v in arr {
+            if let Some(s) = v.as_str() {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    raw_paths.push(trimmed.to_string());
+                }
+            }
+        }
+    } else if let Some(s) = args.get("paths").and_then(Value::as_str) {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            raw_paths.push(trimmed.to_string());
+        }
+    }
+    if let Some(s) = args.get("path").and_then(Value::as_str) {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() && !raw_paths.contains(&trimmed.to_string()) {
+            raw_paths.push(trimmed.to_string());
+        }
+    }
+
+    if !all && raw_paths.is_empty() {
+        return Outcome::err("git_stage requires either all: true or non-empty paths");
+    }
+
+    if all {
+        if action == "add" {
+            run_git(ctx, &["add", "-A"])
+        } else {
+            run_git(ctx, &["reset"])
+        }
+    } else {
+        let mut clean_paths = Vec::new();
+        for p in &raw_paths {
+            let p_norm = p.replace('\\', "/");
+            if p_norm.split('/').any(|seg| seg == ".sqwai") {
+                return Outcome::err(format!("cannot stage host-owned state in path '{p}'"));
+            }
+            if p_norm.starts_with('/') || p_norm.contains("..") {
+                return Outcome::err(format!("bad path '{p}': use a repo-relative path"));
+            }
+            match ctx.resolve(p) {
+                Ok(_) => clean_paths.push(p_norm),
+                Err(e) => return Outcome::err(format!("forbidden path '{p}': {e}")),
+            }
+        }
+
+        let mut git_args: Vec<&str> = Vec::with_capacity(2 + clean_paths.len());
+        if action == "add" {
+            git_args.push("add");
+        } else {
+            git_args.push("reset");
+        }
+        git_args.push("--");
+        for p in &clean_paths {
+            git_args.push(p.as_str());
+        }
+        run_git(ctx, &git_args)
+    }
+}
+
 pub fn branch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let action = arg(args, "action");
     let name = arg(args, "name").trim();
