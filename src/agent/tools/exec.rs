@@ -189,8 +189,12 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
     // read stdout/stderr concurrently so a chatty child can't deadlock
     let out_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let err_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let out_capped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let err_capped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut readers = Vec::new();
-    let read_loop = |mut handle: Box<dyn std::io::Read + Send>, buf: Arc<Mutex<Vec<u8>>>| {
+    let read_loop = |mut handle: Box<dyn std::io::Read + Send>,
+                     buf: Arc<Mutex<Vec<u8>>>,
+                     capped: Arc<std::sync::atomic::AtomicBool>| {
         std::thread::spawn(move || {
             let mut chunk = [0u8; 8192];
             loop {
@@ -199,7 +203,14 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
                     Ok(n) => {
                         let mut b = buf.lock().unwrap();
                         if b.len() < 1_000_000 {
-                            b.extend_from_slice(&chunk[..n]);
+                            let available = 1_000_000 - b.len();
+                            let to_take = n.min(available);
+                            b.extend_from_slice(&chunk[..to_take]);
+                            if to_take < n {
+                                capped.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        } else {
+                            capped.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
                 }
@@ -207,10 +218,10 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
         })
     };
     if let Some(so) = child.stdout.take() {
-        readers.push(read_loop(Box::new(so), out_buf.clone()));
+        readers.push(read_loop(Box::new(so), out_buf.clone(), out_capped.clone()));
     }
     if let Some(se) = child.stderr.take() {
-        readers.push(read_loop(Box::new(se), err_buf.clone()));
+        readers.push(read_loop(Box::new(se), err_buf.clone(), err_capped.clone()));
     }
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
@@ -255,10 +266,16 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
         combined = String::from("no output");
     }
     let status_line = format!("(exit code {code_str})");
-    let body = if combined.len() > MAX_RETURNED {
+    let is_capped = out_capped.load(std::sync::atomic::Ordering::Relaxed)
+        || err_capped.load(std::sync::atomic::Ordering::Relaxed);
+    let body = if combined.len() > MAX_RETURNED || is_capped {
+        let note = if is_capped {
+            format!("output (capped at 2 MB) written to {}", spill(&combined).display())
+        } else {
+            format!("full output written to {}", spill(&combined).display())
+        };
         format!(
-            "full output written to {}\n{}",
-            spill(&combined).display(),
+            "{note}\n{}",
             tail_of(&combined, MAX_RETURNED)
         )
     } else {
