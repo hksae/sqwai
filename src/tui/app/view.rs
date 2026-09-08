@@ -1946,7 +1946,7 @@ impl App {
             .checked_div(context_used)
             .unwrap_or(0)
             .min(100);
-        let ctx_metrics_label = format!(" cache {cp}% · {ctx_pct}% · {tok_str} ·");
+        let mut ctx_metrics_label = format!(" cache {cp}% · {ctx_pct}% · {tok_str} ·");
 
         let model_label = format!(" {} ", self.model_cfg.id);
         let working_label = if self.streaming {
@@ -1999,7 +1999,36 @@ impl App {
         // wide, pushed the right-hand group past the edge and shifted every
         // click target computed below.
         let left = format!(" {}  {}", self.mode.label(), plan_label);
-        let lw = cols(&left) as u16;
+        let left_base_cols = cols(&left);
+
+        let mut fixed_len: usize = 1
+            + cols(&agents_label)
+            + cols(&ctx_metrics_label)
+            + cols(&working_label)
+            + cols(&model_label)
+            + cols(&ef_label)
+            + cols(&lsp_label); // mode chip always present
+
+        if left_base_cols + fixed_len > w as usize && !ctx_metrics_label.is_empty() {
+            ctx_metrics_label.clear();
+            fixed_len = 1
+                + cols(&agents_label)
+                + cols(&working_label)
+                + cols(&model_label)
+                + cols(&ef_label)
+                + cols(&lsp_label);
+        }
+
+        let avail_for_act = (w as usize).saturating_sub(left_base_cols + fixed_len);
+        let activity = if avail_for_act < 8 {
+            String::new()
+        } else if cols(&activity) > avail_for_act {
+            truncate_display_width(&activity, avail_for_act)
+        } else {
+            activity
+        };
+
+        let lw = (left_base_cols + cols(&activity)) as u16;
 
         // Everything except the directory, which is the least important item
         // and therefore the one that yields when the row is too narrow. `pad`
@@ -2007,13 +2036,6 @@ impl App {
         // the terminal: at width 70 a directory named `仕事プロジェクト`
         // produced a 72-column status bar, and the click targets derived from
         // these same numbers landed outside the row.
-        let fixed_len: usize = 1
-            + cols(&agents_label)
-            + cols(&ctx_metrics_label)
-            + cols(&working_label)
-            + cols(&model_label)
-            + cols(&ef_label)
-            + cols(&lsp_label); // mode chip always present
         let dir_budget = (w as usize)
             .saturating_sub(lw as usize + fixed_len)
             .min(DIR_MAX_COLS);

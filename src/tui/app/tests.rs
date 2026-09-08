@@ -2919,6 +2919,33 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn status_bar_with_activity_respects_width_and_click_targets() {
+        for activity_setup in [
+            |app: &mut App| app.last_checkpoint = Some("edit src/main.rs".into()),
+            |app: &mut App| app.bar_error = Some("network timeout 408".into()),
+            |app: &mut App| app.retry_line = Some("retrying in 2s (1/3)".into()),
+        ] {
+            for w in [60u16, 80, 100, 120] {
+                let mut app = test_app("http://127.0.0.1:9/v1".into());
+                app.startup = false;
+                app.cwd_label = "my-project".into();
+                app.plan_step_label = "step 1/3".into();
+                activity_setup(&mut app);
+                let spans = app.status_bar_spans(w);
+                let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+                let used = unicode_width::UnicodeWidthStr::width(text.as_str());
+                assert!(
+                    used <= w as usize,
+                    "at width {w}: status bar is {used} columns: {text:?}"
+                );
+                if let Some((from, to)) = app.ef_click {
+                    assert!(to <= w && from <= to, "click target out of bounds: {from}..{to} at {w}");
+                }
+            }
+        }
+    }
     /// The working spinner reads as part of the model group, right of the
     /// model name, in the chip's accent colour but without its inverted
     /// background.
