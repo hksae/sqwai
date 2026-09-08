@@ -1076,6 +1076,53 @@ mod tests {
     }
 
     #[test]
+    fn pinned_session_frame_aligns_columns_and_respects_narrow_terminal() {
+        use crate::providers::Role;
+        use unicode_width::UnicodeWidthStr;
+
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let mut s = Session::new("m".into(), 1000);
+        s.push(Role::User, "тестовая сессия (wide / cyrillic) 🚀");
+        s.pinned = true;
+        app.sessions = vec![s];
+        app.menu_rect.width = 40;
+        app.cache_w = 40;
+        app.open_menu(Menu::Sessions);
+
+        let render_line = |l: &ratatui::text::Line| -> String {
+            l.spans.iter().map(|sp| sp.content.as_ref()).collect()
+        };
+
+        let top_row = app
+            .menu_rows
+            .iter()
+            .find(|(l, _)| render_line(l).contains("pinned"))
+            .map(|(l, _)| render_line(l))
+            .expect("top border");
+        let bot_row = app
+            .menu_rows
+            .iter()
+            .find(|(l, _)| render_line(l).starts_with('└'))
+            .map(|(l, _)| render_line(l))
+            .expect("bottom border");
+        let content_row = app
+            .menu_rows
+            .iter()
+            .find(|(l, _)| render_line(l).starts_with('│'))
+            .map(|(l, _)| render_line(l))
+            .expect("content row");
+
+        let w_top = UnicodeWidthStr::width(top_row.as_str());
+        let w_bot = UnicodeWidthStr::width(bot_row.as_str());
+        let w_row = UnicodeWidthStr::width(content_row.as_str());
+
+        assert_eq!(w_top, w_bot, "top and bottom borders must match");
+        assert_eq!(w_top, w_row, "row and borders must match in display width");
+        assert!(w_top <= 40, "must fit within menu rect width: {w_top} > 40");
+    }
+
+    #[test]
+
     fn debug_enter_updates_visible_value() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.open_menu(Menu::Debug);

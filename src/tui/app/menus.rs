@@ -1232,11 +1232,16 @@ impl App {
                 let cur_id = self.session.id.to_string();
                 let pinned: Vec<&Session> = visible.iter().filter(|s| s.pinned).copied().collect();
                 if !pinned.is_empty() {
-                    const FRAME_W: usize = 72;
+                    let menu_w = if self.menu_rect.width > 0 {
+                        self.menu_rect.width
+                    } else {
+                        78.min(self.cache_w.saturating_sub(4)).max(30)
+                    };
+                    let frame_w = (menu_w as usize).saturating_sub(4).max(24).min(72);
                     let head = " pinned ";
                     let mid = {
                         let label = format!(" {head} ");
-                        let fill = FRAME_W.saturating_sub(label.chars().count());
+                        let fill = frame_w.saturating_sub(super::view::cols(&label));
                         format!(
                             "{}{}{}",
                             "─".repeat(fill / 2),
@@ -1250,11 +1255,11 @@ impl App {
                     ));
                     for s in &pinned {
                         self.menu_rows
-                            .push(session_row(s, s.id.to_string() == cur_id, true));
+                            .push(session_row(s, s.id.to_string() == cur_id, Some(frame_w)));
                     }
                     self.menu_rows.push(row(
                         Line::from(vec![Span::styled(
-                            format!("└{}┘", "─".repeat(FRAME_W)),
+                            format!("└{}┘", "─".repeat(frame_w)),
                             Theme::rule_color(),
                         )]),
                         MenuAction::None,
@@ -1265,7 +1270,7 @@ impl App {
                         continue;
                     }
                     self.menu_rows
-                        .push(session_row(s, s.id.to_string() == cur_id, false));
+                        .push(session_row(s, s.id.to_string() == cur_id, None));
                 }
                 if visible.is_empty() {
                     let note = if q.is_empty() {
@@ -1930,8 +1935,7 @@ fn plan_rows(
     rows
 }
 
-fn session_row(s: &Session, is_current: bool, framed: bool) -> (Line<'static>, MenuAction) {
-    const FRAME_CONTENT: usize = 72;
+fn session_row(s: &Session, is_current: bool, framed: Option<usize>) -> (Line<'static>, MenuAction) {
     let badge = if s.forked_from_id.is_some() {
         "[fork] "
     } else {
@@ -1949,7 +1953,7 @@ fn session_row(s: &Session, is_current: bool, framed: bool) -> (Line<'static>, M
         dim.push_str(&format!(" · from '{}'", truncate_chars(parent, 20)));
     }
     let action = MenuAction::OpenSession(s.id.to_string());
-    if !framed {
+    let Some(frame_w) = framed else {
         return (
             Line::from(vec![
                 Span::styled(left, Theme::accent()),
@@ -1957,14 +1961,21 @@ fn session_row(s: &Session, is_current: bool, framed: bool) -> (Line<'static>, M
             ]),
             action,
         );
-    }
-    let text_len = left.chars().count() + 2 + dim.chars().count();
-    let pad = FRAME_CONTENT.saturating_sub(text_len);
+    };
+    let left_w = super::view::cols(&left);
+    let avail_for_dim = frame_w.saturating_sub(left_w + 2);
+    let dim_truncated = if super::view::cols(&dim) > avail_for_dim {
+        super::view::truncate_display_width(&dim, avail_for_dim)
+    } else {
+        dim
+    };
+    let dim_w = super::view::cols(&dim_truncated);
+    let pad = frame_w.saturating_sub(left_w + 2 + dim_w);
     (
         Line::from(vec![
             Span::styled("│".to_string(), Theme::rule_color()),
             Span::styled(left, Theme::accent()),
-            Span::styled(format!("  {dim}"), Theme::dim()),
+            Span::styled(format!("  {dim_truncated}"), Theme::dim()),
             Span::styled(" ".repeat(pad), Theme::base()),
             Span::styled("│".to_string(), Theme::rule_color()),
         ]),

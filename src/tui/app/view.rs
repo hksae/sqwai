@@ -2491,11 +2491,11 @@ fn pad_display(s: &str, width: usize) -> String {
 const DIR_MAX_COLS: usize = 20;
 
 /// Terminal columns a status-bar label occupies.
-fn cols(s: &str) -> usize {
+pub(super) fn cols(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
-fn truncate_display_width(s: &str, width: usize) -> String {
+pub(super) fn truncate_display_width(s: &str, width: usize) -> String {
     if UnicodeWidthStr::width(s) <= width {
         return s.to_string();
     }
