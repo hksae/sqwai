@@ -649,11 +649,13 @@ impl App {
 
     // ---------- rendering ----------
 
-    /// cache key for a segment's rendered content; changing it forces a repaint
+    /// cache key for a segment's rendered content; changing it forces a repaint.
+    /// Byte lengths (O(1)) rather than char counts: counting chars over the
+    /// whole transcript on every streamed frame was the long-chat lag.
     pub(super) fn seg_key(&self, seg: &Segment) -> usize {
         match seg {
-            Segment::User(t) => t.chars().count(),
-            Segment::Assistant { text, .. } => text.chars().count(),
+            Segment::User(t) => t.len(),
+            Segment::Assistant { text, .. } => text.len(),
             Segment::AskUser {
                 questions,
                 picked,
@@ -727,7 +729,7 @@ impl App {
                 started,
                 ..
             } => {
-                text.chars().count() * 2
+                text.len() * 2
                     + *expanded as usize
                     + started.map(|t| t.elapsed().as_secs() as usize).unwrap_or(0) / 8
             }
@@ -739,10 +741,10 @@ impl App {
                 diff,
                 expanded,
             } => {
-                let mut k = name.chars().count()
-                    + args.chars().count()
-                    + output.chars().count()
-                    + diff.as_ref().map(|d| d.chars().count() * 3).unwrap_or(0)
+                let mut k = name.len()
+                    + args.len()
+                    + output.len()
+                    + diff.as_ref().map(|d| d.len() * 3).unwrap_or(0)
                     + usize::from(*expanded) * 5;
                 k = match ok {
                     // running: the spinner frame is part of the key
@@ -1616,7 +1618,19 @@ impl App {
             return;
         }
         let is_form = self.is_form_menu();
-        self.build_menu_rows();
+        // Event handlers rebuild rows when the menu actually changes. A full
+        // rebuild here would run on every frame — for /plan that means
+        // re-reading and re-parsing the plan file 20 times a second. Throttle
+        // the background refresh so step updates from a running agent still
+        // appear, at a fraction of the cost.
+        let now = std::time::Instant::now();
+        let stale = self
+            .menu_built_at
+            .is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_millis(500));
+        if stale {
+            self.build_menu_rows();
+            self.menu_built_at = Some(now);
+        }
 
         // fixed extra lines under the content: hint footer and transient status
         // Menu footers are intentionally empty: controls should be consistent
@@ -1640,7 +1654,10 @@ impl App {
         };
         let max_h = area.height.saturating_sub(4).max(4);
         let h = (inner as u16 + 2).clamp(4, max_h);
-        let w = 78.min(area.width.saturating_sub(4)).max(30);
+        // Width cap order matters: the 30-column minimum must not win over
+        // the terminal's real width — in a 20..29-column terminal that would
+        // push the menu rectangle past the right edge (§TUI invariants).
+        let w = 78.min(area.width.saturating_sub(4)).max(30).min(area.width);
         let rect = Rect {
             x: area.x + (area.width.saturating_sub(w)) / 2,
             y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -2578,34 +2595,35 @@ mod frame_tests {
 }
 
 fn segment_layout_key(seg: &Segment) -> u64 {
-    // Include the stable identifying text, but not the live spinner/text body;
-    // normal content changes are handled by seg_key, while insertions/removals
-    // must invalidate the entire positional cache.
+    // Detect structural changes (insertions/removals/reordering) in O(1) per
+    // segment. Hashing full text here cost O(whole conversation) on every
+    // streamed frame — the long-chat stutter. Content changes are seg_key's
+    // job (byte length flips on every append), so lengths suffice here.
     let mut h = std::collections::hash_map::DefaultHasher::new();
     std::mem::discriminant(seg).hash(&mut h);
     match seg {
-        Segment::User(text) | Segment::Assistant { text, .. } => text.hash(&mut h),
+        Segment::User(text) | Segment::Assistant { text, .. } => text.len().hash(&mut h),
         Segment::AskUser { questions, .. } => {
             for q in questions {
-                q.header.hash(&mut h);
-                q.question.hash(&mut h);
+                q.header.len().hash(&mut h);
+                q.question.len().hash(&mut h);
             }
         }
         Segment::PlanProposal { draft, .. } => {
-            draft.goal.text.hash(&mut h);
+            draft.goal.text.len().hash(&mut h);
             draft.steps.len().hash(&mut h);
         }
-        Segment::Thinking { .. } => {}
+        Segment::Thinking { text, .. } => text.len().hash(&mut h),
         Segment::Subagent { id, task, .. } => {
             id.hash(&mut h);
-            task.hash(&mut h);
+            task.len().hash(&mut h);
         }
         Segment::Tool { name, args, .. } => {
-            name.hash(&mut h);
-            args.hash(&mut h);
+            name.len().hash(&mut h);
+            args.len().hash(&mut h);
         }
         Segment::Status { text, kind, .. } => {
-            text.hash(&mut h);
+            text.len().hash(&mut h);
             std::mem::discriminant(kind).hash(&mut h);
         }
     }

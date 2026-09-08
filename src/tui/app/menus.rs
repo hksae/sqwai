@@ -351,18 +351,23 @@ impl App {
         )
     }
 
-    pub(super) fn menu_hover(&mut self, row: u16) {
-        if self.is_form_menu() {
-            return;
+    pub(super) fn menu_hover(&mut self, row: u16) -> Option<usize> {
+        let r = self.menu_rect;
+        // forms highlight nothing; clicks/hover on the frame (borders) or on
+        // rows past the last entry must not select anything — otherwise a
+        // click on the top border would run the first menu item (rel == 0)
+        if self.is_form_menu() || r.height == 0 || row <= r.y || row + 1 >= r.bottom() {
+            return None;
         }
-        if self.menu_rect.height > 0 && row >= self.menu_rect.y && row < self.menu_rect.bottom() {
-            let rel = row.saturating_sub(self.menu_rect.y + 1) as usize; // skip border
-            let abs = self.menu_scroll + rel;
-            if abs < self.menu_rows.len() && abs != self.menu_sel {
-                self.menu_sel = abs;
-                self.dirty = true;
-            }
+        let abs = self.menu_scroll + (row - r.y - 1) as usize;
+        if abs >= self.menu_rows.len() {
+            return None;
         }
+        if abs != self.menu_sel {
+            self.menu_sel = abs;
+            self.dirty = true;
+        }
+        Some(abs)
     }
 
     /// id of the session row currently highlighted in the sessions menu
@@ -379,10 +384,12 @@ impl App {
     }
 
     pub(super) fn menu_click(&mut self, row: u16) {
-        self.menu_hover(row);
+        let Some(sel) = self.menu_hover(row) else {
+            return;
+        };
         // confirmation prompts: honor the exact row clicked (label/cancel/confirm)
         if let Some(Menu::ConfirmDelete { .. }) = self.cur_menu() {
-            let Some((_, action)) = self.menu_rows.get(self.menu_sel) else {
+            let Some((_, action)) = self.menu_rows.get(sel) else {
                 return;
             };
             self.run_action(action.clone());

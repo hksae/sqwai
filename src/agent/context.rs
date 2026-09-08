@@ -164,6 +164,12 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
 /// Return the host-owned instruction used when a session resumes mid-step.
 /// A plan `start` without a later `finish`, `block`, or `cancel` is evidence
 /// that the process stopped while work was in progress.
+///
+/// The journal signal alone is not trusted: steps from older, abandoned
+/// plans leave `start` records too, and a plan file can be revised after the
+/// crash. The open step is only reported when it belongs to the currently
+/// active plan for this session and the plan's own state agrees that the
+/// step is in progress (§2.1.4 host-owned state over journal claims).
 pub fn resume_notice(root: &std::path::Path, session_id: &str) -> Option<String> {
     let records = crate::agent::journal::Journal::records_for(root, session_id).ok()?;
     let mut open_step = None;
@@ -181,6 +187,19 @@ pub fn resume_notice(root: &std::path::Path, session_id: &str) -> Option<String>
         }
     }
     let (step_id, start_seq) = open_step?;
+    // cross-check against the active plan: a step that the plan does not
+    // list, or lists as not started, must not produce a phantom "resume"
+    let active = crate::plan::open_active_for_session(root, Some(session_id))
+        .ok()
+        .flatten();
+    if let Some(plan) = &active {
+        let in_progress = plan.steps.iter().any(|step| {
+            step.id == step_id && matches!(step.status, crate::plan::StepStatus::InProgress)
+        });
+        if !in_progress {
+            return None;
+        }
+    }
     let recent = records
         .iter()
         .filter(|record| record.seq > start_seq)

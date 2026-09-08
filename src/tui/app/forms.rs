@@ -346,7 +346,13 @@ impl App {
                     .and_then(|i| WireFormat::ALL.get(i))
                     .copied()
                     .unwrap_or(WireFormat::Openai);
-                if name.is_none() && self.cfg.providers.contains_key(&new_name) {
+                // Uniqueness must hold against every other entry: on rename,
+                // the name being edited is excluded, but a collision with a
+                // different existing provider is a hard error — otherwise the
+                // insert below would silently destroy that provider.
+                if name.as_deref() != Some(new_name.as_str())
+                    && self.cfg.providers.contains_key(&new_name)
+                {
                     self.status(
                         &format!("provider '{new_name}' already exists"),
                         StatusKind::Err,
@@ -401,7 +407,9 @@ impl App {
                     return;
                 };
                 let effort = EffortLevel::from_str(&th).unwrap_or(EffortLevel::Off);
-                if key.is_none() && self.cfg.models.contains_key(&new_key) {
+                if key.as_deref() != Some(new_key.as_str())
+                    && self.cfg.models.contains_key(&new_key)
+                {
                     self.status(
                         &format!("model '{new_key}' already exists"),
                         StatusKind::Err,

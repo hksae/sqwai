@@ -645,16 +645,39 @@ pub fn wrap_tagged(
     let mut tags: Vec<Option<usize>> = Vec::new();
 
     for (line, tag) in lines {
+        // blank line: render an explicit empty styled row so the buffer cell
+        // is reset (a span-less line would leave stale content behind)
+        if line.spans.iter().all(|s| s.content.is_empty()) {
+            rows.push(Line::from(vec![Span::styled(String::new(), Theme::base())]));
+            tags.push(tag);
+            continue;
+        }
+        // fast path: a line that already fits (and has no newlines) is its
+        // own wrap result — push it unchanged instead of paying the per-char
+        // cells buffer on every assembly pass. This pass runs on every
+        // streamed frame, so the constant factor matters for long chats.
+        let has_newline = line.spans.iter().any(|s| s.content.contains('\n'));
+        let total_width: usize = line
+            .spans
+            .iter()
+            .map(|s| {
+                s.content
+                    .chars()
+                    .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+                    .sum::<usize>()
+            })
+            .sum();
+        if !has_newline && total_width <= width {
+            rows.push(line);
+            tags.push(tag);
+            continue;
+        }
+
         let mut cells: Vec<(Style, char)> = Vec::new();
         for span in &line.spans {
             for c in span.content.chars() {
                 cells.push((span.style, c));
             }
-        }
-        if cells.is_empty() {
-            rows.push(Line::from(vec![Span::styled(String::new(), Theme::base())]));
-            tags.push(tag);
-            continue;
         }
 
         let mut cur: Vec<(Style, char)> = Vec::new();

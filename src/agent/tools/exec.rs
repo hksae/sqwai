@@ -82,9 +82,27 @@ fn shell() -> (ShellKind, &'static str, &'static str) {
 
 /// build a Command runnable in `cwd`
 fn spawn_command(ctx: &ToolCtx, command: &str, cwd: Option<&str>) -> Command {
-    let (_kind, program, flag) = shell();
+    let (kind, program, flag) = shell();
     let mut c = Command::new(program);
-    c.arg(flag).arg(command);
+    #[cfg(windows)]
+    {
+        if kind == ShellKind::Cmd {
+            // cmd.exe /C does not follow CommandLineToArgvW quoting rules:
+            // passing the command through .arg() re-quotes it, so embedded
+            // quotes (paths with spaces, quoted arguments) arrive mangled
+            // and cmd reports "not recognized as an internal or external
+            // command". raw_arg hands the string to cmd.exe verbatim.
+            use std::os::windows::process::CommandExt;
+            c.arg(flag).raw_arg(command);
+        } else {
+            c.arg(flag).arg(command);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = kind;
+        c.arg(flag).arg(command);
+    }
     match cwd {
         Some(d) => {
             if let Ok(p) = ctx.resolve(d) {
@@ -510,11 +528,14 @@ mod tests {
     /// A loop that appends a timestamp line to `marker` about twenty times a
     /// second. Same platform split: `cmd` has no `sleep`/`seq`/`date`, so it
     /// loops with `for /L` and paces with `ping`. Single `%i` (a command
-    /// line, not a batch file); the path is quoted for spaces.
+    /// line, not a batch file); the path is quoted for spaces. The loop runs
+    /// for ~120s: far longer than any scheduling delay a loaded test machine
+    /// can produce, so the elapsed bound below can only fail if the child
+    /// really was left running.
     #[cfg(unix)]
     fn marker_loop_command(marker: &std::path::Path) -> String {
         format!(
-            "for i in $(seq 1 200); do date +%s%N >> {}; sleep 0.05; done",
+            "for i in $(seq 1 2400); do date +%s%N >> {}; sleep 0.05; done",
             marker.display()
         )
     }
@@ -522,7 +543,7 @@ mod tests {
     #[cfg(windows)]
     fn marker_loop_command(marker: &std::path::Path) -> String {
         format!(
-            "for /L %i in (1,1,200) do @echo %time%>>\"{}\" & @ping -n 1 -w 40 127.0.0.1",
+            "for /L %i in (1,1,2400) do @echo %time%>>\"{}\" & @ping -n 1 -w 40 127.0.0.1",
             marker.display()
         )
     }
@@ -589,13 +610,12 @@ mod tests {
             outcome.ok, outcome.output
         );
         // The real proof: `bash` must not block until the child exits on its
-        // own (the loop runs for up to 10s). If the process were merely
-        // abandoned rather than killed, the pipe readers this call joins on
-        // would keep it waiting for the full 10s regardless of the flag.
-        // The 5s bound leaves head room for loaded CI machines while still
-        // failing a full 10s block.
+        // own (the loop runs for ~120s). If the process were merely abandoned
+        // rather than killed, the pipe readers this call joins on would keep
+        // it waiting for that full span; a working kill returns promptly even
+        // on a loaded machine.
         assert!(
-            elapsed < std::time::Duration::from_secs(5),
+            elapsed < std::time::Duration::from_secs(10),
             "bash() blocked until the child finished on its own: {elapsed:?}"
         );
 

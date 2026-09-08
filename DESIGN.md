@@ -1902,4 +1902,16 @@ To enable parallel agent execution without interrupting the developer's working 
   may refuse legitimate commands. Mitigations: fallback to Mythos model, configurable safety
   levels (AG), journaled refusals, and user‑controlled override.
 
+### Findings vs notes
+
+Findings (bugs, issues, vulnerabilities found during code review) are not stored in `note`.
+They belong to:
+
+- `plan add` if they should be fixed now.
+- GitHub issues if they are deferred.
+- `summary` of a step if they were found during that step.
+
+`note` is reserved for decisions, assumptions, lessons, blockers, and rejected approaches.
+Findings are observations, not model claims with special anchor status.
+
 

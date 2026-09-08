@@ -264,6 +264,8 @@ pub struct App {
     /// absolute top line of the viewport when not following (None-equivalent: follow == true)
     view_top: usize,
     spinner_tick: usize,
+    /// last time draw_menu rebuilt menu_rows (throttled background refresh)
+    menu_built_at: Option<std::time::Instant>,
     quit: bool,
 
     dirty: bool,
@@ -510,6 +512,7 @@ impl App {
             follow: true,
             view_top: 0,
             spinner_tick: 0,
+            menu_built_at: None,
             quit: false,
             dirty: true,
             cache_w: 0,

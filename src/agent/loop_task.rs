@@ -1142,7 +1142,7 @@ async fn run_agent(
         let mut interrupted = false;
 
         // execute each call, feeding results back into the conversation
-        for call in &turn.calls {
+        for (call_index, call) in turn.calls.iter().enumerate() {
             // A cancellation from the previous call must not leak into this
             // one: the flag is per-request, reset right before dispatch.
             ctx.cancel
@@ -1454,6 +1454,11 @@ async fn run_agent(
                         );
                     }
                     if !diagnostics.is_empty() {
+                        // any diagnostics are worth showing to the model, but
+                        // only real errors (severity 1) fail the tool result:
+                        // the file is already written, and a hint or
+                        // information entry must not make the model believe
+                        // the write failed and retry it.
                         outcome.output.push_str("\nLSP diagnostics:\n");
                         for item in diagnostics {
                             for diagnostic in item.diagnostics {
@@ -1465,7 +1470,7 @@ async fn run_agent(
                                 ));
                             }
                         }
-                        outcome.ok = false;
+                        outcome.ok = outcome.ok && errors == 0;
                     }
                 }
             }
@@ -1608,7 +1613,19 @@ async fn run_agent(
             messages.push(Message::tool_result(&call.id, outcome.output, !outcome.ok));
             if interrupted {
                 // §3.7: Esc means stop — the remaining calls in this batch
-                // (if the model requested several) do not run.
+                // (if the model requested several) do not run. Each of them
+                // still needs a tool_result: a tool_use without a matching
+                // tool_result is a fatal protocol error for Anthropic
+                // (400 "Each tool_use must have a corresponding tool_result")
+                // and for OpenAI (orphan tool_call_id), which would lock the
+                // session permanently.
+                for rest in &turn.calls[call_index + 1..] {
+                    messages.push(Message::tool_result(
+                        &rest.id,
+                        "cancelled by user — this tool call was not run".to_string(),
+                        true,
+                    ));
+                }
                 break;
             }
         }

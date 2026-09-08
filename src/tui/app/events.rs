@@ -757,7 +757,9 @@ impl App {
                             }
                         }
                     }
-                    MouseEventKind::Moved if !self.menu_stack.is_empty() => self.menu_hover(m.row),
+                    MouseEventKind::Moved if !self.menu_stack.is_empty() => {
+                        let _ = self.menu_hover(m.row);
+                    }
                     MouseEventKind::Down(MouseButton::Left)
                         if self.in_input_rect(m.row, m.column) =>
                     {

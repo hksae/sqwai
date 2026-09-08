@@ -154,6 +154,16 @@ fn heuristic_classify(shell: ShellKind, cmd: &str) -> Verdict {
             return Verdict::NeedsApproval("forceful git operation");
         }
     }
+    // force push via refspec: `git push origin +master` moves the force flag
+    // into the refspec, so the substring checks above never see it
+    if lower.contains("git push") {
+        let tokens: Vec<&str> = lower.split_whitespace().collect();
+        if let Some(pos) = tokens.iter().position(|t| *t == "push")
+            && tokens[pos + 1..].iter().any(|t| t.starts_with('+'))
+        {
+            return Verdict::NeedsApproval("forceful git operation");
+        }
+    }
 
     // --- package publishing ------------------------------------------------
     for p in ["npm publish", "cargo publish", "pip upload", "twine upload"] {

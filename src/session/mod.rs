@@ -324,6 +324,12 @@ impl Session {
     /// Load only the first visible window of saved sessions. The directory is
     /// ordered by file modification time before deserializing, so opening the
     /// menu does not parse the complete conversation history of every session.
+    ///
+    /// Pinned sessions are exempt from the window: with more sessions on disk
+    /// than `limit`, a pinned one would otherwise be unreachable from the
+    /// menu, defeating the point of pinning. Older entries are checked by a
+    /// raw-string scan for the serialized `"pinned":true` flag instead of a
+    /// full history parse; a false positive can only cost one extra menu row.
     #[allow(dead_code)]
     pub fn list_visible(limit: usize) -> Result<Vec<Self>> {
         let dir = Self::sessions_dir()?;
@@ -337,13 +343,35 @@ impl Session {
             }
         }
         entries.sort_by_key(|e| std::cmp::Reverse(e.0));
-        let mut out = Vec::new();
-        for (_, path) in entries.into_iter().take(limit.max(1)) {
-            if let Some(mut session) = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|raw| serde_json::from_str::<Self>(&raw).ok())
-            {
-                session.strip_system_messages();
+
+        let load = |path: &std::path::Path| -> Option<Self> {
+            let mut session: Self =
+                serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+            session.strip_system_messages();
+            Some(session)
+        };
+
+        let limit = limit.max(1);
+        let mut out: Vec<Self> = Vec::new();
+        let mut recent: Vec<&(Option<std::time::SystemTime>, std::path::PathBuf)> = Vec::new();
+        for (index, entry) in entries.iter().enumerate() {
+            if out.len() >= limit {
+                break;
+            }
+            let pinned_beyond_window = index >= limit
+                && std::fs::read_to_string(&entry.1)
+                    .map(|raw| raw.contains("\"pinned\":true"))
+                    .unwrap_or(false);
+            if pinned_beyond_window {
+                if let Some(session) = load(&entry.1) {
+                    out.push(session);
+                }
+            } else {
+                recent.push(entry);
+            }
+        }
+        for (_, path) in recent.into_iter().take(limit - out.len()) {
+            if let Some(session) = load(path) {
                 out.push(session);
             }
         }
