@@ -2227,6 +2227,16 @@ async fn propose_plan(
     let budget_limit = plan_limits
         .budget_tokens(context_limit)
         .max(tools::MIN_PLAN_BUDGET_TOKENS);
+    let active_plan = match plan::open_active(root) {
+        Ok(plan) => plan,
+        Err(e) => return tools::Outcome::err(format!("active plan unreadable: {e:#}")),
+    };
+    if let Err(r) = plan::validate_proposal_invariants(active_plan.as_ref(), &draft_args) {
+        return tools::Outcome::err(format!(
+            "plan proposal rejected [{}]: {} — {}",
+            r.code, r.reason, r.hint
+        ));
+    }
     let draft = match draft_args.build(budget_limit, &limits) {
         Ok(draft) => draft,
         Err(r) => {

@@ -582,6 +582,78 @@ pub fn abandon(plan: &mut Plan) {
     plan.revision += 1;
 }
 
+/// Host-side validation of a proposed plan draft against the current active plan (§2.1.6).
+///
+/// If the goal is unchanged (the model is refining/adjusting steps under the same goal),
+/// the model is not allowed to silently weaken commitments:
+/// 1. Active constraints cannot be dropped.
+/// 2. Active acceptance criteria cannot be dropped.
+/// 3. Pending steps cannot be silently deleted if work was already attempted on them.
+///
+/// If the goal is changed (user-initiated goal revision or model-proposed pivot),
+/// a new goal is declared and the diff will be explicitly reviewed and accepted by the user.
+pub fn validate_proposal_invariants(
+    active: Option<&Plan>,
+    draft: &PlanDraftArgs,
+) -> Result<(), Rejection> {
+    let Some(active) = active else {
+        return Ok(());
+    };
+
+    let same_goal = active.goal.text.trim() == draft.goal.trim();
+    if same_goal {
+        // 1. Constraints monotonicity under the same goal
+        for constraint in &active.constraints {
+            let found = draft
+                .constraints
+                .iter()
+                .any(|c| c.trim() == constraint.trim());
+            if !found {
+                return Err(Rejection::new(
+                    "weakened_constraints",
+                    format!("proposal removes active constraint '{constraint}' under the same goal"),
+                    "keep existing constraints or propose a goal revision if the task direction changed",
+                ));
+            }
+        }
+
+        // 2. Acceptance criteria preservation under the same goal
+        for acc in &active.acceptance {
+            let found = draft
+                .acceptance
+                .iter()
+                .any(|a| a.trim() == acc.text.trim());
+            if !found {
+                return Err(Rejection::new(
+                    "dropped_acceptance",
+                    format!("proposal drops active acceptance item '{}' under the same goal", acc.text),
+                    "keep existing acceptance criteria; manual acceptance can only be waived by user",
+                ));
+            }
+        }
+
+        // 3. Pending steps preservation: cannot drop steps that had attempts or evidence
+        for step in &active.steps {
+            if !step.evidence.is_empty() {
+                // If a step has host evidence, its work or title should remain tracked
+                let title_retained = draft
+                    .steps
+                    .iter()
+                    .any(|s| s.title.trim() == step.title.trim());
+                if !title_retained {
+                    return Err(Rejection::new(
+                        "dropped_evidenced_step",
+                        format!("proposal drops step '{}' which already has recorded evidence", step.title),
+                        "steps with recorded evidence cannot be removed without trace; keep them in the proposal",
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     pub max_steps: usize,
@@ -1588,4 +1660,41 @@ mod tests {
         assert!(plans.join("corrupt").join(format!("{id}.json")).exists());
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn proposal_invariants_reject_dropping_constraints_under_same_goal() {
+        let active = new_plan(); // has constraint: "no new dependencies", acceptance: "cmd: cargo test"
+        let mut draft = PlanDraftArgs {
+            goal: active.goal.text.clone(),
+            constraints: vec![], // dropped!
+            acceptance: vec!["cmd: cargo test".into()],
+            steps: vec![NewStep {
+                title: "step 1".into(),
+                kind: None,
+                refs: vec![],
+            }],
+        };
+
+        // 1. Weakened constraints rejected
+        let res = validate_proposal_invariants(Some(&active), &draft);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().code, "weakened_constraints");
+
+        // 2. Preserved constraints accepted
+        draft.constraints = active.constraints.clone();
+        assert!(validate_proposal_invariants(Some(&active), &draft).is_ok());
+
+        // 3. Dropped acceptance rejected
+        draft.acceptance = vec![];
+        let res = validate_proposal_invariants(Some(&active), &draft);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().code, "dropped_acceptance");
+
+        // 4. Changing goal allows new constraints and acceptance
+        draft.goal = "A completely different goal".into();
+        draft.constraints = vec!["new constraint".into()];
+        draft.acceptance = vec!["new acceptance".into()];
+        assert!(validate_proposal_invariants(Some(&active), &draft).is_ok());
+    }
 }
+

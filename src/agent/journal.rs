@@ -583,6 +583,69 @@ impl Journal {
         out
     }
 
+    /// Check if file modifications attached as evidence to `finished_step` overlap
+    /// with `refs` of any pending or other in_progress steps (§2.1.4).
+    pub fn step_misattribution_warnings(
+        root: &Path,
+        active: &crate::plan::Plan,
+        finished_step: &str,
+    ) -> Vec<String> {
+        let Some(step) = active.step(finished_step) else {
+            return Vec::new();
+        };
+        let other_steps_with_refs: Vec<(&str, &[String])> = active
+            .steps
+            .iter()
+            .filter(|s| {
+                s.id != finished_step
+                    && matches!(
+                        s.status,
+                        crate::plan::StepStatus::Pending | crate::plan::StepStatus::InProgress
+                    )
+                    && !s.refs.is_empty()
+            })
+            .map(|s| (s.id.as_str(), s.refs.as_slice()))
+            .collect();
+
+        if other_steps_with_refs.is_empty() {
+            return Vec::new();
+        }
+
+        let mut warnings = Vec::new();
+        for reference in &step.evidence {
+            let record = Self::evidence(root, &active.id, Some(finished_step), reference, None)
+                .ok()
+                .flatten();
+            let Some(record) = record else { continue };
+            if record.kind != "file_diff" {
+                continue;
+            }
+            let Some(path) = record.fields.get("path").and_then(Value::as_str) else {
+                continue;
+            };
+
+            for (other_id, refs) in &other_steps_with_refs {
+                let matches = refs.iter().any(|r| {
+                    let r_clean = r.split("::").next().unwrap_or(r);
+                    path == r_clean || path.ends_with(r_clean) || r_clean.ends_with(path)
+                });
+                if matches {
+                    warnings.push(format!(
+                        "modified file '{path}' overlaps with refs of step {other_id}; \
+                         if this was done in error, use /undo step {finished_step} to revert"
+                    ));
+                    break;
+                }
+            }
+            if warnings.len() >= 3 {
+                break;
+            }
+        }
+
+        warnings
+    }
+
+
     /// Return a non-blocking reminder when a step has accumulated actions
     /// since its last plan operation.
     pub fn nudge(root: &Path, threshold: usize) -> Result<Option<String>> {
@@ -1329,4 +1392,56 @@ mod tests {
         assert!(journal.append("bad", json!("nope")).is_err());
         fs::remove_dir_all(root).ok();
     }
+
+    #[test]
+    fn warns_on_step_misattribution_via_refs() {
+        let root = root();
+        let mut plan = crate::plan::create(
+            "keep working".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                crate::plan::NewStep {
+                    title: "step 1".into(),
+                    kind: Some(crate::plan::StepKind::Change),
+                    refs: Vec::new(),
+                },
+                crate::plan::NewStep {
+                    title: "auth step".into(),
+                    kind: Some(crate::plan::StepKind::Change),
+                    refs: vec!["src/auth.rs::fn::login".into()],
+                },
+            ],
+            1000,
+            &crate::plan::Limits::default(),
+        )
+        .unwrap();
+        crate::plan::store(&root, &plan).unwrap();
+
+        let mut journal = Journal::open(&root, "session").unwrap();
+        journal.set_attribution(Some("1".into()), Some(plan.id.clone()), "main");
+        let seq = journal
+            .append(
+                "file_diff",
+                json!({
+                    "path": "src/auth.rs",
+                    "checkpoint": "checkpoint-1",
+                    "hash_before": "h1",
+                    "hash_after": "h2",
+                }),
+            )
+            .unwrap();
+
+        plan.step_mut("1").unwrap().evidence.push(crate::plan::EvidenceRef {
+            session: "session".into(),
+            seq,
+        });
+
+        let warns = Journal::step_misattribution_warnings(&root, &plan, "1");
+        assert_eq!(warns.len(), 1);
+        assert!(warns[0].contains("overlaps with refs of step 2"));
+        assert!(warns[0].contains("/undo step 1"));
+        fs::remove_dir_all(root).ok();
+    }
 }
+

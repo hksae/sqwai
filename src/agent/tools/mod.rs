@@ -1505,6 +1505,12 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             let msg = with_assumption_warning(ctx, finishing.as_deref(), message);
                             let msg =
                                 with_evidence_ts_warning(ctx, finishing.as_deref(), &active, msg);
+                            let msg = with_misattribution_warning(
+                                ctx,
+                                finishing.as_deref(),
+                                &active,
+                                msg,
+                            );
                             Outcome::ok(msg)
                         }
                         plan::Applied::Shown { text } => Outcome::ok(text),
@@ -1672,6 +1678,27 @@ fn with_evidence_ts_warning(
     }
     format!("{message}\nwarning: {}", warns.join("; "))
 }
+
+fn with_misattribution_warning(
+    ctx: &ToolCtx,
+    finished_step: Option<&str>,
+    active: &plan::Plan,
+    message: String,
+) -> String {
+    let Some(step) = finished_step else {
+        return message;
+    };
+    let warns = crate::agent::journal::Journal::step_misattribution_warnings(
+        &ctx.root,
+        active,
+        step,
+    );
+    if warns.is_empty() {
+        return message;
+    }
+    format!("{message}\nwarning: {}", warns.join("; "))
+}
+
 
 /// A verify step whose evidence no acceptance item has spent yet, with that
 /// evidence. `None` when every verify step's records are already accounted
