@@ -338,6 +338,9 @@ pub struct PublishDiagnosticsParams {
 pub fn file_uri(path: &Path) -> Result<String> {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut s = path.to_string_lossy().replace('\\', "/");
+    if let Some(stripped) = s.strip_prefix("//?/") {
+        s = stripped.to_string();
+    }
     if !s.starts_with('/') {
         s.insert(0, '/');
     }
@@ -415,5 +418,10 @@ mod tests {
         let uri = file_uri(Path::new("C:\\work dir\\main.rs")).unwrap();
         assert!(uri.starts_with("file:///"));
         assert!(uri.contains("%20"));
+
+        let existing = std::env::current_dir().unwrap().join("Cargo.toml");
+        let uri2 = file_uri(&existing).unwrap();
+        assert!(uri2.starts_with("file:///"), "{uri2}");
+        assert!(!uri2.contains("?"), "must not contain verbatim prefix: {uri2}");
     }
 }
