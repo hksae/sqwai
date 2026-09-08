@@ -2440,6 +2440,9 @@ async fn bash_call(
     let needs_approval =
         match safety::classify_for(crate::agent::shell::ShellKind::detect(), &command) {
             safety::Verdict::Safe => None,
+            safety::Verdict::Blocked(reason) => {
+                return tools::Outcome::err(format!("error: {reason}"));
+            }
             safety::Verdict::NeedsApproval(reason) => Some(reason),
         };
 

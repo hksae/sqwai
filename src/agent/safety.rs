@@ -18,6 +18,8 @@ pub enum Verdict {
     Safe,
     /// show the command to the user first
     NeedsApproval(&'static str),
+    /// refuse without asking — host-owned state or forbidden operation
+    Blocked(&'static str),
 }
 
 /// classify a command using the syntax of the shell that will execute it.
@@ -26,6 +28,10 @@ pub fn classify(cmd: &str) -> Verdict {
 }
 
 pub fn classify_for(shell: ShellKind, cmd: &str) -> Verdict {
+    // 0. Protected host-owned state (.sqwai/) hard block
+    if let Verdict::Blocked(reason) = check_protected_path(cmd) {
+        return Verdict::Blocked(reason);
+    }
     // Layer 1: shell-specific heuristic (substring/regex)
     if let Verdict::NeedsApproval(reason) = heuristic_classify(shell, cmd) {
         return Verdict::NeedsApproval(reason);
@@ -35,6 +41,64 @@ pub fn classify_for(shell: ShellKind, cmd: &str) -> Verdict {
         ShellKind::Bash | ShellKind::Sh => ast_classify(cmd),
         ShellKind::Cmd | ShellKind::PowerShell => Verdict::Safe,
     }
+}
+
+fn check_protected_path(cmd: &str) -> Verdict {
+    let lower = cmd.to_lowercase();
+    if !lower.contains(".sqwai") {
+        return Verdict::Safe;
+    }
+
+    // Split into tokens by whitespace and shell operators/delimiters
+    for raw_token in lower.split(|c: char| {
+        c.is_whitespace()
+            || c == ';'
+            || c == '|'
+            || c == '&'
+            || c == '>'
+            || c == '<'
+            || c == '`'
+            || c == '('
+            || c == ')'
+            || c == '"'
+            || c == '\''
+            || c == '='
+    }) {
+        let token = raw_token.trim_matches(|c: char| {
+            c == '"' || c == '\'' || c == '`' || c == '(' || c == ')' || c == '[' || c == ']'
+        });
+        if let Some(idx) = token.find(".sqwai") {
+            // Check if .sqwai is a path segment (start of token, or preceded by / or \ or .)
+            if idx > 0 {
+                let prev = token.as_bytes()[idx - 1];
+                if prev != b'/' && prev != b'\\' && prev != b'.' && prev != b':' && prev != b'=' {
+                    continue;
+                }
+            }
+
+            let rest = &token[idx + ".sqwai".len()..];
+            let rest_norm = rest.replace('\\', "/");
+
+            // Allowed exceptions:
+            // 1. .sqwai/skills or .sqwai/skills/ or .sqwai/skills/...
+            // 2. .sqwai/config.toml
+            // (Both must not contain ".." path traversal)
+            let is_skills = rest_norm == "/skills"
+                || rest_norm == "/skills/"
+                || rest_norm.starts_with("/skills/");
+            let is_config = rest_norm == "/config.toml";
+
+            let has_traversal = rest_norm.contains("..");
+
+            if (is_skills || is_config) && !has_traversal {
+                continue;
+            }
+
+            return Verdict::Blocked("protected_path");
+        }
+    }
+
+    Verdict::Safe
 }
 
 // ---------------------------------------------------------------------------
@@ -601,6 +665,14 @@ mod tests {
                         "{cmd}: {reason} (expected hint {why})"
                     )
                 }
+                Verdict::Blocked(reason) => {
+                    assert!(
+                        reason.to_lowercase().contains(&why.to_lowercase())
+                            || cmd.contains(why)
+                            || reason.contains(why.split(' ').next().unwrap()),
+                        "{cmd}: {reason} (expected hint {why})"
+                    )
+                }
                 Verdict::Safe => panic!("missed dangerous: {cmd}"),
             }
         }
@@ -686,5 +758,81 @@ mod tests {
             classify("xargs rm < list.txt"),
             Verdict::NeedsApproval(_)
         ));
+    }
+
+    #[test]
+    fn sqwai_protected_paths_are_blocked() {
+        let blocked_cases = [
+            "del .sqwai/plans/*.json",
+            "del .sqwai\\plans\\*.json",
+            "del .sqwai/plans/01M1V0GK22W0PFVYBM0501N1FJ.json",
+            "rm -rf .sqwai",
+            "rm -rf .sqwai/",
+            "rm .sqwai/journal/live.jsonl",
+            "rm .sqwai/memory/MEMORY.md",
+            "mv .sqwai/plans/1.json .",
+            "ren .sqwai\\plans\\1.json 2.json",
+            "copy foo.txt .sqwai\\plans\\",
+            "echo test > .sqwai/plans/1.json",
+            "echo test >.sqwai/plans/1.json",
+            "echo test >> .sqwai/memory/MEMORY.md",
+            "cat .sqwai/journal/live.jsonl",
+            "cat < .sqwai/plans/1.json",
+            "type .sqwai\\plans\\1.json",
+            "dir .sqwai",
+            "dir .sqwai\\plans",
+            "ls .sqwai",
+            "ls .sqwai/plans",
+            "ls -la .sqwai/journal",
+            "cat .sqwai/skills/../../plans/1.json",
+            "cat \".sqwai/plans/1.json\"",
+            "cat '.sqwai/plans/1.json'",
+        ];
+
+        for cmd in blocked_cases {
+            for shell in [
+                ShellKind::Bash,
+                ShellKind::Sh,
+                ShellKind::Cmd,
+                ShellKind::PowerShell,
+            ] {
+                assert_eq!(
+                    classify_for(shell, cmd),
+                    Verdict::Blocked("protected_path"),
+                    "expected blocked for shell {shell:?}: {cmd}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sqwai_allowed_exceptions_pass() {
+        let allowed_cases = [
+            "cat .sqwai/skills/demo/SKILL.md",
+            "cat .sqwai\\skills\\demo\\SKILL.md",
+            "ls .sqwai/skills",
+            "ls .sqwai/skills/",
+            "dir .sqwai\\skills",
+            "dir .sqwai\\skills\\",
+            "cat .sqwai/config.toml",
+            "type .sqwai\\config.toml",
+            "cat \".sqwai/config.toml\"",
+            "echo \"[safety]\" > .sqwai/config.toml",
+        ];
+
+        for cmd in allowed_cases {
+            for shell in [
+                ShellKind::Bash,
+                ShellKind::Sh,
+                ShellKind::Cmd,
+                ShellKind::PowerShell,
+            ] {
+                assert_eq!(
+                    classify_for(shell, cmd),
+                    Verdict::Safe,
+                    "expected safe for shell {shell:?}: {cmd}"
+                );
+            }
+        }
     }
 }

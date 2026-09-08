@@ -1636,13 +1636,23 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
             // It goes through the same classifier as `bash`, and anything that
             // would need approval is refused rather than silently run: an
             // acceptance criterion is not the place to ask.
-            if let safety::Verdict::NeedsApproval(reason) = safety::classify(&command) {
-                return rejection(plan::Rejection {
-                    code: "unsafe_acceptance",
-                    reason: format!("acceptance {index} would run a {reason} command: {command}"),
-                    hint: "acceptance commands run without asking, so they must be safe;                            rewrite it or have the user waive the item"
-                        .to_string(),
-                });
+            match safety::classify(&command) {
+                safety::Verdict::Blocked(reason) => {
+                    return rejection(plan::Rejection {
+                        code: "protected_path",
+                        reason: format!("acceptance {index} touches protected path ({reason}): {command}"),
+                        hint: "acceptance commands must not touch host-owned state".to_string(),
+                    });
+                }
+                safety::Verdict::NeedsApproval(reason) => {
+                    return rejection(plan::Rejection {
+                        code: "unsafe_acceptance",
+                        reason: format!("acceptance {index} would run a {reason} command: {command}"),
+                        hint: "acceptance commands run without asking, so they must be safe;                            rewrite it or have the user waive the item"
+                            .to_string(),
+                    });
+                }
+                safety::Verdict::Safe => {}
             }
             let run = exec::bash(ctx, &command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
             if !run.ok {
@@ -1861,10 +1871,18 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
         }
         match acceptance.kind() {
             plan::AcceptanceKind::Command(command) => {
-                if let safety::Verdict::NeedsApproval(reason) = safety::classify(command) {
-                    return Err(format!(
-                        "unsafe_acceptance: acceptance {index} would run a {reason} command                          at completion: {command}"
-                    ));
+                match safety::classify(command) {
+                    safety::Verdict::Blocked(reason) => {
+                        return Err(format!(
+                            "protected_path: acceptance {index} touches protected path ({reason}) at completion: {command}"
+                        ));
+                    }
+                    safety::Verdict::NeedsApproval(reason) => {
+                        return Err(format!(
+                            "unsafe_acceptance: acceptance {index} would run a {reason} command                          at completion: {command}"
+                        ));
+                    }
+                    safety::Verdict::Safe => {}
                 }
                 let run = exec::bash(ctx, command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
                 if !run.ok {

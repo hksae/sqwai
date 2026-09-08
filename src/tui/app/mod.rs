@@ -566,6 +566,15 @@ impl App {
         if !startup {
             app.load_history_segments();
         }
+        if let Some(ref plan_id) = app.session.plan_id {
+            if crate::plan::open(&app.project_root, plan_id).is_err() {
+                crate::tui::event_log::log(
+                    "PLAN",
+                    format!("plan {plan_id} not found or corrupted; resetting plan_id to None"),
+                );
+                app.session.plan_id = None;
+            }
+        }
         if app.session.plan_id.is_none() {
             app.session.plan_id = crate::plan::open_active(&app.project_root)
                 .ok()
@@ -1534,12 +1543,20 @@ impl App {
         }
         self.context_bootstrap_pending = true;
         self.session = s;
+        if let Some(ref plan_id) = self.session.plan_id {
+            if crate::plan::open(&self.project_root, plan_id).is_err() {
+                crate::tui::event_log::log(
+                    "PLAN",
+                    format!("plan {plan_id} not found or corrupted; resetting plan_id to None"),
+                );
+                self.session.plan_id = None;
+            }
+        }
         if self.session.plan_id.is_none() {
-            self.session.plan_id =
-                crate::plan::open_active(&std::env::current_dir().unwrap_or_default())
-                    .ok()
-                    .flatten()
-                    .map(|plan| plan.id);
+            self.session.plan_id = crate::plan::open_active(&self.project_root)
+                .ok()
+                .flatten()
+                .map(|plan| plan.id);
         }
         // defensive: never let a legacy system turn back into the transcript
         self.session.strip_system_messages();

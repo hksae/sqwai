@@ -4239,4 +4239,69 @@ mod tests {
         assert_eq!(app.activity_groups.len(), 1);
         assert!(app.activity_groups[0].expanded);
     }
+
+    #[test]
+    fn session_recovery_with_deleted_or_broken_plan_id() {
+        let mut session = Session::new("m".into(), 1000);
+        session.plan_id = Some("deleted_or_nonexistent_plan_99999".into());
+
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "p".to_string(),
+            ProviderConfig {
+                format: WireFormat::Openai,
+                base_url: "http://127.0.0.1:9/v1".into(),
+                api_key: Some("test-key".into()),
+                api_key_env: None,
+                continuation: true,
+            },
+        );
+        let mut models = BTreeMap::new();
+        models.insert(
+            "m".to_string(),
+            ModelConfig {
+                provider: "p".into(),
+                id: "test-model".into(),
+                context: 1000,
+                effort: EffortLevel::Off,
+                effort_control: None,
+                effort_always_on: false,
+                price_in: None,
+                price_out: None,
+            },
+        );
+        let cfg = Config {
+            default_model: "m".into(),
+            default_effort: crate::config::EffortLevel::Off,
+            providers,
+            models,
+            safety: Default::default(),
+            ui: Default::default(),
+            mcp: Default::default(),
+            lsp: Default::default(),
+            skills: Default::default(),
+            memory: Default::default(),
+            diary: Default::default(),
+            compaction: Default::default(),
+            plan: Default::default(),
+            secrets: Default::default(),
+            undo: Default::default(),
+        };
+
+        // Starting app with a deleted/broken plan_id should not panic and should reset the invalid plan_id
+        let mut app = App::new(cfg, session, false, false).unwrap();
+        assert_ne!(
+            app.session.plan_id.as_deref(),
+            Some("deleted_or_nonexistent_plan_99999")
+        );
+
+        // Switching to another session with a broken plan_id also clears the broken plan_id gracefully
+        let mut session2 = Session::new("m".into(), 1000);
+        session2.plan_id = Some("another_corrupt_or_deleted_plan_88888".into());
+        app.apply_session(session2);
+        assert_ne!(
+            app.session.plan_id.as_deref(),
+            Some("another_corrupt_or_deleted_plan_88888")
+        );
+    }
 }
