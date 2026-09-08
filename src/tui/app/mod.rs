@@ -1352,6 +1352,7 @@ impl App {
             memory: self.cfg.memory.clone(),
             compaction: self.cfg.compaction.clone(),
             plan_limits: self.cfg.plan,
+            shadow_store: self.cfg.undo.shadow,
             subagent_depth: 0,
         };
         self.context_bootstrap_pending = false;
@@ -1424,6 +1425,7 @@ impl App {
             memory: self.cfg.memory.clone(),
             compaction: self.cfg.compaction.clone(),
             plan_limits: self.cfg.plan,
+            shadow_store: self.cfg.undo.shadow,
             subagent_depth: 0,
         };
         self.agent = Some(spawn_agent(input));
@@ -3013,7 +3015,7 @@ impl App {
                 .collect()
         };
 
-        match crate::agent::checkpoints::restore_paths(&root, &sha, &targets) {
+        match crate::agent::checkpoints::restore_paths_in(&root, self.cfg.undo.shadow, &sha, &targets) {
             Ok(report) => {
                 let touched = report.touched();
                 let reopened_steps =

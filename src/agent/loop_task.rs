@@ -267,6 +267,8 @@ pub struct AgentInput {
     pub compaction: crate::config::CompactionConfig,
     /// host limits on the structured plan copied from configuration
     pub plan_limits: crate::config::PlanConfig,
+    /// where the shadow repository lives, from [undo].shadow configuration
+    pub shadow_store: crate::config::ShadowStore,
     /// nesting guard for delegated subagents; the first generation may create
     /// children, but children cannot recursively create more children.
     pub subagent_depth: u8,
@@ -408,6 +410,7 @@ async fn run_subagent(
     mcp: crate::config::McpConfig,
     lsp: crate::config::LspConfig,
     read_only: bool,
+    shadow_store: crate::config::ShadowStore,
 ) -> tools::Outcome {
     let tasks = match subagent_tasks_from_args(&call.args) {
         Ok(tasks) => tasks,
@@ -439,6 +442,7 @@ async fn run_subagent(
                         mcp.clone(),
                         lsp.clone(),
                         read_only,
+                        shadow_store,
                     )
                     .await;
                     (
@@ -497,6 +501,7 @@ async fn run_subagent(
         memory: crate::config::MemoryConfig::default(),
         compaction: crate::config::CompactionConfig::default(),
         plan_limits: crate::config::PlanConfig::default(),
+        shadow_store,
         subagent_depth: 1,
     });
     let mut child = child;
@@ -641,6 +646,7 @@ async fn run_agent(
         plan_limits,
         mcp,
         lsp,
+        shadow_store,
         subagent_depth,
     } = input;
 
@@ -810,6 +816,7 @@ async fn run_agent(
 
     let mut ctx = ToolCtx::with_read_only(&root, read_only)
         .in_session(&session_id)
+        .with_shadow_store(shadow_store)
         .with_plan_limits(plan_limits, context_limit)
         .with_cancel(cancel_tool);
     let mut journal = if enable_tools && !read_only {
@@ -1253,6 +1260,7 @@ async fn run_agent(
                             mcp.clone(),
                             lsp.clone(),
                             read_only,
+                            shadow_store,
                         )
                         .await
                     }
@@ -1380,7 +1388,7 @@ async fn run_agent(
                 && call.name == "bash"
                 && let Ok(Some(sha)) = checkpoints::snapshot_session(
                     &ctx.root,
-                    crate::config::ShadowStore::Local,
+                    ctx.shadow_store,
                     &ctx.session_id,
                     "post_bash cancelled",
                 )
@@ -2439,7 +2447,7 @@ async fn bash_call(
         // advance, so this is where layer 2 earns its existence.
         if let Ok(Some(sha)) = checkpoints::snapshot_session(
             &ctx.root,
-            crate::config::ShadowStore::Local,
+            ctx.shadow_store,
             &ctx.session_id,
             &format!("pre_bash {command}"),
         ) {

@@ -507,7 +507,7 @@ fn checkpoint(ctx: &mut ToolCtx, p: &Path, what: &str) {
     // neither is a reason to fail the edit.
     if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
         &ctx.root,
-        crate::config::ShadowStore::Local,
+        ctx.shadow_store,
         &ctx.session_id,
         &label,
     ) {

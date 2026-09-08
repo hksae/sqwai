@@ -144,7 +144,7 @@ pub fn commit(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
     if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
         &ctx.root,
-        crate::config::ShadowStore::Local,
+        ctx.shadow_store,
         &ctx.session_id,
         "git_commit",
     ) {
@@ -169,7 +169,7 @@ pub fn branch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             } else {
                 if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
                     &ctx.root,
-                    crate::config::ShadowStore::Local,
+                    ctx.shadow_store,
                     &ctx.session_id,
                     "git_branch create",
                 ) {
@@ -184,7 +184,7 @@ pub fn branch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             } else {
                 if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
                     &ctx.root,
-                    crate::config::ShadowStore::Local,
+                    ctx.shadow_store,
                     &ctx.session_id,
                     "git_branch switch",
                 ) {
@@ -243,7 +243,7 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
 
     if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
         &ctx.root,
-        crate::config::ShadowStore::Local,
+        ctx.shadow_store,
         &ctx.session_id,
         "patch",
     ) {

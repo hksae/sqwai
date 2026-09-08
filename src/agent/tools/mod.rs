@@ -63,6 +63,8 @@ pub struct ToolCtx {
     /// a handler and pull it out mid-syscall, so a handler that never checks
     /// this is a handler Esc cannot interrupt.
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Where the shadow repository lives, from [undo].shadow configuration.
+    pub shadow_store: crate::config::ShadowStore,
 }
 
 impl ToolCtx {
@@ -85,7 +87,13 @@ impl ToolCtx {
             plan_limits: crate::config::PlanConfig::default(),
             context_limit: 0,
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            shadow_store: crate::config::ShadowStore::Local,
         }
+    }
+
+    pub fn with_shadow_store(mut self, shadow_store: crate::config::ShadowStore) -> Self {
+        self.shadow_store = shadow_store;
+        self
     }
 
     /// Name the session whose checkpoint chain this context appends to.

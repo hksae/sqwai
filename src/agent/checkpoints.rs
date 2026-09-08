@@ -288,7 +288,16 @@ pub fn restore_from_blobs(
 /// The index and HEAD are never touched, and no path outside `targets` is read
 /// or written.
 pub fn restore_paths(root: &Path, sha: &str, targets: &[Target]) -> Result<RestoreReport> {
-    let Some(shadow) = shadow(root, ShadowStore::Local) else {
+    restore_paths_in(root, ShadowStore::Local, sha, targets)
+}
+
+pub fn restore_paths_in(
+    root: &Path,
+    store: ShadowStore,
+    sha: &str,
+    targets: &[Target],
+) -> Result<RestoreReport> {
+    let Some(shadow) = shadow(root, store).or_else(|| shadow(root, ShadowStore::Local)) else {
         anyhow::bail!("no shadow repository: git is unavailable or [undo].shadow is off");
     };
     let mut report = RestoreReport::default();
