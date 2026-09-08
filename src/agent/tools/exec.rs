@@ -478,13 +478,13 @@ mod tests {
         ToolCtx::new(std::env::temp_dir())
     }
 
-    /// A command that blocks well past any test deadline on this platform.
-    /// `sleep` is POSIX-only, and `timeout` exits immediately with the
-    /// redirected stdin the child gets — so Windows paces 30 seconds of
-    /// `ping` instead. Either way a single process the kill ends.
+    /// A command that blocks well past any test deadline on this platform and
+    /// outputs lines steadily so background polling tests see output in the log.
+    /// Both Unix and Windows pace 30 seconds of `ping` to localhost; either
+    /// way a single process the kill ends.
     #[cfg(unix)]
     fn long_sleep_command() -> String {
-        "sleep 30".to_string()
+        "ping -c 31 127.0.0.1".to_string()
     }
 
     #[cfg(windows)]
