@@ -588,11 +588,7 @@ impl Journal {
                         .unwrap_or("unknown");
                     out.push(format!(
                         "evidence {}:{} predates step {} start ({} < {})",
-                        reference.session,
-                        reference.seq,
-                        step,
-                        rec_ts,
-                        start_ts
+                        reference.session, reference.seq, step, rec_ts, start_ts
                     ));
                     if out.len() >= 3 {
                         break;

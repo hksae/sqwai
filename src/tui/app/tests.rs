@@ -3921,7 +3921,8 @@ mod tests {
         // Populate a conversation with multiple past segments
         for i in 0..10 {
             if i % 2 == 0 {
-                app.segments.push(Segment::User(format!("User question {i} with code `foo`")));
+                app.segments
+                    .push(Segment::User(format!("User question {i} with code `foo`")));
             } else {
                 app.segments.push(Segment::Assistant {
                     text: format!("Assistant answer {i} with details"),
@@ -3949,7 +3950,9 @@ mod tests {
 
         // Simulate streaming: append text to the live segment at index 10
         if let Some(Segment::Assistant { text, .. }) = app.segments.get_mut(10) {
-            text.push_str(" and more streamed tokens across multiple lines\n```rust\nfn bar() {}\n```\n");
+            text.push_str(
+                " and more streamed tokens across multiple lines\n```rust\nfn bar() {}\n```\n",
+            );
         }
 
         // Rebuild cache (as happens on each frame during streaming)
@@ -3957,15 +3960,29 @@ mod tests {
 
         // Verify that past segments 0..10 were NOT wiped or recomputed
         for (i, expected) in previous_snapshots.iter().enumerate() {
-            let cached = app.seg_cache[i].as_ref().expect("past segment must remain cached");
+            let cached = app.seg_cache[i]
+                .as_ref()
+                .expect("past segment must remain cached");
             assert_eq!(cached.0, expected.0, "past segment {i} key must not change");
-            assert_eq!(cached.1, expected.1, "past segment {i} width must not change");
-            assert_eq!(cached.2.len(), expected.2, "past segment {i} line count must not change");
+            assert_eq!(
+                cached.1, expected.1,
+                "past segment {i} width must not change"
+            );
+            assert_eq!(
+                cached.2.len(),
+                expected.2,
+                "past segment {i} line count must not change"
+            );
         }
 
         // The live segment at index 10 MUST have updated cache
-        let live_cached = app.seg_cache[10].as_ref().expect("live segment must be cached");
-        assert!(live_cached.2.len() > 1, "live segment should have rendered the code block");
+        let live_cached = app.seg_cache[10]
+            .as_ref()
+            .expect("live segment must be cached");
+        assert!(
+            live_cached.2.len() > 1,
+            "live segment should have rendered the code block"
+        );
     }
 
     #[test]
@@ -3998,7 +4015,10 @@ mod tests {
 
         // Rebuilding cache should detect structural change and update layout
         app.rebuild_cache(80);
-        assert_ne!(app.seg_layout, layout_before, "layout must change when a segment is inserted");
+        assert_ne!(
+            app.seg_layout, layout_before,
+            "layout must change when a segment is inserted"
+        );
         assert_eq!(app.seg_layout.len(), 3);
         assert_eq!(app.seg_cache.len(), 3);
     }
@@ -4069,9 +4089,7 @@ mod tests {
         }
 
         match &app.segments[2] {
-            Segment::Tool {
-                name, args, ok, ..
-            } => {
+            Segment::Tool { name, args, ok, .. } => {
                 assert_eq!(name, "read");
                 assert_eq!(args, "a.rs");
                 assert_eq!(*ok, Some(true));
@@ -4087,9 +4105,7 @@ mod tests {
         }
 
         match &app.segments[4] {
-            Segment::Tool {
-                name, args, ok, ..
-            } => {
+            Segment::Tool { name, args, ok, .. } => {
                 assert_eq!(name, "edit");
                 assert_eq!(args, "a.rs");
                 assert_eq!(*ok, Some(true));
@@ -4117,7 +4133,10 @@ mod tests {
         app.rebuild_cache(80);
         let screen = rendered(&app);
         assert!(screen.contains("activity · 2 calls"), "header: {screen}");
-        assert!(screen.contains("I have finished the fix."), "answer: {screen}");
+        assert!(
+            screen.contains("I have finished the fix."),
+            "answer: {screen}"
+        );
     }
 
     #[test]
@@ -4233,7 +4252,11 @@ mod tests {
         assert_eq!(names, vec!["bash"]);
 
         // No empty assistant segment remains
-        assert!(!app.segments.iter().any(|s| matches!(s, Segment::Assistant { .. })));
+        assert!(
+            !app.segments
+                .iter()
+                .any(|s| matches!(s, Segment::Assistant { .. }))
+        );
 
         // Activity group is expanded so user sees what happened
         assert_eq!(app.activity_groups.len(), 1);

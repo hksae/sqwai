@@ -301,12 +301,7 @@ fn parse_table_row(l: &str) -> Vec<String> {
     cells
 }
 
-fn emit_table(
-    out: &mut Vec<Line<'static>>,
-    rows: Vec<Vec<String>>,
-    align: Vec<Align>,
-    width: u16,
-) {
+fn emit_table(out: &mut Vec<Line<'static>>, rows: Vec<Vec<String>>, align: Vec<Align>, width: u16) {
     if rows.is_empty() {
         return;
     }
@@ -454,8 +449,7 @@ fn emit_table(
                     Align::Center => (extra / 2, extra - extra / 2),
                 };
                 let mut line = cells_to_line(v, st);
-                let mut spans: Vec<Span> =
-                    vec![Span::styled(" ".to_string(), st)];
+                let mut spans: Vec<Span> = vec![Span::styled(" ".to_string(), st)];
                 spans.push(Span::styled(" ".repeat(lpad), st));
                 spans.append(&mut line.spans);
                 spans.push(Span::styled(" ".repeat(rpad), st));
@@ -470,10 +464,7 @@ fn emit_table(
         }
     }
     let bar_with = |bg: ratatui::style::Color| {
-        Span::styled(
-            "│".to_string(),
-            Style::new().fg(Theme::rule_color()).bg(bg),
-        )
+        Span::styled("│".to_string(), Style::new().fg(Theme::rule_color()).bg(bg))
     };
     // a physical table row may span several lines when cells wrap
     let render_row = |r: &[String], header: bool| -> Vec<Line<'static>> {
@@ -716,10 +707,7 @@ fn try_list(s: &str) -> Option<(String, &str)> {
                 } else {
                     "☑"
                 };
-                return Some((
-                    mark.to_string(),
-                    after.trim_start_matches([' ', '\t']),
-                ));
+                return Some((mark.to_string(), after.trim_start_matches([' ', '\t'])));
             }
         }
         return Some(("-".to_string(), rest));
@@ -900,12 +888,15 @@ fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
             if lp > 0 {
                 out.push(Span::styled(rest[..lp].to_string(), style));
             }
-            let link_style = style
-                .fg(Theme::ACCENT())
-                .add_modifier(Modifier::UNDERLINED);
+            let link_style = style.fg(Theme::ACCENT()).add_modifier(Modifier::UNDERLINED);
             let url_style = Style::new().fg(Theme::DIM()).bg(ambient_bg);
             match kind {
-                InlineLink::Md { len, text, url, image } => {
+                InlineLink::Md {
+                    len,
+                    text,
+                    url,
+                    image,
+                } => {
                     let label = if image && text.is_empty() {
                         "image".to_string()
                     } else {
@@ -1400,7 +1391,11 @@ mod tests {
     #[test]
     fn lists_tasks_nesting_and_ordered_guards() {
         let hl = Highlighter::new();
-        let lines = render("- [ ] todo\n- [x] done\n  - nested\n1) kept\n1.foo\n-nope", 80, &hl);
+        let lines = render(
+            "- [ ] todo\n- [x] done\n  - nested\n1) kept\n1.foo\n-nope",
+            80,
+            &hl,
+        );
         let all: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
@@ -1408,7 +1403,10 @@ mod tests {
             .join("\n");
         assert!(all.contains('☐'), "{all:?}");
         assert!(all.contains('☑'), "{all:?}");
-        assert!(all.contains("1)"), "`)` delimiter must be preserved: {all:?}");
+        assert!(
+            all.contains("1)"),
+            "`)` delimiter must be preserved: {all:?}"
+        );
         assert!(all.contains("1.foo"), "`1.foo` is a paragraph: {all:?}");
         assert!(all.contains("-nope"), "`-nope` is a paragraph: {all:?}");
         // nested item is indented deeper than the top-level one
@@ -1432,12 +1430,7 @@ mod tests {
                     .contains("nested")
             })
             .unwrap();
-        let indent = |l: &Line<'_>| {
-            line_text_pub(l)
-                .chars()
-                .take_while(|c| *c == ' ')
-                .count()
-        };
+        let indent = |l: &Line<'_>| line_text_pub(l).chars().take_while(|c| *c == ' ').count();
         assert!(indent(nested) > indent(top), "{top:?} vs {nested:?}");
     }
 
@@ -1477,16 +1470,21 @@ mod tests {
         // exactly 2 columns (3 rails), and the cell text survives the wrap
         for l in &lines {
             if line_text_pub(l).contains('│') {
-                assert_eq!(line_text_pub(l).chars().filter(|c| *c == '│').count(), 3, "{l:?}");
+                assert_eq!(
+                    line_text_pub(l).chars().filter(|c| *c == '│').count(),
+                    3,
+                    "{l:?}"
+                );
             }
         }
-        assert!(all.contains('x') && all.contains("| y"), "escaped pipe lost: {all:?}");
+        assert!(
+            all.contains('x') && all.contains("| y"),
+            "escaped pipe lost: {all:?}"
+        );
         // right-aligned numeric cell: padding sits left of the digit
         let body = lines
             .iter()
-            .find(|l| {
-                line_text_pub(l).contains('1') && line_text_pub(l).contains('│')
-            })
+            .find(|l| line_text_pub(l).contains('1') && line_text_pub(l).contains('│'))
             .unwrap();
         let t = line_text_pub(body);
         let cell = t.split('│').nth(1).unwrap();
@@ -1495,7 +1493,10 @@ mod tests {
             "right column must pad left: {cell:?}"
         );
         for l in &lines {
-            assert!(UnicodeWidthStr::width(line_text_pub(l).as_str()) <= 40, "{l:?}");
+            assert!(
+                UnicodeWidthStr::width(line_text_pub(l).as_str()) <= 40,
+                "{l:?}"
+            );
         }
     }
 
@@ -1509,14 +1510,20 @@ mod tests {
         let tiny = render("```rust\nfn main() {}\n```", 4, &hl);
         assert!(!tiny.is_empty());
         for l in &tiny {
-            assert!(UnicodeWidthStr::width(line_text_pub(l).as_str()) <= 4, "{l:?}");
+            assert!(
+                UnicodeWidthStr::width(line_text_pub(l).as_str()) <= 4,
+                "{l:?}"
+            );
         }
         // uppercase language tag still highlights instead of falling back:
         // the body keeps syntax spans, not one uniform style
         let up = render("```RUST\nfn main() {}\n```", 60, &hl);
         assert!(up.len() >= 3);
-        let styles: std::collections::HashSet<String> =
-            up[1].spans.iter().map(|s| format!("{:?}", s.style)).collect();
+        let styles: std::collections::HashSet<String> = up[1]
+            .spans
+            .iter()
+            .map(|s| format!("{:?}", s.style))
+            .collect();
         assert!(styles.len() > 1, "expected highlight spans: {:?}", up[1]);
     }
 }

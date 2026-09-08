@@ -1589,7 +1589,10 @@ async fn run_agent(
                         .ok()
                         .flatten();
                     let plan_id = active.as_ref().map(|p| p.id.clone());
-                    if outcome.ok && op == "start" && let Some(id) = plan_step_id {
+                    if outcome.ok
+                        && op == "start"
+                        && let Some(id) = plan_step_id
+                    {
                         writer.set_attribution(Some(id.to_string()), plan_id, "main");
                     } else if outcome.ok && matches!(op, "finish" | "block" | "cancel") {
                         writer.set_attribution(None, plan_id, "main");

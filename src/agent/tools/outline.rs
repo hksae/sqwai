@@ -65,10 +65,7 @@ pub fn outline(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         Err(_) => return Outcome::err("file is binary or not valid UTF-8"),
     };
 
-    let ext = full_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = full_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     let items = match Lang::from_extension(ext) {
         Some(lang) => {
@@ -149,18 +146,18 @@ fn walk_node(
             });
 
             // If it has a body and depth < max_depth, recurse into inner declarations
-            if let Some(body) = body_opt {
-                if depth < max_depth {
-                    // C# and C++ namespaces: children stay at current depth (top-level classes)
-                    let next_depth = if is_namespace(kind, lang) {
-                        depth
-                    } else {
-                        depth + 1
-                    };
-                    let mut cursor = body.walk();
-                    for c in body.children(&mut cursor) {
-                        walk_node(c, src, lang, next_depth, max_depth, out);
-                    }
+            if let Some(body) = body_opt
+                && depth < max_depth
+            {
+                // C# and C++ namespaces: children stay at current depth (top-level classes)
+                let next_depth = if is_namespace(kind, lang) {
+                    depth
+                } else {
+                    depth + 1
+                };
+                let mut cursor = body.walk();
+                for c in body.children(&mut cursor) {
+                    walk_node(c, src, lang, next_depth, max_depth, out);
                 }
             }
         }
@@ -188,12 +185,7 @@ fn is_namespace(kind: &str, lang: Lang) -> bool {
 fn is_transparent_container(kind: &str, lang: Lang) -> bool {
     matches!(
         kind,
-        "source_file"
-            | "compilation_unit"
-            | "translation_unit"
-            | "program"
-            | "script"
-            | "module"
+        "source_file" | "compilation_unit" | "translation_unit" | "program" | "script" | "module"
     ) || (matches!(lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx)
         && kind == "export_statement")
         || (lang == Lang::Python && kind == "decorated_definition")
@@ -218,10 +210,7 @@ fn is_declaration_node(node: Node, lang: Lang) -> bool {
                 | "macro_definition"
                 | "enum_variant"
         ),
-        Lang::Python => matches!(
-            kind,
-            "function_definition" | "class_definition"
-        ),
+        Lang::Python => matches!(kind, "function_definition" | "class_definition"),
         Lang::JavaScript | Lang::TypeScript | Lang::Tsx => matches!(
             kind,
             "function_declaration"
@@ -328,21 +317,14 @@ fn find_body_node<'a>(node: Node<'a>, _lang: Lang) -> Option<Node<'a>> {
     None
 }
 
-fn extract_signature(
-    node: Node,
-    src: &str,
-    body_opt: Option<Node>,
-    lang: Lang,
-) -> (usize, String) {
+fn extract_signature(node: Node, src: &str, body_opt: Option<Node>, lang: Lang) -> (usize, String) {
     let mut start = node.start_byte();
 
     let mut has_parent_prefix = false;
     // If wrapped in export_statement, template_declaration, or decorated_definition, include parent prefix
     if let Some(p) = node.parent() {
         let pk = p.kind();
-        if pk == "export_statement"
-            || pk == "template_declaration"
-            || pk == "decorated_definition"
+        if pk == "export_statement" || pk == "template_declaration" || pk == "decorated_definition"
         {
             start = p.start_byte();
             has_parent_prefix = true;
@@ -488,10 +470,30 @@ fn count_indent(line: &str) -> usize {
 fn match_fallback_declaration(line: &str) -> Option<String> {
     let stripped = strip_modifiers(line);
     let decl_keywords = [
-        "fn ", "fun ", "func ", "function ", "def ", "defp ", "defmodule ",
-        "class ", "struct ", "enum ", "interface ", "trait ", "type ",
-        "record ", "protocol ", "extension ", "actor ", "module ", "namespace ",
-        "package ", "impl ", "mod ", "proc ", "sub ",
+        "fn ",
+        "fun ",
+        "func ",
+        "function ",
+        "def ",
+        "defp ",
+        "defmodule ",
+        "class ",
+        "struct ",
+        "enum ",
+        "interface ",
+        "trait ",
+        "type ",
+        "record ",
+        "protocol ",
+        "extension ",
+        "actor ",
+        "module ",
+        "namespace ",
+        "package ",
+        "impl ",
+        "mod ",
+        "proc ",
+        "sub ",
     ];
 
     for kw in decl_keywords {
@@ -501,8 +503,7 @@ fn match_fallback_declaration(line: &str) -> Option<String> {
     }
 
     // Zig style: `const X = struct {` or `const X = enum {`
-    if stripped.starts_with("const ")
-        && (stripped.contains("struct") || stripped.contains("enum"))
+    if stripped.starts_with("const ") && (stripped.contains("struct") || stripped.contains("enum"))
     {
         return Some(cut_before_body(line));
     }
@@ -512,10 +513,30 @@ fn match_fallback_declaration(line: &str) -> Option<String> {
 
 fn strip_modifiers(mut s: &str) -> &str {
     let modifiers = [
-        "pub ", "pub(crate) ", "pub(super) ", "public ", "private ", "protected ",
-        "internal ", "open ", "final ", "override ", "abstract ", "static ",
-        "async ", "const ", "export ", "default ", "mut ", "lazy ", "inline ",
-        "extern ", "virtual ", "explicit ", "friend ", "constexpr ",
+        "pub ",
+        "pub(crate) ",
+        "pub(super) ",
+        "public ",
+        "private ",
+        "protected ",
+        "internal ",
+        "open ",
+        "final ",
+        "override ",
+        "abstract ",
+        "static ",
+        "async ",
+        "const ",
+        "export ",
+        "default ",
+        "mut ",
+        "lazy ",
+        "inline ",
+        "extern ",
+        "virtual ",
+        "explicit ",
+        "friend ",
+        "constexpr ",
     ];
     loop {
         let mut stripped = false;

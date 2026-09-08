@@ -566,14 +566,14 @@ impl App {
         if !startup {
             app.load_history_segments();
         }
-        if let Some(ref plan_id) = app.session.plan_id {
-            if crate::plan::open(&app.project_root, plan_id).is_err() {
-                crate::tui::event_log::log(
-                    "PLAN",
-                    format!("plan {plan_id} not found or corrupted; resetting plan_id to None"),
-                );
-                app.session.plan_id = None;
-            }
+        if let Some(ref plan_id) = app.session.plan_id
+            && crate::plan::open(&app.project_root, plan_id).is_err()
+        {
+            crate::tui::event_log::log(
+                "PLAN",
+                format!("plan {plan_id} not found or corrupted; resetting plan_id to None"),
+            );
+            app.session.plan_id = None;
         }
         if app.session.plan_id.is_none() {
             app.session.plan_id = crate::plan::open_active(&app.project_root)
@@ -652,8 +652,7 @@ impl App {
                     work_start.get_or_insert(self.segments.len());
                     let trimmed = m.content.trim();
                     if !trimmed.is_empty() {
-                        self.segments
-                            .push(Segment::Commentary(trimmed.to_string()));
+                        self.segments.push(Segment::Commentary(trimmed.to_string()));
                     }
                     for call in &m.tool_calls {
                         let idx = self.segments.len();
@@ -1543,14 +1542,14 @@ impl App {
         }
         self.context_bootstrap_pending = true;
         self.session = s;
-        if let Some(ref plan_id) = self.session.plan_id {
-            if crate::plan::open(&self.project_root, plan_id).is_err() {
-                crate::tui::event_log::log(
-                    "PLAN",
-                    format!("plan {plan_id} not found or corrupted; resetting plan_id to None"),
-                );
-                self.session.plan_id = None;
-            }
+        if let Some(ref plan_id) = self.session.plan_id
+            && crate::plan::open(&self.project_root, plan_id).is_err()
+        {
+            crate::tui::event_log::log(
+                "PLAN",
+                format!("plan {plan_id} not found or corrupted; resetting plan_id to None"),
+            );
+            self.session.plan_id = None;
         }
         if self.session.plan_id.is_none() {
             self.session.plan_id = crate::plan::open_active(&self.project_root)
@@ -2301,18 +2300,19 @@ impl App {
                         if let Some(pos) = chat.iter().rposition(|segment| {
                             matches!(segment, Segment::Assistant { live: true, .. })
                         }) {
-                            let preamble = if let Some(Segment::Assistant { text, .. }) = chat.get_mut(pos) {
-                                let t = text.trim();
-                                if !t.is_empty() {
-                                    let full = std::mem::take(text);
-                                    Some(full)
+                            let preamble =
+                                if let Some(Segment::Assistant { text, .. }) = chat.get_mut(pos) {
+                                    let t = text.trim();
+                                    if !t.is_empty() {
+                                        let full = std::mem::take(text);
+                                        Some(full)
+                                    } else {
+                                        text.clear();
+                                        None
+                                    }
                                 } else {
-                                    text.clear();
                                     None
-                                }
-                            } else {
-                                None
-                            };
+                                };
                             if let Some(p) = preamble {
                                 let trimmed = p.trim();
                                 if !trimmed.is_empty() {
@@ -2574,22 +2574,22 @@ impl App {
             .iter()
             .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }));
         if let Some(pos) = pos {
-            if text.is_empty() {
-                if let Some(Segment::Assistant { text: seg_text, .. }) = self.segments.get(pos) {
-                    text = seg_text.clone();
-                }
+            if text.is_empty()
+                && let Some(Segment::Assistant { text: seg_text, .. }) = self.segments.get(pos)
+            {
+                text = seg_text.clone();
             }
             if let Some(Segment::Assistant { text: seg_text, .. }) = self.segments.get_mut(pos) {
                 seg_text.clear();
             }
         }
         let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            if let Some(pos) = pos {
-                self.segments
-                    .insert(pos, Segment::Commentary(trimmed.to_string()));
-                self.dirty = true;
-            }
+        if !trimmed.is_empty()
+            && let Some(pos) = pos
+        {
+            self.segments
+                .insert(pos, Segment::Commentary(trimmed.to_string()));
+            self.dirty = true;
         }
     }
 

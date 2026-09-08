@@ -1640,7 +1640,9 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                 safety::Verdict::Blocked(reason) => {
                     return rejection(plan::Rejection {
                         code: "protected_path",
-                        reason: format!("acceptance {index} touches protected path ({reason}): {command}"),
+                        reason: format!(
+                            "acceptance {index} touches protected path ({reason}): {command}"
+                        ),
                         hint: "acceptance commands must not touch host-owned state".to_string(),
                     });
                 }
@@ -2413,20 +2415,32 @@ mod tests {
         // 3. Stage via all: true
         let stage_all = execute(&mut ctx, "git_stage", &json!({"all": true}));
         assert!(stage_all.ok, "{}", stage_all.output);
-        let commit = execute(&mut ctx, "git_commit", &json!({"message": "commit created"}));
+        let commit = execute(
+            &mut ctx,
+            "git_commit",
+            &json!({"message": "commit created"}),
+        );
         assert!(commit.ok, "{}", commit.output);
 
         let status_clean = execute(&mut ctx, "git_status", &json!({}));
         assert!(!status_clean.output.contains("created.txt"));
 
         // 4. Validation errors
-        let bad_action = execute(&mut ctx, "git_stage", &json!({"action": "invalid", "all": true}));
+        let bad_action = execute(
+            &mut ctx,
+            "git_stage",
+            &json!({"action": "invalid", "all": true}),
+        );
         assert!(!bad_action.ok);
         assert!(bad_action.output.contains("action must be add or reset"));
 
         let no_args = execute(&mut ctx, "git_stage", &json!({}));
         assert!(!no_args.ok);
-        assert!(no_args.output.contains("requires either all: true or non-empty paths"));
+        assert!(
+            no_args
+                .output
+                .contains("requires either all: true or non-empty paths")
+        );
 
         let forbidden_sqwai = execute(
             &mut ctx,
@@ -2786,10 +2800,13 @@ mod tests {
 
         // Premature evidence is in step.evidence
         let mut plan = plan::open_active(&dir).unwrap().unwrap();
-        plan.step_mut("1").unwrap().evidence.push(crate::plan::EvidenceRef {
-            session: "boundary-test".into(),
-            seq: premature_seq,
-        });
+        plan.step_mut("1")
+            .unwrap()
+            .evidence
+            .push(crate::plan::EvidenceRef {
+                session: "boundary-test".into(),
+                seq: premature_seq,
+            });
         plan::store(&dir, &plan).unwrap();
 
         // Finishing with premature evidence triggers warning
@@ -3394,15 +3411,27 @@ mod tests {
 
         let cpp_res = execute(&mut ctx, "ast_grep", &json!({"pattern": "void start() {}"}));
         assert!(cpp_res.ok, "{}", cpp_res.output);
-        assert!(cpp_res.output.contains("service.cpp:1"), "{}", cpp_res.output);
+        assert!(
+            cpp_res.output.contains("service.cpp:1"),
+            "{}",
+            cpp_res.output
+        );
 
-        let cs_res = execute(&mut ctx, "ast_grep", &json!({"pattern": "void SayHello() {}"}));
+        let cs_res = execute(
+            &mut ctx,
+            "ast_grep",
+            &json!({"pattern": "void SayHello() {}"}),
+        );
         assert!(cs_res.ok, "{}", cs_res.output);
         assert!(cs_res.output.contains("App.cs:1"), "{}", cs_res.output);
 
         let java_res = execute(&mut ctx, "ast_grep", &json!({"pattern": "void greet() {}"}));
         assert!(java_res.ok, "{}", java_res.output);
-        assert!(java_res.output.contains("Hello.java:1"), "{}", java_res.output);
+        assert!(
+            java_res.output.contains("Hello.java:1"),
+            "{}",
+            java_res.output
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -3449,18 +3478,48 @@ def main():
 
         let res_rs = execute(&mut ctx, "outline", &json!({"path": "server.rs"}));
         assert!(res_rs.ok, "{}", res_rs.output);
-        assert!(res_rs.output.contains("pub struct ServerConfig"), "{}", res_rs.output);
-        assert!(res_rs.output.contains("impl ServerConfig"), "{}", res_rs.output);
-        assert!(res_rs.output.contains("pub fn new(port: u16) -> Self"), "{}", res_rs.output);
-        assert!(res_rs.output.contains("pub enum State"), "{}", res_rs.output);
+        assert!(
+            res_rs.output.contains("pub struct ServerConfig"),
+            "{}",
+            res_rs.output
+        );
+        assert!(
+            res_rs.output.contains("impl ServerConfig"),
+            "{}",
+            res_rs.output
+        );
+        assert!(
+            res_rs.output.contains("pub fn new(port: u16) -> Self"),
+            "{}",
+            res_rs.output
+        );
+        assert!(
+            res_rs.output.contains("pub enum State"),
+            "{}",
+            res_rs.output
+        );
         assert!(res_rs.output.contains("Running"), "{}", res_rs.output);
-        assert!(res_rs.output.contains("pub async fn start_server() -> Result<(), ()>"), "{}", res_rs.output);
+        assert!(
+            res_rs
+                .output
+                .contains("pub async fn start_server() -> Result<(), ()>"),
+            "{}",
+            res_rs.output
+        );
 
         let res_py = execute(&mut ctx, "outline", &json!({"path": "worker.py"}));
         assert!(res_py.ok, "{}", res_py.output);
         assert!(res_py.output.contains("class Worker:"), "{}", res_py.output);
-        assert!(res_py.output.contains("def __init__(self, name: str):"), "{}", res_py.output);
-        assert!(res_py.output.contains("def run(self) -> None:"), "{}", res_py.output);
+        assert!(
+            res_py.output.contains("def __init__(self, name: str):"),
+            "{}",
+            res_py.output
+        );
+        assert!(
+            res_py.output.contains("def run(self) -> None:"),
+            "{}",
+            res_py.output
+        );
         assert!(res_py.output.contains("def main():"), "{}", res_py.output);
 
         fs::remove_dir_all(&dir).ok();
@@ -3499,26 +3558,66 @@ end
 
         let mut ctx = ToolCtx::new(dir.path());
 
-        let res_d1 = execute(&mut ctx, "outline", &json!({"path": "test.rs", "max_depth": 1}));
+        let res_d1 = execute(
+            &mut ctx,
+            "outline",
+            &json!({"path": "test.rs", "max_depth": 1}),
+        );
         assert!(res_d1.ok, "{}", res_d1.output);
         assert!(res_d1.output.contains("struct Outer"), "{}", res_d1.output);
         assert!(!res_d1.output.contains("inner_method"), "{}", res_d1.output);
 
-        let res_d2 = execute(&mut ctx, "outline", &json!({"path": "test.rs", "max_depth": 2}));
+        let res_d2 = execute(
+            &mut ctx,
+            "outline",
+            &json!({"path": "test.rs", "max_depth": 2}),
+        );
         assert!(res_d2.ok, "{}", res_d2.output);
-        assert!(res_d2.output.contains("fn inner_method()"), "{}", res_d2.output);
+        assert!(
+            res_d2.output.contains("fn inner_method()"),
+            "{}",
+            res_d2.output
+        );
 
-        let res_rb = execute(&mut ctx, "outline", &json!({"path": "tracker.rb", "max_depth": 3}));
+        let res_rb = execute(
+            &mut ctx,
+            "outline",
+            &json!({"path": "tracker.rb", "max_depth": 3}),
+        );
         assert!(res_rb.ok, "{}", res_rb.output);
-        assert!(res_rb.output.contains("module Analytics"), "{}", res_rb.output);
+        assert!(
+            res_rb.output.contains("module Analytics"),
+            "{}",
+            res_rb.output
+        );
         assert!(res_rb.output.contains("class Tracker"), "{}", res_rb.output);
-        assert!(res_rb.output.contains("def track_event(name)"), "{}", res_rb.output);
+        assert!(
+            res_rb.output.contains("def track_event(name)"),
+            "{}",
+            res_rb.output
+        );
 
-        let res_md = execute(&mut ctx, "outline", &json!({"path": "README.md", "max_depth": 2}));
+        let res_md = execute(
+            &mut ctx,
+            "outline",
+            &json!({"path": "README.md", "max_depth": 2}),
+        );
         assert!(res_md.ok, "{}", res_md.output);
-        assert!(res_md.output.contains("# Project Documentation"), "{}", res_md.output);
-        assert!(res_md.output.contains("## Getting Started"), "{}", res_md.output);
-        assert!(!res_md.output.contains("### Prerequisites"), "{}", res_md.output);
+        assert!(
+            res_md.output.contains("# Project Documentation"),
+            "{}",
+            res_md.output
+        );
+        assert!(
+            res_md.output.contains("## Getting Started"),
+            "{}",
+            res_md.output
+        );
+        assert!(
+            !res_md.output.contains("### Prerequisites"),
+            "{}",
+            res_md.output
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -3585,33 +3684,93 @@ end
 
         let c_res = execute(&mut ctx, "outline", &json!({"path": "main.c"}));
         assert!(c_res.ok, "{}", c_res.output);
-        assert!(c_res.output.contains("int calculate(int x)"), "{}", c_res.output);
+        assert!(
+            c_res.output.contains("int calculate(int x)"),
+            "{}",
+            c_res.output
+        );
         assert!(c_res.output.contains("int main()"), "{}", c_res.output);
 
-        let cpp_res = execute(&mut ctx, "outline", &json!({"path": "service.cpp", "max_depth": 2}));
+        let cpp_res = execute(
+            &mut ctx,
+            "outline",
+            &json!({"path": "service.cpp", "max_depth": 2}),
+        );
         assert!(cpp_res.ok, "{}", cpp_res.output);
-        assert!(cpp_res.output.contains("class Engine"), "{}", cpp_res.output);
-        assert!(cpp_res.output.contains("void start()"), "{}", cpp_res.output);
+        assert!(
+            cpp_res.output.contains("class Engine"),
+            "{}",
+            cpp_res.output
+        );
+        assert!(
+            cpp_res.output.contains("void start()"),
+            "{}",
+            cpp_res.output
+        );
 
-        let cs_res = execute(&mut ctx, "outline", &json!({"path": "App.cs", "max_depth": 2}));
+        let cs_res = execute(
+            &mut ctx,
+            "outline",
+            &json!({"path": "App.cs", "max_depth": 2}),
+        );
         assert!(cs_res.ok, "{}", cs_res.output);
         assert!(cs_res.output.contains("class Greeter"), "{}", cs_res.output);
-        assert!(cs_res.output.contains("void SayHello()"), "{}", cs_res.output);
+        assert!(
+            cs_res.output.contains("void SayHello()"),
+            "{}",
+            cs_res.output
+        );
 
-        let java_res = execute(&mut ctx, "outline", &json!({"path": "Hello.java", "max_depth": 2}));
+        let java_res = execute(
+            &mut ctx,
+            "outline",
+            &json!({"path": "Hello.java", "max_depth": 2}),
+        );
         assert!(java_res.ok, "{}", java_res.output);
-        assert!(java_res.output.contains("class Hello"), "{}", java_res.output);
-        assert!(java_res.output.contains("void greet()"), "{}", java_res.output);
+        assert!(
+            java_res.output.contains("class Hello"),
+            "{}",
+            java_res.output
+        );
+        assert!(
+            java_res.output.contains("void greet()"),
+            "{}",
+            java_res.output
+        );
 
-        let go_res = execute(&mut ctx, "outline", &json!({"path": "server.go", "max_depth": 2}));
+        let go_res = execute(
+            &mut ctx,
+            "outline",
+            &json!({"path": "server.go", "max_depth": 2}),
+        );
         assert!(go_res.ok, "{}", go_res.output);
-        assert!(go_res.output.contains("type Server struct"), "{}", go_res.output);
-        assert!(go_res.output.contains("func (s *Server) Start() error"), "{}", go_res.output);
+        assert!(
+            go_res.output.contains("type Server struct"),
+            "{}",
+            go_res.output
+        );
+        assert!(
+            go_res.output.contains("func (s *Server) Start() error"),
+            "{}",
+            go_res.output
+        );
 
-        let ts_res = execute(&mut ctx, "outline", &json!({"path": "index.ts", "max_depth": 2}));
+        let ts_res = execute(
+            &mut ctx,
+            "outline",
+            &json!({"path": "index.ts", "max_depth": 2}),
+        );
         assert!(ts_res.ok, "{}", ts_res.output);
-        assert!(ts_res.output.contains("export interface Config"), "{}", ts_res.output);
-        assert!(ts_res.output.contains("export class App"), "{}", ts_res.output);
+        assert!(
+            ts_res.output.contains("export interface Config"),
+            "{}",
+            ts_res.output
+        );
+        assert!(
+            ts_res.output.contains("export class App"),
+            "{}",
+            ts_res.output
+        );
         assert!(ts_res.output.contains("start(): void"), "{}", ts_res.output);
 
         fs::remove_dir_all(&dir).ok();
