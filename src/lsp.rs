@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStdin, Command};
 
 const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -53,12 +53,76 @@ pub async fn read_message<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Val
     Ok(serde_json::from_slice(&body)?)
 }
 
+pub async fn handle_server_message<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    diagnostics: &mut Vec<PublishDiagnosticsParams>,
+    msg: Value,
+) -> Result<Option<Value>> {
+    if msg.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics") {
+        if let Some(params) = msg.get("params") {
+            let diagnostic = serde_json::from_value(params.clone())?;
+            diagnostics.push(diagnostic);
+        }
+        return Ok(None);
+    }
+    if let (Some(req_id), Some(method)) = (
+        msg.get("id").filter(|id| !id.is_null()),
+        msg.get("method").and_then(Value::as_str),
+    ) {
+        let response = match method {
+            "workspace/configuration" => {
+                let count = msg
+                    .get("params")
+                    .and_then(|p| p.get("items"))
+                    .and_then(Value::as_array)
+                    .map(|a| a.len())
+                    .unwrap_or(1);
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": vec![Value::Null; count]
+                })
+            }
+            "window/workDoneProgress/create" => {
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": Value::Null
+                })
+            }
+            _ => {
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32601,
+                        "message": "Method not found"
+                    }
+                })
+            }
+        };
+        write_message(writer, &response).await?;
+        return Ok(None);
+    }
+    if msg.get("method").is_some() {
+        return Ok(None);
+    }
+    Ok(Some(msg))
+}
+
 pub struct Client {
     child: Child,
     stdin: ChildStdin,
-    stdout: tokio::io::BufReader<ChildStdout>,
+    incoming: tokio::sync::mpsc::Receiver<Result<Value>>,
+    reader_task: tokio::task::JoinHandle<()>,
     next_id: u64,
     diagnostics: Vec<PublishDiagnosticsParams>,
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.reader_task.abort();
+    }
 }
 
 impl Client {
@@ -73,10 +137,28 @@ impl Client {
             .with_context(|| format!("start LSP server {}", server.name))?;
         let stdin = child.stdin.take().context("LSP stdin unavailable")?;
         let stdout = child.stdout.take().context("LSP stdout unavailable")?;
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        let reader_task = tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(stdout);
+            loop {
+                match read_message(&mut reader).await {
+                    Ok(msg) => {
+                        if tx.send(Ok(msg)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
+                }
+            }
+        });
         Ok(Self {
             child,
             stdin,
-            stdout: tokio::io::BufReader::new(stdout),
+            incoming: rx,
+            reader_task,
             next_id: 1,
             diagnostics: Vec::new(),
         })
@@ -91,19 +173,20 @@ impl Client {
         )
         .await?;
         loop {
-            let msg = read_message(&mut self.stdout).await?;
-            if msg.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
+            let msg = match self.incoming.recv().await {
+                Some(Ok(msg)) => msg,
+                Some(Err(e)) => return Err(e),
+                None => bail!("LSP server closed stdout"),
+            };
+            if let Some(resp) =
+                handle_server_message(&mut self.stdin, &mut self.diagnostics, msg).await?
             {
-                self.diagnostics.push(serde_json::from_value(
-                    msg.get("params").cloned().unwrap_or(Value::Null),
-                )?);
-                continue;
-            }
-            if msg.get("id") == Some(&Value::from(id)) {
-                if let Some(error) = msg.get("error") {
-                    bail!("LSP {method}: {error}");
+                if resp.get("id") == Some(&Value::from(id)) {
+                    if let Some(error) = resp.get("error") {
+                        bail!("LSP {method}: {error}");
+                    }
+                    return Ok(resp.get("result").cloned().unwrap_or(Value::Null));
                 }
-                return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
             }
         }
     }
@@ -162,15 +245,18 @@ impl Client {
             return Ok(Some(self.diagnostics.remove(0)));
         }
         loop {
-            let msg = read_message(&mut self.stdout).await?;
-            if msg.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
-            {
-                let diagnostic =
-                    serde_json::from_value(msg.get("params").cloned().unwrap_or(Value::Null))?;
-                return Ok(Some(diagnostic));
+            let msg = match self.incoming.recv().await {
+                Some(Ok(msg)) => msg,
+                Some(Err(e)) => return Err(e),
+                None => return Ok(None),
+            };
+            handle_server_message(&mut self.stdin, &mut self.diagnostics, msg).await?;
+            if !self.diagnostics.is_empty() {
+                return Ok(Some(self.diagnostics.remove(0)));
             }
         }
     }
+
     pub async fn shutdown(mut self) -> Result<()> {
         let mut first_error = None;
         if let Err(error) = self.request("shutdown", Value::Null).await {
@@ -181,6 +267,7 @@ impl Client {
         {
             first_error = Some(error);
         }
+        self.reader_task.abort();
         if let Err(error) = self.child.wait().await
             && first_error.is_none()
         {
@@ -261,13 +348,17 @@ impl Manager {
             .flat_map(|(_, client)| client.diagnostics.drain(..))
             .collect::<Vec<_>>();
         for (_, client) in &mut self.clients {
-            while let Ok(Ok(Some(item))) = tokio::time::timeout(
+            while let Ok(res) = tokio::time::timeout(
                 std::time::Duration::from_millis(100),
                 client.next_diagnostics(),
             )
             .await
             {
-                result.push(item);
+                match res {
+                    Ok(Some(item)) => result.push(item),
+                    Ok(None) => break,
+                    Err(e) => return Err(e),
+                }
             }
         }
         Ok(result)
@@ -423,5 +514,148 @@ mod tests {
         let uri2 = file_uri(&existing).unwrap();
         assert!(uri2.starts_with("file:///"), "{uri2}");
         assert!(!uri2.contains("?"), "must not contain verbatim prefix: {uri2}");
+    }
+
+    #[tokio::test]
+    async fn server_requests_are_answered_and_not_confused_with_responses() {
+        let mut writer = Vec::new();
+        let mut diags = Vec::new();
+
+        // 1. workspace/configuration request with numeric id matching client pending id
+        let config_req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "workspace/configuration",
+            "params": {"items": [{"section": "gopls"}, {"section": "go"}]}
+        });
+        let res = handle_server_message(&mut writer, &mut diags, config_req).await.unwrap();
+        assert!(res.is_none(), "server request must not be treated as client response");
+        let mut reader = BufReader::new(writer.as_slice());
+        let reply = read_message(&mut reader).await.unwrap();
+        assert_eq!(reply.get("id"), Some(&serde_json::json!(1)));
+        assert_eq!(reply.get("result"), Some(&serde_json::json!([null, null])));
+
+        // 2. window/workDoneProgress/create request
+        writer.clear();
+        let progress_req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "window/workDoneProgress/create",
+            "params": {"token": "token-1"}
+        });
+        let res = handle_server_message(&mut writer, &mut diags, progress_req).await.unwrap();
+        assert!(res.is_none());
+        let mut reader = BufReader::new(writer.as_slice());
+        let reply = read_message(&mut reader).await.unwrap();
+        assert_eq!(reply.get("id"), Some(&serde_json::json!(2)));
+        assert_eq!(reply.get("result"), Some(&Value::Null));
+
+        // 3. unknown server-to-client request
+        writer.clear();
+        let unknown_req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "custom/request"
+        });
+        let res = handle_server_message(&mut writer, &mut diags, unknown_req).await.unwrap();
+        assert!(res.is_none());
+        let mut reader = BufReader::new(writer.as_slice());
+        let reply = read_message(&mut reader).await.unwrap();
+        assert_eq!(reply.get("id"), Some(&serde_json::json!(99)));
+        assert_eq!(
+            reply.get("error").and_then(|e| e.get("code")),
+            Some(&serde_json::json!(-32601))
+        );
+
+        // 4. real response to client request with id 1
+        writer.clear();
+        let real_resp = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"capabilities": {}}
+        });
+        let res = handle_server_message(&mut writer, &mut diags, real_resp.clone()).await.unwrap();
+        assert_eq!(res, Some(real_resp));
+        assert!(writer.is_empty(), "responses to client should not write a reply");
+    }
+
+    #[tokio::test]
+    async fn diagnostics_are_accumulated_and_not_returned_as_response() {
+        let mut writer = Vec::new();
+        let mut diags = Vec::new();
+
+        let diag_msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": "file:///test.rs",
+                "diagnostics": []
+            }
+        });
+        let res = handle_server_message(&mut writer, &mut diags, diag_msg).await.unwrap();
+        assert!(res.is_none());
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].uri, "file:///test.rs");
+        assert!(writer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reader_task_preserves_framing_across_receiver_timeouts() {
+        let (client_write, server_read) = tokio::io::duplex(4096);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+
+        // Background reader task reading from server_read
+        let reader_task = tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(server_read);
+            loop {
+                match read_message(&mut reader).await {
+                    Ok(msg) => {
+                        if tx.send(Ok(msg)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        let mut client_write = client_write;
+
+        // Receiver times out before any message arrives
+        let timeout_res = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            rx.recv(),
+        )
+        .await;
+        assert!(timeout_res.is_err(), "expected timeout");
+
+        // Now write first complete message
+        let msg1 = serde_json::json!({"jsonrpc": "2.0", "method": "test1"});
+        write_message(&mut client_write, &msg1).await.unwrap();
+
+        // Receiver reads it cleanly without framing error
+        let received1 = rx.recv().await.unwrap().unwrap();
+        assert_eq!(received1, msg1);
+
+        // Another timeout
+        let timeout_res2 = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            rx.recv(),
+        )
+        .await;
+        assert!(timeout_res2.is_err(), "expected timeout");
+
+        // Write second message
+        let msg2 = serde_json::json!({"jsonrpc": "2.0", "method": "test2"});
+        write_message(&mut client_write, &msg2).await.unwrap();
+
+        // Receiver reads second message cleanly
+        let received2 = rx.recv().await.unwrap().unwrap();
+        assert_eq!(received2, msg2);
+
+        reader_task.abort();
     }
 }
