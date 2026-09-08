@@ -114,17 +114,12 @@ enum ProbeTask {
 }
 
 fn shell_name() -> String {
-    #[cfg(windows)]
-    {
-        if std::env::var_os("PSModulePath").is_some()
-            || std::env::var_os("POWERSHELL_DISTRIBUTION_CHANNEL").is_some()
-        {
-            return "PowerShell environment".into();
-        }
+    match crate::agent::shell::ShellKind::detect() {
+        crate::agent::shell::ShellKind::Bash => "bash".into(),
+        crate::agent::shell::ShellKind::Sh => "sh".into(),
+        crate::agent::shell::ShellKind::Cmd => "cmd.exe".into(),
+        crate::agent::shell::ShellKind::PowerShell => "PowerShell".into(),
     }
-    std::env::var("SHELL")
-        .or_else(|_| std::env::var("COMSPEC"))
-        .unwrap_or_else(|_| "unknown".into())
 }
 
 fn os_info() -> String {
