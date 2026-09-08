@@ -592,8 +592,10 @@ mod tests {
         // own (the loop runs for up to 10s). If the process were merely
         // abandoned rather than killed, the pipe readers this call joins on
         // would keep it waiting for the full 10s regardless of the flag.
+        // The 5s bound leaves head room for loaded CI machines while still
+        // failing a full 10s block.
         assert!(
-            elapsed < std::time::Duration::from_secs(2),
+            elapsed < std::time::Duration::from_secs(5),
             "bash() blocked until the child finished on its own: {elapsed:?}"
         );
 

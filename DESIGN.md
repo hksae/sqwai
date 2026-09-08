@@ -1702,7 +1702,7 @@ number; a `partial` one is missing something the design calls for.
 | G | Goal-retention benchmark (§8.2) | planned | F6 |
 | H0 | L0 fact block + criticism detector | planned | F2 |
 | H1 | bash_ro, read-only toolset, Scope/Neutralizer/Executor/Verdict, /verify | planned | H0, D |
-| I1 | Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild | planned | E |
+| I1 | Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild | done — rusqlite (bundled) engine with the §2.4.2 schema (files/nodes/edges/nodes_fts/meta, WAL, synchronous=NORMAL); corrupt-db quarantine to `corrupt-<ts>.db`; atomic full rebuild via `graph.db.new` rename; meta.json sidecar (schema_version, generation, built_at, status); generic adapter at Level 1 (`references` edges from path mentions, resolved against the walked file set); section keys now `section:<path>#<slug>` with `-2` collision suffix. One stated deviation: edges are stored by stable keys (`from_key`,`to_key`,`kind`,`source`) rather than node ids, so adapters may emit edges to not-yet-indexed nodes (needed by the memory adapter's `mentions` in §2.4.5) | E |
 | I2 | Rust adapter (tree-sitter), qualified keys | planned | I1 |
 | I3 | Freshness: edit/bash/undo/head triggers; status semantics | planned | I1 |
 | I4 | resolve_ref; validator refs; pre-edit warning; stale markers; reflector executor tool | next | I2, I3, F1, H1 |

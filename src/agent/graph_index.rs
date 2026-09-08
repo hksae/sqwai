@@ -31,6 +31,122 @@ pub trait SourceAdapter {
     fn index(&self, relative_path: &str, content: &[u8]) -> Result<GraphBatch>;
 }
 
+/// Bump when an adapter's output changes shape; a bump should trigger a
+/// full reindex (§2.4.4).
+pub const GENERIC_ADAPTER_VERSION: &str = "1";
+pub const MARKDOWN_ADAPTER_VERSION: &str = "1";
+
+/// §2.4.4 Level 1: a file node plus `references` edges for path-like
+/// mentions (imports and relative paths) that resolve inside the project.
+/// The indexer drops mentions that point outside the walked file set.
+pub struct GenericAdapter;
+
+/// Path-like tokens: must contain a separator (`/` or `\`) or start with
+/// `./` / `../`, so bare words like `cargo` never match. URLs are excluded
+/// by the `://` check in the caller.
+fn path_mentions(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        // token characters for a path mention
+        let is_token = |c: char| c.is_alphanumeric() || matches!(c, '.' | '/' | '\\' | '-' | '_');
+        if !is_token(chars[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && is_token(chars[i]) {
+            i += 1;
+        }
+        let token: String = chars[start..i].iter().collect();
+        // a path mention has a separator, never a scheme, and a known extension
+        let has_sep = token.contains('/') || token.starts_with("./") || token.starts_with("../");
+        let has_ext = token.rsplit('.').next().is_some_and(|ext| {
+            matches!(
+                ext,
+                "rs" | "py"
+                    | "js"
+                    | "jsx"
+                    | "mjs"
+                    | "cjs"
+                    | "ts"
+                    | "tsx"
+                    | "go"
+                    | "java"
+                    | "c"
+                    | "h"
+                    | "cc"
+                    | "cpp"
+                    | "cxx"
+                    | "hpp"
+                    | "json"
+                    | "toml"
+                    | "yaml"
+                    | "yml"
+                    | "md"
+                    | "markdown"
+                    | "sh"
+            )
+        });
+        if has_sep && !token.contains("://") && has_ext {
+            out.push(token);
+        }
+    }
+    out
+}
+
+impl SourceAdapter for GenericAdapter {
+    fn supports(&self, _path: &Path) -> bool {
+        true
+    }
+
+    fn index(&self, relative_path: &str, content: &[u8]) -> Result<GraphBatch> {
+        let mut batch = GraphBatch::default();
+        let language = language_for_path(Path::new(relative_path));
+        batch.nodes.push(file_node(
+            relative_path,
+            content,
+            language,
+            "generic",
+            GENERIC_ADAPTER_VERSION,
+            1,
+        ));
+        let text = String::from_utf8_lossy(content);
+        for mention in path_mentions(&text) {
+            // `./` and `../` are relative to the file's directory; everything
+            // else is treated as project-root relative (the usual shape of
+            // module and include paths)
+            let joined = if mention.starts_with("./") || mention.starts_with("../") {
+                Path::new(relative_path)
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""))
+                    .join(&mention)
+            } else {
+                PathBuf::from(&mention)
+            };
+            let target = match normalize_relative(joined) {
+                Some(target) => target,
+                None => continue,
+            };
+            if target == relative_path {
+                continue;
+            }
+            let mut relation = edge(
+                &file_key(relative_path),
+                &file_key(&target),
+                "references",
+                "generic",
+            );
+            relation
+                .properties
+                .insert("mention".into(), Value::String(mention));
+            batch.edges.push(relation);
+        }
+        Ok(batch)
+    }
+}
+
 pub struct MarkdownAdapter;
 
 impl SourceAdapter for MarkdownAdapter {
@@ -46,9 +162,14 @@ impl SourceAdapter for MarkdownAdapter {
         let source_file_key = file_key(relative_path);
         let document_key = format!("document:{relative_path}");
         let mut batch = GraphBatch::default();
-        batch
-            .nodes
-            .push(file_node(relative_path, content, Some("markdown")));
+        batch.nodes.push(file_node(
+            relative_path,
+            content,
+            Some("markdown"),
+            "markdown",
+            MARKDOWN_ADAPTER_VERSION,
+            2,
+        ));
         batch.nodes.push(Node {
             stable_key: document_key.clone(),
             kind: NodeKind::Document,
@@ -58,7 +179,11 @@ impl SourceAdapter for MarkdownAdapter {
             line_start: Some(1),
             line_end: Some(text.lines().count().max(1) as u32),
             signature: None,
-            properties: properties([("source_adapter", json!("markdown"))]),
+            properties: properties([
+                ("source_adapter", json!("markdown")),
+                ("adapter_level", json!(2)),
+                ("adapter_version", json!(MARKDOWN_ADAPTER_VERSION)),
+            ]),
             content_hash: Some(content_hash(content)),
         });
         batch.edges.push(edge(
@@ -69,15 +194,22 @@ impl SourceAdapter for MarkdownAdapter {
         ));
 
         let headings = markdown_headings(text);
+        let mut slug_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         for (index, heading) in headings.iter().enumerate() {
             let end_line = headings
                 .get(index + 1)
                 .map_or_else(|| text.lines().count().max(1) as u32, |next| next.line - 1);
-            let section_key = format!(
-                "section:{relative_path}::{}::{}",
-                slug(&heading.title),
-                heading.line
-            );
+            // deterministic key: `section:<path>#<slug>`, `-2` on collision —
+            // stable under line shifts (§2.4.3)
+            let base = slug(&heading.title);
+            let count = slug_counts.entry(base.clone()).or_insert(0);
+            *count += 1;
+            let section_key = if *count == 1 {
+                format!("section:{relative_path}#{base}")
+            } else {
+                format!("section:{relative_path}#{base}-{count}")
+            };
             batch.nodes.push(Node {
                 stable_key: section_key.clone(),
                 kind: NodeKind::Section,
@@ -116,19 +248,15 @@ impl SourceAdapter for MarkdownAdapter {
     }
 }
 
-pub fn index_project(store: &mut impl GraphStore, root: &Path) -> Result<IndexReport> {
-    index_project_excluding(
-        store,
-        root,
-        &crate::config::SecretsConfig::default().exclude_globs,
-    )
-}
-
 /// Index the project, skipping paths that match `exclude_globs`.
 ///
 /// §2.3.6 keeps credential files out of the index: their contents would land
 /// in graph node properties and in the FTS table, which is durable state the
 /// screening in `agent::secrets` never sees.
+///
+/// Two passes: the first collects the walked file set so that Level 1
+/// `references` edges can be resolved against it — an adapter never needs to
+/// know what else exists, and no dangling `file:` edges are stored.
 pub fn index_project_excluding(
     store: &mut impl GraphStore,
     root: &Path,
@@ -138,9 +266,33 @@ pub fn index_project_excluding(
         .canonicalize()
         .with_context(|| format!("canonicalize project root {}", root.display()))?;
     let excluded = build_globset(exclude_globs);
-    let adapter = MarkdownAdapter;
+    let markdown = MarkdownAdapter;
+    let generic = GenericAdapter;
     let mut report = IndexReport::default();
+
+    let mut collect = WalkBuilder::new(&root);
+    collect.hidden(true).require_git(false);
     let mut retained_paths = std::collections::BTreeSet::new();
+    for entry in collect.build().flatten() {
+        let path = entry.path();
+        if !path.is_file() || is_internal_graph_path(&root, path) {
+            continue;
+        }
+        if let Some(excluded) = &excluded {
+            let name = path.file_name().map(Path::new).unwrap_or(path);
+            let relative = path.strip_prefix(&root).unwrap_or(path);
+            if excluded.is_match(name) || excluded.is_match(relative) {
+                report.skipped_files += 1;
+                continue;
+            }
+        }
+        if let Ok(relative) = relative_path(&root, path) {
+            retained_paths.insert(relative);
+        }
+    }
+    let resolve_edge = |edge: &Edge| {
+        !(edge.to.starts_with("file:") && !retained_paths.contains(&edge.to["file:".len()..]))
+    };
 
     let mut walker = WalkBuilder::new(&root);
     walker.hidden(true).require_git(false);
@@ -156,14 +308,11 @@ pub fn index_project_excluding(
         if !path.is_file() || is_internal_graph_path(&root, path) {
             continue;
         }
-        // Match on the file name as well as the relative path: `.env*` and
-        // `id_*` are written to match a name, not a location.
         if let Some(excluded) = &excluded {
             let name = path.file_name().map(Path::new).unwrap_or(path);
             let relative = path.strip_prefix(&root).unwrap_or(path);
             if excluded.is_match(name) || excluded.is_match(relative) {
-                report.skipped_files += 1;
-                continue;
+                continue; // counted in the first pass
             }
         }
         let relative_path = match relative_path(&root, path) {
@@ -174,7 +323,6 @@ pub fn index_project_excluding(
                 continue;
             }
         };
-        retained_paths.insert(relative_path.clone());
         let content = match read_bounded(path) {
             Ok(content) => content,
             Err(error) => {
@@ -183,23 +331,44 @@ pub fn index_project_excluding(
                 continue;
             }
         };
-        let batch = if adapter.supports(path) {
-            match adapter.index(&relative_path, &content) {
+        let mut batch = if markdown.supports(path) {
+            match markdown.index(&relative_path, &content) {
                 Ok(batch) => batch,
                 Err(error) => {
                     report.warnings.push(format!("{relative_path}: {error}"));
                     GraphBatch {
-                        nodes: vec![file_node(&relative_path, &content, None)],
+                        nodes: vec![file_node(
+                            &relative_path,
+                            &content,
+                            None,
+                            "generic",
+                            GENERIC_ADAPTER_VERSION,
+                            1,
+                        )],
                         edges: vec![],
                     }
                 }
             }
         } else {
-            GraphBatch {
-                nodes: vec![file_node(&relative_path, &content, language_for_path(path))],
-                edges: vec![],
+            match generic.index(&relative_path, &content) {
+                Ok(batch) => batch,
+                Err(error) => {
+                    report.warnings.push(format!("{relative_path}: {error}"));
+                    GraphBatch {
+                        nodes: vec![file_node(
+                            &relative_path,
+                            &content,
+                            None,
+                            "generic",
+                            GENERIC_ADAPTER_VERSION,
+                            1,
+                        )],
+                        edges: vec![],
+                    }
+                }
             }
         };
+        batch.edges.retain(resolve_edge);
         store
             .replace_file_subgraph(&relative_path, &batch.nodes, &batch.edges)
             .with_context(|| format!("index {relative_path}"))?;
@@ -210,7 +379,73 @@ pub fn index_project_excluding(
     Ok(report)
 }
 
-fn file_node(relative_path: &str, content: &[u8], language: Option<&str>) -> Node {
+/// Full rebuild with §2.4.2 atomicity: index into `graph.db.new`, then swap
+/// it over `graph.db` on success, so a half-built graph is never published.
+pub fn rebuild_project(root: &Path) -> Result<IndexReport> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("canonicalize project root {}", root.display()))?;
+    let graph_dir = root.join(".sqwai").join("graph");
+    std::fs::create_dir_all(&graph_dir)
+        .with_context(|| format!("create graph directory {}", graph_dir.display()))?;
+    let new_db = graph_dir.join("graph.db.new");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(PathBuf::from(format!("{}{suffix}", new_db.display())));
+    }
+
+    let report = {
+        let mut store = super::graph::SqliteGraphStore::open_unmanaged(&new_db, root.clone())
+            .context("open fresh graph database for rebuild")?;
+        let report = index_project_excluding(&mut store, &root, &secret_exclude_globs())?;
+        store.bump_generation().context("bump graph generation")?;
+        report
+    };
+
+    let db_path = graph_dir.join("graph.db");
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(PathBuf::from(format!("{}{suffix}", db_path.display())));
+    }
+    // the old database is only removed once the new one is fully built
+    let _ = std::fs::remove_file(&db_path);
+    std::fs::rename(&new_db, &db_path)
+        .with_context(|| format!("publish rebuilt graph {}", db_path.display()))?;
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(PathBuf::from(format!("{}{suffix}", new_db.display())));
+    }
+
+    let previous = super::graph::read_meta(&graph_dir);
+    super::graph::write_meta(
+        &graph_dir,
+        &super::graph::GraphMeta {
+            schema_version: super::graph::GRAPH_SCHEMA_VERSION,
+            generation: previous
+                .as_ref()
+                .map(|meta| meta.generation + 1)
+                .unwrap_or(1),
+            built_at: Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or_default(),
+            ),
+            status: super::graph::GraphStatus::Ok,
+        },
+    )?;
+    Ok(report)
+}
+
+fn secret_exclude_globs() -> Vec<String> {
+    crate::config::SecretsConfig::default().exclude_globs
+}
+
+fn file_node(
+    relative_path: &str,
+    content: &[u8],
+    language: Option<&str>,
+    adapter: &str,
+    adapter_version: &str,
+    level: u8,
+) -> Node {
     Node {
         stable_key: file_key(relative_path),
         kind: NodeKind::File,
@@ -221,7 +456,9 @@ fn file_node(relative_path: &str, content: &[u8], language: Option<&str>) -> Nod
         line_end: None,
         signature: None,
         properties: properties([
-            ("source_adapter", json!("generic")),
+            ("source_adapter", json!(adapter)),
+            ("adapter_level", json!(level)),
+            ("adapter_version", json!(adapter_version)),
             ("size_bytes", json!(content.len())),
         ]),
         content_hash: Some(content_hash(content)),
@@ -454,9 +691,14 @@ fn slug(title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::graph::{CozoGraphStore, Direction, NeighborQuery};
+    use crate::agent::graph::{Direction, NeighborQuery, SqliteGraphStore};
     use std::fs;
     use tempfile::tempdir;
+
+    /// Incremental indexing with the default secret exclusions.
+    fn index_project(store: &mut impl GraphStore, root: &Path) -> Result<IndexReport> {
+        index_project_excluding(store, root, &secret_exclude_globs())
+    }
 
     /// §2.3.6: credential files stay out of the index. Their contents would
     /// land in node properties and the FTS table, which is durable state the
@@ -475,7 +717,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("config")).unwrap();
         std::fs::write(dir.path().join("config/app_secret.toml"), "token = 1\n").unwrap();
 
-        let mut store = CozoGraphStore::open(dir.path()).unwrap();
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
         let globs = crate::config::SecretsConfig::default().exclude_globs;
         index_project_excluding(&mut store, dir.path(), &globs).unwrap();
 
@@ -516,7 +758,7 @@ mod tests {
             batch
                 .nodes
                 .iter()
-                .any(|node| node.stable_key == "section:docs/guide.md::guide::1")
+                .any(|node| node.stable_key == "section:docs/guide.md#guide")
         );
         assert!(
             batch
@@ -535,7 +777,7 @@ mod tests {
         fs::write(dir.path().join("ignored.txt"), "secret\n").unwrap();
         fs::write(dir.path().join("binary.bin"), b"a\0b").unwrap();
 
-        let mut store = CozoGraphStore::open(dir.path()).unwrap();
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
         let report = index_project(&mut store, dir.path()).unwrap();
         assert_eq!(report.indexed_files, 2);
         assert_eq!(report.skipped_files, 1);
@@ -555,29 +797,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("README.md");
         fs::write(&path, "# Old\n").unwrap();
-        let mut store = CozoGraphStore::open(dir.path()).unwrap();
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
         index_project(&mut store, dir.path()).unwrap();
-        assert!(
-            store
-                .find_node("section:README.md::old::1")
-                .unwrap()
-                .is_some()
-        );
+        assert!(store.find_node("section:README.md#old").unwrap().is_some());
 
         fs::write(&path, "# New\n").unwrap();
         index_project(&mut store, dir.path()).unwrap();
-        assert!(
-            store
-                .find_node("section:README.md::old::1")
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            store
-                .find_node("section:README.md::new::1")
-                .unwrap()
-                .is_some()
-        );
+        assert!(store.find_node("section:README.md#old").unwrap().is_none());
+        assert!(store.find_node("section:README.md#new").unwrap().is_some());
         let projection = store
             .neighbors(
                 "document:README.md",
@@ -603,7 +830,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let stale_path = dir.path().join("stale.md");
         fs::write(&stale_path, "# Stale\n").unwrap();
-        let mut store = CozoGraphStore::open(dir.path()).unwrap();
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
         index_project(&mut store, dir.path()).unwrap();
         assert!(store.find_node("file:stale.md").unwrap().is_some());
 
@@ -622,5 +849,108 @@ mod tests {
         );
         assert_eq!(normalize_link("a.md", "../outside.md"), None);
         assert_eq!(normalize_link("a.md", "https://example.com"), None);
+    }
+
+    #[test]
+    fn generic_adapter_level1_emits_reference_edges() {
+        let batch = GenericAdapter
+            .index(
+                "src/main.rs",
+                b"include!(\"src/lib.rs\");\n// docs live in docs/guide.md\nfn main() {}\n",
+            )
+            .unwrap();
+        let mentions: Vec<_> = batch
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == "references")
+            .map(|edge| edge.to.as_str())
+            .collect();
+        assert!(mentions.contains(&"file:src/lib.rs"), "{mentions:?}");
+        assert!(mentions.contains(&"file:docs/guide.md"), "{mentions:?}");
+        // bare words and schemes never become edges
+        assert!(!mentions.iter().any(|target| !target.starts_with("file:")));
+    }
+
+    #[test]
+    fn reference_edges_only_target_walked_files() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "include!(\"src/b.rs\");\n").unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/b.rs"), "pub fn b() {}\n").unwrap();
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        index_project(&mut store, dir.path()).unwrap();
+
+        let projection = store
+            .neighbors(
+                "file:a.rs",
+                NeighborQuery {
+                    direction: Direction::Outgoing,
+                    depth: 1,
+                    limit: 10,
+                },
+            )
+            .unwrap();
+        assert!(
+            projection
+                .edges
+                .iter()
+                .any(|edge| edge.kind == "references" && edge.to == "file:src/b.rs"),
+            "{:?}",
+            projection.edges
+        );
+        // a mention of a file that does not exist is dropped by the indexer
+        fs::write(dir.path().join("c.rs"), "// see src/ghost.rs\n").unwrap();
+        index_project(&mut store, dir.path()).unwrap();
+        let projection = store
+            .neighbors(
+                "file:c.rs",
+                NeighborQuery {
+                    direction: Direction::Outgoing,
+                    depth: 1,
+                    limit: 10,
+                },
+            )
+            .unwrap();
+        assert!(
+            !projection
+                .edges
+                .iter()
+                .any(|edge| edge.to == "file:src/ghost.rs"),
+            "{:?}",
+            projection.edges
+        );
+    }
+
+    #[test]
+    fn full_rebuild_publishes_database_atomically() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "# Hello\n").unwrap();
+
+        let report = rebuild_project(dir.path()).unwrap();
+        assert_eq!(report.indexed_files, 1);
+        let graph_dir = dir.path().join(".sqwai/graph");
+        assert!(graph_dir.join("graph.db").exists());
+        assert!(!graph_dir.join("graph.db.new").exists());
+        let meta = crate::agent::graph::read_meta(&graph_dir).unwrap();
+        assert_eq!(meta.status, crate::agent::graph::GraphStatus::Ok);
+        assert_eq!(meta.generation, 1);
+
+        fs::write(dir.path().join("README.md"), "# Changed\n").unwrap();
+        rebuild_project(dir.path()).unwrap();
+        let meta = crate::agent::graph::read_meta(&graph_dir).unwrap();
+        assert_eq!(meta.generation, 2);
+        let store = SqliteGraphStore::open(dir.path()).unwrap();
+        assert!(
+            store
+                .find_node("section:README.md#changed")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .find_node("section:README.md#hello")
+                .unwrap()
+                .is_none()
+        );
     }
 }

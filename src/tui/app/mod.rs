@@ -1715,9 +1715,7 @@ impl App {
                     self.show_busy_status();
                 } else {
                     let root = std::env::current_dir().unwrap_or_default();
-                    match crate::agent::graph::CozoGraphStore::open(&root).and_then(|mut store| {
-                        crate::agent::graph_index::index_project(&mut store, &root)
-                    }) {
+                    match crate::agent::graph_index::rebuild_project(&root) {
                         Ok(report) => self.status(
                             &format!(
                                 "graph rebuilt: {} indexed, {} removed, {} skipped",
