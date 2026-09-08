@@ -644,6 +644,17 @@ async fn run_agent(
         subagent_depth,
     } = input;
 
+    for pat in &blocked_patterns {
+        if let Err(e) = regex::Regex::new(pat) {
+            let _ = tx
+                .send(AgentEvent::Completed(Err(format!(
+                    "invalid [safety].blocked_patterns regex '{pat}': {e}"
+                ))))
+                .await;
+            return;
+        }
+    }
+
     let mut lsp_manager = if enable_tools && !lsp.servers.is_empty() {
         match crate::lsp::Manager::start(&lsp, &root).await {
             Ok(manager) => Some(manager),
@@ -2363,13 +2374,19 @@ async fn bash_call(
 
     // 0. hard block from config — no questions
     for pat in blocked {
-        let Ok(re) = regex::Regex::new(pat) else {
-            continue;
-        };
-        if re.is_match(&command) || re.is_match(&lower) {
-            return tools::Outcome::err(format!(
-                "command blocked by [safety].blocked_patterns '{pat}'"
-            ));
+        match regex::Regex::new(pat) {
+            Ok(re) => {
+                if re.is_match(&command) || re.is_match(&lower) {
+                    return tools::Outcome::err(format!(
+                        "command blocked by [safety].blocked_patterns '{pat}'"
+                    ));
+                }
+            }
+            Err(e) => {
+                return tools::Outcome::err(format!(
+                    "invalid [safety].blocked_patterns regex '{pat}': {e} - command blocked"
+                ));
+            }
         }
     }
 
