@@ -3602,6 +3602,27 @@ mod tests {
     }
 
     #[test]
+    fn mouse_selection_maps_screen_column_to_char_index_with_wide_chars() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.last_chat = ratatui::layout::Rect::new(1, 0, 80, 20);
+        app.cache_lines = vec![ratatui::text::Line::from("日本語 hello")];
+
+        // Click on 'h' at screen col 8 (chat_x=1 + 7 display columns: 3 CJK * 2 + 1 space = 7)
+        app.mouse_down(0, 8);
+        assert_eq!(
+            app.press.unwrap().col,
+            4,
+            "screen column 8 must map to char index 4 ('h')"
+        );
+
+        // Drag to after 'hello' at screen col 13 (chat_x=1 + 7 + 5 = 13 display columns)
+        app.mouse_drag(0, 13);
+        let sel = app.sel.unwrap();
+        assert_eq!(sel.a.col, 4);
+        assert_eq!(sel.b.col, 9);
+    }
+
+    #[test]
     fn draw_menu_at_height_6_or_7_does_not_panic() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.open_menu(Menu::Settings);

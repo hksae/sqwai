@@ -222,19 +222,49 @@ impl App {
             + (screen_row.saturating_sub(self.last_chat.y)) as usize
     }
 
+    /// Maps a screen cell column to a character index within `self.cache_lines[abs_row]`.
+    pub(super) fn screen_col_to_char(&self, abs_row: usize, screen_col: u16) -> usize {
+        let chat_x = if self.last_chat.width > 0 {
+            self.last_chat.x
+        } else {
+            1
+        };
+        let target_col = screen_col.saturating_sub(chat_x) as usize;
+        let Some(line) = self.cache_lines.get(abs_row) else {
+            return target_col;
+        };
+        let mut cur_col = 0usize;
+        let mut char_idx = 0usize;
+        for span in &line.spans {
+            for ch in span.content.chars() {
+                let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if cur_col + w > target_col {
+                    return char_idx;
+                }
+                cur_col += w;
+                char_idx += 1;
+            }
+        }
+        char_idx
+    }
+
     pub(super) fn mouse_down(&mut self, row: u16, col: u16) {
+        let abs_r = self.abs_row(row);
+        let char_col = self.screen_col_to_char(abs_r, col);
         self.press = Some(CellPos {
-            row: self.abs_row(row),
-            col: col.saturating_sub(1) as usize,
+            row: abs_r,
+            col: char_col,
         });
         self.dragging = false;
     }
 
     pub(super) fn mouse_drag(&mut self, row: u16, col: u16) {
         let Some(p0) = self.press else { return };
+        let abs_r = self.abs_row(row);
+        let char_col = self.screen_col_to_char(abs_r, col);
         let cur = CellPos {
-            row: self.abs_row(row),
-            col: col.saturating_sub(1) as usize,
+            row: abs_r,
+            col: char_col,
         };
         if !self.dragging && cur == p0 {
             return;
