@@ -1688,17 +1688,13 @@ fn with_misattribution_warning(
     let Some(step) = finished_step else {
         return message;
     };
-    let warns = crate::agent::journal::Journal::step_misattribution_warnings(
-        &ctx.root,
-        active,
-        step,
-    );
+    let warns =
+        crate::agent::journal::Journal::step_misattribution_warnings(&ctx.root, active, step);
     if warns.is_empty() {
         return message;
     }
     format!("{message}\nwarning: {}", warns.join("; "))
 }
-
 
 /// A verify step whose evidence no acceptance item has spent yet, with that
 /// evidence. `None` when every verify step's records are already accounted

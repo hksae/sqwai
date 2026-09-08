@@ -645,7 +645,6 @@ impl Journal {
         warnings
     }
 
-
     /// Return a non-blocking reminder when a step has accumulated actions
     /// since its last plan operation.
     pub fn nudge(root: &Path, threshold: usize) -> Result<Option<String>> {
@@ -1432,10 +1431,13 @@ mod tests {
             )
             .unwrap();
 
-        plan.step_mut("1").unwrap().evidence.push(crate::plan::EvidenceRef {
-            session: "session".into(),
-            seq,
-        });
+        plan.step_mut("1")
+            .unwrap()
+            .evidence
+            .push(crate::plan::EvidenceRef {
+                session: "session".into(),
+                seq,
+            });
 
         let warns = Journal::step_misattribution_warnings(&root, &plan, "1");
         assert_eq!(warns.len(), 1);
@@ -1444,4 +1446,3 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 }
-

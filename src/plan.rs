@@ -611,7 +611,9 @@ pub fn validate_proposal_invariants(
             if !found {
                 return Err(Rejection::new(
                     "weakened_constraints",
-                    format!("proposal removes active constraint '{constraint}' under the same goal"),
+                    format!(
+                        "proposal removes active constraint '{constraint}' under the same goal"
+                    ),
                     "keep existing constraints or propose a goal revision if the task direction changed",
                 ));
             }
@@ -619,14 +621,14 @@ pub fn validate_proposal_invariants(
 
         // 2. Acceptance criteria preservation under the same goal
         for acc in &active.acceptance {
-            let found = draft
-                .acceptance
-                .iter()
-                .any(|a| a.trim() == acc.text.trim());
+            let found = draft.acceptance.iter().any(|a| a.trim() == acc.text.trim());
             if !found {
                 return Err(Rejection::new(
                     "dropped_acceptance",
-                    format!("proposal drops active acceptance item '{}' under the same goal", acc.text),
+                    format!(
+                        "proposal drops active acceptance item '{}' under the same goal",
+                        acc.text
+                    ),
                     "keep existing acceptance criteria; manual acceptance can only be waived by user",
                 ));
             }
@@ -643,7 +645,10 @@ pub fn validate_proposal_invariants(
                 if !title_retained {
                     return Err(Rejection::new(
                         "dropped_evidenced_step",
-                        format!("proposal drops step '{}' which already has recorded evidence", step.title),
+                        format!(
+                            "proposal drops step '{}' which already has recorded evidence",
+                            step.title
+                        ),
                         "steps with recorded evidence cannot be removed without trace; keep them in the proposal",
                     ));
                 }
@@ -1697,4 +1702,3 @@ mod tests {
         assert!(validate_proposal_invariants(Some(&active), &draft).is_ok());
     }
 }
-
