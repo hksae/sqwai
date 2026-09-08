@@ -1149,29 +1149,7 @@ impl App {
                 let head = Line::from(head_spans);
                 out.push((head, Some(idx)));
                 if *expanded {
-                    // ask_user history rows store only a one-line summary in
-                    // `args` (not the JSON), so never try to parse it: show
-                    // the question summary and the recorded answer instead of
-                    // an empty expansion.
-                    let body = if name == "ask_user" {
-                        let mut s = String::new();
-                        if !args.is_empty() {
-                            s.push_str(&format!("Q: {args}\n"));
-                        } else {
-                            s.push_str("Q: (question)\n");
-                        }
-                        if !output.is_empty() {
-                            s.push_str(&format!("A: {output}"));
-                        } else {
-                            s.push_str("A: (no answer yet)");
-                        }
-                        s
-                    } else {
-                        diff.clone().unwrap_or_else(|| output.clone())
-                    };
                     const MAX_ROWS: usize = 40;
-                    let rows: Vec<&str> = body.lines().collect();
-                    let shown = &rows[..rows.len().min(MAX_ROWS)];
                     let border = Theme::border_dim();
                     let width = usize::from(w).saturating_sub(6).max(1);
                     // Expanded output has no surrounding box. Keep one quiet
@@ -1181,34 +1159,76 @@ impl App {
                         Line::from(vec![Span::styled("    │".to_string(), border)]),
                         Some(idx),
                     ));
-                    for l in shown {
-                        let st = if l.starts_with('+') && !l.starts_with("+++") {
-                            Theme::ok()
-                        } else if l.starts_with('-') && !l.starts_with("---") {
-                            Theme::err()
-                        } else if l.starts_with("@@") {
-                            Theme::accent()
+                    if name == "talking" {
+                        let rendered = render(output, width as u16, &self.hl);
+                        let shown = &rendered[..rendered.len().min(MAX_ROWS)];
+                        for l in shown {
+                            let mut spans = vec![Span::styled("    │ ", border)];
+                            spans.extend(l.spans.clone());
+                            out.push((Line::from(spans), Some(idx)));
+                        }
+                        if rendered.len() > MAX_ROWS {
+                            let more = format!("… {} more lines", rendered.len() - MAX_ROWS);
+                            out.push((
+                                Line::from(vec![
+                                    Span::styled("    │ ", border),
+                                    Span::styled(truncate_display_width(&more, width), Theme::dim()),
+                                ]),
+                                Some(idx),
+                            ));
+                        }
+                    } else {
+                        // ask_user history rows store only a one-line summary in
+                        // `args` (not the JSON), so never try to parse it: show
+                        // the question summary and the recorded answer instead of
+                        // an empty expansion.
+                        let body = if name == "ask_user" {
+                            let mut s = String::new();
+                            if !args.is_empty() {
+                                s.push_str(&format!("Q: {args}\n"));
+                            } else {
+                                s.push_str("Q: (question)\n");
+                            }
+                            if !output.is_empty() {
+                                s.push_str(&format!("A: {output}"));
+                            } else {
+                                s.push_str("A: (no answer yet)");
+                            }
+                            s
                         } else {
-                            Theme::dim()
+                            diff.clone().unwrap_or_else(|| output.clone())
                         };
-                        let line = truncate_display_width(l, width);
-                        out.push((
-                            Line::from(vec![
-                                Span::styled("    │ ", border),
-                                Span::styled(truncate_display_width(&line, width), st),
-                            ]),
-                            Some(idx),
-                        ));
-                    }
-                    if rows.len() > MAX_ROWS {
-                        let more = format!("… {} more lines", rows.len() - MAX_ROWS);
-                        out.push((
-                            Line::from(vec![
-                                Span::styled("    │ ", border),
-                                Span::styled(truncate_display_width(&more, width), Theme::dim()),
-                            ]),
-                            Some(idx),
-                        ));
+                        let rows: Vec<&str> = body.lines().collect();
+                        let shown = &rows[..rows.len().min(MAX_ROWS)];
+                        for l in shown {
+                            let st = if l.starts_with('+') && !l.starts_with("+++") {
+                                Theme::ok()
+                            } else if l.starts_with('-') && !l.starts_with("---") {
+                                Theme::err()
+                            } else if l.starts_with("@@") {
+                                Theme::accent()
+                            } else {
+                                Theme::dim()
+                            };
+                            let line = truncate_display_width(l, width);
+                            out.push((
+                                Line::from(vec![
+                                    Span::styled("    │ ", border),
+                                    Span::styled(truncate_display_width(&line, width), st),
+                                ]),
+                                Some(idx),
+                            ));
+                        }
+                        if rows.len() > MAX_ROWS {
+                            let more = format!("… {} more lines", rows.len() - MAX_ROWS);
+                            out.push((
+                                Line::from(vec![
+                                    Span::styled("    │ ", border),
+                                    Span::styled(truncate_display_width(&more, width), Theme::dim()),
+                                ]),
+                                Some(idx),
+                            ));
+                        }
                     }
                 }
             }

@@ -641,6 +641,24 @@ impl App {
                 }
                 Role::Assistant => {
                     work_start.get_or_insert(self.segments.len());
+                    let trimmed = m.content.trim();
+                    if !trimmed.is_empty() {
+                        let summary = trimmed
+                            .lines()
+                            .map(str::trim)
+                            .find(|l| !l.is_empty())
+                            .map(|l| l.trim_start_matches('#').trim())
+                            .unwrap_or("")
+                            .to_string();
+                        self.segments.push(Segment::Tool {
+                            name: "talking".to_string(),
+                            args: summary,
+                            ok: Some(true),
+                            output: trimmed.to_string(),
+                            diff: None,
+                            expanded: false,
+                        });
+                    }
                     for call in &m.tool_calls {
                         let idx = self.segments.len();
                         self.segments.push(Segment::Tool {
@@ -706,7 +724,7 @@ impl App {
         self.activity_groups.push(ActivityGroup {
             seg_start,
             seg_end: answer,
-            calls: saved.calls,
+            calls: saved.calls.max(derived.calls),
             thinking: saved.thinking,
             duration_ms: saved.duration_ms,
             errors: saved.errors,
@@ -878,6 +896,7 @@ impl App {
         id: u64,
         questions: Vec<crate::agent::loop_task::AskQuestion>,
     ) {
+        self.flush_assistant_preamble_to_talking();
         // a previous unanswered ask (e.g. after abort) is frozen first so at
         // most one segment stays active
         self.freeze_active_ask("(no answer — superseded)");
@@ -1107,6 +1126,7 @@ impl App {
     /// like tool rows — so the finished turn folds it into its activity group
     /// instead of leaving it rendered below the answer.
     pub(super) fn push_proposal_segment(&mut self, id: u64, draft: crate::plan::Plan) {
+        self.flush_assistant_preamble_to_talking();
         self.freeze_active_proposal();
         let seg = Segment::PlanProposal {
             id,
@@ -1425,6 +1445,7 @@ impl App {
         self.streaming = true;
         self.aborted = false;
         self.assistant_buf.clear();
+        self.pending_reveal.clear();
         // the activity header shows how long the turn took; measure from here
         self.turn_started = Some(Instant::now());
         self.live_group_collapsed = false;
@@ -2273,6 +2294,42 @@ impl App {
                 }
                 AgentEvent::SubagentToolStart { id, name, summary } => {
                     if let Some(chat) = self.subagent_chats.get_mut(&id) {
+                        if let Some(pos) = chat.iter().rposition(|segment| {
+                            matches!(segment, Segment::Assistant { live: true, .. })
+                        }) {
+                            let preamble = if let Some(Segment::Assistant { text, .. }) = chat.get_mut(pos) {
+                                let t = text.trim();
+                                if !t.is_empty() {
+                                    let full = std::mem::take(text);
+                                    Some(full)
+                                } else {
+                                    text.clear();
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            if let Some(p) = preamble {
+                                let summary = p
+                                    .lines()
+                                    .map(str::trim)
+                                    .find(|l| !l.is_empty())
+                                    .map(|l| l.trim_start_matches('#').trim())
+                                    .unwrap_or("")
+                                    .to_string();
+                                chat.insert(
+                                    pos,
+                                    Segment::Tool {
+                                        name: "talking".to_string(),
+                                        args: summary,
+                                        ok: Some(true),
+                                        output: p.trim().to_string(),
+                                        diff: None,
+                                        expanded: false,
+                                    },
+                                );
+                            }
+                        }
                         let pos = chat
                             .iter()
                             .rposition(|segment| {
@@ -2483,6 +2540,7 @@ impl App {
     /// tool calls that follow them (think -> tool -> think -> tool -> answer).
     fn handle_thinking_delta(&mut self, t: String) {
         if !self.thinking_open {
+            self.flush_assistant_preamble_to_talking();
             self.thinking_open = true;
             // reasoning precedes the answer: insert before the live assistant
             let pos = self
@@ -2513,18 +2571,56 @@ impl App {
         self.dirty = true;
     }
 
+    /// If the model streamed conversational text/preamble before issuing a tool
+    /// call, fold that text into an activity group row (`talking`) instead of
+    /// leaving it rendered below the tool activity or letting it be overwritten
+    /// by the final answer.
+    fn flush_assistant_preamble_to_talking(&mut self) {
+        self.reveal_chars(usize::MAX);
+        let mut text = std::mem::take(&mut self.assistant_buf);
+        let pos = self
+            .segments
+            .iter()
+            .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }));
+        if let Some(pos) = pos {
+            if text.is_empty() {
+                if let Some(Segment::Assistant { text: seg_text, .. }) = self.segments.get(pos) {
+                    text = seg_text.clone();
+                }
+            }
+            if let Some(Segment::Assistant { text: seg_text, .. }) = self.segments.get_mut(pos) {
+                seg_text.clear();
+            }
+        }
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            if let Some(pos) = pos {
+                let summary = trimmed
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .map(|l| l.trim_start_matches('#').trim())
+                    .unwrap_or("")
+                    .to_string();
+                let tool = Segment::Tool {
+                    name: "talking".to_string(),
+                    args: summary,
+                    ok: Some(true),
+                    output: trimmed.to_string(),
+                    diff: None,
+                    expanded: false,
+                };
+                self.segments.insert(pos, tool);
+                self.dirty = true;
+            }
+        }
+    }
+
     /// close any open reasoning block, then insert a running tool row above the
     /// live answer (tool -> result -> answer). A tool call ends the current
     /// reasoning block, so the next ThinkingDelta opens its own row instead of
     /// piling onto the previous one.
     fn handle_tool_start(&mut self, name: String, summary: String) {
-        // ask_user has its own inline Q&A segment (AgentEvent::AskUser); a
-        // parallel Tool row would duplicate it and its expansion used to be
-        // empty because `args` here is only a one-line summary, not the JSON.
-        // propose_plan is the same: the PlanProposal segment is the surface.
-        if name == "ask_user" || name == "propose_plan" {
-            return;
-        }
         if self.thinking_open {
             if let Some(i) = self.thinking_idx.take() {
                 self.freeze_thinking(i);
@@ -2537,6 +2633,14 @@ impl App {
                 }
             }
             self.thinking_open = false;
+        }
+        self.flush_assistant_preamble_to_talking();
+        // ask_user has its own inline Q&A segment (AgentEvent::AskUser); a
+        // parallel Tool row would duplicate it and its expansion used to be
+        // empty because `args` here is only a one-line summary, not the JSON.
+        // propose_plan is the same: the PlanProposal segment is the surface.
+        if name == "ask_user" || name == "propose_plan" {
+            return;
         }
         let tool = Segment::Tool {
             name,
@@ -2591,6 +2695,7 @@ impl App {
                 }
             }
             None => {
+                self.flush_assistant_preamble_to_talking();
                 let tool = Segment::Tool {
                     name,
                     args: String::new(),

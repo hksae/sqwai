@@ -4001,4 +4001,267 @@ mod tests {
         assert_eq!(app.seg_layout.len(), 3);
         assert_eq!(app.seg_cache.len(), 3);
     }
+
+    #[test]
+    fn preamble_before_tool_becomes_talking_row_in_activity() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.streaming = true;
+        app.segments.push(Segment::User("fix bug".into()));
+        app.segments.push(Segment::Assistant {
+            text: String::new(),
+            live: true,
+        });
+
+        // Turn 1: model outputs preamble text, then calls tool 'read'
+        app.handle_text_delta("Let me inspect the file.\nHere is my plan.".into());
+        app.handle_tool_start("read".into(), "a.rs".into());
+        app.handle_tool_notice("read".into(), "file contents".into(), true, None);
+
+        // Turn 2: model outputs preamble text, then calls tool 'edit'
+        app.handle_text_delta("Now I see the issue, editing line 10.".into());
+        app.handle_tool_start("edit".into(), "a.rs".into());
+        app.handle_tool_notice("edit".into(), "done".into(), true, None);
+
+        // Turn 3: model outputs final answer (no tools)
+        app.handle_text_delta("I have finished the fix.".into());
+
+        app.session.messages = vec![
+            crate::providers::Message::new(crate::providers::Role::User, "fix bug"),
+            crate::providers::Message::new(
+                crate::providers::Role::Assistant,
+                "Let me inspect the file.\nHere is my plan.",
+            )
+            .with_tool_calls(vec![crate::providers::ToolCallReq::new(
+                "c1",
+                "read",
+                serde_json::json!({}),
+            )]),
+            crate::providers::Message::tool_result("c1", "file contents", false),
+            crate::providers::Message::new(
+                crate::providers::Role::Assistant,
+                "Now I see the issue, editing line 10.",
+            )
+            .with_tool_calls(vec![crate::providers::ToolCallReq::new(
+                "c2",
+                "edit",
+                serde_json::json!({}),
+            )]),
+            crate::providers::Message::tool_result("c2", "done", false),
+            crate::providers::Message::new(
+                crate::providers::Role::Assistant,
+                "I have finished the fix.",
+            ),
+        ];
+
+        app.finish_turn(Ok(()));
+
+        // Verify segments: User, Tool(talking), Tool(read), Tool(talking), Tool(edit), Assistant
+        assert_eq!(app.segments.len(), 6);
+        assert!(matches!(app.segments[0], Segment::User(ref u) if u == "fix bug"));
+
+        match &app.segments[1] {
+            Segment::Tool {
+                name,
+                args,
+                ok,
+                output,
+                expanded,
+                ..
+            } => {
+                assert_eq!(name, "talking");
+                assert_eq!(args, "Let me inspect the file.");
+                assert_eq!(output, "Let me inspect the file.\nHere is my plan.");
+                assert_eq!(*ok, Some(true));
+                assert!(!expanded);
+            }
+            other => panic!("expected talking tool, got {other:?}"),
+        }
+
+        match &app.segments[2] {
+            Segment::Tool {
+                name, args, ok, ..
+            } => {
+                assert_eq!(name, "read");
+                assert_eq!(args, "a.rs");
+                assert_eq!(*ok, Some(true));
+            }
+            other => panic!("expected read tool, got {other:?}"),
+        }
+
+        match &app.segments[3] {
+            Segment::Tool {
+                name,
+                args,
+                ok,
+                output,
+                ..
+            } => {
+                assert_eq!(name, "talking");
+                assert_eq!(args, "Now I see the issue, editing line 10.");
+                assert_eq!(output, "Now I see the issue, editing line 10.");
+                assert_eq!(*ok, Some(true));
+            }
+            other => panic!("expected talking tool, got {other:?}"),
+        }
+
+        match &app.segments[4] {
+            Segment::Tool {
+                name, args, ok, ..
+            } => {
+                assert_eq!(name, "edit");
+                assert_eq!(args, "a.rs");
+                assert_eq!(*ok, Some(true));
+            }
+            other => panic!("expected edit tool, got {other:?}"),
+        }
+
+        match &app.segments[5] {
+            Segment::Assistant { text, live } => {
+                assert_eq!(text, "I have finished the fix.");
+                assert!(!live);
+            }
+            other => panic!("expected assistant answer, got {other:?}"),
+        }
+
+        // Verify activity group encompasses all 4 tools
+        assert_eq!(app.activity_groups.len(), 1);
+        let g = &app.activity_groups[0];
+        assert_eq!(g.seg_start, 1);
+        assert_eq!(g.seg_end, 5);
+        assert_eq!(g.calls, 4);
+
+        // Rendering check: activity collapsed header
+        app.rebuild_cache(80);
+        let screen = rendered(&app);
+        assert!(screen.contains("activity · 4 calls"), "header: {screen}");
+        assert!(screen.contains("I have finished the fix."), "answer: {screen}");
+    }
+
+    #[test]
+    fn talking_row_click_expands_and_renders_with_left_rail() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.streaming = true;
+        app.segments.push(Segment::Assistant {
+            text: String::new(),
+            live: true,
+        });
+
+        app.handle_text_delta("First line of commentary.\nSecond line of commentary.".into());
+        app.handle_tool_start("read".into(), "main.rs".into());
+        app.handle_tool_notice("read".into(), "ok".into(), true, None);
+        app.finish_turn(Ok(()));
+
+        // Find talking segment index
+        let talking_idx = app
+            .segments
+            .iter()
+            .position(|s| matches!(s, Segment::Tool { name, .. } if name == "talking"))
+            .expect("talking segment must exist");
+
+        // Expand activity group first so rows are rendered
+        app.activity_groups[0].expanded = true;
+        app.rebuild_cache(80);
+        let screen_collapsed_tool = rendered(&app);
+        assert!(screen_collapsed_tool.contains("talking"));
+        assert!(screen_collapsed_tool.contains("First line of commentary."));
+
+        // Expand talking tool
+        if let Some(Segment::Tool { expanded, .. }) = app.segments.get_mut(talking_idx) {
+            *expanded = true;
+        }
+        app.rebuild_cache(80);
+        let screen_expanded = rendered(&app);
+        assert!(screen_expanded.contains("│"));
+        assert!(screen_expanded.contains("First line of commentary."));
+        assert!(screen_expanded.contains("Second line of commentary."));
+    }
+
+    #[test]
+    fn load_history_restores_talking_tool_when_assistant_message_has_content() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.session.messages = vec![
+            crate::providers::Message::new(crate::providers::Role::User, "inspect"),
+            crate::providers::Message::new(
+                crate::providers::Role::Assistant,
+                "I will read src/lib.rs first.\nThen edit it.",
+            )
+            .with_tool_calls(vec![crate::providers::ToolCallReq::new(
+                "call-1",
+                "read",
+                serde_json::json!({"file_path": "src/lib.rs"}),
+            )]),
+            crate::providers::Message::tool_result("call-1", "file contents", false),
+            crate::providers::Message::new(crate::providers::Role::Assistant, "done"),
+        ];
+        app.segments.clear();
+        app.load_history_segments();
+
+        assert_eq!(app.segments.len(), 4);
+        assert!(matches!(app.segments[0], Segment::User(ref t) if t == "inspect"));
+        match &app.segments[1] {
+            Segment::Tool {
+                name,
+                args,
+                output,
+                ok,
+                ..
+            } => {
+                assert_eq!(name, "talking");
+                assert_eq!(args, "I will read src/lib.rs first.");
+                assert_eq!(output, "I will read src/lib.rs first.\nThen edit it.");
+                assert_eq!(*ok, Some(true));
+            }
+            other => panic!("expected talking tool, got {other:?}"),
+        }
+        match &app.segments[2] {
+            Segment::Tool {
+                name, ok, output, ..
+            } => {
+                assert_eq!(name, "read");
+                assert_eq!(*ok, Some(true));
+                assert_eq!(output, "file contents");
+            }
+            other => panic!("expected read tool, got {other:?}"),
+        }
+        assert!(matches!(app.segments[3], Segment::Assistant { ref text, .. } if text == "done"));
+        assert_eq!(app.activity_groups.len(), 1);
+        assert_eq!(app.activity_groups[0].calls, 2);
+    }
+
+    #[test]
+    fn aborted_turn_during_tool_preserves_talking_row() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.streaming = true;
+        app.segments.push(Segment::Assistant {
+            text: String::new(),
+            live: true,
+        });
+
+        app.handle_text_delta("Starting build...".into());
+        app.handle_tool_start("bash".into(), "cargo build".into());
+
+        // Abort mid-tool
+        app.finish_turn(Err("aborted".into()));
+
+        // Talking and bash tools are preserved
+        let names: Vec<&str> = app
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Tool { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["talking", "bash"]);
+
+        // No empty assistant segment remains
+        assert!(!app.segments.iter().any(|s| matches!(s, Segment::Assistant { .. })));
+
+        // Activity group is expanded so user sees what happened
+        assert_eq!(app.activity_groups.len(), 1);
+        assert!(app.activity_groups[0].expanded);
+    }
 }
