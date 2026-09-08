@@ -10,6 +10,10 @@ env:
   # keep the cache small: debug info is not useful in CI
   CARGO_PROFILE_TEST_DEBUG: "0"
 
+# the workflow only builds and tests: no token scope beyond reading the repo
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
