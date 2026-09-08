@@ -245,6 +245,9 @@ pub struct App {
     /// screen is shown for every such session, not only at launch
     startup: bool,
     pub(super) startup_data: Option<StartupData>,
+    /// background collector for startup_data; Some while a collection is
+    /// still running, so /new and session switches never block the UI
+    startup_data_rx: Option<std::sync::mpsc::Receiver<StartupData>>,
     pub(super) last_ctrl_c: Option<Instant>,
     /// last request error, shown in the status bar until the next action
     bar_error: Option<String>,
@@ -502,6 +505,7 @@ impl App {
             mode: Mode::Act,
             startup,
             startup_data,
+            startup_data_rx: None,
             last_ctrl_c: None,
             read_only,
             bar_error: None,
@@ -764,6 +768,7 @@ impl App {
                 self.submit();
             }
             self.poll_input(&ev_rx)?;
+            self.poll_startup_data();
             self.poll_agent();
             self.poll_provider_check();
             self.poll_maintain();
@@ -1539,14 +1544,11 @@ impl App {
         self.ask_custom_focus = None;
         self.rebuild_session_environment();
         self.load_history_segments();
-        // an empty session shows the startup screen like a fresh launch
+        // an empty session shows the startup screen like a fresh launch;
+        // data is collected in the background — switching must not block
         self.startup = self.session.messages.is_empty();
         if self.startup {
-            self.startup_data = Some(Self::collect_startup_data(
-                &self.cfg,
-                &self.model_cfg,
-                self.read_only,
-            ));
+            self.refresh_startup_data();
         }
         self.menu_home();
         self.follow = true;
@@ -1589,13 +1591,10 @@ impl App {
                 .flatten()
                 .map(|plan| plan.id);
         self.context_bootstrap_pending = true;
-        // a fresh empty session shows the startup screen again
+        // a fresh empty session shows the startup screen again; the data
+        // refresh runs in the background so /new returns instantly
         self.startup = true;
-        self.startup_data = Some(Self::collect_startup_data(
-            &self.cfg,
-            &self.model_cfg,
-            self.read_only,
-        ));
+        self.refresh_startup_data();
         self.segments.clear();
         self.seg_cache.clear();
         self.activity_groups.clear();
@@ -3321,6 +3320,42 @@ impl App {
             self.view_top = next;
         }
         self.dirty = true;
+    }
+
+    /// Start collecting startup screen data on a background thread. The
+    /// heavy parts (git subprocesses, session index, plan file) would stall
+    /// the UI for seconds when run synchronously inside /new.
+    /// Until the result arrives the previous data (if any) keeps rendering.
+    fn refresh_startup_data(&mut self) {
+        if self.startup_data_rx.is_some() {
+            return; // a collection is already running
+        }
+        let cfg = self.cfg.clone();
+        let model_cfg = self.model_cfg.clone();
+        let read_only = self.read_only;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let data = Self::collect_startup_data(&cfg, &model_cfg, read_only);
+            let _ = tx.send(data);
+        });
+        self.startup_data_rx = Some(rx);
+    }
+
+    /// Pick up a finished background startup-data collection, if any.
+    fn poll_startup_data(&mut self) {
+        if self.startup_data_rx.is_none() {
+            return;
+        }
+        if let Some(rx) = self.startup_data_rx.take() {
+            match rx.try_recv() {
+                Ok(data) => {
+                    self.startup_data = Some(data);
+                    self.dirty = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => self.startup_data_rx = Some(rx),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+            }
+        }
     }
 
     pub(super) fn collect_startup_data(

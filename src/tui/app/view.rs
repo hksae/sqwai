@@ -2162,7 +2162,21 @@ impl App {
         let data = if let Some(d) = &self.startup_data {
             d
         } else {
-            fallback_data = Self::collect_startup_data(&self.cfg, &self.model_cfg, self.read_only);
+            // data is collected on a background thread (refresh_startup_data);
+            // never collect here — this runs every frame while waiting
+            fallback_data = StartupData {
+                version: env!("CARGO_PKG_VERSION"),
+                project_path: shorten_path(&self.project_root),
+                git_branch: None,
+                git_modified: None,
+                model: self.model_cfg.id.clone(),
+                active_plan: None,
+                last_session: None,
+                memory: MemoryInfo::default(),
+                recent: Vec::new(),
+                warnings: Vec::new(),
+                has_sqwai_dir: self.project_root.join(".sqwai").exists(),
+            };
             &fallback_data
         };
 
