@@ -12,7 +12,7 @@ For a normal tool-enabled request, sqwai sends these parts in order:
 4. The active durable plan, if present.
 5. The host-built `ANCHOR`, then resume notice and volatile runtime context.
 
-`ANCHOR` is state, not a model summary: after compaction it is the authoritative record of the goal, constraints, plan state, and bounded journal facts. The prompt identifies `ANCHOR`, `FACTS`, the durable plan, and nudges as host facts.
+`ANCHOR` is state, not a model summary: after compaction it is the authoritative record of the goal, constraints, plan state, and bounded journal facts. The prompt identifies `ANCHOR`, `FACTS`, the durable plan and its per-turn tail (compact current-state block), and nudges as host facts.
 
 ## Design requirements
 
@@ -24,6 +24,7 @@ The tool list is derived from the registry in `src/agent/tools/mod.rs`; it must 
 
 ## Changelog
 
+- 2026-09-05: Clarified plan-change etiquette (targeted plan operations first, `propose_plan` only for structure-invalidating rewrites), constraint-conflict handling, serial mutating tool calls, capabilities described through tools, and no unverifiable claims.
 - 2026-09-05: Clarified that `ANCHOR` is host-built post-compaction state rather than a summary; documented manual acceptance, block/cancel/split outcomes, forced questions after repeated rejections, assumptions, modes, prompt layers, read-before-edit, parallel read-only calls, and minimal-change/commit rules.
 - 2026-09-05: Rewrote the prompt around identity, host facts, integrity, tools, safety, style, and recovery. Removed duplicated operating sections, guessing examples, incident-specific limits, postponed-work notes, and sqwai development rules.
 - 2026-09-05: Added registry-level tool-name coverage assertion and documented the prompt source.
