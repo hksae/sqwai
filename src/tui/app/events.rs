@@ -141,6 +141,7 @@ impl App {
                         if c == '?'
                             && self.input_text().trim().is_empty()
                             && self.menu_stack.is_empty()
+                            && self.ask_custom_focus.is_none()
                         {
                             self.status(
                                 "commands: /settings, /plan, /sessions, /undo, /init, /exit",
@@ -175,7 +176,12 @@ impl App {
                                 }
                             }
                             if !self.menu_stack.is_empty() {
-                                if self.is_inline_ask_free() {
+                                if let Some(q) = self.ask_custom_focus {
+                                    if let Some(custom) = self.ask_custom.get_mut(q) {
+                                        custom.push_str(&text_batch);
+                                        self.build_menu_rows();
+                                    }
+                                } else if self.is_inline_ask_free() {
                                     self.jump_to_bottom_on_typing();
                                     self.paste_text(&text_batch);
                                 } else if self.is_form_menu() {
@@ -185,6 +191,15 @@ impl App {
                                     {
                                         ta.insert_str(p);
                                     }
+                                }
+                            } else if let Some(q) = self.ask_custom_focus {
+                                if let Some(seg) = self.active_ask_seg()
+                                    && let Some(Segment::AskUser { custom, .. }) =
+                                        self.segments.get_mut(seg)
+                                    && let Some(slot) = custom.get_mut(q)
+                                {
+                                    slot.push_str(&text_batch);
+                                    self.follow = true;
                                 }
                             } else {
                                 self.paste_text(&text_batch);
