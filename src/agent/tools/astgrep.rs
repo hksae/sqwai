@@ -23,8 +23,8 @@ fn placeholder(i: usize) -> String {
     format!("ZqMeta{i}Zq")
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Lang {
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Lang {
     Rust,
     Python,
     JavaScript,
@@ -39,7 +39,7 @@ enum Lang {
 }
 
 impl Lang {
-    fn from_name(name: &str) -> Option<Lang> {
+    pub(crate) fn from_name(name: &str) -> Option<Lang> {
         Some(match name {
             "rust" => Lang::Rust,
             "python" => Lang::Python,
@@ -56,7 +56,7 @@ impl Lang {
         })
     }
 
-    fn from_extension(ext: &str) -> Option<Lang> {
+    pub(crate) fn from_extension(ext: &str) -> Option<Lang> {
         Some(match ext {
             "rs" => Lang::Rust,
             "py" => Lang::Python,
@@ -73,7 +73,7 @@ impl Lang {
         })
     }
 
-    fn name(&self) -> &'static str {
+    pub(crate) fn name(&self) -> &'static str {
         match self {
             Lang::Rust => "rust",
             Lang::Python => "python",
@@ -89,7 +89,7 @@ impl Lang {
         }
     }
 
-    fn ts(&self) -> tree_sitter::Language {
+    pub(crate) fn ts(&self) -> tree_sitter::Language {
         match self {
             Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
             Lang::Python => tree_sitter_python::LANGUAGE.into(),
@@ -105,7 +105,7 @@ impl Lang {
         }
     }
 
-    fn is_comment(&self, kind: &str) -> bool {
+    pub(crate) fn is_comment(&self, kind: &str) -> bool {
         match self {
             Lang::Rust => matches!(kind, "line_comment" | "block_comment"),
             _ => kind == "comment" || kind == "line_comment" || kind == "block_comment",
