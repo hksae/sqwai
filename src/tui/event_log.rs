@@ -10,13 +10,7 @@ static START: OnceLock<Instant> = OnceLock::new();
 fn file() -> &'static Option<Mutex<File>> {
     LOG.get_or_init(|| {
         std::env::var_os("SQWAI_EVENT_LOG")
-            .and_then(|path| {
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                    .ok()
-            })
+            .and_then(|path| OpenOptions::new().create(true).append(true).open(path).ok())
             .map(Mutex::new)
     })
 }

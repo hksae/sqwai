@@ -766,7 +766,11 @@ mod tests {
             )),
             "no error status shown"
         );
-        assert_eq!(app.input.lines().join("\n"), "hi", "typed input must be preserved");
+        assert_eq!(
+            app.input.lines().join("\n"),
+            "hi",
+            "typed input must be preserved"
+        );
     }
 
     fn press_enter(app: &mut App) {
@@ -956,7 +960,10 @@ mod tests {
         app.session.push(Role::User, "earlier user prompt");
         app.start_compaction();
         app.finish_turn(Err("compaction model error".into()));
-        assert!(app.session.turn_notes.is_empty(), "must not attach error to earlier user message");
+        assert!(
+            app.session.turn_notes.is_empty(),
+            "must not attach error to earlier user message"
+        );
     }
 
     #[test]
@@ -1340,7 +1347,8 @@ mod tests {
     fn new_session_clears_active_subagent_and_subagent_chats() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.active_subagent = Some(7);
-        app.subagents.push((7, "child".into(), String::new(), String::new(), false));
+        app.subagents
+            .push((7, "child".into(), String::new(), String::new(), false));
         app.start_new_session();
         assert_eq!(app.active_subagent, None);
         assert!(app.subagents.is_empty());
@@ -1990,9 +1998,21 @@ mod tests {
             header: "H".into(),
             question: "Choose?".into(),
             options: vec![
-                AskOption { label: "A".into(), description: None, recommended: false },
-                AskOption { label: "B".into(), description: None, recommended: false },
-                AskOption { label: "C".into(), description: None, recommended: false },
+                AskOption {
+                    label: "A".into(),
+                    description: None,
+                    recommended: false,
+                },
+                AskOption {
+                    label: "B".into(),
+                    description: None,
+                    recommended: false,
+                },
+                AskOption {
+                    label: "C".into(),
+                    description: None,
+                    recommended: false,
+                },
             ],
             multiple: false,
             allow_free: false,
@@ -2988,7 +3008,10 @@ mod tests {
                     "at width {w}: status bar is {used} columns: {text:?}"
                 );
                 if let Some((from, to)) = app.ef_click {
-                    assert!(to <= w && from <= to, "click target out of bounds: {from}..{to} at {w}");
+                    assert!(
+                        to <= w && from <= to,
+                        "click target out of bounds: {from}..{to} at {w}"
+                    );
                 }
             }
         }
@@ -3126,7 +3149,10 @@ mod tests {
             text: String::new(),
             live: true,
         });
-        assert!(app.tool_running(), "tool running with live assistant trailing");
+        assert!(
+            app.tool_running(),
+            "tool running with live assistant trailing"
+        );
 
         if let Some(Segment::Tool { ok, .. }) = app
             .segments

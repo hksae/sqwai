@@ -764,7 +764,9 @@ impl App {
                         self.input_mouse_down(m.row, m.column)
                     }
                     MouseEventKind::Drag(MouseButton::Left)
-                        if self.input_dragging || (self.in_input_rect(m.row, m.column) && self.input.is_selecting()) =>
+                        if self.input_dragging
+                            || (self.in_input_rect(m.row, m.column)
+                                && self.input.is_selecting()) =>
                     {
                         self.input_mouse_drag(m.row, m.column)
                     }

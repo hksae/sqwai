@@ -376,8 +376,10 @@ fn walk(tree: &Tree, src: &str) -> Verdict {
                 for child in node.named_children(&mut node.walk()) {
                     let raw = child.utf8_text(src_bytes).unwrap_or("");
                     let text = raw.trim().trim_matches(['"', '\'']);
-                    if matches!(child.kind(), "word" | "string" | "raw_string" | "concatenation")
-                        && !text.is_empty()
+                    if matches!(
+                        child.kind(),
+                        "word" | "string" | "raw_string" | "concatenation"
+                    ) && !text.is_empty()
                     {
                         let operator = node.utf8_text(src_bytes).unwrap_or("");
                         // `>` / `>>` truncate-overwrite; `<` is input (fine)

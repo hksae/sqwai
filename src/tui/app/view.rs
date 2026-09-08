@@ -666,7 +666,9 @@ impl App {
                 for (q, p) in picked.iter().enumerate() {
                     for (opt, v) in p.iter().enumerate() {
                         if *v {
-                            k = k.wrapping_add(((1usize << (opt.min(60))) | 1).wrapping_mul((q + 1) * 100_003));
+                            k = k.wrapping_add(
+                                ((1usize << (opt.min(60))) | 1).wrapping_mul((q + 1) * 100_003),
+                            );
                         }
                     }
                 }

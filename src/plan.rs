@@ -437,7 +437,9 @@ pub fn open_active_for_session(root: &Path, session_id: Option<&str>) -> Result<
         return Ok(None);
     }
     if let Some(sid) = session_id
-        && let Some(plan) = active_plans.iter().find(|p| p.sessions.iter().any(|s| s == sid))
+        && let Some(plan) = active_plans
+            .iter()
+            .find(|p| p.sessions.iter().any(|s| s == sid))
     {
         return Ok(Some(plan.clone()));
     }

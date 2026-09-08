@@ -119,14 +119,19 @@ impl OpenAiProvider {
             }
         }
         if !req.tools.is_empty() {
-            body["tools"] = json!(req.tools.iter().map(|t| json!({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                },
-            })).collect::<Vec<_>>());
+            body["tools"] = json!(
+                req.tools
+                    .iter()
+                    .map(|t| json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.parameters,
+                        },
+                    }))
+                    .collect::<Vec<_>>()
+            );
             // explicit auto nudges small local models (ollama) into
             // emitting structured tool_calls instead of plain-text JSON
             body["tool_choice"] = json!("auto");

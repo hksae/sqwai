@@ -825,7 +825,10 @@ async fn run_agent(
         None
     };
     if let Some(writer) = journal.as_mut() {
-        let plan_id = plan::open_active_for_session(&root, Some(&session_id)).ok().flatten().map(|p| p.id);
+        let plan_id = plan::open_active_for_session(&root, Some(&session_id))
+            .ok()
+            .flatten()
+            .map(|p| p.id);
         writer.set_attribution(None, plan_id, "main");
         let resumed_from = context::resume_notice(&root, &session_id).map(|_| "journal");
         let _ = writer.session_start(
@@ -1147,7 +1150,9 @@ async fn run_agent(
             let journal_mark = ctx.journal.len();
             let tool_started = Instant::now();
             if let Some(writer) = journal.as_mut() {
-                let active = plan::open_active_for_session(&root, Some(&session_id)).ok().flatten();
+                let active = plan::open_active_for_session(&root, Some(&session_id))
+                    .ok()
+                    .flatten();
                 let plan_id = active.as_ref().map(|p| p.id.clone());
                 let step = call
                     .args
@@ -1206,13 +1211,13 @@ async fn run_agent(
                 ))
             } else {
                 match call.name.as_str() {
-                    "ask_user" if subagent_depth > 0 => {
-                        tools::Outcome::err("subagents cannot interact with the user; make decisions autonomously")
-                    }
+                    "ask_user" if subagent_depth > 0 => tools::Outcome::err(
+                        "subagents cannot interact with the user; make decisions autonomously",
+                    ),
                     "ask_user" => ask_user(call, &tx, &mut ctl, &mut next_id).await,
-                    "propose_plan" if subagent_depth > 0 => {
-                        tools::Outcome::err("subagents cannot propose plans; plans belong to the primary session")
-                    }
+                    "propose_plan" if subagent_depth > 0 => tools::Outcome::err(
+                        "subagents cannot propose plans; plans belong to the primary session",
+                    ),
                     "propose_plan" => {
                         propose_plan(
                             call,
@@ -1342,7 +1347,8 @@ async fn run_agent(
                         args["context_limit"] = serde_json::json!(context_limit);
                         let outcome = run_tool_blocking(&mut ctx, "plan", &args).await;
                         if outcome.ok
-                            && let Ok(Some(saved)) = plan::open_active_for_session(&root, Some(&session_id))
+                            && let Ok(Some(saved)) =
+                                plan::open_active_for_session(&root, Some(&session_id))
                         {
                             plan_todos = saved
                                 .steps

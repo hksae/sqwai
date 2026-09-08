@@ -270,14 +270,14 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
         || err_capped.load(std::sync::atomic::Ordering::Relaxed);
     let body = if combined.len() > MAX_RETURNED || is_capped {
         let note = if is_capped {
-            format!("output (capped at 2 MB) written to {}", spill(&combined).display())
+            format!(
+                "output (capped at 2 MB) written to {}",
+                spill(&combined).display()
+            )
         } else {
             format!("full output written to {}", spill(&combined).display())
         };
-        format!(
-            "{note}\n{}",
-            tail_of(&combined, MAX_RETURNED)
-        )
+        format!("{note}\n{}", tail_of(&combined, MAX_RETURNED))
     } else {
         combined
     };

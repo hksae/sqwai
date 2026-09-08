@@ -1254,8 +1254,11 @@ impl App {
                         MenuAction::None,
                     ));
                     for s in &pinned {
-                        self.menu_rows
-                            .push(session_row(s, s.id.to_string() == cur_id, Some(frame_w)));
+                        self.menu_rows.push(session_row(
+                            s,
+                            s.id.to_string() == cur_id,
+                            Some(frame_w),
+                        ));
                     }
                     self.menu_rows.push(row(
                         Line::from(vec![Span::styled(
@@ -1935,7 +1938,11 @@ fn plan_rows(
     rows
 }
 
-fn session_row(s: &Session, is_current: bool, framed: Option<usize>) -> (Line<'static>, MenuAction) {
+fn session_row(
+    s: &Session,
+    is_current: bool,
+    framed: Option<usize>,
+) -> (Line<'static>, MenuAction) {
     let badge = if s.forked_from_id.is_some() {
         "[fork] "
     } else {

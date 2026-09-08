@@ -512,7 +512,10 @@ mod tests {
         let existing = std::env::current_dir().unwrap().join("Cargo.toml");
         let uri2 = file_uri(&existing).unwrap();
         assert!(uri2.starts_with("file:///"), "{uri2}");
-        assert!(!uri2.contains("?"), "must not contain verbatim prefix: {uri2}");
+        assert!(
+            !uri2.contains("?"),
+            "must not contain verbatim prefix: {uri2}"
+        );
     }
 
     #[tokio::test]
@@ -527,8 +530,13 @@ mod tests {
             "method": "workspace/configuration",
             "params": {"items": [{"section": "gopls"}, {"section": "go"}]}
         });
-        let res = handle_server_message(&mut writer, &mut diags, config_req).await.unwrap();
-        assert!(res.is_none(), "server request must not be treated as client response");
+        let res = handle_server_message(&mut writer, &mut diags, config_req)
+            .await
+            .unwrap();
+        assert!(
+            res.is_none(),
+            "server request must not be treated as client response"
+        );
         let mut reader = BufReader::new(writer.as_slice());
         let reply = read_message(&mut reader).await.unwrap();
         assert_eq!(reply.get("id"), Some(&serde_json::json!(1)));
@@ -542,7 +550,9 @@ mod tests {
             "method": "window/workDoneProgress/create",
             "params": {"token": "token-1"}
         });
-        let res = handle_server_message(&mut writer, &mut diags, progress_req).await.unwrap();
+        let res = handle_server_message(&mut writer, &mut diags, progress_req)
+            .await
+            .unwrap();
         assert!(res.is_none());
         let mut reader = BufReader::new(writer.as_slice());
         let reply = read_message(&mut reader).await.unwrap();
@@ -556,7 +566,9 @@ mod tests {
             "id": 99,
             "method": "custom/request"
         });
-        let res = handle_server_message(&mut writer, &mut diags, unknown_req).await.unwrap();
+        let res = handle_server_message(&mut writer, &mut diags, unknown_req)
+            .await
+            .unwrap();
         assert!(res.is_none());
         let mut reader = BufReader::new(writer.as_slice());
         let reply = read_message(&mut reader).await.unwrap();
@@ -573,9 +585,14 @@ mod tests {
             "id": 1,
             "result": {"capabilities": {}}
         });
-        let res = handle_server_message(&mut writer, &mut diags, real_resp.clone()).await.unwrap();
+        let res = handle_server_message(&mut writer, &mut diags, real_resp.clone())
+            .await
+            .unwrap();
         assert_eq!(res, Some(real_resp));
-        assert!(writer.is_empty(), "responses to client should not write a reply");
+        assert!(
+            writer.is_empty(),
+            "responses to client should not write a reply"
+        );
     }
 
     #[tokio::test]
@@ -591,7 +608,9 @@ mod tests {
                 "diagnostics": []
             }
         });
-        let res = handle_server_message(&mut writer, &mut diags, diag_msg).await.unwrap();
+        let res = handle_server_message(&mut writer, &mut diags, diag_msg)
+            .await
+            .unwrap();
         assert!(res.is_none());
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].uri, "file:///test.rs");
@@ -624,11 +643,8 @@ mod tests {
         let mut client_write = client_write;
 
         // Receiver times out before any message arrives
-        let timeout_res = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            rx.recv(),
-        )
-        .await;
+        let timeout_res =
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
         assert!(timeout_res.is_err(), "expected timeout");
 
         // Now write first complete message
@@ -640,11 +656,8 @@ mod tests {
         assert_eq!(received1, msg1);
 
         // Another timeout
-        let timeout_res2 = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            rx.recv(),
-        )
-        .await;
+        let timeout_res2 =
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
         assert!(timeout_res2.is_err(), "expected timeout");
 
         // Write second message

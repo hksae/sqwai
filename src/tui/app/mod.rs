@@ -3029,7 +3029,12 @@ impl App {
                 .collect()
         };
 
-        match crate::agent::checkpoints::restore_paths_in(&root, self.cfg.undo.shadow, &sha, &targets) {
+        match crate::agent::checkpoints::restore_paths_in(
+            &root,
+            self.cfg.undo.shadow,
+            &sha,
+            &targets,
+        ) {
             Ok(report) => {
                 let touched = report.touched();
                 let reopened_steps =
