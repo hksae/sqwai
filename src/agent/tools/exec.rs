@@ -243,9 +243,7 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    for r in readers {
-        let _ = r.join();
-    }
+    join_readers(readers);
 
     let stdout = String::from_utf8_lossy(&out_buf.lock().unwrap()).into_owned();
     let stderr = String::from_utf8_lossy(&err_buf.lock().unwrap()).into_owned();
