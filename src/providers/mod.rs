@@ -358,6 +358,7 @@ pub fn classify_response(status: u16, body: &str) -> ErrorClass {
     match status {
         401 | 403 => ErrorClass::Auth,
         402 => ErrorClass::Quota,
+        408 => ErrorClass::Network,
         413 => ErrorClass::ContextOverflow,
         429 => {
             // A 429 that is really "you have no money" never clears on its own.
@@ -712,7 +713,8 @@ mod error_class_tests {
     #[test]
     fn transient_failures_are_retryable() {
         for (status, body, expected) in [
-            (429u16, "slow down", ErrorClass::RateLimit),
+            (408u16, "request timeout", ErrorClass::Network),
+            (429, "slow down", ErrorClass::RateLimit),
             (500, "internal server error", ErrorClass::Server),
             (502, "bad gateway", ErrorClass::Server),
             (529, "overloaded_error", ErrorClass::Server),

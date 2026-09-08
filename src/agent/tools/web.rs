@@ -259,11 +259,11 @@ fn html_to_text(html: &str) -> String {
 
 fn decode_entities(text: &str) -> String {
     text.replace("&nbsp;", " ")
-        .replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
+        .replace("&amp;", "&")
 }
 
 fn truncate(text: &str) -> String {
@@ -350,6 +350,11 @@ mod tests {
         assert_eq!(
             decode_entities("&lt;x&gt; &quot;y&quot; &#39;z&#39;"),
             "<x> \"y\" 'z'"
+        );
+        assert_eq!(
+            decode_entities("&amp;lt;"),
+            "&lt;",
+            "&amp;lt; must not double-decode to <"
         );
     }
 

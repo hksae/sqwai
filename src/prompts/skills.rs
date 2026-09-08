@@ -116,7 +116,8 @@ pub fn prompt(skills: &[Skill]) -> Option<String> {
 }
 
 fn parse(raw: &str, path: PathBuf) -> Option<Skill> {
-    let (front, body) = raw.strip_prefix("---\n")?.split_once("\n---")?;
+    let normalized = raw.replace("\r\n", "\n");
+    let (front, body) = normalized.strip_prefix("---\n")?.split_once("\n---")?;
     let mut name = None;
     let mut description = None;
     let mut triggers = Vec::new();
@@ -178,5 +179,18 @@ mod tests {
     #[test]
     fn rejects_missing_frontmatter() {
         assert!(parse("# no frontmatter", PathBuf::from("x/SKILL.md")).is_none());
+    }
+
+    #[test]
+    fn parses_crlf_frontmatter() {
+        let skill = parse(
+            "---\r\nname: win\r\ndescription: Windows rules\r\ntriggers: [win, ps]\r\n---\r\nUse powershell.\r\n",
+            PathBuf::from("win/SKILL.md"),
+        )
+        .unwrap();
+        assert_eq!(skill.name, "win");
+        assert_eq!(skill.description.as_deref(), Some("Windows rules"));
+        assert_eq!(skill.triggers, ["win", "ps"]);
+        assert!(skill.body.contains("Use powershell."));
     }
 }

@@ -1284,6 +1284,16 @@ impl App {
                 return;
             }
         }
+        if !text.starts_with('/')
+            && let Some(pc) = self.cfg.providers.get(&self.model_cfg.provider)
+            && pc.effective_api_key(&self.model_cfg.provider).is_none()
+        {
+            self.status(
+                &format!("provider '{}' has no api key", self.model_cfg.provider),
+                StatusKind::Err,
+            );
+            return;
+        }
         self.input = Self::fresh_input(String::new());
         self.popup_dismiss = false;
         self.hover = None;
@@ -1296,15 +1306,6 @@ impl App {
             return;
         }
         self.startup = false;
-        if let Some(pc) = self.cfg.providers.get(&self.model_cfg.provider)
-            && pc.effective_api_key(&self.model_cfg.provider).is_none()
-        {
-            self.status(
-                &format!("provider '{}' has no api key", self.model_cfg.provider),
-                StatusKind::Err,
-            );
-            return;
-        }
         // pick up any provider/key change made since the last turn
         self.rebuild_provider();
         self.segments.push(Segment::User(text.clone()));

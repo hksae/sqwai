@@ -766,6 +766,7 @@ mod tests {
             )),
             "no error status shown"
         );
+        assert_eq!(app.input.lines().join("\n"), "hi", "typed input must be preserved");
     }
 
     fn press_enter(app: &mut App) {
