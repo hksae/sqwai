@@ -1154,29 +1154,16 @@ async fn run_agent(
                     .ok()
                     .flatten();
                 let plan_id = active.as_ref().map(|p| p.id.clone());
-                let step = call
-                    .args
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-                    .or_else(|| {
-                        if call.name == "plan"
-                            && call.args.get("op").and_then(|v| v.as_str()) == Some("verify")
-                        {
-                            return active.as_ref().and_then(|p| {
-                                p.steps
-                                    .iter()
-                                    .find(|s| s.kind == plan::StepKind::Verify)
-                                    .map(|s| s.id.clone())
-                            });
-                        }
-                        active.as_ref().and_then(|p| {
-                            p.steps
-                                .iter()
-                                .find(|s| s.status == plan::StepStatus::InProgress)
-                                .map(|s| s.id.clone())
-                        })
-                    });
+                let step = if call.name == "plan" {
+                    None
+                } else {
+                    active.as_ref().and_then(|p| {
+                        p.steps
+                            .iter()
+                            .find(|s| s.status == plan::StepStatus::InProgress)
+                            .map(|s| s.id.clone())
+                    })
+                };
                 writer.set_attribution(step, plan_id, "main");
                 let _ = writer.append(
                     "tool_call",
@@ -1518,23 +1505,40 @@ async fn run_agent(
                         "resolves": call.args.get("resolves").and_then(|v| v.as_u64()),
                     }));
                 }
-                let result_seq = writer
-                    .append_evidence(
-                        "tool_result",
-                        serde_json::json!({
-                            "tool": call.name,
-                            "call_id": call.id,
-                            "ok": outcome.ok,
-                            "duration_ms": tool_started.elapsed().as_millis(),
-                            "summary": outcome.output.chars().take(200).collect::<String>(),
-                            "trust": if matches!(call.name.as_str(), "webfetch" | "websearch") { "low" } else { "high" },
-                            // §3.7: distinct from an ordinary failure, so the
-                            // journal can say the user stopped this rather
-                            // than that it went wrong on its own
-                            "code": if outcome.cancelled { Some("cancelled") } else { None },
-                        }),
-                    )
-                    .ok();
+                let result_seq = if call.name == "plan" {
+                    writer
+                        .append(
+                            "tool_result",
+                            serde_json::json!({
+                                "tool": call.name,
+                                "call_id": call.id,
+                                "ok": outcome.ok,
+                                "duration_ms": tool_started.elapsed().as_millis(),
+                                "summary": outcome.output.chars().take(200).collect::<String>(),
+                                "trust": "high",
+                                "code": if outcome.cancelled { Some("cancelled") } else { None },
+                            }),
+                        )
+                        .ok()
+                } else {
+                    writer
+                        .append_evidence(
+                            "tool_result",
+                            serde_json::json!({
+                                "tool": call.name,
+                                "call_id": call.id,
+                                "ok": outcome.ok,
+                                "duration_ms": tool_started.elapsed().as_millis(),
+                                "summary": outcome.output.chars().take(200).collect::<String>(),
+                                "trust": if matches!(call.name.as_str(), "webfetch" | "websearch") { "low" } else { "high" },
+                                // §3.7: distinct from an ordinary failure, so the
+                                // journal can say the user stopped this rather
+                                // than that it went wrong on its own
+                                "code": if outcome.cancelled { Some("cancelled") } else { None },
+                            }),
+                        )
+                        .ok()
+                };
                 if call.name == "plan"
                     && outcome.ok
                     && let Some(seq) = result_seq
@@ -1572,14 +1576,24 @@ async fn run_agent(
                         .get("op")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
+                    let plan_step_id = call.args.get("id").and_then(|value| value.as_str());
                     let _ = writer.append(
                         "plan",
                         serde_json::json!({
                             "op": op,
-                            "id": call.args.get("id").and_then(|value| value.as_str()),
+                            "id": plan_step_id,
                             "ok": outcome.ok,
                         }),
                     );
+                    let active = plan::open_active_for_session(&root, Some(&session_id))
+                        .ok()
+                        .flatten();
+                    let plan_id = active.as_ref().map(|p| p.id.clone());
+                    if outcome.ok && op == "start" && let Some(id) = plan_step_id {
+                        writer.set_attribution(Some(id.to_string()), plan_id, "main");
+                    } else if outcome.ok && matches!(op, "finish" | "block" | "cancel") {
+                        writer.set_attribution(None, plan_id, "main");
+                    }
                     if outcome.ok && matches!(op, "finish" | "block" | "cancel") {
                         let _ = crate::agent::diary::write_entry(
                             &root,

@@ -545,10 +545,11 @@ impl Journal {
             .iter()
             .filter(|r| {
                 r.plan.as_deref() == Some(plan)
-                    && r.step.as_deref() == Some(step)
+                    && (r.step.as_deref() == Some(step)
+                        || r.fields.get("id").and_then(Value::as_str) == Some(step))
                     && r.kind == "plan"
                     && r.fields.get("op").and_then(Value::as_str) == Some("start")
-                    && r.fields.get("ok").and_then(Value::as_bool) == Some(true)
+                    && r.fields.get("ok").and_then(Value::as_bool) != Some(false)
             })
             .filter_map(|r| chrono::DateTime::parse_from_rfc3339(&r.ts).ok())
             .min();
@@ -557,6 +558,48 @@ impl Journal {
         };
         let mut out = Vec::new();
         for reference in evidence {
+            let session_records = if reference.session.is_empty() {
+                records.clone()
+            } else {
+                Self::records_for(root, &reference.session).unwrap_or_default()
+            };
+            let start_seq = session_records
+                .iter()
+                .filter(|r| {
+                    (r.plan.as_deref() == Some(plan) || r.plan.is_none())
+                        && (r.step.as_deref() == Some(step)
+                            || r.fields.get("id").and_then(Value::as_str) == Some(step))
+                        && r.kind == "plan"
+                        && r.fields.get("op").and_then(Value::as_str) == Some("start")
+                        && r.fields.get("ok").and_then(Value::as_bool) != Some(false)
+                })
+                .map(|r| r.seq)
+                .min();
+            if let Some(start_seq) = start_seq {
+                if reference.seq < start_seq {
+                    let precise = Self::evidence(root, plan, Some(step), reference, None)
+                        .ok()
+                        .flatten();
+                    let rec_ts = precise.as_ref().map(|r| r.ts.as_str()).unwrap_or("unknown");
+                    let start_ts = session_records
+                        .iter()
+                        .find(|r| r.seq == start_seq)
+                        .map(|r| r.ts.as_str())
+                        .unwrap_or("unknown");
+                    out.push(format!(
+                        "evidence {}:{} predates step {} start ({} < {})",
+                        reference.session,
+                        reference.seq,
+                        step,
+                        rec_ts,
+                        start_ts
+                    ));
+                    if out.len() >= 3 {
+                        break;
+                    }
+                }
+                continue;
+            }
             // precise session lookup to avoid seq collision across files
             let precise = Self::evidence(root, plan, Some(step), reference, None)
                 .ok()
@@ -1445,6 +1488,67 @@ mod tests {
         assert_eq!(warns.len(), 1);
         assert!(warns[0].contains("overlaps with refs of step 2"));
         assert!(warns[0].contains("/undo step 1"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stale_evidence_warnings_checks_sequence_boundary() {
+        let root = root();
+        let plan = crate::plan::create(
+            "test boundary".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![crate::plan::NewStep {
+                title: "step 1".into(),
+                kind: Some(crate::plan::StepKind::Research),
+                refs: Vec::new(),
+            }],
+            1000,
+            &crate::plan::Limits::default(),
+        )
+        .unwrap();
+        crate::plan::store(&root, &plan).unwrap();
+
+        let mut journal = Journal::open(&root, "test-boundary-sess").unwrap();
+        // seq 1: premature record before start
+        journal.set_attribution(Some("1".into()), Some(plan.id.clone()), "main");
+        let pre_seq = journal
+            .append("tool_result", json!({"tool": "read", "ok": true}))
+            .unwrap();
+        assert_eq!(pre_seq, 1);
+
+        // seq 2: op start
+        let start_seq = journal
+            .append("plan", json!({"op": "start", "id": "1", "ok": true}))
+            .unwrap();
+        assert_eq!(start_seq, 2);
+
+        // seq 3: record after start
+        let post_seq = journal
+            .append("tool_result", json!({"tool": "read", "ok": true}))
+            .unwrap();
+        assert_eq!(post_seq, 3);
+
+        // Evidence with seq 3 (>= start_seq) must NOT produce any stale warning
+        let valid_evidence = vec![crate::plan::EvidenceRef {
+            session: "test-boundary-sess".into(),
+            seq: post_seq,
+        }];
+        let warns = Journal::stale_evidence_warnings(&root, &plan.id, "1", &valid_evidence);
+        assert!(
+            warns.is_empty(),
+            "evidence after start must not produce warning: {warns:?}"
+        );
+
+        // Evidence with seq 1 (< start_seq) MUST produce stale warning
+        let stale_evidence = vec![crate::plan::EvidenceRef {
+            session: "test-boundary-sess".into(),
+            seq: pre_seq,
+        }];
+        let warns = Journal::stale_evidence_warnings(&root, &plan.id, "1", &stale_evidence);
+        assert_eq!(warns.len(), 1);
+        assert!(warns[0].contains("predates step 1 start"));
+
         fs::remove_dir_all(root).ok();
     }
 }

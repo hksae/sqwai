@@ -2593,6 +2593,11 @@ mod tests {
             &json!({"op": "finish", "id": "1", "summary": "schema added", "evidence": [2]}),
         );
         assert!(finish.ok, "{}", finish.output);
+        assert!(
+            !finish.output.contains("warning:"),
+            "finish output should not contain warning: {}",
+            finish.output
+        );
 
         let shown = plan_op(&mut ctx, &json!({"op": "show"}));
         assert!(shown.ok, "{}", shown.output);
@@ -2605,6 +2610,56 @@ mod tests {
             shown.output.contains("[x] 1"),
             "step 1 should read as done:\n{}",
             shown.output
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn finish_warns_when_evidence_predates_step_start() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "boundary test",
+                "steps": [{"title": "step 1", "kind": "research"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        let mut journal = crate::agent::journal::Journal::open(&dir, "boundary-test").unwrap();
+
+        // Premature evidence before start (seq 1)
+        journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
+        let premature_seq = journal
+            .append("tool_result", json!({"tool": "read", "ok": true}))
+            .unwrap();
+        assert_eq!(premature_seq, 1);
+
+        // Op start (seq 2)
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        journal
+            .append("plan", json!({"op": "start", "id": "1"}))
+            .unwrap();
+
+        // Premature evidence is in step.evidence
+        let mut plan = plan::open_active(&dir).unwrap().unwrap();
+        plan.step_mut("1").unwrap().evidence.push(crate::plan::EvidenceRef {
+            session: "boundary-test".into(),
+            seq: premature_seq,
+        });
+        plan::store(&dir, &plan).unwrap();
+
+        // Finishing with premature evidence triggers warning
+        let finish = plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "1", "summary": "researched"}),
+        );
+        assert!(finish.ok, "finish still succeeds: {}", finish.output);
+        assert!(
+            finish.output.contains("warning:") && finish.output.contains("predates step 1 start"),
+            "stale evidence must produce warning: {}",
+            finish.output
         );
         fs::remove_dir_all(&dir).ok();
     }
