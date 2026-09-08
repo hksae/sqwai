@@ -218,7 +218,7 @@ impl App {
         if matches!(self.cur_menu(), Some(Menu::Sessions | Menu::DeleteSessions)) {
             // The menu needs metadata only; defer loading full message histories
             // until the user actually opens a session.
-            self.sessions = Session::list_visible(40).unwrap_or_default();
+            self.sessions = Session::list_visible_headers(40).unwrap_or_default();
         }
         if matches!(self.cur_menu(), Some(Menu::Sessions)) {
             self.sessions_filter.clear();
@@ -566,20 +566,25 @@ impl App {
                 self.open_menu(Menu::EditSessionTitle { id });
             }
             MenuAction::PinSession(id) => {
+                // headers hold menu state; the durable file is updated
+                // through a full load/toggle/save round-trip
+                let mut pinned = false;
                 if let Some(s) = self.sessions.iter_mut().find(|s| s.id.to_string() == id) {
                     s.pinned = !s.pinned;
-                    let _ = s.save();
-                    let state = if s.pinned { "pinned" } else { "unpinned" };
-                    self.status(&format!("session {state}"), StatusKind::Ok);
+                    pinned = s.pinned;
                 }
+                if let Ok(mut s) = Session::load(&id) {
+                    s.pinned = pinned;
+                    let _ = s.save();
+                }
+                let state = if pinned { "pinned" } else { "unpinned" };
+                self.status(&format!("session {state}"), StatusKind::Ok);
                 if self.session.id.to_string() == id {
                     // keep the in-memory copy consistent with the file
-                    if let Some(s) = self.sessions.iter().find(|s| s.id.to_string() == id) {
-                        self.session.pinned = s.pinned;
-                    }
+                    self.session.pinned = pinned;
                 }
                 // re-sort and rebuild while staying in the menu
-                Session::sort_sessions(&mut self.sessions);
+                SessionHeader::sort_sessions(&mut self.sessions);
                 self.build_menu_rows();
             }
             MenuAction::ForkSessionList => {
@@ -1221,7 +1226,7 @@ impl App {
             }
             Menu::Sessions => {
                 let q = self.sessions_filter.to_lowercase();
-                let visible: Vec<&Session> = self
+                let visible: Vec<&SessionHeader> = self
                     .sessions
                     .iter()
                     .filter(|s| {
@@ -1237,7 +1242,8 @@ impl App {
                     ));
                 }
                 let cur_id = self.session.id.to_string();
-                let pinned: Vec<&Session> = visible.iter().filter(|s| s.pinned).copied().collect();
+                let pinned: Vec<&SessionHeader> =
+                    visible.iter().filter(|s| s.pinned).copied().collect();
                 if !pinned.is_empty() {
                     let menu_w = if self.menu_rect.width > 0 {
                         self.menu_rect.width
@@ -1946,7 +1952,7 @@ fn plan_rows(
 }
 
 fn session_row(
-    s: &Session,
+    s: &SessionHeader,
     is_current: bool,
     framed: Option<usize>,
 ) -> (Line<'static>, MenuAction) {
@@ -1961,7 +1967,7 @@ fn session_row(
         "{} · {} · {} tok",
         fmt_date(s.last_activity()),
         truncate_chars(&s.model_key, 14),
-        fmt_k(s.context_tokens_used())
+        fmt_k(s.context_tokens)
     );
     if let Some(parent) = &s.forked_from_title {
         dim.push_str(&format!(" · from '{}'", truncate_chars(parent, 20)));

@@ -104,6 +104,10 @@ pub(super) struct ActivityGroup {
     pub errors: usize,
     pub rejected: usize,
     pub expanded: bool,
+    /// Index of the user message that started this group's turn. Saved into
+    /// `ActivitySummary::user_index` so a restore can re-attach summaries to
+    /// the right group even after stopped/failed turns.
+    pub turn_user: Option<usize>,
 }
 
 /// Click-tag offset for an activity-group header line inside `cache_rowseg`.

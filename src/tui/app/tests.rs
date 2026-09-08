@@ -923,6 +923,92 @@ mod tests {
     }
 
     #[test]
+    fn restore_keeps_stopped_turns_out_of_later_groups() {
+        use crate::providers::{Message, Role, ToolCallReq};
+        use crate::session::{ActivitySummary, SessionHeader};
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        // turn 1: stopped after a failed tool call (no assistant text);
+        // turn 2: normal tool turn with an answer
+        app.session.messages = vec![
+            Message::new(Role::User, "one"),
+            Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+                "call-1",
+                "read",
+                serde_json::json!({}),
+            )]),
+            Message::tool_result("call-1", "boom", true),
+            Message::new(Role::User, "two"),
+            Message::new(Role::Assistant, "").with_tool_calls(vec![
+                ToolCallReq::new("call-2", "read", serde_json::json!({})),
+                ToolCallReq::new("call-3", "read", serde_json::json!({})),
+            ]),
+            Message::tool_result("call-2", "a", false),
+            Message::tool_result("call-3", "b", false),
+            Message::new(Role::Assistant, "two done"),
+        ];
+        app.session.activity = vec![
+            ActivitySummary {
+                calls: 1,
+                thinking: 0,
+                duration_ms: 100,
+                errors: 1,
+                rejected: 0,
+                user_index: Some(0),
+            },
+            ActivitySummary {
+                calls: 2,
+                thinking: 0,
+                duration_ms: 500,
+                errors: 0,
+                rejected: 0,
+                user_index: Some(2),
+            },
+        ];
+        app.segments.clear();
+        app.load_history_segments();
+
+        assert_eq!(app.activity_groups.len(), 2, "two turns, two groups");
+        let (g1, g2) = (&app.activity_groups[0], &app.activity_groups[1]);
+        assert_eq!(g1.turn_user, Some(0));
+        assert_eq!((g1.calls, g1.errors), (1, 1));
+        assert!(g1.expanded, "a stopped turn's group restores expanded");
+        assert_eq!(g2.turn_user, Some(2));
+        assert_eq!((g2.calls, g2.errors), (2, 0));
+        assert!(!g2.expanded);
+
+        // the second user message must sit between the groups, visible
+        let user_two = app
+            .segments
+            .iter()
+            .position(|s| matches!(s, Segment::User(t) if t == "two"))
+            .expect("user two segment");
+        assert!(
+            !app.activity_groups
+                .iter()
+                .any(|g| g.seg_start <= user_two && user_two < g.seg_end),
+            "the second user message was swallowed by the stopped turn's group"
+        );
+
+        // legacy save (no anchors): sequential fallback still groups correctly
+        let mut legacy = test_app("http://127.0.0.1:9/v1".into());
+        legacy.session.messages = app.session.messages.clone();
+        legacy.session.activity = app
+            .session
+            .activity
+            .iter()
+            .map(|a| ActivitySummary {
+                user_index: None,
+                ..a.clone()
+            })
+            .collect();
+        legacy.segments.clear();
+        legacy.load_history_segments();
+        assert_eq!(legacy.activity_groups.len(), 2);
+        assert_eq!(legacy.activity_groups[0].calls, 1);
+        assert_eq!(legacy.activity_groups[1].calls, 2);
+    }
+
+    #[test]
     fn stopped_and_failed_turns_append_durable_notes() {
         let mut stopped = test_app("http://127.0.0.1:9/v1".into());
         stopped.session.push(Role::User, "first");
@@ -1056,7 +1142,7 @@ mod tests {
         let mut s = Session::new("m".into(), 1000);
         s.push(Role::User, "x");
         let id = s.id.to_string();
-        app.sessions = vec![s];
+        app.sessions = vec![SessionHeader::from_session(&s)];
         app.open_menu(Menu::Sessions);
         // select the session row and pin it
         let row = app
@@ -1091,7 +1177,7 @@ mod tests {
         let mut s = Session::new("m".into(), 1000);
         s.push(Role::User, "тестовая сессия (wide / cyrillic) 🚀");
         s.pinned = true;
-        app.sessions = vec![s];
+        app.sessions = vec![SessionHeader::from_session(&s)];
         app.menu_rect.width = 40;
         app.cache_w = 40;
         app.open_menu(Menu::Sessions);
@@ -1769,7 +1855,10 @@ mod tests {
         a.title = "alpha task".into();
         let mut b = Session::new("m".into(), 100);
         b.title = "beta task".into();
-        app.sessions = vec![a, b];
+        app.sessions = vec![
+            SessionHeader::from_session(&a),
+            SessionHeader::from_session(&b),
+        ];
         app.open_menu(Menu::Sessions);
 
         let send = |app: &mut App, code: KeyCode| {
@@ -2642,6 +2731,7 @@ mod tests {
             duration_ms: 3000,
             errors: 0,
             rejected: 0,
+            turn_user: None,
             expanded: false,
         });
         app.segments.push(Segment::Assistant {
@@ -2741,6 +2831,7 @@ mod tests {
             duration_ms: 5200,
             errors: 1,
             rejected: 0,
+            turn_user: None,
             expanded: false, // collapsed by default
         });
         app.segments.push(Segment::Assistant {

@@ -14,7 +14,7 @@ use crate::agent::loop_task::{
 use crate::config::{Config, EffortLevel, ModelConfig};
 use crate::plan;
 use crate::providers::{self, Message as PMessage, Role, SharedProvider};
-use crate::session::{ActivitySummary, Session, TurnNote};
+use crate::session::{ActivitySummary, Session, SessionHeader, TurnNote};
 use crate::tui::markdown::Highlighter;
 use crate::tui::theme::Theme;
 
@@ -325,8 +325,9 @@ pub struct App {
     menu_rect: Rect,
     form_fields: Vec<FormField>,
     form_focus: usize,
-    /// cached session list for the sessions menus
-    sessions: Vec<Session>,
+    /// cached session list for the sessions menus (headers only — see
+    /// `Session::list_visible_headers`)
+    sessions: Vec<SessionHeader>,
     /// live filter typed inside the sessions menu
     sessions_filter: String,
     ef_click: Option<(u16, u16)>,
@@ -579,12 +580,17 @@ impl App {
         // transcript. Keep the rendered row keyed by call id so batched calls
         // and providers that return results out of order are restored safely.
         let mut pending_tools = std::collections::HashMap::<String, usize>::new();
-        let activity_summaries = self.session.activity.clone();
+        // Anchored mode: summaries recorded the user message that started
+        // their turn, so each can be re-attached to the right group even when
+        // turns were stopped/failed. Legacy saves (all anchors None) fall
+        // back to the old sequential order.
+        let anchored_mode = self.session.activity.iter().any(|a| a.user_index.is_some());
+        let mut remaining_summaries = self.session.activity.clone();
         let turn_notes = self.session.turn_notes.clone();
         let messages = self.session.messages.clone();
-        let mut activity = activity_summaries.iter();
         let mut work_start: Option<usize> = None;
         let mut previous_user: Option<usize> = None;
+        let mut turn_user: Option<usize> = None;
         for (message_index, m) in messages.iter().enumerate() {
             match m.role {
                 Role::User => {
@@ -595,38 +601,38 @@ impl App {
                     if let Some(user_index) = previous_user {
                         self.restore_turn_notes(&turn_notes, user_index);
                     }
+                    // the dangling work run of that turn also ends here: close
+                    // it so the stopped turn does not swallow this user
+                    // message (and everything after it) into one giant group
+                    if let Some(seg_start) = work_start.take() {
+                        self.close_restored_group(
+                            seg_start,
+                            turn_user,
+                            &mut remaining_summaries,
+                            anchored_mode,
+                            true,
+                        );
+                    }
                     previous_user = Some(message_index);
+                    turn_user = Some(message_index);
                     self.segments.push(Segment::User(m.content.clone()));
                 }
                 Role::Assistant if m.tool_calls.is_empty() => {
-                    let answer = self.segments.len();
+                    if let Some(seg_start) = work_start.take() {
+                        // A saved session is never streaming: historical work
+                        // must begin folded, even if it ended with an error.
+                        self.close_restored_group(
+                            seg_start,
+                            turn_user,
+                            &mut remaining_summaries,
+                            anchored_mode,
+                            false,
+                        );
+                    }
                     self.segments.push(Segment::Assistant {
                         text: m.content.clone(),
                         live: false,
                     });
-                    if let Some(seg_start) = work_start.take() {
-                        // A saved session is never streaming: historical work
-                        // must begin folded, even if it ended with an error.
-                        let saved = activity.next().cloned();
-                        let derived = self.build_activity_group((seg_start, answer));
-                        let saved = saved.unwrap_or(ActivitySummary {
-                            calls: derived.calls,
-                            thinking: derived.thinking,
-                            duration_ms: 0,
-                            errors: derived.errors,
-                            rejected: 0,
-                        });
-                        self.activity_groups.push(ActivityGroup {
-                            seg_start,
-                            seg_end: answer,
-                            calls: saved.calls,
-                            thinking: saved.thinking,
-                            duration_ms: saved.duration_ms,
-                            errors: saved.errors,
-                            rejected: saved.rejected,
-                            expanded: false,
-                        });
-                    }
                 }
                 Role::Assistant => {
                     work_start.get_or_insert(self.segments.len());
@@ -658,8 +664,51 @@ impl App {
         if let Some(user_index) = previous_user {
             self.restore_turn_notes(&turn_notes, user_index);
         }
+        if let Some(seg_start) = work_start.take() {
+            self.close_restored_group(
+                seg_start,
+                turn_user,
+                &mut remaining_summaries,
+                anchored_mode,
+                true,
+            );
+        }
         // The panel is derived from the active structured plan; legacy session
         // to-do state is intentionally not loaded.
+    }
+
+    /// Close a restored work run `[seg_start..]` into an `ActivityGroup`,
+    /// preferring the summary anchored to this turn's user message.
+    /// `failed` groups (stopped turns) restore expanded, like the live UI.
+    fn close_restored_group(
+        &mut self,
+        seg_start: usize,
+        turn_user: Option<usize>,
+        remaining: &mut Vec<ActivitySummary>,
+        anchored_mode: bool,
+        failed: bool,
+    ) {
+        let answer = self.segments.len();
+        let derived = self.build_activity_group((seg_start, answer));
+        let saved = take_summary(remaining, anchored_mode, turn_user).unwrap_or(ActivitySummary {
+            calls: derived.calls,
+            thinking: derived.thinking,
+            duration_ms: 0,
+            errors: derived.errors,
+            rejected: 0,
+            user_index: turn_user,
+        });
+        self.activity_groups.push(ActivityGroup {
+            seg_start,
+            seg_end: answer,
+            calls: saved.calls,
+            thinking: saved.thinking,
+            duration_ms: saved.duration_ms,
+            errors: saved.errors,
+            rejected: saved.rejected,
+            expanded: failed || saved.errors > 0,
+            turn_user: saved.user_index.or(turn_user),
+        });
     }
 
     fn restore_turn_notes(&mut self, notes: &[TurnNote], user_index: usize) {
@@ -2753,6 +2802,7 @@ impl App {
             errors,
             rejected: 0,
             expanded: true,
+            turn_user: self.turn_user_index,
         }
     }
 
@@ -2917,6 +2967,7 @@ impl App {
                 duration_ms: g.duration_ms,
                 errors: g.errors,
                 rejected: g.rejected,
+                user_index: g.turn_user,
             })
             .collect();
         self.session.save().ok();
@@ -3304,7 +3355,7 @@ impl App {
         };
 
         // Saved sessions
-        let sessions = Session::list_visible(10).unwrap_or_default();
+        let sessions = Session::list_visible_headers(10).unwrap_or_default();
 
         let (active_plan, last_session, recent) = if let Some(plan) = active_plan_raw {
             let in_prog = plan
@@ -3382,15 +3433,13 @@ impl App {
                 })
                 .take(3)
                 .map(|s| {
-                    let calls: usize = s.activity.iter().map(|a| a.calls).sum();
-                    let errors: usize = s.activity.iter().map(|a| a.errors).sum();
-                    let outcome = if calls > 0 || errors > 0 {
+                    let outcome = if s.calls > 0 || s.errors > 0 {
                         let mut parts = Vec::new();
-                        if calls > 0 {
-                            parts.push(format!("{calls} done"));
+                        if s.calls > 0 {
+                            parts.push(format!("{} done", s.calls));
                         }
-                        if errors > 0 {
-                            parts.push(format!("{errors} blocked"));
+                        if s.errors > 0 {
+                            parts.push(format!("{} blocked", s.errors));
                         }
                         parts.join(" · ")
                     } else {
@@ -3416,15 +3465,13 @@ impl App {
                 .iter()
                 .take(3)
                 .map(|s| {
-                    let calls: usize = s.activity.iter().map(|a| a.calls).sum();
-                    let errors: usize = s.activity.iter().map(|a| a.errors).sum();
-                    let outcome = if calls > 0 || errors > 0 {
+                    let outcome = if s.calls > 0 || s.errors > 0 {
                         let mut parts = Vec::new();
-                        if calls > 0 {
-                            parts.push(format!("{calls} done"));
+                        if s.calls > 0 {
+                            parts.push(format!("{} done", s.calls));
                         }
-                        if errors > 0 {
-                            parts.push(format!("{errors} blocked"));
+                        if s.errors > 0 {
+                            parts.push(format!("{} blocked", s.errors));
                         }
                         parts.join(" · ")
                     } else {
@@ -3545,6 +3592,27 @@ pub(super) fn fmt_relative_time(dt: chrono::DateTime<chrono::Utc>) -> String {
     } else {
         local.format("%d.%m %H:%M").to_string()
     }
+}
+
+/// Pick the summary for a restored group: anchored by the turn's user message
+/// when available, legacy sequential order otherwise. Never loses a summary —
+/// the final fallback takes the first remaining entry.
+fn take_summary(
+    remaining: &mut Vec<ActivitySummary>,
+    anchored_mode: bool,
+    turn_user: Option<usize>,
+) -> Option<ActivitySummary> {
+    if remaining.is_empty() {
+        return None;
+    }
+    if !anchored_mode {
+        return Some(remaining.remove(0));
+    }
+    let pos = turn_user
+        .and_then(|user| remaining.iter().position(|a| a.user_index == Some(user)))
+        .or_else(|| remaining.iter().position(|a| a.user_index.is_none()))
+        .unwrap_or(0);
+    Some(remaining.remove(pos))
 }
 
 fn fmt_bytes(n: u64) -> String {

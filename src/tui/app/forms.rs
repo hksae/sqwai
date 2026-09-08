@@ -306,14 +306,16 @@ impl App {
                     return;
                 }
                 let title = truncate_chars(&t, 60);
-                let mut found = false;
-                for s in self.sessions.iter_mut() {
-                    if s.id.to_string() == id {
-                        s.title = title.clone();
-                        let _ = s.save();
-                        found = true;
-                        break;
-                    }
+                // headers hold menu state; the durable file is updated
+                // through a full load/save round-trip
+                let mut found = self.sessions.iter().any(|s| s.id.to_string() == id);
+                if let Ok(mut s) = Session::load(&id) {
+                    s.title = title.clone();
+                    let _ = s.save();
+                    found = true;
+                }
+                if let Some(s) = self.sessions.iter_mut().find(|s| s.id.to_string() == id) {
+                    s.title = title.clone();
                 }
                 // keep the open session's header in sync
                 if self.session.id.to_string() == id {

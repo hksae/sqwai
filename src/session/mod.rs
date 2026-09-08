@@ -14,6 +14,64 @@ pub struct ActivitySummary {
     pub duration_ms: u64,
     pub errors: usize,
     pub rejected: usize,
+    /// Index of the user message that started this activity's turn. Saved so
+    /// a session restore can attribute summaries to the right group even
+    /// when turns were stopped/failed (they leave no assistant text in the
+    /// transcript). `None` marks a legacy save: restore falls back to
+    /// sequential order for those.
+    #[serde(default)]
+    pub user_index: Option<usize>,
+}
+
+/// Menu metadata only: everything the sessions menu and the start screen
+/// show, without the message history. See `Session::list_visible_headers`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionHeader {
+    pub id: Uuid,
+    pub title: String,
+    pub pinned: bool,
+    pub created_at: DateTime<Utc>,
+    pub last_message_at: Option<DateTime<Utc>>,
+    pub model_key: String,
+    pub plan_id: Option<String>,
+    pub forked_from_id: Option<String>,
+    pub forked_from_title: Option<String>,
+    pub context_tokens: u64,
+    pub calls: usize,
+    pub errors: usize,
+}
+
+impl SessionHeader {
+    /// last activity time, falling back to creation time
+    pub fn last_activity(&self) -> DateTime<Utc> {
+        self.last_message_at.unwrap_or(self.created_at)
+    }
+
+    /// pinned first, then newest activity
+    pub fn sort_sessions(v: &mut [Self]) {
+        v.sort_by(|a, b| {
+            b.pinned
+                .cmp(&a.pinned)
+                .then_with(|| b.last_activity().cmp(&a.last_activity()))
+        });
+    }
+
+    pub(crate) fn from_session(s: &Session) -> Self {
+        Self {
+            id: s.id,
+            title: s.title.clone(),
+            pinned: s.pinned,
+            created_at: s.created_at,
+            last_message_at: s.last_message_at,
+            model_key: s.model_key.clone(),
+            plan_id: s.plan_id.clone(),
+            forked_from_id: s.forked_from_id.clone(),
+            forked_from_title: s.forked_from_title.clone(),
+            context_tokens: s.context_tokens_used(),
+            calls: s.activity.iter().map(|a| a.calls).sum(),
+            errors: s.activity.iter().map(|a| a.errors).sum(),
+        }
+    }
 }
 
 /// A completed request with no normal assistant answer (provider failure or an
@@ -321,62 +379,107 @@ impl Session {
         Ok(dir.join(&found[0]))
     }
 
-    /// Load only the first visible window of saved sessions. The directory is
-    /// ordered by file modification time before deserializing, so opening the
-    /// menu does not parse the complete conversation history of every session.
+    /// Menu/start-screen listing without parsing unchanged session files.
     ///
-    /// Pinned sessions are exempt from the window: with more sessions on disk
-    /// than `limit`, a pinned one would otherwise be unreachable from the
-    /// menu, defeating the point of pinning. Older entries are checked by a
-    /// raw-string scan for the serialized `"pinned":true` flag instead of a
-    /// full history parse; a false positive can only cost one extra menu row.
-    #[allow(dead_code)]
-    pub fn list_visible(limit: usize) -> Result<Vec<Self>> {
+    /// Ctrl+S used to deserialize up to 40 full conversations on the UI
+    /// thread — a visible stall once sessions grew. A small sidecar index
+    /// (`index.json` next to the sessions) remembers every file's header
+    /// keyed by mtime, so a normal menu open parses nothing; only new or
+    /// externally modified files are read. The index is self-healing: a
+    /// missing, stale, or corrupt entry is simply rebuilt.
+    ///
+    /// Pinned sessions are exempt from the window: with more sessions on
+    /// disk than `limit`, a pinned one would otherwise be unreachable from
+    /// the menu, defeating the point of pinning.
+    pub fn list_visible_headers(limit: usize) -> Result<Vec<SessionHeader>> {
         let dir = Self::sessions_dir()?;
-        let mut entries = Vec::new();
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
+        #[derive(Serialize, Deserialize)]
+        struct IdxEntry {
+            mtime: u64,
+            #[serde(flatten)]
+            header: SessionHeader,
+        }
+        let index_path = dir.join("index.json");
+        let mut index: std::collections::HashMap<String, IdxEntry> =
+            std::fs::read_to_string(&index_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_default();
+
+        let mut entries: Vec<(Option<std::time::SystemTime>, std::path::PathBuf)> = Vec::new();
+        for entry in std::fs::read_dir(&dir)?.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                let modified = entry.metadata().and_then(|m| m.modified()).ok();
+            if path.extension().and_then(|e| e.to_str()) == Some("json")
+                && path.file_name().and_then(|n| n.to_str()) != Some("index.json")
+            {
+                let modified = entry.metadata().ok().and_then(|m| m.modified().ok());
                 entries.push((modified, path));
             }
         }
         entries.sort_by_key(|e| std::cmp::Reverse(e.0));
 
-        let load = |path: &std::path::Path| -> Option<Self> {
-            let mut session: Self =
-                serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-            session.strip_system_messages();
-            Some(session)
-        };
-
-        let limit = limit.max(1);
-        let mut out: Vec<Self> = Vec::new();
-        let mut recent: Vec<&(Option<std::time::SystemTime>, std::path::PathBuf)> = Vec::new();
-        for (index, entry) in entries.iter().enumerate() {
-            if out.len() >= limit {
-                break;
+        let mut headers: Vec<SessionHeader> = Vec::new();
+        let mut changed = false;
+        let mut seen = std::collections::HashSet::new();
+        for (modified, path) in &entries {
+            let id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            seen.insert(id.clone());
+            let mtime = modified
+                .map(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            if let Some(hit) = index.get(&id)
+                && hit.mtime == mtime
+            {
+                headers.push(hit.header.clone());
+                continue;
             }
-            let pinned_beyond_window = index >= limit
-                && std::fs::read_to_string(&entry.1)
-                    .map(|raw| raw.contains("\"pinned\":true"))
-                    .unwrap_or(false);
-            if pinned_beyond_window {
-                if let Some(session) = load(&entry.1) {
-                    out.push(session);
+            let mut session = match std::fs::read_to_string(path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Self>(&raw).ok())
+            {
+                Some(session) => session,
+                None => {
+                    // an unparsable file is skipped; its stale index entry is dropped
+                    if index.remove(&id).is_some() {
+                        changed = true;
+                    }
+                    continue;
                 }
-            } else {
-                recent.push(entry);
-            }
+            };
+            session.strip_system_messages();
+            let header = SessionHeader::from_session(&session);
+            index.insert(
+                id,
+                IdxEntry {
+                    mtime,
+                    header: header.clone(),
+                },
+            );
+            changed = true;
+            headers.push(header);
         }
-        for (_, path) in recent.into_iter().take(limit - out.len()) {
-            if let Some(session) = load(path) {
-                out.push(session);
-            }
+        let before = index.len();
+        index.retain(|id, _| seen.contains(id));
+        if index.len() != before {
+            changed = true;
         }
-        Self::sort_sessions(&mut out);
-        Ok(out)
+        if changed {
+            let _ = std::fs::write(
+                &index_path,
+                serde_json::to_string(&index).unwrap_or_default(),
+            );
+        }
+        SessionHeader::sort_sessions(&mut headers);
+        headers.truncate(limit.max(1));
+        Ok(headers)
     }
 
     /// all saved sessions, newest activity first, pinned on top
