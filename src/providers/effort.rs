@@ -72,13 +72,13 @@ pub fn plan(level: EffortLevel, support: EffortSupport) -> Plan {
             (Wire::Nothing, Status::Applied)
         }
         (EffortControl::Toggle, EffortLevel::Off) => (
-            Wire::Level("on"),
+            Wire::Level("medium"),
             Status::Ignored {
                 why: "this model always reasons",
             },
         ),
         // reasoning is switched on, but the level never reaches the model
-        (EffortControl::Toggle, _) => (Wire::Level("on"), Status::Clamped { to: "on" }),
+        (EffortControl::Toggle, _) => (Wire::Level("medium"), Status::Clamped { to: "medium" }),
 
         // ── named levels ────────────────────────────────────────────────────
         (EffortControl::Levels | EffortControl::Xhigh, EffortLevel::Off) => {
@@ -206,8 +206,8 @@ mod tests {
     #[test]
     fn a_toggle_api_gets_reasoning_on_but_not_the_level() {
         let p = plan(EffortLevel::High, support(EffortControl::Toggle, false));
-        assert_eq!(p.wire, Wire::Level("on"));
-        assert_eq!(p.status, Status::Clamped { to: "on" });
+        assert_eq!(p.wire, Wire::Level("medium"));
+        assert_eq!(p.status, Status::Clamped { to: "medium" });
         let p = plan(EffortLevel::Off, support(EffortControl::Toggle, false));
         assert_eq!(p.wire, Wire::Nothing);
         assert!(p.is_honoured());

@@ -87,6 +87,65 @@ impl OpenAiProvider {
             Role::Assistant => json!({"role": "assistant", "content": m.content}),
         }
     }
+
+    pub fn build_body(req: &ChatRequest) -> Value {
+        let mut msgs: Vec<Value> = Vec::new();
+        let system = super::system_text(&req.system);
+        if !system.trim().is_empty() {
+            msgs.push(json!({"role": "system", "content": system}));
+        }
+        msgs.extend(req.messages.iter().map(Self::message_json));
+        let mut body = json!({
+            "model": req.model_id,
+            "messages": msgs,
+            "stream": true,
+            "stream_options": {"include_usage": true},
+        });
+        // openai-compatible reasoning control; servers that do not know
+        // the field simply ignore it
+        if let Some(level) = req.effort.filter(|l| *l != EffortLevel::Off)
+            && let super::effort::Wire::Level(effort) =
+                super::effort::plan(level, req.effort_support).wire
+        {
+            body["reasoning_effort"] = json!(effort);
+        }
+        let uses_max_completion =
+            uses_max_completion_tokens(&req.model_id, body.get("reasoning_effort").is_some());
+        if let Some(mt) = req.max_tokens {
+            if uses_max_completion {
+                body["max_completion_tokens"] = json!(mt);
+            } else {
+                body["max_tokens"] = json!(mt);
+            }
+        }
+        if !req.tools.is_empty() {
+            body["tools"] = json!(req.tools.iter().map(|t| json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                },
+            })).collect::<Vec<_>>());
+            // explicit auto nudges small local models (ollama) into
+            // emitting structured tool_calls instead of plain-text JSON
+            body["tool_choice"] = json!("auto");
+        }
+        body
+    }
+}
+
+pub fn uses_max_completion_tokens(model: &str, has_reasoning: bool) -> bool {
+    if has_reasoning {
+        return true;
+    }
+    let lower = model.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    name.starts_with("o1")
+        || name.starts_with("o3")
+        || name.starts_with("o4")
+        || name.starts_with("o-")
+        || name.contains("gpt-5")
 }
 
 /// accumulated partial tool call keyed by the streaming index
@@ -137,40 +196,7 @@ impl Provider for OpenAiProvider {
                     "openai-compatible: previous_response_id dropped (not supported by Chat Completions)",
                 );
             }
-            let mut msgs: Vec<Value> = Vec::new();
-            let system = super::system_text(&req.system);
-            if !system.trim().is_empty() {
-                msgs.push(json!({"role": "system", "content": system}));
-            }
-            msgs.extend(req.messages.iter().map(Self::message_json));
-            let mut body = json!({
-                "model": req.model_id,
-                "messages": msgs,
-                "stream": true,
-                "stream_options": {"include_usage": true},
-            });
-            // openai-compatible reasoning control; servers that do not know
-            // the field simply ignore it
-            if let Some(level) = req.effort.filter(|l| *l != EffortLevel::Off)
-                && let super::effort::Wire::Level(effort) =
-                    super::effort::plan(level, req.effort_support).wire
-            {
-                body["reasoning_effort"] = json!(effort);
-            }
-            if let Some(mt) = req.max_tokens { body["max_tokens"] = json!(mt); }
-            if !req.tools.is_empty() {
-                body["tools"] = json!(req.tools.iter().map(|t| json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    },
-                })).collect::<Vec<_>>());
-                // explicit auto nudges small local models (ollama) into
-                // emitting structured tool_calls instead of plain-text JSON
-                body["tool_choice"] = json!("auto");
-            }
+            let body = Self::build_body(&req);
 
             let mut r = this.http.post(&url);
             if let Some(k) = &this.api_key { r = r.bearer_auth(k); }
@@ -761,5 +787,43 @@ mod tests {
         // no partial multibyte sequence: must round-trip as valid UTF-8
         assert!(std::str::from_utf8(t.as_bytes()).is_ok());
         assert!(s.starts_with(t.trim_end_matches('…')));
+    }
+
+    #[test]
+    fn requested_max_tokens_uses_completion_tokens_for_o_series_or_reasoning() {
+        let mut req = ChatRequest {
+            model_id: "gpt-4o".into(),
+            system: vec![],
+            messages: vec![Message::new(Role::User, "hi")],
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: Some(1024),
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        let body = OpenAiProvider::build_body(&req);
+        assert_eq!(body["max_tokens"], 1024);
+        assert!(body.get("max_completion_tokens").is_none());
+
+        req.model_id = "o3-mini".into();
+        let body = OpenAiProvider::build_body(&req);
+        assert_eq!(body["max_completion_tokens"], 1024);
+        assert!(body.get("max_tokens").is_none());
+
+        req.model_id = "gpt-5-turbo".into();
+        let body = OpenAiProvider::build_body(&req);
+        assert_eq!(body["max_completion_tokens"], 1024);
+        assert!(body.get("max_tokens").is_none());
+
+        req.model_id = "custom-reasoning-model".into();
+        req.effort = Some(crate::providers::EffortLevel::Medium);
+        req.effort_support = crate::config::EffortSupport {
+            control: crate::config::EffortControl::Levels,
+            always_on: false,
+        };
+        let body = OpenAiProvider::build_body(&req);
+        assert_eq!(body["max_completion_tokens"], 1024);
+        assert!(body.get("max_tokens").is_none());
     }
 }

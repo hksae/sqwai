@@ -91,6 +91,9 @@ pub fn build_body(req: &ChatRequest) -> Value {
     if let Some(id) = &req.previous_response_id {
         body["previous_response_id"] = json!(id);
     }
+    if let Some(mt) = req.max_tokens {
+        body["max_output_tokens"] = json!(mt);
+    }
     body
 }
 
@@ -300,6 +303,20 @@ impl Provider for ResponsesProvider {
                             "error" => {
                                 let msg = v.get("message").and_then(|x| x.as_str()).unwrap_or("unknown");
                                 super::log_http(&format!("POST {} stream error: {msg}", this.url));
+                                yield Err(anyhow!("provider error: {msg}"));
+                                return;
+                            }
+                            "response.failed" => {
+                                let msg = v
+                                    .pointer("/response/error/message")
+                                    .or_else(|| v.pointer("/error/message"))
+                                    .and_then(|x| x.as_str())
+                                    .or_else(|| {
+                                        v.pointer("/response/error/code")
+                                            .and_then(|x| x.as_str())
+                                    })
+                                    .unwrap_or("response.failed");
+                                super::log_http(&format!("POST {} response failed: {msg}", this.url));
                                 yield Err(anyhow!("provider error: {msg}"));
                                 return;
                             }
@@ -630,5 +647,57 @@ mod tests {
         stripped.previous_response_id = None;
         stripped.context_transport = crate::providers::ContextTransport::Stateless;
         assert!(build_body(&stripped).get("previous_response_id").is_none());
+    }
+
+    #[test]
+    fn requested_max_tokens_mapped_to_max_output_tokens() {
+        let req = ChatRequest {
+            model_id: "gpt-4.5".into(),
+            system: vec![],
+            messages: vec![Message::new(Role::User, "hi")],
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: Some(4096),
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        let body = build_body(&req);
+        assert_eq!(body["max_output_tokens"], 4096);
+    }
+
+    #[tokio::test]
+    async fn response_failed_event_yields_err() {
+        use futures::StreamExt;
+        let body = concat!(
+            "event: response.failed\n",
+            "data: {\"response\":{\"error\":{\"message\":\"server overloaded\"}}}\n\n",
+        )
+        .to_string();
+        let (url, h) = sse_server(body);
+        let p = ResponsesProvider::new(&ResolvedProvider {
+            name: "p".into(),
+            format: crate::config::WireFormat::Responses,
+            base_url: url,
+            api_key: Some("k".into()),
+        })
+        .unwrap();
+        let req = ChatRequest {
+            model_id: "gpt-x".into(),
+            system: vec![],
+            messages: vec![Message::new(Role::User, "go")],
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        let mut stream = p.stream_chat(req);
+        let first = stream.next().await;
+        h.join().unwrap();
+        assert!(first.is_some());
+        let err = first.unwrap().unwrap_err();
+        assert!(err.to_string().contains("server overloaded"), "{err}");
     }
 }
