@@ -374,8 +374,11 @@ fn walk(tree: &Tree, src: &str) -> Verdict {
             "file_redirect" => {
                 // inspect the redirect target path node
                 for child in node.named_children(&mut node.walk()) {
-                    let text = child.utf8_text(src_bytes).unwrap_or("");
-                    if child.kind() == "word" && !text.is_empty() {
+                    let raw = child.utf8_text(src_bytes).unwrap_or("");
+                    let text = raw.trim().trim_matches(['"', '\'']);
+                    if matches!(child.kind(), "word" | "string" | "raw_string" | "concatenation")
+                        && !text.is_empty()
+                    {
                         let operator = node.utf8_text(src_bytes).unwrap_or("");
                         // `>` / `>>` truncate-overwrite; `<` is input (fine)
                         if operator.contains('>') && is_critical_path(text) {
@@ -629,6 +632,14 @@ mod tests {
         ));
         assert!(matches!(
             classify("cat key > ~/.ssh/authorized_keys"),
+            Verdict::NeedsApproval(_)
+        ));
+        assert!(matches!(
+            classify("cat x > \"/etc/passwd\""),
+            Verdict::NeedsApproval(_)
+        ));
+        assert!(matches!(
+            classify("echo key > '$HOME/.ssh/authorized_keys'"),
             Verdict::NeedsApproval(_)
         ));
         // input redirect stays safe
