@@ -3082,6 +3082,11 @@ mod tests {
             "{}",
             complete.output
         );
+        assert!(
+            complete.output.contains("Pending acceptance items without cmd: prefix require user waiver (/plan waive <index>) or conversion to verify steps."),
+            "{}",
+            complete.output
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

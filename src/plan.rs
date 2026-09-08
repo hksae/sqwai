@@ -1250,7 +1250,7 @@ fn complete(plan: &mut Plan) -> Result<Applied, Rejection> {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            "verify them, or have the user waive them with /plan waive",
+            "verify them, or have the user waive them with /plan waive. Pending acceptance items without cmd: prefix require user waiver (/plan waive <index>) or conversion to verify steps.",
         );
     }
     plan.status = PlanStatus::Completed;
@@ -1578,6 +1578,11 @@ mod tests {
         }
         let err = apply(&mut plan, Op::Complete, &Limits::default()).unwrap_err();
         assert_eq!(err.code, "acceptance_pending");
+        assert!(
+            err.hint.contains("Pending acceptance items without cmd: prefix require user waiver (/plan waive <index>) or conversion to verify steps."),
+            "{}",
+            err.hint
+        );
         waive(&mut plan, 0, "manual check").unwrap();
         assert!(matches!(
             apply(&mut plan, Op::Complete, &Limits::default()),
