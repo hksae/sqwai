@@ -128,6 +128,7 @@ impl App {
                         self.paste_enter_guard = false;
                         continue;
                     }
+                    self.dirty = true;
                     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
                     let shift = k.modifiers.contains(KeyModifiers::SHIFT);
                     let alt = k.modifiers.contains(KeyModifiers::ALT);

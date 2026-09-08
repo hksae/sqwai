@@ -2612,36 +2612,29 @@ mod frame_tests {
     }
 }
 
-fn segment_layout_key(seg: &Segment) -> u64 {
-    // Detect structural changes (insertions/removals/reordering) in O(1) per
-    // segment. Hashing full text here cost O(whole conversation) on every
-    // streamed frame — the long-chat stutter. Content changes are seg_key's
-    // job (byte length flips on every append), so lengths suffice here.
+pub(super) fn segment_layout_key(seg: &Segment) -> u64 {
+    // Detect structural changes (insertions/removals/reordering/discriminant shifts)
+    // in O(1) per segment so positional caches don't point to the wrong segment.
+    // Content changes are seg_key's job (which invalidates individual segment
+    // render caches without blowing away the entire conversation history).
     let mut h = std::collections::hash_map::DefaultHasher::new();
     std::mem::discriminant(seg).hash(&mut h);
     match seg {
-        Segment::User(text) | Segment::Assistant { text, .. } => text.len().hash(&mut h),
+        Segment::User(_) | Segment::Assistant { .. } => {}
         Segment::AskUser { questions, .. } => {
-            for q in questions {
-                q.header.len().hash(&mut h);
-                q.question.len().hash(&mut h);
-            }
+            questions.len().hash(&mut h);
         }
         Segment::PlanProposal { draft, .. } => {
-            draft.goal.text.len().hash(&mut h);
             draft.steps.len().hash(&mut h);
         }
-        Segment::Thinking { text, .. } => text.len().hash(&mut h),
-        Segment::Subagent { id, task, .. } => {
+        Segment::Thinking { .. } => {}
+        Segment::Subagent { id, .. } => {
             id.hash(&mut h);
-            task.len().hash(&mut h);
         }
-        Segment::Tool { name, args, .. } => {
-            name.len().hash(&mut h);
-            args.len().hash(&mut h);
+        Segment::Tool { name, .. } => {
+            name.hash(&mut h);
         }
-        Segment::Status { text, kind, .. } => {
-            text.len().hash(&mut h);
+        Segment::Status { kind, .. } => {
             std::mem::discriminant(kind).hash(&mut h);
         }
     }

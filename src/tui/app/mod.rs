@@ -762,6 +762,7 @@ impl App {
         });
 
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         while !self.quit {
             tick.tick().await;
             if self.enter_gate.flush(Instant::now()) {
@@ -792,11 +793,17 @@ impl App {
             {
                 self.clear_busy_statuses();
                 self.busy_until = None;
+                self.dirty = true;
             }
-            self.spinner_tick = self.spinner_tick.wrapping_add(1);
-            self.dirty |= self.streaming;
-            terminal.draw(|f| self.draw(f))?;
-            self.dirty = false;
+            let animating = self.streaming || self.tool_running();
+            if animating {
+                self.spinner_tick = self.spinner_tick.wrapping_add(1);
+                self.dirty = true;
+            }
+            if self.dirty {
+                terminal.draw(|f| self.draw(f))?;
+                self.dirty = false;
+            }
         }
         // Shutdown must never wait for a provider request. A final diary
         // entry is host-only here; model-written diary prose belongs to the

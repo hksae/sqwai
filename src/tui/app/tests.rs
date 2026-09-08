@@ -3911,4 +3911,94 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
     }
+
+    #[test]
+    fn streaming_text_appends_preserve_past_segment_caches() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+
+        // Populate a conversation with multiple past segments
+        for i in 0..10 {
+            if i % 2 == 0 {
+                app.segments.push(Segment::User(format!("User question {i} with code `foo`")));
+            } else {
+                app.segments.push(Segment::Assistant {
+                    text: format!("Assistant answer {i} with details"),
+                    live: false,
+                });
+            }
+        }
+        // Add a live assistant segment at the end
+        app.segments.push(Segment::Assistant {
+            text: "Initial token".into(),
+            live: true,
+        });
+
+        // First cache build
+        app.rebuild_cache(80);
+        assert_eq!(app.seg_cache.len(), 11);
+
+        // Snapshot cache keys and pointers/line counts of all previous segments (0..10)
+        let previous_snapshots: Vec<(usize, u16, usize)> = (0..10)
+            .map(|i| {
+                let cached = app.seg_cache[i].as_ref().expect("segment cached");
+                (cached.0, cached.1, cached.2.len())
+            })
+            .collect();
+
+        // Simulate streaming: append text to the live segment at index 10
+        if let Some(Segment::Assistant { text, .. }) = app.segments.get_mut(10) {
+            text.push_str(" and more streamed tokens across multiple lines\n```rust\nfn bar() {}\n```\n");
+        }
+
+        // Rebuild cache (as happens on each frame during streaming)
+        app.rebuild_cache(80);
+
+        // Verify that past segments 0..10 were NOT wiped or recomputed
+        for (i, expected) in previous_snapshots.iter().enumerate() {
+            let cached = app.seg_cache[i].as_ref().expect("past segment must remain cached");
+            assert_eq!(cached.0, expected.0, "past segment {i} key must not change");
+            assert_eq!(cached.1, expected.1, "past segment {i} width must not change");
+            assert_eq!(cached.2.len(), expected.2, "past segment {i} line count must not change");
+        }
+
+        // The live segment at index 10 MUST have updated cache
+        let live_cached = app.seg_cache[10].as_ref().expect("live segment must be cached");
+        assert!(live_cached.2.len() > 1, "live segment should have rendered the code block");
+    }
+
+    #[test]
+    fn structural_segment_changes_invalidate_seg_cache() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+
+        app.segments.push(Segment::User("Question".into()));
+        app.segments.push(Segment::Assistant {
+            text: "Answer".into(),
+            live: false,
+        });
+
+        app.rebuild_cache(80);
+        let layout_before = app.seg_layout.clone();
+        assert_eq!(layout_before.len(), 2);
+
+        // Insert a tool segment between question and answer
+        app.segments.insert(
+            1,
+            Segment::Tool {
+                name: "bash".into(),
+                args: "echo hi".into(),
+                ok: Some(true),
+                output: "hi".into(),
+                diff: None,
+                expanded: false,
+            },
+        );
+
+        // Rebuilding cache should detect structural change and update layout
+        app.rebuild_cache(80);
+        assert_ne!(app.seg_layout, layout_before, "layout must change when a segment is inserted");
+        assert_eq!(app.seg_layout.len(), 3);
+        assert_eq!(app.seg_cache.len(), 3);
+    }
 }
