@@ -241,7 +241,8 @@ pub struct App {
     thinking_open: bool,
     thinking_idx: Option<usize>,
     mode: Mode,
-    /// true while showing the no-session startup screen
+    /// true while the current session has no user turns yet: the startup
+    /// screen is shown for every such session, not only at launch
     startup: bool,
     pub(super) startup_data: Option<StartupData>,
     pub(super) last_ctrl_c: Option<Instant>,
@@ -1353,10 +1354,6 @@ impl App {
         self.popup_dismiss = false;
         self.hover = None;
         if let Some(rest) = text.strip_prefix('/') {
-            let cmd_name = rest.split_whitespace().next().unwrap_or("");
-            if cmd_name != "new" {
-                self.startup = false;
-            }
             self.command(rest);
             return;
         }
@@ -1493,7 +1490,6 @@ impl App {
     }
 
     fn apply_session(&mut self, mut s: Session) {
-        self.startup = false;
         // persist the session we are leaving — but skip a brand-new empty one
         // (e.g. the startup stub), otherwise opening an existing session from
         // the startup screen would litter the list with an extra empty file
@@ -1543,6 +1539,15 @@ impl App {
         self.ask_custom_focus = None;
         self.rebuild_session_environment();
         self.load_history_segments();
+        // an empty session shows the startup screen like a fresh launch
+        self.startup = self.session.messages.is_empty();
+        if self.startup {
+            self.startup_data = Some(Self::collect_startup_data(
+                &self.cfg,
+                &self.model_cfg,
+                self.read_only,
+            ));
+        }
         self.menu_home();
         self.follow = true;
         self.view_top = 0;
@@ -1564,7 +1569,6 @@ impl App {
         if self.startup {
             return false;
         }
-        self.startup = false;
         if self.streaming {
             self.show_busy_status();
             return false;
@@ -1585,6 +1589,13 @@ impl App {
                 .flatten()
                 .map(|plan| plan.id);
         self.context_bootstrap_pending = true;
+        // a fresh empty session shows the startup screen again
+        self.startup = true;
+        self.startup_data = Some(Self::collect_startup_data(
+            &self.cfg,
+            &self.model_cfg,
+            self.read_only,
+        ));
         self.segments.clear();
         self.seg_cache.clear();
         self.activity_groups.clear();
