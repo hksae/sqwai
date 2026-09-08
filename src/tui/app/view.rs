@@ -633,8 +633,12 @@ impl App {
                 ..
             } => {
                 let mut k = questions.len() * 1000;
-                for (i, p) in picked.iter().enumerate() {
-                    k += p.iter().filter(|v| **v).count() * (i + 1) * 10;
+                for (q, p) in picked.iter().enumerate() {
+                    for (opt, v) in p.iter().enumerate() {
+                        if *v {
+                            k = k.wrapping_add(((1usize << (opt.min(60))) | 1).wrapping_mul((q + 1) * 100_003));
+                        }
+                    }
                 }
                 for c in custom {
                     k += c.len();

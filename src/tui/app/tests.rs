@@ -1924,6 +1924,41 @@ mod tests {
     }
 
     #[test]
+    fn ask_user_seg_key_changes_with_picked_options() {
+        use crate::agent::loop_task::{AskOption, AskQuestion};
+        use crate::tui::app::Segment;
+        let app = test_app("http://127.0.0.1:9/v1".into());
+        let q = vec![AskQuestion {
+            header: "H".into(),
+            question: "Choose?".into(),
+            options: vec![
+                AskOption { label: "A".into(), description: None, recommended: false },
+                AskOption { label: "B".into(), description: None, recommended: false },
+                AskOption { label: "C".into(), description: None, recommended: false },
+            ],
+            multiple: false,
+            allow_free: false,
+        }];
+        let seg1 = Segment::AskUser {
+            id: 1,
+            questions: q.clone(),
+            picked: vec![vec![true, false, false]],
+            custom: vec![String::new()],
+            focus: 0,
+            answered: None,
+        };
+        let seg2 = Segment::AskUser {
+            id: 1,
+            questions: q,
+            picked: vec![vec![false, true, false]],
+            custom: vec![String::new()],
+            focus: 0,
+            answered: None,
+        };
+        assert_ne!(app.seg_key(&seg1), app.seg_key(&seg2));
+    }
+
+    #[test]
     fn form_popup_titles_have_no_parentheses_and_support_mouse_selection() {
         use crate::tui::app::forms::FormField;
         use ratatui::layout::Rect;
