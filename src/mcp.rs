@@ -27,13 +27,31 @@ impl Registry {
         for server in config.servers.iter().filter(|server| server.enabled) {
             let connection = match &server.transport {
                 crate::config::McpTransport::Stdio { command, args, env } => {
-                    connect_stdio(command, args, env).await?
+                    match connect_stdio(command, args, env).await {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            eprintln!("Warning: failed to connect to MCP server '{}': {e}", server.name);
+                            continue;
+                        }
+                    }
                 }
                 crate::config::McpTransport::Http { url, headers } => {
-                    connect_http(url, headers).await?
+                    match connect_http(url, headers).await {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            eprintln!("Warning: failed to connect to MCP server '{}': {e}", server.name);
+                            continue;
+                        }
+                    }
                 }
             };
-            let discovered = list_tools(&connection).await?;
+            let discovered = match list_tools(&connection).await {
+                Ok(tools) => tools,
+                Err(e) => {
+                    eprintln!("Warning: failed to list tools from MCP server '{}': {e}", server.name);
+                    continue;
+                }
+            };
             registry.tools.extend(specs(&server.name, &discovered));
             registry.connections.insert(server.name.clone(), connection);
         }
@@ -177,5 +195,24 @@ mod tests {
             split_namespaced("mcp__github__issues"),
             Some(("github", "issues"))
         );
+    }
+
+    #[tokio::test]
+    async fn from_config_skips_failing_server() {
+        let config = crate::config::McpConfig {
+            servers: vec![crate::config::McpServerDef {
+                name: "broken".to_string(),
+                enabled: true,
+                transport: crate::config::McpTransport::Stdio {
+                    command: "nonexistent-sqwai-binary-xyz".to_string(),
+                    args: vec![],
+                    env: std::collections::BTreeMap::new(),
+                },
+            }],
+        };
+        let res = Registry::from_config(&config).await;
+        assert!(res.is_ok());
+        let registry = res.unwrap();
+        assert!(registry.tools.is_empty());
     }
 }
