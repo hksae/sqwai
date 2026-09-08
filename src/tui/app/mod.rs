@@ -347,6 +347,7 @@ pub struct App {
     press: Option<CellPos>,
     dragging: bool,
     sel: Option<Selection>,
+    input_dragging: bool,
 }
 
 impl App {
@@ -540,6 +541,7 @@ impl App {
             press: None,
             dragging: false,
             sel: None,
+            input_dragging: false,
             pasted_clipboard: None,
             paste_enter_guard: false,
             enter_gate: events::EnterGate::default(),
@@ -2571,7 +2573,10 @@ impl App {
     /// per-tool cancel (§3.7) and the hard whole-turn abort: there is nothing
     /// "mid-tool" to cancel while the model is only streaming text.
     fn tool_running(&self) -> bool {
-        matches!(self.segments.last(), Some(Segment::Tool { ok: None, .. }))
+        self.segments
+            .iter()
+            .rev()
+            .any(|s| matches!(s, Segment::Tool { ok: None, .. }))
     }
 
     fn clear_busy_statuses(&mut self) {

@@ -2989,7 +2989,18 @@ mod tests {
         });
         assert!(app.tool_running());
 
-        if let Some(Segment::Tool { ok, .. }) = app.segments.last_mut() {
+        // In real execution, a live Assistant segment trails behind the tool call
+        app.segments.push(Segment::Assistant {
+            text: String::new(),
+            live: true,
+        });
+        assert!(app.tool_running(), "tool running with live assistant trailing");
+
+        if let Some(Segment::Tool { ok, .. }) = app
+            .segments
+            .iter_mut()
+            .find(|s| matches!(s, Segment::Tool { .. }))
+        {
             *ok = Some(false);
         }
         assert!(!app.tool_running(), "the row closed, nothing is running");
@@ -3444,5 +3455,17 @@ mod tests {
             Segment::AskUser { picked, .. } => assert_eq!(picked[0], vec![true, false]),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn plain_click_in_composer_does_not_start_selection() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.last_input = ratatui::layout::Rect::new(0, 10, 40, 3);
+        app.input_mouse_down(10, 5);
+        assert!(!app.input.is_selecting());
+        assert!(!app.input_dragging);
+        app.input_mouse_up();
+        assert!(!app.input.is_selecting());
+        assert!(!app.input_dragging);
     }
 }

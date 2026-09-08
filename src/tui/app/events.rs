@@ -748,10 +748,14 @@ impl App {
                     {
                         self.input_mouse_down(m.row, m.column)
                     }
-                    MouseEventKind::Drag(MouseButton::Left) if self.input.is_selecting() => {
+                    MouseEventKind::Drag(MouseButton::Left)
+                        if self.input_dragging || (self.in_input_rect(m.row, m.column) && self.input.is_selecting()) =>
+                    {
                         self.input_mouse_drag(m.row, m.column)
                     }
-                    MouseEventKind::Up(MouseButton::Left) if self.input.is_selecting() => {
+                    MouseEventKind::Up(MouseButton::Left)
+                        if self.input_dragging || self.input.is_selecting() =>
+                    {
                         self.input_mouse_up()
                     }
                     MouseEventKind::Down(MouseButton::Left) => self.mouse_down(m.row, m.column),
@@ -807,26 +811,35 @@ impl App {
         tui_textarea::CursorMove::Jump(line, column)
     }
 
-    fn input_mouse_down(&mut self, row: u16, col: u16) {
+    pub(super) fn input_mouse_down(&mut self, row: u16, col: u16) {
+        self.input.cancel_selection();
         self.input.move_cursor(self.input_cursor_at(row, col));
-        self.input.start_selection();
+        self.input_dragging = false;
         self.dirty = true;
     }
 
-    fn input_mouse_drag(&mut self, row: u16, col: u16) {
-        self.input.move_cursor(self.input_cursor_at(row, col));
-        self.dirty = true;
-    }
-
-    fn input_mouse_up(&mut self) {
-        if self.input.is_selecting() {
-            self.input.copy();
-            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                let _ = clipboard.set_text(self.input.yank_text());
-            }
-            // Keep the selection active so the copied range remains visibly
-            // selected, matching transcript selection behavior.
+    pub(super) fn input_mouse_drag(&mut self, row: u16, col: u16) {
+        if !self.input_dragging {
+            self.input.start_selection();
+            self.input_dragging = true;
         }
+        self.input.move_cursor(self.input_cursor_at(row, col));
+        self.dirty = true;
+    }
+
+    pub(super) fn input_mouse_up(&mut self) {
+        if self.input_dragging && self.input.is_selecting() {
+            self.input.copy();
+            let text = self.input.yank_text();
+            if !text.is_empty() {
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    let _ = clipboard.set_text(text);
+                }
+            }
+        } else {
+            self.input.cancel_selection();
+        }
+        self.input_dragging = false;
         self.dirty = true;
     }
 
