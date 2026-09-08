@@ -32,6 +32,10 @@ enum Lang {
     Tsx,
     Go,
     Bash,
+    C,
+    Cpp,
+    CSharp,
+    Java,
 }
 
 impl Lang {
@@ -44,6 +48,10 @@ impl Lang {
             "tsx" => Lang::Tsx,
             "go" => Lang::Go,
             "bash" => Lang::Bash,
+            "c" => Lang::C,
+            "cpp" | "c++" => Lang::Cpp,
+            "csharp" | "c#" | "cs" => Lang::CSharp,
+            "java" => Lang::Java,
             _ => return None,
         })
     }
@@ -57,6 +65,10 @@ impl Lang {
             "tsx" => Lang::Tsx,
             "go" => Lang::Go,
             "sh" | "bash" => Lang::Bash,
+            "c" | "h" => Lang::C,
+            "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Lang::Cpp,
+            "cs" => Lang::CSharp,
+            "java" => Lang::Java,
             _ => return None,
         })
     }
@@ -70,6 +82,10 @@ impl Lang {
             Lang::Tsx => "tsx",
             Lang::Go => "go",
             Lang::Bash => "bash",
+            Lang::C => "c",
+            Lang::Cpp => "cpp",
+            Lang::CSharp => "csharp",
+            Lang::Java => "java",
         }
     }
 
@@ -82,13 +98,17 @@ impl Lang {
             Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Lang::Go => tree_sitter_go::LANGUAGE.into(),
             Lang::Bash => tree_sitter_bash::LANGUAGE.into(),
+            Lang::C => tree_sitter_c::LANGUAGE.into(),
+            Lang::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+            Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            Lang::Java => tree_sitter_java::LANGUAGE.into(),
         }
     }
 
     fn is_comment(&self, kind: &str) -> bool {
         match self {
             Lang::Rust => matches!(kind, "line_comment" | "block_comment"),
-            _ => kind == "comment",
+            _ => kind == "comment" || kind == "line_comment" || kind == "block_comment",
         }
     }
 }
@@ -103,6 +123,7 @@ enum Meta {
 #[derive(Debug, Clone)]
 struct PNode {
     kind: u16,
+    kind_name: String,
     /// named nodes match structurally; unnamed ones are literal tokens
     named: bool,
     /// exact text for leaves (no children)
@@ -193,6 +214,7 @@ fn build_pattern(node: Node, src: &str, lang: Lang, metas: &[Meta]) -> Option<PN
         let idx = (0..metas.len()).find(|&i| text == placeholder(i))?;
         return Some(PNode {
             kind: node.kind_id(),
+            kind_name: node.kind().to_string(),
             named: node.is_named(),
             text: None,
             children: Vec::new(),
@@ -210,6 +232,7 @@ fn build_pattern(node: Node, src: &str, lang: Lang, metas: &[Meta]) -> Option<PN
     if children.is_empty() {
         Some(PNode {
             kind: node.kind_id(),
+            kind_name: node.kind().to_string(),
             named: node.is_named(),
             text: Some(text),
             children: Vec::new(),
@@ -218,6 +241,7 @@ fn build_pattern(node: Node, src: &str, lang: Lang, metas: &[Meta]) -> Option<PN
     } else {
         Some(PNode {
             kind: node.kind_id(),
+            kind_name: node.kind().to_string(),
             named: node.is_named(),
             text: None,
             children,
@@ -237,24 +261,54 @@ fn compile_pattern(pattern: &str, lang: Lang) -> Result<PNode, String> {
         .parse(&replaced, None)
         .ok_or_else(|| "pattern parse failed".to_string())?;
     let root = tree.root_node();
-    // a trailing MISSING `;` after a bare-expression statement is expected
-    // for snippet patterns; any other missing token (e.g. the `)` of `Ok(`)
-    // or a real ERROR node rejects the pattern
-    if contains_reject_node(root) {
-        return Err(format!(
-            "pattern does not parse as {}; check the syntax (metavariables: $NAME, $$$NAME with uppercase names)",
-            lang.name()
-        ));
+    if !contains_reject_node(root) {
+        let mut pat = build_pattern(root, &replaced, lang, &metas)
+            .ok_or_else(|| "pattern build failed (invalid utf-8?)".to_string())?;
+        while pat.text.is_none() && pat.children.len() == 1 {
+            pat = pat.children.pop().expect("len checked");
+        }
+        return Ok(pat);
     }
-    let mut pat = build_pattern(root, &replaced, lang, &metas)
-        .ok_or_else(|| "pattern build failed (invalid utf-8?)".to_string())?;
-    // a snippet parses wrapped in source_file (and often an
-    // expression_statement); descend through single-child wrappers so the
-    // pattern can match the meaningful node anywhere in the target tree
-    while pat.text.is_none() && pat.children.len() == 1 {
-        pat = pat.children.pop().expect("len checked");
+
+    // Many languages (C, C++, Java, C#, Go) do not allow bare expressions or
+    // statements at the file root. Try wrapping in synthetic wrappers.
+    let candidates = match lang {
+        Lang::C | Lang::Cpp => vec![
+            format!("void _ZqWrap() {{\n{replaced}\n;}}"),
+            format!("{replaced};"),
+        ],
+        Lang::Java | Lang::CSharp => vec![
+            format!("class _ZqWrap {{\n{replaced}\n}}"),
+            format!("class _ZqWrap {{\nvoid _ZqWrap() {{\n{replaced}\n;}}\n}}"),
+        ],
+        Lang::Go => vec![
+            format!("package _zq\n{replaced}"),
+            format!("package _zq\nfunc _ZqWrap() {{\n{replaced}\n}}"),
+        ],
+        _ => Vec::new(),
+    };
+    for wrapped in candidates {
+        if let Some(wrapped_tree) = parser.parse(&wrapped, None)
+            && !contains_reject_node(wrapped_tree.root_node())
+        {
+            let offset = wrapped.find(&replaced).unwrap_or(0);
+            let root = wrapped_tree.root_node();
+            let target_node = root
+                .descendant_for_byte_range(offset, offset + replaced.len())
+                .unwrap_or(root);
+            if let Some(mut pat) = build_pattern(target_node, &wrapped, lang, &metas) {
+                while pat.text.is_none() && pat.children.len() == 1 {
+                    pat = pat.children.pop().expect("len checked");
+                }
+                return Ok(pat);
+            }
+        }
     }
-    Ok(pat)
+
+    Err(format!(
+        "pattern does not parse as {}; check the syntax (metavariables: $NAME, $$$NAME with uppercase names)",
+        lang.name()
+    ))
 }
 
 fn contains_reject_node(root: Node) -> bool {
@@ -324,7 +378,15 @@ fn match_one(pat: &PNode, tree: Node, lang: Lang, src: &[u8], binds: &mut Binds)
             Meta::Multi(_) => false, // multi metas are matched in sequences
         };
     }
-    if pat.kind != tree.kind_id() {
+    let kinds_match = pat.kind == tree.kind_id() || {
+        let tk = tree.kind();
+        let pk = &pat.kind_name;
+        ((pk == "identifier" || pk == "field_identifier" || pk == "property_identifier")
+            && (tk == "identifier" || tk == "field_identifier" || tk == "property_identifier"))
+            || ((pk == "method_declaration" || pk == "local_function_statement")
+                && (tk == "method_declaration" || tk == "local_function_statement"))
+    };
+    if !kinds_match {
         return false;
     }
     if pat.children.is_empty() {
@@ -412,7 +474,7 @@ pub fn ast_grep(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let lang_arg = args["lang"].as_str().and_then(Lang::from_name);
     if args["lang"].as_str().is_some_and(|_| lang_arg.is_none()) {
         return Outcome::err(
-            "unknown lang: use rust, python, javascript, typescript, tsx, go, or bash",
+            "unknown lang: use rust, python, javascript, typescript, tsx, go, bash, c, cpp, csharp, or java",
         );
     }
     let path_arg = args["path"].as_str().unwrap_or(".");

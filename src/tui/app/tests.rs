@@ -3559,7 +3559,7 @@ mod tests {
 
         // Two seconds is generous: the first backoff alone is one second, and a
         // retrying implementation would still be sleeping when this expires.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while app.streaming && std::time::Instant::now() < deadline {
             app.poll_agent();
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;

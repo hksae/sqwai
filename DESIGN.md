@@ -59,7 +59,8 @@ that must be solid but is not what the project is about.
 8. **Deterministic first, model second.** Where a cheap heuristic in code gets
    80% of the value (criticism detection, claim extraction), it runs first;
    model calls are escalation, not default.
-9. **Observations vs claims.** Journal fields are observations written by the host at dispatch;
+9. **Prompt is third, and it shapes forms, not traits.** Behavior falls into three classes: type-and-checkable (response format, tool annotation rules) — prompt it; global traits (verbosity, sycophancy, thoroughness) — prompt barely helps, expose them instead (claim lint, facts blocks, manual: acceptance); invariants — code. Choose the remedy by the class of the behavior, never by the annoyance it causes.
+10. **Observations vs claims.** Journal fields are observations written by the host at dispatch;
    plan state is validated claims (host-written after model proposal and host validation);
    tool arguments are unvalidated claims until accepted by the host.
    This distinction defines the trust boundary: the host owns observations, validates claims,

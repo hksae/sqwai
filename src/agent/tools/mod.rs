@@ -464,7 +464,7 @@ Use instead of grep when whitespace, line breaks or comments vary.",
                 "properties": {
                     "pattern": {"type": "string", "description": "code pattern with $NAME / $$$NAME metavariables"},
                     "path": {"type": "string", "description": "file or directory, default project root"},
-                    "lang": {"type": "string", "enum": ["rust", "python", "javascript", "typescript", "tsx", "go", "bash"], "description": "force a language; default is per-file by extension"},
+                    "lang": {"type": "string", "enum": ["rust", "python", "javascript", "typescript", "tsx", "go", "bash", "c", "cpp", "csharp", "java"], "description": "force a language; default is per-file by extension"},
                     "include": {"type": "string", "description": "path glob filter, e.g. src/**/*.rs"},
                     "max": {"type": "integer", "description": "max matches (default 50, max 200)"}
                 },
@@ -3319,6 +3319,50 @@ mod tests {
             &json!({"pattern": "Ok($E)", "lang": "cobol"}),
         );
         assert!(!o.ok, "{}", o.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ast_grep_supports_c_cpp_csharp_and_java() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("main.c"),
+            "int calculate(int x) { return x * 2; }\nint main() { return calculate(5); }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("service.cpp"),
+            "class Engine { void start() {} };\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("App.cs"),
+            "class Greeter { void SayHello() {} }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("Hello.java"),
+            "class Hello { void greet() {} }\n",
+        )
+        .unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+
+        let c_res = execute(&mut ctx, "ast_grep", &json!({"pattern": "calculate($X)"}));
+        assert!(c_res.ok, "{}", c_res.output);
+        assert!(c_res.output.contains("main.c:2"), "{}", c_res.output);
+
+        let cpp_res = execute(&mut ctx, "ast_grep", &json!({"pattern": "void start() {}"}));
+        assert!(cpp_res.ok, "{}", cpp_res.output);
+        assert!(cpp_res.output.contains("service.cpp:1"), "{}", cpp_res.output);
+
+        let cs_res = execute(&mut ctx, "ast_grep", &json!({"pattern": "void SayHello() {}"}));
+        assert!(cs_res.ok, "{}", cs_res.output);
+        assert!(cs_res.output.contains("App.cs:1"), "{}", cs_res.output);
+
+        let java_res = execute(&mut ctx, "ast_grep", &json!({"pattern": "void greet() {}"}));
+        assert!(java_res.ok, "{}", java_res.output);
+        assert!(java_res.output.contains("Hello.java:1"), "{}", java_res.output);
+
         fs::remove_dir_all(&dir).ok();
     }
 
