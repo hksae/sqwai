@@ -59,6 +59,11 @@ that must be solid but is not what the project is about.
 8. **Deterministic first, model second.** Where a cheap heuristic in code gets
    80% of the value (criticism detection, claim extraction), it runs first;
    model calls are escalation, not default.
+9. **Observations vs claims.** Journal fields are observations written by the host at dispatch;
+   plan state is validated claims (host-written after model proposal and host validation);
+   tool arguments are unvalidated claims until accepted by the host.
+   This distinction defines the trust boundary: the host owns observations, validates claims,
+   and never trusts unvalidated input. Untrusted content (§2.2.2) is unvalidated input by definition.
 
 ---
 
@@ -258,6 +263,14 @@ through host-only `waive`. Text acceptances verify against host-attached
 evidence for the referenced step; the model does not select sequence
 numbers.
 
+**Attribute misattribution warning (non-blocking).** If the step being finished has
+file_diff evidence whose paths overlap with `refs` of another pending or in_progress step,
+the host attaches a warning to the `finish` result. The user may `/undo step N` to revert
+and reopen the step if the warning indicates a misattribution. Until the graph (I4) is
+fully implemented, this check is degraded: only the nudge (§2.1.4) and a specific hint
+in rejection ("0 file_diff since start; work may belong to another step") are available.
+
+
 **Open assumptions.** A `note` with `note: assumption` records a model
 assumption; a later `note` with `note: assumption, resolves: <seq>` closes it.
 `finish` on a step that still has open assumption notes returns a non-blocking
@@ -309,6 +322,17 @@ not changed by /goal; /constraints edits them the same way.
 
 A new user message never silently changes the goal. If the model believes a
 message changes the goal, it proposes a revision.
+
+`propose_plan` is a tool for legitimate goal refinement, not for escaping difficult steps.
+**Model‑proposed revisions:** the host validates that the new plan does not remove any
+pending step without evidence of attempt or block, and that constraints are not weakened
+unless explicitly marked as replaced. **User‑initiated revisions** (via `/goal`) may drop
+steps made irrelevant by the new goal — the diff is shown to the user, who is the author
+of the change. In both cases, the user sees a diff and must explicitly accept.
+
+Repeated rejections of model‑proposed proposals trigger the forced ask_user mechanism
+(§2.1.4, `rejections_in_a_row`) — the mechanic is not duplicated here.
+
 
 2.1.7 User surface
 /plan — full plan document (goal, constraints, acceptance, steps, folded).
@@ -1681,7 +1705,7 @@ number; a `partial` one is missing something the design calls for.
 | I1 | Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild | planned | E |
 | I2 | Rust adapter (tree-sitter), qualified keys | planned | I1 |
 | I3 | Freshness: edit/bash/undo/head triggers; status semantics | planned | I1 |
-| I4 | resolve_ref; validator refs; pre-edit warning; stale markers; reflector executor tool | planned | I2, I3, F1, H1 |
+| I4 | resolve_ref; validator refs; pre-edit warning; stale markers; reflector executor tool | next | I2, I3, F1, H1 |
 | I5 | Memory adapter; recall/graph_query exposed; context block | planned | I4, F4 |
 | J | Python adapter; LSP diagnostics → journal; graph-view list MVP; checkpoint before/after bash | planned | I5, C |
 | K | Canvas graph-view, watcher, LSP Level 4, blast radius, path view | planned | J |
@@ -1705,6 +1729,9 @@ number; a `partial` one is missing something the design calls for.
 | AC | bench command (user-facing wrapper over §8.2 regression harness) | planned | G |
 | AD | Bash isolation/sandbox (container/bwrap/WSL) | open question | — |
 | AE | Core and UI decoupling: headless `serve` (stdio/JSON-RPC) + crates workspace split (`sqwai-core`, `sqwai-tui`, `sqwai-server`) (§5.11) | planned | B |
+| AF | Hardcode linter: scan file_diff for test-shaped literals (warn-layer) | planned | I4 |
+| AG | Safety level presets / refusal override policy for models with strong filters | planned | — |
+
 
 
 Ordering beyond the dependency column: K, L and O are the last passes — the
@@ -1814,6 +1841,7 @@ Playwright MCP as the permanent browser driver	no control over refs, diffs, toke
 Unattended `ask_user` answered by a model (auto-approve)	reintroduces trust in the model exactly where the human is absent
 Test impact replacing the full suite at `complete`	dynamic dispatch and I/O tests make impact a lower bound, not an equivalence
 Auto-creating a plan from an issue without review	the goal would be owned by whoever wrote the issue, including strangers
+Explicit `step` parameter in every tool call for manual attribution	shifts attribution from host-owned state to model argument, creating a new trust surface; finish-time warning via refs + nudge preserves host-owned observations and is simpler; warn-layer accepting mode also rejected for simplicity (§2.1.4)
 
 11. Explicitly excluded (do not add)
 To protect execution integrity and determinism, the following are out of scope by
@@ -1855,4 +1883,23 @@ To enable parallel agent execution without interrupting the developer's working 
 - **Isolated task workspaces**: Long-running or unattended agent operations spawn within isolated git worktrees (`.sqwai/worktrees/<task-id>`) branched off the current HEAD.
 - Compiles, tests, and file edits occur in the isolated worktree without touching the user's primary working tree or holding a blocking filesystem lock.
 - Upon plan completion and verification, changes are offered as an atomic squashed branch or clean fast-forward merge into the user's working branch.
+
+---
+
+## 13. Known gaps (acknowledged boundaries)
+
+- **Attribute misattribution.** Until I4 (resolve_ref + refs validator) is complete,
+  the host cannot reliably detect that evidence belongs to a different step than the
+  one in_progress. Mitigations: nudge (§2.1.4), specific hint in rejection, and planned
+  finish-time warning via refs (§2.1.4). This follows the degrade‑don’t‑refuse principle.
+
+- **Hardcoding detection.** The host does not automatically detect test-shaped hardcodes
+  (e.g., string literals matching test inputs). Mitigations: manual acceptance items,
+  property‑based tests, and planned hardcode linter (AF). Until then, users are encouraged
+  to review diffs.
+
+- **Model refusal under pressure.** Models with strong safety filters (e.g., Anthropic Fable)
+  may refuse legitimate commands. Mitigations: fallback to Mythos model, configurable safety
+  levels (AG), journaled refusals, and user‑controlled override.
+
 
