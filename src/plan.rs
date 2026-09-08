@@ -436,10 +436,10 @@ pub fn open_active_for_session(root: &Path, session_id: Option<&str>) -> Result<
     if active_plans.is_empty() {
         return Ok(None);
     }
-    if let Some(sid) = session_id {
-        if let Some(plan) = active_plans.iter().find(|p| p.sessions.iter().any(|s| s == sid)) {
-            return Ok(Some(plan.clone()));
-        }
+    if let Some(sid) = session_id
+        && let Some(plan) = active_plans.iter().find(|p| p.sessions.iter().any(|s| s == sid))
+    {
+        return Ok(Some(plan.clone()));
     }
     // Deterministic fallback: pick the most recent active plan by created timestamp
     active_plans.sort_by(|a, b| b.created.cmp(&a.created));

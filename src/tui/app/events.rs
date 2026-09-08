@@ -846,10 +846,10 @@ impl App {
         if self.input_dragging && self.input.is_selecting() {
             self.input.copy();
             let text = self.input.yank_text();
-            if !text.is_empty() {
-                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                    let _ = clipboard.set_text(text);
-                }
+            if !text.is_empty()
+                && let Ok(mut clipboard) = arboard::Clipboard::new()
+            {
+                let _ = clipboard.set_text(text);
             }
         } else {
             self.input.cancel_selection();

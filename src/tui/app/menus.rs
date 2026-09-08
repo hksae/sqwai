@@ -1237,7 +1237,7 @@ impl App {
                     } else {
                         78.min(self.cache_w.saturating_sub(4)).max(30)
                     };
-                    let frame_w = (menu_w as usize).saturating_sub(4).max(24).min(72);
+                    let frame_w = (menu_w as usize).saturating_sub(4).clamp(24, 72);
                     let head = " pinned ";
                     let mid = {
                         let label = format!(" {head} ");

@@ -180,13 +180,12 @@ impl Client {
             };
             if let Some(resp) =
                 handle_server_message(&mut self.stdin, &mut self.diagnostics, msg).await?
+                && resp.get("id") == Some(&Value::from(id))
             {
-                if resp.get("id") == Some(&Value::from(id)) {
-                    if let Some(error) = resp.get("error") {
-                        bail!("LSP {method}: {error}");
-                    }
-                    return Ok(resp.get("result").cloned().unwrap_or(Value::Null));
+                if let Some(error) = resp.get("error") {
+                    bail!("LSP {method}: {error}");
                 }
+                return Ok(resp.get("result").cloned().unwrap_or(Value::Null));
             }
         }
     }

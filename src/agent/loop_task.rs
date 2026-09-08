@@ -2367,6 +2367,7 @@ async fn propose_plan(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn bash_call(
     call: &ToolCallReq,
     ctx: &mut ToolCtx,

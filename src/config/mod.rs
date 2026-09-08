@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -949,7 +949,7 @@ fn atomic_write(path: &std::path::Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn write_template(path: &PathBuf) -> Result<()> {
+pub fn write_template(path: &Path) -> Result<()> {
     atomic_write(path, &toml::to_string_pretty(&Config::default())?)?;
     Ok(())
 }
