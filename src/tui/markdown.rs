@@ -281,6 +281,21 @@ fn emit_table(out: &mut Vec<Line<'static>>, rows: Vec<Vec<String>>, width: u16) 
                 chars.push((s.style, ch));
             }
         }
+        let take_budget = |cur: &mut Vec<(Style, char)>| -> Vec<(Style, char)> {
+            let mut cols = 0;
+            let mut split_idx = 0;
+            for (i, (_, ch)) in cur.iter().enumerate() {
+                let w = cell_width(*ch);
+                if cols + w > budget && split_idx > 0 {
+                    break;
+                }
+                cols += w;
+                split_idx = i + 1;
+            }
+            let rest = cur.split_off(split_idx);
+            std::mem::replace(cur, rest)
+        };
+
         // greedy word wrap
         let mut lines: Vec<Vec<(Style, char)>> = Vec::new();
         let mut cur: Vec<(Style, char)> = Vec::new();
@@ -298,8 +313,11 @@ fn emit_table(out: &mut Vec<Line<'static>>, rows: Vec<Vec<String>>, width: u16) 
                         cur = rest;
                     }
                     None => {
-                        lines.push(std::mem::take(&mut cur));
+                        lines.push(take_budget(&mut cur));
                     }
+                }
+                while columns_of(&cur) > budget {
+                    lines.push(take_budget(&mut cur));
                 }
                 cur_cols = columns_of(&cur);
                 last_space = None;
@@ -311,7 +329,12 @@ fn emit_table(out: &mut Vec<Line<'static>>, rows: Vec<Vec<String>>, width: u16) 
             cur_cols += ch_cols;
         }
         trim_end_spaces(&mut cur);
-        lines.push(cur);
+        while columns_of(&cur) > budget {
+            lines.push(take_budget(&mut cur));
+        }
+        if !cur.is_empty() || lines.is_empty() {
+            lines.push(cur);
+        }
 
         let lines_out = lines
             .into_iter()
@@ -874,6 +897,29 @@ mod tests {
             assert!(
                 cols[0] <= width as usize,
                 "width {width}: grid overflows the terminal {cols:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn table_wraps_long_unbreakable_words_and_urls() {
+        let hl = Highlighter::new();
+        let md = "| col | url |\n|---|---|\n| a | https://example.com/a/very/long/unbreakable/link/that/exceeds/the/column/budget/by/far |\n| b | prefix https://another.example.com/very/long/path/with/words/and/no/space/runs |\n";
+        for width in [30u16, 40, 60] {
+            let lines = render(md, width, &hl);
+            let cols: Vec<usize> = lines
+                .iter()
+                .map(|l| UnicodeWidthStr::width(line_text_pub(l).as_str()))
+                .collect();
+            assert!(!cols.is_empty(), "width {width}: nothing rendered");
+            assert!(
+                cols.iter().all(|&c| c == cols[0]),
+                "width {width}: ragged grid {cols:?}"
+            );
+            assert!(
+                cols[0] <= width as usize,
+                "width {width}: grid overflows terminal ({w} > {width}): {cols:?}",
+                w = cols[0]
             );
         }
     }
