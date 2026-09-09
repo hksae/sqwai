@@ -4861,6 +4861,28 @@ mod tests {
             plan::AcceptanceStatus::Pending
         ));
 
+        // /plan complete mutates A, leaves B alone
+        let mut a_ready = a_after;
+        a_ready.steps[0].status = plan::StepStatus::Done;
+        plan::store(&temp_dir, &a_ready).unwrap();
+        app.plan_command("/plan complete");
+        let a_completed = plan::open(&temp_dir, &plan_a.id).unwrap();
+        assert_eq!(a_completed.status, plan::PlanStatus::Completed);
+        let b_after_complete = plan::open(&temp_dir, &plan_b.id).unwrap();
+        assert_eq!(b_after_complete.status, plan::PlanStatus::Active);
+
+        // /plan abandon mutates linked plan, leaves B alone
+        let mut plan_c = mk_plan("session C goal");
+        plan_c.sessions = vec![sid.clone()];
+        plan::store(&temp_dir, &plan_c).unwrap();
+        app.session.plan_id = Some(plan_c.id.clone());
+        app.plan_command("/plan abandon");
+        let c_abandoned = plan::open(&temp_dir, &plan_c.id).unwrap();
+        assert_eq!(c_abandoned.status, plan::PlanStatus::Abandoned);
+        let b_still_active = plan::open(&temp_dir, &plan_b.id).unwrap();
+        assert_eq!(b_still_active.status, plan::PlanStatus::Active);
+
+        app.session.plan_id = Some(plan_a.id.clone());
         // Menu::Plan renders the session's plan, not the newest global one
         app.open_menu(Menu::Plan);
         let rendered: String = app
