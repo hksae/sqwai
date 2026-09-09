@@ -520,6 +520,9 @@ pub fn reopen_for_undo(plan: &mut Plan, step_id: &str, reason: impl Into<String>
     step.step_epoch = step.step_epoch.saturating_add(1);
     step.reason = Some(reason.into());
     plan.revision = plan.revision.saturating_add(1);
+    if plan.status == PlanStatus::Completed {
+        plan.status = PlanStatus::Active;
+    }
     Ok(())
 }
 
@@ -2817,6 +2820,16 @@ mod tests {
         assert_eq!(step.validation.status, ValidationStatus::Pending);
         assert!(step.validation.receipts.is_empty());
         assert!(step.evidence.is_empty());
+    }
+
+    #[test]
+    fn reopen_for_undo_reactivates_completed_plan() {
+        let mut plan = new_plan();
+        plan.status = PlanStatus::Completed;
+        plan.steps[0].status = StepStatus::Done;
+        reopen_for_undo(&mut plan, "1", "undo step 1").unwrap();
+        assert_eq!(plan.steps[0].status, StepStatus::Reopened);
+        assert_eq!(plan.status, PlanStatus::Active);
     }
 
     #[test]
