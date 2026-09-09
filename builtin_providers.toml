@@ -35,16 +35,16 @@ provider = "gemini"
 id = "gemini-3.6-flash"
 context = 1048576
 effort = "medium"
-price_in = 0.5
-price_out = 3.0
+price_in = 0.75
+price_out = 3.75
 
 [models."gemini-3.5-flash"]
 provider = "gemini"
 id = "gemini-3.5-flash"
 context = 1048576
 effort = "medium"
-price_in = 0.5
-price_out = 3.0
+price_in = 1.5
+price_out = 9.0
 
 [models."gemini-3.5-flash-lite"]
 provider = "gemini"
@@ -60,4 +60,4 @@ id = "gemini-3.1-flash-lite"
 context = 1048576
 effort = "off"
 price_in = 0.25
-price_out = 2.0
+price_out = 1.5
