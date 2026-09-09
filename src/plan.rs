@@ -1725,6 +1725,23 @@ fn split(
             );
         }
     };
+    let step = &plan.steps[index];
+    if !matches!(step.status, StepStatus::Pending | StepStatus::Reopened) {
+        return reject(
+            plan,
+            "step_not_splittable",
+            format!("step {id} is {}", step.status.as_str()),
+            "only a pending or reopened step can be split",
+        );
+    }
+    if !step.evidence.is_empty() {
+        return reject(
+            plan,
+            "step_has_evidence",
+            format!("step {id} already has recorded evidence"),
+            "steps with recorded evidence cannot be split or deleted",
+        );
+    }
     let resulting = plan.steps.len() - 1 + into.len();
     if resulting > limits.max_steps {
         return reject(
@@ -2865,5 +2882,127 @@ mod tests {
         assert_eq!(resolved_default.id, child_id);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn split_pending_or_reopened_step_succeeds() {
+        let mut plan = new_plan();
+        let parts = vec![
+            NewStep {
+                title: "part a".into(),
+                kind: None,
+                refs: vec![],
+            },
+            NewStep {
+                title: "part b".into(),
+                kind: None,
+                refs: vec![],
+            },
+        ];
+        assert!(apply(
+            &mut plan,
+            Op::Split {
+                id: "1".into(),
+                into: parts.clone()
+            },
+            &Limits::default(),
+            None,
+        )
+        .is_ok());
+        assert!(plan.step("1a").is_some());
+        assert!(plan.step("1b").is_some());
+        assert!(plan.step("1").is_none());
+
+        // Reopened step can also be split
+        plan.steps[2].status = StepStatus::Reopened;
+        assert!(apply(
+            &mut plan,
+            Op::Split {
+                id: "2".into(),
+                into: parts
+            },
+            &Limits::default(),
+            None,
+        )
+        .is_ok());
+        assert!(plan.step("2a").is_some());
+        assert!(plan.step("2b").is_some());
+    }
+
+    #[test]
+    fn split_rejects_done_in_progress_blocked_or_evidenced_steps() {
+        let mut plan = new_plan();
+        let parts = vec![
+            NewStep {
+                title: "part a".into(),
+                kind: None,
+                refs: vec![],
+            },
+            NewStep {
+                title: "part b".into(),
+                kind: None,
+                refs: vec![],
+            },
+        ];
+
+        // 1. Done step cannot be split
+        plan.steps[0].status = StepStatus::Done;
+        let err = apply(
+            &mut plan,
+            Op::Split {
+                id: "1".into(),
+                into: parts.clone(),
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "step_not_splittable");
+
+        // 2. InProgress step cannot be split
+        plan.steps[0].status = StepStatus::InProgress;
+        let err = apply(
+            &mut plan,
+            Op::Split {
+                id: "1".into(),
+                into: parts.clone(),
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "step_not_splittable");
+
+        // 3. Blocked step cannot be split
+        plan.steps[0].status = StepStatus::Blocked;
+        let err = apply(
+            &mut plan,
+            Op::Split {
+                id: "1".into(),
+                into: parts.clone(),
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "step_not_splittable");
+
+        // 4. Pending step with recorded evidence cannot be split
+        plan.steps[0].status = StepStatus::Pending;
+        plan.steps[0].evidence.push(EvidenceRef {
+            session: "sess".into(),
+            seq: 1,
+        });
+        let err = apply(
+            &mut plan,
+            Op::Split {
+                id: "1".into(),
+                into: parts,
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "step_has_evidence");
     }
 }
