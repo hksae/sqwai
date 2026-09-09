@@ -714,7 +714,7 @@ continue; await its result before dependent changes or reporting success.",
                             "properties": {
                                 "title": {"type": "string"},
                                 "kind": {"type": "string", "enum": ["research", "change", "verify"]},
-                                "refs": {"type": "array", "items": {"type": "string"}}
+                                "refs": {"type": "array", "items": {"type": ["string", "object"]}, "description": "what the step touches: plain \"path[::symbol]\" means modify, or {\"path\", \"symbol\", \"intent\": \"modify|create|remove\"}"}
                             },
                             "required": ["title"]
                         }
@@ -759,7 +759,7 @@ every acceptance validation passed or waived with fresh receipts. Never invent e
                             "properties": {
                                 "title": {"type": "string"},
                                 "kind": {"type": "string", "enum": ["research", "change", "verify"]},
-                                "refs": {"type": "array", "items": {"type": "string"}}
+                                "refs": {"type": "array", "items": {"type": ["string", "object"]}, "description": "what the step touches: plain \"path[::symbol]\" means modify, or {\"path\", \"symbol\", \"intent\": \"modify|create|remove\"}"}
                             },
                             "required": ["title"]
                         }
@@ -772,7 +772,7 @@ every acceptance validation passed or waived with fresh receipts. Never invent e
                             "properties": {
                                 "title": {"type": "string"},
                                 "kind": {"type": "string", "enum": ["research", "change", "verify"]},
-                                "refs": {"type": "array", "items": {"type": "string"}}
+                                "refs": {"type": "array", "items": {"type": ["string", "object"]}, "description": "what the step touches: plain \"path[::symbol]\" means modify, or {\"path\", \"symbol\", \"intent\": \"modify|create|remove\"}"}
                             },
                             "required": ["title"]
                         }
@@ -780,7 +780,7 @@ every acceptance validation passed or waived with fresh receipts. Never invent e
                     "after": {"type": "string", "description": "add: insert after this step id"},
                     "title": {"type": "string", "description": "add: new step title"},
                     "kind": {"type": "string", "enum": ["research", "change", "verify"]},
-                    "refs": {"type": "array", "items": {"type": "string"}},
+                    "refs": {"type": "array", "items": {"type": ["string", "object"]}, "description": "what the step touches: plain \"path[::symbol]\" means modify, or {\"path\", \"symbol\", \"intent\": \"modify|create|remove\"}"},
                     "summary": {"type": "string", "description": "finish: what was done, where, and any remaining limitations"},
                     "reason": {"type": "string", "description": "block / cancel"},
                     "confirm": {"type": "boolean", "description": "start: re-read a stale step"},
@@ -1917,7 +1917,7 @@ fn unspent_verify_evidence(
         .acceptance
         .iter()
         .enumerate()
-        .filter(|(other, item)| *other != index && item.status == plan::AcceptanceStatus::Verified)
+        .filter(|(other, item)| *other != index && item.status == plan::AcceptanceStatus::Passed)
         .flat_map(|(_, item)| item.evidence.iter())
         .collect();
     active
@@ -1993,7 +1993,7 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
         validate_attached_records(&root, &active.id, &step.id, step.kind, &step.evidence)?;
     }
     for (index, acceptance) in active.acceptance.iter().enumerate() {
-        if acceptance.status != plan::AcceptanceStatus::Verified {
+        if acceptance.status != plan::AcceptanceStatus::Passed {
             continue;
         }
         match acceptance.kind() {
@@ -2020,7 +2020,7 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
                 }
             }
             plan::AcceptanceKind::Manual(text) => {
-                // Verified rather than waived: it should not have been possible
+                // Passed rather than waived: it should not have been possible
                 // to get here, so say so instead of letting it slide.
                 return Err(format!(
                     "invalid_evidence: acceptance {index} is manual ({text}) and can only be                      waived by the user"
@@ -3142,7 +3142,7 @@ mod tests {
         assert!(passed.ok, "{}", passed.output);
         assert_eq!(
             plan::open_active(&dir).unwrap().unwrap().acceptance[1].status,
-            plan::AcceptanceStatus::Verified
+            plan::AcceptanceStatus::Passed
         );
         fs::remove_dir_all(&dir).ok();
     }

@@ -1583,6 +1583,7 @@ async fn run_agent(
                             "op": op,
                             "id": plan_step_id,
                             "ok": outcome.ok,
+                            "by": "model",
                         }),
                     );
                     let active = plan::open_active_for_session(&root, Some(&session_id))
@@ -2357,7 +2358,7 @@ async fn propose_plan(
     if let Some(writer) = journal.as_mut() {
         let _ = writer.append(
             "plan",
-            serde_json::json!({"op": "propose", "goal": draft.goal.text}),
+            serde_json::json!({"op": "propose", "goal": draft.goal.text, "by": "model"}),
         );
     }
     if tx
@@ -2379,7 +2380,7 @@ async fn propose_plan(
     };
     if !accept {
         if let Some(writer) = journal.as_mut() {
-            let _ = writer.append("plan", serde_json::json!({"op": "decline_proposal"}));
+            let _ = writer.append("plan", serde_json::json!({"op": "decline_proposal", "by": "user"}));
         }
         return tools::Outcome::ok(
             "the user declined the proposed plan. Ask what was wrong with it, adjust, \
@@ -2419,7 +2420,7 @@ async fn propose_plan(
     if let Some(writer) = journal.as_mut() {
         let _ = writer.append(
             "plan",
-            serde_json::json!({"op": "accept_proposal", "id": new_id, "abandoned": abandoned}),
+            serde_json::json!({"op": "accept_proposal", "id": new_id, "abandoned": abandoned, "by": "user"}),
         );
     }
     // tell the TUI the stored plan's id so it re-links the session before the

@@ -3061,7 +3061,7 @@ fn plan_rows(
         for (i, a) in plan.acceptance.iter().enumerate() {
             let st = match a.status {
                 plan::AcceptanceStatus::Pending => Theme::dim(),
-                plan::AcceptanceStatus::Verified => Theme::ok(),
+                plan::AcceptanceStatus::Passed => Theme::ok(),
                 plan::AcceptanceStatus::Waived => Theme::warn(),
             };
             let prefix = format!("    [{i}] {} ", a.status.as_str());

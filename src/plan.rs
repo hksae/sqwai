@@ -135,7 +135,10 @@ impl StepKind {
 #[serde(rename_all = "snake_case")]
 pub enum AcceptanceStatus {
     Pending,
-    Verified,
+    /// A host-run check passed for this item (§2.1.4). Old files say
+    /// `verified`; that stays readable through the alias.
+    #[serde(alias = "verified")]
+    Passed,
     Waived,
 }
 
@@ -143,9 +146,151 @@ impl AcceptanceStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
-            Self::Verified => "verified",
+            Self::Passed => "passed",
             Self::Waived => "waived",
         }
+    }
+}
+
+/// Validation state of a step or acceptance item, separate from whether the
+/// work was performed (§2.1.2, §2.1.4). `finish` moves a step to `done` and
+/// never touches this; only a host-recorded `verification_receipt` sets
+/// `passed`, and later state changes flip it to `stale`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationStatus {
+    #[default]
+    Pending,
+    Passed,
+    Stale,
+    Waived,
+}
+
+impl ValidationStatus {
+    /// Text form for the anchor and `/plan` (wired in phase 3/5).
+    #[allow(dead_code)]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Passed => "passed",
+            Self::Stale => "stale",
+            Self::Waived => "waived",
+        }
+    }
+}
+
+/// One verification run bound to the exact state it checked (§2.1.4).
+/// `session`/`seq` point at the journal `verification_receipt` record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Receipt {
+    pub session: String,
+    pub seq: u64,
+    pub state_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<i32>,
+    pub at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct Validation {
+    #[serde(default)]
+    pub status: ValidationStatus,
+    #[serde(default)]
+    pub receipts: Vec<Receipt>,
+}
+
+/// What a step intends to touch (§2.1.2, §2.4.8). `modify` and `remove`
+/// refer to existing code; `create` declares a new path/symbol that must
+/// not exist yet. Plain strings stay accepted on input and mean
+/// `modify` (the `path::symbol` tail, if any, becomes `symbol`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RefIntent {
+    #[default]
+    Modify,
+    Create,
+    Remove,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StepRef {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    #[serde(default)]
+    pub intent: RefIntent,
+}
+
+impl<'de> Deserialize<'de> for StepRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct StepRefVisitor;
+        impl<'de> Visitor<'de> for StepRefVisitor {
+            type Value = StepRef;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a ref object or a plain \"path[::symbol]\" string")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(StepRef::from(value))
+            }
+
+            fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+            where
+                M: de::MapAccess<'de>,
+            {
+                #[derive(Deserialize)]
+                struct Wire {
+                    path: String,
+                    #[serde(default)]
+                    symbol: Option<String>,
+                    #[serde(default)]
+                    intent: RefIntent,
+                }
+                Wire::deserialize(de::value::MapAccessDeserializer::new(map)).map(|wire| {
+                    StepRef {
+                        path: wire.path,
+                        symbol: wire.symbol,
+                        intent: wire.intent,
+                    }
+                })
+            }
+        }
+        deserializer.deserialize_any(StepRefVisitor)
+    }
+}
+
+impl From<&str> for StepRef {
+    /// `"src/x.rs"` → modify `src/x.rs`; `"src/x.rs::fn::foo"` → modify
+    /// path `src/x.rs`, symbol `fn::foo` (the `::` convention the
+    /// misattribution warning already splits on).
+    fn from(value: &str) -> Self {
+        match value.split_once("::") {
+            Some((path, symbol)) if !path.is_empty() && !symbol.is_empty() => StepRef {
+                path: path.to_string(),
+                symbol: Some(symbol.to_string()),
+                intent: RefIntent::Modify,
+            },
+            _ => StepRef {
+                path: value.to_string(),
+                symbol: None,
+                intent: RefIntent::Modify,
+            },
+        }
+    }
+}
+
+impl From<String> for StepRef {
+    fn from(value: String) -> Self {
+        StepRef::from(value.as_str())
     }
 }
 
@@ -173,6 +318,8 @@ pub struct Acceptance {
     pub status: AcceptanceStatus,
     #[serde(default)]
     pub evidence: Vec<EvidenceRef>,
+    #[serde(default)]
+    pub validation: Validation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -222,9 +369,18 @@ pub struct Step {
     /// Journal seq values. Written by the host only (§2.1.2).
     #[serde(default)]
     pub evidence: Vec<EvidenceRef>,
-    /// Stable graph keys the step intends to touch (§2.4.3).
+    /// What the step intends to touch (§2.1.2, §2.4.8).
     #[serde(default)]
-    pub refs: Vec<String>,
+    pub refs: Vec<StepRef>,
+    /// Check state, separate from step status (§2.1.2). `finish` never
+    /// writes this; the host sets `passed` via receipts (phase 3).
+    #[serde(default)]
+    pub validation: Validation,
+    /// Bumped by every host-only reopen; subagent evidence from an older
+    /// epoch does not count (§2.2.4, phase 2).
+    #[serde(default)]
+    pub step_epoch: u64,
+    /// Set on pending steps after a goal revision (§2.1.6).
     /// Set on pending steps after a goal revision (§2.1.6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_goal: Option<bool>,
@@ -258,6 +414,10 @@ pub struct Plan {
     pub forked_from: Option<String>,
     #[serde(default)]
     pub sessions: Vec<String>,
+    /// Scoped `session:seq` of the last journal event applied to this file.
+    /// The plan is a projection replayed from here on load (§2.1.4, phase 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_event: Option<String>,
     pub goal: Goal,
     #[serde(default)]
     pub constraints: Vec<String>,
@@ -484,7 +644,7 @@ pub struct NewStep {
     #[serde(default)]
     pub kind: Option<StepKind>,
     #[serde(default)]
-    pub refs: Vec<String>,
+    pub refs: Vec<StepRef>,
 }
 
 /// One operation per call (§2.1.3).
@@ -532,7 +692,7 @@ pub enum Op {
         #[serde(default)]
         kind: Option<StepKind>,
         #[serde(default)]
-        refs: Vec<String>,
+        refs: Vec<StepRef>,
     },
     Split {
         id: String,
@@ -750,6 +910,7 @@ pub fn create(
         created: ts.clone(),
         forked_from: None,
         sessions: Vec::new(),
+        applied_event: None,
         goal: Goal {
             text: goal,
             source: "user".to_string(),
@@ -763,6 +924,7 @@ pub fn create(
                 text,
                 status: AcceptanceStatus::Pending,
                 evidence: Vec::new(),
+                validation: Validation::default(),
                 by: None,
                 reason: None,
             })
@@ -781,6 +943,8 @@ pub fn create(
                 reason: None,
                 evidence: Vec::new(),
                 refs: s.refs,
+                validation: Validation::default(),
+                step_epoch: 0,
                 stale_goal: None,
             })
             .collect(),
@@ -1018,7 +1182,7 @@ fn add(
     after: Option<&str>,
     title: String,
     kind: Option<StepKind>,
-    refs: Vec<String>,
+    refs: Vec<StepRef>,
     limits: &Limits,
 ) -> Result<Applied, Rejection> {
     if title.trim().is_empty() {
@@ -1068,6 +1232,8 @@ fn add(
         reason: None,
         evidence: Vec::new(),
         refs,
+        validation: Validation::default(),
+        step_epoch: 0,
         stale_goal: None,
     };
     let id = step.id.clone();
@@ -1136,6 +1302,8 @@ fn split(
             reason: None,
             evidence: Vec::new(),
             refs: s.refs,
+            validation: Validation::default(),
+            step_epoch: 0,
             stale_goal: None,
         })
         .collect();
@@ -1203,7 +1371,7 @@ pub fn verify_acceptance(
                 .iter()
                 .enumerate()
                 .filter(|(other, item)| {
-                    *other != index && item.status == AcceptanceStatus::Verified
+                    *other != index && item.status == AcceptanceStatus::Passed
                 })
                 .flat_map(|(_, item)| item.evidence.iter())
                 .collect();
@@ -1225,7 +1393,7 @@ pub fn verify_acceptance(
         }
     }
     let item = &mut plan.acceptance[index];
-    item.status = AcceptanceStatus::Verified;
+    item.status = AcceptanceStatus::Passed;
     item.evidence = evidence;
     let message = if supplied_evidence {
         format!("acceptance {index} verified (model evidence ignored; host evidence used)")
@@ -1759,10 +1927,161 @@ mod tests {
         let mut plan = new_plan();
         plan.steps[0].status = StepStatus::Done;
         plan.steps[1].status = StepStatus::Reopened;
-        plan.acceptance[0].status = AcceptanceStatus::Verified;
+        plan.acceptance[0].status = AcceptanceStatus::Passed;
         let err = complete(&mut plan).unwrap_err();
         assert_eq!(err.code, "steps_open");
         assert!(err.reason.contains('2'), "reason: {}", err.reason);
+    }
+
+    #[test]
+    fn legacy_plan_file_loads_with_phase0_defaults() {
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-legacy-{}", new_id()));
+        let plans = plans_dir(&dir);
+        std::fs::create_dir_all(&plans).unwrap();
+        let id = "01JLEGACYPLAN00000000000001";
+        std::fs::write(
+            plans.join(format!("{id}.json")),
+            serde_json::json!({
+                "version": 1,
+                "id": id,
+                "status": "active",
+                "created": "2026-01-01T00:00:00+00:00",
+                "sessions": ["s1"],
+                "goal": {"text": "old goal", "source": "user", "created": "..."},
+                "acceptance": [
+                    {"text": "cmd: cargo test", "status": "verified", "evidence": [3]},
+                ],
+                "steps": [
+                    {"id": "1", "title": "old step", "status": "done",
+                     "evidence": [1, 2],
+                     "refs": ["src/session/mod.rs::fn::save", "src/plain.rs"]},
+                ],
+                "budget": {"tokens": 10, "limit": 20000},
+                "revision": 2,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let plan = open(&dir, id).unwrap();
+        // `verified` stays readable and means passed
+        assert_eq!(plan.acceptance[0].status, AcceptanceStatus::Passed);
+        // bare seq evidence keeps the legacy empty-session identity
+        assert_eq!(
+            plan.acceptance[0].evidence,
+            vec![EvidenceRef {
+                session: String::new(),
+                seq: 3
+            }]
+        );
+        // phase-0 fields default without touching the file format
+        assert_eq!(
+            plan.acceptance[0].validation.status,
+            ValidationStatus::Pending
+        );
+        assert!(plan.acceptance[0].validation.receipts.is_empty());
+        assert_eq!(plan.applied_event, None);
+        let step = &plan.steps[0];
+        assert_eq!(step.step_epoch, 0);
+        assert_eq!(step.validation.status, ValidationStatus::Pending);
+        assert_eq!(step.refs.len(), 2);
+        assert_eq!(step.refs[0].path, "src/session/mod.rs");
+        assert_eq!(step.refs[0].symbol.as_deref(), Some("fn::save"));
+        assert_eq!(step.refs[0].intent, RefIntent::Modify);
+        assert_eq!(step.refs[1].path, "src/plain.rs");
+        assert_eq!(step.refs[1].symbol, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn step_ref_objects_keep_intent() {
+        let create: StepRef = serde_json::from_value(serde_json::json!({
+            "path": "src/new.rs", "symbol": "Thing", "intent": "create"
+        }))
+        .unwrap();
+        assert_eq!(create.intent, RefIntent::Create);
+        assert_eq!(create.symbol.as_deref(), Some("Thing"));
+        // intent defaults to modify when omitted
+        let plain: StepRef = serde_json::from_value(serde_json::json!({"path": "src/x.rs"}))
+            .unwrap();
+        assert_eq!(plain.intent, RefIntent::Modify);
+        assert_eq!(plain.symbol, None);
+    }
+
+    #[test]
+    fn phase0_schema_round_trips() {
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-phase0-{}", new_id()));
+        let mut plan = new_plan();
+        plan.applied_event = Some("sess:41".to_string());
+        plan.steps[0].step_epoch = 3;
+        plan.steps[0].validation = Validation {
+            status: ValidationStatus::Passed,
+            receipts: vec![Receipt {
+                session: "sess".to_string(),
+                seq: 41,
+                state_digest: "abc".to_string(),
+                command: Some("cargo test".to_string()),
+                exit: Some(0),
+                at: "2026-01-01T00:00:00+00:00".to_string(),
+            }],
+        };
+        plan.acceptance[0].validation = Validation {
+            status: ValidationStatus::Waived,
+            receipts: Vec::new(),
+        };
+        plan.steps[0].refs = vec![StepRef {
+            path: "src/new.rs".to_string(),
+            symbol: Some("Thing".to_string()),
+            intent: RefIntent::Create,
+        }];
+        store(&dir, &plan).unwrap();
+        let loaded = open(&dir, &plan.id).unwrap();
+        assert_eq!(loaded.applied_event.as_deref(), Some("sess:41"));
+        assert_eq!(loaded.steps[0].step_epoch, 3);
+        assert_eq!(
+            loaded.steps[0].validation.status,
+            ValidationStatus::Passed
+        );
+        assert_eq!(loaded.steps[0].validation.receipts.len(), 1);
+        assert_eq!(
+            loaded.steps[0].validation.receipts[0].state_digest,
+            "abc"
+        );
+        assert_eq!(
+            loaded.acceptance[0].validation.status,
+            ValidationStatus::Waived
+        );
+        assert_eq!(loaded.steps[0].refs[0].intent, RefIntent::Create);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn finish_leaves_validation_untouched() {
+        let mut plan = new_plan();
+        apply(
+            &mut plan,
+            Op::Start {
+                id: "1".into(),
+                confirm: None,
+            },
+            &Limits::default(),
+        )
+        .unwrap();
+        apply(
+            &mut plan,
+            Op::Finish {
+                id: "1".into(),
+                summary: "model added".into(),
+                evidence: vec![],
+            },
+            &Limits::default(),
+        )
+        .unwrap();
+        // done means performed, not verified (§2.1.4)
+        assert_eq!(plan.step("1").unwrap().status, StepStatus::Done);
+        assert_eq!(
+            plan.step("1").unwrap().validation.status,
+            ValidationStatus::Pending
+        );
     }
 
     #[test]

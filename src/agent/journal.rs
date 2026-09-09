@@ -164,6 +164,30 @@ impl Journal {
         Ok(seq)
     }
 
+    /// Record a host-run check bound to the exact state it verified (§2.1.4).
+    /// Wired to the verify path in phase 3; until then it is exercised by
+    /// tests only.
+    #[allow(dead_code)]
+    pub fn append_verification_receipt(
+        &mut self,
+        acceptance: usize,
+        state_digest: &str,
+        command: Option<&str>,
+        exit: Option<i32>,
+        output_hash: &str,
+    ) -> Result<u64> {
+        self.append(
+            "verification_receipt",
+            json!({
+                "acceptance_id": acceptance,
+                "state_digest": state_digest,
+                "command": command,
+                "exit": exit,
+                "output_hash": output_hash,
+            }),
+        )
+    }
+
     #[allow(dead_code)]
     pub fn next_seq(&self) -> u64 {
         self.next_seq
@@ -632,7 +656,7 @@ impl Journal {
         let Some(step) = active.step(finished_step) else {
             return Vec::new();
         };
-        let other_steps_with_refs: Vec<(&str, &[String])> = active
+        let other_steps_with_refs: Vec<(&str, &[crate::plan::StepRef])> = active
             .steps
             .iter()
             .filter(|s| {
@@ -667,7 +691,7 @@ impl Journal {
 
             for (other_id, refs) in &other_steps_with_refs {
                 let matches = refs.iter().any(|r| {
-                    let r_clean = r.split("::").next().unwrap_or(r);
+                    let r_clean = r.path.as_str();
                     path == r_clean || path.ends_with(r_clean) || r_clean.ends_with(path)
                 });
                 if matches {
@@ -1489,6 +1513,42 @@ mod tests {
         assert_eq!(warns.len(), 1);
         assert!(warns[0].contains("overlaps with refs of step 2"));
         assert!(warns[0].contains("/undo step 1"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn verification_receipt_records_the_check() {
+        let root = root();
+        let mut journal = Journal::open(&root, "verify").unwrap();
+        let seq = journal
+            .append_verification_receipt(0, "digest-abc", Some("cargo test"), Some(0), "outhash")
+            .unwrap();
+        let records = Journal::records_for(&root, "verify").unwrap();
+        let record = records.iter().find(|r| r.seq == seq).unwrap();
+        assert_eq!(record.kind, "verification_receipt");
+        assert_eq!(
+            record
+                .fields
+                .get("acceptance_id")
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            record.fields.get("state_digest").and_then(Value::as_str),
+            Some("digest-abc")
+        );
+        assert_eq!(
+            record.fields.get("command").and_then(Value::as_str),
+            Some("cargo test")
+        );
+        assert_eq!(
+            record.fields.get("exit").and_then(Value::as_i64),
+            Some(0)
+        );
+        assert_eq!(
+            record.fields.get("output_hash").and_then(Value::as_str),
+            Some("outhash")
+        );
         fs::remove_dir_all(root).ok();
     }
 
