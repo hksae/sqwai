@@ -386,6 +386,14 @@ pub fn store(root: &Path, plan: &Plan) -> Result<()> {
     Ok(())
 }
 
+/// Side-effect-free read of one plan file: missing or corrupt files yield
+/// `None` instead of an error (unlike `open`, it never moves anything aside).
+/// Used to resolve a session's linked plan without touching the store.
+pub fn read_plan_file(root: &Path, id: &str) -> Option<Plan> {
+    let text = std::fs::read_to_string(plans_dir(root).join(format!("{id}.json"))).ok()?;
+    serde_json::from_str::<Plan>(&text).ok()
+}
+
 /// A plan that fails schema validation is moved aside, never silently dropped.
 pub fn open(root: &Path, id: &str) -> Result<Plan> {
     let dir = plans_dir(root);

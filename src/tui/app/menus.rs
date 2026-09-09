@@ -1934,8 +1934,7 @@ impl App {
                 self.menu_footer_text = Some("esc: close · ctrl+t: toggle".into());
             }
             Menu::Plan => {
-                let root = std::env::current_dir().unwrap_or_default();
-                let Some(plan) = crate::plan::open_active(&root).ok().flatten() else {
+                let Some(plan) = self.session_plan() else {
                     self.menu_rows.push(row(
                         Line::from(vec![Span::styled("  no active plan", Theme::dim())]),
                         MenuAction::None,

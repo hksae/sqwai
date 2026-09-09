@@ -55,7 +55,10 @@ fn reopen_undone_steps(
     files: &[String],
     checkpoint: &str,
 ) -> Vec<String> {
-    let Some(mut active) = plan::open_active(root).ok().flatten() else {
+    let Some(mut active) = plan::open_active_for_session(root, Some(session_id))
+        .ok()
+        .flatten()
+    else {
         return Vec::new();
     };
     let records = crate::agent::journal::Journal::records_for(root, session_id).unwrap_or_default();
@@ -402,7 +405,7 @@ impl App {
             parts.push(SystemPart::cached(self.session_environment.clone()));
         }
         let root = std::env::current_dir().unwrap_or_default();
-        if let Some(plan) = crate::prompts::plan_block(&root) {
+        if let Some(plan) = crate::prompts::plan_block(&root, Some(&self.session.id.to_string())) {
             parts.push(SystemPart::cached(plan));
         }
         // The anchor is host-generated from the plan and this session's
@@ -431,9 +434,8 @@ impl App {
     /// operation reported by the agent, the end of a turn, `/undo`, and any
     /// slash command — instead of on every frame from inside the renderer.
     pub(super) fn refresh_plan_label(&mut self) {
-        self.plan_step_label = plan::open_active(&self.project_root)
-            .ok()
-            .flatten()
+        self.plan_step_label = self
+            .session_plan()
             .and_then(|plan| {
                 let current = plan
                     .steps
@@ -584,10 +586,13 @@ impl App {
             app.session.plan_id = None;
         }
         if app.session.plan_id.is_none() {
-            app.session.plan_id = crate::plan::open_active(&app.project_root)
-                .ok()
-                .flatten()
-                .map(|plan| plan.id);
+            app.session.plan_id = crate::plan::open_active_for_session(
+                &app.project_root,
+                Some(&app.session.id.to_string()),
+            )
+            .ok()
+            .flatten()
+            .map(|plan| plan.id);
         }
         app.refresh_plan_label();
         app.stable_prefix = app.stable_prefix();
@@ -1362,8 +1367,7 @@ impl App {
         let mut text = self.input_text().trim().to_string();
         if text.is_empty() {
             if self.startup {
-                let root = std::env::current_dir().unwrap_or_default();
-                if let Ok(Some(active)) = crate::plan::open_active(&root) {
+                if let Some(active) = self.session_plan() {
                     text = if let Some(step) = active.steps.iter().find(|s| {
                         s.status == crate::plan::StepStatus::InProgress
                             || s.status == crate::plan::StepStatus::Pending
@@ -1589,10 +1593,13 @@ impl App {
             self.session.plan_id = None;
         }
         if self.session.plan_id.is_none() {
-            self.session.plan_id = crate::plan::open_active(&self.project_root)
-                .ok()
-                .flatten()
-                .map(|plan| plan.id);
+            self.session.plan_id = crate::plan::open_active_for_session(
+                &self.project_root,
+                Some(&self.session.id.to_string()),
+            )
+            .ok()
+            .flatten()
+            .map(|plan| plan.id);
         }
         // defensive: never let a legacy system turn back into the transcript
         self.session.strip_system_messages();
@@ -1653,11 +1660,13 @@ impl App {
         self.run_undo_maintenance();
         let ctx = self.session.context_limit;
         self.session = Session::new(self.cfg.default_model.clone(), ctx);
-        self.session.plan_id =
-            crate::plan::open_active(&std::env::current_dir().unwrap_or_default())
-                .ok()
-                .flatten()
-                .map(|plan| plan.id);
+        self.session.plan_id = crate::plan::open_active_for_session(
+            &self.project_root,
+            Some(&self.session.id.to_string()),
+        )
+        .ok()
+        .flatten()
+        .map(|plan| plan.id);
         self.context_bootstrap_pending = true;
         // a fresh empty session shows the startup screen again; the data
         // refresh runs in the background so /new returns instantly
@@ -1992,6 +2001,24 @@ impl App {
     /// Plan id `/plan delete` would remove: the session's own plan while its
     /// file is still on disk, otherwise the most recent active plan.
     /// One shared resolver so the command gate and the confirmed action can
+    /// The plan this session works on: its linked plan while the file is
+    /// still readable on disk, otherwise the session-scoped active plan
+    /// (which falls back to the most recent one, preserving single-plan
+    /// behavior when nothing is linked). Every TUI read or mutation of
+    /// "the plan" goes through here so two sessions never operate on each
+    /// other's plans.
+    fn session_plan(&self) -> Option<plan::Plan> {
+        let root = &self.project_root;
+        if let Some(id) = &self.session.plan_id
+            && let Some(plan) = plan::read_plan_file(root, id)
+        {
+            return Some(plan);
+        }
+        plan::open_active_for_session(root, Some(&self.session.id.to_string()))
+            .ok()
+            .flatten()
+    }
+
     /// never disagree about what is being deleted.
     fn deletable_plan_id(&self) -> Option<String> {
         let root = &self.project_root;
@@ -1999,7 +2026,12 @@ impl App {
             .plan_id
             .clone()
             .filter(|id| plan::plans_dir(root).join(format!("{id}.json")).exists())
-            .or_else(|| plan::open_active(root).ok().flatten().map(|plan| plan.id))
+            .or_else(|| {
+                plan::open_active_for_session(root, Some(&self.session.id.to_string()))
+                    .ok()
+                    .flatten()
+                    .map(|plan| plan.id)
+            })
     }
 
     fn plan_command(&mut self, rest: &str) {
@@ -2040,8 +2072,8 @@ impl App {
                     self.cfg.plan.max_steps
                 )
             }
-            Some("complete") => match plan::open_active(&root) {
-                Ok(Some(mut active)) => {
+            Some("complete") => match self.session_plan() {
+                Some(mut active) => {
                     match plan::apply(&mut active, plan::Op::Complete, &plan::Limits::default()) {
                         Ok(plan::Applied::Completed) => match plan::store(&root, &active) {
                             Ok(()) => "plan completed".to_string(),
@@ -2051,11 +2083,10 @@ impl App {
                         Err(e) => format!("plan complete rejected [{}]: {}", e.code, e.reason),
                     }
                 }
-                Ok(None) => "no active plan".to_string(),
-                Err(e) => format!("plan load failed: {e:#}"),
+                None => "no active plan".to_string(),
             },
-            Some("abandon") => match plan::open_active(&root) {
-                Ok(Some(mut active)) => {
+            Some("abandon") => match self.session_plan() {
+                Some(mut active) => {
                     active.status = plan::PlanStatus::Abandoned;
                     active.revision += 1;
                     match plan::store(&root, &active) {
@@ -2063,23 +2094,21 @@ impl App {
                         Err(e) => format!("plan write failed: {e:#}"),
                     }
                 }
-                Ok(None) => "no active plan".to_string(),
-                Err(e) => format!("plan load failed: {e:#}"),
+                None => "no active plan".to_string(),
             },
             Some("waive") => {
                 let index = args.get(1).and_then(|s| s.parse::<usize>().ok());
                 let reason = args.get(2..).map(|v| v.join(" ")).unwrap_or_default();
                 match (index, reason.trim()) {
-                    (Some(index), reason) if !reason.is_empty() => match plan::open_active(&root) {
-                        Ok(Some(mut active)) => match plan::waive(&mut active, index, reason) {
+                    (Some(index), reason) if !reason.is_empty() => match self.session_plan() {
+                        Some(mut active) => match plan::waive(&mut active, index, reason) {
                             Ok(()) => match plan::store(&root, &active) {
                                 Ok(()) => format!("acceptance {index} waived"),
                                 Err(e) => format!("plan write failed: {e:#}"),
                             },
                             Err(e) => format!("plan waive rejected [{}]: {}", e.code, e.reason),
                         },
-                        Ok(None) => "no active plan".to_string(),
-                        Err(e) => format!("plan load failed: {e:#}"),
+                        None => "no active plan".to_string(),
                     },
                     _ => "usage: /plan waive <acceptance-index> <reason>".to_string(),
                 }
@@ -2090,7 +2119,7 @@ impl App {
     }
 
     fn goal_command(&mut self, rest: &str) {
-        let root = std::env::current_dir().unwrap_or_default();
+        let root = self.project_root.clone();
         let text = rest
             .split_once(' ')
             .map(|(_, value)| value.trim())
@@ -2099,8 +2128,8 @@ impl App {
             self.status("usage: /goal <text>", StatusKind::Warn);
             return;
         }
-        match plan::open_active(&root) {
-            Ok(Some(mut active)) => {
+        match self.session_plan() {
+            Some(mut active) => {
                 plan::set_goal(
                     &mut active,
                     text.to_string(),
@@ -2112,13 +2141,12 @@ impl App {
                     Err(e) => self.status(&format!("goal update failed: {e:#}"), StatusKind::Err),
                 }
             }
-            Ok(None) => self.status("no active plan", StatusKind::Warn),
-            Err(e) => self.status(&format!("plan load failed: {e:#}"), StatusKind::Err),
+            None => self.status("no active plan", StatusKind::Warn),
         }
     }
 
     fn constraints_command(&mut self, rest: &str) {
-        let root = std::env::current_dir().unwrap_or_default();
+        let root = self.project_root.clone();
         let mut parts = rest.splitn(3, ' ');
         let _ = parts.next();
         let action = parts.next().unwrap_or_default();
@@ -2127,8 +2155,8 @@ impl App {
             self.status("usage: /constraints add|remove <text>", StatusKind::Warn);
             return;
         }
-        match plan::open_active(&root) {
-            Ok(Some(mut active)) => {
+        match self.session_plan() {
+            Some(mut active) => {
                 if action == "add" {
                     active.constraints.push(text.to_string());
                 } else if let Some(index) = active.constraints.iter().position(|c| c == text) {
@@ -2143,8 +2171,7 @@ impl App {
                     ),
                 }
             }
-            Ok(None) => self.status("no active plan", StatusKind::Warn),
-            Err(e) => self.status(&format!("plan load failed: {e:#}"), StatusKind::Err),
+            None => self.status("no active plan", StatusKind::Warn),
         }
     }
 
@@ -3444,7 +3471,8 @@ impl App {
             Ok(report) => {
                 let touched = report.touched();
                 let mut reopened: Vec<String> = Vec::new();
-                if let Ok(Some(mut active)) = crate::plan::open_active(&root)
+                if let Ok(Some(mut active)) =
+                    crate::plan::open_active_for_session(&root, Some(&self.session.id.to_string()))
                     && crate::plan::reopen_for_undo(
                         &mut active,
                         step,

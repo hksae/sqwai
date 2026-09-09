@@ -4517,6 +4517,76 @@ mod tests {
     }
 
     #[test]
+    fn tui_commands_operate_on_session_plan_not_newest_global() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let temp_dir = std::env::temp_dir().join(format!(
+            "sqwai-test-plan-session-scope-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        app.project_root = temp_dir.clone();
+        let sid = app.session.id.to_string();
+
+        let limits = plan::Limits { max_steps: 10 };
+        let mk_plan = |goal: &str| {
+            plan::create(
+                goal.into(),
+                vec![],
+                vec!["manual: eyeball it".into()],
+                vec![plan::NewStep {
+                    title: "step 1".into(),
+                    kind: None,
+                    refs: vec![],
+                }],
+                1000,
+                &limits,
+            )
+            .unwrap()
+        };
+        // session's own older plan vs a newer unrelated active plan
+        let mut plan_a = mk_plan("session goal");
+        plan_a.created = "2026-01-01T00:00:00+00:00".to_string();
+        plan_a.sessions = vec![sid.clone()];
+        plan::store(&temp_dir, &plan_a).unwrap();
+        let mut plan_b = mk_plan("other goal");
+        plan_b.created = "2026-09-09T00:00:00+00:00".to_string();
+        plan_b.sessions = vec!["someone-else".into()];
+        plan::store(&temp_dir, &plan_b).unwrap();
+        app.session.plan_id = Some(plan_a.id.clone());
+
+        // resolver prefers the linked plan over the newest global one
+        assert_eq!(app.session_plan().map(|p| p.id), Some(plan_a.id.clone()));
+
+        // /plan waive mutates A, leaves B alone
+        app.plan_command("/plan waive 0 looks good");
+        let a_after = plan::open(&temp_dir, &plan_a.id).unwrap();
+        assert!(matches!(
+            a_after.acceptance[0].status,
+            plan::AcceptanceStatus::Waived
+        ));
+        let b_after = plan::open(&temp_dir, &plan_b.id).unwrap();
+        assert!(matches!(
+            b_after.acceptance[0].status,
+            plan::AcceptanceStatus::Pending
+        ));
+
+        // Menu::Plan renders the session's plan, not the newest global one
+        app.open_menu(Menu::Plan);
+        let rendered: String = app
+            .menu_rows
+            .iter()
+            .flat_map(|(line, _)| line.spans.iter().map(|s| s.content.as_ref().to_string()))
+            .collect();
+        assert!(rendered.contains(&plan_a.id), "menu must show session plan");
+        assert!(
+            !rendered.contains(&plan_b.id),
+            "menu must not show another session's plan"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
     fn builtin_providers_and_models_are_immutable_and_updateable() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
 

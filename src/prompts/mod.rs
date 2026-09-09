@@ -89,8 +89,10 @@ pub fn runtime_context() -> String {
 
 /// The durable plan, when the project has one. It changes only when the agent
 /// rewrites it, so it belongs to the cacheable prefix.
-pub fn plan_block(root: &std::path::Path) -> Option<String> {
-    let plan = crate::plan::open_active(root).ok().flatten()?;
+pub fn plan_block(root: &std::path::Path, session_id: Option<&str>) -> Option<String> {
+    let plan = crate::plan::open_active_for_session(root, session_id)
+        .ok()
+        .flatten()?;
     Some(format!(
         "<durable_plan>\n{}\n</durable_plan>",
         crate::plan::render(&plan)

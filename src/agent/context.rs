@@ -23,7 +23,7 @@ use crate::providers::{Message, Role};
 /// model never writes or rewrites this block.
 pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     let mut out = String::from("ANCHOR (host-generated; source of truth after compaction)\n");
-    if let Ok(Some(plan)) = crate::plan::open_active(root) {
+    if let Ok(Some(plan)) = crate::plan::open_active_for_session(root, Some(session_id)) {
         out.push_str(&format!("goal: {}\n", bounded(&plan.goal.text, 500)));
         if plan.constraints.is_empty() {
             out.push_str("constraints: none\n");

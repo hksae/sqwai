@@ -687,10 +687,15 @@ impl Journal {
     }
 
     /// Return a non-blocking reminder when a step has accumulated actions
-    /// since its last plan operation.
-    pub fn nudge(root: &Path, threshold: usize) -> Result<Option<String>> {
+    /// since its last plan operation. Scoped to the calling session so one
+    /// session's unfinished step never nags another session's turn.
+    pub fn nudge(
+        root: &Path,
+        session_id: Option<&str>,
+        threshold: usize,
+    ) -> Result<Option<String>> {
         let records = Self::records(root)?;
-        let active = crate::plan::open_active(root)?;
+        let active = crate::plan::open_active_for_session(root, session_id)?;
         let Some(active) = active else {
             return Ok(None);
         };
@@ -1415,13 +1420,13 @@ mod tests {
                 .unwrap();
         }
         assert!(
-            Journal::nudge(&root, 2)
+            Journal::nudge(&root, None, 2)
                 .unwrap()
                 .unwrap()
                 .contains("3 actions")
         );
         journal.append("plan", json!({"op": "show"})).unwrap();
-        assert!(Journal::nudge(&root, 2).unwrap().is_none());
+        assert!(Journal::nudge(&root, None, 2).unwrap().is_none());
         fs::remove_dir_all(root).ok();
     }
 

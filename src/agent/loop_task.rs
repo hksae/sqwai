@@ -892,7 +892,7 @@ async fn run_agent(
                 "compaction",
                 Some(&provider),
                 &model_id,
-                plan::open_active(&root)
+                plan::open_active_for_session(&root, Some(&session_id))
                     .ok()
                     .flatten()
                     .map(|plan| plan::render(&plan))
@@ -938,7 +938,7 @@ async fn run_agent(
 
         let mut turn_system = system.clone();
         if let Ok(Some(nudge)) =
-            crate::agent::journal::Journal::nudge(&root, plan_limits.nudge_after)
+            crate::agent::journal::Journal::nudge(&root, Some(&session_id), plan_limits.nudge_after)
         {
             turn_system.push(crate::providers::SystemPart::volatile(nudge));
         }
