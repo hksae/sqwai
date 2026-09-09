@@ -127,6 +127,11 @@ pub struct Session {
     /// plan copied for this fork, if the parent had an active plan
     #[serde(default)]
     pub plan_id: Option<String>,
+    /// step this session currently holds (§2.2.3). Set on `plan start`,
+    /// cleared on `finish`/`block`/`cancel`; mirrored from the agent loop
+    /// via `StepCurrent` events. `None` means idle.
+    #[serde(default)]
+    pub current_step_id: Option<String>,
     /// title snapshot of the parent, survives parent deletion
     #[serde(default)]
     pub forked_from_title: Option<String>,
@@ -167,6 +172,7 @@ impl Session {
             pinned: false,
             forked_from_id: None,
             plan_id: None,
+            current_step_id: None,
             forked_from_title: None,
             last_response_id: None,
             last_response_model: None,

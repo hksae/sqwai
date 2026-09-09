@@ -289,7 +289,7 @@ abandon, restore (resume).
 2.1.4 Validator (host code only)
 Op	Rejected when
 create	active plan exists · goal empty · zero steps · more than plan.max_steps (24) steps
-start	step not `pending|reopened` · another step is already `current_step_id` (main agent must finish/block/cancel first) · stale_goal without `confirm: true`
+start	step not `pending|reopened` · `step_busy`: the session holds another step, or another step is already `in_progress` in the plan (finish/block/cancel it first — a second one would make attribution ambiguous) · stale_goal without `confirm: true`
 finish	step not in_progress · host evidence rule fails (below) · summary empty
 block	step not `in_progress
 unblock	step not blocked

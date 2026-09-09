@@ -519,6 +519,10 @@ pub fn fork(root: &Path, source: &Plan, session_id: &str) -> Result<Plan> {
 }
 
 /// Reopen a completed step after host-side undo removed its recorded evidence.
+/// Conservative rule (§3.6): ANY reverted part of the step's result reopens
+/// it — reverting a subset cannot leave the step marked completed. Bumps
+/// `step_epoch` so subagent records from before the reopen stop counting as
+/// evidence, and resets `validation` (a reverted result is unverified).
 pub fn reopen_for_undo(plan: &mut Plan, step_id: &str, reason: impl Into<String>) -> Result<()> {
     let step = plan
         .step_mut(step_id)
@@ -530,9 +534,21 @@ pub fn reopen_for_undo(plan: &mut Plan, step_id: &str, reason: impl Into<String>
     step.finished = None;
     step.summary = None;
     step.evidence.clear();
+    step.validation = Validation::default();
+    step.step_epoch = step.step_epoch.saturating_add(1);
     step.reason = Some(reason.into());
     plan.revision = plan.revision.saturating_add(1);
     Ok(())
+}
+
+/// Immutable spawn context a subagent inherits (§2.2.4): which plan step it
+/// works on and at which epoch. Mutations and evidence from an older epoch
+/// are refused / filtered after the step is reopened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepContext {
+    pub plan_id: String,
+    pub step_id: String,
+    pub step_epoch: u64,
 }
 
 // ---------------------------------------------------------------- journal-first commits and replay (§2.1.4, §2.2.1)
@@ -951,7 +967,7 @@ fn apply_record(
         ) => {
             let op: Op = serde_json::from_value(serde_json::Value::Object(fields.clone()))
                 .map_err(|_| Rejection::new("replay_shape", "unparsable op intent", ""))?;
-            apply(plan, op, &Limits::default()).map(|_| true)
+            apply(plan, op, &Limits::default(), None).map(|_| true)
         }
         _ => Ok(false),
     }
@@ -1385,7 +1401,12 @@ pub fn create(
 
 /// Apply one operation. Every rule from §2.1.4 except the evidence rule and
 /// refs (deferred to F3 / I4).
-pub fn apply(plan: &mut Plan, op: Op, limits: &Limits) -> Result<Applied, Rejection> {
+pub fn apply(
+    plan: &mut Plan,
+    op: Op,
+    limits: &Limits,
+    current_step: Option<&str>,
+) -> Result<Applied, Rejection> {
     match op {
         Op::Create { .. } => reject(
             plan,
@@ -1397,7 +1418,7 @@ pub fn apply(plan: &mut Plan, op: Op, limits: &Limits) -> Result<Applied, Reject
             plan.rejections_in_a_row = 0;
             Ok(Applied::Shown { text: render(plan) })
         }
-        Op::Start { id, confirm } => start(plan, &id, confirm),
+        Op::Start { id, confirm } => start(plan, &id, confirm, current_step),
         Op::Finish {
             id,
             summary,
@@ -1458,7 +1479,12 @@ fn unknown_step(plan: &mut Plan, id: &str) -> Result<Applied, Rejection> {
     )
 }
 
-fn start(plan: &mut Plan, id: &str, confirm: Option<bool>) -> Result<Applied, Rejection> {
+fn start(
+    plan: &mut Plan,
+    id: &str,
+    confirm: Option<bool>,
+    current_step: Option<&str>,
+) -> Result<Applied, Rejection> {
     let Some((status, stale)) = step_status(plan, id) else {
         return unknown_step(plan, id);
     };
@@ -1468,6 +1494,27 @@ fn start(plan: &mut Plan, id: &str, confirm: Option<bool>) -> Result<Applied, Re
             "step_not_pending",
             format!("step {id} is {}", status.as_str()),
             "only a pending or reopened step can be started",
+        );
+    }
+    // One step at a time (§2.2.3): the caller's session must not hold another
+    // step, and the plan must not have one in progress either (a second
+    // InProgress step would make dispatch attribution ambiguous).
+    if let Some(other) = current_step.filter(|current| *current != id) {
+        return reject(
+            plan,
+            "step_busy",
+            format!("step {other} is already the current step of this session"),
+            format!("finish, block or cancel step {other} first — or continue it instead of starting step {id}"),
+        );
+    }
+    if let Some(other) = plan.steps.iter().find_map(|step| {
+        (step.id != id && step.status == StepStatus::InProgress).then(|| step.id.clone())
+    }) {
+        return reject(
+            plan,
+            "step_busy",
+            format!("step {other} is already in progress"),
+            format!("only one step runs at a time; finish, block or cancel step {other} first"),
         );
     }
     if stale && confirm != Some(true) {
@@ -2049,6 +2096,7 @@ mod tests {
                 confirm: None,
             },
             &Limits::default(),
+            None,
         )
         .unwrap();
         plan.step_mut("1").unwrap().evidence.push(EvidenceRef {
@@ -2063,6 +2111,7 @@ mod tests {
                 evidence: vec![42],
             },
             &Limits::default(),
+            None,
         )
         .unwrap();
         let revision = plan.revision;
@@ -2084,6 +2133,7 @@ mod tests {
                     confirm: None,
                 },
                 &Limits::default(),
+                None,
             )
             .is_ok()
         );
@@ -2128,7 +2178,8 @@ mod tests {
                     id: "1".into(),
                     confirm: None
                 },
-                &Limits::default()
+                &Limits::default(),
+                None,
             ),
             Ok(Applied::Updated { .. })
         ));
@@ -2140,7 +2191,8 @@ mod tests {
                     summary: "model added".into(),
                     evidence: vec![1]
                 },
-                &Limits::default()
+                &Limits::default(),
+                None,
             ),
             Ok(Applied::Updated { .. })
         ));
@@ -2158,6 +2210,7 @@ mod tests {
                 evidence: vec![],
             },
             &Limits::default(),
+            None,
         )
         .unwrap_err();
         assert_eq!(err.code, "step_not_in_progress");
@@ -2167,7 +2220,7 @@ mod tests {
     #[test]
     fn complete_requires_all_steps_closed() {
         let mut plan = new_plan();
-        let err = apply(&mut plan, Op::Complete, &Limits::default()).unwrap_err();
+        let err = apply(&mut plan, Op::Complete, &Limits::default(), None).unwrap_err();
         assert_eq!(err.code, "steps_open");
     }
 
@@ -2182,6 +2235,7 @@ mod tests {
                     confirm: None,
                 },
                 &Limits::default(),
+                None,
             )
             .unwrap();
             apply(
@@ -2192,10 +2246,11 @@ mod tests {
                     evidence: vec![1],
                 },
                 &Limits::default(),
+                None,
             )
             .unwrap();
         }
-        let err = apply(&mut plan, Op::Complete, &Limits::default()).unwrap_err();
+        let err = apply(&mut plan, Op::Complete, &Limits::default(), None).unwrap_err();
         assert_eq!(err.code, "acceptance_pending");
         assert!(
             err.hint.contains("Pending acceptance items without cmd: prefix require user waiver (/plan waive <index>) or conversion to verify steps."),
@@ -2204,7 +2259,7 @@ mod tests {
         );
         waive(&mut plan, 0, "manual check").unwrap();
         assert!(matches!(
-            apply(&mut plan, Op::Complete, &Limits::default()),
+            apply(&mut plan, Op::Complete, &Limits::default(), None),
             Ok(Applied::Completed)
         ));
         assert_eq!(plan.status, PlanStatus::Completed);
@@ -2220,6 +2275,7 @@ mod tests {
                 confirm: None,
             },
             &Limits::default(),
+            None,
         )
         .unwrap();
         set_goal(&mut plan, "a different goal".into(), "user", None);
@@ -2241,6 +2297,7 @@ mod tests {
                 confirm: None,
             },
             &Limits::default(),
+            None,
         )
         .unwrap_err();
         assert_eq!(err.code, "stale_goal");
@@ -2251,7 +2308,8 @@ mod tests {
                     id: "1".into(),
                     confirm: Some(true)
                 },
-                &Limits::default()
+                &Limits::default(),
+                None,
             )
             .is_ok()
         );
@@ -2270,6 +2328,7 @@ mod tests {
                 refs: Vec::new(),
             },
             &limits,
+            None,
         )
         .unwrap();
         assert_eq!(plan.steps.len(), 3);
@@ -2282,6 +2341,7 @@ mod tests {
                 refs: Vec::new(),
             },
             &limits,
+            None,
         )
         .unwrap_err();
         assert_eq!(err.code, "too_many_steps");
@@ -2519,6 +2579,7 @@ mod tests {
                 confirm: None,
             },
             &Limits::default(),
+            None,
         )
         .unwrap();
         apply(
@@ -2528,9 +2589,10 @@ mod tests {
                 reason: "waiting".into(),
             },
             &Limits::default(),
+            None,
         )
         .unwrap();
-        let err = apply(&mut plan, Op::Complete, &Limits::default()).unwrap_err();
+        let err = apply(&mut plan, Op::Complete, &Limits::default(), None).unwrap_err();
         assert_eq!(err.code, "steps_open");
         assert!(err.reason.contains('1'), "reason: {}", err.reason);
     }
@@ -2666,6 +2728,7 @@ mod tests {
                 confirm: None,
             },
             &Limits::default(),
+            None,
         )
         .unwrap();
         apply(
@@ -2676,6 +2739,7 @@ mod tests {
                 evidence: vec![],
             },
             &Limits::default(),
+            None,
         )
         .unwrap();
         // done means performed, not verified (§2.1.4)
@@ -2684,6 +2748,117 @@ mod tests {
             plan.step("1").unwrap().validation.status,
             ValidationStatus::Pending
         );
+    }
+
+    #[test]
+    fn start_rejected_while_session_holds_another_step() {
+        let mut plan = new_plan();
+        apply(
+            &mut plan,
+            Op::Start {
+                id: "1".into(),
+                confirm: None,
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap();
+        // Same session holding step 1 cannot start step 2 (§2.2.3).
+        let err = apply(
+            &mut plan,
+            Op::Start {
+                id: "2".into(),
+                confirm: None,
+            },
+            &Limits::default(),
+            Some("1"),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "step_busy");
+        assert!(err.reason.contains('1'), "reason: {}", err.reason);
+        // Re-stating the held step is not "another step": falls through to
+        // the status check, which rejects with the clearer pending rule.
+        let err = apply(
+            &mut plan,
+            Op::Start {
+                id: "1".into(),
+                confirm: None,
+            },
+            &Limits::default(),
+            Some("1"),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "step_not_pending");
+    }
+
+    #[test]
+    fn start_rejected_while_plan_has_other_in_progress() {
+        let mut plan = new_plan();
+        apply(
+            &mut plan,
+            Op::Start {
+                id: "1".into(),
+                confirm: None,
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap();
+        // No session claim, but the plan globally holds step 1: a second
+        // InProgress step would make attribution ambiguous.
+        let err = apply(
+            &mut plan,
+            Op::Start {
+                id: "2".into(),
+                confirm: None,
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "step_busy");
+        assert!(err.reason.contains('1'), "reason: {}", err.reason);
+    }
+
+    #[test]
+    fn reopen_bumps_epoch_and_resets_validation() {
+        let mut plan = new_plan();
+        apply(
+            &mut plan,
+            Op::Start {
+                id: "1".into(),
+                confirm: None,
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap();
+        plan.step_mut("1").unwrap().evidence.push(EvidenceRef {
+            session: "test".into(),
+            seq: 42,
+        });
+        apply(
+            &mut plan,
+            Op::Finish {
+                id: "1".into(),
+                summary: "model added".into(),
+                evidence: vec![42],
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap();
+        plan.step_mut("1").unwrap().validation.status = ValidationStatus::Passed;
+        assert_eq!(plan.step("1").unwrap().step_epoch, 0);
+
+        reopen_for_undo(&mut plan, "1", "reopened by undo").unwrap();
+
+        let step = plan.step("1").unwrap();
+        assert_eq!(step.status, StepStatus::Reopened);
+        assert_eq!(step.step_epoch, 1);
+        assert_eq!(step.validation.status, ValidationStatus::Pending);
+        assert!(step.validation.receipts.is_empty());
+        assert!(step.evidence.is_empty());
     }
 
     #[test]

@@ -530,6 +530,7 @@ mod tests {
             step: None,
             plan: None,
             agent: "main".into(),
+            epoch: None,
             kind: "tool_result".into(),
             fields: serde_json::json!({
                 "tool": "bash",
@@ -591,6 +592,7 @@ mod tests {
                 step: None,
                 plan: None,
                 agent: "main".into(),
+                epoch: None,
                 kind: "file_diff".into(),
                 fields: serde_json::from_value(json!({"path":"src/lib.rs","added":2,"removed":1}))
                     .unwrap(),
@@ -601,6 +603,7 @@ mod tests {
                 step: None,
                 plan: None,
                 agent: "main".into(),
+                epoch: None,
                 kind: "tool_result".into(),
                 fields: serde_json::from_value(json!({"tool":"cargo test","ok":true})).unwrap(),
             },

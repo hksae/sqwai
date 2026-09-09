@@ -143,6 +143,12 @@ pub enum AgentEvent {
     PlanAccepted {
         id: String,
     },
+    /// the session's current plan step changed (§2.2.3); `None` means idle.
+    /// The TUI persists it on the session; the loop itself tracks it in
+    /// `current_step` and never waits for this round-trip.
+    StepCurrent {
+        step: Option<String>,
+    },
     /// a dangerous command needs approval; decide via ControlMsg
     Approval {
         id: u64,
@@ -272,6 +278,10 @@ pub struct AgentInput {
     /// nesting guard for delegated subagents; the first generation may create
     /// children, but children cannot recursively create more children.
     pub subagent_depth: u8,
+    /// Immutable step context inherited from the spawning session (§2.2.4).
+    /// `None` for main agents. The child stamps it on its journal records
+    /// and refuses mutations once the step moves to a newer epoch.
+    pub parent_step: Option<plan::StepContext>,
 }
 
 const RETRY_WINDOW: Duration = Duration::from_secs(3600);
@@ -471,6 +481,25 @@ async fn run_subagent(
     }
     let task = tasks.into_iter().next().unwrap();
     let id = next_subagent_id();
+    // NOTE (§2.2.4): children always complete inside this tool call — the
+    // event loop below is awaited before the outcome returns. There is no
+    // fire-and-forget spawn, so `plan finish` can never race still-running
+    // children of the same step; no extra gate is needed for that.
+    // Inherit the spawning step, if any (§2.2.4): the child stamps this
+    // context on its records and stops mutating once the epoch moves on.
+    let parent_step = plan::open_active_for_session(root, None)
+        .ok()
+        .flatten()
+        .and_then(|plan| {
+            plan.steps
+                .iter()
+                .find(|step| step.status == plan::StepStatus::InProgress)
+                .map(|step| plan::StepContext {
+                    plan_id: plan.id.clone(),
+                    step_id: step.id.clone(),
+                    step_epoch: step.step_epoch,
+                })
+        });
     let _ = parent_tx
         .send(AgentEvent::SubagentStart {
             id,
@@ -503,6 +532,7 @@ async fn run_subagent(
         plan_limits: crate::config::PlanConfig::default(),
         shadow_store,
         subagent_depth: 1,
+        parent_step,
     });
     let mut child = child;
     let mut output = String::new();
@@ -648,6 +678,7 @@ async fn run_agent(
         lsp,
         shadow_store,
         subagent_depth,
+        parent_step,
     } = input;
 
     for pat in &blocked_patterns {
@@ -819,17 +850,39 @@ async fn run_agent(
         .with_shadow_store(shadow_store)
         .with_plan_limits(plan_limits, context_limit)
         .with_cancel(cancel_tool);
+    // Subagents inherit their spawn context (§2.2.4): it stamps their
+    // journal records and gates their mutations against reopen races.
+    ctx.subagent_step = parent_step.clone();
+    // The session's current step (§2.2.3). Adopt whatever the plan holds in
+    // progress — after a crash that is the interrupted step (§3.4) — and
+    // keep it in lockstep with plan outcomes below. `ctx.current_step` is
+    // the single live copy; the TUI persists it via `StepCurrent` events.
+    ctx.current_step = plan::open_active_for_session(&root, Some(&session_id))
+        .ok()
+        .flatten()
+        .and_then(|plan| {
+            plan.steps
+                .iter()
+                .find(|step| step.status == plan::StepStatus::InProgress)
+                .map(|step| step.id.clone())
+        });
+    if enable_tools && !read_only {
+        // Heal a crash between a journal intent and its plan store (§2.1.4,
+        // §3.7) before anything — including this session's writer — reads the
+        // plan or the tail counter. No-op on a clean tree.
+        let _ = plan::replay(&root);
+    }
     let mut journal = if enable_tools && !read_only {
         crate::agent::journal::Journal::open(&root, &session_id).ok()
     } else {
         None
     };
-    if enable_tools && !read_only {
-        // Heal a crash between a journal intent and its plan store (§2.1.4,
-        // §3.7) before anything reads the plan. No-op on a clean tree.
-        let _ = plan::replay(&root);
-    }
     if let Some(writer) = journal.as_mut() {
+        if let Some(inherited) = parent_step.as_ref() {
+            // Stamp the inherited epoch on every record this writer produces
+            // so post-reopen validation can tell stale work apart (§2.2.4).
+            writer.set_epoch(Some(inherited.step_epoch));
+        }
         let plan_id = plan::open_active_for_session(&root, Some(&session_id))
             .ok()
             .flatten()
@@ -1159,14 +1212,18 @@ async fn run_agent(
                     .ok()
                     .flatten();
                 let plan_id = active.as_ref().map(|p| p.id.clone());
+                // Explicit session step first (§2.2.3); the plan scan is only
+                // a fallback for records predating current-step tracking.
                 let step = if call.name == "plan" {
                     None
                 } else {
-                    active.as_ref().and_then(|p| {
-                        p.steps
-                            .iter()
-                            .find(|s| s.status == plan::StepStatus::InProgress)
-                            .map(|s| s.id.clone())
+                    ctx.current_step.clone().or_else(|| {
+                        active.as_ref().and_then(|p| {
+                            p.steps
+                                .iter()
+                                .find(|s| s.status == plan::StepStatus::InProgress)
+                                .map(|s| s.id.clone())
+                        })
                     })
                 };
                 writer.set_attribution(step, plan_id, "main");
@@ -1595,6 +1652,15 @@ async fn run_agent(
                         && let Some(id) = plan_step_id
                     {
                         writer.set_attribution(Some(id.to_string()), plan_id, "main");
+                        // The session now holds this step (§2.2.3).
+                        ctx.current_step = Some(id.to_string());
+                        if subagent_depth == 0 {
+                            let _ = tx
+                                .send(AgentEvent::StepCurrent {
+                                    step: Some(id.to_string()),
+                                })
+                                .await;
+                        }
                         if let Ok(Some(sha)) = checkpoints::snapshot_boundary(
                             &root,
                             shadow_store,
@@ -1634,6 +1700,11 @@ async fn run_agent(
                             );
                         }
                         writer.set_attribution(None, plan_id, "main");
+                        // The session is idle again (§2.2.3).
+                        ctx.current_step = None;
+                        if subagent_depth == 0 {
+                            let _ = tx.send(AgentEvent::StepCurrent { step: None }).await;
+                        }
                     }
                     if outcome.ok && matches!(op, "finish" | "block" | "cancel") {
                         let _ = crate::agent::diary::write_entry(

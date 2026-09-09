@@ -24,6 +24,9 @@ fn reopened_step_ids(
     session_id: &str,
     files: &[String],
 ) -> Vec<String> {
+    // Conservative rule (§3.6): ANY reverted part of a done step's result
+    // reopens it. Reverting a subset while the rest stays changed cannot
+    // leave the step marked completed.
     let file_set: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
     active
         .steps
@@ -43,7 +46,7 @@ fn reopened_step_ids(
                 })
                 .filter_map(|record| record.fields.get("path").and_then(|value| value.as_str()))
                 .collect();
-            !evidence_paths.is_empty() && evidence_paths.iter().all(|path| file_set.contains(path))
+            !evidence_paths.is_empty() && evidence_paths.iter().any(|path| file_set.contains(path))
         })
         .map(|step| step.id.clone())
         .collect()
@@ -1484,6 +1487,7 @@ impl App {
             plan_limits: self.cfg.plan,
             shadow_store: self.cfg.undo.shadow,
             subagent_depth: 0,
+            parent_step: None,
         };
         self.context_bootstrap_pending = false;
         self.agent = Some(spawn_agent(input));
@@ -1558,6 +1562,7 @@ impl App {
             plan_limits: self.cfg.plan,
             shadow_store: self.cfg.undo.shadow,
             subagent_depth: 0,
+            parent_step: None,
         };
         self.agent = Some(spawn_agent(input));
         self.streaming = true;
@@ -2085,7 +2090,7 @@ impl App {
             }
             Some("complete") => match self.session_plan() {
                 Some(mut active) => {
-                    match plan::apply(&mut active, plan::Op::Complete, &plan::Limits::default()) {
+                    match plan::apply(&mut active, plan::Op::Complete, &plan::Limits::default(), None) {
                         Ok(plan::Applied::Completed) => {
                             let sid = self.session.id.to_string();
                             match plan::commit(&root, &sid, &mut active, "complete", "user", true, serde_json::json!({})) {
@@ -2656,6 +2661,12 @@ impl App {
                     self.session.plan_id = Some(id);
                     self.refresh_plan_label();
                     self.dirty = true;
+                }
+                AgentEvent::StepCurrent { step } => {
+                    // the loop moved the session's current step (§2.2.3):
+                    // persist the mirror so resume and the next run agree
+                    self.session.current_step_id = step;
+                    self.session.save().ok();
                 }
                 AgentEvent::Approval {
                     id,

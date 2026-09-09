@@ -66,6 +66,14 @@ pub struct ToolCtx {
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Where the shadow repository lives, from [undo].shadow configuration.
     pub shadow_store: crate::config::ShadowStore,
+    /// Step this session currently holds (§2.2.3). Set on `plan start`,
+    /// cleared on `finish`/`block`/`cancel`; the loop mirrors it into the
+    /// journal attribution at dispatch. `None` means idle.
+    pub current_step: Option<String>,
+    /// Immutable spawn context for subagent sessions (§2.2.4). `None` for
+    /// the main agent. Mutating tools refuse to run when the inherited
+    /// epoch no longer matches the plan.
+    pub subagent_step: Option<plan::StepContext>,
 }
 
 impl ToolCtx {
@@ -89,6 +97,8 @@ impl ToolCtx {
             context_limit: 0,
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             shadow_store: crate::config::ShadowStore::Local,
+            current_step: None,
+            subagent_step: None,
         }
     }
 
@@ -1061,6 +1071,19 @@ pub fn tool_specs(plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
 
 const READ_MAX_BYTES: usize = 400_000;
 
+/// True when the step a subagent was spawned for still exists in the named
+/// plan at exactly the inherited epoch (§2.2.4). Anything else — reopened,
+/// retired plan, deleted step — means the inherited context is stale.
+fn step_epoch_current(root: &Path, inherited: &plan::StepContext) -> bool {
+    let Some(plan) = plan::read_plan_file(root, &inherited.plan_id) else {
+        return false;
+    };
+    plan.steps
+        .iter()
+        .find(|step| step.id == inherited.step_id)
+        .is_some_and(|step| step.step_epoch == inherited.step_epoch)
+}
+
 /// dispatch one tool call
 pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
     if ctx.read_only
@@ -1079,6 +1102,25 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
     {
         return Outcome::err(
             "project is read-only because another sqwai instance owns the lock; use --force to enable writes",
+        );
+    }
+    // A subagent mutating after its step was reopened (or its plan retired)
+    // would attach stale work to a fresh epoch (§2.2.4). Refuse instead.
+    if let Some(inherited) = ctx.subagent_step.clone()
+        && matches!(name, "write" | "edit" | "multi_edit" | "patch" | "bash")
+        && !step_epoch_current(&ctx.root, &inherited)
+    {
+        return Outcome::err(
+            serde_json::json!({
+                "ok": false,
+                "code": "stale_epoch",
+                "reason": format!(
+                    "step {} was reopened or retired after this task was spawned (inherited epoch {})",
+                    inherited.step_id, inherited.step_epoch,
+                ),
+                "hint": "stop working on this step; report what was done before the reopen",
+            })
+            .to_string(),
         );
     }
     match name {
@@ -1656,7 +1698,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         id: Some(target_id.clone()),
                         reason,
                     };
-                    match plan::apply(&mut active, op, &limits) {
+                    match plan::apply(&mut active, op, &limits, ctx.current_step.as_deref()) {
                         Ok(applied) => {
                             if let Err(e) = plan::store(&ctx.root, &active) {
                                 return Outcome::err(format!("plan write failed: {e:#}"));
@@ -1703,7 +1745,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 .unwrap_or("unknown")
                 .to_string();
             let readonly_show = op_name == "show";
-            match plan::apply(&mut active, other, &limits) {
+            match plan::apply(&mut active, other, &limits, ctx.current_step.as_deref()) {
                 Ok(applied) => {
                     if readonly_show {
                         if let Err(e) = plan::store(&ctx.root, &active) {
@@ -1847,7 +1889,7 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
             Vec::new()
         }
         plan::AcceptanceKind::Text(_) => {
-            let Some((step_id, evidence)) = unspent_verify_evidence(&active, index) else {
+            let Some((step_id, evidence)) = unspent_verify_evidence(&ctx.root, &active, index) else {
                 return rejection(plan::Rejection {
                     code: "no_evidence",
                     reason: format!("acceptance {index} has no host evidence of its own"),
@@ -1966,7 +2008,10 @@ fn with_misattribution_warning(
 /// A verify step whose evidence no acceptance item has spent yet, with that
 /// evidence. `None` when every verify step's records are already accounted
 /// for — which is the case this whole function exists to catch.
+/// Records from a stale step epoch (subagent work predating a reopen) are
+/// excluded: they belong to the undone attempt, not the current one (§2.2.4).
 fn unspent_verify_evidence(
+    root: &Path,
     active: &plan::Plan,
     index: usize,
 ) -> Option<(String, Vec<plan::EvidenceRef>)> {
@@ -1990,10 +2035,38 @@ fn unspent_verify_evidence(
                         .iter()
                         .any(|used| used.session == reference.session && used.seq == reference.seq)
                 })
+                .filter(|reference| {
+                    evidence_epoch_current(root, &active.id, step, reference)
+                })
                 .cloned()
                 .collect();
             (!fresh.is_empty()).then(|| (step.id.clone(), fresh))
         })
+}
+
+/// True unless the referenced record positively belongs to an older step
+/// epoch. Unresolvable references fail open here — resolution problems
+/// surface with their own error at validation.
+fn evidence_epoch_current(
+    root: &Path,
+    plan_id: &str,
+    step: &plan::Step,
+    reference: &plan::EvidenceRef,
+) -> bool {
+    let record = match crate::agent::journal::Journal::evidence(
+        root,
+        plan_id,
+        Some(&step.id),
+        reference,
+        None,
+    ) {
+        Ok(record) => record,
+        Err(_) => return true,
+    };
+    let Some(record) = record else {
+        return true;
+    };
+    crate::agent::journal::epoch_matches(&record, step.step_epoch)
 }
 
 /// The gate on `plan finish`: the step must have host-recorded evidence of the
@@ -2117,6 +2190,20 @@ fn validate_attached_records(
             .map_err(|e| format!("evidence_unreadable: {e:#}"))?
     };
     let mut valid = 0usize;
+    let mut stale_epoch = 0usize;
+    // Epoch of the step being validated. Acceptance-level checks have no
+    // step; their refs were epoch-filtered when selected (unspent evidence).
+    let step_epoch = if step_id == "acceptance" {
+        None
+    } else {
+        plan::read_plan_file(root, plan_id)
+            .and_then(|plan| {
+                plan.steps
+                    .iter()
+                    .find(|step| step.id == step_id)
+                    .map(|step| step.step_epoch)
+            })
+    };
     for reference in evidence {
         let record = crate::agent::journal::Journal::evidence(
             root,
@@ -2136,6 +2223,14 @@ fn validate_attached_records(
                 reference.seq
             )
         })?;
+        // Records from a stale step epoch (subagent work predating a reopen)
+        // belong to the undone attempt, not the current one (§2.2.4).
+        if let Some(epoch) = step_epoch
+            && !crate::agent::journal::epoch_matches(&record, epoch)
+        {
+            stale_epoch += 1;
+            continue;
+        }
         let allowed = match required_kind {
             plan::StepKind::Research => record.kind == "tool_result",
             plan::StepKind::Change => record.kind == "file_diff",
@@ -2155,6 +2250,11 @@ fn validate_attached_records(
         }
     }
     if valid == 0 {
+        if stale_epoch > 0 {
+            return Err(format!(
+                "stale_epoch: all {stale_epoch} evidence record(s) predate the last reopen of step {step_id}; do the work again under the current epoch"
+            ));
+        }
         return Err(format!(
             "wrong_evidence: evidence does not satisfy {} step requirements",
             required_kind.as_str()
@@ -2889,6 +2989,117 @@ mod tests {
             &json!({"op": "finish", "id": "1", "summary": "no errors reported"}),
         );
         assert!(finished.ok, "{}", finished.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A subagent mutating after its step was reopened would attach stale
+    /// work to a fresh epoch (§2.2.4). The dispatcher refuses the mutation
+    /// instead; read-only tools keep working, and a fresh spawn proceeds.
+    #[test]
+    fn subagent_mutation_refused_after_step_reopen() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({"op": "create", "goal": "guarded work", "acceptance": [],
+                    "steps": [{"title": "change things"}]}),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        ctx.current_step = Some("1".into());
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+
+        let mut child = ToolCtx::new(&dir).in_session("sub-1");
+        child.subagent_step = Some(plan::StepContext {
+            plan_id: plan_id.clone(),
+            step_id: "1".into(),
+            step_epoch: 0,
+        });
+        let wrote = execute(
+            &mut child,
+            "write",
+            &json!({"file_path": "src/child.rs", "content": "fresh work\n"}),
+        );
+        assert!(wrote.ok, "{}", wrote.output);
+
+        // The step is done and reopened: epoch moves to 1.
+        let mut active = plan::open_active(&dir).unwrap().unwrap();
+        active.steps[0].status = plan::StepStatus::Done;
+        plan::store(&dir, &active).unwrap();
+        plan::reopen_for_undo(&mut active, "1", "test reopen").unwrap();
+        plan::store(&dir, &active).unwrap();
+
+        let refused = execute(
+            &mut child,
+            "write",
+            &json!({"file_path": "src/child2.rs", "content": "stale work\n"}),
+        );
+        assert!(!refused.ok, "stale mutation must be refused");
+        assert!(refused.output.contains("stale_epoch"), "{}", refused.output);
+
+        // Read-only observation is not a mutation: still allowed.
+        let read = execute(&mut child, "read", &json!({"file_path": "src/main.rs"}));
+        assert!(read.ok, "{}", read.output);
+
+        // A fresh spawn inheriting epoch 1 proceeds normally.
+        child.subagent_step = Some(plan::StepContext {
+            plan_id,
+            step_id: "1".into(),
+            step_epoch: 1,
+        });
+        let wrote_again = execute(
+            &mut child,
+            "write",
+            &json!({"file_path": "src/child3.rs", "content": "fresh work\n"}),
+        );
+        assert!(wrote_again.ok, "{}", wrote_again.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Evidence stamped with a pre-reopen epoch belongs to the undone
+    /// attempt and must not validate the reworked step (§2.2.4). Unstamped
+    /// records (main agent, legacy) always count.
+    #[test]
+    fn stale_epoch_evidence_rejected_at_validation() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({"op": "create", "goal": "epoch filter", "acceptance": [],
+                    "steps": [{"title": "change things"}]}),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+
+        let mut journal = crate::agent::journal::Journal::open(&dir, "epoch-test").unwrap();
+        journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
+        journal.set_epoch(Some(0));
+        let stale_seq = journal
+            .append_evidence("file_diff", json!({"path": "src/main.rs"}))
+            .unwrap();
+        journal.set_epoch(None);
+        let fresh_seq = journal
+            .append_evidence("file_diff", json!({"path": "src/main.rs"}))
+            .unwrap();
+
+        // The step moved to epoch 1 (reopen semantics without the status dance).
+        let mut active = plan::open_active(&dir).unwrap().unwrap();
+        active.steps[0].step_epoch = 1;
+        plan::store(&dir, &active).unwrap();
+
+        let stale = vec![plan::EvidenceRef {
+            session: "epoch-test".into(),
+            seq: stale_seq,
+        }];
+        let err =
+            validate_attached_records(&dir, &plan_id, "1", plan::StepKind::Change, &stale)
+                .unwrap_err();
+        assert!(err.contains("stale_epoch"), "{err}");
+
+        let fresh = vec![plan::EvidenceRef {
+            session: "epoch-test".into(),
+            seq: fresh_seq,
+        }];
+        validate_attached_records(&dir, &plan_id, "1", plan::StepKind::Change, &fresh)
+            .expect("unstamped evidence counts");
         fs::remove_dir_all(&dir).ok();
     }
 

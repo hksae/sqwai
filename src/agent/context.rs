@@ -661,6 +661,7 @@ mod tests {
                 confirm: None,
             },
             &crate::plan::Limits::default(),
+            None,
         )
         .unwrap();
         crate::plan::store(&root, &plan).unwrap();
@@ -710,6 +711,7 @@ mod tests {
                 confirm: None,
             },
             &crate::plan::Limits::default(),
+            None,
         )
         .unwrap();
         crate::plan::store(&root, &plan).unwrap();

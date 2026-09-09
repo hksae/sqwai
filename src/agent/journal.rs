@@ -15,9 +15,22 @@ pub struct Record {
     pub step: Option<String>,
     pub plan: Option<String>,
     pub agent: String,
+    /// Step epoch the record was written under (§2.2.4). `None` for
+    /// pre-epoch records and the main agent, which always count as current.
+    /// A subagent stamps its inherited epoch; after the step is reopened
+    /// (epoch bumped) such records stop counting as evidence.
+    #[serde(default)]
+    pub epoch: Option<u64>,
     pub kind: String,
     #[serde(flatten)]
     pub fields: serde_json::Map<String, Value>,
+}
+
+/// True when a resolved evidence record still belongs to the step's current
+/// epoch: unstamped records predate epochs (or come from the main agent)
+/// and always count.
+pub fn epoch_matches(record: &Record, step_epoch: u64) -> bool {
+    record.epoch.is_none_or(|epoch| epoch == step_epoch)
 }
 
 pub struct Journal {
@@ -27,6 +40,7 @@ pub struct Journal {
     step: Option<String>,
     plan: Option<String>,
     agent: String,
+    epoch: Option<u64>,
 }
 
 /// What a per-step revert can and cannot put back (§2.5).
@@ -94,6 +108,7 @@ impl Journal {
             step: None,
             plan: None,
             agent: "main".to_string(),
+            epoch: None,
         };
         if repaired > 0 {
             journal.append(
@@ -113,6 +128,12 @@ impl Journal {
         self.step = step;
         self.plan = plan;
         self.agent = agent.to_string();
+    }
+
+    /// Stamp the inherited step epoch on every record this writer produces
+    /// (§2.2.4). Used by subagent sessions; the main session leaves it `None`.
+    pub fn set_epoch(&mut self, epoch: Option<u64>) {
+        self.epoch = epoch;
     }
 
     #[allow(dead_code)]
@@ -795,6 +816,7 @@ impl Journal {
             step: self.step.clone(),
             plan: self.plan.clone(),
             agent: self.agent.clone(),
+            epoch: self.epoch,
             kind: kind.to_string(),
             fields,
         };
@@ -1443,6 +1465,7 @@ mod tests {
                 confirm: None,
             },
             &crate::plan::Limits::default(),
+            None,
         )
         .unwrap();
         crate::plan::store(&root, &plan).unwrap();
@@ -1620,6 +1643,24 @@ mod tests {
         assert_eq!(warns.len(), 1);
         assert!(warns[0].contains("predates step 1 start"));
 
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn writer_stamps_inherited_epoch_and_defaults_to_none() {
+        let root = root();
+        let mut journal = Journal::open(&root, "epoch-stamp").unwrap();
+        let plain = journal.append("note", json!({"text": "main work"})).unwrap();
+        journal.set_epoch(Some(3));
+        let stamped = journal.append("note", json!({"text": "child work"})).unwrap();
+
+        let records = Journal::records_for(&root, "epoch-stamp").unwrap();
+        let by_seq = |seq| records.iter().find(|r| r.seq == seq).unwrap().epoch;
+        assert_eq!(by_seq(plain), None);
+        assert_eq!(by_seq(stamped), Some(3));
+        assert!(epoch_matches(&records[1], 3));
+        assert!(!epoch_matches(&records[1], 4));
+        assert!(epoch_matches(&records[0], 99));
         fs::remove_dir_all(root).ok();
     }
 }

@@ -2572,6 +2572,7 @@ mod tests {
             step: Some(step.into()),
             plan: Some(active.id.clone()),
             agent: "main".into(),
+            epoch: None,
             kind: "file_diff".into(),
             fields: serde_json::from_value(serde_json::json!({"path": path})).unwrap(),
         };
@@ -2583,6 +2584,53 @@ mod tests {
         let reopened = reopened_step_ids(&active, &records, "session", &["src/changed.rs".into()]);
 
         assert_eq!(reopened, vec!["1"]);
+    }
+
+    #[test]
+    fn undo_reopens_step_on_any_partial_revert() {
+        let mut active = crate::plan::create(
+            "partial revert".into(),
+            Vec::new(),
+            Vec::new(),
+            vec![crate::plan::NewStep {
+                title: "two files".into(),
+                kind: Some(crate::plan::StepKind::Change),
+                refs: Vec::new(),
+            }],
+            1000,
+            &crate::plan::Limits::default(),
+        )
+        .unwrap();
+        active.steps[0].status = crate::plan::StepStatus::Done;
+        active.steps[0].evidence = vec![
+            crate::plan::EvidenceRef {
+                session: "session".into(),
+                seq: 10,
+            },
+            crate::plan::EvidenceRef {
+                session: "session".into(),
+                seq: 11,
+            },
+        ];
+        let record = |seq: u64, path: &str| crate::agent::journal::Record {
+            seq,
+            ts: "now".into(),
+            step: Some("1".into()),
+            plan: Some(active.id.clone()),
+            agent: "main".into(),
+            epoch: None,
+            kind: "file_diff".into(),
+            fields: serde_json::from_value(serde_json::json!({"path": path})).unwrap(),
+        };
+        let records = vec![record(10, "src/a.rs"), record(11, "src/b.rs")];
+
+        // Only one of the two files reverted: conservative rule (§3.6)
+        // still reopens — a partial revert cannot leave "done" standing.
+        let reopened = reopened_step_ids(&active, &records, "session", &["src/a.rs".into()]);
+        assert_eq!(reopened, vec!["1"]);
+        // Nothing reverted: stays done.
+        let reopened = reopened_step_ids(&active, &records, "session", &["src/z.rs".into()]);
+        assert!(reopened.is_empty());
     }
 
     #[test]
