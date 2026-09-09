@@ -41,21 +41,14 @@ impl ProjectLock {
                 let other_meta = fs::metadata(&other_path).ok();
                 let other_created =
                     other_meta.and_then(|m| m.created().or_else(|_| m.modified()).ok());
-                match (my_created, other_created) {
-                    (Some(my_t), Some(other_t)) if other_t < my_t => {
-                        read_only = true;
-                        break;
-                    }
-                    (Some(my_t), Some(other_t)) if other_t == my_t => {
-                        if other_path.file_name() < path.file_name() {
-                            read_only = true;
-                            break;
-                        }
-                    }
-                    _ => {
-                        read_only = true;
-                        break;
-                    }
+                if is_lock_superseded(
+                    my_created,
+                    other_created,
+                    path.file_name().unwrap_or_default(),
+                    other_path.file_name().unwrap_or_default(),
+                ) {
+                    read_only = true;
+                    break;
                 }
             }
         }
@@ -69,6 +62,20 @@ impl ProjectLock {
         self.read_only.then(|| {
             "another sqwai instance owns this project; plan/journal/memory/graph writes are read-only (use --force to override)".into()
         })
+    }
+}
+
+pub(crate) fn is_lock_superseded(
+    my_t: Option<std::time::SystemTime>,
+    other_t: Option<std::time::SystemTime>,
+    my_name: &std::ffi::OsStr,
+    other_name: &std::ffi::OsStr,
+) -> bool {
+    match (my_t, other_t) {
+        (Some(my), Some(other)) if other < my => true,
+        (Some(my), Some(other)) if other == my => other_name < my_name,
+        (Some(my), Some(other)) if other > my => false,
+        _ => true,
     }
 }
 
@@ -194,5 +201,32 @@ mod tests {
         let lock = ProjectLock::acquire(root.path(), false).unwrap();
         assert!(!lock.read_only);
         assert!(!stale_path.exists());
+    }
+
+    #[test]
+    fn newer_lock_does_not_supersede_older_lock() {
+        use std::ffi::OsStr;
+        use std::time::{Duration, SystemTime};
+
+        let now = SystemTime::now();
+        let earlier = now - Duration::from_secs(10);
+        let later = now + Duration::from_secs(10);
+
+        let name_a = OsStr::new("a.lock");
+        let name_b = OsStr::new("b.lock");
+
+        // When another lock is newer than ours (other_t > my_t), our lock is NOT superseded.
+        assert!(!is_lock_superseded(Some(now), Some(later), name_b, name_a));
+
+        // When another lock is older than ours (other_t < my_t), our lock IS superseded.
+        assert!(is_lock_superseded(Some(now), Some(earlier), name_b, name_a));
+
+        // When timestamps are equal, tiebreak by filename.
+        assert!(is_lock_superseded(Some(now), Some(now), name_b, name_a)); // other "a" < my "b" -> true
+        assert!(!is_lock_superseded(Some(now), Some(now), name_a, name_b)); // other "b" > my "a" -> false
+
+        // Missing timestamps fallback to safe default (superseded)
+        assert!(is_lock_superseded(None, Some(now), name_a, name_b));
+        assert!(is_lock_superseded(Some(now), None, name_a, name_b));
     }
 }
