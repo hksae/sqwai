@@ -273,11 +273,22 @@ fn looks_like_rm_rf(lower: &str) -> bool {
 }
 
 fn powershell_recursive_delete(lower: &str) -> bool {
-    let aliases = ["remove-item", "ri", "rm", "del", "erase"];
-    let has_delete = lower
+    let aliases = ["remove-item", "ri", "rm", "del", "erase", "rd"];
+    let tokens: Vec<&str> = lower
         .split(|c: char| c.is_whitespace() || c == ';' || c == '|')
+        .map(|token| token.trim())
+        .filter(|token| !token.is_empty())
+        .collect();
+    let has_delete = tokens
+        .iter()
         .any(|token| aliases.contains(&token.trim_start_matches('-')));
-    has_delete && lower.contains("-recurse") && lower.contains("-force")
+    let has_recurse = tokens.iter().any(|token| {
+        *token == "-r"
+            || *token == "-recurse"
+            || token.starts_with("-recurse:")
+            || token.starts_with("-r:")
+    }) || lower.contains("-recurse");
+    has_delete && has_recurse
 }
 
 fn powershell_critical_write(lower: &str) -> bool {
@@ -583,9 +594,13 @@ mod tests {
     }
 
     #[test]
-    fn powershell_aliases_require_recursive_and_force_flags() {
+    fn powershell_aliases_require_recursive_flag() {
         assert!(matches!(
             classify_for(ShellKind::PowerShell, "rm -Recurse -Force C:\\tmp"),
+            Verdict::NeedsApproval(_)
+        ));
+        assert!(matches!(
+            classify_for(ShellKind::PowerShell, "rm -Recurse C:\\tmp"),
             Verdict::NeedsApproval(_)
         ));
         assert_eq!(
@@ -833,6 +848,39 @@ mod tests {
                     "expected safe for shell {shell:?}: {cmd}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn powershell_recursive_delete_is_flagged_without_force() {
+        for cmd in [
+            "remove-item -recurse target",
+            "Remove-Item -Recurse -Force target",
+            "ri -r target",
+            "del -recurse target",
+            "rm -r build",
+            "erase -recurse test",
+            "rd -recurse folder",
+        ] {
+            assert!(
+                matches!(
+                    classify_for(ShellKind::PowerShell, cmd),
+                    Verdict::NeedsApproval(_)
+                ),
+                "expected NeedsApproval for PowerShell cmd: {cmd}"
+            );
+        }
+
+        for cmd in [
+            "remove-item target.txt",
+            "del file.log",
+            "ri notes.md",
+        ] {
+            assert_eq!(
+                classify_for(ShellKind::PowerShell, cmd),
+                Verdict::Safe,
+                "expected Safe for non-recursive cmd: {cmd}"
+            );
         }
     }
 }
