@@ -19,7 +19,7 @@ Policy (agreed):
   * a family missing from the DB is skipped with a log line (no stale data);
   * capped per provider to keep the menu usable.
 - Legacy/retired IDs disappear on their own: they either leave the DB, get a
-  deprecation_date, or fall out of the top-N ranking.
+  deprecation_date, or are superseded by newer revisions inside their family.
 - Unknown direct chat models outside the cap are reported as CANDIDATES.
 - Fetch failure is fatal (exit 1) so the Action goes red instead of silently
   writing stale fallbacks with a fresh date.
@@ -47,6 +47,10 @@ EXCLUDE_SUBSTRINGS = (
 
 DATE_SUFFIX = re.compile(r"-20\d{6}$|-20\d\d-\d\d-\d\d$")
 VENDOR_DOT = re.compile(r"^[a-z0-9_]+\.")
+
+# Confirmed-phantom API IDs: present in the LiteLLM DB but not real models
+# (e.g. bare gpt-5.6 — only luna/terra/sol/cyber exist). Logged when dropped.
+DROP_IDS = {"gpt-5.6"}
 
 # Extra substrings that disqualify a model for coding/chat use in sqwai.
 # (generic audio/image/... live in EXCLUDE_SUBSTRINGS; these are search APIs.)
@@ -108,15 +112,15 @@ PROVIDERS_CONFIG = [
         "continuation": True,
         "slugs": ("anthropic",),
         "prefixes": (),
-        # model families in priority order; newest revision per family adds itself
+        # model lines in priority order: (family prefix, revisions to keep).
+        # New revisions inside a line (e.g. opus-4-9) add themselves; only a
+        # brand-new line name needs a one-line addition (flagged in the log).
         "families": [
-            "claude-opus-4",
-            "claude-opus-5",
-            "claude-sonnet-4",
-            "claude-sonnet-5",
-            "claude-haiku-4",
-            "claude-fable",
-            "claude-mythos",
+            ("claude-opus", 2),
+            ("claude-sonnet", 2),
+            ("claude-haiku", 1),
+            ("claude-fable", 1),
+            ("claude-mythos", 1),
         ],
         "max_models": 8,
     },
@@ -130,16 +134,16 @@ PROVIDERS_CONFIG = [
         "slugs": ("openai",),
         "prefixes": (),
         "families": [
-            "gpt-5.6",
-            "gpt-5.5",
-            "gpt-5.4",
-            "gpt-5.4-mini",
-            "gpt-5.4-nano",
-            "gpt-5.3-codex",
-            "gpt-6",
-            "o4-mini",
+            ("gpt-5.4-mini", 1),
+            ("gpt-5.4-nano", 1),
+            ("gpt-5.3-codex", 1),
+            ("gpt-5", 5),
+            ("gpt-6", 1),
+            ("o4", 1),
+            ("o3", 1),
+            ("o1", 1),
         ],
-        "max_models": 8,
+        "max_models": 10,
     },
     {
         "name": "deepseek",
@@ -151,10 +155,10 @@ PROVIDERS_CONFIG = [
         "slugs": ("deepseek",),
         "prefixes": ("deepseek",),
         "families": [
-            "deepseek-chat",
-            "deepseek-reasoner",
-            "deepseek-v4-pro",
-            "deepseek-v4-flash",
+            ("deepseek-chat", 1),
+            ("deepseek-reasoner", 1),
+            ("deepseek-v4", 2),
+            ("deepseek-v3", 1),
         ],
         "max_models": 5,
     },
@@ -167,14 +171,15 @@ PROVIDERS_CONFIG = [
         "continuation": True,
         "slugs": ("xai",),
         "prefixes": ("xai",),
+        # pinned stable line: xAI numbers don't sort by recency
+        # (4.20-0309 is a dated track, the flagship is 4.6)
         "families": [
-            "grok-4.6",
-            "grok-4.5",
-            "grok-4.3",
-            "grok-4",
-            "grok-build",
+            ("grok-build", 1),
+            ("grok-4.6", 1),
+            ("grok-4.5", 1),
+            ("grok-4.3", 1),
         ],
-        "max_models": 6,
+        "max_models": 5,
     },
     {
         "name": "kimi",
@@ -186,11 +191,10 @@ PROVIDERS_CONFIG = [
         "slugs": ("moonshot",),
         "prefixes": ("moonshot",),
         "families": [
-            "kimi-k3",
-            "kimi-k2.7",
-            "kimi-k2.6",
+            ("kimi-k3", 1),
+            ("kimi-k2", 2),
         ],
-        "max_models": 5,
+        "max_models": 4,
     },
 ]
 
@@ -239,6 +243,9 @@ def discover(data, slugs, prefixes, today):
             cid = key
         if not usable_entry(info, today):
             continue
+        if cid in DROP_IDS:
+            print(f"  ! {cid}: known-phantom id, dropped")
+            continue
         low = cid.lower()
         if any(x in low for x in EXCLUDE_SUBSTRINGS + SEARCH_SUBSTRINGS):
             continue
@@ -275,21 +282,23 @@ def pick_latest(members):
 
 
 def pick_families(found, families, max_models):
-    """Latest model per family, families in priority order, capped."""
+    """Newest revisions per family, families in priority order, capped."""
     picked, seen = [], set()
-    for fam in families:
+    for fam, count in families:
         members = [kv for kv in family_members(found, fam) if kv[0] not in seen]
         if not members:
             print(f"  ! family {fam}: nothing in DB, skipped")
             continue
         # dated snapshots collapse into their alias before picking newest
         members = drop_snapshots(dict(members))
-        cid, info = pick_latest(members)
-        seen.add(cid)
-        picked.append((cid, info))
+        members.sort(key=lambda kv: (len(kv[0]), kv[0]))
+        members.sort(key=lambda kv: version_key(kv[0]), reverse=True)
+        for cid, info in members[:count]:
+            seen.add(cid)
+            picked.append((cid, info))
         if len(picked) >= max_models:
             break
-    return picked
+    return picked[:max_models]
 
 
 def guess_effort(cid):
