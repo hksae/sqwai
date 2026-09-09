@@ -1570,9 +1570,25 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     Ok(mut created) => {
                         created.sessions = vec![ctx.session_id.clone()];
                         let id = created.id.clone();
-                        let steps = created.steps.len();
-                        match plan::store(&ctx.root, &created) {
-                            Ok(()) => Outcome::ok(format!("plan {id} created with {steps} steps")),
+                        let step_count = created.steps.len();
+                        // Journal-first (§2.1.4): the intent carries everything
+                        // replay needs to rebuild this plan.
+                        let args = serde_json::json!({
+                            "goal": created.goal.text,
+                            "constraints": created.constraints,
+                            "acceptance": created.acceptance.iter().map(|a| a.text.clone()).collect::<Vec<_>>(),
+                            "steps": created.steps.iter().map(|s| serde_json::json!({
+                                "title": s.title,
+                                "kind": s.kind.as_str(),
+                                "refs": s.refs,
+                            })).collect::<Vec<_>>(),
+                            "budget_limit": created.budget.limit,
+                            "result_id": created.id,
+                            "result_created": created.created,
+                            "result_sessions": created.sessions,
+                        });
+                        match plan::commit(&ctx.root, &ctx.session_id, &mut created, "create", "model", true, args) {
+                            Ok(_) => Outcome::ok(format!("plan {id} created with {step_count} steps")),
                             Err(e) => Outcome::err(format!("plan write failed: {e:#}")),
                         }
                     }
@@ -1604,12 +1620,14 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         ));
                     }
                     let mut target_plan = active_plans.into_iter().next().unwrap();
+                    let pid = target_plan.id.clone();
                     target_plan.status = plan::PlanStatus::Abandoned;
                     target_plan.revision += 1;
-                    if let Err(e) = plan::store(&ctx.root, &target_plan) {
-                        return Outcome::err(format!("plan write failed: {e:#}"));
+                    let args = serde_json::json!({"id": pid});
+                    match plan::commit(&ctx.root, &ctx.session_id, &mut target_plan, "cancel", "model", true, args) {
+                        Ok(_) => Outcome::ok(format!("plan {pid} cancelled")),
+                        Err(e) => Outcome::err(format!("plan write failed: {e:#}")),
                     }
-                    Outcome::ok(format!("plan {} cancelled", target_plan.id))
                 }
                 Some(target_id) => {
                     if let Some(mut target_plan) =
@@ -1617,10 +1635,12 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     {
                         target_plan.status = plan::PlanStatus::Abandoned;
                         target_plan.revision += 1;
-                        if let Err(e) = plan::store(&ctx.root, &target_plan) {
-                            return Outcome::err(format!("plan write failed: {e:#}"));
+                        let pid = target_plan.id.clone();
+                        let args = serde_json::json!({"id": pid});
+                        match plan::commit(&ctx.root, &ctx.session_id, &mut target_plan, "cancel", "model", true, args) {
+                            Ok(_) => return Outcome::ok(format!("plan {pid} cancelled")),
+                            Err(e) => return Outcome::err(format!("plan write failed: {e:#}")),
                         }
-                        return Outcome::ok(format!("plan {} cancelled", target_plan.id));
                     }
                     let mut active =
                         match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
@@ -1672,9 +1692,32 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 plan::Op::Finish { id, .. } => Some(id.clone()),
                 _ => None,
             };
+            // Journal-first (§2.1.4): the intent is recorded ahead of the
+            // store, carrying the full op for replay. `show` is read-only
+            // and keeps the old plain store with no cursor advance.
+            let op_value =
+                serde_json::to_value(&other).unwrap_or(serde_json::Value::Null);
+            let op_name = op_value
+                .get("op")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let readonly_show = op_name == "show";
             match plan::apply(&mut active, other, &limits) {
                 Ok(applied) => {
-                    if let Err(e) = plan::store(&ctx.root, &active) {
+                    if readonly_show {
+                        if let Err(e) = plan::store(&ctx.root, &active) {
+                            return Outcome::err(format!("plan write failed: {e:#}"));
+                        }
+                    } else if let Err(e) = plan::commit(
+                        &ctx.root,
+                        &ctx.session_id,
+                        &mut active,
+                        &op_name,
+                        "model",
+                        true,
+                        op_value,
+                    ) {
                         return Outcome::err(format!("plan write failed: {e:#}"));
                     }
                     if let Some(ref id) = starting
@@ -1718,8 +1761,17 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     }
                 }
                 Err(r) => {
-                    // the rejection counter is plan state, so persist it too
-                    let _ = plan::store(&ctx.root, &active);
+                    // the rejection counter is plan state, so persist it too —
+                    // behind a rejection intent, keeping the cursor discipline
+                    let _ = plan::commit(
+                        &ctx.root,
+                        &ctx.session_id,
+                        &mut active,
+                        &op_name,
+                        "model",
+                        false,
+                        op_value,
+                    );
                     rejection(r)
                 }
             }
@@ -1823,7 +1875,11 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
 
     match plan::verify_acceptance(&mut active, index, evidence, supplied) {
         Ok(applied) => {
-            if let Err(e) = plan::store(&ctx.root, &active) {
+            let args = serde_json::json!({
+                "acceptance": index,
+                "evidence_refs": active.acceptance.get(index).map(|item| item.evidence.clone()).unwrap_or_default(),
+            });
+            if let Err(e) = plan::commit(&ctx.root, &ctx.session_id, &mut active, "verify", "model", true, args) {
                 return Outcome::err(format!("plan write failed: {e:#}"));
             }
             match applied {
@@ -1832,7 +1888,8 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
             }
         }
         Err(r) => {
-            let _ = plan::store(&ctx.root, &active);
+            let args = serde_json::json!({"acceptance": index});
+            let _ = plan::commit(&ctx.root, &ctx.session_id, &mut active, "verify", "model", false, args);
             rejection(r)
         }
     }

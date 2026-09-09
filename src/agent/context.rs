@@ -174,6 +174,10 @@ pub fn resume_notice(root: &std::path::Path, session_id: &str) -> Option<String>
     let records = crate::agent::journal::Journal::records_for(root, session_id).ok()?;
     let mut open_step = None;
     for record in records.iter().filter(|record| record.kind == "plan") {
+        // Rejected ops never took effect; only accepted intents resume work.
+        if record.fields.get("ok") == Some(&serde_json::Value::Bool(false)) {
+            continue;
+        }
         let op = record.fields.get("op").and_then(|value| value.as_str());
         let id = record.fields.get("id").and_then(|value| value.as_str());
         match (op, id) {

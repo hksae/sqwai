@@ -513,7 +513,8 @@ A fork record is not written: fork is deleted, so no new journal starts with
 `{"kind":"fork",...}`. Old journals may contain one; it is ignored.
 
 2.2.2 Record shape
-Common fields: seq, ts (RFC 3339 with local offset), step (current
+Common fields: seq, ts (RFC 3339 with local offset; the implementation
+records UTC, local offset is a display concern), step (current
 in_progress step id or null), plan (plan id or null), agent
 ("main" or "sub-N"), kind, then kind-specific fields.
 

@@ -824,6 +824,11 @@ async fn run_agent(
     } else {
         None
     };
+    if enable_tools && !read_only {
+        // Heal a crash between a journal intent and its plan store (§2.1.4,
+        // §3.7) before anything reads the plan. No-op on a clean tree.
+        let _ = plan::replay(&root);
+    }
     if let Some(writer) = journal.as_mut() {
         let plan_id = plan::open_active_for_session(&root, Some(&session_id))
             .ok()
@@ -1571,21 +1576,16 @@ async fn run_agent(
                     );
                 }
                 if call.name == "plan" {
+                    // `plan_op` journals its own intent records ahead of every
+                    // store (§2.1.4); resync this long-lived handle past them
+                    // so the next append cannot reuse a sequence number.
+                    writer.resync();
                     let op = call
                         .args
                         .get("op")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
                     let plan_step_id = call.args.get("id").and_then(|value| value.as_str());
-                    let _ = writer.append(
-                        "plan",
-                        serde_json::json!({
-                            "op": op,
-                            "id": plan_step_id,
-                            "ok": outcome.ok,
-                            "by": "model",
-                        }),
-                    );
                     let active = plan::open_active_for_session(&root, Some(&session_id))
                         .ok()
                         .flatten();
@@ -2399,29 +2399,57 @@ async fn propose_plan(
         }
     };
     let abandoned = match plan::open_active_for_session(root, Some(session_id)) {
-        Ok(Some(mut active)) => {
-            let old = active.id.clone();
-            plan::abandon(&mut active);
-            if let Err(e) = plan::store(root, &active) {
-                return tools::Outcome::err(format!("abandoning the previous plan failed: {e:#}"));
-            }
-            Some(old)
-        }
+        Ok(Some(active)) => Some(active.id.clone()),
         Ok(None) => None,
         Err(e) => return tools::Outcome::err(format!("plan store unreadable: {e:#}")),
     };
+    // Journal-first (§2.1.4): the intent carries the full draft so replay
+    // can rebuild the new plan and retire the old one after a crash.
+    let new_id = fresh.id.clone();
+    let new_created = fresh.created.clone();
+    let intent_seq = if let Some(writer) = journal.as_mut() {
+        writer
+            .append(
+                "plan",
+                serde_json::json!({
+                    "op": "accept_proposal",
+                    "by": "user",
+                    "ok": true,
+                    "plan_id": new_id,
+                    "draft": draft_args,
+                    "new_id": new_id,
+                    "new_created": new_created,
+                    "new_sessions": [session_id],
+                    "abandoned": abandoned,
+                }),
+            )
+            .ok()
+    } else {
+        None
+    };
+    if let Some(old) = abandoned.clone() {
+        match plan::open_active_for_session(root, Some(session_id)) {
+            Ok(Some(mut active)) if active.id == old => {
+                plan::abandon(&mut active);
+                if let Some(seq) = intent_seq {
+                    active.applied_event = Some(format!("{session_id}:{seq}"));
+                }
+                if let Err(e) = plan::store(root, &active) {
+                    return tools::Outcome::err(format!("abandoning the previous plan failed: {e:#}"));
+                }
+            }
+            Ok(_) => {}
+            Err(e) => return tools::Outcome::err(format!("plan store unreadable: {e:#}")),
+        }
+    }
     let mut fresh = fresh;
     fresh.sessions = vec![session_id.to_string()];
-    let new_id = fresh.id.clone();
+    if let Some(seq) = intent_seq {
+        fresh.applied_event = Some(format!("{session_id}:{seq}"));
+    }
     let steps = fresh.steps.len();
     if let Err(e) = plan::store(root, &fresh) {
         return tools::Outcome::err(format!("plan write failed: {e:#}"));
-    }
-    if let Some(writer) = journal.as_mut() {
-        let _ = writer.append(
-            "plan",
-            serde_json::json!({"op": "accept_proposal", "id": new_id, "abandoned": abandoned, "by": "user"}),
-        );
     }
     // tell the TUI the stored plan's id so it re-links the session before the
     // tool outcome is processed (fork must copy the new plan, not the old one)

@@ -535,6 +535,428 @@ pub fn reopen_for_undo(plan: &mut Plan, step_id: &str, reason: impl Into<String>
     Ok(())
 }
 
+// ---------------------------------------------------------------- journal-first commits and replay (§2.1.4, §2.2.1)
+//
+// Every mutation of a plan file is preceded by a journal `plan` intent
+// record carrying the full op args. The record's scoped `session:seq`
+// becomes the file's `applied_event` in the same store, so a crash between
+// the two is detectable: on load the host replays journal events after the
+// cursor. Replay is pure re-application — no commands run, no approvals,
+// no evidence gates — which is sound because every replayed op was already
+// accepted (and validated, where validation applies) when first journaled.
+
+fn scoped(session: &str, seq: u64) -> String {
+    format!("{session}:{seq}")
+}
+
+fn split_applied(applied: &Option<String>) -> Option<(String, u64)> {
+    let cursor = applied.as_ref()?;
+    let (session, seq) = cursor.split_once(':')?;
+    Some((session.to_string(), seq.parse().ok()?))
+}
+
+/// Journal-first commit: append the intent record, point the file at it,
+/// then store. A crash before the append leaves nothing behind (the op only
+/// ran in memory); a crash after it heals by `replay`.
+pub fn commit(
+    root: &Path,
+    session_id: &str,
+    plan: &mut Plan,
+    op: &str,
+    by: &str,
+    ok: bool,
+    args: serde_json::Value,
+) -> Result<u64> {
+    let mut fields = args.as_object().cloned().unwrap_or_default();
+    fields.insert(
+        "op".to_string(),
+        serde_json::Value::String(op.to_string()),
+    );
+    fields.insert(
+        "plan_id".to_string(),
+        serde_json::Value::String(plan.id.clone()),
+    );
+    fields.insert(
+        "by".to_string(),
+        serde_json::Value::String(by.to_string()),
+    );
+    fields.insert("ok".to_string(), serde_json::Value::Bool(ok));
+    let mut journal = crate::agent::journal::Journal::open(root, session_id)?;
+    let seq = journal.append("plan", serde_json::Value::Object(fields))?;
+    plan.applied_event = Some(scoped(session_id, seq));
+    store(root, plan)?;
+    Ok(seq)
+}
+
+#[derive(Debug, Default)]
+pub struct ReplayReport {
+    pub ops_applied: usize,
+    pub evidence_reattached: usize,
+    pub plans_healed: Vec<String>,
+    pub orphans_rebuilt: Vec<String>,
+    pub stalled: Vec<String>,
+}
+
+/// Re-apply journaled plan ops the plan files have not caught up with, and
+/// re-attach evidence refs whose file update was lost. Files without a
+/// cursor (`applied_event`, i.e. written before journal-first) are skipped.
+/// Idempotent: a clean tree changes nothing and stores nothing.
+pub fn replay(root: &Path) -> Result<ReplayReport> {
+    let mut report = ReplayReport::default();
+    for plan in list(root) {
+        let Some((sess, cursor)) = split_applied(&plan.applied_event) else {
+            continue;
+        };
+        let mut records = match crate::agent::journal::Journal::records_for(root, &sess) {
+            Ok(records) => records,
+            Err(_) => continue,
+        };
+        records.sort_by_key(|record| record.seq);
+        let mut plan = plan;
+        let mut dirty = false;
+        for record in records.iter().filter(|record| record.seq > cursor) {
+            if record.kind == "plan"
+                && record
+                    .fields
+                    .get("plan_id")
+                    .and_then(|value| value.as_str())
+                    == Some(plan.id.as_str())
+            {
+                match apply_record(&mut plan, record) {
+                    Ok(true) => {
+                        plan.applied_event = Some(scoped(&sess, record.seq));
+                        store(root, &plan)?;
+                        report.ops_applied += 1;
+                        if !report.plans_healed.contains(&plan.id) {
+                            report.plans_healed.push(plan.id.clone());
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(_) => {
+                        // State diverged from what the op was accepted against;
+                        // hold the cursor and leave the rest for a human.
+                        if !report.stalled.contains(&plan.id) {
+                            report.stalled.push(plan.id.clone());
+                        }
+                        break;
+                    }
+                }
+                continue;
+            }
+            if matches!(record.kind.as_str(), "tool_result" | "file_diff" | "diagnostics")
+                && record.plan.as_deref() == Some(plan.id.as_str())
+            {
+                let Some(step) = record.step.clone().and_then(|id| {
+                    plan.steps.iter_mut().find(|step| step.id == id)
+                }) else {
+                    continue;
+                };
+                if !step.evidence.iter().any(|reference| {
+                    reference.session == sess && reference.seq == record.seq
+                }) {
+                    step.evidence.push(EvidenceRef {
+                        session: sess.clone(),
+                        seq: record.seq,
+                    });
+                    report.evidence_reattached += 1;
+                    dirty = true;
+                }
+            }
+        }
+        if dirty {
+            plan.revision = plan.revision.saturating_add(1);
+            store(root, &plan)?;
+            if !report.plans_healed.contains(&plan.id) {
+                report.plans_healed.push(plan.id.clone());
+            }
+        }
+    }
+    report.orphans_rebuilt = replay_orphans(root, &mut report.ops_applied);
+    if report.ops_applied > 0 || !report.stalled.is_empty() {
+        // Audit trail for the healing itself. `op: replay` is not a plan op
+        // and is always skipped on later replays; it moves no cursor.
+        for plan_id in report.plans_healed.clone() {
+            let sess = applied_session(root, &plan_id);
+            if let Some(sess) = sess
+                && let Ok(mut journal) = crate::agent::journal::Journal::open(root, &sess)
+            {
+                let _ = journal.append(
+                    "plan",
+                    serde_json::json!({
+                        "op": "replay",
+                        "plan_id": plan_id,
+                        "by": "host",
+                        "ops_applied": report.ops_applied,
+                        "stalled": report.stalled,
+                    }),
+                );
+            }
+        }
+    }
+    Ok(report)
+}
+
+fn applied_session(root: &Path, plan_id: &str) -> Option<String> {
+    let plan = read_plan_file(root, plan_id)?;
+    let (sess, _) = split_applied(&plan.applied_event)?;
+    Some(sess)
+}
+
+/// Rebuild plans whose create/accept intent was journaled but whose file is
+/// missing — the crash landed between the record and the store. A later
+/// `plan_deleted` for the same id means the absence is deliberate.
+fn replay_orphans(root: &Path, ops_applied: &mut usize) -> Vec<String> {
+    let mut rebuilt = Vec::new();
+    let dir = root.join(".sqwai").join("journal");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return rebuilt;
+    };
+    for entry in entries.flatten() {
+        if entry.path().extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some(sess) = entry
+            .path()
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let records = match crate::agent::journal::Journal::records_for(root, &sess) {
+            Ok(records) => records,
+            Err(_) => continue,
+        };
+        for record in records.iter().filter(|record| record.kind == "plan") {
+            let fields = &record.fields;
+            if fields.get("ok") == Some(&serde_json::Value::Bool(false)) {
+                continue;
+            }
+            let deleted_after = records.iter().any(|other| {
+                other.kind == "plan_deleted"
+                    && other.seq > record.seq
+                    && other
+                        .fields
+                        .get("plan_id")
+                        .and_then(|value| value.as_str())
+                        == fields.get("result_id").and_then(|value| value.as_str())
+            });
+            if deleted_after {
+                continue;
+            }
+            match fields.get("op").and_then(|value| value.as_str()) {
+                Some("create") => {
+                    let Some(result_id) = fields
+                        .get("result_id")
+                        .and_then(|value| value.as_str())
+                    else {
+                        continue;
+                    };
+                    if plans_dir(root).join(format!("{result_id}.json")).exists() {
+                        continue;
+                    }
+                    if let Some(plan) = rebuild_created(root, &sess, record.seq, fields) {
+                        rebuilt.push(plan.id.clone());
+                        *ops_applied += 1;
+                    }
+                }
+                Some("accept_proposal") => {
+                    let Some(new_id) =
+                        fields.get("new_id").and_then(|value| value.as_str())
+                    else {
+                        continue;
+                    };
+                    if plans_dir(root).join(format!("{new_id}.json")).exists() {
+                        continue;
+                    }
+                    if let Some(plan) = rebuild_accepted(root, &sess, record.seq, fields) {
+                        rebuilt.push(plan.id.clone());
+                        *ops_applied += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    rebuilt
+}
+
+fn rebuild_created(
+    root: &Path,
+    sess: &str,
+    seq: u64,
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Plan> {
+    let get = |name: &str| fields.get(name);
+    let goal = get("goal")?.as_str()?.to_string();
+    let constraints = get("constraints")?
+        .as_array()?
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect();
+    let acceptance = get("acceptance")?
+        .as_array()?
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect();
+    let steps: Vec<NewStep> = serde_json::from_value(
+        get("steps")?.clone(),
+    )
+    .ok()?;
+    let budget_limit = get("budget_limit").and_then(|value| value.as_u64()).unwrap_or(0);
+    let mut plan = create(goal, constraints, acceptance, steps, budget_limit, &Limits::default()).ok()?;
+    plan.id = get("result_id")?.as_str()?.to_string();
+    plan.created = get("result_created")?.as_str()?.to_string();
+    plan.sessions = get("result_sessions")?
+        .as_array()?
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect();
+    plan.applied_event = Some(scoped(sess, seq));
+    store(root, &plan).ok()?;
+    Some(plan)
+}
+
+fn rebuild_accepted(
+    root: &Path,
+    sess: &str,
+    seq: u64,
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Plan> {
+    let draft: PlanDraftArgs = serde_json::from_value(fields.get("draft")?.clone()).ok()?;
+    let mut fresh = draft.build(u64::MAX, &Limits::default()).ok()?;
+    fresh.id = fields.get("new_id")?.as_str()?.to_string();
+    fresh.created = fields.get("new_created")?.as_str()?.to_string();
+    fresh.sessions = fields
+        .get("new_sessions")?
+        .as_array()?
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect();
+    if let Some(abandoned) = fields.get("abandoned").and_then(|value| value.as_str())
+        && let Some(mut old) = read_plan_file(root, abandoned)
+        && old.status == PlanStatus::Active
+    {
+        old.status = PlanStatus::Abandoned;
+        old.revision = old.revision.saturating_add(1);
+        old.applied_event = Some(scoped(sess, seq));
+        store(root, &old).ok()?;
+    }
+    fresh.applied_event = Some(scoped(sess, seq));
+    store(root, &fresh).ok()?;
+    Some(fresh)
+}
+
+/// Apply one journaled intent to an in-memory plan. `Ok(true)` means the op
+/// took effect; `Ok(false)` means the record carries no replayable effect
+/// (rejected op, read-only op, unknown shape); `Err` means the plan state
+/// diverged from what the op was accepted against — the caller holds the
+/// cursor there.
+fn apply_record(
+    plan: &mut Plan,
+    record: &crate::agent::journal::Record,
+) -> Result<bool, Rejection> {
+    let fields = &record.fields;
+    if fields.get("ok") == Some(&serde_json::Value::Bool(false)) {
+        return Ok(false);
+    }
+    let op_name = fields.get("op").and_then(|value| value.as_str());
+    match op_name {
+        Some("verify") => {
+            let index = fields
+                .get("acceptance")
+                .and_then(|value| value.as_u64())
+                .ok_or_else(|| {
+                    Rejection::new("replay_shape", "verify intent without acceptance index", "")
+                })? as usize;
+            let evidence: Vec<EvidenceRef> = fields
+                .get("evidence_refs")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_default();
+            verify_acceptance(plan, index, evidence, false).map(|_| true)
+        }
+        Some("waive") => {
+            let index = fields
+                .get("index")
+                .and_then(|value| value.as_u64())
+                .ok_or_else(|| Rejection::new("replay_shape", "waive intent without index", ""))?
+                as usize;
+            let reason = fields
+                .get("reason")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            waive(plan, index, reason).map(|_| true)
+        }
+        Some("set_goal") => {
+            let text = fields
+                .get("text")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| Rejection::new("replay_shape", "goal intent without text", ""))?;
+            let source = fields
+                .get("source")
+                .and_then(|value| value.as_str())
+                .unwrap_or("user");
+            let reason = fields
+                .get("reason")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            set_goal(plan, text.to_string(), source, reason);
+            Ok(true)
+        }
+        Some("constraints") => {
+            let action = fields
+                .get("action")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let text = fields
+                .get("text")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            match action {
+                "add" => plan.constraints.push(text.to_string()),
+                "remove" => {
+                    if let Some(index) = plan.constraints.iter().position(|c| c == text) {
+                        plan.constraints.remove(index);
+                    }
+                }
+                _ => return Ok(false),
+            }
+            plan.revision = plan.revision.saturating_add(1);
+            Ok(true)
+        }
+        Some("reopen") => {
+            let ids: Vec<String> = fields
+                .get("ids")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let reason = fields
+                .get("reason")
+                .and_then(|value| value.as_str())
+                .unwrap_or("reopened by undo");
+            for id in &ids {
+                reopen_for_undo(plan, id, reason).map_err(|_| {
+                    Rejection::new("replay_diverged", format!("cannot reopen step {id}"), "")
+                })?;
+            }
+            Ok(true)
+        }
+        Some(
+            "start" | "finish" | "block" | "unblock" | "cancel" | "add" | "split" | "complete",
+        ) => {
+            let op: Op = serde_json::from_value(serde_json::Value::Object(fields.clone()))
+                .map_err(|_| Rejection::new("replay_shape", "unparsable op intent", ""))?;
+            apply(plan, op, &Limits::default()).map(|_| true)
+        }
+        _ => Ok(false),
+    }
+}
+
 pub fn store(root: &Path, plan: &Plan) -> Result<()> {
     let dir = plans_dir(root);
     std::fs::create_dir_all(&dir).context("creating plans directory")?;
@@ -638,7 +1060,7 @@ pub fn list_active(root: &Path) -> Vec<Plan> {
 
 // ---------------------------------------------------------------- operations
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewStep {
     pub title: String,
     #[serde(default)]
@@ -647,8 +1069,10 @@ pub struct NewStep {
     pub refs: Vec<StepRef>,
 }
 
-/// One operation per call (§2.1.3).
-#[derive(Debug, Clone, Deserialize)]
+/// One operation per call (§2.1.3). `Serialize` is for the journal intent
+/// record: every accepted op is journaled with its full args before the
+/// plan file is stored, so a crash between the two heals by replay (§2.1.4).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
     Create {
@@ -744,7 +1168,7 @@ pub enum Applied {
 /// without the active-plan guard. The host validates a draft with
 /// `create` before the user ever sees it, and stores the rebuilt plan on
 /// accept — the agent never writes plan state itself.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanDraftArgs {
     #[serde(default)]
     pub goal: String,
@@ -1410,7 +1834,10 @@ fn complete(plan: &mut Plan) -> Result<Applied, Rejection> {
         .filter(|s| {
             matches!(
                 s.status,
-                StepStatus::Pending | StepStatus::InProgress | StepStatus::Reopened
+                StepStatus::Pending
+                    | StepStatus::InProgress
+                    | StepStatus::Blocked
+                    | StepStatus::Reopened
             )
         })
         .map(|s| s.id.clone())
@@ -1419,8 +1846,8 @@ fn complete(plan: &mut Plan) -> Result<Applied, Rejection> {
         return reject(
             plan,
             "steps_open",
-            format!("steps still open: {}", pending.join(", ")),
-            "finish, cancel or block them first",
+            format!(            "steps still open: {}", pending.join(", ")),
+            "finish, unblock or cancel them first",
         );
     }
     let unverified: Vec<usize> = plan
@@ -1931,6 +2358,181 @@ mod tests {
         let err = complete(&mut plan).unwrap_err();
         assert_eq!(err.code, "steps_open");
         assert!(err.reason.contains('2'), "reason: {}", err.reason);
+    }
+
+    #[test]
+    fn replay_heals_crash_between_journal_and_store() {
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-replay-{}", new_id()));
+        let mut plan = new_plan();
+        plan.applied_event = Some("crash:0".to_string());
+        store(&dir, &plan).unwrap();
+        // The crash: intent journaled, plan file never caught up.
+        let mut journal =
+            crate::agent::journal::Journal::open(&dir, "crash").unwrap();
+        let seq = journal
+            .append(
+                "plan",
+                serde_json::json!({
+                    "op": "start", "id": "1",
+                    "plan_id": plan.id, "by": "model", "ok": true,
+                }),
+            )
+            .unwrap();
+        assert_eq!(seq, 1);
+
+        let report = replay(&dir).unwrap();
+        assert_eq!(report.ops_applied, 1);
+        assert_eq!(report.plans_healed, vec![plan.id.clone()]);
+        let healed = open(&dir, &plan.id).unwrap();
+        assert_eq!(
+            healed.step("1").unwrap().status,
+            StepStatus::InProgress
+        );
+        assert_eq!(healed.applied_event.as_deref(), Some("crash:1"));
+
+        // Idempotent: a second run changes nothing and stores nothing.
+        let again = replay(&dir).unwrap();
+        assert_eq!(again.ops_applied, 0);
+        assert!(again.plans_healed.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn replay_rebuilds_orphan_create_and_respects_delete() {
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-orphan-{}", new_id()));
+        let mut journal =
+            crate::agent::journal::Journal::open(&dir, "orphan").unwrap();
+        journal
+            .append(
+                "plan",
+                serde_json::json!({
+                    "op": "create", "by": "model", "ok": true,
+                    "plan_id": "01J000ORPHAN00000000000001",
+                    "goal": "orphaned goal",
+                    "constraints": [],
+                    "acceptance": ["cmd: true"],
+                    "steps": [{"title": "s1", "kind": "change", "refs": []}],
+                    "budget_limit": 20000,
+                    "result_id": "01J000ORPHAN00000000000001",
+                    "result_created": "2026-01-01T00:00:00+00:00",
+                    "result_sessions": ["orphan"],
+                }),
+            )
+            .unwrap();
+
+        let report = replay(&dir).unwrap();
+        assert_eq!(report.orphans_rebuilt, vec!["01J000ORPHAN00000000000001"]);
+        let rebuilt = open(&dir, "01J000ORPHAN00000000000001").unwrap();
+        assert_eq!(rebuilt.goal.text, "orphaned goal");
+        assert_eq!(rebuilt.applied_event.as_deref(), Some("orphan:1"));
+
+        // Deliberate absence: a later plan_deleted means do not resurrect.
+        journal
+            .append(
+                "plan_deleted",
+                serde_json::json!({"plan_id": "01J000ORPHAN00000000000001"}),
+            )
+            .unwrap();
+        std::fs::remove_file(
+            plans_dir(&dir).join("01J000ORPHAN00000000000001.json"),
+        )
+        .unwrap();
+        let report = replay(&dir).unwrap();
+        assert!(report.orphans_rebuilt.is_empty());
+        assert!(open(&dir, "01J000ORPHAN00000000000001").is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn replay_skips_rejected_intents() {
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-repskip-{}", new_id()));
+        let mut plan = new_plan();
+        plan.applied_event = Some("rs:0".to_string());
+        store(&dir, &plan).unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&dir, "rs").unwrap();
+        journal
+            .append(
+                "plan",
+                serde_json::json!({
+                    "op": "start", "id": "1",
+                    "plan_id": plan.id, "by": "model", "ok": false,
+                }),
+            )
+            .unwrap();
+
+        let report = replay(&dir).unwrap();
+        assert_eq!(report.ops_applied, 0);
+        assert_eq!(open(&dir, &plan.id).unwrap().step("1").unwrap().status, StepStatus::Pending);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn replay_applies_verify_with_recorded_evidence() {
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-repver-{}", new_id()));
+        let mut plan = create(
+            "goal".to_string(),
+            Vec::new(),
+            vec!["check the docs".to_string()],
+            vec![NewStep {
+                title: "verify docs".into(),
+                kind: Some(StepKind::Verify),
+                refs: Vec::new(),
+            }],
+            1000,
+            &Limits::default(),
+        )
+        .unwrap();
+        plan.applied_event = Some("rv:7".to_string());
+        store(&dir, &plan).unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&dir, "rv").unwrap();
+        // Seven filler records so the intent lands on seq 8, past the cursor.
+        for _ in 0..7 {
+            journal.append("note", serde_json::json!({"note": "x", "kind": "decision"})).unwrap();
+        }
+        journal
+            .append(
+                "plan",
+                serde_json::json!({
+                    "op": "verify", "acceptance": 0,
+                    "evidence_refs": [{"session": "rv", "seq": 3}],
+                    "plan_id": plan.id, "by": "model", "ok": true,
+                }),
+            )
+            .unwrap();
+
+        let report = replay(&dir).unwrap();
+        assert_eq!(report.ops_applied, 1);
+        assert_eq!(
+            open(&dir, &plan.id).unwrap().acceptance[0].status,
+            AcceptanceStatus::Passed
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn complete_rejects_blocked_steps() {
+        let mut plan = new_plan();
+        apply(
+            &mut plan,
+            Op::Start {
+                id: "1".into(),
+                confirm: None,
+            },
+            &Limits::default(),
+        )
+        .unwrap();
+        apply(
+            &mut plan,
+            Op::Block {
+                id: "1".into(),
+                reason: "waiting".into(),
+            },
+            &Limits::default(),
+        )
+        .unwrap();
+        let err = apply(&mut plan, Op::Complete, &Limits::default()).unwrap_err();
+        assert_eq!(err.code, "steps_open");
+        assert!(err.reason.contains('1'), "reason: {}", err.reason);
     }
 
     #[test]

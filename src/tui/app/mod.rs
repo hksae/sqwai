@@ -71,7 +71,11 @@ fn reopen_undone_steps(
         );
     }
     if !reopened.is_empty() {
-        let _ = plan::store(root, &active);
+        let args = serde_json::json!({
+            "ids": reopened,
+            "reason": format!("reopened by undo to {checkpoint}"),
+        });
+        let _ = plan::commit(root, session_id, &mut active, "reopen", "host", true, args);
     }
     if let Ok(mut journal) = crate::agent::journal::Journal::open(root, session_id) {
         journal.set_attribution(None, Some(active.id.clone()), "host");
@@ -472,6 +476,11 @@ impl App {
         };
 
         let project_root = std::env::current_dir().unwrap_or_default();
+        if !read_only {
+            // Heal a crash between a journal intent and its plan store
+            // (§2.1.4, §3.7) before any plan read. No-op on a clean tree.
+            let _ = crate::plan::replay(&project_root);
+        }
         let cwd_label = project_root
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -2075,10 +2084,13 @@ impl App {
             Some("complete") => match self.session_plan() {
                 Some(mut active) => {
                     match plan::apply(&mut active, plan::Op::Complete, &plan::Limits::default()) {
-                        Ok(plan::Applied::Completed) => match plan::store(&root, &active) {
-                            Ok(()) => "plan completed".to_string(),
-                            Err(e) => format!("plan write failed: {e:#}"),
-                        },
+                        Ok(plan::Applied::Completed) => {
+                            let sid = self.session.id.to_string();
+                            match plan::commit(&root, &sid, &mut active, "complete", "user", true, serde_json::json!({})) {
+                                Ok(_) => "plan completed".to_string(),
+                                Err(e) => format!("plan write failed: {e:#}"),
+                            }
+                        }
                         Ok(_) => "plan complete did not change its status".to_string(),
                         Err(e) => format!("plan complete rejected [{}]: {}", e.code, e.reason),
                     }
@@ -2089,8 +2101,10 @@ impl App {
                 Some(mut active) => {
                     active.status = plan::PlanStatus::Abandoned;
                     active.revision += 1;
-                    match plan::store(&root, &active) {
-                        Ok(()) => "plan abandoned".to_string(),
+                    let sid = self.session.id.to_string();
+                    let args = serde_json::json!({"id": active.id.clone()});
+                    match plan::commit(&root, &sid, &mut active, "cancel", "user", true, args) {
+                        Ok(_) => "plan abandoned".to_string(),
                         Err(e) => format!("plan write failed: {e:#}"),
                     }
                 }
@@ -2102,10 +2116,14 @@ impl App {
                 match (index, reason.trim()) {
                     (Some(index), reason) if !reason.is_empty() => match self.session_plan() {
                         Some(mut active) => match plan::waive(&mut active, index, reason) {
-                            Ok(()) => match plan::store(&root, &active) {
-                                Ok(()) => format!("acceptance {index} waived"),
-                                Err(e) => format!("plan write failed: {e:#}"),
-                            },
+                            Ok(()) => {
+                                let sid = self.session.id.to_string();
+                                let args = serde_json::json!({"index": index, "reason": reason});
+                                match plan::commit(&root, &sid, &mut active, "waive", "user", true, args) {
+                                    Ok(_) => format!("acceptance {index} waived"),
+                                    Err(e) => format!("plan write failed: {e:#}"),
+                                }
+                            }
                             Err(e) => format!("plan waive rejected [{}]: {}", e.code, e.reason),
                         },
                         None => "no active plan".to_string(),
@@ -2136,8 +2154,14 @@ impl App {
                     "user",
                     Some("user: /goal".to_string()),
                 );
-                match plan::store(&root, &active) {
-                    Ok(()) => self.status("goal updated; pending steps are stale", StatusKind::Ok),
+                let args = serde_json::json!({
+                    "text": text,
+                    "source": "user",
+                    "reason": "user: /goal",
+                });
+                let sid = self.session.id.to_string();
+                match plan::commit(&root, &sid, &mut active, "set_goal", "user", true, args) {
+                    Ok(_) => self.status("goal updated; pending steps are stale", StatusKind::Ok),
                     Err(e) => self.status(&format!("goal update failed: {e:#}"), StatusKind::Err),
                 }
             }
@@ -2163,8 +2187,10 @@ impl App {
                     active.constraints.remove(index);
                 }
                 active.revision += 1;
-                match plan::store(&root, &active) {
-                    Ok(()) => self.status("constraints updated", StatusKind::Ok),
+                let args = serde_json::json!({"action": action, "text": text});
+                let sid = self.session.id.to_string();
+                match plan::commit(&root, &sid, &mut active, "constraints", "user", true, args) {
+                    Ok(_) => self.status("constraints updated", StatusKind::Ok),
                     Err(e) => self.status(
                         &format!("constraints update failed: {e:#}"),
                         StatusKind::Err,
@@ -3480,7 +3506,12 @@ impl App {
                     )
                     .is_ok()
                 {
-                    if crate::plan::store(&root, &active).is_ok() {
+                    let args = serde_json::json!({
+                        "ids": [step],
+                        "reason": format!("reopened by undo of step {step}"),
+                    });
+                    let sid = self.session.id.to_string();
+                    if crate::plan::commit(&root, &sid, &mut active, "reopen", "host", true, args).is_ok() {
                         reopened.push(step.to_string());
                     }
                     self.refresh_plan_label();

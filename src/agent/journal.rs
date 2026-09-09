@@ -193,6 +193,16 @@ impl Journal {
         self.next_seq
     }
 
+    /// Re-read the tail counter from disk. `plan::commit` appends through a
+    /// short-lived handle, so a long-lived writer must call this after any
+    /// plan tool call before appending again — otherwise it would reuse a
+    /// sequence number (§2.1.4).
+    pub fn resync(&mut self) {
+        if let Ok(last) = last_seq(&self.path) {
+            self.next_seq = last.saturating_add(1);
+        }
+    }
+
     /// Read records from every journal belonging to this project.
     pub fn records(root: &Path) -> Result<Vec<Record>> {
         let dir = root.join(".sqwai").join("journal");
