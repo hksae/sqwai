@@ -59,10 +59,11 @@ that must be solid but is not what the project is about.
 8. **Deterministic first, model second.** Where a cheap heuristic in code gets
    80% of the value (criticism detection, claim extraction), it runs first;
    model calls are escalation, not default.
-9. **Prompt is third, and it shapes forms, not traits.** Behavior falls into three classes: type-and-checkable (response format, tool annotation rules) — prompt it; global traits (verbosity, sycophancy, thoroughness) — prompt barely helps, expose them instead (claim lint, facts blocks, manual: acceptance); invariants — code. Choose the remedy by the class of the behavior, never by the annoyance it causes.
+9. **Prompt is third, and it shapes forms, not traits.** Behavior falls into three classes: type-and-checkable (response format, tool annotation rules) — prompt it; global traits (verbosity, sycophancy, thoroughness) — prompt barely helps, expose them instead (claim lint, facts blocks, manual: acceptance); invariants — code. Choose the remedy by the class of the behavior, never by the annoyance it causes. Threat-model limits (§2.0) are invariants, never prompt requests: "do not touch .sqwai via bash" is not enforceable by wording.
 10. **Observations vs claims.** Journal fields are observations written by the host at dispatch;
    plan state is validated claims (host-written after model proposal and host validation);
-   tool arguments are unvalidated claims until accepted by the host.
+   tool arguments are unvalidated claims until accepted by the host — this covers
+   `plan create` payloads, `finish` summaries, and `note` text alike.
    This distinction defines the trust boundary: the host owns observations, validates claims,
    and never trusts unvalidated input. Untrusted content (§2.2.2) is unvalidated input by definition.
 
@@ -105,7 +106,20 @@ per-machine caches and potentially private transcripts.
 `glob`, `grep`, `ls`) refuse paths under `.sqwai/` except `.sqwai/skills/` and
 `.sqwai/config.toml`. Plan, journal, memory and graph are reachable only through
 their dedicated tools. This is what makes "append-only" and "host-written"
-enforceable rather than requested.
+enforceable for file tools — not for `bash` (see Threat model below).
+
+**Threat model.** sqwai offers two execution modes: normal (bash has
+user-level access, path jail applies to file tools only, warnings for
+suspicious commands) and isolated (host-state is outside the agent's writable
+scope; required for unattended). In normal mode, bash can modify `.sqwai/`;
+this is not considered a security breach, only a degrade of integrity
+guarantees for that turn: the host detects the mutation (external_change /
+post-bash status), marks affected receipts `stale`, and reports reduced
+guarantees in the tail block and status bar. Integrity enforcement
+("append-only", "host-written", replay in §2.1.4) holds fully only in
+isolated mode or when the user refrains from hand-editing `.sqwai/` and from
+running shell commands that touch it. The safety classifier (§5.2) is a
+warning and approval layer in normal mode, not a security boundary.
 
 **Single instance.** `.sqwai/lock/<session>.lock` records the owning process pid
 and session id. A second sqwai started in the same project finds a live lock and
@@ -121,8 +135,8 @@ lock protects the plaintext plan, diary and journal (§7 Q).
 
 A plan is independent of a session. `plans/<plan-id>.json` where `plan-id` is a
 ULID. A session stores `plan_id`; several sessions may point to one plan
-(resume, fork). Plan status:
-active → completed all steps done|cancelled, all acceptance verified|waived
+(resume). Plan status:
+active → completed all steps done|cancelled, all acceptance validation passed|waived
 active → abandoned user: /plan abandon
 completed|abandoned → (read-only, listed by /plan history)
 
@@ -135,7 +149,10 @@ via `/plan` (continue, complete, abandon) — the model cannot.
 
 `/fork` copies the plan (`forked_from: <plan-id>`, steps and statuses
 preserved, `revision` reset) and the journal position; both sessions continue
-independently.
+independently. Deferred to v2: in v1 the host rejects `/fork` with
+`code: fork_deferred`; resume (`--resume`, session picker, `/new` continue)
+is the only multi-session path. `forked_from` stays in the schema for
+forward compatibility. See §3.4 and §7.
 
 #### 2.1.2 On-disk format
 
@@ -147,6 +164,7 @@ independently.
   "created": "2026-08-31T18:00:00+03:00",
   "forked_from": null,
   "sessions": ["a8f2...", "c110..."],
+  "applied_event": "a8f2:41",
   "goal": {
     "text": "Persist the todo list in the session and show it on Ctrl+T",
     "source": "user",
@@ -157,23 +175,32 @@ independently.
   },
   "constraints": ["do not change the public session format", "no new dependencies"],
   "acceptance": [
-    {"text": "cmd: cargo test", "status": "pending", "evidence": []},
-    {"text": "cmd: cargo clippy -- -D warnings", "status": "pending", "evidence": []},
-    {"text": "manual: Ctrl+T shows the list", "status": "waived", "by": "user", "reason": "manual check"}
+    {"text": "cmd: cargo test", "status": "pending", "evidence": [],
+     "validation": {"status": "pending", "receipts": []}},
+    {"text": "cmd: cargo clippy -- -D warnings", "status": "pending", "evidence": [],
+     "validation": {"status": "pending", "receipts": []}},
+    {"text": "manual: Ctrl+T shows the list", "status": "waived", "by": "user", "reason": "manual check",
+     "validation": {"status": "waived", "receipts": []}}
   ],
   "steps": [
     {"id": "1", "kind": "research", "title": "Find where sessions are saved",
      "status": "done", "started": "...", "finished": "...",
      "summary": "session/mod.rs save()/load()", "evidence": [3, 4, 5],
-     "refs": ["src/session/mod.rs::fn::save"]},
+     "refs": [{"path": "src/session/mod.rs", "intent": "modify"}],
+     "validation": {"status": "pending", "receipts": []}},
     {"id": "2", "kind": "change", "title": "Add todos field with serde default",
-     "status": "in_progress", "started": "...", "refs": ["src/session/mod.rs::struct::Session"]},
-    {"id": "3", "kind": "verify", "title": "Run tests", "status": "pending"},
+     "status": "in_progress", "started": "...",
+     "refs": [{"path": "src/session/mod.rs", "symbol": "Session", "intent": "modify"},
+              {"path": "src/session/mod.rs", "symbol": "save_todos", "intent": "create"}],
+     "validation": {"status": "pending", "receipts": []}},
+    {"id": "3", "kind": "verify", "title": "Run tests", "status": "pending",
+     "validation": {"status": "pending", "receipts": []}},
     {"id": "4", "kind": "change", "title": "Todo panel on Ctrl+T", "status": "blocked",
-     "reason": "waiting for user: keybinding conflicts with existing Ctrl+T"}
+     "reason": "waiting for user: keybinding conflicts with existing Ctrl+T",
+     "validation": {"status": "pending", "receipts": []}}
   ],
   "folded": [
-    {"ids": ["0a", "0b"], "text": "✓ 0a–0b: explored TUI menu structure", "evidence": [1, 2]}
+    {"ids": ["0a", "0b"], "text": "✓ 0a–0b: explored TUI menus", "evidence": [1, 2]}
   ],
   "budget": {"tokens": 1840, "limit": 20000},
   "revision": 7,
@@ -181,12 +208,28 @@ independently.
 }
 Field notes:
 
+applied_event — scoped reference `session:seq` of the last journal event
+applied to this plan file. The plan is a recoverable projection; on load the
+host replays journal events after applied_event (§2.1.4, §2.2.1).
 steps[].kind ∈ research | change | verify (default change). Determines
 what counts as evidence (§2.1.4).
-steps[].refs — optional list of stable keys (§2.4.3) the step intends to
-touch. Resolved by the graph when available.
+steps[].refs — optional list of `{path, symbol?, intent}` objects where
+intent ∈ modify | create | remove (default modify). `modify` and `remove`
+refer to existing code; `create` declares a new file/symbol that must not
+exist yet (§2.4.8). Plain-string keys (`"src/x.rs::fn::foo"`) remain accepted
+on input and are interpreted as `{"path": ..., "intent": "modify"}`.
 steps[].evidence — journal seq values. Set by the host only.
 steps[].status ∈ pending | in_progress | blocked | done | cancelled | reopened.
+`done` means "action performed", not "result verified".
+steps[].validation — `{status, receipts[]}` where
+status ∈ pending | passed | stale | waived. `finish` sets `status: done`
+and never touches `validation`. `passed` is set only by a host-recorded
+`verification_receipt`; `stale` is set by the host when relevant state
+changed after the check (§2.1.4). `waived` is set only by the user via
+host-only `waive`.
+acceptance[].validation — same shape as steps[].validation. `complete`
+requires every acceptance item to have `validation.status` of `passed` or
+`waived`; non-stale receipts required (§2.1.4).
 stale_goal: true appears on pending steps after a goal revision (§2.1.6).
 folded — host-compressed done steps (§2.1.5).
 budget — token estimate of the plan as injected; limit derived from model
@@ -202,7 +245,8 @@ without a plan and asks whether to recreate.
 
 2.1.3 Operations
 Tool plan accepts one operation per call. The model has no operation that
-writes goal, constraints, acceptance[].status, evidence, or
+writes goal, constraints, acceptance[].status, acceptance[].validation,
+steps[].validation, evidence, applied_event, or
 folded.
 
 JSON
@@ -215,7 +259,7 @@ JSON
 {"op":"block","id":"4","reason":"..."}
 {"op":"unblock","id":"4"}
 {"op":"cancel","id":"6","reason":"..."}
-{"op":"add","after":"3","title":"...","kind":"verify","refs":["src/x.rs::fn::foo"]}
+{"op":"add","after":"3","title":"...","kind":"verify","refs":[{"path":"src/x.rs","symbol":"foo","intent":"modify"}]}
 {"op":"split","id":"3","into":[{"title":"..."},{"title":"..."}]}
 {"op":"verify","acceptance":0}
 {"op":"complete"}
@@ -232,15 +276,15 @@ abandon, restore (resume).
 2.1.4 Validator (host code only)
 Op	Rejected when
 create	active plan exists · goal empty · zero steps · more than plan.max_steps (24) steps
-start	step not `pending
+start	step not `pending|reopened` · another step is already `current_step_id` (main agent must finish/block/cancel first) · stale_goal without `confirm: true`
 finish	step not in_progress · host evidence rule fails (below) · summary empty
 block	step not `in_progress
 unblock	step not blocked
 cancel	step done · reason empty
 add / split	resulting step count > plan.max_steps (user may raise via /plan limit N) · after id unknown
 verify	acceptance index unknown · host evidence rule fails (below)
-complete	any step `pending
-any	plan `completed
+complete	any step `pending|in_progress|blocked|reopened` · any acceptance `validation.status` not `passed|waived` · any `passed` receipt is `stale`
+any	plan `completed|abandoned`
 Evidence is owned by the host. The model never supplies journal sequence
 numbers to `finish` or `verify`. Whenever the host writes a `tool_result`,
 `file_diff`, or `diagnostics` record with a non-empty step attribution, it
@@ -249,6 +293,13 @@ A scoped reference is `{session, seq}` (or the compact string `session:seq`),
 never a bare sequence number. `finish` accepts only `id` and `summary`; it
 checks the evidence already attached to that step. If a model sends an
 `evidence` field, the host ignores it and returns an informational note.
+
+Done is not validated. `finish` moves a step to `done` and leaves
+`validation.status` untouched (still `pending` unless previously waived).
+A step reads honestly as "work performed, result not yet checked" until a
+host-recorded `verification_receipt` flips `validation` to `passed`
+(or the user waives it). `complete` never implies correctness by itself;
+only `validation: passed|waived` on every acceptance item does.
 
 kind	Requires
 research	≥ 1 host-attached tool_result of any tool since start
@@ -263,6 +314,28 @@ attached automatically. `manual:` acceptance is completed only by the user
 through host-only `waive`. Text acceptances verify against host-attached
 evidence for the referenced step; the model does not select sequence
 numbers.
+
+Verification receipt: a record of a check run on a specific state. Every
+successful `verify` (and every `cmd:`/`browser:` acceptance run, §2.6.4)
+appends a `verification_receipt` journal record
+`{acceptance_id, state_digest, command, exit, output_hash}` and sets
+`validation: {status: passed, receipts: [...]}` on the target. The receipt
+binds the verdict to an exact tree state (`state_digest` over source, tests,
+config, lockfile inputs of the check). It becomes `stale` when the relevant
+state changes (any later `file_diff` on covered paths, checkpoint range
+advance, or config/lockfile change): the host flips `validation.status` to
+`stale` and keeps the old receipts for audit. A `stale` check does not count
+toward `complete`; it requires a re-run or an explicit user `waive`.
+A `waive` records `{by: user, reason}` and is never auto-invalidated.
+
+Journal as source of truth, plan as projection. Every accepted `plan` op is
+first appended to the journal as a `plan` event and only then applied to
+`plans/<plan-id>.json`; `applied_event` is advanced to the event's scoped
+reference in the same atomic step. On load (session start, resume, crash
+recovery) the host reads the journal from `applied_event` forward and
+re-applies `plan` events in seq order; a crash between journal append and
+plan write therefore heals by replay (§2.2.1, §3.7). The plan file alone is
+never trusted without its journal prefix.
 
 **Attribute misattribution warning (non-blocking).** If the step being finished has
 file_diff evidence whose paths overlap with `refs` of another pending or in_progress step,
@@ -400,7 +473,7 @@ draft.
 
 2.1.9 Scope guard and plan-first gate
 Scope guard (config `scope_guard: warn|block`, default `warn`). When a
-`file_diff` arrives on a path outside `step.refs` and outside the depth-1 graph
+`file_diff` arrives on a path outside `step.refs[].path` and outside the depth-1 graph
 neighborhood of those refs, the tool result carries a warning and block D gains
 a line: "step N: edited <path> outside declared scope — split the step or note
 why". This catches the "incidental refactor" the prompt forbids in words,
@@ -422,14 +495,18 @@ read the journal files directly (§2.2 host-owned state) and every line it
 sees was already screened at append time.
 
 2.2.1 File and integrity
+Journal is the authoritative log of all state transitions. Plan is a
+recoverable projection, rebuilt by replaying journal events since the last
+checkpoint (`applied_event`, §2.1.4).
 journal/<session-id>.jsonl, one JSON object per line, seq strictly
 increasing from 1 per session. Appends are flushed per record. On open, a
 trailing partial line is truncated and a journal_repair record is written.
 seq values are referenced from plans and diaries; they are never renumbered.
 
-A forked session starts a new journal whose first record is
+A forked session (v2) starts a new journal whose first record is
 {"kind":"fork","from_session":"...","from_seq":N}. Evidence references
 before the fork point remain valid by resolving through the parent chain.
+In v1 fork is deferred, so this record is specified but never written.
 
 2.2.2 Record shape
 Common fields: seq, ts (RFC 3339 with local offset), step (current
@@ -452,6 +529,7 @@ note	by: model, `note: decision|rejected|assumption|lesson|blocker`, resolves? (
 external_change	path, mtime, hash_before, hash_after, last_known_seq, by: host	before a file tool when mtime/hash differs from last known
 claim_lint	pattern, text, line, matched_journal, matched_ref, action, repeated	host, after response generation
 plan	op, id, `by: host	host
+verification_receipt	acceptance_id, state_digest, command, exit, output_hash	host runs a `cmd:`/`browser:` check or `plan verify` (§2.1.4)
 goal_revision	by: user, from_hash, to_hash	/goal or accepted proposal
 subagent	`event: spawn	done
 graph	`event: reindex	stale
@@ -474,14 +552,24 @@ user confirmation (ask_user). Screening applies to content only; it never
 strips data the model needs.
 
 2.2.3 Step attribution
-step is whatever is in_progress at the moment of the record. If nothing is
-in progress, step: null; such records still count as session facts (diary
-host block) but never as evidence. The prompt tells the model to start a
-step before acting; the nudge (§2.1.4) reminds it.
+The session holds an explicit `current_step_id` (null when idle). `plan start`
+sets it; `finish`/`block`/`cancel` clear it. `plan start` is rejected for the
+main agent when `current_step_id` is not null — one step at a time; the model
+must close the current step first. Evidence is bound to `current_step_id` at
+dispatch time, not to "whatever was last started": each `tool_call`,
+`tool_result`, `file_diff`, and `diagnostics` record snapshots the id, so a
+late `finish` cannot retroactively claim records from another step and an
+"evidence predates step start" record never counts. Records with
+step: null still count as session facts (diary host block) but never as
+evidence. The prompt tells the model to start a step before acting; the
+nudge (§2.1.4) reminds it.
 
 2.2.4 Subagents
 Child agents write to the parent session's journal with agent: "sub-N" and
-inherit the parent's step at spawn time. Their file_diff and
+an immutable spawn context `{plan_id, step_id, step_epoch}` captured at spawn
+time. `step_epoch` increments on every host-only `reopen` (§3.6); records
+whose epoch does not match the step's current epoch do not count as evidence
+for the reopened step. Their file_diff and
 tool_result records count as evidence for that step. The subagent record
 with event: done carries the child's summary digest so the diary can
 reference it.
@@ -745,7 +833,7 @@ resolve_ref (which waits or returns unknown).
 
 2.4.8 Verifier integrations
 Where	Behavior
-plan start/add with refs	each ref resolved; not_found at level ≥ 2 rejects with candidates; unknown passes
+plan start/add with refs	each ref resolved per intent: `modify`/`remove` require `found` at level ≥ 2 (`not_found` rejects with candidates); `create` requires the path/symbol to be absent (resolves to `not_found` or `unknown` passes; `found` rejects as "already exists"); `unknown` passes for all intents
 edit/multi_edit pre-check	if old_string is a single identifier-like token and the file is at level ≥ 2 and resolve_ref is not_found → tool still runs (the string may legitimately be non-symbol text) but the result carries warning: symbol 'foo' not in index for this file
 finish of a change step	host computes blast radius: nodes with `references
 diary/MEMORY.md load	stale markers (§2.3.7)
@@ -1120,31 +1208,37 @@ Status bar: compacted: kept N turns · anchor 1.8k.
 Nothing in this procedure asks the model what the goal was.
 
 3.3.3 Anchor
-Fixed order, budgeted at compaction.anchor_ratio (0.08 of context):
+The anchor is a working memo, not a database. Fixed order, budgeted at
+compaction.anchor_ratio (0.08 of context):
 
 text
 
 ANCHOR (host-generated; source of truth after compaction)
 goal: …
 constraints: …
-acceptance: [0] pending · [1] verified j#41 · [2] waived
+acceptance: [0] validation pending · [1] validation passed j#41 (state_digest abc…) · [2] waived
 plan 01J… rev 7: 1 done · 2 in_progress "Add todos field" · 3 pending · 4 blocked "…"
   folded: ✓ 0a–0b explored TUI menus
 files changed this session: src/session/mod.rs (+14/−2) · src/tui/app/mod.rs (+31/−5)
-files read this session: src/session/mod.rs (hash…) · src/tui/app/mod.rs (hash…)
+recent reads (last 5): src/tui/app/mod.rs (hash…) · src/session/mod.rs (hash…)
 open assumptions: step 2 assumes `tokio::time::timeout` not already used (j#19)
 external: src/net/fetch.rs changed outside sqwai since j#40
-last verification: cargo test ✓ 61 passed (j#15, 18:40)
+last verification: cargo test ✓ 61 passed (j#15, 18:40, receipt state_digest abc…)
 notes on open steps:
   step 2 decision: todos live in session file (j#16)
   step 4 blocker: Ctrl+T conflict, waiting for user (j#22)
 diary today: 18:47 "Persist todos in session" (1–3 done, 4 blocked)
-If over budget, cut from the bottom: diary headings → notes on pending
-steps → files list (keep count). Goal, constraints, acceptance, the current
-step, and files-read are never cut (§1.6: read-guard keeps working after
-compaction only if the anchor records what was read).
+Full file lists, full journal, and full receipts live in host-state
+(journal + plan file); the anchor keeps only what the next turns need to
+act. If over budget, cut from the bottom: diary headings → notes on pending
+steps → files list (keep count). Goal, constraints, acceptance validation,
+the current step, and recent reads are never cut.
+Read-guard after compaction: a file read before compaction counts as read
+only while its hash is still in context (recent-reads line or kept history);
+otherwise the model must re-read it before editing. This keeps the guard
+sound without storing every read in the anchor.
 
-3.4 Resume and fork
+3.4 Resume (fork deferred to v2)
 sqwai --resume <session> or the session picker:
 
 Load session; journal opened, repaired if needed.
@@ -1160,11 +1254,9 @@ the kept history (last compaction.keep_turns turns) is loaded verbatim.
 /new with an active plan: ask_user — continue in the new session (plan
 attached), complete, abandon, or leave it (new session without plan; the
 plan stays active and blocks plan create until resolved).
-
-/fork: new session id, new journal with fork record, plan copied with
-forked_from; the original plan remains the project's active one only if the
-user says so — otherwise the fork's copy becomes active and the original is
-marked archived.
+Resume is the only v1 multi-session path. `/fork` (new session id, new
+journal with fork record, plan copied with `forked_from`) is deferred to v2
+and rejected with `code: fork_deferred`.
 
 3.5 Criticism → Reflector
 Problem: "what did you even do?" / "this is wrong" makes models either argue
@@ -1281,7 +1373,8 @@ against the last checkpoint, no agent_claims, confidence: low.
 Files restored; journal undo with the file list.
 Plan: for every done step whose file_diff evidence paths are all
 covered by the undo and whose hash_after no longer matches the tree, the
-host sets status: reopened and appends an automatic note
+host sets status: reopened, increments `step_epoch`, resets
+`validation` to `pending`, and appends an automatic note
 (by: host, "reopened by undo to <sha>"). reopened behaves like
 pending for start and requires new evidence to finish.
 Graph: reindex affected paths.
@@ -1294,7 +1387,7 @@ Provider error mid-turn after retries	partial text kept in history; provider_err
 User cancels a running tool (Esc)	tool_result ok:false code:cancelled; if the tree changed, a post-checkpoint is written; the cancel is journaled; step stays in_progress; no prior work is reverted (§7 S)
 Provider down with fallback configured	automatic switch to [models.x].fallback after retry exhaustion on network/5xx; provider_error journaled with recovered:true, switched_to; step stays in_progress (work queue T)
 Tool panics	caught per call; tool_result ok:false code:internal; agent continues
-Crash	on restart the session picker marks it recoverable; resume path (§3.4) with journal repair; plan file is always consistent (atomic writes)
+Crash	on restart the session picker marks it recoverable; resume path (§3.4) with journal repair; a crash between journal append and plan write heals by replay from `applied_event` (§2.1.4); plan file writes stay atomic
 Diary call fails	host-only entry; never blocks compaction
 Graph corrupt	status shown; graph features off until rebuild; nothing else affected
 Not a git repo	layer-1 file checkpoints and `/undo step N` remain available; Bash side effects that cannot be enumerated are not fully restorable; status shows reduced guarantees
@@ -1307,12 +1400,16 @@ Git unavailable or shadow snapshot skipped	Bash still runs with layer-1 checkpoi
 executes an active plan without a TUI and without a human. It is safe only
 because the plan, evidence, safety classifier, and checkpoints already do not
 depend on a human watching; unattended mode adds policy on top, not new trust.
+Unattended requires isolated mode by default (host-state outside the agent's
+writable scope, §2.0); running with `--no-isolation` is allowed only with an
+explicit flag and is journaled as reduced guarantees.
 
 #### 3.8.1 Preconditions (checked before the first turn, refused otherwise)
 
 - an `active` plan with ≥ 1 acceptance item of kind `cmd:|browser:|ci:`
   (a plan that can only be completed by `manual:` items cannot run
   unattended);
+- isolated execution (or `--no-isolation` with explicit user ack);
 - git available (shadow repo works) or `--no-undo-ack`;
 - mode `act`; `plan.step_max_calls` and `unattended.budget_*` set;
 - no other sqwai instance holds the project lock;
@@ -1466,7 +1563,10 @@ Two-layer command classifier: shell-word heuristics + tree-sitter-bash AST
 sudo|doas|env prefixes, find -delete|-exec, compound commands checked per
 node). Classes: normal (run), dangerous (approval dialog: once / session /
 deny), blocked ([safety].blocked_patterns, no dialog, no retries). Base
-detector cannot be disabled. MCP tools pass through the same approval policy
+detector cannot be disabled. The classifier is an advisory warning and
+approval layer, not a security boundary: in normal mode a determined command
+can still reach `.sqwai/` or the network (see Threat model in §2.0); only
+isolated mode makes host-state unwritable. MCP tools pass through the same approval policy
 using declared annotations plus a per-server approval: always|dangerous|never
 setting. bash_ro (§3.5.3) reuses the classifier at threshold "any mutation".
 
@@ -1502,7 +1602,7 @@ a step shows its combined diff (all `file_diff` of that step from its first
 checkpoint to the last — §7 AB) and offers `/undo step N` (reverts one step if
 its files do not overlap later steps; otherwise refuses with an explanation).
 
-Commands: /new /sessions /fork /resume /undo /compact /diary /plan [history| complete|abandon|limit|waive] /plan from /run /brief /review /goal /constraints /mode /verify [--full] /graph-rebuild /why /export /bench /settings /providers /models /themes /skills /skill /mcp /lsp /init /debug /exit. README must list the same set; a test diffs the two.
+Commands: /new /sessions /resume /undo /compact /diary /plan [history| complete|abandon|limit|waive] /plan from /run /brief /review /goal /constraints /mode /verify [--full] /graph-rebuild /why /export /bench /settings /providers /models /themes /skills /skill /mcp /lsp /init /debug /exit. `/fork` is deferred to v2 and not listed. README must list the same set; a test diffs the two.
 
 5.5 MCP
 rmcp client; stdio and streamable HTTP; tool discovery at session start
@@ -1686,6 +1786,13 @@ Dependencies, not chronology. Each item ends in a usable state. **This table is
 the only status in this document** — the sections above describe the design
 regardless of what is built.
 
+Core loop (must be done before benchmark G): F7 (checkpoints) · R (untrusted
+input) · T (provider fallback) · V (executable acceptance) · I4 (resolve_ref).
+Next priority after V is I4. Infrastructure features (J helpers beyond
+checkpoints, K canvas/watcher/LSP-4, L browser, O unattended, AE server split
+beyond the B contract) are deferred until the core integrity loop is proven
+by the benchmark — they must not starve the core loop.
+
 Status vocabulary: `done` — shipped and behaving as specified; `partial` —
 shipped with a named gap; `next` — unblocked and in line; `planned` —
 specified, waiting on its dependencies; `open question` — not decided.
@@ -1704,7 +1811,7 @@ number; a `partial` one is missing something the design calls for.
 | F3 | Evidence rule in `finish`, `verify`, `complete`; nudges; note | done — `verify` accepts evidence from an unrelated step (#6) | F1 |
 | F4 | Diary: host block, triggers, writer call, fallback; memory_read; secrets screening | done — the journal itself is not screened (#11); the diary number post-check of §2.3.2 is a prompt instruction, not host code (#12) | F2 |
 | F5 | MEMORY.md + memory_propose approval; session-start loading | done | F4 |
-| F6 | Compaction anchor; summary=off default; resume/fork per §3.4; undo→reopen | done | F1–F5 |
+| F6 | Compaction anchor; summary=off default; resume per §3.4 (`/fork` deferred to v2); undo→reopen | done | F1–F5 |
 | F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, optional zstd) + layer-2 shadow repo driven by the git CLI through `tokio::process`; restore via diff-tree; `/undo step N` | done, with two stated deviations: git is invoked synchronously (the call sites are already blocking), and `keep_per_session` is reported rather than enforced — truncating a commit chain rewrites the shas the journal recorded — restore is path-scoped and a non-count `/undo` argument is refused (#4, #5); remaining: git2, checkpoints in the user's `.git`, no undo outside git repos (#17) | F1 |
 | G | Goal-retention benchmark (§8.2) | planned | F6 |
 | H0 | L0 fact block + criticism detector | planned | F2 |
@@ -1727,8 +1834,9 @@ number; a `partial` one is missing something the design calls for.
 | T | Provider fallback chain ([models.x].fallback) | planned — the `fallback` field does not exist on ModelConfig (#8) | §5.1 |
 | U | Assumption notes: open tracking, finish warning, resolve | done | F3 |
 | V | Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md) | next — cmd:/manual: settling done (#7); remaining: /init seeding of verify commands and their substitution on create | F3 |
+| FORK | `/fork` multi-session branch (plan copy + journal fork record) | planned (v2) — v1 rejects with `fork_deferred`; resume is the only path | F6 |
 | W | Plan-first gate (Act first-mutate w/o plan → plan_required) | planned | F3 |
-| X | Staged compaction + files-read anchor + USER.md split/load | partial — USER.md split and loading are in; staged pre-compaction (§3.3.1) and the files-read line in the anchor (§3.3.3) are not | F1, F5 |
+| X | Staged compaction + recent-reads anchor + USER.md split/load | partial — USER.md split and loading are in; staged pre-compaction (§3.3.1) is not; anchor keeps last-5 reads (§3.3.3), not all reads | F1, F5 |
 | Y | Claim lint (post-generation verify against journal/resolve_ref) | planned | I4 |
 | Z | Scope guard (step.refs vs file_diff) | planned | I4 |
 | AA | Lessons tied to files (note kind + context-block rule) | planned | I5 |
@@ -1741,7 +1849,8 @@ number; a `partial` one is missing something the design calls for.
 
 
 
-Ordering beyond the dependency column: K, L and O are the last passes — the
+Ordering beyond the dependency column: core loop first (F7 → R → T → V → I4),
+then benchmark G, then infrastructure. K, L and O are the last passes — the
 canvas graph view, the browser and unattended mode. Order among M, N, O is
 M → N → O. Unattended is last because it is only as safe as everything under
 it, and `brief` is only as useful as the journal is complete.
@@ -1784,10 +1893,27 @@ redundant work: number of file_diff records that revert or re-do a change
 already in a done step;
 fabricated references: resolve_ref failures on symbols the model named in
 text;
-completion: acceptance items verified.
+completion: acceptance items with `validation: passed|waived` (stale does not count).
 Baseline: same tasks with plan/journal/anchor disabled and summary=short
 (i.e., a conventional agent). The README's claim stands only if the
 mechanism beats the baseline on every metric across all three tasks.
+
+How to run (dogfooding checklist):
+
+1. Tasks: three fixtures — (a) add a session field + TUI surface, (b) rename
+   a widely used symbol across modules, (c) fix a failing test with an
+   ambiguous issue text. Each ships with a goal sentence, 2–3 constraints,
+   and `cmd:` acceptance (`cargo test`, `cargo clippy -- -D warnings`).
+2. Baseline: run each task with `compaction.summary=short` and plan/journal
+   disabled; save journals as `bench/<task>/baseline.jsonl`.
+3. Mechanism: run each task with the full core loop (plan + evidence +
+   anchor + `verification_receipt`); force `compaction.threshold` low for
+   ≥ 3 compactions; save journals as `bench/<task>/sqwai.jsonl`.
+4. Probe: after every compaction the harness injects the hidden goal probe;
+   score fidelity/retention without showing the score to the agent.
+5. Metrics: `sqwai bench --plan <id>` prints the five scores above plus
+   stale-receipt count and replay-recovery count; `brief` must equal the
+   journal. Green only if sqwai beats baseline on all five, on all three tasks.
 
 8.3 Ongoing metrics (shown in /debug)
 Plan rejections per accepted op; forced ask_user count; host-only diary
@@ -1840,7 +1966,7 @@ CozoDB as the graph engine	pre-1.0, unstable on-disk format, low upstream activi
 Filesystem watcher as the basis of incrementality	correctness must not depend on a watcher; explicit triggers first
 Force-directed / canvas graph view in the MVP	expensive, untestable, no value to the agent; list view first
 Checkpoint only before "dangerous" bash	formatters and git commands mutate silently; hash-gated checkpoints instead
-Plan bound to session id	breaks resume/fork and multi-session tasks; plans have their own ids
+Plan bound to session id	breaks resume and multi-session tasks; plans have their own ids (`/fork` deferred to v2)
 /plan /act as mode commands	collides with plan document commands; modes are Tab / /mode
 Project-specific dev rules in the system prompt	leaked sqwai's own AGENTS.md into every user's session
 Screenshot-first control	expensive and imprecise, requires vision; the accessibility tree is exact and model-agnostic
