@@ -291,6 +291,12 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         }
     }
 
+    let mut pre_images: Vec<(std::path::PathBuf, Option<Vec<u8>>)> = Vec::new();
+    for p in &resolved_paths {
+        let prev = std::fs::read(p).ok();
+        pre_images.push((p.clone(), prev));
+    }
+
     let check = Command::new("git")
         .current_dir(&ctx.root)
         .args(["apply", "--check", "--whitespace=error", "-"])
@@ -317,14 +323,17 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         return Outcome::err(format!("patch rejected: {}", truncate(error.trim())));
     }
 
-    if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
+    let checkpoint = if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
         &ctx.root,
         ctx.shadow_store,
         &ctx.session_id,
         "patch",
     ) {
-        ctx.journal.push((sha, "patch".to_string()));
-    }
+        ctx.journal.push((sha.clone(), "patch".to_string()));
+        Some(sha)
+    } else {
+        None
+    };
 
     let mut apply = match Command::new("git")
         .current_dir(&ctx.root)
@@ -345,11 +354,32 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     }
     match apply.wait_with_output() {
         Ok(output) if output.status.success() => {
-            // Keep ToolCtx read_state in sync so subsequent edits do not fail as stale
-            for path in &resolved_paths {
-                ctx.mark_read(path);
+            let mut file_diffs = Vec::new();
+            for (path, before) in pre_images {
+                let after = std::fs::read(&path).unwrap_or_default();
+                let diff_text = before
+                    .as_deref()
+                    .map(|b| {
+                        let b_str = String::from_utf8_lossy(b);
+                        let a_str = String::from_utf8_lossy(&after);
+                        super::fs::make_diff(&b_str, &a_str)
+                    })
+                    .unwrap_or_default();
+                let fd = super::fs::file_diff(
+                    &path,
+                    &ctx.root,
+                    before.as_deref(),
+                    &after,
+                    "patch",
+                    checkpoint.clone(),
+                    &diff_text,
+                );
+                file_diffs.push(fd);
+                ctx.mark_read(&path);
             }
             Outcome::ok("patch applied")
+                .with_diff(patch.to_string())
+                .with_file_diffs(file_diffs)
         }
         Ok(output) => Outcome::err(format!(
             "patch failed: {}",
@@ -567,5 +597,60 @@ mod tests {
         let (start, finish) = resolve_boundary_commits(&commits_finished, "1");
         assert_eq!(start.as_deref(), Some("sha_start_2"));
         assert_eq!(finish.as_deref(), Some("sha_finish_2"));
+    }
+
+    #[test]
+    fn patch_stores_layer1_blobs_and_records_file_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .current_dir(dir.path())
+            .args(["init"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .current_dir(dir.path())
+            .args(["config", "user.name", "sqwai-test"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .current_dir(dir.path())
+            .args(["config", "user.email", "test@test.local"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .current_dir(dir.path())
+            .args(["config", "core.autocrlf", "false"])
+            .output()
+            .unwrap();
+
+        let file = dir.path().join("hello.txt");
+        std::fs::write(&file, "line1\nline2\n").unwrap();
+        Command::new("git")
+            .current_dir(dir.path())
+            .args(["add", "hello.txt"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .current_dir(dir.path())
+            .args(["commit", "-m", "init"])
+            .output()
+            .unwrap();
+
+        let mut ctx = ToolCtx::new(dir.path());
+        let unified_patch = "--- a/hello.txt\n+++ b/hello.txt\n@@ -1,2 +1,2 @@\n line1\n-line2\n+line2_modified\n";
+        let outcome = patch(&mut ctx, &json!({"patch": unified_patch}));
+        assert!(outcome.ok, "patch failed: {}", outcome.output);
+        assert!(outcome.file_diff.is_some());
+        let fd = outcome.file_diff.as_ref().unwrap();
+        assert_eq!(fd.path, "hello.txt");
+        assert_eq!(fd.added, 1);
+        assert_eq!(fd.removed, 1);
+        assert!(fd.blob_before.is_some());
+        assert!(fd.blob_after.is_some());
+
+        // Verify blob_before in blob store
+        let blob_hash = fd.blob_before.as_ref().unwrap();
+        let blob_bytes = crate::agent::blobs::get(dir.path(), blob_hash).unwrap();
+        assert_eq!(blob_bytes, b"line1\nline2\n");
     }
 }

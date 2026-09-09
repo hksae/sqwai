@@ -45,7 +45,7 @@ fn is_binary(buf: &[u8]) -> bool {
 
 /// unified diff of two file contents (design §4.1: edits are shown to the user
 /// after the fact, no confirmation dialog beforehand)
-fn make_diff(old: &str, new: &str) -> String {
+pub(crate) fn make_diff(old: &str, new: &str) -> String {
     let d = similar::TextDiff::from_lines(old, new);
     let out = d
         .unified_diff()
@@ -62,11 +62,11 @@ fn make_diff(old: &str, new: &str) -> String {
 }
 
 /// (+added/-removed) line counts from a unified diff body
-fn content_hash(content: &[u8]) -> String {
+pub(crate) fn content_hash(content: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(content))
 }
 
-fn file_diff(
+pub(crate) fn file_diff(
     path: &Path,
     root: &Path,
     before: Option<&[u8]>,
@@ -102,7 +102,7 @@ fn file_diff(
     }
 }
 
-fn diff_counts(diff: &str) -> (usize, usize) {
+pub(crate) fn diff_counts(diff: &str) -> (usize, usize) {
     let mut add = 0usize;
     let mut rem = 0usize;
     for l in diff.lines().skip(2) {
