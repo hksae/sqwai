@@ -41,11 +41,29 @@ pub(super) const COMMANDS: &[&str] = &[
     "/undo",
 ];
 
-/// Pilot second-level completions: subcommands of `/plan`, in the same order
-/// as the `plan_command` arms. Other commands keep level-1-only behavior.
-pub(super) const PLAN_SUBCOMMANDS: &[&str] = &[
-    "show", "history", "limit", "complete", "abandon", "waive", "delete",
+/// Second-level completions: (command, subcommands), in the same order as
+/// the dispatch arms. Commands absent here keep level-1-only behavior
+/// (the popup hides after the first space).
+pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
+    (
+        "/plan",
+        &[
+            "show", "history", "limit", "complete", "abandon", "waive", "delete",
+        ],
+    ),
+    ("/undo", &["step"]),
+    ("/providers", &["update"]),
+    ("/constraints", &["add", "remove"]),
+    ("/mode", &["plan", "act"]),
 ];
+
+/// Subcommand list for a top-level command, if it has second-level completions.
+pub(super) fn subcommands_of(cmd: &str) -> Option<&'static [&'static str]> {
+    SUBCOMMANDS
+        .iter()
+        .find(|(c, _)| *c == cmd)
+        .map(|(_, subs)| *subs)
+}
 
 pub(super) const POPUP_MAX_ROWS: usize = 14;
 

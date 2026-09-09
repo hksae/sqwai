@@ -1668,7 +1668,7 @@ mod tests {
         app.input = App::fresh_input("/plan ".into());
         assert!(app.popup_visible());
         let items = app.popup_items();
-        assert_eq!(items.len(), menus::PLAN_SUBCOMMANDS.len());
+        assert_eq!(items.len(), menus::subcommands_of("/plan").unwrap().len());
         assert!(items.contains(&"/plan waive".to_string()));
         // filtering by the typed prefix
         app.input = App::fresh_input("/plan w".into());
@@ -1681,8 +1681,23 @@ mod tests {
         app.input = App::fresh_input("/plan waive 2".into());
         app.apply_subcommand_insert("/plan", "waive");
         assert_eq!(app.input_text(), "/plan waive 2");
-        // other commands keep level-1-only behavior: hidden after space
-        app.input = App::fresh_input("/undo ".into());
+        // other level-2 commands behave the same way
+        app.input = App::fresh_input("/mode ".into());
+        assert!(app.popup_visible());
+        assert_eq!(
+            app.popup_items(),
+            vec!["/mode plan".to_string(), "/mode act".to_string()]
+        );
+        app.input = App::fresh_input("/undo s".into());
+        assert_eq!(app.popup_items(), vec!["/undo step".to_string()]);
+        app.input = App::fresh_input("/constraints a".into());
+        assert_eq!(app.popup_items(), vec!["/constraints add".to_string()]);
+        app.input = App::fresh_input("/providers ".into());
+        assert_eq!(app.popup_items(), vec!["/providers update".to_string()]);
+        // commands without subcommands keep level-1-only behavior
+        app.input = App::fresh_input("/goal ".into());
+        assert!(!app.popup_visible());
+        app.input = App::fresh_input("/skill ".into());
         assert!(!app.popup_visible());
         // level 1 untouched
         app.input = App::fresh_input("/pl".into());

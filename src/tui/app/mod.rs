@@ -1206,15 +1206,14 @@ impl App {
         self.dirty = true;
     }
 
-    /// Second-level completion target: `/plan <tail>` filters the pilot
-    /// `/plan` subcommand list. Other commands keep level-1-only behavior.
+    /// Second-level completion target: `<cmd> <tail>` filters that
+    /// command's subcommand list from [`menus::SUBCOMMANDS`].
     fn popup_level2_cmd(&self) -> Option<&'static str> {
         let t = self.input_text();
-        if t.starts_with("/plan ") {
-            Some("/plan")
-        } else {
-            None
-        }
+        menus::SUBCOMMANDS
+            .iter()
+            .map(|(cmd, _)| *cmd)
+            .find(|cmd| t.starts_with(&format!("{cmd} ")))
     }
 
     fn popup_visible(&self) -> bool {
@@ -1229,13 +1228,15 @@ impl App {
     }
 
     /// Completion strings, used for both display and insertion.
-    /// Level 1: top-level commands (`/plan`). Level 2: `/plan <sub>`.
+    /// Level 1: top-level commands (`/plan`). Level 2: `<cmd> <sub>`.
     fn popup_items(&self) -> Vec<String> {
         let t = self.input_text();
-        if let Some(cmd) = self.popup_level2_cmd() {
+        if let Some(cmd) = self.popup_level2_cmd()
+            && let Some(subs) = menus::subcommands_of(cmd)
+        {
             let tail = t.strip_prefix(cmd).unwrap_or("").trim_start_matches(' ');
             let word = tail.split_whitespace().next().unwrap_or("");
-            return menus::PLAN_SUBCOMMANDS
+            return subs
                 .iter()
                 .filter(|sub| sub.starts_with(word))
                 .map(|sub| format!("{cmd} {sub}"))
@@ -1998,9 +1999,6 @@ impl App {
         self.dirty = true;
     }
 
-    /// Plan id `/plan delete` would remove: the session's own plan while its
-    /// file is still on disk, otherwise the most recent active plan.
-    /// One shared resolver so the command gate and the confirmed action can
     /// The plan this session works on: its linked plan while the file is
     /// still readable on disk, otherwise the session-scoped active plan
     /// (which falls back to the most recent one, preserving single-plan
@@ -2019,6 +2017,9 @@ impl App {
             .flatten()
     }
 
+    /// Plan id `/plan delete` would remove: the session's own plan while its
+    /// file is still on disk, otherwise the most recent active plan.
+    /// One shared resolver so the command gate and the confirmed action can
     /// never disagree about what is being deleted.
     fn deletable_plan_id(&self) -> Option<String> {
         let root = &self.project_root;
