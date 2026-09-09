@@ -126,6 +126,40 @@ pub(super) enum Menu {
     /// /debug: runtime toggles and diagnostics
     #[allow(dead_code)]
     Debug,
+    /// /settings -> Agent: plan, memory, diary and compaction scalars
+    Agent,
+    /// /settings -> Safety: secrets globs and blocked patterns
+    Safety,
+    /// /settings -> Undo: checkpoint retention and shadow store
+    Undo,
+    /// pick the default model for new sessions
+    PickDefaultModel,
+    /// single-field form editing one numeric host setting
+    EditScalar(ScalarSetting),
+    /// single-field form appending one entry to a string list
+    AddListItem(ListSection),
+    /// pick an entry of a string list to delete
+    DeleteListItems(ListSection),
+    /// MCP server add (None) or edit (Some) form
+    EditMcpServer {
+        index: Option<usize>,
+    },
+    /// one MCP server: edit / enable-disable / delete
+    McpServer {
+        index: usize,
+    },
+    /// pick an MCP server to delete
+    DeleteMcpServer,
+    /// LSP server add (None) or edit (Some) form
+    EditLspServer {
+        index: Option<usize>,
+    },
+    /// one LSP server: edit / enable-disable / delete
+    LspServer {
+        index: usize,
+    },
+    /// pick an LSP server to delete
+    DeleteLspServer,
     /// /theme: palette browser
     Themes,
     /// single-field form to rename a session
@@ -249,6 +283,300 @@ pub(super) enum MenuAction {
     AskNext,
     #[allow(dead_code)]
     AskPrev,
+    OpenAgent,
+    OpenSafety,
+    OpenUndo,
+    OpenPickDefaultModel,
+    SetDefaultModel(String),
+    CycleDiaryEffort,
+    CycleCompactionSummary,
+    CycleUndoShadow,
+    ToggleSkillsAutoLoad,
+    AddMcpServer,
+    EditMcpServer(usize),
+    OpenMcpServer(usize),
+    ToggleMcpServer(usize),
+    DeleteMcpServerList,
+    DeleteMcpServer(usize),
+    AddLspServer,
+    EditLspServer(usize),
+    OpenLspServer(usize),
+    ToggleLspServer(usize),
+    DeleteLspServerList,
+    DeleteLspServer(usize),
+    AddListItem(ListSection),
+    DeleteListItems(ListSection),
+    DeleteListItem(ListSection, usize),
+    EditScalar(ScalarSetting),
+}
+
+/// One numeric host setting editable from /settings. Enums (diary effort,
+/// compaction summary, undo shadow) are cycle rows, not scalars.
+#[derive(Clone, Copy)]
+pub(super) enum ScalarSetting {
+    PlanBudgetRatio,
+    PlanMaxSteps,
+    PlanNudgeAfter,
+    MemoryLoadBudgetRatio,
+    MemoryHeadingDays,
+    MemoryMaxTokens,
+    MemoryMaxProposals,
+    DiaryTokenBudget,
+    DiaryTimeoutSecs,
+    DiaryBatchSteps,
+    DiaryBatchMinutes,
+    CompactionThreshold,
+    CompactionStageRatio,
+    CompactionKeepTurns,
+    CompactionAnchorRatio,
+    UndoKeepPerSession,
+    UndoMaxTreeFiles,
+    UndoBlobGraceSecs,
+    UndoShadowMaxBytes,
+}
+
+/// Parse `raw` into `slot`; on failure reset to `default`. Returns a status line.
+fn apply_num<T>(label: &str, raw: &str, slot: &mut T, default: T) -> String
+where
+    T: std::str::FromStr + std::fmt::Display + Clone,
+{
+    match raw.trim().parse::<T>() {
+        Ok(v) => {
+            *slot = v.clone();
+            format!("{label} = {v}")
+        }
+        Err(_) => {
+            *slot = default.clone();
+            format!("invalid number, reset to default ({default})")
+        }
+    }
+}
+
+impl ScalarSetting {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::PlanBudgetRatio => "budget ratio",
+            Self::PlanMaxSteps => "max steps",
+            Self::PlanNudgeAfter => "nudge after",
+            Self::MemoryLoadBudgetRatio => "load budget ratio",
+            Self::MemoryHeadingDays => "heading days",
+            Self::MemoryMaxTokens => "max tokens",
+            Self::MemoryMaxProposals => "max proposals",
+            Self::DiaryTokenBudget => "token budget",
+            Self::DiaryTimeoutSecs => "timeout secs",
+            Self::DiaryBatchSteps => "batch steps",
+            Self::DiaryBatchMinutes => "batch minutes",
+            Self::CompactionThreshold => "threshold",
+            Self::CompactionStageRatio => "stage ratio",
+            Self::CompactionKeepTurns => "keep turns",
+            Self::CompactionAnchorRatio => "anchor ratio",
+            Self::UndoKeepPerSession => "keep per session",
+            Self::UndoMaxTreeFiles => "max tree files",
+            Self::UndoBlobGraceSecs => "blob grace secs",
+            Self::UndoShadowMaxBytes => "shadow max bytes",
+        }
+    }
+
+    pub(super) fn current(self, cfg: &Config) -> String {
+        match self {
+            Self::PlanBudgetRatio => cfg.plan.budget_ratio.to_string(),
+            Self::PlanMaxSteps => cfg.plan.max_steps.to_string(),
+            Self::PlanNudgeAfter => cfg.plan.nudge_after.to_string(),
+            Self::MemoryLoadBudgetRatio => cfg.memory.load_budget_ratio.to_string(),
+            Self::MemoryHeadingDays => cfg.memory.heading_days.to_string(),
+            Self::MemoryMaxTokens => cfg.memory.max_tokens.to_string(),
+            Self::MemoryMaxProposals => cfg.memory.max_proposals_per_turn.to_string(),
+            Self::DiaryTokenBudget => cfg.diary.token_budget.to_string(),
+            Self::DiaryTimeoutSecs => cfg.diary.timeout_secs.to_string(),
+            Self::DiaryBatchSteps => cfg.diary.batch_steps.to_string(),
+            Self::DiaryBatchMinutes => cfg.diary.batch_minutes.to_string(),
+            Self::CompactionThreshold => cfg.compaction.threshold.to_string(),
+            Self::CompactionStageRatio => cfg.compaction.stage_ratio.to_string(),
+            Self::CompactionKeepTurns => cfg.compaction.keep_turns.to_string(),
+            Self::CompactionAnchorRatio => cfg.compaction.anchor_ratio.to_string(),
+            Self::UndoKeepPerSession => cfg.undo.keep_per_session.to_string(),
+            Self::UndoMaxTreeFiles => cfg.undo.max_tree_files.to_string(),
+            Self::UndoBlobGraceSecs => cfg.undo.blob_grace_secs.to_string(),
+            Self::UndoShadowMaxBytes => cfg.undo.shadow_max_bytes.to_string(),
+        }
+    }
+
+    pub(super) fn apply(self, cfg: &mut Config, raw: &str) -> String {
+        let label = self.label();
+        let def = Config::default();
+        match self {
+            Self::PlanBudgetRatio => apply_num(
+                label,
+                raw,
+                &mut cfg.plan.budget_ratio,
+                def.plan.budget_ratio,
+            ),
+            Self::PlanMaxSteps => {
+                apply_num(label, raw, &mut cfg.plan.max_steps, def.plan.max_steps)
+            }
+            Self::PlanNudgeAfter => {
+                apply_num(label, raw, &mut cfg.plan.nudge_after, def.plan.nudge_after)
+            }
+            Self::MemoryLoadBudgetRatio => apply_num(
+                label,
+                raw,
+                &mut cfg.memory.load_budget_ratio,
+                def.memory.load_budget_ratio,
+            ),
+            Self::MemoryHeadingDays => apply_num(
+                label,
+                raw,
+                &mut cfg.memory.heading_days,
+                def.memory.heading_days,
+            ),
+            Self::MemoryMaxTokens => apply_num(
+                label,
+                raw,
+                &mut cfg.memory.max_tokens,
+                def.memory.max_tokens,
+            ),
+            Self::MemoryMaxProposals => apply_num(
+                label,
+                raw,
+                &mut cfg.memory.max_proposals_per_turn,
+                def.memory.max_proposals_per_turn,
+            ),
+            Self::DiaryTokenBudget => apply_num(
+                label,
+                raw,
+                &mut cfg.diary.token_budget,
+                def.diary.token_budget,
+            ),
+            Self::DiaryTimeoutSecs => apply_num(
+                label,
+                raw,
+                &mut cfg.diary.timeout_secs,
+                def.diary.timeout_secs,
+            ),
+            Self::DiaryBatchSteps => apply_num(
+                label,
+                raw,
+                &mut cfg.diary.batch_steps,
+                def.diary.batch_steps,
+            ),
+            Self::DiaryBatchMinutes => apply_num(
+                label,
+                raw,
+                &mut cfg.diary.batch_minutes,
+                def.diary.batch_minutes,
+            ),
+            Self::CompactionThreshold => apply_num(
+                label,
+                raw,
+                &mut cfg.compaction.threshold,
+                def.compaction.threshold,
+            ),
+            Self::CompactionStageRatio => apply_num(
+                label,
+                raw,
+                &mut cfg.compaction.stage_ratio,
+                def.compaction.stage_ratio,
+            ),
+            Self::CompactionKeepTurns => apply_num(
+                label,
+                raw,
+                &mut cfg.compaction.keep_turns,
+                def.compaction.keep_turns,
+            ),
+            Self::CompactionAnchorRatio => apply_num(
+                label,
+                raw,
+                &mut cfg.compaction.anchor_ratio,
+                def.compaction.anchor_ratio,
+            ),
+            Self::UndoKeepPerSession => apply_num(
+                label,
+                raw,
+                &mut cfg.undo.keep_per_session,
+                def.undo.keep_per_session,
+            ),
+            Self::UndoMaxTreeFiles => apply_num(
+                label,
+                raw,
+                &mut cfg.undo.max_tree_files,
+                def.undo.max_tree_files,
+            ),
+            Self::UndoBlobGraceSecs => apply_num(
+                label,
+                raw,
+                &mut cfg.undo.blob_grace_secs,
+                def.undo.blob_grace_secs,
+            ),
+            Self::UndoShadowMaxBytes => apply_num(
+                label,
+                raw,
+                &mut cfg.undo.shadow_max_bytes,
+                def.undo.shadow_max_bytes,
+            ),
+        }
+    }
+}
+
+/// A string list editable from /settings with add/remove rows.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum ListSection {
+    SecretsExclude,
+    SafetyBlocked,
+    SkillsDirs,
+}
+
+impl ListSection {
+    pub(super) fn title(self) -> &'static str {
+        match self {
+            Self::SecretsExclude => "secret globs",
+            Self::SafetyBlocked => "blocked patterns",
+            Self::SkillsDirs => "skill directories",
+        }
+    }
+
+    pub(super) fn items(self, cfg: &Config) -> Vec<String> {
+        match self {
+            Self::SecretsExclude => cfg.secrets.exclude_globs.clone(),
+            Self::SafetyBlocked => cfg.safety.blocked_patterns.clone(),
+            Self::SkillsDirs => cfg
+                .skills
+                .dirs
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
+        }
+    }
+
+    pub(super) fn push(self, cfg: &mut Config, value: String) {
+        match self {
+            Self::SecretsExclude => cfg.secrets.exclude_globs.push(value),
+            Self::SafetyBlocked => cfg.safety.blocked_patterns.push(value),
+            Self::SkillsDirs => cfg.skills.dirs.push(value.into()),
+        }
+    }
+
+    pub(super) fn remove(self, cfg: &mut Config, index: usize) -> bool {
+        let len = match self {
+            Self::SecretsExclude => cfg.secrets.exclude_globs.len(),
+            Self::SafetyBlocked => cfg.safety.blocked_patterns.len(),
+            Self::SkillsDirs => cfg.skills.dirs.len(),
+        };
+        if index >= len {
+            return false;
+        }
+        match self {
+            Self::SecretsExclude => {
+                cfg.secrets.exclude_globs.remove(index);
+            }
+            Self::SafetyBlocked => {
+                cfg.safety.blocked_patterns.remove(index);
+            }
+            Self::SkillsDirs => {
+                cfg.skills.dirs.remove(index);
+            }
+        };
+        true
+    }
 }
 
 impl App {
@@ -408,6 +736,10 @@ impl App {
                     | Menu::EditModel { .. }
                     | Menu::EditSessionTitle { .. }
                     | Menu::AskFree { .. }
+                    | Menu::EditScalar(..)
+                    | Menu::AddListItem(..)
+                    | Menu::EditMcpServer { .. }
+                    | Menu::EditLspServer { .. }
             )
         )
     }
@@ -548,6 +880,158 @@ impl App {
             MenuAction::OpenLsp => self.open_menu(Menu::Lsp),
             MenuAction::OpenSkills => self.open_menu(Menu::Skills),
             MenuAction::OpenDebug => self.open_menu(Menu::Debug),
+            MenuAction::OpenAgent => self.open_menu(Menu::Agent),
+            MenuAction::OpenSafety => self.open_menu(Menu::Safety),
+            MenuAction::OpenUndo => self.open_menu(Menu::Undo),
+            MenuAction::OpenPickDefaultModel => self.open_menu(Menu::PickDefaultModel),
+            MenuAction::SetDefaultModel(key) => {
+                if !self.cfg.models.contains_key(&key) {
+                    self.status(&format!("unknown model '{key}'"), StatusKind::Err);
+                    return;
+                }
+                self.cfg.default_model = key.clone();
+                self.cfg.save().ok();
+                self.status(
+                    &format!("default model = {key} (applies to new sessions)"),
+                    StatusKind::Ok,
+                );
+                self.build_menu_rows();
+            }
+            MenuAction::CycleDiaryEffort => {
+                let cur = EffortLevel::ALL
+                    .iter()
+                    .position(|l| *l == self.cfg.diary.effort)
+                    .unwrap_or(0);
+                self.cfg.diary.effort = EffortLevel::ALL[(cur + 1) % EffortLevel::ALL.len()];
+                self.cfg.save().ok();
+                self.status(
+                    &format!("diary effort = {}", self.cfg.diary.effort.as_str()),
+                    StatusKind::Ok,
+                );
+                self.build_menu_rows();
+            }
+            MenuAction::CycleCompactionSummary => {
+                let all = crate::config::CompactionSummary::ALL;
+                let cur = all
+                    .iter()
+                    .position(|s| s.as_str() == self.cfg.compaction.summary.as_str())
+                    .unwrap_or(0);
+                self.cfg.compaction.summary = all[(cur + 1) % all.len()];
+                self.cfg.save().ok();
+                self.status(
+                    &format!(
+                        "compaction summary = {}",
+                        self.cfg.compaction.summary.as_str()
+                    ),
+                    StatusKind::Ok,
+                );
+                self.build_menu_rows();
+            }
+            MenuAction::CycleUndoShadow => {
+                let all = crate::config::ShadowStore::ALL;
+                let cur = all
+                    .iter()
+                    .position(|s| s.as_str() == self.cfg.undo.shadow.as_str())
+                    .unwrap_or(0);
+                self.cfg.undo.shadow = all[(cur + 1) % all.len()];
+                self.cfg.save().ok();
+                self.status(
+                    &format!("undo shadow = {}", self.cfg.undo.shadow.as_str()),
+                    StatusKind::Ok,
+                );
+                self.build_menu_rows();
+            }
+            MenuAction::ToggleSkillsAutoLoad => {
+                self.cfg.skills.auto_load = !self.cfg.skills.auto_load;
+                self.cfg.save().ok();
+                let on = self.cfg.skills.auto_load;
+                self.status(&format!("skills auto-load: {}", on_off(on)), StatusKind::Ok);
+                self.build_menu_rows();
+            }
+            MenuAction::AddMcpServer => self.open_menu(Menu::EditMcpServer { index: None }),
+            MenuAction::EditMcpServer(index) => {
+                self.open_menu(Menu::EditMcpServer { index: Some(index) })
+            }
+            MenuAction::OpenMcpServer(index) => self.open_menu(Menu::McpServer { index }),
+            MenuAction::ToggleMcpServer(index) => {
+                let Some(server) = self.cfg.mcp.servers.get_mut(index) else {
+                    self.status("unknown MCP server", StatusKind::Err);
+                    return;
+                };
+                server.enabled = !server.enabled;
+                let state = if server.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                let name = server.name.clone();
+                self.cfg.save().ok();
+                self.status(&format!("MCP server '{name}' {state}"), StatusKind::Ok);
+                self.build_menu_rows();
+            }
+            MenuAction::DeleteMcpServerList => self.open_menu(Menu::DeleteMcpServer),
+            MenuAction::DeleteMcpServer(index) => {
+                let name = self
+                    .cfg
+                    .mcp
+                    .servers
+                    .get(index)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                self.open_menu(Menu::ConfirmDelete {
+                    label: format!("delete MCP server '{name}'?"),
+                    action: MenuAction::DeleteMcpServer(index),
+                });
+            }
+            MenuAction::AddLspServer => self.open_menu(Menu::EditLspServer { index: None }),
+            MenuAction::EditLspServer(index) => {
+                self.open_menu(Menu::EditLspServer { index: Some(index) })
+            }
+            MenuAction::OpenLspServer(index) => self.open_menu(Menu::LspServer { index }),
+            MenuAction::ToggleLspServer(index) => {
+                let Some(server) = self.cfg.lsp.servers.get_mut(index) else {
+                    self.status("unknown LSP server", StatusKind::Err);
+                    return;
+                };
+                server.enabled = !server.enabled;
+                let state = if server.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                let name = server.name.clone();
+                self.cfg.save().ok();
+                self.status(&format!("LSP server '{name}' {state}"), StatusKind::Ok);
+                self.build_menu_rows();
+            }
+            MenuAction::DeleteLspServerList => self.open_menu(Menu::DeleteLspServer),
+            MenuAction::DeleteLspServer(index) => {
+                let name = self
+                    .cfg
+                    .lsp
+                    .servers
+                    .get(index)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                self.open_menu(Menu::ConfirmDelete {
+                    label: format!("delete LSP server '{name}'?"),
+                    action: MenuAction::DeleteLspServer(index),
+                });
+            }
+            MenuAction::AddListItem(section) => self.open_menu(Menu::AddListItem(section)),
+            MenuAction::DeleteListItems(section) => self.open_menu(Menu::DeleteListItems(section)),
+            MenuAction::DeleteListItem(section, index) => {
+                let item = section
+                    .items(&self.cfg)
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_default();
+                self.open_menu(Menu::ConfirmDelete {
+                    label: format!("delete {} '{item}'?", section.title()),
+                    action: MenuAction::DeleteListItem(section, index),
+                });
+            }
+            MenuAction::EditScalar(setting) => self.open_menu(Menu::EditScalar(setting)),
             MenuAction::OpenModels(p) => self.open_menu(Menu::Models { provider: p }),
             MenuAction::AddProvider => self.open_menu(Menu::EditProvider { name: None }),
             MenuAction::EditProvider(name) => {
@@ -857,6 +1341,41 @@ impl App {
                         Err(e) => self.status(&format!("delete session: {e:#}"), StatusKind::Err),
                     }
                 }
+                if let MenuAction::DeleteMcpServer(index) = &inner {
+                    if *index < self.cfg.mcp.servers.len() {
+                        let removed = self.cfg.mcp.servers.remove(*index);
+                        self.cfg.save().ok();
+                        self.status(
+                            &format!("MCP server '{}' deleted", removed.name),
+                            StatusKind::Ok,
+                        );
+                    } else {
+                        self.status("unknown MCP server", StatusKind::Err);
+                    }
+                }
+                if let MenuAction::DeleteLspServer(index) = &inner {
+                    if *index < self.cfg.lsp.servers.len() {
+                        let removed = self.cfg.lsp.servers.remove(*index);
+                        self.cfg.save().ok();
+                        self.status(
+                            &format!("LSP server '{}' deleted", removed.name),
+                            StatusKind::Ok,
+                        );
+                    } else {
+                        self.status("unknown LSP server", StatusKind::Err);
+                    }
+                }
+                if let MenuAction::DeleteListItem(section, index) = &inner {
+                    if section.remove(&mut self.cfg, *index) {
+                        self.cfg.save().ok();
+                        self.status(
+                            &format!("{} entry deleted", section.title()),
+                            StatusKind::Ok,
+                        );
+                    } else {
+                        self.status("unknown entry", StatusKind::Err);
+                    }
+                }
                 if matches!(&inner, MenuAction::DeletePlan) {
                     // close the prompt first: with a menu open status()
                     // writes to menu_status, which nothing renders once the
@@ -923,6 +1442,19 @@ impl App {
                     MenuAction::DeleteSession(_) => {
                         self.menu_stack.pop();
                         self.open_menu(Menu::Sessions);
+                    }
+                    // server gone: back to a fresh server list
+                    MenuAction::DeleteMcpServer(_) => {
+                        self.menu_home();
+                        self.open_menu(Menu::Mcp);
+                    }
+                    MenuAction::DeleteLspServer(_) => {
+                        self.menu_home();
+                        self.open_menu(Menu::Lsp);
+                    }
+                    // entry gone: back to the delete list (rebuilt) for the next one
+                    MenuAction::DeleteListItem(_, _) => {
+                        self.menu_back();
                     }
                     _ => {}
                 }
@@ -1095,6 +1627,27 @@ impl App {
             Some(Menu::DeleteSessions) => " delete session ".into(),
             Some(Menu::ForkPoint) => " fork this session ".into(),
             Some(Menu::Debug) => " debug ".into(),
+            Some(Menu::Agent) => " agent ".into(),
+            Some(Menu::Safety) => " safety ".into(),
+            Some(Menu::Undo) => " undo ".into(),
+            Some(Menu::PickDefaultModel) => " default model ".into(),
+            Some(Menu::EditScalar(setting)) => format!(" edit {} ", setting.label()),
+            Some(Menu::AddListItem(section)) => format!(" add {} ", section.title()),
+            Some(Menu::DeleteListItems(section)) => {
+                format!(" delete {} ", section.title())
+            }
+            Some(Menu::EditMcpServer { index }) => match index {
+                Some(_) => " edit MCP server ".into(),
+                None => " new MCP server ".into(),
+            },
+            Some(Menu::McpServer { .. }) => " mcp server ".into(),
+            Some(Menu::DeleteMcpServer) => " delete MCP server ".into(),
+            Some(Menu::EditLspServer { index }) => match index {
+                Some(_) => " edit LSP server ".into(),
+                None => " new LSP server ".into(),
+            },
+            Some(Menu::LspServer { .. }) => " lsp server ".into(),
+            Some(Menu::DeleteLspServer) => " delete LSP server ".into(),
             Some(Menu::Themes) => " themes ".into(),
             Some(Menu::EditSessionTitle { .. }) => " rename session ".into(),
             Some(Menu::ConfirmDelete { .. }) => " confirm ".into(),
@@ -1144,6 +1697,21 @@ impl App {
                     "models and API providers",
                     MenuAction::OpenProviders,
                 ));
+                self.menu_rows.push(section(
+                    "Agent",
+                    "plan, memory, diary, compaction",
+                    MenuAction::OpenAgent,
+                ));
+                self.menu_rows.push(section(
+                    "Safety",
+                    "secrets, blocked patterns",
+                    MenuAction::OpenSafety,
+                ));
+                self.menu_rows.push(section(
+                    "Undo",
+                    "checkpoints, retention",
+                    MenuAction::OpenUndo,
+                ));
                 self.menu_rows
                     .push(section("MCP", "tool servers", MenuAction::OpenMcp));
                 self.menu_rows
@@ -1167,7 +1735,7 @@ impl App {
                     self.menu_rows
                         .push(row(Line::from("  no servers configured"), MenuAction::None));
                 } else {
-                    for server in &self.cfg.mcp.servers {
+                    for (i, server) in self.cfg.mcp.servers.iter().enumerate() {
                         self.menu_rows.push(row(
                             Line::from(format!(
                                 "  {:<20} {}",
@@ -1178,11 +1746,73 @@ impl App {
                                     "disabled"
                                 }
                             )),
-                            MenuAction::None,
+                            MenuAction::OpenMcpServer(i),
                         ));
                     }
                 }
-                self.menu_footer_text = Some("edit config.toml · esc: back".into());
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(
+                        " + add server".to_string(),
+                        Theme::ACCENT_SOFT(),
+                    )]),
+                    MenuAction::AddMcpServer,
+                ));
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(
+                        " · delete server".to_string(),
+                        Theme::ERR(),
+                    )]),
+                    MenuAction::DeleteMcpServerList,
+                ));
+                self.menu_footer_text = Some("enter: open · esc: back".into());
+            }
+            Menu::McpServer { index } => {
+                let name = self
+                    .cfg
+                    .mcp
+                    .servers
+                    .get(index)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                let enabled = self.cfg.mcp.servers.get(index).is_some_and(|s| s.enabled);
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(" edit".to_string(), Theme::FG())]),
+                    MenuAction::EditMcpServer(index),
+                ));
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(
+                        if enabled { " disable" } else { " enable" }.to_string(),
+                        Theme::FG(),
+                    )]),
+                    MenuAction::ToggleMcpServer(index),
+                ));
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(" delete", Theme::ERR())]),
+                    MenuAction::DeleteMcpServer(index),
+                ));
+                self.menu_footer_text = Some(format!(" mcp server: {name} · esc: back "));
+            }
+            Menu::DeleteMcpServer => {
+                for (i, server) in self.cfg.mcp.servers.iter().enumerate() {
+                    self.menu_rows.push(row(
+                        Line::from(vec![
+                            Span::styled(format!(" {}", server.name), Theme::ERR()),
+                            Span::styled(
+                                format!(
+                                    "  {}",
+                                    if server.enabled {
+                                        "enabled"
+                                    } else {
+                                        "disabled"
+                                    }
+                                ),
+                                Theme::dim(),
+                            ),
+                        ]),
+                        MenuAction::DeleteMcpServer(i),
+                    ));
+                }
+                self.menu_footer_text = Some("enter: delete · esc: back".into());
             }
             Menu::Lsp => {
                 self.menu_rows
@@ -1191,7 +1821,7 @@ impl App {
                     self.menu_rows
                         .push(row(Line::from("  no servers configured"), MenuAction::None));
                 } else {
-                    for server in &self.cfg.lsp.servers {
+                    for (i, server) in self.cfg.lsp.servers.iter().enumerate() {
                         self.menu_rows.push(row(
                             Line::from(format!(
                                 "  {:<20} {}",
@@ -1202,13 +1832,113 @@ impl App {
                                     "disabled"
                                 }
                             )),
-                            MenuAction::None,
+                            MenuAction::OpenLspServer(i),
                         ));
                     }
                 }
-                self.menu_footer_text = Some("edit config.toml · esc: back".into());
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(
+                        " + add server".to_string(),
+                        Theme::ACCENT_SOFT(),
+                    )]),
+                    MenuAction::AddLspServer,
+                ));
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(
+                        " · delete server".to_string(),
+                        Theme::ERR(),
+                    )]),
+                    MenuAction::DeleteLspServerList,
+                ));
+                self.menu_footer_text = Some("enter: open · esc: back".into());
+            }
+            Menu::LspServer { index } => {
+                let name = self
+                    .cfg
+                    .lsp
+                    .servers
+                    .get(index)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                let enabled = self.cfg.lsp.servers.get(index).is_some_and(|s| s.enabled);
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(" edit".to_string(), Theme::FG())]),
+                    MenuAction::EditLspServer(index),
+                ));
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(
+                        if enabled { " disable" } else { " enable" }.to_string(),
+                        Theme::FG(),
+                    )]),
+                    MenuAction::ToggleLspServer(index),
+                ));
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(" delete", Theme::ERR())]),
+                    MenuAction::DeleteLspServer(index),
+                ));
+                self.menu_footer_text = Some(format!(" lsp server: {name} · esc: back "));
+            }
+            Menu::DeleteLspServer => {
+                for (i, server) in self.cfg.lsp.servers.iter().enumerate() {
+                    self.menu_rows.push(row(
+                        Line::from(vec![
+                            Span::styled(format!(" {}", server.name), Theme::ERR()),
+                            Span::styled(
+                                format!(
+                                    "  {}",
+                                    if server.enabled {
+                                        "enabled"
+                                    } else {
+                                        "disabled"
+                                    }
+                                ),
+                                Theme::dim(),
+                            ),
+                        ]),
+                        MenuAction::DeleteLspServer(i),
+                    ));
+                }
+                self.menu_footer_text = Some("enter: delete · esc: back".into());
             }
             Menu::Skills => {
+                self.menu_rows.push(row(
+                    Line::from(vec![
+                        Span::styled(format!("  {:<18}", "auto-load"), Theme::dim()),
+                        Span::styled(on_off(self.cfg.skills.auto_load), Theme::accent()),
+                    ]),
+                    MenuAction::ToggleSkillsAutoLoad,
+                ));
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(
+                        "  Directories".to_string(),
+                        Theme::dim(),
+                    )]),
+                    MenuAction::None,
+                ));
+                if self.cfg.skills.dirs.is_empty() {
+                    self.menu_rows
+                        .push(row(Line::from("  (none)"), MenuAction::None));
+                }
+                for dir in &self.cfg.skills.dirs {
+                    self.menu_rows.push(row(
+                        Line::from(format!("  {}", dir.display())),
+                        MenuAction::None,
+                    ));
+                }
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(
+                        " + add directory".to_string(),
+                        Theme::ACCENT_SOFT(),
+                    )]),
+                    MenuAction::AddListItem(ListSection::SkillsDirs),
+                ));
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(
+                        " · delete directory".to_string(),
+                        Theme::ERR(),
+                    )]),
+                    MenuAction::DeleteListItems(ListSection::SkillsDirs),
+                ));
                 let root = std::env::current_dir().unwrap_or_default();
                 let loaded = crate::prompts::skills::load(&self.cfg.skills, &root);
                 self.menu_rows
@@ -1253,6 +1983,220 @@ impl App {
                     MenuAction::ToggleShowCost,
                 ));
                 self.menu_footer_text = Some("enter: open/toggle · esc: back".into());
+            }
+            Menu::Agent => {
+                let header = |t: &str| {
+                    row(
+                        Line::from(vec![Span::styled(format!("  {t}"), Theme::dim())]),
+                        MenuAction::None,
+                    )
+                };
+                let scalar = |label: &str, val: String, s: ScalarSetting| {
+                    row(
+                        Line::from(vec![
+                            Span::styled(format!("  {label:<18}"), Theme::dim()),
+                            Span::styled(val, Theme::accent()),
+                        ]),
+                        MenuAction::EditScalar(s),
+                    )
+                };
+                self.menu_rows.push(header("plan"));
+                self.menu_rows.push(scalar(
+                    "budget ratio",
+                    ScalarSetting::PlanBudgetRatio.current(&self.cfg),
+                    ScalarSetting::PlanBudgetRatio,
+                ));
+                self.menu_rows.push(scalar(
+                    "max steps",
+                    ScalarSetting::PlanMaxSteps.current(&self.cfg),
+                    ScalarSetting::PlanMaxSteps,
+                ));
+                self.menu_rows.push(scalar(
+                    "nudge after",
+                    ScalarSetting::PlanNudgeAfter.current(&self.cfg),
+                    ScalarSetting::PlanNudgeAfter,
+                ));
+                self.menu_rows.push(header("memory"));
+                self.menu_rows.push(scalar(
+                    "load budget ratio",
+                    ScalarSetting::MemoryLoadBudgetRatio.current(&self.cfg),
+                    ScalarSetting::MemoryLoadBudgetRatio,
+                ));
+                self.menu_rows.push(scalar(
+                    "heading days",
+                    ScalarSetting::MemoryHeadingDays.current(&self.cfg),
+                    ScalarSetting::MemoryHeadingDays,
+                ));
+                self.menu_rows.push(scalar(
+                    "max tokens",
+                    ScalarSetting::MemoryMaxTokens.current(&self.cfg),
+                    ScalarSetting::MemoryMaxTokens,
+                ));
+                self.menu_rows.push(scalar(
+                    "max proposals",
+                    ScalarSetting::MemoryMaxProposals.current(&self.cfg),
+                    ScalarSetting::MemoryMaxProposals,
+                ));
+                self.menu_rows.push(header("diary"));
+                self.menu_rows.push(scalar(
+                    "token budget",
+                    ScalarSetting::DiaryTokenBudget.current(&self.cfg),
+                    ScalarSetting::DiaryTokenBudget,
+                ));
+                self.menu_rows.push(row(
+                    Line::from(vec![
+                        Span::styled(format!("  {:<18}", "effort"), Theme::dim()),
+                        Span::styled(self.cfg.diary.effort.as_str().to_string(), Theme::accent()),
+                    ]),
+                    MenuAction::CycleDiaryEffort,
+                ));
+                self.menu_rows.push(scalar(
+                    "timeout secs",
+                    ScalarSetting::DiaryTimeoutSecs.current(&self.cfg),
+                    ScalarSetting::DiaryTimeoutSecs,
+                ));
+                self.menu_rows.push(scalar(
+                    "batch steps",
+                    ScalarSetting::DiaryBatchSteps.current(&self.cfg),
+                    ScalarSetting::DiaryBatchSteps,
+                ));
+                self.menu_rows.push(scalar(
+                    "batch minutes",
+                    ScalarSetting::DiaryBatchMinutes.current(&self.cfg),
+                    ScalarSetting::DiaryBatchMinutes,
+                ));
+                self.menu_rows.push(header("compaction"));
+                self.menu_rows.push(scalar(
+                    "threshold",
+                    ScalarSetting::CompactionThreshold.current(&self.cfg),
+                    ScalarSetting::CompactionThreshold,
+                ));
+                self.menu_rows.push(scalar(
+                    "stage ratio",
+                    ScalarSetting::CompactionStageRatio.current(&self.cfg),
+                    ScalarSetting::CompactionStageRatio,
+                ));
+                self.menu_rows.push(scalar(
+                    "keep turns",
+                    ScalarSetting::CompactionKeepTurns.current(&self.cfg),
+                    ScalarSetting::CompactionKeepTurns,
+                ));
+                self.menu_rows.push(scalar(
+                    "anchor ratio",
+                    ScalarSetting::CompactionAnchorRatio.current(&self.cfg),
+                    ScalarSetting::CompactionAnchorRatio,
+                ));
+                self.menu_rows.push(row(
+                    Line::from(vec![
+                        Span::styled(format!("  {:<18}", "summary"), Theme::dim()),
+                        Span::styled(
+                            self.cfg.compaction.summary.as_str().to_string(),
+                            Theme::accent(),
+                        ),
+                    ]),
+                    MenuAction::CycleCompactionSummary,
+                ));
+                self.menu_footer_text = Some("enter: edit/cycle · esc: back".into());
+            }
+            Menu::Safety => {
+                let header = |t: &str| {
+                    row(
+                        Line::from(vec![Span::styled(format!("  {t}"), Theme::dim())]),
+                        MenuAction::None,
+                    )
+                };
+                for section in [ListSection::SecretsExclude, ListSection::SafetyBlocked] {
+                    self.menu_rows.push(header(section.title()));
+                    let items = section.items(&self.cfg);
+                    if items.is_empty() {
+                        self.menu_rows
+                            .push(row(Line::from("  (empty)"), MenuAction::None));
+                    }
+                    for item in items {
+                        self.menu_rows
+                            .push(row(Line::from(format!("  {item}")), MenuAction::None));
+                    }
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled(
+                            " + add".to_string(),
+                            Theme::ACCENT_SOFT(),
+                        )]),
+                        MenuAction::AddListItem(section),
+                    ));
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled(" · delete".to_string(), Theme::ERR())]),
+                        MenuAction::DeleteListItems(section),
+                    ));
+                }
+                self.menu_footer_text = Some("enter: open · esc: back".into());
+            }
+            Menu::Undo => {
+                let scalar = |label: &str, val: String, s: ScalarSetting| {
+                    row(
+                        Line::from(vec![
+                            Span::styled(format!("  {label:<18}"), Theme::dim()),
+                            Span::styled(val, Theme::accent()),
+                        ]),
+                        MenuAction::EditScalar(s),
+                    )
+                };
+                self.menu_rows.push(scalar(
+                    "keep per session",
+                    ScalarSetting::UndoKeepPerSession.current(&self.cfg),
+                    ScalarSetting::UndoKeepPerSession,
+                ));
+                self.menu_rows.push(scalar(
+                    "max tree files",
+                    ScalarSetting::UndoMaxTreeFiles.current(&self.cfg),
+                    ScalarSetting::UndoMaxTreeFiles,
+                ));
+                self.menu_rows.push(scalar(
+                    "blob grace secs",
+                    ScalarSetting::UndoBlobGraceSecs.current(&self.cfg),
+                    ScalarSetting::UndoBlobGraceSecs,
+                ));
+                self.menu_rows.push(row(
+                    Line::from(vec![
+                        Span::styled(format!("  {:<18}", "shadow"), Theme::dim()),
+                        Span::styled(self.cfg.undo.shadow.as_str().to_string(), Theme::accent()),
+                    ]),
+                    MenuAction::CycleUndoShadow,
+                ));
+                self.menu_rows.push(scalar(
+                    "shadow max bytes",
+                    ScalarSetting::UndoShadowMaxBytes.current(&self.cfg),
+                    ScalarSetting::UndoShadowMaxBytes,
+                ));
+                self.menu_footer_text = Some("enter: edit/cycle · esc: back".into());
+            }
+            Menu::PickDefaultModel => {
+                for (k, m) in &self.cfg.models {
+                    let mark = if *k == self.cfg.default_model {
+                        " *default"
+                    } else {
+                        ""
+                    };
+                    self.menu_rows.push(row(
+                        Line::from(vec![
+                            Span::styled(format!(" {k}{mark}"), Theme::accent()),
+                            Span::styled(format!("  {}", m.provider), Theme::dim()),
+                        ]),
+                        MenuAction::SetDefaultModel(k.clone()),
+                    ));
+                }
+                self.menu_footer_text = Some("enter: set default · esc: back".into());
+            }
+            Menu::DeleteListItems(section) => {
+                for (i, item) in section.items(&self.cfg).iter().enumerate() {
+                    self.menu_rows.push(row(
+                        Line::from(vec![
+                            Span::styled(format!(" {item}"), Theme::ERR()),
+                            Span::styled(format!("  {}", section.title()), Theme::dim()),
+                        ]),
+                        MenuAction::DeleteListItem(section, i),
+                    ));
+                }
+                self.menu_footer_text = Some("enter: delete · esc: back".into());
             }
             Menu::Themes => {
                 let cur = crate::tui::theme::theme_index();
@@ -1512,6 +2456,23 @@ impl App {
                 self.menu_footer_text = Some("enter: fork from here · esc: cancel".into());
             }
             Menu::Providers => {
+                self.menu_rows.push(row(
+                    Line::from(vec![
+                        Span::styled("  default model".to_string(), Theme::dim()),
+                        Span::styled(format!("  {}", self.cfg.default_model), Theme::accent()),
+                    ]),
+                    MenuAction::OpenPickDefaultModel,
+                ));
+                self.menu_rows.push(row(
+                    Line::from(vec![
+                        Span::styled("  default effort".to_string(), Theme::dim()),
+                        Span::styled(
+                            self.cfg.default_effort.as_str().to_string(),
+                            Theme::accent(),
+                        ),
+                    ]),
+                    MenuAction::CycleDefaultEffort,
+                ));
                 for (name, pc) in &self.cfg.providers {
                     let models = self
                         .cfg
@@ -1897,7 +2858,11 @@ impl App {
             Menu::EditProvider { .. }
             | Menu::EditModel { .. }
             | Menu::EditSessionTitle { .. }
-            | Menu::AskFree { .. } => {}
+            | Menu::AskFree { .. }
+            | Menu::EditScalar(..)
+            | Menu::AddListItem(..)
+            | Menu::EditMcpServer { .. }
+            | Menu::EditLspServer { .. } => {}
             Menu::Subagents => {
                 if self.subagents.is_empty() {
                     self.menu_rows.push(row(

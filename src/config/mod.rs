@@ -725,6 +725,27 @@ impl Default for DiaryConfig {
     }
 }
 
+impl CompactionSummary {
+    pub const ALL: [CompactionSummary; 2] = [CompactionSummary::Off, CompactionSummary::Short];
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Short => "short",
+        }
+    }
+}
+
+impl ShadowStore {
+    pub const ALL: [ShadowStore; 3] = [ShadowStore::Local, ShadowStore::User, ShadowStore::Off];
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::User => "user",
+            Self::Off => "off",
+        }
+    }
+}
+
 fn default_memory_load_budget_ratio() -> f64 {
     0.06
 }

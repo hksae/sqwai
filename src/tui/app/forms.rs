@@ -19,6 +19,23 @@ use crate::tui::theme::Theme;
 
 const FORMAT_OPTS: &[&str] = &["openai", "anthropic", "responses"];
 const EFFORT_OPTS: &[&str] = &["off", "low", "medium", "high", "max"];
+const MCP_TRANSPORT_OPTS: &[&str] = &["stdio", "http"];
+
+/// "K=V,K=V" <-> env map rendering for server forms.
+fn join_env(env: &std::collections::BTreeMap<String, String>) -> String {
+    env.iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn parse_env(raw: &str) -> std::collections::BTreeMap<String, String> {
+    raw.split(',')
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .filter(|(k, _)| !k.is_empty())
+        .collect()
+}
 
 pub(super) enum FormField {
     /// free text edited through a real textarea (cursor, word jumps, paste)
@@ -158,6 +175,65 @@ impl App {
                     .map(|s| s.title.clone())
                     .unwrap_or_default();
                 self.form_fields = vec![FormField::text("title", title)];
+            }
+            Some(Menu::EditScalar(setting)) => {
+                self.form_fields =
+                    vec![FormField::text(setting.label(), setting.current(&self.cfg))];
+            }
+            Some(Menu::AddListItem(section)) => {
+                self.form_fields = vec![FormField::text(section.title(), String::new())];
+            }
+            Some(Menu::EditMcpServer { index }) => {
+                match index.and_then(|i| self.cfg.mcp.servers.get(i)) {
+                    Some(server) => {
+                        let (type_sel, endpoint, args, env) = match &server.transport {
+                            crate::config::McpTransport::Stdio { command, args, env } => {
+                                (0, command.clone(), args.join(" "), join_env(env))
+                            }
+                            crate::config::McpTransport::Http { url, headers } => {
+                                (1, url.clone(), String::new(), join_env(headers))
+                            }
+                        };
+                        self.form_fields = vec![
+                            FormField::text("name", server.name.clone()),
+                            FormField::choice("type", MCP_TRANSPORT_OPTS, type_sel),
+                            FormField::text("endpoint", endpoint),
+                            FormField::text("args", args),
+                            FormField::text("env", env),
+                        ];
+                    }
+                    None => {
+                        self.form_fields = vec![
+                            FormField::text("name", String::new()),
+                            FormField::choice("type", MCP_TRANSPORT_OPTS, 0),
+                            FormField::text("endpoint", String::new()),
+                            FormField::text("args", String::new()),
+                            FormField::text("env", String::new()),
+                        ];
+                    }
+                }
+            }
+            Some(Menu::EditLspServer { index }) => {
+                match index.and_then(|i| self.cfg.lsp.servers.get(i)) {
+                    Some(server) => {
+                        self.form_fields = vec![
+                            FormField::text("name", server.name.clone()),
+                            FormField::text("language", server.language.clone()),
+                            FormField::text("command", server.command.clone()),
+                            FormField::text("args", server.args.join(" ")),
+                            FormField::text("root markers", server.root_markers.join(",")),
+                        ];
+                    }
+                    None => {
+                        self.form_fields = vec![
+                            FormField::text("name", String::new()),
+                            FormField::text("language", String::new()),
+                            FormField::text("command", String::new()),
+                            FormField::text("args", String::new()),
+                            FormField::text("root markers", String::new()),
+                        ];
+                    }
+                }
             }
             Some(Menu::AskFree { .. }) => {
                 self.form_fields = vec![FormField::text("answer", String::new())];
@@ -500,6 +576,153 @@ impl App {
                     .map(|f| f.trimmed())
                     .unwrap_or_default();
                 self.ask_answer(t);
+            }
+            Some(Menu::EditScalar(setting)) => {
+                let raw = self
+                    .form_fields
+                    .first()
+                    .map(|f| f.trimmed())
+                    .unwrap_or_default();
+                let message = setting.apply(&mut self.cfg, &raw);
+                self.cfg.save().ok();
+                self.status(&message, StatusKind::Ok);
+                self.open_menu_replace(match setting {
+                    super::menus::ScalarSetting::UndoKeepPerSession
+                    | super::menus::ScalarSetting::UndoMaxTreeFiles
+                    | super::menus::ScalarSetting::UndoBlobGraceSecs
+                    | super::menus::ScalarSetting::UndoShadowMaxBytes => Menu::Undo,
+                    _ => Menu::Agent,
+                });
+            }
+            Some(Menu::AddListItem(section)) => {
+                let value = self
+                    .form_fields
+                    .first()
+                    .map(|f| f.trimmed())
+                    .unwrap_or_default();
+                if value.is_empty() {
+                    self.status("value cannot be empty", StatusKind::Err);
+                    return;
+                }
+                section.push(&mut self.cfg, value.clone());
+                self.cfg.save().ok();
+                self.status(
+                    &format!("added to {}: {value}", section.title()),
+                    StatusKind::Ok,
+                );
+                self.open_menu_replace(match section {
+                    super::menus::ListSection::SkillsDirs => Menu::Skills,
+                    _ => Menu::Safety,
+                });
+            }
+            Some(Menu::EditMcpServer { index }) => {
+                let vals: Vec<String> = self.form_fields.iter().map(|f| f.trimmed()).collect();
+                let (name, kind, endpoint, args, env) = (
+                    vals.first().cloned().unwrap_or_default(),
+                    vals.get(1).cloned().unwrap_or_default(),
+                    vals.get(2).cloned().unwrap_or_default(),
+                    vals.get(3).cloned().unwrap_or_default(),
+                    vals.get(4).cloned().unwrap_or_default(),
+                );
+                if name.is_empty() || endpoint.is_empty() {
+                    self.status("name and endpoint are required", StatusKind::Err);
+                    return;
+                }
+                if self
+                    .cfg
+                    .mcp
+                    .servers
+                    .iter()
+                    .enumerate()
+                    .any(|(i, s)| s.name == name && Some(i) != index)
+                {
+                    self.status(
+                        &format!("MCP server '{name}' already exists"),
+                        StatusKind::Err,
+                    );
+                    return;
+                }
+                let transport = if kind == "http" {
+                    crate::config::McpTransport::Http {
+                        url: endpoint,
+                        headers: parse_env(&env),
+                    }
+                } else {
+                    crate::config::McpTransport::Stdio {
+                        command: endpoint,
+                        args: args.split_whitespace().map(str::to_string).collect(),
+                        env: parse_env(&env),
+                    }
+                };
+                let enabled = index
+                    .and_then(|i| self.cfg.mcp.servers.get(i))
+                    .is_none_or(|s| s.enabled);
+                let server = crate::config::McpServerDef {
+                    name: name.clone(),
+                    enabled,
+                    transport,
+                };
+                match index {
+                    Some(i) if i < self.cfg.mcp.servers.len() => {
+                        self.cfg.mcp.servers[i] = server;
+                    }
+                    _ => self.cfg.mcp.servers.push(server),
+                }
+                self.cfg.save().ok();
+                self.status(&format!("MCP server '{name}' saved"), StatusKind::Ok);
+                self.open_menu_replace(Menu::Mcp);
+            }
+            Some(Menu::EditLspServer { index }) => {
+                let vals: Vec<String> = self.form_fields.iter().map(|f| f.trimmed()).collect();
+                let (name, language, command, args, markers) = (
+                    vals.first().cloned().unwrap_or_default(),
+                    vals.get(1).cloned().unwrap_or_default(),
+                    vals.get(2).cloned().unwrap_or_default(),
+                    vals.get(3).cloned().unwrap_or_default(),
+                    vals.get(4).cloned().unwrap_or_default(),
+                );
+                if name.is_empty() || command.is_empty() {
+                    self.status("name and command are required", StatusKind::Err);
+                    return;
+                }
+                if self
+                    .cfg
+                    .lsp
+                    .servers
+                    .iter()
+                    .enumerate()
+                    .any(|(i, s)| s.name == name && Some(i) != index)
+                {
+                    self.status(
+                        &format!("LSP server '{name}' already exists"),
+                        StatusKind::Err,
+                    );
+                    return;
+                }
+                let enabled = index
+                    .and_then(|i| self.cfg.lsp.servers.get(i))
+                    .is_none_or(|s| s.enabled);
+                let server = crate::config::LspServerDef {
+                    name: name.clone(),
+                    enabled,
+                    language,
+                    command,
+                    args: args.split_whitespace().map(str::to_string).collect(),
+                    root_markers: markers
+                        .split(',')
+                        .map(|m| m.trim().to_string())
+                        .filter(|m| !m.is_empty())
+                        .collect(),
+                };
+                match index {
+                    Some(i) if i < self.cfg.lsp.servers.len() => {
+                        self.cfg.lsp.servers[i] = server;
+                    }
+                    _ => self.cfg.lsp.servers.push(server),
+                }
+                self.cfg.save().ok();
+                self.status(&format!("LSP server '{name}' saved"), StatusKind::Ok);
+                self.open_menu_replace(Menu::Lsp);
             }
             _ => {}
         }

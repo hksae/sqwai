@@ -1925,6 +1925,190 @@ mod tests {
     }
 
     #[test]
+    fn settings_hub_lists_agent_safety_undo_sections() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::Settings);
+        let labels: Vec<String> = app
+            .menu_rows
+            .iter()
+            .map(|(line, _)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref().to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(labels.iter().any(|row| row.contains("Agent")));
+        assert!(labels.iter().any(|row| row.contains("Safety")));
+        assert!(labels.iter().any(|row| row.contains("Undo")));
+
+        app.run_action(MenuAction::OpenAgent);
+        assert!(matches!(app.cur_menu(), Some(Menu::Agent)));
+        app.menu_back();
+        app.run_action(MenuAction::OpenSafety);
+        assert!(matches!(app.cur_menu(), Some(Menu::Safety)));
+        app.menu_back();
+        app.run_action(MenuAction::OpenUndo);
+        assert!(matches!(app.cur_menu(), Some(Menu::Undo)));
+    }
+
+    #[test]
+    fn settings_scalar_edit_valid_and_invalid_reset() {
+        use super::menus::ScalarSetting;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::EditScalar(ScalarSetting::PlanMaxSteps));
+        assert!(app.is_form_menu());
+        // prefilled with the current value
+        assert_eq!(app.form_fields[0].trimmed(), "24");
+
+        app.form_fields[0] = super::forms::FormField::text("max steps", "32".into());
+        app.form_save();
+        assert_eq!(app.cfg.plan.max_steps, 32);
+
+        // garbage resets to the default instead of corrupting the config
+        app.open_menu(Menu::EditScalar(ScalarSetting::PlanMaxSteps));
+        app.form_fields[0] = super::forms::FormField::text("max steps", "abc".into());
+        app.form_save();
+        assert_eq!(app.cfg.plan.max_steps, 24);
+        // a form is open, so the status lands in the menu, not in chat
+        assert!(matches!(
+            &app.menu_status,
+            Some((text, _)) if text.contains("reset to default")
+        ));
+    }
+
+    #[test]
+    fn settings_cycles_and_toggles() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let effort = app.cfg.diary.effort;
+        app.run_action(MenuAction::CycleDiaryEffort);
+        assert_ne!(app.cfg.diary.effort.as_str(), effort.as_str());
+
+        app.run_action(MenuAction::CycleCompactionSummary);
+        assert_eq!(app.cfg.compaction.summary.as_str(), "short");
+        app.run_action(MenuAction::CycleCompactionSummary);
+        assert_eq!(app.cfg.compaction.summary.as_str(), "off");
+
+        app.run_action(MenuAction::CycleUndoShadow);
+        assert_eq!(app.cfg.undo.shadow.as_str(), "user");
+
+        let auto = app.cfg.skills.auto_load;
+        app.run_action(MenuAction::ToggleSkillsAutoLoad);
+        assert_eq!(app.cfg.skills.auto_load, !auto);
+    }
+
+    #[test]
+    fn settings_safety_list_add_and_remove() {
+        use super::menus::ListSection;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::AddListItem(ListSection::SafetyBlocked));
+        app.form_fields[0] = super::forms::FormField::text("blocked patterns", "rm -rf /".into());
+        app.form_save();
+        assert!(
+            app.cfg
+                .safety
+                .blocked_patterns
+                .contains(&"rm -rf /".to_string())
+        );
+
+        app.run_action(MenuAction::DeleteListItem(ListSection::SafetyBlocked, 0));
+        assert!(matches!(app.cur_menu(), Some(Menu::ConfirmDelete { .. })));
+        app.run_confirm_action();
+        assert!(
+            !app.cfg
+                .safety
+                .blocked_patterns
+                .contains(&"rm -rf /".to_string())
+        );
+    }
+
+    #[test]
+    fn settings_default_model_pick() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::PickDefaultModel);
+        let key = app
+            .menu_rows
+            .iter()
+            .find_map(|(_, action)| match action {
+                MenuAction::SetDefaultModel(key) => Some(key.clone()),
+                _ => None,
+            })
+            .expect("picker lists models");
+        app.run_action(MenuAction::SetDefaultModel(key.clone()));
+        assert_eq!(app.cfg.default_model, key);
+    }
+
+    #[test]
+    fn settings_mcp_server_crud() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        assert!(app.cfg.mcp.servers.is_empty());
+
+        // add (stdio)
+        app.open_menu(Menu::EditMcpServer { index: None });
+        let set = |app: &mut App, i: usize, v: &str| {
+            let label = app.form_fields[i].label().to_string();
+            app.form_fields[i] = super::forms::FormField::text(&label, v.into());
+        };
+        set(&mut app, 0, "files");
+        set(&mut app, 2, "mcp-files");
+        set(&mut app, 3, "--root /tmp");
+        set(&mut app, 4, "TOKEN=abc");
+        app.form_save();
+        assert_eq!(app.cfg.mcp.servers.len(), 1);
+        assert!(app.cfg.mcp.servers[0].enabled);
+
+        // toggle off via the server submenu
+        app.run_action(MenuAction::ToggleMcpServer(0));
+        assert!(!app.cfg.mcp.servers[0].enabled);
+
+        // edit keeps the toggle state
+        app.open_menu(Menu::EditMcpServer { index: Some(0) });
+        set(&mut app, 2, "mcp-files-v2");
+        app.form_save();
+        assert!(!app.cfg.mcp.servers[0].enabled);
+
+        // delete through the confirmation prompt
+        app.run_action(MenuAction::DeleteMcpServer(0));
+        assert!(matches!(app.cur_menu(), Some(Menu::ConfirmDelete { .. })));
+        app.run_confirm_action();
+        assert!(app.cfg.mcp.servers.is_empty());
+    }
+
+    #[test]
+    fn settings_lsp_server_add_and_delete() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::EditLspServer { index: None });
+        let set = |app: &mut App, i: usize, v: &str| {
+            let label = app.form_fields[i].label().to_string();
+            app.form_fields[i] = super::forms::FormField::text(&label, v.into());
+        };
+        set(&mut app, 0, "rust");
+        set(&mut app, 1, "rust");
+        set(&mut app, 2, "rust-analyzer");
+        app.form_save();
+        assert_eq!(app.cfg.lsp.servers.len(), 1);
+        assert_eq!(app.cfg.lsp.servers[0].language, "rust");
+
+        app.run_action(MenuAction::DeleteLspServer(0));
+        app.run_confirm_action();
+        assert!(app.cfg.lsp.servers.is_empty());
+    }
+
+    #[test]
+    fn settings_skills_dirs_add_and_remove() {
+        use super::menus::ListSection;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::AddListItem(ListSection::SkillsDirs));
+        app.form_fields[0] = super::forms::FormField::text("skill directories", "/tmp/s".into());
+        app.form_save();
+        assert_eq!(app.cfg.skills.dirs.len(), 1);
+
+        app.run_action(MenuAction::DeleteListItem(ListSection::SkillsDirs, 0));
+        app.run_confirm_action();
+        assert!(app.cfg.skills.dirs.is_empty());
+    }
+
+    #[test]
     fn ctrl_v_does_not_submit_following_enter() {
         use crossterm::event::{Event, KeyCode, KeyModifiers};
         let mut app = test_app("http://127.0.0.1:9/v1".into());
