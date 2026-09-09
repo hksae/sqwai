@@ -1257,6 +1257,9 @@ async fn run_agent(
                         .await
                     }
                     "subagent" => tools::Outcome::err("nested subagents are not allowed"),
+                    "memory_propose" if subagent_depth > 0 => tools::Outcome::err(
+                        "subagents cannot propose durable memories; memories belong to the primary session",
+                    ),
                     "memory_propose" => {
                         memory_proposals_this_turn = memory_proposals_this_turn.saturating_add(1);
                         if memory_proposals_this_turn > memory.max_proposals_per_turn {
@@ -1287,12 +1290,7 @@ async fn run_agent(
                                 let answer = ask_user(&question, &tx, &mut ctl, &mut next_id).await;
                                 let raw_answer = answer.output.trim();
                                 let answer_lower = raw_answer.to_ascii_lowercase();
-                                if answer.ok
-                                    && (answer_lower == "accept"
-                                        || (!raw_answer.is_empty()
-                                            && answer_lower != "reject"
-                                            && answer_lower != "edit"))
-                                {
+                                if is_accepted_memory_answer(answer.ok, raw_answer) {
                                     let text = if answer_lower == "accept" {
                                         call.args["text"].as_str().unwrap_or_default()
                                     } else {
@@ -2575,6 +2573,17 @@ async fn run_tool_blocking(
     outcome
 }
 
+pub(crate) fn is_accepted_memory_answer(answer_ok: bool, raw_answer: &str) -> bool {
+    let raw = raw_answer.trim();
+    let lower = raw.to_ascii_lowercase();
+    answer_ok
+        && (lower == "accept"
+            || (!raw.is_empty()
+                && lower != "reject"
+                && lower != "edit"
+                && !lower.starts_with("subagents cannot")))
+}
+
 #[cfg(test)]
 mod subagent_tests {
     use super::*;
@@ -2597,6 +2606,21 @@ mod subagent_tests {
         let error = subagent_tasks_from_args(&serde_json::json!({"tasks":tasks})).unwrap_err();
         assert!(error.contains("maximum is 8"));
         assert_eq!(MAX_PARALLEL_SUBAGENTS, 4);
+    }
+
+    #[test]
+    fn memory_proposal_answers_filter_subagent_responses() {
+        assert!(is_accepted_memory_answer(true, "accept"));
+        assert!(is_accepted_memory_answer(true, " ACCEPT "));
+        assert!(is_accepted_memory_answer(true, "edited content by user"));
+        assert!(!is_accepted_memory_answer(true, "reject"));
+        assert!(!is_accepted_memory_answer(true, "edit"));
+        assert!(!is_accepted_memory_answer(true, ""));
+        assert!(!is_accepted_memory_answer(false, "accept"));
+        assert!(!is_accepted_memory_answer(
+            true,
+            "subagents cannot reach the user; decide yourself and continue"
+        ));
     }
 }
 
