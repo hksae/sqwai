@@ -1,0 +1,63 @@
+updated_at = "2026-09-09"
+
+[providers.gemini]
+format = "openai"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+api_key_env = "GEMINI_API_KEY"
+continuation = true
+
+[models."gemini-3.1-pro-preview"]
+provider = "gemini"
+id = "gemini-3.1-pro-preview"
+context = 1048576
+effort = "high"
+price_in = 2.0
+price_out = 12.0
+
+[models."gemini-3.8-flash"]
+provider = "gemini"
+id = "gemini-3.8-flash"
+context = 1048576
+effort = "medium"
+price_in = 0.75
+price_out = 3.75
+
+[models."gemini-3.7-flash"]
+provider = "gemini"
+id = "gemini-3.7-flash"
+context = 1048576
+effort = "medium"
+price_in = 0.75
+price_out = 3.75
+
+[models."gemini-3.6-flash"]
+provider = "gemini"
+id = "gemini-3.6-flash"
+context = 1048576
+effort = "medium"
+price_in = 0.5
+price_out = 3.0
+
+[models."gemini-3.5-flash"]
+provider = "gemini"
+id = "gemini-3.5-flash"
+context = 1048576
+effort = "medium"
+price_in = 0.5
+price_out = 3.0
+
+[models."gemini-3.5-flash-lite"]
+provider = "gemini"
+id = "gemini-3.5-flash-lite"
+context = 1048576
+effort = "off"
+price_in = 0.3
+price_out = 2.5
+
+[models."gemini-3.1-flash-lite"]
+provider = "gemini"
+id = "gemini-3.1-flash-lite"
+context = 1048576
+effort = "off"
+price_in = 0.25
+price_out = 2.0

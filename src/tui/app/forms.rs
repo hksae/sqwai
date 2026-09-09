@@ -81,22 +81,35 @@ impl App {
         self.form_fields.clear();
         match self.cur_menu() {
             Some(Menu::EditProvider { name }) => {
+                let is_builtin = name
+                    .as_ref()
+                    .is_some_and(|n| self.cfg.is_builtin_provider(n));
                 match name.as_ref().and_then(|n| self.cfg.providers.get(n)) {
                     Some(pc) => {
-                        let fmt_sel = FORMAT_OPTS
-                            .iter()
-                            .position(|s| *s == pc.format.as_str())
-                            .unwrap_or(0);
-                        self.form_fields = vec![
-                            FormField::text("name", name.clone().unwrap_or_default()),
-                            FormField::choice("format", FORMAT_OPTS, fmt_sel),
-                            FormField::text("base url", pc.base_url.clone()),
-                            FormField::text("api key", pc.api_key.clone().unwrap_or_default()),
-                            FormField::text(
-                                "key env var",
-                                pc.api_key_env.clone().unwrap_or_default(),
-                            ),
-                        ];
+                        if is_builtin {
+                            self.form_fields = vec![
+                                FormField::text("api key", pc.api_key.clone().unwrap_or_default()),
+                                FormField::text(
+                                    "key env var",
+                                    pc.api_key_env.clone().unwrap_or_default(),
+                                ),
+                            ];
+                        } else {
+                            let fmt_sel = FORMAT_OPTS
+                                .iter()
+                                .position(|s| *s == pc.format.as_str())
+                                .unwrap_or(0);
+                            self.form_fields = vec![
+                                FormField::text("name", name.clone().unwrap_or_default()),
+                                FormField::choice("format", FORMAT_OPTS, fmt_sel),
+                                FormField::text("base url", pc.base_url.clone()),
+                                FormField::text("api key", pc.api_key.clone().unwrap_or_default()),
+                                FormField::text(
+                                    "key env var",
+                                    pc.api_key_env.clone().unwrap_or_default(),
+                                ),
+                            ];
+                        }
                     }
                     _ => {
                         self.form_fields = vec![
@@ -330,6 +343,31 @@ impl App {
                 }
             }
             Some(Menu::EditProvider { name }) => {
+                let is_builtin = name
+                    .as_ref()
+                    .is_some_and(|n| self.cfg.is_builtin_provider(n));
+                if is_builtin {
+                    let provider_name = name.clone().unwrap();
+                    let key = self
+                        .form_fields
+                        .first()
+                        .map(|f| f.trimmed())
+                        .unwrap_or_default();
+                    let key_env = self
+                        .form_fields
+                        .get(1)
+                        .map(|f| f.trimmed())
+                        .unwrap_or_default();
+                    if let Some(pc) = self.cfg.providers.get_mut(&provider_name) {
+                        pc.api_key = (!key.is_empty()).then_some(key);
+                        pc.api_key_env = (!key_env.is_empty()).then_some(key_env);
+                    }
+                    self.cfg.save().ok();
+                    self.open_menu_replace(Menu::Models {
+                        provider: provider_name,
+                    });
+                    return;
+                }
                 let vals: Vec<String> = self.form_fields.iter().map(|f| f.trimmed()).collect();
                 let (new_name, fmt, url, key, key_env) = (
                     vals.first().cloned().unwrap_or_default(),

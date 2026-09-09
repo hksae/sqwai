@@ -171,6 +171,11 @@ pub(super) enum ProviderCheck {
     Err(String),
 }
 
+type BuiltinUpdateRx = (
+    bool,
+    std::sync::mpsc::Receiver<Result<Option<crate::config::BuiltinCatalog>, String>>,
+);
+
 pub struct App {
     cfg: Config,
     model_cfg: ModelConfig,
@@ -341,6 +346,8 @@ pub struct App {
     /// In-flight check and the channel its worker thread reports back on,
     /// polled on the UI tick so the check never blocks rendering.
     provider_check_rx: Option<(String, std::sync::mpsc::Receiver<Result<String, String>>)>,
+    /// Background check/download of builtin providers: (manual, rx)
+    builtin_update_rx: Option<BuiltinUpdateRx>,
     /// Background undo maintenance (blobs + shadow GC) — the scan+gc can
     /// take seconds with many sessions, so `/new` must not block on it.
     maintain_rx:
@@ -546,6 +553,7 @@ impl App {
             ef_click: None,
             provider_checks: std::collections::HashMap::new(),
             provider_check_rx: None,
+            builtin_update_rx: None,
             maintain_rx: None,
             effort_observed_ignored: None,
             agents_click: None,
@@ -585,6 +593,7 @@ impl App {
         app.stable_prefix = app.stable_prefix();
         app.rebuild_session_environment();
         app.context_bootstrap_pending = true;
+        app.start_builtin_update(false);
         Ok(app)
     }
 
@@ -785,6 +794,7 @@ impl App {
             self.poll_startup_data();
             self.poll_agent();
             self.poll_provider_check();
+            self.poll_builtin_update();
             self.poll_maintain();
             // typewriter: reveal queued answer text gradually, catching up when
             // the queue grows faster than the reveal speed
@@ -1854,7 +1864,14 @@ impl App {
                     self.open_menu(Menu::ForkPoint);
                 }
             }
-            "/providers" => self.open_menu(Menu::Providers),
+            "/providers" => {
+                let arg = rest.split_whitespace().nth(1);
+                if arg == Some("update") {
+                    self.start_builtin_update(true);
+                } else {
+                    self.open_menu(Menu::Providers);
+                }
+            }
             "/models" => self.open_menu(Menu::Models {
                 provider: self.model_cfg.provider.clone(),
             }),
@@ -2177,6 +2194,88 @@ impl App {
                 self.build_menu_rows();
                 self.dirty = true;
             }
+        }
+    }
+
+    pub(super) fn start_builtin_update(&mut self, manual: bool) {
+        if self.builtin_update_rx.is_some() {
+            if manual {
+                self.status("update check already in progress…", StatusKind::Info);
+            }
+            return;
+        }
+        if manual {
+            self.status("checking for built-in provider updates…", StatusKind::Info);
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.builtin_update_rx = Some((manual, rx));
+        std::thread::spawn(move || {
+            let outcome = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt
+                    .block_on(crate::config::check_and_update_builtins(manual))
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("runtime: {e}")),
+            };
+            let _ = tx.send(outcome);
+        });
+    }
+
+    fn poll_builtin_update(&mut self) {
+        let Some((manual, rx)) = self.builtin_update_rx.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(outcome) => match outcome {
+                Ok(Some(new_catalog)) => {
+                    self.cfg.apply_builtins();
+                    if let Ok(mc) = self.cfg.default_model_config().cloned()
+                        && self.model_cfg.id == mc.id
+                    {
+                        self.model_cfg = mc;
+                    }
+                    self.build_menu_rows();
+                    self.dirty = true;
+                    if manual {
+                        self.status(
+                            &format!(
+                                "built-in providers updated ({} models)",
+                                new_catalog.models.len()
+                            ),
+                            StatusKind::Ok,
+                        );
+                    } else {
+                        crate::tui::event_log::log(
+                            "PROVIDERS",
+                            format!(
+                                "built-in providers updated in background ({} models)",
+                                new_catalog.models.len()
+                            ),
+                        );
+                    }
+                }
+                Ok(None) => {
+                    if manual {
+                        self.status("built-in providers are up to date", StatusKind::Info);
+                    }
+                }
+                Err(e) => {
+                    if manual {
+                        self.status(&format!("update failed: {e}"), StatusKind::Err);
+                    } else {
+                        crate::tui::event_log::log(
+                            "PROVIDERS",
+                            format!("background update check failed: {e}"),
+                        );
+                    }
+                }
+            },
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.builtin_update_rx = Some((manual, rx));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
         }
     }
 

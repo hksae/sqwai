@@ -4392,4 +4392,48 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn builtin_providers_and_models_are_immutable_and_updateable() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+
+        // Built-in provider and model checks
+        assert!(app.cfg.is_builtin_provider("gemini"));
+        assert!(app.cfg.is_builtin_model("gemini-3.8-flash"));
+
+        // 1. Trying to delete built-in provider is refused
+        app.run_action(MenuAction::DeleteProvider("gemini".into()));
+        assert!(matches!(
+            app.segments.last(),
+            Some(Segment::Status { text, .. }) if text.contains("cannot be deleted")
+        ));
+
+        // 2. Trying to delete built-in model is refused
+        app.run_action(MenuAction::DeleteModel(
+            "gemini".into(),
+            "gemini-3.8-flash".into(),
+        ));
+        assert!(matches!(
+            app.segments.last(),
+            Some(Segment::Status { text, .. }) if text.contains("cannot be deleted")
+        ));
+
+        // 3. Trying to edit built-in model is refused
+        app.run_action(MenuAction::EditModel(
+            "gemini".into(),
+            "gemini-3.8-flash".into(),
+        ));
+        assert!(matches!(
+            app.segments.last(),
+            Some(Segment::Status { text, .. }) if text.contains("cannot be modified")
+        ));
+
+        // 4. /providers update triggers update status
+        app.builtin_update_rx = None; // clear in-flight check from test_app startup
+        app.command("providers update");
+        assert!(matches!(
+            app.segments.last(),
+            Some(Segment::Status { text, .. }) if text.contains("checking for built-in provider updates")
+        ));
+    }
 }

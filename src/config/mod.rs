@@ -286,76 +286,102 @@ impl ModelConfig {
     }
 }
 
-/// built-in providers seeded on first run / merged into existing configs;
-/// everything is prefilled except the api keys
-pub struct SeedProvider {
-    pub name: &'static str,
-    pub format: WireFormat,
-    pub base_url: &'static str,
-    /// conventional env variable for the key
-    pub key_env: &'static str,
-    pub models: &'static [(&'static str, &'static str, u64, EffortLevel, f64, f64)],
+pub const BUILTIN_PROVIDERS_FALLBACK: &str = include_str!("../../builtin_providers.toml");
+
+pub const BUILTIN_PROVIDERS_URL: &str =
+    "https://raw.githubusercontent.com/hksae/sqwai/master/builtin_providers.toml";
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BuiltinCatalog {
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub providers: BTreeMap<String, ProviderConfig>,
+    #[serde(default)]
+    pub models: BTreeMap<String, ModelConfig>,
 }
 
-macro_rules! m {
-    ($key:expr, $ctx:expr, $th:expr, $pin:expr, $pout:expr) => {
-        ($key, $key, $ctx, $th, $pin, $pout)
-    };
+pub fn builtin_cache_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("builtin_providers.toml"))
 }
 
-pub const SEED_PROVIDERS: &[SeedProvider] = &[
-    SeedProvider {
-        name: "anthropic",
-        format: WireFormat::Anthropic,
-        base_url: "https://api.anthropic.com",
-        key_env: "ANTHROPIC_API_KEY",
-        models: &[
-            m!("claude-opus-5", 1_000_000, EffortLevel::High, 5.0, 25.0),
-            m!("claude-sonnet-5", 1_000_000, EffortLevel::High, 2.0, 10.0),
-            m!("claude-haiku-4-5", 200_000, EffortLevel::Medium, 1.0, 5.0),
-        ],
-    },
-    SeedProvider {
-        name: "openai",
-        format: WireFormat::Openai,
-        base_url: "https://api.openai.com/v1",
-        key_env: "OPENAI_API_KEY",
-        models: &[
-            m!("gpt-5.6", 922_000, EffortLevel::High, 4.0, 20.0),
-            m!("gpt-5.6-luna", 922_000, EffortLevel::Low, 0.2, 1.2),
-            m!("gpt-5.3-codex", 272_000, EffortLevel::High, 1.75, 14.0),
-        ],
-    },
-    SeedProvider {
-        name: "gemini",
-        format: WireFormat::Openai,
-        base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
-        key_env: "GEMINI_API_KEY",
-        models: &[
-            m!(
-                "gemini-3.1-pro-preview",
-                1_048_576,
-                EffortLevel::High,
-                2.0,
-                12.0
-            ),
-            m!(
-                "gemini-3.7-flash",
-                1_048_576,
-                EffortLevel::Medium,
-                0.75,
-                3.75
-            ),
-            m!(
-                "gemini-3.5-flash-lite",
-                1_048_576,
-                EffortLevel::Off,
-                0.3,
-                2.5
-            ),
-        ],
-    },
-];
+pub fn builtin_meta_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("builtin_providers_meta.json"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BuiltinMeta {
+    pub last_checked: String,
+}
+
+static BUILTIN_CACHE: std::sync::RwLock<Option<BuiltinCatalog>> = std::sync::RwLock::new(None);
+
+impl BuiltinCatalog {
+    pub fn current() -> Self {
+        if let Ok(guard) = BUILTIN_CACHE.read()
+            && let Some(catalog) = guard.as_ref()
+        {
+            return catalog.clone();
+        }
+        let catalog = Self::load_local();
+        if let Ok(mut guard) = BUILTIN_CACHE.write() {
+            *guard = Some(catalog.clone());
+        }
+        catalog
+    }
+
+    pub fn invalidate_cache() {
+        if let Ok(mut guard) = BUILTIN_CACHE.write() {
+            *guard = None;
+        }
+    }
+
+    pub fn load_local() -> Self {
+        if let Ok(path) = builtin_cache_path()
+            && let Ok(raw) = std::fs::read_to_string(&path)
+            && let Ok(catalog) = toml::from_str::<BuiltinCatalog>(&raw)
+        {
+            return catalog;
+        }
+        toml::from_str(BUILTIN_PROVIDERS_FALLBACK).unwrap_or_default()
+    }
+}
+
+pub async fn check_and_update_builtins(force: bool) -> Result<Option<BuiltinCatalog>> {
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    if !force
+        && let Ok(meta_path) = builtin_meta_path()
+        && let Ok(raw) = std::fs::read_to_string(&meta_path)
+        && let Ok(meta) = serde_json::from_str::<BuiltinMeta>(&raw)
+        && meta.last_checked == today
+    {
+        return Ok(None);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let res = client.get(BUILTIN_PROVIDERS_URL).send().await?;
+    if !res.status().is_success() {
+        anyhow::bail!("server returned status {}", res.status());
+    }
+    let text = res.text().await?;
+    let catalog: BuiltinCatalog =
+        toml::from_str(&text).context("parsing builtin providers TOML")?;
+
+    if let Ok(cache_path) = builtin_cache_path() {
+        let _ = atomic_write(&cache_path, &text);
+    }
+    if let Ok(meta_path) = builtin_meta_path()
+        && let Ok(meta_json) = serde_json::to_string(&BuiltinMeta {
+            last_checked: today,
+        })
+    {
+        let _ = atomic_write(&meta_path, &meta_json);
+    }
+    BuiltinCatalog::invalidate_cache();
+    Ok(Some(catalog))
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SafetyConfig {
@@ -763,7 +789,7 @@ pub struct Config {
 }
 
 fn default_model_name() -> String {
-    "claude-sonnet-5".into()
+    "gemini-3.8-flash".into()
 }
 fn default_effort() -> EffortLevel {
     EffortLevel::Medium
@@ -801,11 +827,12 @@ impl std::error::Error for LoadError {}
 
 impl Default for Config {
     fn default() -> Self {
-        let mut cfg = Self {
+        let catalog = BuiltinCatalog::current();
+        Self {
             default_model: default_model_name(),
             default_effort: EffortLevel::Medium,
-            providers: BTreeMap::new(),
-            models: BTreeMap::new(),
+            providers: catalog.providers,
+            models: catalog.models,
             safety: SafetyConfig::default(),
             ui: UiConfig::default(),
             mcp: McpConfig::default(),
@@ -817,41 +844,42 @@ impl Default for Config {
             plan: PlanConfig::default(),
             secrets: SecretsConfig::default(),
             undo: UndoConfig::default(),
-        };
-        cfg.ensure_seeds();
-        cfg
+        }
     }
 }
 
 impl Config {
-    /// add built-in providers/models that are not present yet; existing
-    /// entries are never touched
-    pub fn ensure_seeds(&mut self) {
-        for s in SEED_PROVIDERS {
-            self.providers
-                .entry(s.name.to_string())
-                .or_insert_with(|| ProviderConfig {
-                    format: s.format,
-                    base_url: s.base_url.to_string(),
-                    api_key: None,
-                    api_key_env: Some(s.key_env.to_string()),
-                    continuation: default_continuation(),
-                });
-            for (key, id, ctx, th, pin, pout) in s.models {
-                self.models
-                    .entry(key.to_string())
-                    .or_insert_with(|| ModelConfig {
-                        provider: s.name.to_string(),
-                        id: id.to_string(),
-                        context: *ctx,
-                        effort: *th,
-                        effort_control: None,
-                        effort_always_on: false,
-                        price_in: Some(*pin),
-                        price_out: Some(*pout),
-                    });
+    pub fn is_builtin_provider(&self, name: &str) -> bool {
+        BuiltinCatalog::current().providers.contains_key(name)
+    }
+
+    pub fn is_builtin_model(&self, key: &str) -> bool {
+        BuiltinCatalog::current().models.contains_key(key)
+    }
+
+    /// Merge built-in providers/models into config. User key overrides are preserved;
+    /// built-in models and formats are kept up-to-date with the catalog.
+    pub fn apply_builtins(&mut self) {
+        let catalog = BuiltinCatalog::current();
+        for (name, p) in catalog.providers {
+            if let Some(user_p) = self.providers.get_mut(&name) {
+                user_p.base_url = p.base_url;
+                user_p.format = p.format;
+                if user_p.api_key_env.is_none() {
+                    user_p.api_key_env = p.api_key_env;
+                }
+            } else {
+                self.providers.insert(name, p);
             }
         }
+        for (k, m) in catalog.models {
+            self.models.insert(k, m);
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn ensure_seeds(&mut self) {
+        self.apply_builtins();
     }
 }
 
@@ -863,8 +891,7 @@ impl Config {
         }
         let raw = std::fs::read_to_string(&path).context("reading config")?;
         let mut cfg: Config = toml::from_str(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
-        // merge built-in providers/models into existing configs
-        cfg.ensure_seeds();
+        cfg.apply_builtins();
         Ok(cfg)
     }
 
@@ -875,9 +902,24 @@ impl Config {
         #[allow(unreachable_code)]
         {
             let path = config_path()?;
+            let builtin = BuiltinCatalog::current();
+
+            // Strip built-in models and unmodified built-in providers from user's config.toml
+            let mut save_cfg = self.clone();
+            save_cfg
+                .models
+                .retain(|k, _| !builtin.models.contains_key(k));
+            save_cfg.providers.retain(|name, p| {
+                if let Some(bp) = builtin.providers.get(name) {
+                    p.api_key.is_some() || p.api_key_env != bp.api_key_env
+                } else {
+                    true
+                }
+            });
+
             atomic_write(
                 &path,
-                &toml::to_string_pretty(self).context("serializing config")?,
+                &toml::to_string_pretty(&save_cfg).context("serializing config")?,
             )?;
             Ok(())
         }
@@ -950,7 +992,12 @@ fn atomic_write(path: &std::path::Path, content: &str) -> Result<()> {
 }
 
 pub fn write_template(path: &Path) -> Result<()> {
-    atomic_write(path, &toml::to_string_pretty(&Config::default())?)?;
+    let mut cfg = Config::default();
+    let builtin = BuiltinCatalog::current();
+    cfg.models.retain(|k, _| !builtin.models.contains_key(k));
+    cfg.providers
+        .retain(|name, _| !builtin.providers.contains_key(name));
+    atomic_write(path, &toml::to_string_pretty(&cfg)?)?;
     Ok(())
 }
 
@@ -967,8 +1014,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         write_template(&path).unwrap();
-        let loaded: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(loaded.default_model, "claude-sonnet-5");
+        let mut loaded: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        loaded.apply_builtins();
+        assert_eq!(loaded.default_model, "gemini-3.8-flash");
         assert!(loaded.default_model_config().is_ok());
     }
 
@@ -1158,18 +1206,28 @@ mod tests {
     }
 
     #[test]
-    fn seeds_merge_without_overwriting_user_edits() {
+    fn builtins_merge_without_overwriting_user_edits() {
         let mut cfg = Config::default();
-        assert!(cfg.providers.contains_key("anthropic"));
-        assert!(cfg.providers.contains_key("openai"));
         assert!(cfg.providers.contains_key("gemini"));
-        let opus = cfg.models.get("claude-opus-5").expect("seed model");
-        assert_eq!(opus.context, 1_000_000);
-        assert_eq!(opus.price_in, Some(5.0));
+        assert!(cfg.is_builtin_provider("gemini"));
+        assert!(cfg.is_builtin_model("gemini-3.8-flash"));
 
-        // a user edit must survive a re-seed on the next load
-        cfg.models.get_mut("claude-opus-5").unwrap().context = 42;
-        cfg.ensure_seeds();
-        assert_eq!(cfg.models.get("claude-opus-5").unwrap().context, 42);
+        // user-defined model survives apply_builtins
+        cfg.models.insert(
+            "my-custom-model".into(),
+            ModelConfig {
+                provider: "custom".into(),
+                id: "my-id".into(),
+                context: 128000,
+                effort: EffortLevel::Off,
+                effort_control: None,
+                effort_always_on: false,
+                price_in: None,
+                price_out: None,
+            },
+        );
+        cfg.apply_builtins();
+        assert!(cfg.models.contains_key("my-custom-model"));
+        assert!(!cfg.is_builtin_model("my-custom-model"));
     }
 }

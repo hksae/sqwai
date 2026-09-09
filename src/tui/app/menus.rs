@@ -166,6 +166,7 @@ pub(super) enum MenuAction {
     SetTheme(usize),
     Confirm(Box<MenuAction>),
     DeletePlan,
+    UpdateBuiltins,
     SetEffort(EffortLevel),
     OpenSubagent(u64),
     /// ask_user: select one option (q, idx)
@@ -493,11 +494,17 @@ impl App {
             MenuAction::EditProvider(name) => {
                 self.open_menu(Menu::EditProvider { name: Some(name) })
             }
-            MenuAction::DeleteProvider(p) => self.open_menu(Menu::ConfirmDelete {
-                label: format!("delete provider '{p}' and all its models?"),
-                // stored unwrapped; build_menu_rows adds the single Confirm layer
-                action: MenuAction::DeleteProvider(p),
-            }),
+            MenuAction::DeleteProvider(p) => {
+                if self.cfg.is_builtin_provider(&p) {
+                    self.status("built-in provider cannot be deleted", StatusKind::Warn);
+                    return;
+                }
+                self.open_menu(Menu::ConfirmDelete {
+                    label: format!("delete provider '{p}' and all its models?"),
+                    // stored unwrapped; build_menu_rows adds the single Confirm layer
+                    action: MenuAction::DeleteProvider(p),
+                });
+            }
             MenuAction::CheckProvider(name) => {
                 let Some(pc) = self.cfg.providers.get(&name).cloned() else {
                     self.status(&format!("unknown provider '{name}'"), StatusKind::Err);
@@ -537,14 +544,26 @@ impl App {
                 provider: p,
                 key: None,
             }),
-            MenuAction::EditModel(p, k) => self.open_menu(Menu::EditModel {
-                provider: p,
-                key: Some(k),
-            }),
-            MenuAction::DeleteModel(p, k) => self.open_menu(Menu::ConfirmDelete {
-                label: format!("delete model '{k}'?"),
-                action: MenuAction::DeleteModel(p, k),
-            }),
+            MenuAction::EditModel(p, k) => {
+                if self.cfg.is_builtin_model(&k) {
+                    self.status("built-in model cannot be modified", StatusKind::Warn);
+                    return;
+                }
+                self.open_menu(Menu::EditModel {
+                    provider: p,
+                    key: Some(k),
+                });
+            }
+            MenuAction::DeleteModel(p, k) => {
+                if self.cfg.is_builtin_model(&k) {
+                    self.status("built-in model cannot be deleted", StatusKind::Warn);
+                    return;
+                }
+                self.open_menu(Menu::ConfirmDelete {
+                    label: format!("delete model '{k}'?"),
+                    action: MenuAction::DeleteModel(p, k),
+                });
+            }
             MenuAction::PickModelList(p) => self.open_menu(Menu::PickModel { provider: p }),
             MenuAction::DeleteModelList(p) => self.open_menu(Menu::DeleteModelList { provider: p }),
             MenuAction::OpenSession(id) => {
@@ -735,6 +754,10 @@ impl App {
             MenuAction::Confirm(inner) => {
                 let inner = *inner;
                 if let MenuAction::DeleteProvider(p) = &inner {
+                    if self.cfg.is_builtin_provider(p) {
+                        self.status("built-in provider cannot be deleted", StatusKind::Warn);
+                        return;
+                    }
                     let removed: Vec<String> = self
                         .cfg
                         .models
@@ -754,6 +777,10 @@ impl App {
                     }
                 }
                 if let MenuAction::DeleteModel(_, k) = &inner {
+                    if self.cfg.is_builtin_model(k) {
+                        self.status("built-in model cannot be deleted", StatusKind::Warn);
+                        return;
+                    }
                     self.cfg.models.remove(k);
                     if self.session.model_key == *k {
                         self.status(
@@ -827,6 +854,9 @@ impl App {
             }
             MenuAction::DeletePlan => {
                 self.run_action(MenuAction::Confirm(Box::new(MenuAction::DeletePlan)));
+            }
+            MenuAction::UpdateBuiltins => {
+                self.start_builtin_update(true);
             }
             MenuAction::OpenSubagent(id) => {
                 self.menu_home();
@@ -1421,9 +1451,11 @@ impl App {
                     } else {
                         "no key".to_string()
                     };
+                    let is_builtin = self.cfg.is_builtin_provider(name);
+                    let badge = if is_builtin { " [builtin]" } else { "" };
                     self.menu_rows.push(row(
                         Line::from(vec![
-                            Span::styled(format!(" {name}"), Theme::accent()),
+                            Span::styled(format!(" {name}{badge}"), Theme::accent()),
                             Span::styled(
                                 format!("  {} · {models} models · {key_state}", pc.base_url),
                                 Theme::dim(),
@@ -1436,12 +1468,25 @@ impl App {
                     Line::from(vec![Span::styled(" + add provider", Theme::ACCENT_SOFT())]),
                     MenuAction::AddProvider,
                 ));
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(
+                        " · update built-in providers",
+                        Theme::FG(),
+                    )]),
+                    MenuAction::UpdateBuiltins,
+                ));
             }
             Menu::Models { provider } => {
+                let is_builtin = self.cfg.is_builtin_provider(&provider);
                 for (k, m) in &self.cfg.models {
                     if m.provider == provider {
                         let current = k == &self.session.model_key;
                         let mark = if current { " *" } else { "" };
+                        let action = if is_builtin {
+                            MenuAction::UseModel(k.clone())
+                        } else {
+                            MenuAction::EditModel(provider.clone(), k.clone())
+                        };
                         self.menu_rows.push(row(
                             Line::from(vec![
                                 Span::styled(format!(" {k}{mark}"), Theme::accent()),
@@ -1467,14 +1512,16 @@ impl App {
                                     Theme::dim(),
                                 ),
                             ]),
-                            MenuAction::EditModel(provider.clone(), k.clone()),
+                            action,
                         ));
                     }
                 }
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(" + add model", Theme::ACCENT_SOFT())]),
-                    MenuAction::AddModel(provider.clone()),
-                ));
+                if !is_builtin {
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled(" + add model", Theme::ACCENT_SOFT())]),
+                        MenuAction::AddModel(provider.clone()),
+                    ));
+                }
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled(" · switch active model", Theme::FG())]),
                     MenuAction::PickModelList(provider.clone()),
@@ -1497,18 +1544,25 @@ impl App {
                     Line::from(vec![Span::styled(shown, check_style)]),
                     MenuAction::CheckProvider(provider.clone()),
                 ));
+                let edit_label = if is_builtin {
+                    " · set api key"
+                } else {
+                    " · edit provider"
+                };
                 self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(" · edit provider", Theme::FG())]),
+                    Line::from(vec![Span::styled(edit_label, Theme::FG())]),
                     MenuAction::EditProvider(provider.clone()),
                 ));
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(" · delete model", Theme::ERR())]),
-                    MenuAction::DeleteModelList(provider.clone()),
-                ));
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(" · delete provider", Theme::ERR())]),
-                    MenuAction::DeleteProvider(provider.clone()),
-                ));
+                if !is_builtin {
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled(" · delete model", Theme::ERR())]),
+                        MenuAction::DeleteModelList(provider.clone()),
+                    ));
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled(" · delete provider", Theme::ERR())]),
+                        MenuAction::DeleteProvider(provider.clone()),
+                    ));
+                }
             }
             Menu::PickModel { provider } => {
                 for (k, m) in &self.cfg.models {
