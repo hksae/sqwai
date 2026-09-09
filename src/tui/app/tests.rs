@@ -4787,7 +4787,7 @@ mod tests {
         assert!(
             matches!(
                 app.segments.last(),
-                Some(Segment::Status { text, .. }) if text == "plan deleted"
+                Some(Segment::Status { text, .. }) if text == "plan deleted; no active plan"
             ),
             "success status must reach chat segments, not vanish with the menu"
         );
@@ -4850,6 +4850,149 @@ mod tests {
         assert!(!file_x.exists(), "session plan file must be deleted");
         assert!(file_y.exists(), "unrelated active plan must survive");
         assert_eq!(app.session.plan_id, None);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn completed_linked_plan_refuses_tui_mutations() {
+        // Defect A: a linked completed plan is read-only history. TUI
+        // mutations must refuse it explicitly instead of silently rewriting
+        // a finished plan the agent itself can no longer touch.
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let temp_dir = std::env::temp_dir().join(format!(
+            "sqwai-test-plan-completed-guard-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        app.project_root = temp_dir.clone();
+
+        let limits = plan::Limits { max_steps: 10 };
+        let mut finished = plan::create(
+            "done goal".into(),
+            vec![],
+            vec!["manual: eyeball it".into()],
+            vec![plan::NewStep {
+                title: "step 1".into(),
+                kind: None,
+                refs: vec![],
+            }],
+            1000,
+            &limits,
+        )
+        .unwrap();
+        finished.status = plan::PlanStatus::Completed;
+        plan::store(&temp_dir, &finished).unwrap();
+        app.session.plan_id = Some(finished.id.clone());
+        let revision = finished.revision;
+
+        let last_status = |app: &App| match app.segments.last() {
+            Some(Segment::Status { text, .. }) => text.clone(),
+            other => panic!("expected status segment, got {other:?}"),
+        };
+
+        app.plan_command("/plan complete");
+        assert!(
+            last_status(&app).contains("completed") && last_status(&app).contains("read-only"),
+            "complete must refuse: {}",
+            last_status(&app)
+        );
+        app.plan_command("/plan waive 0 looks fine");
+        assert!(
+            last_status(&app).contains("read-only"),
+            "waive must refuse: {}",
+            last_status(&app)
+        );
+        app.plan_command("/plan abandon");
+        assert!(
+            last_status(&app).contains("read-only"),
+            "abandon must refuse: {}",
+            last_status(&app)
+        );
+        app.goal_command("/goal a new direction");
+        assert!(
+            last_status(&app).contains("read-only"),
+            "goal must refuse: {}",
+            last_status(&app)
+        );
+        app.constraints_command("/constraints add something");
+        assert!(
+            last_status(&app).contains("read-only"),
+            "constraints must refuse: {}",
+            last_status(&app)
+        );
+
+        let after: plan::Plan = serde_json::from_str(
+            &std::fs::read_to_string(
+                plan::plans_dir(&temp_dir).join(format!("{}.json", finished.id)),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(after.status, plan::PlanStatus::Completed);
+        assert_eq!(after.revision, revision, "refused mutations must not write");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn plan_delete_names_foreign_fallback_plan() {
+        // Defect B: after delete, the fallback can surface another session's
+        // stale active plan. The status must name it explicitly instead of
+        // silently switching the session onto it.
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let temp_dir = std::env::temp_dir().join(format!(
+            "sqwai-test-plan-delete-foreign-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        app.project_root = temp_dir.clone();
+        let sid = app.session.id.to_string();
+
+        let limits = plan::Limits { max_steps: 10 };
+        let mk_plan = |goal: &str| {
+            plan::create(
+                goal.into(),
+                vec![],
+                vec![],
+                vec![plan::NewStep {
+                    title: "step 1".into(),
+                    kind: None,
+                    refs: vec![],
+                }],
+                1000,
+                &limits,
+            )
+            .unwrap()
+        };
+        let mut own = mk_plan("own finished work");
+        own.created = "2026-01-01T00:00:00+00:00".to_string();
+        own.sessions = vec![sid.clone()];
+        plan::store(&temp_dir, &own).unwrap();
+        let mut foreign = mk_plan("foreign stale work");
+        foreign.created = "2026-09-09T00:00:00+00:00".to_string();
+        foreign.sessions = vec!["someone-else".into()];
+        plan::store(&temp_dir, &foreign).unwrap();
+        app.session.plan_id = Some(own.id.clone());
+
+        app.plan_command("/plan delete");
+        app.run_confirm_action();
+
+        assert_eq!(app.session.plan_id, None);
+        let text = match app.segments.last() {
+            Some(Segment::Status { text, .. }) => text.clone(),
+            other => panic!("expected status segment, got {other:?}"),
+        };
+        assert!(
+            text.contains("foreign stale work") && text.contains("another session"),
+            "delete must name the foreign fallback plan: {text}"
+        );
+        // The fallback itself still resolves (global-plan semantics), just
+        // no longer silently.
+        assert_eq!(
+            app.session_plan().map(|p| p.id),
+            Some(foreign.id.clone())
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

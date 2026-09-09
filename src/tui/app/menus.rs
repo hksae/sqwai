@@ -1354,6 +1354,7 @@ impl App {
                             match std::fs::remove_file(&plan_path) {
                                 Ok(()) if !plan_path.exists() => {
                                     self.session.plan_id = None;
+                                    self.session.save().ok();
                                     if let Ok(mut journal) = crate::agent::journal::Journal::open(
                                         &root,
                                         &self.session.id.to_string(),
@@ -1363,7 +1364,38 @@ impl App {
                                             serde_json::json!({ "plan_id": id }),
                                         );
                                     }
-                                    self.status("plan deleted", StatusKind::Ok);
+                                    // Defect B: the fallback below can surface
+                                    // another session's stale active plan — say
+                                    // so explicitly instead of silently
+                                    // switching the session onto it.
+                                    let sid = self.session.id.to_string();
+                                    let note = match crate::plan::open_active_for_session(
+                                        &root,
+                                        Some(&sid),
+                                    )
+                                    .ok()
+                                    .flatten()
+                                    {
+                                        Some(next) => {
+                                            let goal: String = next
+                                                .goal
+                                                .text
+                                                .chars()
+                                                .take(60)
+                                                .collect();
+                                            if next.sessions.iter().any(|s| s == &sid) {
+                                                format!(
+                                                    "plan deleted; now following active plan '{goal}' (see /plan)"
+                                                )
+                                            } else {
+                                                format!(
+                                                    "plan deleted; now following active plan '{goal}' — it belongs to another session (see /plan)"
+                                                )
+                                            }
+                                        }
+                                        None => "plan deleted; no active plan".to_string(),
+                                    };
+                                    self.status(&note, StatusKind::Ok);
                                     self.refresh_plan_label();
                                 }
                                 Ok(()) => self.status(
@@ -1379,6 +1411,7 @@ impl App {
                         }
                         None => {
                             self.session.plan_id = None;
+                            self.session.save().ok();
                             self.refresh_plan_label();
                             self.status("no active plan", StatusKind::Info);
                         }

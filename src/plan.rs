@@ -502,8 +502,6 @@ fn now() -> String {
     Local::now().to_rfc3339()
 }
 
-/// Atomic write: temp file + rename (§2.1.2).
-
 /// Reopen a completed step after host-side undo removed its recorded evidence.
 /// Conservative rule (§3.6): ANY reverted part of the step's result reopens
 /// it — reverting a subset cannot leave the step marked completed. Bumps
@@ -959,6 +957,7 @@ fn apply_record(
     }
 }
 
+/// Atomic write: temp file + rename (§2.1.2).
 pub fn store(root: &Path, plan: &Plan) -> Result<()> {
     let dir = plans_dir(root);
     std::fs::create_dir_all(&dir).context("creating plans directory")?;

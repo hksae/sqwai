@@ -2022,6 +2022,25 @@ impl App {
             .flatten()
     }
 
+    /// The linked plan if it is still workable, i.e. active. A linked
+    /// completed/abandoned plan is read-only history (§2.1.1, defect A):
+    /// mutations must refuse it explicitly instead of silently rewriting a
+    /// finished plan the agent itself can no longer touch.
+    fn workable_plan(&self) -> Result<plan::Plan, String> {
+        match self.session_plan() {
+            Some(plan) if plan.status == plan::PlanStatus::Active => Ok(plan),
+            Some(plan) => Err(format!(
+                "plan is {} (read-only, see /plan history); create a new plan to continue",
+                match plan.status {
+                    plan::PlanStatus::Completed => "completed",
+                    plan::PlanStatus::Abandoned => "abandoned",
+                    plan::PlanStatus::Active => "active",
+                }
+            )),
+            None => Err("no active plan".to_string()),
+        }
+    }
+
     /// Plan id `/plan delete` would remove: the session's own plan while its
     /// file is still on disk, otherwise the most recent active plan.
     /// One shared resolver so the command gate and the confirmed action can
@@ -2079,8 +2098,8 @@ impl App {
                     self.cfg.plan.max_steps
                 )
             }
-            Some("complete") => match self.session_plan() {
-                Some(mut active) => {
+            Some("complete") => match self.workable_plan() {
+                Ok(mut active) => {
                     match plan::apply(&mut active, plan::Op::Complete, &plan::Limits::default(), None) {
                         Ok(plan::Applied::Completed) => {
                             let sid = self.session.id.to_string();
@@ -2093,10 +2112,10 @@ impl App {
                         Err(e) => format!("plan complete rejected [{}]: {}", e.code, e.reason),
                     }
                 }
-                None => "no active plan".to_string(),
+                Err(message) => message,
             },
-            Some("abandon") => match self.session_plan() {
-                Some(mut active) => {
+            Some("abandon") => match self.workable_plan() {
+                Ok(mut active) => {
                     active.status = plan::PlanStatus::Abandoned;
                     active.revision += 1;
                     let sid = self.session.id.to_string();
@@ -2106,14 +2125,14 @@ impl App {
                         Err(e) => format!("plan write failed: {e:#}"),
                     }
                 }
-                None => "no active plan".to_string(),
+                Err(message) => message,
             },
             Some("waive") => {
                 let index = args.get(1).and_then(|s| s.parse::<usize>().ok());
                 let reason = args.get(2..).map(|v| v.join(" ")).unwrap_or_default();
                 match (index, reason.trim()) {
-                    (Some(index), reason) if !reason.is_empty() => match self.session_plan() {
-                        Some(mut active) => match plan::waive(&mut active, index, reason) {
+                    (Some(index), reason) if !reason.is_empty() => match self.workable_plan() {
+                        Ok(mut active) => match plan::waive(&mut active, index, reason) {
                             Ok(()) => {
                                 let sid = self.session.id.to_string();
                                 let args = serde_json::json!({"index": index, "reason": reason});
@@ -2124,7 +2143,7 @@ impl App {
                             }
                             Err(e) => format!("plan waive rejected [{}]: {}", e.code, e.reason),
                         },
-                        None => "no active plan".to_string(),
+                        Err(message) => message,
                     },
                     _ => "usage: /plan waive <acceptance-index> <reason>".to_string(),
                 }
@@ -2144,8 +2163,8 @@ impl App {
             self.status("usage: /goal <text>", StatusKind::Warn);
             return;
         }
-        match self.session_plan() {
-            Some(mut active) => {
+        match self.workable_plan() {
+            Ok(mut active) => {
                 plan::set_goal(
                     &mut active,
                     text.to_string(),
@@ -2163,7 +2182,7 @@ impl App {
                     Err(e) => self.status(&format!("goal update failed: {e:#}"), StatusKind::Err),
                 }
             }
-            None => self.status("no active plan", StatusKind::Warn),
+            Err(message) => self.status(&message, StatusKind::Warn),
         }
     }
 
@@ -2177,8 +2196,8 @@ impl App {
             self.status("usage: /constraints add|remove <text>", StatusKind::Warn);
             return;
         }
-        match self.session_plan() {
-            Some(mut active) => {
+        match self.workable_plan() {
+            Ok(mut active) => {
                 if action == "add" {
                     active.constraints.push(text.to_string());
                 } else if let Some(index) = active.constraints.iter().position(|c| c == text) {
@@ -2195,7 +2214,7 @@ impl App {
                     ),
                 }
             }
-            None => self.status("no active plan", StatusKind::Warn),
+            Err(message) => self.status(&message, StatusKind::Warn),
         }
     }
 
