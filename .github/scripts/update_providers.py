@@ -2,19 +2,25 @@
 """
 Sync builtin_providers.toml with latest model specifications and pricing.
 
-Source of truth for specs/prices: LiteLLM model_prices_and_context_window.json
-(plus official provider docs as fallback for models missing from that DB,
-e.g. direct xAI models).
+Source of truth for specs/prices: LiteLLM model_prices_and_context_window.json.
 
 Policy (agreed):
-- Legacy/retired IDs are REPLACED, not kept (grok-2, grok-beta, moonshot-v1,
-  kimi-latest, gpt-4o, o1/o3-mini, claude-3-*).
-- Gemini list is pinned by the repo owner; other providers are auto-resolved:
-  the script looks up each tracked alias in the DB (bare key, then
-  "<provider>/key") and refreshes context window + prices.
-- Entries deprecated in the DB (deprecation_date in the past) are dropped.
-- Direct chat models unknown to the tracked list are reported to stdout as
-  CANDIDATES so the maintainer can see what to add next.
+- AUTO-DISCOVERY: tracked model IDs are NOT hardcoded (except Gemini, which is
+  owner-pinned). Each provider declares model FAMILIES in priority order; the
+  script resolves the newest revision per family from the DB:
+  * only mode == "chat" entries;
+  * only direct keys (no third-party routes like azure_ai/, bedrock/, and no
+    vendor-dot keys like anthropic.claude-...); first-party prefixes
+    (deepseek/, moonshot/, xai/) are accepted and stripped to the API id;
+  * dated snapshots (-YYYYMMDD, -YYYY-MM-DD) collapse into their alias;
+  * entries with deprecation_date in the past are dropped;
+  * audio/image/video/transcribe/tts/realtime/embedding/vision/search excluded;
+  * within a family the max version wins, ties go to the shorter (alias) name;
+  * a family missing from the DB is skipped with a log line (no stale data);
+  * capped per provider to keep the menu usable.
+- Legacy/retired IDs disappear on their own: they either leave the DB, get a
+  deprecation_date, or fall out of the top-N ranking.
+- Unknown direct chat models outside the cap are reported as CANDIDATES.
 - Fetch failure is fatal (exit 1) so the Action goes red instead of silently
   writing stale fallbacks with a fresh date.
 - If nothing but the date changed, the file is left untouched (keeps the old
@@ -36,10 +42,43 @@ RESERVED_KEYS = {"sample_spec", "fallback_generalizations"}
 # Substrings that disqualify a model for coding/chat use in sqwai.
 EXCLUDE_SUBSTRINGS = (
     "audio", "image", "transcribe", "tts", "whisper", "realtime",
-    "embedding", "search-preview", "diarize", "vision-preview",
+    "embedding", "diarize", "vision",
 )
 
-# (tracked_alias, effort, fallback_ctx, fallback_in, fallback_out)
+DATE_SUFFIX = re.compile(r"-20\d{6}$|-20\d\d-\d\d-\d\d$")
+VENDOR_DOT = re.compile(r"^[a-z0-9_]+\.")
+
+# Extra substrings that disqualify a model for coding/chat use in sqwai.
+# (generic audio/image/... live in EXCLUDE_SUBSTRINGS; these are search APIs.)
+SEARCH_SUBSTRINGS = ("search",)
+
+# Effort defaults for auto-discovered models (known IDs keep curated values).
+EFFORT_HIGH = ("reason", "r1", "opus", "codex", "k3", "build", "o1", "o3", "o4")
+EFFORT_OFF = ("mini", "nano", "lite")
+EFFORT_LOW = ("luna",)
+EFFORT_MEDIUM = ("flash", "haiku")
+
+EFFORT_OVERRIDES = {
+    # continuity with the previously curated catalog
+    "claude-sonnet-4-5": "high",
+    "claude-sonnet-5": "medium",
+    "claude-haiku-4-5": "medium",
+    "gpt-5.5": "high",
+    "gpt-5.4": "high",
+    "gpt-5.4-mini": "off",
+    "gpt-5.3-codex": "high",
+    "o4-mini": "medium",
+    "deepseek-chat": "off",
+    "deepseek-reasoner": "high",
+    "grok-4.6": "high",
+    "grok-4.5": "high",
+    "grok-4.3": "medium",
+    "grok-build-0.1": "high",
+    "kimi-k3": "high",
+    "kimi-k2.6": "medium",
+    "kimi-k2.7-code": "high",
+}
+
 PROVIDERS_CONFIG = [
     {
         "name": "gemini",
@@ -48,9 +87,8 @@ PROVIDERS_CONFIG = [
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "api_key_env": "GEMINI_API_KEY",
         "continuation": True,
-        "pinned": True,  # owner-curated list, only specs/prices refresh from DB
-        "litellm_prefixes": ("gemini/",),
-        "models": [
+        # owner-pinned list; only specs/prices refresh from the DB
+        "pinned": [
             ("gemini-3.1-pro-preview", "high", 1048576, 2.0, 12.0),
             ("gemini-3.8-flash", "medium", 1048576, 0.75, 3.75),
             ("gemini-3.7-flash", "medium", 1048576, 0.75, 3.75),
@@ -59,6 +97,7 @@ PROVIDERS_CONFIG = [
             ("gemini-3.5-flash-lite", "off", 1048576, 0.3, 2.5),
             ("gemini-3.1-flash-lite", "off", 1048576, 0.25, 2.0),
         ],
+        "litellm_prefixes": ("gemini",),
     },
     {
         "name": "anthropic",
@@ -67,14 +106,19 @@ PROVIDERS_CONFIG = [
         "base_url": "https://api.anthropic.com",
         "api_key_env": "ANTHROPIC_API_KEY",
         "continuation": True,
-        "litellm_prefixes": ("anthropic/",),
-        "models": [
-            ("claude-opus-4-6", "high", 1000000, 5.0, 25.0),
-            ("claude-opus-4-5", "high", 200000, 5.0, 25.0),
-            ("claude-sonnet-4-5", "high", 200000, 3.0, 15.0),
-            ("claude-sonnet-5", "medium", 1000000, 2.0, 10.0),
-            ("claude-haiku-4-5", "medium", 200000, 0.8, 4.0),
+        "slugs": ("anthropic",),
+        "prefixes": (),
+        # model families in priority order; newest revision per family adds itself
+        "families": [
+            "claude-opus-4",
+            "claude-opus-5",
+            "claude-sonnet-4",
+            "claude-sonnet-5",
+            "claude-haiku-4",
+            "claude-fable",
+            "claude-mythos",
         ],
+        "max_models": 8,
     },
     {
         "name": "openai",
@@ -83,14 +127,19 @@ PROVIDERS_CONFIG = [
         "base_url": "https://api.openai.com/v1",
         "api_key_env": "OPENAI_API_KEY",
         "continuation": True,
-        "litellm_prefixes": (),
-        "models": [
-            ("gpt-5.5", "high", 400000, 2.5, 15.0),
-            ("gpt-5.4", "high", 1048576, 2.5, 15.0),
-            ("gpt-5.4-mini", "off", 1048576, 0.5, 3.0),
-            ("gpt-5.3-codex", "high", 400000, 1.75, 14.0),
-            ("o4-mini", "medium", 200000, 1.1, 4.4),
+        "slugs": ("openai",),
+        "prefixes": (),
+        "families": [
+            "gpt-5.6",
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.4-nano",
+            "gpt-5.3-codex",
+            "gpt-6",
+            "o4-mini",
         ],
+        "max_models": 8,
     },
     {
         "name": "deepseek",
@@ -99,11 +148,15 @@ PROVIDERS_CONFIG = [
         "base_url": "https://api.deepseek.com",
         "api_key_env": "DEEPSEEK_API_KEY",
         "continuation": True,
-        "litellm_prefixes": ("deepseek/",),
-        "models": [
-            ("deepseek-chat", "off", 128000, 0.27, 1.1),
-            ("deepseek-reasoner", "high", 128000, 0.55, 2.19),
+        "slugs": ("deepseek",),
+        "prefixes": ("deepseek",),
+        "families": [
+            "deepseek-chat",
+            "deepseek-reasoner",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
         ],
+        "max_models": 5,
     },
     {
         "name": "grok",
@@ -112,16 +165,16 @@ PROVIDERS_CONFIG = [
         "base_url": "https://api.x.ai/v1",
         "api_key_env": "XAI_API_KEY",
         "continuation": True,
-        "litellm_prefixes": ("xai/",),
-        # Current xAI lineup per docs.x.ai (Sep 2026). The LiteLLM DB mostly
-        # carries xAI models via third-party routes, so official docs values
-        # are the fallback here.
-        "models": [
-            ("grok-4.6", "high", 500000, 2.0, 6.0),
-            ("grok-4.5", "high", 500000, 2.0, 6.0),
-            ("grok-4.3", "medium", 1000000, 1.25, 2.5),
-            ("grok-build-0.1", "high", 256000, 1.0, 2.0),
+        "slugs": ("xai",),
+        "prefixes": ("xai",),
+        "families": [
+            "grok-4.6",
+            "grok-4.5",
+            "grok-4.3",
+            "grok-4",
+            "grok-build",
         ],
+        "max_models": 6,
     },
     {
         "name": "kimi",
@@ -130,12 +183,14 @@ PROVIDERS_CONFIG = [
         "base_url": "https://api.moonshot.cn/v1",
         "api_key_env": "MOONSHOT_API_KEY",
         "continuation": True,
-        "litellm_prefixes": ("moonshot/",),
-        "models": [
-            ("kimi-k3", "high", 1000000, 2.0, 8.0),
-            ("kimi-k2.6", "medium", 256000, 1.0, 4.0),
-            ("kimi-k2.7-code", "high", 256000, 1.0, 4.0),
+        "slugs": ("moonshot",),
+        "prefixes": ("moonshot",),
+        "families": [
+            "kimi-k3",
+            "kimi-k2.7",
+            "kimi-k2.6",
         ],
+        "max_models": 5,
     },
 ]
 
@@ -152,19 +207,104 @@ def fetch_litellm_data():
         sys.exit(1)
 
 
-def lookup(data, prefixes, model_id):
-    """Return (info, matched_key) for a model id or None."""
-    candidates = [model_id] + [f"{p}{model_id}" for p in prefixes]
-    for key in candidates:
-        info = data.get(key)
-        if isinstance(info, dict):
-            return info, key
-    return None, None
+def usable_entry(info, today):
+    if not isinstance(info, dict):
+        return False
+    # codex-style coding models are tagged "responses" in the DB but still
+    # serve chat completions; realtime/audio/image never do (excluded below)
+    if info.get("mode") not in ("chat", "responses"):
+        return False
+    dep = info.get("deprecation_date")
+    if dep and dep <= today:
+        return False
+    return True
 
 
-def is_deprecated(info, today):
-    dep = info.get("deprecation_date") if isinstance(info, dict) else None
-    return bool(dep) and dep <= today
+def discover(data, slugs, prefixes, today):
+    """Find direct chat models: {canonical_id: info}."""
+    found = {}
+    for key, info in data.items():
+        if key in RESERVED_KEYS:
+            continue
+        if "/" in key:
+            pre, rest = key.split("/", 1)
+            if "/" in rest or pre not in prefixes:
+                continue
+            cid = rest
+        else:
+            if VENDOR_DOT.match(key):
+                continue
+            if not isinstance(info, dict) or info.get("litellm_provider") not in slugs:
+                continue
+            cid = key
+        if not usable_entry(info, today):
+            continue
+        low = cid.lower()
+        if any(x in low for x in EXCLUDE_SUBSTRINGS + SEARCH_SUBSTRINGS):
+            continue
+        if cid not in found:
+            found[cid] = info
+    return found
+
+
+def drop_snapshots(found):
+    """When both alias and dated snapshot exist, keep the alias."""
+    groups = {}
+    for cid, info in found.items():
+        groups.setdefault(DATE_SUFFIX.sub("", cid), []).append((cid, info))
+    return [min(g, key=lambda kv: (len(kv[0]), kv[0])) for g in groups.values()]
+
+
+def version_key(cid):
+    return tuple(int(x) for x in re.findall(r"\d+", cid))
+
+
+def family_members(found, family):
+    """Candidates belonging to a family: exact id or id + separator + suffix."""
+    out = []
+    for cid, info in found.items():
+        if cid == family or cid.startswith(family + "-") or cid.startswith(family + "."):
+            out.append((cid, info))
+    return out
+
+
+def pick_latest(members):
+    """Newest version wins; on ties the shorter (alias) name wins."""
+    by_name = sorted(members, key=lambda kv: (len(kv[0]), kv[0]))
+    return max(by_name, key=lambda kv: version_key(kv[0]))
+
+
+def pick_families(found, families, max_models):
+    """Latest model per family, families in priority order, capped."""
+    picked, seen = [], set()
+    for fam in families:
+        members = [kv for kv in family_members(found, fam) if kv[0] not in seen]
+        if not members:
+            print(f"  ! family {fam}: nothing in DB, skipped")
+            continue
+        # dated snapshots collapse into their alias before picking newest
+        members = drop_snapshots(dict(members))
+        cid, info = pick_latest(members)
+        seen.add(cid)
+        picked.append((cid, info))
+        if len(picked) >= max_models:
+            break
+    return picked
+
+
+def guess_effort(cid):
+    if cid in EFFORT_OVERRIDES:
+        return EFFORT_OVERRIDES[cid]
+    low = cid.lower()
+    if any(k in low for k in EFFORT_HIGH):
+        return "high"
+    if any(k in low for k in EFFORT_OFF):
+        return "off"
+    if any(k in low for k in EFFORT_LOW):
+        return "low"
+    if any(k in low for k in EFFORT_MEDIUM):
+        return "medium"
+    return "medium"
 
 
 def clean_price(value):
@@ -172,55 +312,22 @@ def clean_price(value):
     return round(float(value), 4)
 
 
-def resolve_model(data, prefixes, model_id, effort, d_ctx, d_in, d_out, today):
-    info, key = lookup(data, prefixes, model_id)
-    if info is None:
-        print(f"  - {model_id}: not in LiteLLM DB, using fallback defaults")
-        return d_ctx, d_in, d_out
-    if is_deprecated(info, today):
-        print(f"  - {model_id}: DEPRECATED in DB ({info.get('deprecation_date')}), keeping with fallback")
-        return d_ctx, d_in, d_out
+def specs_from_db(info, d_ctx=1000000, d_in=1.0, d_out=5.0):
     ctx = info.get("max_input_tokens") or info.get("max_tokens") or d_ctx
     in_cost = info.get("input_cost_per_token")
     out_cost = info.get("output_cost_per_token")
     price_in = clean_price(in_cost * 1_000_000) if in_cost is not None else d_in
     price_out = clean_price(out_cost * 1_000_000) if out_cost is not None else d_out
-    print(f"  - {model_id}: ctx={ctx} in=${price_in}/M out=${price_out}/M (db: {key})")
     return int(ctx), price_in, price_out
 
 
-def report_candidates(data, today):
-    """List direct chat models in the DB that we do NOT track (visibility for maintainer)."""
-    tracked = set()
-    for p in PROVIDERS_CONFIG:
-        for m in p["models"]:
-            tracked.add(m[0])
-            for prefix in p["litellm_prefixes"]:
-                tracked.add(f"{prefix}{m[0]}")
-    vendor_prefix = re.compile(r"^[a-z0-9_]+\.")
-    interesting = []
-    for key, info in data.items():
-        if key in RESERVED_KEYS or not isinstance(info, dict):
-            continue
-        if "/" in key:  # third-party routes (azure_ai/, bedrock/, ...) are out of scope
-            continue
-        if vendor_prefix.match(key):  # bedrock-style (anthropic.claude-..., amazon....)
-            continue
-        if info.get("mode") != "chat":
-            continue
-        low = key.lower()
-        if any(x in low for x in EXCLUDE_SUBSTRINGS):
-            continue
-        if is_deprecated(info, today):
-            continue
-        if key in tracked:
-            continue
-        interesting.append(key)
-    interesting.sort()
-    if interesting:
-        print(f"\nUntracked direct chat models in DB ({len(interesting)}), consider adding:")
-        for key in interesting[:30]:
-            print(f"    ? {key}")
+def lookup(data, prefixes, model_id):
+    candidates = [model_id] + [f"{p}/{model_id}" for p in prefixes]
+    for key in candidates:
+        info = data.get(key)
+        if isinstance(info, dict):
+            return info, key
+    return None, None
 
 
 def build_catalog(data, today):
@@ -237,11 +344,28 @@ def build_catalog(data, today):
             "",
         ]
         print(f"[{p['name']}]")
-        for model_id, effort, d_ctx, d_in, d_out in p["models"]:
-            total += 1
-            ctx, price_in, price_out = resolve_model(
-                data, p["litellm_prefixes"], model_id, effort, d_ctx, d_in, d_out, today
-            )
+        if "pinned" in p:
+            models = []
+            for model_id, effort, d_ctx, d_in, d_out in p["pinned"]:
+                info, key = lookup(data, p["litellm_prefixes"], model_id)
+                if info is None or not usable_entry(info, today):
+                    print(f"  - {model_id}: not in DB, using pinned defaults")
+                    ctx, price_in, price_out = d_ctx, d_in, d_out
+                else:
+                    ctx, price_in, price_out = specs_from_db(info, d_ctx, d_in, d_out)
+                    print(f"  - {model_id}: ctx={ctx} in=${price_in}/M out=${price_out}/M (db: {key})")
+                models.append((model_id, effort, ctx, price_in, price_out))
+        else:
+            found = discover(data, p["slugs"], p["prefixes"], today)
+            picked = pick_families(found, p["families"], p["max_models"])
+            models = []
+            for cid, info in picked:
+                ctx, price_in, price_out = specs_from_db(info)
+                effort = guess_effort(cid)
+                print(f"  - {cid}: ctx={ctx} in=${price_in}/M out=${price_out}/M effort={effort}")
+                models.append((cid, effort, ctx, price_in, price_out))
+        total += len(models)
+        for model_id, effort, ctx, price_in, price_out in models:
             lines += [
                 f'[models."{model_id}"]',
                 f"provider = \"{p['name']}\"",
@@ -259,7 +383,6 @@ def main():
     data = fetch_litellm_data()
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     content, total = build_catalog(data, today)
-    report_candidates(data, today)
 
     target = os.path.abspath(CATALOG_PATH)
     # No-op when only the date would change: keeps history clean and lets

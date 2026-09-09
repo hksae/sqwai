@@ -1222,10 +1222,19 @@ mod tests {
         }
         assert!(cfg.is_builtin_model("gemini-3.8-flash"));
         assert!(cfg.is_builtin_model("deepseek-chat"));
-        assert!(cfg.is_builtin_model("claude-opus-4-6"));
-        assert!(cfg.is_builtin_model("gpt-5.5"));
-        assert!(cfg.is_builtin_model("grok-4.6"));
-        assert!(cfg.is_builtin_model("kimi-k3"));
+        // auto-discovered providers resolve at least one model each; exact
+        // revisions float with the catalog, so assert structurally, not by id
+        for (provider, min_models) in [("anthropic", 5), ("openai", 5), ("grok", 4), ("kimi", 3)] {
+            let count = cfg
+                .models
+                .values()
+                .filter(|m| m.provider == provider)
+                .count();
+            assert!(
+                count >= min_models,
+                "provider {provider} has only {count} models"
+            );
+        }
         // retired IDs must be gone, not kept alongside
         for retired in [
             "claude-3-7-sonnet-20250219",

@@ -70,27 +70,27 @@ base_url = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
 continuation = true
 
-[models."claude-opus-4-6"]
+[models."claude-opus-4-8"]
 provider = "anthropic"
-id = "claude-opus-4-6"
+id = "claude-opus-4-8"
 context = 1000000
 effort = "high"
 price_in = 5.0
 price_out = 25.0
 
-[models."claude-opus-4-5"]
+[models."claude-opus-5"]
 provider = "anthropic"
-id = "claude-opus-4-5"
-context = 200000
+id = "claude-opus-5"
+context = 1000000
 effort = "high"
 price_in = 5.0
 price_out = 25.0
 
-[models."claude-sonnet-4-5"]
+[models."claude-sonnet-4-6"]
 provider = "anthropic"
-id = "claude-sonnet-4-5"
-context = 200000
-effort = "high"
+id = "claude-sonnet-4-6"
+context = 1000000
+effort = "medium"
 price_in = 3.0
 price_out = 15.0
 
@@ -110,12 +110,36 @@ effort = "medium"
 price_in = 1.0
 price_out = 5.0
 
+[models."claude-fable-5-1"]
+provider = "anthropic"
+id = "claude-fable-5-1"
+context = 1000000
+effort = "medium"
+price_in = 10.0
+price_out = 50.0
+
+[models."claude-mythos-5-1"]
+provider = "anthropic"
+id = "claude-mythos-5-1"
+context = 1000000
+effort = "medium"
+price_in = 10.0
+price_out = 50.0
+
 # OpenAI
 [providers.openai]
 format = "openai"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 continuation = true
+
+[models."gpt-5.6"]
+provider = "openai"
+id = "gpt-5.6"
+context = 922000
+effort = "medium"
+price_in = 4.0
+price_out = 20.0
 
 [models."gpt-5.5"]
 provider = "openai"
@@ -141,6 +165,14 @@ effort = "off"
 price_in = 0.75
 price_out = 4.5
 
+[models."gpt-5.4-nano"]
+provider = "openai"
+id = "gpt-5.4-nano"
+context = 272000
+effort = "off"
+price_in = 0.2
+price_out = 1.25
+
 [models."gpt-5.3-codex"]
 provider = "openai"
 id = "gpt-5.3-codex"
@@ -148,6 +180,14 @@ context = 272000
 effort = "high"
 price_in = 1.75
 price_out = 14.0
+
+[models."gpt-6-astra"]
+provider = "openai"
+id = "gpt-6-astra"
+context = 922000
+effort = "medium"
+price_in = 10.0
+price_out = 50.0
 
 [models."o4-mini"]
 provider = "openai"
@@ -180,6 +220,22 @@ effort = "high"
 price_in = 0.28
 price_out = 0.42
 
+[models."deepseek-v4-pro"]
+provider = "deepseek"
+id = "deepseek-v4-pro"
+context = 1000000
+effort = "medium"
+price_in = 1.32
+price_out = 3.96
+
+[models."deepseek-v4-flash"]
+provider = "deepseek"
+id = "deepseek-v4-flash"
+context = 1000000
+effort = "medium"
+price_in = 0.44
+price_out = 1.32
+
 # Grok
 [providers.grok]
 format = "openai"
@@ -211,6 +267,14 @@ effort = "medium"
 price_in = 1.25
 price_out = 2.5
 
+[models."grok-4.20-0309-reasoning"]
+provider = "grok"
+id = "grok-4.20-0309-reasoning"
+context = 1000000
+effort = "high"
+price_in = 1.25
+price_out = 2.5
+
 [models."grok-build-0.1"]
 provider = "grok"
 id = "grok-build-0.1"
@@ -234,19 +298,19 @@ effort = "high"
 price_in = 3.0
 price_out = 15.0
 
-[models."kimi-k2.6"]
-provider = "kimi"
-id = "kimi-k2.6"
-context = 262144
-effort = "medium"
-price_in = 0.95
-price_out = 4.0
-
 [models."kimi-k2.7-code"]
 provider = "kimi"
 id = "kimi-k2.7-code"
 context = 262144
 effort = "high"
+price_in = 0.95
+price_out = 4.0
+
+[models."kimi-k2.6"]
+provider = "kimi"
+id = "kimi-k2.6"
+context = 262144
+effort = "medium"
 price_in = 0.95
 price_out = 4.0
 
