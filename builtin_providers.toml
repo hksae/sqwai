@@ -1,5 +1,6 @@
 updated_at = "2026-09-09"
 
+# Gemini
 [providers.gemini]
 format = "openai"
 base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
@@ -61,3 +62,182 @@ context = 1048576
 effort = "off"
 price_in = 0.25
 price_out = 1.5
+
+# Anthropic
+[providers.anthropic]
+format = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+continuation = true
+
+[models."claude-3-7-sonnet-20250219"]
+provider = "anthropic"
+id = "claude-3-7-sonnet-20250219"
+context = 200000
+effort = "high"
+price_in = 3.0
+price_out = 15.0
+
+[models."claude-3-5-sonnet-20241022"]
+provider = "anthropic"
+id = "claude-3-5-sonnet-20241022"
+context = 200000
+effort = "high"
+price_in = 3.0
+price_out = 15.0
+
+[models."claude-3-5-haiku-20241022"]
+provider = "anthropic"
+id = "claude-3-5-haiku-20241022"
+context = 200000
+effort = "medium"
+price_in = 0.8
+price_out = 4.0
+
+[models."claude-3-opus-20240229"]
+provider = "anthropic"
+id = "claude-3-opus-20240229"
+context = 200000
+effort = "high"
+price_in = 15.0
+price_out = 75.0
+
+# Openai
+[providers.openai]
+format = "openai"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+continuation = true
+
+[models."gpt-4o"]
+provider = "openai"
+id = "gpt-4o"
+context = 128000
+effort = "off"
+price_in = 2.5
+price_out = 10.0
+
+[models."gpt-4o-mini"]
+provider = "openai"
+id = "gpt-4o-mini"
+context = 128000
+effort = "off"
+price_in = 0.15
+price_out = 0.6
+
+[models."o1"]
+provider = "openai"
+id = "o1"
+context = 200000
+effort = "high"
+price_in = 15.0
+price_out = 60.0
+
+[models."o1-mini"]
+provider = "openai"
+id = "o1-mini"
+context = 128000
+effort = "medium"
+price_in = 1.1
+price_out = 4.4
+
+[models."o3-mini"]
+provider = "openai"
+id = "o3-mini"
+context = 200000
+effort = "medium"
+price_in = 1.1
+price_out = 4.4
+
+# Deepseek
+[providers.deepseek]
+format = "openai"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+continuation = true
+
+[models."deepseek-chat"]
+provider = "deepseek"
+id = "deepseek-chat"
+context = 131072
+effort = "off"
+price_in = 0.28
+price_out = 0.42
+
+[models."deepseek-reasoner"]
+provider = "deepseek"
+id = "deepseek-reasoner"
+context = 131072
+effort = "high"
+price_in = 0.28
+price_out = 0.42
+
+# Grok
+[providers.grok]
+format = "openai"
+base_url = "https://api.x.ai/v1"
+api_key_env = "XAI_API_KEY"
+continuation = true
+
+[models."grok-2-1212"]
+provider = "grok"
+id = "grok-2-1212"
+context = 131072
+effort = "off"
+price_in = 2.0
+price_out = 10.0
+
+[models."grok-2-vision-1212"]
+provider = "grok"
+id = "grok-2-vision-1212"
+context = 32768
+effort = "off"
+price_in = 2.0
+price_out = 10.0
+
+[models."grok-beta"]
+provider = "grok"
+id = "grok-beta"
+context = 131072
+effort = "off"
+price_in = 5.0
+price_out = 15.0
+
+# Kimi
+[providers.kimi]
+format = "openai"
+base_url = "https://api.moonshot.cn/v1"
+api_key_env = "MOONSHOT_API_KEY"
+continuation = true
+
+[models."moonshot-v1-8k"]
+provider = "kimi"
+id = "moonshot-v1-8k"
+context = 8192
+effort = "off"
+price_in = 0.19999999999999998
+price_out = 2.0
+
+[models."moonshot-v1-32k"]
+provider = "kimi"
+id = "moonshot-v1-32k"
+context = 32768
+effort = "off"
+price_in = 1.0
+price_out = 3.0
+
+[models."moonshot-v1-128k"]
+provider = "kimi"
+id = "moonshot-v1-128k"
+context = 131072
+effort = "off"
+price_in = 2.0
+price_out = 5.0
+
+[models."kimi-latest"]
+provider = "kimi"
+id = "kimi-latest"
+context = 131072
+effort = "off"
+price_in = 2.0
+price_out = 5.0

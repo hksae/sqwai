@@ -337,13 +337,21 @@ impl BuiltinCatalog {
     }
 
     pub fn load_local() -> Self {
-        if let Ok(path) = builtin_cache_path()
-            && let Ok(raw) = std::fs::read_to_string(&path)
-            && let Ok(catalog) = toml::from_str::<BuiltinCatalog>(&raw)
+        #[cfg(test)]
+        return toml::from_str(BUILTIN_PROVIDERS_FALLBACK).unwrap_or_default();
+        #[allow(unreachable_code)]
         {
-            return catalog;
+            let fallback: BuiltinCatalog =
+                toml::from_str(BUILTIN_PROVIDERS_FALLBACK).unwrap_or_default();
+            if let Ok(path) = builtin_cache_path()
+                && let Ok(raw) = std::fs::read_to_string(&path)
+                && let Ok(catalog) = toml::from_str::<BuiltinCatalog>(&raw)
+                && catalog.updated_at >= fallback.updated_at
+            {
+                return catalog;
+            }
+            fallback
         }
-        toml::from_str(BUILTIN_PROVIDERS_FALLBACK).unwrap_or_default()
     }
 }
 
@@ -1208,9 +1216,13 @@ mod tests {
     #[test]
     fn builtins_merge_without_overwriting_user_edits() {
         let mut cfg = Config::default();
-        assert!(cfg.providers.contains_key("gemini"));
-        assert!(cfg.is_builtin_provider("gemini"));
+        for p in ["gemini", "anthropic", "openai", "deepseek", "grok", "kimi"] {
+            assert!(cfg.providers.contains_key(p), "missing provider {p}");
+            assert!(cfg.is_builtin_provider(p), "not marked builtin {p}");
+        }
         assert!(cfg.is_builtin_model("gemini-3.8-flash"));
+        assert!(cfg.is_builtin_model("deepseek-chat"));
+        assert!(cfg.is_builtin_model("claude-3-7-sonnet-20250219"));
 
         // user-defined model survives apply_builtins
         cfg.models.insert(
