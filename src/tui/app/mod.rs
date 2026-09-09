@@ -301,9 +301,11 @@ pub struct App {
 
     /// Clipboard text inserted by Ctrl+V, used to consume the terminal's
     /// replay of the same payload before it reaches normal key handling.
-    pasted_clipboard: Option<String>,
+    /// Offset-based (no suffix copies); dies on full consume or deadline.
+    paste_replay: Option<events::PasteReplay>,
     /// Suppresses the synthetic Enter some terminals emit after Ctrl+V.
-    paste_enter_guard: bool,
+    /// Timestamped: an unconsumed guard must never eat a later genuine Enter.
+    paste_enter_until: Option<Instant>,
     /// Classifies ordinary Windows Enter events as submit vs pasted newlines.
     enter_gate: events::EnterGate,
     /// Pending events queued during burst detection.
@@ -573,8 +575,8 @@ impl App {
             dragging: false,
             sel: None,
             input_dragging: false,
-            pasted_clipboard: None,
-            paste_enter_guard: false,
+            paste_replay: None,
+            paste_enter_until: None,
             enter_gate: events::EnterGate::default(),
             pending_events: std::collections::VecDeque::new(),
             busy_until: None,

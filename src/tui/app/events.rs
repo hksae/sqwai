@@ -18,6 +18,10 @@ use crate::tui::theme::Theme;
 
 const ENTER_BURST_GAP: Duration = Duration::from_millis(30);
 
+/// One tick never batches more pasted text than this; the remainder stays
+/// queued for the next poll instead of stalling the render loop.
+const MAX_PASTE_BATCH_BYTES: usize = 32 * 1024;
+
 #[derive(Debug, Default)]
 pub(super) struct EnterGate {
     pending: Option<Instant>,
@@ -101,6 +105,19 @@ impl App {
         self.dirty = true;
     }
 
+    /// A lone digit that would answer the inline question/proposal must reach
+    /// the hotkey arms below, not dissolve into a text batch with its
+    /// neighbors when several keys arrive in one tick.
+    fn is_answer_digit(&self, c: char) -> bool {
+        if self.ask_custom_focus.is_some() || !self.menu_stack.is_empty() {
+            return false;
+        }
+        if self.active_ask_seg().is_some() && ('1'..='9').contains(&c) {
+            return true;
+        }
+        self.active_proposal_seg().is_some() && ('1'..='3').contains(&c)
+    }
+
     pub(super) fn poll_input(
         &mut self,
         ev_rx: &std::sync::mpsc::Receiver<crossterm::event::Event>,
@@ -113,20 +130,28 @@ impl App {
             .pop_front()
             .or_else(|| ev_rx.try_recv().ok())
         {
-            crate::tui::event_log::log("RX", crate::tui::event_log::describe(&ev));
+            if crate::tui::event_log::is_enabled() {
+                crate::tui::event_log::log("RX", crate::tui::event_log::describe(&ev));
+            }
             match ev {
                 Event::Key(k) => {
                     if k.kind != KeyEventKind::Press {
                         continue;
                     }
-                    if consume_replayed_paste_key(&mut self.pasted_clipboard, k) {
+                    if consume_replayed_paste_key(&mut self.paste_replay, k, Instant::now()) {
                         continue;
                     }
-                    if self.paste_enter_guard
-                        && matches!(k.code, KeyCode::Enter | KeyCode::Char('\r'))
-                    {
-                        self.paste_enter_guard = false;
-                        continue;
+                    if matches!(k.code, KeyCode::Enter | KeyCode::Char('\r')) {
+                        match self.paste_enter_until {
+                            // Synthetic Enter following our own Ctrl+V insert:
+                            // swallow once, then disarm so a genuine Enter is
+                            // never eaten by a stale guard.
+                            Some(until) if Instant::now() <= until => {
+                                self.paste_enter_until = None;
+                                continue;
+                            }
+                            _ => self.paste_enter_until = None,
+                        }
                     }
                     self.dirty = true;
                     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
@@ -147,19 +172,29 @@ impl App {
                     }
 
                     if self.is_text_input_focused()
-                        && self.pasted_clipboard.is_none()
+                        && self.paste_replay.is_none()
                         && !ctrl
                         && !alt
                         && let KeyCode::Char(c) = k.code
+                        && !self.is_answer_digit(c)
                     {
                         let mut text_batch = String::new();
                         text_batch.push(c);
+                        let mut batch_bytes = c.len_utf8();
                         while let Some(next_ev) = self
                             .pending_events
                             .pop_front()
                             .or_else(|| ev_rx.try_recv().ok())
                         {
                             if let Some(next_c) = is_paste_key(&next_ev) {
+                                // Bound one tick's batching: the remainder
+                                // stays queued for the next poll instead of
+                                // holding the render loop hostage.
+                                if batch_bytes + next_c.len_utf8() > MAX_PASTE_BATCH_BYTES {
+                                    self.pending_events.push_back(next_ev);
+                                    break;
+                                }
+                                batch_bytes += next_c.len_utf8();
                                 text_batch.push(next_c);
                             } else {
                                 self.pending_events.push_back(next_ev);
@@ -167,10 +202,12 @@ impl App {
                             }
                         }
                         if text_batch.chars().count() > 1 {
-                            while let Ok(next_ev) =
-                                ev_rx.recv_timeout(std::time::Duration::from_millis(5))
+                            while batch_bytes < MAX_PASTE_BATCH_BYTES
+                                && let Ok(next_ev) =
+                                    ev_rx.recv_timeout(std::time::Duration::from_millis(5))
                             {
                                 if let Some(next_c) = is_paste_key(&next_ev) {
+                                    batch_bytes += next_c.len_utf8();
                                     text_batch.push(next_c);
                                 } else {
                                     self.pending_events.push_back(next_ev);
@@ -238,8 +275,8 @@ impl App {
                             continue;
                         };
                         let txt = normalize_paste(&txt);
-                        self.pasted_clipboard = Some(txt.clone());
-                        self.paste_enter_guard = true;
+                        self.paste_replay = Some(PasteReplay::new(txt.clone(), now));
+                        self.paste_enter_until = Some(now + PASTE_REPLAY_TTL);
                         if !self.menu_stack.is_empty() {
                             let p = txt.replace(['\r', '\n'], " ");
                             if let Some(FormField::Text { ta, .. }) =
@@ -800,10 +837,22 @@ impl App {
                     MouseEventKind::Down(MouseButton::Left) => self.mouse_down(m.row, m.column),
                     MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(m.row, m.column),
                     MouseEventKind::Up(MouseButton::Left) => self.mouse_up(m.row, m.column),
-                    MouseEventKind::Moved => self.mouse_move(m.row),
+                    MouseEventKind::Moved => {
+                        // Collapse a hover burst into its last position: only
+                        // it affects highlight/hit-testing, the rest would
+                        // each force a full re-render for nothing.
+                        while matches!(
+                            self.pending_events.front(),
+                            Some(Event::Mouse(nm)) if nm.kind == MouseEventKind::Moved
+                        ) {
+                            self.pending_events.pop_front();
+                        }
+                        self.mouse_move(m.row)
+                    }
                     _ => {}
                 },
                 Event::Paste(p) => {
+                    let now = Instant::now();
                     let p = normalize_paste(&p);
                     // Some Windows terminals emit both our Ctrl+V key
                     // event and one or more bracketed-paste events for the
@@ -811,11 +860,11 @@ impl App {
                     // inserted the complete text, so discard native payloads
                     // while advancing the replay marker by their exact
                     // prefix. This also handles a payload split at a newline.
-                    if consume_replayed_paste_text(&mut self.pasted_clipboard, &p) {
-                        self.paste_enter_guard = true;
+                    if consume_replayed_paste_text(&mut self.paste_replay, &p, now) {
+                        self.paste_enter_until = Some(now + PASTE_REPLAY_TTL);
                         continue;
                     }
-                    self.paste_enter_guard = false;
+                    self.paste_enter_until = None;
                     if !self.menu_stack.is_empty() {
                         let p = p.replace(['\r', '\n'], " ");
                         if let Some(FormField::Text { ta, .. }) =
@@ -908,7 +957,11 @@ impl App {
 /// characters (and anything else) map to themselves via `None` passthrough at
 /// the call site; only Cyrillic letters need translation.
 fn qwerty_char(c: char) -> Option<char> {
-    let lat = match c {
+    // Normalize case first: uppercase Cyrillic (Ctrl+Shift combos) must
+    // translate too — matching on the raw char returned None before the
+    // is_uppercase check below was ever reached.
+    let lower = c.to_lowercase().next()?;
+    let lat = match lower {
         'й' => 'q',
         'ц' => 'w',
         'у' => 'e',
@@ -971,51 +1024,131 @@ fn normalize_paste(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-fn consume_replayed_paste_text(slot: &mut Option<String>, text: &str) -> bool {
-    let Some(expected) = slot.as_deref() else {
+/// Bounded replay state for terminal-echoed clipboard content.
+///
+/// Some terminals re-emit a Ctrl+V payload as key/Paste events after the
+/// application already inserted it. The marker tracks how much of the echo
+/// was consumed so the echo never reaches normal input handling — without
+/// ever swallowing genuine input:
+///
+/// - matching is prefix-only against the unconsumed remainder (offset, no
+///   suffix copies — char-by-char echo of a large paste stays linear);
+/// - the deadline is sliding: every consumed chunk extends it, so a slow
+///   stream survives while a dead marker (no replay coming) expires instead
+///   of eating future keys that happen to match the clipboard prefix;
+/// - a mismatch keeps the marker (terminals interleave trigger artifacts),
+///   but the deadline bounds that generosity.
+#[derive(Debug, Clone)]
+pub(super) struct PasteReplay {
+    text: String,
+    offset: usize,
+    until: Instant,
+}
+
+/// Replay markers live only long enough for terminal echo, never across
+/// turns: echo bursts arrive within milliseconds of the paste.
+const PASTE_REPLAY_TTL: Duration = Duration::from_secs(2);
+
+impl PasteReplay {
+    fn new(text: String, now: Instant) -> Self {
+        Self {
+            text,
+            offset: 0,
+            until: now + PASTE_REPLAY_TTL,
+        }
+    }
+
+    /// False once the deadline passed (slot cleared by the caller).
+    fn live(slot: &mut Option<Self>, now: Instant) -> bool {
+        if slot.as_ref().is_some_and(|r| now > r.until) {
+            *slot = None;
+        }
+        slot.is_some()
+    }
+
+    fn remainder(&self) -> &str {
+        self.text.get(self.offset..).unwrap_or("")
+    }
+
+    fn advance(&mut self, consumed: usize, now: Instant) -> bool {
+        self.offset += consumed;
+        self.until = now + PASTE_REPLAY_TTL;
+        self.offset < self.text.len()
+    }
+}
+
+fn consume_replayed_paste_text(
+    slot: &mut Option<PasteReplay>,
+    text: &str,
+    now: Instant,
+) -> bool {
+    if !PasteReplay::live(slot, now) {
         return false;
-    };
-    if let Some(remainder) = expected.strip_prefix(text) {
-        *slot = (!remainder.is_empty()).then_some(remainder.to_string());
+    }
+    let r = slot.as_mut().unwrap();
+    if let Some(rem) = r.remainder().strip_prefix(text) {
+        let consumed = r.text.len() - r.offset - rem.len();
+        if !r.advance(consumed, now) {
+            *slot = None;
+        }
         true
     } else {
         false
     }
 }
 
-fn consume_replayed_paste_key(slot: &mut Option<String>, key: crossterm::event::KeyEvent) -> bool {
+fn consume_replayed_paste_key(
+    slot: &mut Option<PasteReplay>,
+    key: crossterm::event::KeyEvent,
+    now: Instant,
+) -> bool {
     if key
         .modifiers
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
     {
         return false;
     }
-    let Some(expected) = slot.as_deref() else {
+    if !PasteReplay::live(slot, now) {
         return false;
-    };
-    let text = match key.code {
-        KeyCode::Char('\r') | KeyCode::Enter => "\n".to_string(),
-        KeyCode::Char(ch) => ch.to_string(),
-        _ => return false,
-    };
-    if expected.starts_with(&text) {
-        let remainder = expected[text.len()..].to_string();
-        *slot = (!remainder.is_empty()).then_some(remainder);
-        true
-    } else if text == "\n" {
-        // On Windows, some terminals replay a clipboard newline as Enter
-        // after the preceding characters, while the next characters may be
-        // delivered in a later batch. Consume that boundary without
-        // advancing the marker; otherwise it submits the first line and the
-        // rest of the paste is left in the editor.
-        true
-    } else {
-        // A terminal may interleave the Ctrl+V trigger or a key-release
-        // artifact with the replayed payload. Do not discard the marker on
-        // one unrelated event; otherwise the first embedded Enter can submit
-        // the first line and leave the rest in the editor.
-        false
     }
+    // Key events other than plain characters can never be paste echo.
+    let is_newline = matches!(key.code, KeyCode::Char('\r') | KeyCode::Enter);
+    if !is_newline && !matches!(key.code, KeyCode::Char(_)) {
+        return false;
+    }
+    let r = slot.as_mut().unwrap();
+    let matched = if is_newline {
+        if let Some(rem) = r.remainder().strip_prefix('\n') {
+            let consumed = r.text.len() - r.offset - rem.len();
+            r.advance(consumed, now);
+            true
+        } else {
+            // On Windows, some terminals replay a clipboard newline as Enter
+            // after the preceding characters, while the next characters may be
+            // delivered in a later batch. Consume that boundary without
+            // advancing the marker; otherwise it submits the first line and the
+            // rest of the paste is left in the editor. Bounded by the replay
+            // deadline above, so a stale marker cannot eat genuine Enters.
+            true
+        }
+    } else if let KeyCode::Char(ch) = key.code {
+        if r.remainder().starts_with(ch) {
+            r.advance(ch.len_utf8(), now);
+            true
+        } else {
+            // A terminal may interleave the Ctrl+V trigger or a key-release
+            // artifact with the replayed payload. Do not discard the marker on
+            // one unrelated event; otherwise the first embedded Enter can submit
+            // the first line and leave the rest in the editor.
+            false
+        }
+    } else {
+        false
+    };
+    if matched && slot.as_ref().is_some_and(|r| r.offset >= r.text.len()) {
+        *slot = None;
+    }
+    matched
 }
 
 /// ctrl combos supported identically in the message input and every form field
@@ -1114,22 +1247,64 @@ mod tests {
 
     #[test]
     fn split_native_paste_events_are_consumed_without_submission() {
-        let mut pending = Some("first line\nsecond line".to_string());
-        assert!(consume_replayed_paste_text(&mut pending, "first line\n"));
-        assert_eq!(pending.as_deref(), Some("second line"));
-        assert!(consume_replayed_paste_text(&mut pending, "second line"));
+        let now = Instant::now();
+        let mut pending = Some(PasteReplay::new("first line\nsecond line".to_string(), now));
+        assert!(consume_replayed_paste_text(&mut pending, "first line\n", now));
+        assert_eq!(pending.as_ref().map(|r| r.remainder()), Some("second line"));
+        assert!(consume_replayed_paste_text(&mut pending, "second line", now));
         assert!(pending.is_none());
     }
 
     #[test]
     fn replayed_paste_newline_cannot_submit_first_line() {
-        let mut pending = Some("second line".to_string());
+        let now = Instant::now();
+        let mut pending = Some(PasteReplay::new("second line".to_string(), now));
         let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
-        assert!(consume_replayed_paste_key(&mut pending, enter));
-        assert_eq!(pending.as_deref(), Some("second line"));
+        assert!(consume_replayed_paste_key(&mut pending, enter, now));
+        assert_eq!(
+            pending.as_ref().map(|r| r.remainder()),
+            Some("second line")
+        );
         let first = crossterm::event::KeyEvent::new(KeyCode::Char('s'), KeyModifiers::empty());
-        assert!(consume_replayed_paste_key(&mut pending, first));
-        assert_eq!(pending.as_deref(), Some("econd line"));
+        assert!(consume_replayed_paste_key(&mut pending, first, now));
+        assert_eq!(
+            pending.as_ref().map(|r| r.remainder()),
+            Some("econd line")
+        );
+    }
+
+    #[test]
+    fn stale_replay_marker_cannot_swallow_genuine_input() {
+        let start = Instant::now();
+        let mut pending = Some(PasteReplay::new("hello".to_string(), start));
+        let after = start + PASTE_REPLAY_TTL + Duration::from_millis(1);
+        // the terminal never replayed: after the deadline the 'h' the user
+        // types must reach the editor instead of vanishing into the marker
+        let h = crossterm::event::KeyEvent::new(KeyCode::Char('h'), KeyModifiers::empty());
+        assert!(!consume_replayed_paste_key(&mut pending, h, after));
+        assert!(pending.is_none());
+        let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+        assert!(!consume_replayed_paste_key(&mut pending, enter, after));
+    }
+
+    #[test]
+    fn replay_advances_by_offset_without_copying() {
+        let now = Instant::now();
+        let mut pending = Some(PasteReplay::new("abcdefgh".to_string(), now));
+        assert!(consume_replayed_paste_text(&mut pending, "abcdefg", now));
+        let r = pending.as_ref().unwrap();
+        assert_eq!(r.offset, 7);
+        assert_eq!(r.text, "abcdefgh");
+        assert!(consume_replayed_paste_text(&mut pending, "h", now));
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn qwerty_translates_uppercase_cyrillic() {
+        assert_eq!(qwerty_char('с'), Some('c'));
+        assert_eq!(qwerty_char('С'), Some('C'));
+        assert_eq!(qwerty_char('C'), None);
+        assert_eq!(qwerty_char('a'), None);
     }
 
     #[test]

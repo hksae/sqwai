@@ -15,6 +15,12 @@ fn file() -> &'static Option<Mutex<File>> {
     })
 }
 
+/// Cheap gate so callers can skip building the (sometimes O(paste))
+/// description string entirely when logging is off.
+pub fn is_enabled() -> bool {
+    file().is_some()
+}
+
 pub fn log(tag: &str, message: impl Display) {
     let Some(file) = file() else {
         return;

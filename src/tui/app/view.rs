@@ -1314,11 +1314,16 @@ impl App {
             if gi < groups.len() && idx == groups[gi].seg_start {
                 let g = &groups[gi];
                 if !in_group {
-                    logical.push((blank(), None));
+                    push_wrapped(&mut logical, blank(), None, w);
                     in_group = true;
                 }
                 last_block = BlockKind::Activity;
-                logical.push((activity_header_line(g), Some(GROUP_BASE + gi)));
+                push_wrapped(
+                    &mut logical,
+                    activity_header_line(g),
+                    Some(GROUP_BASE + gi),
+                    w,
+                );
                 if g.expanded {
                     inside_until = g.seg_end;
                 } else {
@@ -1341,34 +1346,34 @@ impl App {
                 Segment::AskUser { .. } | Segment::PlanProposal { .. } => {
                     in_group = false;
                     last_block = BlockKind::None;
-                    logical.push((blank(), None));
+                    push_wrapped(&mut logical, blank(), None, w);
                 }
                 Segment::User(_) => {
                     in_group = false;
                     last_block = BlockKind::None;
-                    logical.push((blank(), None));
+                    push_wrapped(&mut logical, blank(), None, w);
                 }
                 Segment::Assistant { .. } => {
                     if !in_group {
-                        logical.push((blank(), None));
+                        push_wrapped(&mut logical, blank(), None, w);
                         in_group = true;
                     } else if last_block == BlockKind::ThoughtExpanded {
-                        logical.push((blank(), None));
+                        push_wrapped(&mut logical, blank(), None, w);
                     }
                     last_block = BlockKind::Answer;
                 }
                 Segment::Commentary(_) => {
                     if !in_group {
-                        logical.push((blank(), None));
+                        push_wrapped(&mut logical, blank(), None, w);
                         in_group = true;
                     }
                 }
                 Segment::Thinking { expanded, .. } => {
                     if !in_group {
-                        logical.push((blank(), None));
+                        push_wrapped(&mut logical, blank(), None, w);
                         in_group = true;
                     } else if last_block == BlockKind::Answer {
-                        logical.push((blank(), None));
+                        push_wrapped(&mut logical, blank(), None, w);
                     }
                     last_block = if *expanded {
                         BlockKind::ThoughtExpanded
@@ -1378,21 +1383,25 @@ impl App {
                 }
                 Segment::Subagent { .. } => {
                     if !in_group {
-                        logical.push((blank(), None));
+                        push_wrapped(&mut logical, blank(), None, w);
                         in_group = true;
                     }
                 }
                 Segment::Tool { .. } => {
                     // tool rows belong to the agent's turn, keep them grouped
                     if !in_group {
-                        logical.push((blank(), None));
+                        push_wrapped(&mut logical, blank(), None, w);
                         in_group = true;
                     }
                 }
                 Segment::Status { .. } => {}
             }
 
-            // expensive part: reuse rendered lines unless the text changed
+            // expensive part: reuse rendered AND wrapped lines unless the
+            // text changed. Re-wrapping the whole history on every streamed
+            // frame was the long-chat lag; wrapping is per-line independent,
+            // so per-segment chunks concatenate exactly like one whole-list
+            // pass. Indent goes in before wrapping, same as before.
             let key = self.seg_key(seg);
             // nested rows render narrower so the indent cannot push them past
             // the chat width; the width is part of the cache check so a segment
@@ -1404,15 +1413,26 @@ impl App {
             };
             if needs_render {
                 let lines = self.render_segment(idx, render_w);
-                self.seg_cache[idx] = Some((key, render_w, lines));
+                let chunk: Vec<(Line<'static>, Option<usize>)> = lines
+                    .into_iter()
+                    .map(|(line, tag)| (indent_line(line, indent), tag))
+                    .collect();
+                let (rows, tags) = wrap_tagged(chunk, w);
+                self.seg_cache[idx] =
+                    Some((key, render_w, rows.into_iter().zip(tags).collect()));
             }
             let cached = self.seg_cache[idx].as_ref().unwrap();
             for (line, tag) in &cached.2 {
-                logical.push((indent_line(line.clone(), indent), *tag));
+                logical.push((line.clone(), *tag));
             }
         }
         self.seg_cache.truncate(self.segments.len());
-        let (lines, rowseg) = wrap_tagged(logical, w);
+        let mut lines = Vec::with_capacity(logical.len());
+        let mut rowseg = Vec::with_capacity(logical.len());
+        for (line, tag) in logical {
+            lines.push(line);
+            rowseg.push(tag);
+        }
         self.cache_lines = lines;
         self.cache_rowseg = rowseg;
         self.cache_w = width;
@@ -2664,6 +2684,19 @@ pub(super) fn segment_layout_key(seg: &Segment) -> u64 {
         }
     }
     h.finish()
+}
+
+/// Push one structural row wrapped immediately: separators and group
+/// headers are final on their own, so they never wait for a whole-list
+/// wrap pass — segment chunks are wrapped at cache time instead.
+fn push_wrapped(
+    out: &mut Vec<(Line<'static>, Option<usize>)>,
+    line: Line<'static>,
+    tag: Option<usize>,
+    width: u16,
+) {
+    let (rows, tags) = wrap_tagged(vec![(line, tag)], width);
+    out.extend(rows.into_iter().zip(tags));
 }
 
 pub(super) fn blank() -> Line<'static> {

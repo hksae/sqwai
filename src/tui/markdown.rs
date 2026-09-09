@@ -40,6 +40,12 @@ impl Highlighter {
         let mut out = Vec::new();
         for line in syntect::util::LinesWithEndings::from(code) {
             let Ok(regions) = hl.highlight_line(line, &self.ps) else {
+                // never drop source text on a highlighter error: fall back
+                // to the plain line so failures stay visible, not silent
+                out.push(Line::from(Span::styled(
+                    line.trim_end_matches('\n').to_string(),
+                    base_style(),
+                )));
                 continue;
             };
             let mut spans: Vec<Span> = Vec::new();
@@ -128,9 +134,13 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
         }
 
         if trimmed_start.is_empty() {
-            if matches!(out.last(), Some(l) if !l.spans.is_empty()) {
-                out.push(Line::from(vec![Span::styled(String::new(), base_style())]));
+            // collapse runs of blank source lines: only the first one leaves
+            // a row (checked by content, not by span count — an empty styled
+            // span is still a blank row)
+            if matches!(out.last(), Some(l) if l.spans.iter().all(|s| s.content.is_empty())) {
+                continue;
             }
+            out.push(Line::from(vec![Span::styled(String::new(), base_style())]));
             continue;
         }
 
@@ -309,7 +319,12 @@ fn emit_table(out: &mut Vec<Line<'static>>, rows: Vec<Vec<String>>, align: Vec<A
     if ncols == 0 {
         return;
     }
-    let avail = width.saturating_sub(ncols as u16 + 1).max(4);
+    // Minimum column width. Two frame-adjacent padding spaces plus two
+    // content columns: any single char (max width 2) always fits, so a cell
+    // can never overflow its frame. Narrower tables would trade content loss
+    // for width; overflow past the viewport stays rectangular instead.
+    const MIN_COL: usize = 4;
+    let avail = width.saturating_sub(ncols as u16 + 1) as usize;
     // Column widths are terminal columns, not characters: the border below is
     // drawn as `"─".repeat(w(i))`, and a CJK glyph occupies two cells while a
     // combining mark occupies none. Counting characters here made every table
@@ -324,26 +339,41 @@ fn emit_table(out: &mut Vec<Line<'static>>, rows: Vec<Vec<String>>, align: Vec<A
                 })
                 .max()
                 .unwrap_or(0)
-                .max(3)
+                .max(MIN_COL)
         })
         .collect();
-    // shrink to fit
-    loop {
-        let total: usize = widths.iter().sum::<usize>() + widths.len();
-        let max_total = avail as usize;
-        if total <= max_total {
-            break;
+    // Shrink to fit the frame: content budget is `avail`, because the frame
+    // itself costs `ncols + 1` border columns. Distribute the cut
+    // proportionally in bounded passes — never one column per iteration.
+    let content_total: usize = widths.iter().sum();
+    if content_total > avail {
+        let mut over = content_total - avail;
+        // pass 1: proportional floor shares toward MIN_COL
+        let reducible: usize = widths.iter().map(|w| w.saturating_sub(MIN_COL)).sum();
+        if reducible > 0 {
+            for w in widths.iter_mut() {
+                let room = w.saturating_sub(MIN_COL);
+                let cut = over
+                    .saturating_mul(room)
+                    .checked_div(reducible)
+                    .unwrap_or(0)
+                    .min(room);
+                *w -= cut;
+                over -= cut;
+            }
+            // pass 2: leftover from flooring, one column per column max
+            for w in widths.iter_mut() {
+                if over == 0 {
+                    break;
+                }
+                let room = w.saturating_sub(MIN_COL);
+                let cut = over.min(room);
+                *w -= cut;
+                over -= cut;
+            }
         }
-        let (mi, _) = widths
-            .iter()
-            .enumerate()
-            .filter(|(_, w)| **w > 3)
-            .max_by_key(|(_, w)| **w)
-            .unwrap_or((usize::MAX, &0));
-        if mi == usize::MAX {
-            break;
-        }
-        widths[mi] -= 1;
+        // Still over (everything at MIN_COL): the frame overflows the
+        // viewport, but every row keeps the same width — rectangular.
     }
     let w = |i: usize| widths.get(i).copied().unwrap_or(0);
     let border = |out: &mut Vec<Line<'static>>, lft: &str, mid: &str, rgt: &str| {
@@ -571,7 +601,7 @@ fn emit_code(
 
     let iw = lines
         .iter()
-        .map(|l| UnicodeWidthStr::width(line_text_pub(l).as_str()))
+        .map(line_width)
         .max()
         .unwrap_or(0)
         .max(min_iw_for_lang)
@@ -589,8 +619,7 @@ fn emit_code(
         Span::styled(format!("{}╮", "─".repeat(rest)), b),
     ]));
     for l in lines.into_iter().flat_map(|line| wrap_code_line(line, iw)) {
-        let t = line_text_pub(&l);
-        let pad = " ".repeat(iw.saturating_sub(UnicodeWidthStr::width(t.as_str())));
+        let pad = " ".repeat(iw.saturating_sub(line_width(&l)));
         let mut spans = vec![Span::styled("│ ".to_string(), b)];
         spans.extend(l.spans);
         spans.push(Span::styled(format!("{pad} │"), b));
@@ -642,11 +671,21 @@ fn surface_line(line: Line<'static>) -> Line<'static> {
     spans.push(Span::styled(" ".to_string(), surface_pad()));
     for s in line.spans {
         let st = s.style.patch(Style::new().bg(Theme::SURFACE()));
-        spans.push(Span::styled(s.content.to_string(), st));
+        spans.push(Span::styled(s.content, st));
     }
     Line::from(spans)
 }
 
+/// Terminal columns of a rendered line, without joining its spans into a
+/// temporary string first (used for measuring, not for content).
+fn line_width(l: &Line<'_>) -> usize {
+    l.spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum()
+}
+
+#[cfg(test)]
 fn line_text_pub(l: &Line<'_>) -> String {
     l.spans.iter().map(|s| s.content.as_ref()).collect()
 }
@@ -767,12 +806,26 @@ enum InlineLink {
     },
 }
 
+/// Bounds for single-pass inline scanning. Unbounded searches turn pasted
+/// content (`"[".repeat(n)`, marker runs) into quadratic work: every failed
+/// open re-scans the whole remainder. Caps convert the worst case to linear;
+/// only single constructs longer than the cap degrade to literals, which is
+/// unreachable for real chat text.
+const MAX_LINK_LABEL: usize = 1024;
+const MAX_LINK_TARGET: usize = 4096;
+const MAX_EMPHASIS_SPAN: usize = 4096;
+
+/// Largest byte index at or below `cap` that sits on a char boundary.
+fn floor_boundary(s: &str, cap: usize) -> usize {
+    s.floor_char_boundary(cap.min(s.len()))
+}
+
 fn parse_md_link(s: &str, image: bool) -> Option<InlineLink> {
     debug_assert!(s.starts_with('['));
-    let close = s.find(']')?;
+    let close = s[..floor_boundary(s, MAX_LINK_LABEL + 1)].find(']')?;
     let text = &s[1..close];
     let url_part = s[close + 1..].strip_prefix('(')?;
-    let end = url_part.find(')')?;
+    let end = url_part[..floor_boundary(url_part, MAX_LINK_TARGET + 1)].find(')')?;
     // `[t](url "title")`: the title is dropped, only the target is shown
     let mut url = url_part[..end].split_whitespace().next().unwrap_or("");
     if url.starts_with('<') && url.ends_with('>') && url.len() >= 2 {
@@ -792,7 +845,7 @@ fn parse_md_link(s: &str, image: bool) -> Option<InlineLink> {
 
 fn parse_autolink(s: &str) -> Option<InlineLink> {
     debug_assert!(s.starts_with('<'));
-    let end = s.find('>')?;
+    let end = s[..floor_boundary(s, MAX_LINK_LABEL + 1)].find('>')?;
     let inner = &s[1..end];
     if inner.is_empty() || inner.chars().any(|c| c.is_whitespace() || c == '<') {
         return None;
@@ -806,158 +859,134 @@ fn parse_autolink(s: &str) -> Option<InlineLink> {
     })
 }
 
-/// Earliest parseable `[text](url)`, `![alt](src)` or `<url>` in `rest`.
-fn find_link_start(rest: &str) -> Option<(usize, InlineLink)> {
-    let bytes = rest.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'!' if bytes.get(i + 1) == Some(&b'[') => {
-                if let Some(link) = parse_md_link(&rest[i + 1..], true) {
-                    return Some((i, link));
-                }
-                i += 2;
-            }
-            b'[' => {
-                if let Some(link) = parse_md_link(&rest[i..], false) {
-                    return Some((i, link));
-                }
-                i += 1;
-            }
-            b'<' => {
-                if let Some(link) = parse_autolink(&rest[i..]) {
-                    return Some((i, link));
-                }
-                i += 1;
-            }
-            _ => {
-                i += rest[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-            }
-        }
-    }
-    None
+/// Longest emphasis marker starting at `bytes[i]`, if any. Order matters:
+/// on equal positions the longer marker wins (`**` over `*`).
+fn marker_at(bytes: &[u8], i: usize) -> Option<&'static str> {
+    const MARKERS: [&str; 9] = ["***", "___", "**", "__", "~~", "``", "*", "_", "`"];
+    MARKERS
+        .iter()
+        .find(|m| bytes[i..].starts_with(m.as_bytes()))
+        .copied()
 }
 
+/// Single left-to-right pass: every byte position is visited once, so the
+/// whole scan is linear in the input length (bounded closer/link searches
+/// keep adversarial pasted runs from going quadratic). Precedence matches
+/// the old multi-search version: strictly earliest construct wins, escapes
+/// beat a marker at the same-or-later position, links beat markers only when
+/// strictly earlier, and on equal positions the longer marker wins.
 fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
-    const MARKERS: [&str; 9] = ["***", "___", "``", "**", "__", "~~", "`", "*", "_"];
     let ambient_bg = style.bg.unwrap_or(Theme::BG());
-    let mut rest = text;
-    'outer: while !rest.is_empty() {
-        // earliest backslash escape (`\*` -> literal `*`)
-        let mut esc_pos = None;
-        let mut search = 0;
-        while let Some(rel) = rest[search..].find('\\') {
-            let p = search + rel;
-            let valid = rest[p + 1..]
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    let mut lit_start = 0usize;
+    // Every cursor below sits on an ASCII token boundary, so slicing `text`
+    // at it is always safe.
+    let flush = |out: &mut Vec<Span<'static>>, up_to: usize, lit_start: &mut usize| {
+        if up_to > *lit_start {
+            out.push(Span::styled(text[*lit_start..up_to].to_string(), style));
+            *lit_start = up_to;
+        }
+    };
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' {
+            let valid = text[i + 1..]
                 .chars()
                 .next()
                 .is_some_and(|c| c.is_ascii_punctuation());
             if valid {
-                esc_pos = Some(p);
-                break;
+                flush(out, i, &mut lit_start);
+                let ch = text[i + 1..].chars().next().unwrap();
+                out.push(Span::styled(ch.to_string(), style));
+                i += 1 + ch.len_utf8();
+                lit_start = i;
+            } else {
+                i += 1;
             }
-            search = p + 1;
+            continue;
         }
-        let link = find_link_start(rest);
-        // earliest openable emphasis marker (longest wins on ties)
-        let mut best: Option<(usize, &str)> = None;
-        for m in MARKERS {
-            let mut from = 0;
-            while let Some(rel) = rest[from..].find(m) {
-                let pos = from + rel;
-                if m.contains('_') && !can_open_us(rest, pos) {
-                    from = pos + 1;
-                    continue;
+        if b == b'[' || b == b'<' || (b == b'!' && bytes.get(i + 1) == Some(&b'[')) {
+            let parsed = if b == b'<' {
+                parse_autolink(&text[i..])
+            } else if b == b'!' {
+                parse_md_link(&text[i + 1..], true)
+            } else {
+                parse_md_link(&text[i..], false)
+            };
+            if let Some(kind) = parsed {
+                flush(out, i, &mut lit_start);
+                let link_style = style.fg(Theme::ACCENT()).add_modifier(Modifier::UNDERLINED);
+                let url_style = Style::new().fg(Theme::DIM()).bg(ambient_bg);
+                match kind {
+                    InlineLink::Md {
+                        len,
+                        text,
+                        url,
+                        image,
+                    } => {
+                        let label = if image && text.is_empty() {
+                            "image".to_string()
+                        } else {
+                            text
+                        };
+                        push_inline(&label, link_style, out);
+                        out.push(Span::styled(format!(" ({url})"), url_style));
+                        // `len` already covers a leading `!` for images
+                        i += len;
+                        lit_start = i;
+                    }
+                    InlineLink::Auto { len, url } => {
+                        out.push(Span::styled(url, link_style));
+                        i += len;
+                        lit_start = i;
+                    }
                 }
-                best = Some(match best {
-                    // on equal position prefer the longer marker (** over *)
-                    Some((bp, bm)) if bp < pos || (bp == pos && bm.len() >= m.len()) => (bp, bm),
-                    _ => (pos, m),
-                });
-                break;
-            }
-        }
-        let mark_pos = best.map(|(p, _)| p);
-
-        // links win only when strictly earliest, so `*em* [l](u)` still
-        // parses the emphasis first and `[**b**](u)` keeps bold link text
-        if let Some((lp, kind)) = link
-            && esc_pos.is_none_or(|ep| lp < ep)
-            && mark_pos.is_none_or(|mp| lp < mp)
-        {
-            if lp > 0 {
-                out.push(Span::styled(rest[..lp].to_string(), style));
-            }
-            let link_style = style.fg(Theme::ACCENT()).add_modifier(Modifier::UNDERLINED);
-            let url_style = Style::new().fg(Theme::DIM()).bg(ambient_bg);
-            match kind {
-                InlineLink::Md {
-                    len,
-                    text,
-                    url,
-                    image,
-                } => {
-                    let label = if image && text.is_empty() {
-                        "image".to_string()
-                    } else {
-                        text
-                    };
-                    push_inline(&label, link_style, out);
-                    out.push(Span::styled(format!(" ({url})"), url_style));
-                    rest = &rest[lp + len..];
-                }
-                InlineLink::Auto { len, url } => {
-                    out.push(Span::styled(url, link_style));
-                    rest = &rest[lp + len..];
-                }
-            }
-            continue 'outer;
-        }
-        if let Some(ep) = esc_pos
-            && mark_pos.is_none_or(|mp| ep <= mp)
-        {
-            if ep > 0 {
-                out.push(Span::styled(rest[..ep].to_string(), style));
-            }
-            let ch = rest[ep + 1..].chars().next().unwrap();
-            out.push(Span::styled(ch.to_string(), style));
-            rest = &rest[ep + 1 + ch.len_utf8()..];
-            continue 'outer;
-        }
-        let Some((pos, marker)) = best else { break };
-        if pos > 0 {
-            out.push(Span::styled(rest[..pos].to_string(), style));
-            rest = &rest[pos..];
-        }
-        // find a closable closing marker
-        let close_from = marker.len();
-        let mut close = None;
-        let mut from = close_from;
-        while let Some(rel) = rest[from..].find(marker) {
-            let i = from + rel;
-            if marker.contains('_') && !can_close_us(rest, i + marker.len()) {
-                from = i + 1;
                 continue;
             }
-            close = Some(i);
-            break;
+            i += 1;
+            continue;
         }
-        let inner_end = match close {
-            Some(i) => i,
-            None => {
-                out.push(Span::styled(marker.to_string(), style));
-                rest = &rest[marker.len()..];
-                continue 'outer;
-            }
+        let Some(marker) = marker_at(bytes, i) else {
+            i += text[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            continue;
         };
-        if inner_end == close_from {
-            // empty markers like `` — literal
-            out.push(Span::styled(marker.to_string(), style));
-            rest = &rest[marker.len()..];
-            continue 'outer;
+        if marker.contains('_') && !can_open_us(text, i) {
+            i += 1;
+            continue;
         }
-        let inner = &rest[close_from..inner_end];
-        let after = &rest[inner_end + marker.len()..];
+        // Bounded closer search: one linear walk, `_` closers filtered by
+        // the word rule. Anything past the cap stays literal.
+        let from = i + marker.len();
+        let limit = floor_boundary(text, (from + MAX_EMPHASIS_SPAN).min(text.len()));
+        let mut close = None;
+        let mut p = from;
+        while p + marker.len() <= limit {
+            if text[p..].starts_with(marker)
+                && (!marker.contains('_') || can_close_us(text, p + marker.len()))
+            {
+                close = Some(p);
+                break;
+            }
+            p += text[p..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        }
+        let Some(inner_end) = close else {
+            flush(out, i, &mut lit_start);
+            out.push(Span::styled(marker.to_string(), style));
+            i += marker.len();
+            lit_start = i;
+            continue;
+        };
+        if inner_end == from {
+            // empty markers like `` — literal
+            flush(out, i, &mut lit_start);
+            out.push(Span::styled(marker.to_string(), style));
+            i += marker.len();
+            lit_start = i;
+            continue;
+        }
+        flush(out, i, &mut lit_start);
+        let inner = &text[from..inner_end];
         match marker {
             "`" | "``" => {
                 out.push(Span::styled(inner.to_string(), code_style()));
@@ -972,11 +1001,10 @@ fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
             "~~" => push_inline(inner, style.add_modifier(Modifier::CROSSED_OUT), out),
             _ => unreachable!(),
         }
-        rest = after;
+        i = inner_end + marker.len();
+        lit_start = i;
     }
-    if !rest.is_empty() {
-        out.push(Span::styled(rest.to_string(), style));
-    }
+    flush(out, text.len(), &mut lit_start);
 }
 
 /// Greedy word wrap preserving span styles and carrying a per-source-line tag
@@ -1030,13 +1058,23 @@ pub fn wrap_tagged(
         let mut cur: Vec<(Style, char)> = Vec::new();
         let mut cur_width = 0usize;
         let mut last_space: Option<(usize, usize)> = None;
+        let mut prev_zwj = false;
         for (st, ch) in cells {
             if ch == '\n' {
+                // explicit line break: finish the row instead of dropping it
+                trim_end_spaces(&mut cur);
+                rows.push(cells_to_line(std::mem::take(&mut cur), fallback));
+                tags.push(tag);
+                cur_width = 0;
+                last_space = None;
+                prev_zwj = false;
                 continue;
             }
             let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-            // zero-width marks always join the current row, even past budget
-            if ch_width > 0 && cur_width + ch_width > width && !cur.is_empty() {
+            // zero-width marks always join the current row, even past budget;
+            // a joiner continuation never starts a new row either, matching
+            // cell_rows/wrap_code_line so all wrappers share one width model
+            if ch_width > 0 && !prev_zwj && cur_width + ch_width > width && !cur.is_empty() {
                 if let Some((space_index, width_at_space)) = last_space {
                     let rest = cur.split_off(space_index + 1);
                     trim_end_spaces(&mut cur);
@@ -1057,10 +1095,13 @@ pub fn wrap_tagged(
             }
             cur.push((st, ch));
             cur_width += ch_width;
+            prev_zwj = ch == '\u{200d}';
         }
         trim_end_spaces(&mut cur);
-        rows.push(cells_to_line(cur, fallback));
-        tags.push(tag);
+        if !cur.is_empty() {
+            rows.push(cells_to_line(cur, fallback));
+            tags.push(tag);
+        }
     }
     (rows, tags)
 }
@@ -1107,6 +1148,75 @@ fn cells_to_line(mut cells: Vec<(Style, char)>, fallback: Style) -> Line<'static
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrap_preserves_explicit_newlines() {
+        // Note: `Line::from(&str)` already splits on newlines in this
+        // ratatui version, so build the span explicitly to cover the
+        // newline-inside-span path (tool output, pasted text).
+        let input = Line::from(vec![Span::styled(
+            "alpha\nbeta".to_string(),
+            Theme::base(),
+        )]);
+        let (rows, _) = wrap_tagged(vec![(input, Some(1))], 80);
+
+        let text: Vec<_> = rows.iter().map(line_text_pub).collect();
+        assert_eq!(text, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn wrap_collapses_only_at_line_breaks_not_mid_line() {
+        // trailing newline must not append a phantom blank row
+        let input = Line::from("alpha\n");
+        let (rows, _) = wrap_tagged(vec![(input, None)], 80);
+        let text: Vec<_> = rows.iter().map(line_text_pub).collect();
+        assert_eq!(text, vec!["alpha"]);
+    }
+
+    #[test]
+    fn inline_many_markers_stays_linear() {
+        let text = "*x* ".repeat(20_000);
+        let spans = inline(&text, Theme::base());
+        // each pair yields one italic span plus its trailing literal space
+        assert_eq!(spans.len(), 40_000);
+        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>().join("");
+        assert_eq!(joined, "x ".repeat(20_000));
+    }
+
+    #[test]
+    fn inline_unclosed_brackets_stay_linear() {
+        let text = "[".repeat(20_000);
+        let spans = inline(&text, Theme::base());
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content.len(), 20_000);
+    }
+
+    #[test]
+    fn inline_underscore_runs_stay_linear() {
+        // opener at 0 scans a bounded window, then goes literal: each
+        // repetition costs O(1) amortized instead of re-scanning the tail
+        let text = "_a ".repeat(5_000);
+        let spans = inline(&text, Theme::base());
+        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>().join("");
+        assert_eq!(joined, text);
+    }
+
+    #[test]
+    fn table_narrow_cjk_stays_rectangular() {
+        let hl = Highlighter::new();
+        // forces minimum-width columns filled with double-width glyphs
+        let md = "| a | b | c |\n|---|---|---|\n| 日 | 本 | 語 |\n| 本 | 語 | 日 |\n";
+        let lines = render(md, 20, &hl);
+        let cols: Vec<usize> = lines
+            .iter()
+            .map(|l| UnicodeWidthStr::width(line_text_pub(l).as_str()))
+            .collect();
+        assert!(!cols.is_empty());
+        assert!(
+            cols.iter().all(|&c| c == cols[0]),
+            "ragged narrow grid {cols:?}"
+        );
+    }
 
     #[test]
     fn code_block_gets_label_and_lines() {
