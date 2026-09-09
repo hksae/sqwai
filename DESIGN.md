@@ -147,12 +147,10 @@ A project has at most one `active` plan. `plan create` while an active plan
 exists is rejected with the active plan's id and title; the user resolves this
 via `/plan` (continue, complete, abandon) — the model cannot.
 
-`/fork` copies the plan (`forked_from: <plan-id>`, steps and statuses
-preserved, `revision` reset) and the journal position; both sessions continue
-independently. Deferred to v2: in v1 the host rejects `/fork` with
-`code: fork_deferred`; resume (`--resume`, session picker, `/new` continue)
-is the only multi-session path. `forked_from` stays in the schema for
-forward compatibility. See §3.4 and §7.
+Fork is deleted: there is no `/fork`, no plan copy, no journal fork record.
+`forked_from` may linger in old files and is ignored on read. Resume
+(`--resume`, session picker, `/new` continue) is the only multi-session path.
+See §3.4 and §7.
 
 #### 2.1.2 On-disk format
 
@@ -211,6 +209,7 @@ Field notes:
 applied_event — scoped reference `session:seq` of the last journal event
 applied to this plan file. The plan is a recoverable projection; on load the
 host replays journal events after applied_event (§2.1.4, §2.2.1).
+forked_from — legacy, ignored on read (fork deleted).
 steps[].kind ∈ research | change | verify (default change). Determines
 what counts as evidence (§2.1.4).
 steps[].refs — optional list of `{path, symbol?, intent}` objects where
@@ -418,6 +417,13 @@ Repeated rejections of model‑proposed proposals trigger the forced ask_user me
 /plan — full plan document (goal, constraints, acceptance, steps, folded).
 /plan history — completed/abandoned plans.
 /plan complete | abandon | limit N | waive <acceptance-index> "reason".
+/plan delete — user-only: removes the session's plan file after confirmation,
+unlinks the session (`plan_id: None`), journals `plan_deleted`. A linked
+completed/abandoned plan is shown as read-only history with an explicit
+"create a new plan" prompt, never as the work plan. If another active plan
+exists on disk, the session attaches to the most recent one (global-plan
+semantics, §2.1.1) and the TUI says whose plan it is — a deleted plan never
+silently resurrects a stale foreign plan as "yours".
 /goal <text>, /constraints add|remove <text>.
 TUI todo panel (Ctrl+T) — derived view: current step highlighted, counts.
 Mode switching is Tab or /mode plan|act (§5.3). /plan no longer
@@ -503,10 +509,8 @@ increasing from 1 per session. Appends are flushed per record. On open, a
 trailing partial line is truncated and a journal_repair record is written.
 seq values are referenced from plans and diaries; they are never renumbered.
 
-A forked session (v2) starts a new journal whose first record is
-{"kind":"fork","from_session":"...","from_seq":N}. Evidence references
-before the fork point remain valid by resolving through the parent chain.
-In v1 fork is deferred, so this record is specified but never written.
+A fork record is not written: fork is deleted, so no new journal starts with
+`{"kind":"fork",...}`. Old journals may contain one; it is ignored.
 
 2.2.2 Record shape
 Common fields: seq, ts (RFC 3339 with local offset), step (current
@@ -1238,7 +1242,7 @@ only while its hash is still in context (recent-reads line or kept history);
 otherwise the model must re-read it before editing. This keeps the guard
 sound without storing every read in the anchor.
 
-3.4 Resume (fork deferred to v2)
+3.4 Resume (fork deleted)
 sqwai --resume <session> or the session picker:
 
 Load session; journal opened, repaired if needed.
@@ -1254,9 +1258,8 @@ the kept history (last compaction.keep_turns turns) is loaded verbatim.
 /new with an active plan: ask_user — continue in the new session (plan
 attached), complete, abandon, or leave it (new session without plan; the
 plan stays active and blocks plan create until resolved).
-Resume is the only v1 multi-session path. `/fork` (new session id, new
-journal with fork record, plan copied with `forked_from`) is deferred to v2
-and rejected with `code: fork_deferred`.
+Resume is the only multi-session path. Fork is deleted: no `/fork` command,
+no plan copy, no journal fork record.
 
 3.5 Criticism → Reflector
 Problem: "what did you even do?" / "this is wrong" makes models either argue
@@ -1602,7 +1605,7 @@ a step shows its combined diff (all `file_diff` of that step from its first
 checkpoint to the last — §7 AB) and offers `/undo step N` (reverts one step if
 its files do not overlap later steps; otherwise refuses with an explanation).
 
-Commands: /new /sessions /resume /undo /compact /diary /plan [history| complete|abandon|limit|waive] /plan from /run /brief /review /goal /constraints /mode /verify [--full] /graph-rebuild /why /export /bench /settings /providers /models /themes /skills /skill /mcp /lsp /init /debug /exit. `/fork` is deferred to v2 and not listed. README must list the same set; a test diffs the two.
+Commands: /new /sessions /resume /undo /compact /diary /plan [history| complete|abandon|limit|waive|delete] /plan from /run /brief /review /goal /constraints /mode /verify [--full] /graph-rebuild /why /export /bench /settings /providers /models /themes /skills /skill /mcp /lsp /init /debug /exit. `/fork` is deleted (was deferred to v2; removal decided instead — no fork code, no fork record, `forked_from` ignored on read). README must list the same set; a test diffs the two.
 
 5.5 MCP
 rmcp client; stdio and streamable HTTP; tool discovery at session start
@@ -1811,7 +1814,7 @@ number; a `partial` one is missing something the design calls for.
 | F3 | Evidence rule in `finish`, `verify`, `complete`; nudges; note | done — `verify` accepts evidence from an unrelated step (#6) | F1 |
 | F4 | Diary: host block, triggers, writer call, fallback; memory_read; secrets screening | done — the journal itself is not screened (#11); the diary number post-check of §2.3.2 is a prompt instruction, not host code (#12) | F2 |
 | F5 | MEMORY.md + memory_propose approval; session-start loading | done | F4 |
-| F6 | Compaction anchor; summary=off default; resume per §3.4 (`/fork` deferred to v2); undo→reopen | done | F1–F5 |
+| F6 | Compaction anchor; summary=off default; resume per §3.4 (fork deleted); undo→reopen | done | F1–F5 |
 | F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, optional zstd) + layer-2 shadow repo driven by the git CLI through `tokio::process`; restore via diff-tree; `/undo step N` | done, with two stated deviations: git is invoked synchronously (the call sites are already blocking), and `keep_per_session` is reported rather than enforced — truncating a commit chain rewrites the shas the journal recorded — restore is path-scoped and a non-count `/undo` argument is refused (#4, #5); remaining: git2, checkpoints in the user's `.git`, no undo outside git repos (#17) | F1 |
 | G | Goal-retention benchmark (§8.2) | planned | F6 |
 | H0 | L0 fact block + criticism detector | planned | F2 |
@@ -1834,7 +1837,6 @@ number; a `partial` one is missing something the design calls for.
 | T | Provider fallback chain ([models.x].fallback) | planned — the `fallback` field does not exist on ModelConfig (#8) | §5.1 |
 | U | Assumption notes: open tracking, finish warning, resolve | done | F3 |
 | V | Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md) | next — cmd:/manual: settling done (#7); remaining: /init seeding of verify commands and their substitution on create | F3 |
-| FORK | `/fork` multi-session branch (plan copy + journal fork record) | planned (v2) — v1 rejects with `fork_deferred`; resume is the only path | F6 |
 | W | Plan-first gate (Act first-mutate w/o plan → plan_required) | planned | F3 |
 | X | Staged compaction + recent-reads anchor + USER.md split/load | partial — USER.md split and loading are in; staged pre-compaction (§3.3.1) is not; anchor keeps last-5 reads (§3.3.3), not all reads | F1, F5 |
 | Y | Claim lint (post-generation verify against journal/resolve_ref) | planned | I4 |
@@ -1966,7 +1968,7 @@ CozoDB as the graph engine	pre-1.0, unstable on-disk format, low upstream activi
 Filesystem watcher as the basis of incrementality	correctness must not depend on a watcher; explicit triggers first
 Force-directed / canvas graph view in the MVP	expensive, untestable, no value to the agent; list view first
 Checkpoint only before "dangerous" bash	formatters and git commands mutate silently; hash-gated checkpoints instead
-Plan bound to session id	breaks resume and multi-session tasks; plans have their own ids (`/fork` deferred to v2)
+Plan bound to session id	breaks resume and multi-session tasks; plans have their own ids (fork deleted)
 /plan /act as mode commands	collides with plan document commands; modes are Tab / /mode
 Project-specific dev rules in the system prompt	leaked sqwai's own AGENTS.md into every user's session
 Screenshot-first control	expensive and imprecise, requires vision; the accessibility tree is exact and model-agnostic

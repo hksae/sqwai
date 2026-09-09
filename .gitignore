@@ -25,3 +25,6 @@ Desktop.ini
 ehthumbs.db
 
 tui.md
+
+# Local-only implementation plan (never commit)
+/IMPL_PLAN.local.md
