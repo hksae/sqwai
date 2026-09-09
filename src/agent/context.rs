@@ -683,6 +683,55 @@ mod tests {
     }
 
     #[test]
+    fn anchor_prefers_session_plan_over_newer_global_plan() {
+        let root = temp_root("anchor-session-scope");
+        let limits = crate::plan::Limits::default();
+        let mut plan_a = crate::plan::create(
+            "session A goal".into(),
+            Vec::new(),
+            Vec::new(),
+            vec![crate::plan::NewStep {
+                title: "step A".into(),
+                kind: None,
+                refs: Vec::new(),
+            }],
+            20_000,
+            &limits,
+        )
+        .unwrap();
+        plan_a.created = "2026-01-01T00:00:00+00:00".to_string();
+        plan_a.sessions = vec!["session-a".to_string()];
+        crate::plan::store(&root, &plan_a).unwrap();
+
+        let mut plan_b = crate::plan::create(
+            "session B goal".into(),
+            Vec::new(),
+            Vec::new(),
+            vec![crate::plan::NewStep {
+                title: "step B".into(),
+                kind: None,
+                refs: Vec::new(),
+            }],
+            20_000,
+            &limits,
+        )
+        .unwrap();
+        plan_b.created = "2026-09-09T00:00:00+00:00".to_string();
+        plan_b.sessions = vec!["session-b".to_string()];
+        crate::plan::store(&root, &plan_b).unwrap();
+
+        let rendered_a = anchor(&root, "session-a");
+        assert!(rendered_a.contains("goal: session A goal"));
+        assert!(!rendered_a.contains("goal: session B goal"));
+
+        let rendered_b = anchor(&root, "session-b");
+        assert!(rendered_b.contains("goal: session B goal"));
+        assert!(!rendered_b.contains("goal: session A goal"));
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn resume_notice_reports_unfinished_plan_step() {
         let root = temp_root("resume");
         let mut plan = crate::plan::create(
