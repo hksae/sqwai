@@ -26,14 +26,16 @@ fn reopened_step_ids(
 ) -> Vec<String> {
     // Conservative rule (§3.6): ANY reverted part of a done step's result
     // reopens it. Reverting a subset while the rest stays changed cannot
-    // leave the step marked completed.
-    let file_set: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
+    // leave the step marked completed. Paths are separator-normalized so
+    // git forward slashes match journal backslashes on Windows.
+    let file_set: std::collections::HashSet<String> =
+        files.iter().map(|f| f.replace('\\', "/")).collect();
     active
         .steps
         .iter()
         .filter(|step| step.status == plan::StepStatus::Done)
         .filter(|step| {
-            let evidence_paths: Vec<&str> = records
+            let evidence_paths: Vec<String> = records
                 .iter()
                 .filter(|record| {
                     record.plan.as_deref() == Some(active.id.as_str())
@@ -45,6 +47,7 @@ fn reopened_step_ids(
                         })
                 })
                 .filter_map(|record| record.fields.get("path").and_then(|value| value.as_str()))
+                .map(|path| path.replace('\\', "/"))
                 .collect();
             !evidence_paths.is_empty() && evidence_paths.iter().any(|path| file_set.contains(path))
         })
@@ -2100,10 +2103,23 @@ impl App {
             }
             Some("complete") => match self.workable_plan() {
                 Ok(mut active) => {
-                    match plan::apply(&mut active, plan::Op::Complete, &plan::Limits::default(), None) {
+                    match plan::apply(
+                        &mut active,
+                        plan::Op::Complete,
+                        &plan::Limits::default(),
+                        None,
+                    ) {
                         Ok(plan::Applied::Completed) => {
                             let sid = self.session.id.to_string();
-                            match plan::commit(&root, &sid, &mut active, "complete", "user", true, serde_json::json!({})) {
+                            match plan::commit(
+                                &root,
+                                &sid,
+                                &mut active,
+                                "complete",
+                                "user",
+                                true,
+                                serde_json::json!({}),
+                            ) {
                                 Ok(_) => "plan completed".to_string(),
                                 Err(e) => format!("plan write failed: {e:#}"),
                             }
@@ -2136,7 +2152,15 @@ impl App {
                             Ok(()) => {
                                 let sid = self.session.id.to_string();
                                 let args = serde_json::json!({"index": index, "reason": reason});
-                                match plan::commit(&root, &sid, &mut active, "waive", "user", true, args) {
+                                match plan::commit(
+                                    &root,
+                                    &sid,
+                                    &mut active,
+                                    "waive",
+                                    "user",
+                                    true,
+                                    args,
+                                ) {
                                     Ok(_) => format!("acceptance {index} waived"),
                                     Err(e) => format!("plan write failed: {e:#}"),
                                 }
@@ -3534,7 +3558,9 @@ impl App {
                         "reason": format!("reopened by undo of step {step}"),
                     });
                     let sid = self.session.id.to_string();
-                    if crate::plan::commit(&root, &sid, &mut active, "reopen", "host", true, args).is_ok() {
+                    if crate::plan::commit(&root, &sid, &mut active, "reopen", "host", true, args)
+                        .is_ok()
+                    {
                         reopened.push(step.to_string());
                     }
                     self.refresh_plan_label();
