@@ -1666,21 +1666,17 @@ async fn run_agent(
                                 .await;
                         }
                         let tag = format!("step_{id}_start");
-                        let sha = if let Some((s, t)) = ctx.journal.last() && t == &tag {
+                        let sha = if let Some((s, t)) = ctx.journal.last()
+                            && t == &tag
+                        {
                             Some(s.clone())
                         } else {
-                            checkpoints::snapshot_boundary(
-                                &root,
-                                shadow_store,
-                                &session_id,
-                                &tag,
-                            )
-                            .ok()
-                            .flatten()
-                            .map(|s| {
-                                ctx.journal.push((s.clone(), tag.clone()));
-                                s
-                            })
+                            checkpoints::snapshot_boundary(&root, shadow_store, &session_id, &tag)
+                                .ok()
+                                .flatten()
+                                .inspect(|s| {
+                                    ctx.journal.push((s.clone(), tag.clone()));
+                                })
                         };
                         if let Some(sha) = sha {
                             let _ = writer.append(
@@ -1698,7 +1694,9 @@ async fn run_agent(
                             && let Some(id) = plan_step_id
                         {
                             let tag = format!("step_{id}_finish");
-                            let sha = if let Some((s, t)) = ctx.journal.last() && t == &tag {
+                            let sha = if let Some((s, t)) = ctx.journal.last()
+                                && t == &tag
+                            {
                                 Some(s.clone())
                             } else {
                                 checkpoints::snapshot_boundary(
@@ -1709,9 +1707,8 @@ async fn run_agent(
                                 )
                                 .ok()
                                 .flatten()
-                                .map(|s| {
+                                .inspect(|s| {
                                     ctx.journal.push((s.clone(), tag.clone()));
-                                    s
                                 })
                             };
                             if let Some(sha) = sha {

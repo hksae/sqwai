@@ -871,11 +871,7 @@ mod tests {
             );
         }
 
-        for cmd in [
-            "remove-item target.txt",
-            "del file.log",
-            "ri notes.md",
-        ] {
+        for cmd in ["remove-item target.txt", "del file.log", "ri notes.md"] {
             assert_eq!(
                 classify_for(ShellKind::PowerShell, cmd),
                 Verdict::Safe,

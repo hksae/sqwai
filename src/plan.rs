@@ -2899,32 +2899,36 @@ mod tests {
                 refs: vec![],
             },
         ];
-        assert!(apply(
-            &mut plan,
-            Op::Split {
-                id: "1".into(),
-                into: parts.clone()
-            },
-            &Limits::default(),
-            None,
-        )
-        .is_ok());
+        assert!(
+            apply(
+                &mut plan,
+                Op::Split {
+                    id: "1".into(),
+                    into: parts.clone()
+                },
+                &Limits::default(),
+                None,
+            )
+            .is_ok()
+        );
         assert!(plan.step("1a").is_some());
         assert!(plan.step("1b").is_some());
         assert!(plan.step("1").is_none());
 
         // Reopened step can also be split
         plan.steps[2].status = StepStatus::Reopened;
-        assert!(apply(
-            &mut plan,
-            Op::Split {
-                id: "2".into(),
-                into: parts
-            },
-            &Limits::default(),
-            None,
-        )
-        .is_ok());
+        assert!(
+            apply(
+                &mut plan,
+                Op::Split {
+                    id: "2".into(),
+                    into: parts
+                },
+                &Limits::default(),
+                None,
+            )
+            .is_ok()
+        );
         assert!(plan.step("2a").is_some());
         assert!(plan.step("2b").is_some());
     }

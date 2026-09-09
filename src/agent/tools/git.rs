@@ -637,7 +637,8 @@ mod tests {
             .unwrap();
 
         let mut ctx = ToolCtx::new(dir.path());
-        let unified_patch = "--- a/hello.txt\n+++ b/hello.txt\n@@ -1,2 +1,2 @@\n line1\n-line2\n+line2_modified\n";
+        let unified_patch =
+            "--- a/hello.txt\n+++ b/hello.txt\n@@ -1,2 +1,2 @@\n line1\n-line2\n+line2_modified\n";
         let outcome = patch(&mut ctx, &json!({"patch": unified_patch}));
         assert!(outcome.ok, "patch failed: {}", outcome.output);
         assert!(outcome.file_diff.is_some());

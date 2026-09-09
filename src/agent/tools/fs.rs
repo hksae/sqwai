@@ -229,7 +229,10 @@ fn apply_one(content: &str, old: &str, new: &str, replace_all: bool) -> Result<S
         return err("old_string must not be empty");
     }
     let (target_old, target_new) = if content.matches(old).count() > 0 {
-        (std::borrow::Cow::Borrowed(old), std::borrow::Cow::Borrowed(new))
+        (
+            std::borrow::Cow::Borrowed(old),
+            std::borrow::Cow::Borrowed(new),
+        )
     } else {
         let crlf_old = normalize_to_crlf(old);
         if content.matches(&crlf_old).count() > 0 {

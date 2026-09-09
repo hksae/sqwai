@@ -147,7 +147,7 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
         // display math block ($$ ... $$)
         if trimmed_start == "$$" {
             let mut math_lines = Vec::new();
-            while let Some(ml) = lines.next() {
+            for ml in lines.by_ref() {
                 if ml.trim() == "$$" {
                     break;
                 }
@@ -815,9 +815,7 @@ fn can_close_us(rest: &str, close_end: usize) -> bool {
 fn can_open_math(rest: &str, pos: usize, marker_len: usize) -> bool {
     let after = &rest[pos + marker_len..];
     if marker_len == 1 {
-        !after.is_empty()
-            && !after.starts_with(char::is_whitespace)
-            && !after.starts_with('$')
+        !after.is_empty() && !after.starts_with(char::is_whitespace) && !after.starts_with('$')
     } else {
         !after.is_empty()
     }
@@ -827,8 +825,7 @@ fn can_open_math(rest: &str, pos: usize, marker_len: usize) -> bool {
 fn can_close_math(rest: &str, close_pos: usize) -> bool {
     let before = &rest[..close_pos];
     let after = &rest[close_pos + 1..];
-    !before.ends_with(char::is_whitespace)
-        && !after.starts_with(|c: char| c.is_ascii_digit())
+    !before.ends_with(char::is_whitespace) && !after.starts_with(|c: char| c.is_ascii_digit())
 }
 
 enum InlineLink {
@@ -1067,7 +1064,7 @@ pub(crate) fn render_math(s: &str) -> String {
                         chars.next(); // consume '{'
                         let mut depth = 1;
                         let mut inner_text = String::new();
-                        while let Some((_, ch)) = chars.next() {
+                        for (_, ch) in chars.by_ref() {
                             if ch == '{' {
                                 depth += 1;
                                 inner_text.push(ch);
@@ -1924,7 +1921,10 @@ mod tests {
         let text: String = spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(text, "A → B");
 
-        let spans = inline(r"$\leftarrow$ and $\Leftarrow$ and $\Rightarrow$ and $\leftrightarrow$", Theme::base());
+        let spans = inline(
+            r"$\leftarrow$ and $\Leftarrow$ and $\Rightarrow$ and $\leftrightarrow$",
+            Theme::base(),
+        );
         let text: String = spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(text, "← and ⇐ and ⇒ and ↔");
 
