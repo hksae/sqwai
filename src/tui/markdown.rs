@@ -144,6 +144,24 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
             continue;
         }
 
+        // display math block ($$ ... $$)
+        if trimmed_start == "$$" {
+            let mut math_lines = Vec::new();
+            while let Some(ml) = lines.next() {
+                if ml.trim() == "$$" {
+                    break;
+                }
+                math_lines.push(ml);
+            }
+            for ml in math_lines {
+                out.push(Line::from(vec![
+                    Span::styled("  ", base_style()),
+                    Span::styled(render_math(ml.trim()), base_style()),
+                ]));
+            }
+            continue;
+        }
+
         // heading
         if let Some(rest) = try_heading(trimmed_start) {
             out.push(Line::from(rest));
@@ -793,6 +811,26 @@ fn can_close_us(rest: &str, close_end: usize) -> bool {
         .is_none_or(|c| !is_word_char(c))
 }
 
+/// `$`-family markers must not open if followed by whitespace or another `$` (unless `$$`).
+fn can_open_math(rest: &str, pos: usize, marker_len: usize) -> bool {
+    let after = &rest[pos + marker_len..];
+    if marker_len == 1 {
+        !after.is_empty()
+            && !after.starts_with(char::is_whitespace)
+            && !after.starts_with('$')
+    } else {
+        !after.is_empty()
+    }
+}
+
+/// Single `$` closing marker must not be preceded by whitespace, and not followed by a digit.
+fn can_close_math(rest: &str, close_pos: usize) -> bool {
+    let before = &rest[..close_pos];
+    let after = &rest[close_pos + 1..];
+    !before.ends_with(char::is_whitespace)
+        && !after.starts_with(|c: char| c.is_ascii_digit())
+}
+
 enum InlineLink {
     Md {
         len: usize,
@@ -862,7 +900,9 @@ fn parse_autolink(s: &str) -> Option<InlineLink> {
 /// Longest emphasis marker starting at `bytes[i]`, if any. Order matters:
 /// on equal positions the longer marker wins (`**` over `*`).
 fn marker_at(bytes: &[u8], i: usize) -> Option<&'static str> {
-    const MARKERS: [&str; 9] = ["***", "___", "**", "__", "~~", "``", "*", "_", "`"];
+    const MARKERS: [&str; 11] = [
+        "***", "___", "**", "__", "~~", "``", "$$", "*", "_", "`", "$",
+    ];
     MARKERS
         .iter()
         .find(|m| bytes[i..].starts_with(m.as_bytes()))
@@ -875,6 +915,217 @@ fn marker_at(bytes: &[u8], i: usize) -> Option<&'static str> {
 /// the old multi-search version: strictly earliest construct wins, escapes
 /// beat a marker at the same-or-later position, links beat markers only when
 /// strictly earlier, and on equal positions the longer marker wins.
+pub(crate) fn lookup_math_symbol(cmd: &str) -> Option<&'static str> {
+    match cmd {
+        // Arrows
+        "rightarrow" | "to" => Some("→"),
+        "longrightarrow" => Some("⟶"),
+        "leftarrow" | "gets" => Some("←"),
+        "longleftarrow" => Some("⟵"),
+        "leftrightarrow" => Some("↔"),
+        "longleftrightarrow" => Some("⟷"),
+        "Rightarrow" | "implies" => Some("⇒"),
+        "Longrightarrow" => Some("⟹"),
+        "Leftarrow" => Some("⇐"),
+        "Longleftarrow" => Some("⟸"),
+        "Leftrightarrow" | "iff" => Some("⇔"),
+        "Longleftrightarrow" => Some("⟺"),
+        "mapsto" => Some("↦"),
+        "longmapsto" => Some("⟼"),
+        "uparrow" => Some("↑"),
+        "downarrow" => Some("↓"),
+        "updownarrow" => Some("↕"),
+        "Uparrow" => Some("⇑"),
+        "Downarrow" => Some("⇓"),
+        "nearrow" => Some("↗"),
+        "searrow" => Some("↘"),
+        "swarrow" => Some("↙"),
+        "nwarrow" => Some("↖"),
+
+        // Comparisons and relations
+        "le" | "leq" => Some("≤"),
+        "ge" | "geq" => Some("≥"),
+        "ne" | "neq" => Some("≠"),
+        "approx" => Some("≈"),
+        "equiv" => Some("≡"),
+        "sim" => Some("∼"),
+        "simeq" => Some("≃"),
+        "ll" => Some("≪"),
+        "gg" => Some("≫"),
+        "propto" => Some("∝"),
+        "perp" => Some("⊥"),
+        "parallel" => Some("∥"),
+
+        // Operations and symbols
+        "times" => Some("×"),
+        "div" => Some("÷"),
+        "pm" => Some("±"),
+        "mp" => Some("∓"),
+        "cdot" => Some("·"),
+        "circ" => Some("∘"),
+        "bullet" => Some("•"),
+        "dots" | "cdots" | "ldots" => Some("…"),
+        "vdots" => Some("⋮"),
+        "ddots" => Some("⋱"),
+        "infty" => Some("∞"),
+        "in" => Some("∈"),
+        "notin" => Some("∉"),
+        "subset" => Some("⊂"),
+        "subseteq" => Some("⊆"),
+        "supset" => Some("⊃"),
+        "supseteq" => Some("⊇"),
+        "cup" => Some("∪"),
+        "cap" => Some("∩"),
+        "setminus" => Some("∖"),
+        "forall" => Some("∀"),
+        "exists" => Some("∃"),
+        "nexists" => Some("∄"),
+        "emptyset" | "varnothing" => Some("∅"),
+        "partial" => Some("∂"),
+        "nabla" => Some("∇"),
+        "sum" => Some("∑"),
+        "prod" => Some("∏"),
+        "int" => Some("∫"),
+        "oint" => Some("∮"),
+        "sqrt" => Some("√"),
+        "angle" => Some("∠"),
+
+        // Greek lowercase
+        "alpha" => Some("α"),
+        "beta" => Some("β"),
+        "gamma" => Some("γ"),
+        "delta" => Some("δ"),
+        "epsilon" | "varepsilon" => Some("ε"),
+        "zeta" => Some("ζ"),
+        "eta" => Some("η"),
+        "theta" | "vartheta" => Some("θ"),
+        "iota" => Some("ι"),
+        "kappa" => Some("κ"),
+        "lambda" => Some("λ"),
+        "mu" => Some("μ"),
+        "nu" => Some("ν"),
+        "xi" => Some("ξ"),
+        "pi" | "varpi" => Some("π"),
+        "rho" | "varrho" => Some("ρ"),
+        "sigma" | "varsigma" => Some("σ"),
+        "tau" => Some("τ"),
+        "upsilon" => Some("υ"),
+        "phi" | "varphi" => Some("φ"),
+        "chi" => Some("χ"),
+        "psi" => Some("ψ"),
+        "omega" => Some("ω"),
+
+        // Greek uppercase
+        "Gamma" => Some("Γ"),
+        "Delta" => Some("Δ"),
+        "Theta" => Some("Θ"),
+        "Lambda" => Some("Λ"),
+        "Xi" => Some("Ξ"),
+        "Pi" => Some("Π"),
+        "Sigma" => Some("Σ"),
+        "Upsilon" => Some("Υ"),
+        "Phi" => Some("Φ"),
+        "Psi" => Some("Ψ"),
+        "Omega" => Some("Ω"),
+
+        // Spacing
+        "quad" => Some("  "),
+        "qquad" => Some("    "),
+
+        _ => None,
+    }
+}
+
+pub(crate) fn render_math(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == '\\' {
+            let rem = &s[i + 1..];
+            let cmd_len = rem
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphabetic())
+                .map(|ch| ch.len_utf8())
+                .sum::<usize>();
+            if cmd_len > 0 {
+                let cmd = &rem[..cmd_len];
+                if let Some(sym) = lookup_math_symbol(cmd) {
+                    out.push_str(sym);
+                    for _ in 0..cmd.chars().count() {
+                        chars.next();
+                    }
+                    continue;
+                }
+                if matches!(
+                    cmd,
+                    "text" | "mathrm" | "mathbf" | "mathit" | "operatorname"
+                ) {
+                    for _ in 0..cmd.chars().count() {
+                        chars.next();
+                    }
+                    if chars.peek().is_some_and(|(_, ch)| *ch == '{') {
+                        chars.next(); // consume '{'
+                        let mut depth = 1;
+                        let mut inner_text = String::new();
+                        while let Some((_, ch)) = chars.next() {
+                            if ch == '{' {
+                                depth += 1;
+                                inner_text.push(ch);
+                            } else if ch == '}' {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                                inner_text.push(ch);
+                            } else {
+                                inner_text.push(ch);
+                            }
+                        }
+                        out.push_str(&inner_text);
+                        continue;
+                    }
+                }
+            } else if let Some((_, ch)) = chars.peek().copied() {
+                match ch {
+                    ',' | ';' | ':' => {
+                        chars.next();
+                        out.push(' ');
+                        continue;
+                    }
+                    '!' => {
+                        chars.next();
+                        continue;
+                    }
+                    '{' | '}' => {
+                        chars.next();
+                        out.push(ch);
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn push_styled_text(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
+    if text.is_empty() {
+        return;
+    }
+    if text.contains(r"\rightarrow") {
+        let replaced = text.replace(r"\rightarrow", "→");
+        out.push(Span::styled(replaced, style));
+    } else {
+        out.push(Span::styled(text.to_string(), style));
+    }
+}
+
+/// Single left-to-right pass over the input: see the precedence rules in
+/// `marker_at`/`can_open_math` — strictly earliest construct wins, escapes
+/// beat a marker at the same-or-later position, links only when strictly
+/// earlier, longer marker wins ties.
 fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
     let ambient_bg = style.bg.unwrap_or(Theme::BG());
     let bytes = text.as_bytes();
@@ -884,7 +1135,7 @@ fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
     // at it is always safe.
     let flush = |out: &mut Vec<Span<'static>>, up_to: usize, lit_start: &mut usize| {
         if up_to > *lit_start {
-            out.push(Span::styled(text[*lit_start..up_to].to_string(), style));
+            push_styled_text(&text[*lit_start..up_to], style, out);
             *lit_start = up_to;
         }
     };
@@ -955,6 +1206,10 @@ fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
             i += 1;
             continue;
         }
+        if (marker == "$" || marker == "$$") && !can_open_math(text, i, marker.len()) {
+            i += 1;
+            continue;
+        }
         // Bounded closer search: one linear walk, `_` closers filtered by
         // the word rule. Anything past the cap stays literal.
         let from = i + marker.len();
@@ -964,6 +1219,7 @@ fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
         while p + marker.len() <= limit {
             if text[p..].starts_with(marker)
                 && (!marker.contains('_') || can_close_us(text, p + marker.len()))
+                && (marker != "$" || can_close_math(text, p))
             {
                 close = Some(p);
                 break;
@@ -990,6 +1246,10 @@ fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
         match marker {
             "`" | "``" => {
                 out.push(Span::styled(inner.to_string(), code_style()));
+            }
+            "$" | "$$" => {
+                let rendered = render_math(inner);
+                out.push(Span::styled(rendered, style));
             }
             "***" | "___" => push_inline(
                 inner,
@@ -1640,5 +1900,68 @@ mod tests {
             .map(|s| format!("{:?}", s.style))
             .collect();
         assert!(styles.len() > 1, "expected highlight spans: {:?}", up[1]);
+    }
+
+    #[test]
+    fn math_renders_arrows_and_latex_symbols() {
+        let spans = inline(r"$\rightarrow$", Theme::base());
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(text, "→");
+
+        let spans = inline(r"Step 1 $\rightarrow$ Step 2", Theme::base());
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(text, "Step 1 → Step 2");
+
+        let spans = inline(r"$\to$", Theme::base());
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(text, "→");
+
+        let spans = inline(r"$$\rightarrow$$", Theme::base());
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(text, "→");
+
+        let spans = inline(r"A \rightarrow B", Theme::base());
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(text, "A → B");
+
+        let spans = inline(r"$\leftarrow$ and $\Leftarrow$ and $\Rightarrow$ and $\leftrightarrow$", Theme::base());
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(text, "← and ⇐ and ⇒ and ↔");
+
+        let spans = inline(r"$\alpha \le \beta \ne \gamma$", Theme::base());
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(text, "α ≤ β ≠ γ");
+
+        let spans = inline(r"**$\rightarrow$**", Theme::base());
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(text, "→");
+        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn currency_and_escaped_dollars_stay_literal() {
+        let spans = inline("Price: $10 and fee: $20", Theme::base());
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(text, "Price: $10 and fee: $20");
+
+        let spans = inline(r"Costs \$50 only", Theme::base());
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(text, "Costs $50 only");
+
+        let spans = inline(r"`$\rightarrow$`", Theme::base());
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(text, r"$\rightarrow$");
+    }
+
+    #[test]
+    fn display_math_block_renders_arrow() {
+        let hl = Highlighter::new();
+        let md = "$$\n\\rightarrow\n$$\n";
+        let lines = render(md, 40, &hl);
+        let all: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(all.contains('→'), "rendered: {all:?}");
     }
 }
