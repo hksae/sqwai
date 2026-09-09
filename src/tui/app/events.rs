@@ -549,6 +549,21 @@ impl App {
                         {
                             self.open_menu(Menu::Subagents);
                         }
+                        KeyCode::Char('p') | KeyCode::Char('P')
+                            if ctrl && self.menu_stack.is_empty() =>
+                        {
+                            self.open_menu(Menu::Providers);
+                        }
+                        KeyCode::Char('l') | KeyCode::Char('L')
+                            if ctrl && self.menu_stack.is_empty() =>
+                        {
+                            self.open_menu(Menu::Plan);
+                        }
+                        KeyCode::Char('o') | KeyCode::Char('O')
+                            if ctrl && self.menu_stack.is_empty() =>
+                        {
+                            self.open_menu(Menu::Settings);
+                        }
                         KeyCode::Char('r')
                             if matches!(self.cur_menu(), Some(Menu::Sessions))
                                 && self.sessions_filter.is_empty() =>

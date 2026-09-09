@@ -1,5 +1,6 @@
 ---
 source: src/tui/app/tests.rs
+assertion_line: 3431
 expression: s
 ---
 
@@ -15,8 +16,8 @@ expression: s
         API key not set for provider 'openai'. Set OPENAI_API_KEY or add api_key to config.
 
         type a task to start      tab  plan / act         ctrl+s  sessions
+        ctrl+p  providers         ctrl+l  plan            ctrl+o  settings
         ?  help
-
 
 
 

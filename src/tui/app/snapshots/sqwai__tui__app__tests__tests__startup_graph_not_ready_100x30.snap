@@ -1,5 +1,6 @@
 ---
 source: src/tui/app/tests.rs
+assertion_line: 3448
 expression: s
 ---
 
@@ -14,8 +15,8 @@ expression: s
         memory        MEMORY.md · diary 2025-01-14
 
         type a task to start      tab  plan / act         ctrl+s  sessions
+        ctrl+p  providers         ctrl+l  plan            ctrl+o  settings
         ?  help
-
 
 
 

@@ -1813,7 +1813,13 @@ impl App {
         } else if matches!(
             self.cur_menu(),
             Some(
-                Menu::EditProvider { .. } | Menu::EditModel { .. } | Menu::EditSessionTitle { .. }
+                Menu::EditProvider { .. }
+                    | Menu::EditModel { .. }
+                    | Menu::EditSessionTitle { .. }
+                    | Menu::EditScalar(..)
+                    | Menu::AddListItem(..)
+                    | Menu::EditMcpServer { .. }
+                    | Menu::EditLspServer { .. }
             )
         ) {
             block = block.title_bottom(
@@ -2379,6 +2385,9 @@ impl App {
             }
             hint_items.push(("tab", "plan / act"));
             hint_items.push(("ctrl+s", "sessions"));
+            hint_items.push(("ctrl+p", "providers"));
+            hint_items.push(("ctrl+l", "plan"));
+            hint_items.push(("ctrl+o", "settings"));
             hint_items.push(("?", "help"));
             if !data.has_sqwai_dir {
                 hint_items.push(("/init", "set up project"));
@@ -2400,6 +2409,10 @@ impl App {
                 col3_items.push(("ctrl+s", "sessions"));
 
                 col1_items.push(("type a task to start", ""));
+                col2_items.push(("ctrl+p", "providers"));
+                col3_items.push(("ctrl+l", "plan"));
+
+                col1_items.push(("ctrl+o", "settings"));
                 col2_items.push(("?", "help"));
                 if !data.has_sqwai_dir {
                     col3_items.push(("/init", "set up project"));
@@ -2408,6 +2421,10 @@ impl App {
                 col1_items.push(("type a task to start", ""));
                 col2_items.push(("tab", "plan / act"));
                 col3_items.push(("ctrl+s", "sessions"));
+
+                col1_items.push(("ctrl+p", "providers"));
+                col2_items.push(("ctrl+l", "plan"));
+                col3_items.push(("ctrl+o", "settings"));
 
                 col1_items.push(("?", "help"));
                 if !data.has_sqwai_dir {

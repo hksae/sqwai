@@ -1925,6 +1925,73 @@ mod tests {
     }
 
     #[test]
+    fn settings_hub_rows_have_no_hint_subtitles() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::Settings);
+        let texts: Vec<String> = app
+            .menu_rows
+            .iter()
+            .map(|(line, _)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref().to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(!texts.iter().any(|t| t.contains("themes and UI")));
+        assert!(!texts.iter().any(|t| t.contains("models and API")));
+        assert!(texts.iter().any(|t| t.contains("Appearance")));
+    }
+
+    #[test]
+    fn providers_default_rows_are_spaced() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::Providers);
+        let texts: Vec<String> = app
+            .menu_rows
+            .iter()
+            .map(|(line, _)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref().to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.contains("default effort  ")),
+            "value must not stick to the label: {texts:?}"
+        );
+        assert!(texts.iter().any(|t| t.contains("default model  ")));
+    }
+
+    #[test]
+    fn ctrl_shortcuts_open_providers_plan_settings() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let press = |tx: &std::sync::mpsc::Sender<Event>, c: char| {
+            tx.send(Event::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::CONTROL,
+            )))
+            .unwrap();
+        };
+        press(&tx, 'p');
+        app.poll_input(&rx).unwrap();
+        assert!(matches!(app.cur_menu(), Some(Menu::Providers)));
+        app.menu_home();
+
+        press(&tx, 'o');
+        app.poll_input(&rx).unwrap();
+        assert!(matches!(app.cur_menu(), Some(Menu::Settings)));
+        app.menu_home();
+
+        press(&tx, 'l');
+        app.poll_input(&rx).unwrap();
+        assert!(matches!(app.cur_menu(), Some(Menu::Plan)));
+    }
+
+    #[test]
     fn settings_hub_lists_agent_safety_undo_sections() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.open_menu(Menu::Settings);

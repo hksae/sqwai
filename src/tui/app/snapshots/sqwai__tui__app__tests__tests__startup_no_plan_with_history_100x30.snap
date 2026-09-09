@@ -1,5 +1,6 @@
 ---
 source: src/tui/app/tests.rs
+assertion_line: 3391
 expression: s
 ---
 
@@ -17,8 +18,8 @@ expression: s
                       2025-01-14      Add dark mode           Completed
 
         type a task to start      tab  plan / act         ctrl+s  sessions
+        ctrl+p  providers         ctrl+l  plan            ctrl+o  settings
         ?  help
-
 
 
 

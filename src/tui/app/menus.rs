@@ -1678,54 +1678,28 @@ impl App {
         let row = |l: Line<'static>, a: MenuAction| (l, a);
         match menu {
             Menu::Settings => {
-                let section = |label: &str, detail: &str, action: MenuAction| {
+                let section = |label: &str, action: MenuAction| {
                     row(
-                        Line::from(vec![
-                            Span::styled(format!("  {label:<16}"), Theme::accent_bold()),
-                            Span::styled(detail.to_string(), Theme::dim()),
-                        ]),
+                        Line::from(vec![Span::styled(
+                            format!("  {label}"),
+                            Theme::accent_bold(),
+                        )]),
                         action,
                     )
                 };
-                self.menu_rows.push(section(
-                    "Appearance",
-                    "themes and UI",
-                    MenuAction::OpenAppearance,
-                ));
-                self.menu_rows.push(section(
-                    "Providers",
-                    "models and API providers",
-                    MenuAction::OpenProviders,
-                ));
-                self.menu_rows.push(section(
-                    "Agent",
-                    "plan, memory, diary, compaction",
-                    MenuAction::OpenAgent,
-                ));
-                self.menu_rows.push(section(
-                    "Safety",
-                    "secrets, blocked patterns",
-                    MenuAction::OpenSafety,
-                ));
-                self.menu_rows.push(section(
-                    "Undo",
-                    "checkpoints, retention",
-                    MenuAction::OpenUndo,
-                ));
                 self.menu_rows
-                    .push(section("MCP", "tool servers", MenuAction::OpenMcp));
+                    .push(section("Appearance", MenuAction::OpenAppearance));
                 self.menu_rows
-                    .push(section("LSP", "language diagnostics", MenuAction::OpenLsp));
-                self.menu_rows.push(section(
-                    "Skills",
-                    "agent instructions",
-                    MenuAction::OpenSkills,
-                ));
-                self.menu_rows.push(section(
-                    "Debug",
-                    "http log, effort declaration, log path",
-                    MenuAction::OpenDebug,
-                ));
+                    .push(section("Providers", MenuAction::OpenProviders));
+                self.menu_rows.push(section("Agent", MenuAction::OpenAgent));
+                self.menu_rows
+                    .push(section("Safety", MenuAction::OpenSafety));
+                self.menu_rows.push(section("Undo", MenuAction::OpenUndo));
+                self.menu_rows.push(section("MCP", MenuAction::OpenMcp));
+                self.menu_rows.push(section("LSP", MenuAction::OpenLsp));
+                self.menu_rows
+                    .push(section("Skills", MenuAction::OpenSkills));
+                self.menu_rows.push(section("Debug", MenuAction::OpenDebug));
                 self.menu_footer_text = Some("enter: open · esc: close".into());
             }
             Menu::Mcp => {
@@ -2458,14 +2432,14 @@ impl App {
             Menu::Providers => {
                 self.menu_rows.push(row(
                     Line::from(vec![
-                        Span::styled("  default model".to_string(), Theme::dim()),
-                        Span::styled(format!("  {}", self.cfg.default_model), Theme::accent()),
+                        Span::styled(format!("  {:<16}", "default model"), Theme::dim()),
+                        Span::styled(self.cfg.default_model.clone(), Theme::accent()),
                     ]),
                     MenuAction::OpenPickDefaultModel,
                 ));
                 self.menu_rows.push(row(
                     Line::from(vec![
-                        Span::styled("  default effort".to_string(), Theme::dim()),
+                        Span::styled(format!("  {:<16}", "default effort"), Theme::dim()),
                         Span::styled(
                             self.cfg.default_effort.as_str().to_string(),
                             Theme::accent(),
