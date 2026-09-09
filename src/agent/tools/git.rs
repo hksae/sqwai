@@ -443,20 +443,7 @@ pub fn step_diff(ctx: &ToolCtx, args: &Value) -> Outcome {
         },
     };
 
-    let start_label = format!("step_{step_id}_start");
-    let finish_label = format!("step_{step_id}_finish");
-
-    let mut start_sha: Option<String> = None;
-    let mut finish_sha: Option<String> = None;
-
-    for (sha, label) in &commits {
-        if label.contains(&start_label) && start_sha.is_none() {
-            start_sha = Some(sha.clone());
-        }
-        if label.contains(&finish_label) && finish_sha.is_none() {
-            finish_sha = Some(sha.clone());
-        }
-    }
+    let (mut start_sha, mut finish_sha) = resolve_boundary_commits(&commits, step_id);
 
     // Fallback to journal records if labels not in commit messages
     if (start_sha.is_none() || finish_sha.is_none())
@@ -472,18 +459,17 @@ pub fn step_diff(ctx: &ToolCtx, args: &Value) -> Outcome {
             }
             if let Some(sha) = r.fields.get("id").and_then(Value::as_str) {
                 let reason = r.fields.get("reason").and_then(Value::as_str);
-                if reason == Some("step_start") && start_sha.is_none() {
+                if reason == Some("step_start") {
                     start_sha = Some(sha.to_string());
+                    finish_sha = None;
                 }
-                if reason == Some("step_finish") && finish_sha.is_none() {
+                if reason == Some("step_finish") && start_sha.is_some() {
                     finish_sha = Some(sha.to_string());
                 }
             }
             if let Some(sha) = r.fields.get("checkpoint").and_then(Value::as_str) {
-                if start_sha.is_none() {
-                    start_sha = Some(sha.to_string());
-                }
-                finish_sha = Some(sha.to_string());
+                start_sha = Some(sha.to_string());
+                finish_sha = None;
             }
         }
     }
@@ -518,6 +504,28 @@ pub fn step_diff(ctx: &ToolCtx, args: &Value) -> Outcome {
     }
 }
 
+pub(crate) fn resolve_boundary_commits(
+    commits: &[(String, String)],
+    step_id: &str,
+) -> (Option<String>, Option<String>) {
+    let start_label = format!("step_{step_id}_start");
+    let finish_label = format!("step_{step_id}_finish");
+
+    let mut start_sha: Option<String> = None;
+    let mut finish_sha: Option<String> = None;
+
+    // commits are newest first (reverse chronological order)
+    for (sha, label) in commits {
+        if label.contains(&finish_label) && finish_sha.is_none() && start_sha.is_none() {
+            finish_sha = Some(sha.clone());
+        }
+        if label.contains(&start_label) && start_sha.is_none() {
+            start_sha = Some(sha.clone());
+        }
+    }
+    (start_sha, finish_sha)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -532,5 +540,32 @@ mod tests {
         let outcome = patch(&mut ctx, &json!({"patch": forbidden_patch}));
         assert!(!outcome.ok);
         assert!(outcome.output.contains("forbidden path"));
+    }
+
+    #[test]
+    fn resolve_boundary_commits_handles_reopened_steps() {
+        // Step was finished (cycle 1), reopened, and started again (cycle 2 in progress)
+        // Commits in reverse-chronological order (newest first):
+        let commits = vec![
+            ("sha_work".into(), "commit: work in progress".into()),
+            ("sha_start_2".into(), "checkpoint: step_1_start".into()),
+            ("sha_finish_1".into(), "checkpoint: step_1_finish".into()),
+            ("sha_start_1".into(), "checkpoint: step_1_start".into()),
+        ];
+        let (start, finish) = resolve_boundary_commits(&commits, "1");
+        assert_eq!(start.as_deref(), Some("sha_start_2"));
+        // finish must NOT pair with stale sha_finish_1 from prior cycle
+        assert_eq!(finish, None);
+
+        // Once cycle 2 finishes:
+        let commits_finished = vec![
+            ("sha_finish_2".into(), "checkpoint: step_1_finish".into()),
+            ("sha_start_2".into(), "checkpoint: step_1_start".into()),
+            ("sha_finish_1".into(), "checkpoint: step_1_finish".into()),
+            ("sha_start_1".into(), "checkpoint: step_1_start".into()),
+        ];
+        let (start, finish) = resolve_boundary_commits(&commits_finished, "1");
+        assert_eq!(start.as_deref(), Some("sha_start_2"));
+        assert_eq!(finish.as_deref(), Some("sha_finish_2"));
     }
 }
