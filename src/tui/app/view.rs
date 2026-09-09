@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-use super::menus::{COMMANDS, POPUP_MAX_ROWS};
+use super::menus::POPUP_MAX_ROWS;
 use super::*;
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
@@ -316,9 +316,15 @@ impl App {
         }
         self.sel = None;
         // command popup item?
-        if let Some((_, idx)) = self.popup_rows.iter().find(|(y, _)| *y == row) {
-            let cmd = COMMANDS[*idx].to_string();
-            self.apply_command_insert(&cmd);
+        if let Some((_, item)) = self.popup_rows.iter().find(|(y, _)| *y == row) {
+            let item = item.clone();
+            if let Some(cmd) = self.popup_level2_cmd()
+                && let Some(sub) = item.strip_prefix(&format!("{cmd} "))
+            {
+                self.apply_subcommand_insert(cmd, sub);
+                return;
+            }
+            self.apply_command_insert(&item);
             return;
         }
         if let Some(p) = pressed {
@@ -332,7 +338,7 @@ impl App {
                 .popup_rows
                 .iter()
                 .find(|(y, _)| *y == row)
-                .map(|(_, i)| *i);
+                .map(|(_, s)| s.clone());
             if hov != self.hover {
                 self.hover = hov;
                 self.dirty = true;
@@ -1856,9 +1862,8 @@ impl App {
         // it must not dim or otherwise alter the underlying chat.
         let mut rows: Vec<Line> = Vec::new();
         self.popup_rows.clear();
-        for (n, &ci) in items.iter().skip(skip).take(shown).enumerate() {
-            let cmd = COMMANDS[ci];
-            let hovered = self.hover == Some(ci);
+        for (n, item) in items.iter().skip(skip).take(shown).enumerate() {
+            let hovered = self.hover.as_deref() == Some(item.as_str());
             let cmd_style = if hovered {
                 Style::new()
                     .fg(Theme::BG())
@@ -1869,10 +1874,10 @@ impl App {
             };
             let pad = 1usize;
             rows.push(Line::from(vec![Span::styled(
-                format!(" {cmd}{}", " ".repeat(pad)),
+                format!(" {item}{}", " ".repeat(pad)),
                 cmd_style,
             )]));
-            self.popup_rows.push((rect.y + 1 + n as u16, ci));
+            self.popup_rows.push((rect.y + 1 + n as u16, item.clone()));
         }
 
         f.render_widget(Clear, rect);

@@ -1662,6 +1662,35 @@ mod tests {
     }
 
     #[test]
+    fn plan_subcommand_popup_filters_and_inserts() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        // level 2 visible after `/plan `, lists every subcommand
+        app.input = App::fresh_input("/plan ".into());
+        assert!(app.popup_visible());
+        let items = app.popup_items();
+        assert_eq!(items.len(), menus::PLAN_SUBCOMMANDS.len());
+        assert!(items.contains(&"/plan waive".to_string()));
+        // filtering by the typed prefix
+        app.input = App::fresh_input("/plan w".into());
+        assert!(app.popup_visible());
+        assert_eq!(app.popup_items(), vec!["/plan waive".to_string()]);
+        // insert replaces only the subcommand word, keeps typed args
+        app.input = App::fresh_input("/plan wai".into());
+        app.apply_subcommand_insert("/plan", "waive");
+        assert_eq!(app.input_text(), "/plan waive ");
+        app.input = App::fresh_input("/plan waive 2".into());
+        app.apply_subcommand_insert("/plan", "waive");
+        assert_eq!(app.input_text(), "/plan waive 2");
+        // other commands keep level-1-only behavior: hidden after space
+        app.input = App::fresh_input("/undo ".into());
+        assert!(!app.popup_visible());
+        // level 1 untouched
+        app.input = App::fresh_input("/pl".into());
+        assert!(app.popup_visible());
+        assert_eq!(app.popup_items(), vec!["/plan".to_string()]);
+    }
+
+    #[test]
     fn busy_status_is_unique_and_expires() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.show_busy_status();

@@ -1,5 +1,6 @@
 ---
 source: src/tui/app/tests.rs
+assertion_line: 3054
 expression: s
 ---
 
@@ -13,7 +14,7 @@ expression: s
 
 
            ┌  p models  ────────────────────────────────────────────────────────────────┐
-           │ m *  test-model · ctx 1000 · ef:off                                        │
+           │ m *  test-model · 1k · ef:off                                              │
            │ + add model                                                                │
            │ · switch active model                                                      │
            │ · check connection                                                         │

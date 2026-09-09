@@ -316,10 +316,10 @@ pub struct App {
     live_group_collapsed: bool,
 
     // command popup
-    hover: Option<usize>,
+    hover: Option<String>,
     popup_dismiss: bool,
     popup_scroll: usize,
-    popup_rows: Vec<(u16, usize)>,
+    popup_rows: Vec<(u16, String)>,
 
     // providers/models menu (Ctrl+P)
     menu_stack: Vec<Menu>,
@@ -1201,18 +1201,45 @@ impl App {
         self.dirty = true;
     }
 
-    fn popup_visible(&self) -> bool {
+    /// Second-level completion target: `/plan <tail>` filters the pilot
+    /// `/plan` subcommand list. Other commands keep level-1-only behavior.
+    fn popup_level2_cmd(&self) -> Option<&'static str> {
         let t = self.input_text();
-        !self.popup_dismiss && t.starts_with('/') && !t.contains(' ')
+        if t.starts_with("/plan ") {
+            Some("/plan")
+        } else {
+            None
+        }
     }
 
-    fn popup_items(&self) -> Vec<usize> {
+    fn popup_visible(&self) -> bool {
         let t = self.input_text();
+        if self.popup_dismiss || !t.starts_with('/') {
+            return false;
+        }
+        if !t.contains(' ') {
+            return true;
+        }
+        self.popup_level2_cmd().is_some()
+    }
+
+    /// Completion strings, used for both display and insertion.
+    /// Level 1: top-level commands (`/plan`). Level 2: `/plan <sub>`.
+    fn popup_items(&self) -> Vec<String> {
+        let t = self.input_text();
+        if let Some(cmd) = self.popup_level2_cmd() {
+            let tail = t.strip_prefix(cmd).unwrap_or("").trim_start_matches(' ');
+            let word = tail.split_whitespace().next().unwrap_or("");
+            return menus::PLAN_SUBCOMMANDS
+                .iter()
+                .filter(|sub| sub.starts_with(word))
+                .map(|sub| format!("{cmd} {sub}"))
+                .collect();
+        }
         COMMANDS
             .iter()
-            .enumerate()
-            .filter(|(_, cmd)| cmd.starts_with(&t))
-            .map(|(i, _)| i)
+            .filter(|cmd| cmd.starts_with(&t))
+            .map(|cmd| cmd.to_string())
             .collect()
     }
 
@@ -1758,6 +1785,21 @@ impl App {
         let new_text = match rest {
             Some(r) => format!("{cmd} {r}"),
             None => format!("{cmd} "),
+        };
+        self.input = Self::fresh_input(new_text);
+        self.hover = None;
+        self.dirty = true;
+    }
+
+    /// Level-2 insert: replace only the subcommand word, keep already-typed
+    /// arguments (`/plan wai` → `/plan waive `, `/plan waive 2` stays intact).
+    fn apply_subcommand_insert(&mut self, cmd: &str, sub: &str) {
+        let text = self.input_text();
+        let tail = text.strip_prefix(cmd).unwrap_or("").trim_start_matches(' ');
+        let rest = tail.split_once(' ').map(|(_, r)| r.to_string());
+        let new_text = match rest {
+            Some(r) => format!("{cmd} {sub} {r}"),
+            None => format!("{cmd} {sub} "),
         };
         self.input = Self::fresh_input(new_text);
         self.hover = None;

@@ -41,6 +41,12 @@ pub(super) const COMMANDS: &[&str] = &[
     "/undo",
 ];
 
+/// Pilot second-level completions: subcommands of `/plan`, in the same order
+/// as the `plan_command` arms. Other commands keep level-1-only behavior.
+pub(super) const PLAN_SUBCOMMANDS: &[&str] = &[
+    "show", "history", "limit", "complete", "abandon", "waive", "delete",
+];
+
 pub(super) const POPUP_MAX_ROWS: usize = 14;
 
 /// Human-readable context size for menu rows: 1048576 -> "1m", 262144 -> "256k".
