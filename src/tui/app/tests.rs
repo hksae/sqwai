@@ -4436,4 +4436,61 @@ mod tests {
             Some(Segment::Status { text, .. }) if text.contains("checking for built-in provider updates")
         ));
     }
+
+    #[test]
+    fn model_menu_row_formats_ctx_and_prices() {
+        use super::menus::{fmt_ctx, fmt_price};
+
+        assert_eq!(fmt_ctx(1048576), "1m");
+        assert_eq!(fmt_ctx(1000000), "1m");
+        assert_eq!(fmt_ctx(1050000), "1.05m");
+        assert_eq!(fmt_ctx(262144), "256k");
+        assert_eq!(fmt_ctx(200000), "200k");
+        assert_eq!(fmt_ctx(131072), "128k");
+        assert_eq!(fmt_ctx(128000), "128k");
+        assert_eq!(fmt_ctx(32768), "32k");
+        assert_eq!(fmt_ctx(8192), "8k");
+        assert_eq!(fmt_ctx(512), "512");
+
+        assert_eq!(fmt_price(2.0), "2");
+        assert_eq!(fmt_price(0.15), "0.15");
+        assert_eq!(fmt_price(1.1), "1.1");
+        assert_eq!(fmt_price(0.28), "0.28");
+
+        // row shows compact ctx and $in/$out prices
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.cfg.models.insert(
+            "gpt-5.5".into(),
+            ModelConfig {
+                provider: "openai".into(),
+                id: "gpt-5.5".into(),
+                context: 1050000,
+                effort: EffortLevel::High,
+                effort_control: None,
+                effort_always_on: false,
+                price_in: Some(5.0),
+                price_out: Some(30.0),
+            },
+        );
+        app.open_menu(Menu::Models {
+            provider: "openai".into(),
+        });
+        app.build_menu_rows();
+        let texts: Vec<String> = app
+            .menu_rows
+            .iter()
+            .map(|(line, _)| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("1.05m") && t.contains("$5/$30")),
+            "rows: {texts:?}"
+        );
+    }
 }

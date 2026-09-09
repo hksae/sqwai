@@ -43,6 +43,41 @@ pub(super) const COMMANDS: &[&str] = &[
 
 pub(super) const POPUP_MAX_ROWS: usize = 14;
 
+/// Human-readable context size for menu rows: 1048576 -> "1m", 262144 -> "256k".
+pub(super) fn fmt_ctx(n: u64) -> String {
+    const MIB: u64 = 1024 * 1024;
+    const KIB: u64 = 1024;
+    if n >= MIB && n.is_multiple_of(MIB) {
+        return format!("{}m", n / MIB);
+    }
+    if n >= 1_000_000 {
+        if n.is_multiple_of(1_000_000) {
+            return format!("{}m", n / 1_000_000);
+        }
+        return format!("{}m", trim_num(n as f64 / 1_000_000.0, 2));
+    }
+    if n >= 1_000 && n.is_multiple_of(1_000) {
+        return format!("{}k", n / 1_000);
+    }
+    if n >= KIB && n.is_multiple_of(KIB) {
+        return format!("{}k", n / KIB);
+    }
+    if n >= 1_000 {
+        return format!("{}k", trim_num(n as f64 / 1_000.0, 1));
+    }
+    n.to_string()
+}
+
+/// Compact $/1M price for menu rows: 2.0 -> "2", 0.15 -> "0.15".
+pub(super) fn fmt_price(v: f64) -> String {
+    trim_num(v, 4)
+}
+
+fn trim_num(v: f64, prec: usize) -> String {
+    let s = format!("{v:.prec$}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)] // popup state is rebuilt per frame; form payloads are small in practice
 pub(super) enum Menu {
@@ -1487,14 +1522,21 @@ impl App {
                         } else {
                             MenuAction::EditModel(provider.clone(), k.clone())
                         };
+                        let price_part = match (m.price_in, m.price_out) {
+                            (Some(pi), Some(po)) => {
+                                format!(" · ${}/${}", fmt_price(pi), fmt_price(po))
+                            }
+                            _ => String::new(),
+                        };
                         self.menu_rows.push(row(
                             Line::from(vec![
                                 Span::styled(format!(" {k}{mark}"), Theme::accent()),
                                 Span::styled(
                                     format!(
-                                        "  {} · ctx {} · {}",
+                                        "  {} · {}{} · {}",
                                         m.id,
-                                        m.context,
+                                        fmt_ctx(m.context),
+                                        price_part,
                                         // each row reports what that model
                                         // would actually do with its level
                                         crate::providers::effort::plan(
