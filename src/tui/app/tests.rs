@@ -2431,6 +2431,40 @@ mod tests {
     }
 
     #[test]
+    fn undo_reopened_step_ids_matches_across_path_separators() {
+        let mut active = crate::plan::create(
+            "restore evidence".into(),
+            Vec::new(),
+            Vec::new(),
+            vec![crate::plan::NewStep {
+                title: "changed file".into(),
+                kind: Some(crate::plan::StepKind::Change),
+                refs: Vec::new(),
+            }],
+            1000,
+            &crate::plan::Limits::default(),
+        )
+        .unwrap();
+        active.steps[0].status = crate::plan::StepStatus::Done;
+        active.steps[0].evidence = vec![crate::plan::EvidenceRef {
+            session: "session".into(),
+            seq: 10,
+        }];
+        let record = crate::agent::journal::Record {
+            seq: 10,
+            ts: "now".into(),
+            step: Some("1".into()),
+            plan: Some(active.id.clone()),
+            agent: "main".into(),
+            kind: "file_diff".into(),
+            fields: serde_json::from_value(serde_json::json!({"path": "src\\changed.rs"})).unwrap(),
+        };
+        // Git provides forward slashes, journal had backslashes
+        let reopened = reopened_step_ids(&active, &[record], "session", &["src/changed.rs".into()]);
+        assert_eq!(reopened, vec!["1"]);
+    }
+
+    #[test]
     fn static_theme_keeps_seg_key_stable() {
         use crate::tui::app::Segment;
         let app = test_app("http://127.0.0.1:9/v1".into());

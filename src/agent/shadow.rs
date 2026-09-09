@@ -266,10 +266,11 @@ impl Shadow {
     /// Contents of one path in a snapshot, or `None` when the snapshot does
     /// not contain it — which is how a file created afterwards is recognised.
     pub fn show(&self, sha: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        let posix_path = path.replace('\\', "/");
         let out = Command::new("git")
             .arg(format!("--git-dir={}", self.git_dir.display()))
             .arg(format!("--work-tree={}", self.root.display()))
-            .args(["show", &format!("{sha}:{path}")])
+            .args(["show", &format!("{sha}:{posix_path}")])
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -287,7 +288,7 @@ impl Shadow {
         if err.contains("does not exist") || err.contains("exists on disk") {
             return Ok(None);
         }
-        bail!("git show {sha}:{path} failed: {}", err.trim());
+        bail!("git show {sha}:{posix_path} failed: {}", err.trim());
     }
 
     /// List commits on a session's chain in reverse chronological order: (sha, label).
@@ -308,9 +309,11 @@ impl Shadow {
     /// Unified diff between two snapshots, optionally limited to one path.
     pub fn diff(&self, sha1: &str, sha2: &str, path: Option<&str>) -> Result<String> {
         let mut args = vec!["diff", sha1, sha2];
+        let normalized;
         if let Some(p) = path {
+            normalized = p.replace('\\', "/");
             args.push("--");
-            args.push(p);
+            args.push(&normalized);
         }
         self.git(&args)
     }
@@ -554,5 +557,26 @@ mod tests {
             "{user:?}"
         );
         assert!(user.ends_with("git"));
+    }
+
+    #[test]
+    fn show_and_diff_handle_windows_backslash_paths() {
+        let dir = project();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src").join("sub")).unwrap();
+        std::fs::write(root.join("src").join("sub").join("nested.rs"), b"fn nested() {}").unwrap();
+        let shadow = open(root);
+        let sha1 = shadow.snapshot("s", "one").unwrap().unwrap();
+        // Passing Windows-style backslashes to show must succeed
+        assert_eq!(
+            shadow.show(&sha1, "src\\sub\\nested.rs").unwrap().unwrap(),
+            b"fn nested() {}"
+        );
+
+        std::fs::write(root.join("src").join("sub").join("nested.rs"), b"fn nested() { changed(); }").unwrap();
+        let sha2 = shadow.snapshot("s", "two").unwrap().unwrap();
+        // Passing Windows-style backslashes to diff must succeed
+        let diff = shadow.diff(&sha1, &sha2, Some("src\\sub\\nested.rs")).unwrap();
+        assert!(diff.contains("+fn nested() { changed(); }"));
     }
 }

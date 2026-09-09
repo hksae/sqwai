@@ -519,7 +519,7 @@ fn rel_label(root: &Path, p: &Path) -> String {
     p.strip_prefix(root)
         .unwrap_or(p)
         .to_string_lossy()
-        .into_owned()
+        .replace('\\', "/")
 }
 
 // keep json import used even if helpers change

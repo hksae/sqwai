@@ -912,4 +912,26 @@ mod tests {
             "an availability check initialised a shadow repository"
         );
     }
+
+    #[test]
+    fn restore_paths_handles_windows_backslash_targets() {
+        let repo = tmp_repo();
+        let dir = repo.path();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src").join("foo.rs"), "original\n").unwrap();
+        let sha = snapshot(dir, "pre_mutation").expect("snapshot");
+        std::fs::write(dir.join("src").join("foo.rs"), "agent modified\n").unwrap();
+
+        let targets = vec![Target {
+            path: "src\\foo.rs".into(),
+            agent_hash: None,
+        }];
+        let report = restore_paths(dir, &sha, &targets).expect("restore");
+        assert_eq!(report.restored, vec!["src\\foo.rs".to_string()]);
+        assert_eq!(report.deleted, Vec::<String>::new());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src").join("foo.rs")).unwrap(),
+            "original\n"
+        );
+    }
 }

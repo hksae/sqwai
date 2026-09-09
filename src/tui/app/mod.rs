@@ -24,13 +24,14 @@ fn reopened_step_ids(
     session_id: &str,
     files: &[String],
 ) -> Vec<String> {
-    let file_set: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
+    let file_set: std::collections::HashSet<String> =
+        files.iter().map(|f| f.replace('\\', "/")).collect();
     active
         .steps
         .iter()
         .filter(|step| step.status == plan::StepStatus::Done)
         .filter(|step| {
-            let evidence_paths: Vec<&str> = records
+            let evidence_paths: Vec<String> = records
                 .iter()
                 .filter(|record| {
                     record.plan.as_deref() == Some(active.id.as_str())
@@ -42,6 +43,7 @@ fn reopened_step_ids(
                         })
                 })
                 .filter_map(|record| record.fields.get("path").and_then(|value| value.as_str()))
+                .map(|path| path.replace('\\', "/"))
                 .collect();
             !evidence_paths.is_empty() && evidence_paths.iter().all(|path| file_set.contains(path))
         })
