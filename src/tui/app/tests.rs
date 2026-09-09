@@ -1662,6 +1662,31 @@ mod tests {
     }
 
     #[test]
+    fn plan_show_alias_is_gone() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.plan_command("/plan show");
+        assert!(matches!(
+            app.segments.last(),
+            Some(Segment::Status { text, .. }) if text.contains("unknown /plan action")
+        ));
+        // bare `/plan` still opens the overview
+        app.plan_command("/plan");
+        assert!(matches!(app.cur_menu(), Some(Menu::Plan)));
+    }
+
+    #[test]
+    fn form_label_column_fits_long_setting_names() {
+        use super::menus::ScalarSetting;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        // short-label form keeps the legacy 16-column layout
+        app.open_menu(Menu::EditProvider { name: None });
+        assert_eq!(app.form_label_w(), 16);
+        // long scalar labels widen the column so the value never overlaps
+        app.open_menu(Menu::EditScalar(ScalarSetting::MemoryLoadBudgetRatio));
+        assert_eq!(app.form_label_w(), 21);
+    }
+
+    #[test]
     fn plan_subcommand_popup_filters_and_inserts() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         // level 2 visible after `/plan `, lists every subcommand

@@ -47,9 +47,7 @@ pub(super) const COMMANDS: &[&str] = &[
 pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
     (
         "/plan",
-        &[
-            "show", "history", "limit", "complete", "abandon", "waive", "delete",
-        ],
+        &["history", "limit", "complete", "abandon", "waive", "delete"],
     ),
     ("/undo", &["step"]),
     ("/providers", &["update"]),

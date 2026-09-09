@@ -1395,10 +1395,7 @@ impl App {
                 match parts.next().unwrap_or("") {
                     "settings" | "debug" | "theme" | "mcp" | "lsp" | "skill" | "skills"
                     | "providers" | "models" | "sessions" | "exit" => true,
-                    "plan" => {
-                        let sub = parts.next().unwrap_or("show");
-                        matches!(sub, "show")
-                    }
+                    "plan" => parts.next().is_none(),
                     _ => false,
                 }
             } else {
@@ -2039,7 +2036,8 @@ impl App {
         let root = self.project_root.clone();
         let args: Vec<&str> = rest.split_whitespace().skip(1).collect();
         let result = match args.first().copied() {
-            None | Some("show") => {
+            // bare `/plan` opens the overview; there is no `show` alias
+            None => {
                 self.open_menu(Menu::Plan);
                 return;
             }

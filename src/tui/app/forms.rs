@@ -249,6 +249,19 @@ impl App {
         )
     }
 
+    /// Label column width for the open form: fits the longest field label
+    /// (`" {label:>w$} : "`), never narrower than the legacy 16 columns so
+    /// short-label forms render exactly as before.
+    pub(super) fn form_label_w(&self) -> u16 {
+        let widest = self
+            .form_fields
+            .iter()
+            .map(|f| f.label().chars().count())
+            .max()
+            .unwrap_or(0);
+        (widest as u16 + 4).max(16)
+    }
+
     pub(super) fn form_to_start(&mut self) {
         if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus) {
             ta.move_cursor(tui_textarea::CursorMove::Head);
@@ -332,7 +345,7 @@ impl App {
                     }
                     self.form_focus = idx;
                 }
-                let label_w = 16u16;
+                let label_w = self.form_label_w();
                 let text_x = self.menu_rect.x + 1 + label_w;
                 match self.form_fields.get_mut(idx) {
                     Some(FormField::Text { ta, .. }) => {
@@ -356,10 +369,10 @@ impl App {
     }
 
     pub(super) fn form_mouse_drag(&mut self, _row: u16, col: u16) {
+        let label_w = self.form_label_w();
         if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus)
             && ta.is_selecting()
         {
-            let label_w = 16u16;
             let text_x = self.menu_rect.x + 1 + label_w;
             let char_col = (col.saturating_sub(text_x)) as usize;
             ta.move_cursor(tui_textarea::CursorMove::Jump(0, char_col as u16));

@@ -1718,8 +1718,11 @@ impl App {
         let mut rows: Vec<Line> = Vec::new();
         let mut focused_field_rect: Option<(usize, Rect)> = None;
         if is_form {
-            // column layout: " {label:>12} : " then the value
-            let label_w = 16u16;
+            // column layout: " {label:>w$} : " then the value, with the
+            // column sized to the longest label so long setting names
+            // never collide with the value
+            let label_w = self.form_label_w();
+            let inner_w = (label_w as usize).saturating_sub(4);
             for (n, field) in self.form_fields.iter().enumerate() {
                 let focused = n == self.form_focus;
                 let lstyle = if focused {
@@ -1727,7 +1730,7 @@ impl App {
                 } else {
                     Theme::dim()
                 };
-                let prefix = Span::styled(format!(" {:>12} : ", field.label()), lstyle);
+                let prefix = Span::styled(format!(" {:>inner_w$} : ", field.label()), lstyle);
                 let row_y = rect.y + 1 + n as u16;
                 match field {
                     FormField::Text { ta, .. } => {
@@ -2385,9 +2388,6 @@ impl App {
             }
             hint_items.push(("tab", "plan / act"));
             hint_items.push(("ctrl+s", "sessions"));
-            hint_items.push(("ctrl+p", "providers"));
-            hint_items.push(("ctrl+l", "plan"));
-            hint_items.push(("ctrl+o", "settings"));
             hint_items.push(("?", "help"));
             if !data.has_sqwai_dir {
                 hint_items.push(("/init", "set up project"));
@@ -2409,10 +2409,6 @@ impl App {
                 col3_items.push(("ctrl+s", "sessions"));
 
                 col1_items.push(("type a task to start", ""));
-                col2_items.push(("ctrl+p", "providers"));
-                col3_items.push(("ctrl+l", "plan"));
-
-                col1_items.push(("ctrl+o", "settings"));
                 col2_items.push(("?", "help"));
                 if !data.has_sqwai_dir {
                     col3_items.push(("/init", "set up project"));
@@ -2421,10 +2417,6 @@ impl App {
                 col1_items.push(("type a task to start", ""));
                 col2_items.push(("tab", "plan / act"));
                 col3_items.push(("ctrl+s", "sessions"));
-
-                col1_items.push(("ctrl+p", "providers"));
-                col2_items.push(("ctrl+l", "plan"));
-                col3_items.push(("ctrl+o", "settings"));
 
                 col1_items.push(("?", "help"));
                 if !data.has_sqwai_dir {

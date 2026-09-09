@@ -1,6 +1,6 @@
 ---
 source: src/tui/app/tests.rs
-assertion_line: 3448
+assertion_line: 3473
 expression: s
 ---
 
@@ -15,10 +15,10 @@ expression: s
 
   tab    plan / act
   ctrl+s sessions
-  ctrl+p providers
-  ctrl+l plan
-  ctrl+o settings
   ?      help
+
+
+
 
 
 
