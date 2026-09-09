@@ -13,15 +13,16 @@ Reading order for newcomers: §0 → §1 → §2 → §3. Everything else is ref
 ## 0. Thesis
 
 sqwai is a terminal coding agent whose defining property is **execution
-integrity on long tasks**: it does not lose the goal after context compaction,
-it does not claim work it did not do, and it does not act on code that does
-not exist.
+integrity on long tasks**: it bounds goal drift after context compaction,
+does not claim work it did not observe, and verifies code actions against
+durable records.
 
-Every existing agent degrades the same way: the plan is prose the model
-maintains by good will; progress is whatever the model says it is; compaction
-replaces history with a model-written summary that inherits every error; and
-"what did you do?" is answered from memory rather than from facts. sqwai
-replaces good will with structure:
+Without host structure, coding agents degrade under task length: the plan
+is prose the model maintains by good will; progress is whatever the model
+says it is; compaction replaces history with a summary that inherits prior
+hallucinations; and "what did you do?" is answered from model memory rather
+than from facts. sqwai replaces good will with host structure to bound goal
+drift and keep progress checkable:
 
 | Failure | Mechanism | Section |
 |---|---|---|
@@ -111,15 +112,20 @@ enforceable for file tools — not for `bash` (see Threat model below).
 **Threat model.** sqwai offers two execution modes: normal (bash has
 user-level access, path jail applies to file tools only, warnings for
 suspicious commands) and isolated (host-state is outside the agent's writable
-scope; required for unattended). In normal mode, bash can modify `.sqwai/`;
-this is not considered a security breach, only a degrade of integrity
-guarantees for that turn: the host detects the mutation (external_change /
-post-bash status), marks affected receipts `stale`, and reports reduced
-guarantees in the tail block and status bar. Integrity enforcement
-("append-only", "host-written", replay in §2.1.4) holds fully only in
-isolated mode or when the user refrains from hand-editing `.sqwai/` and from
-running shell commands that touch it. The safety classifier (§5.2) is a
-warning and approval layer in normal mode, not a security boundary.
+scope; required for unattended).
+
+In normal mode, bash has full user privileges and can modify or delete `.sqwai/`.
+Because `.sqwai/` is excluded from shadow Git tracking to avoid recursion,
+tampering detection in normal mode is **best-effort** (mtime checks, journal
+header parsing, and single-instance lock checks). The host does not promise to
+detect every modification. Any detected or suspected host-state tampering marks
+integrity as compromised for the session until explicit recovery or reset,
+reports reduced guarantees in the status bar, and invalidates cached receipts.
+Integrity enforcement ("append-only", "host-written", deterministic replay in
+§2.1.4) holds as a guarantee only in isolated mode (e.g. container / bwrap sandbox
+where `.sqwai/` is mounted read-only or outside the workspace) or when the user
+refrains from shell commands that touch `.sqwai/`. The safety classifier (§5.2)
+is an advisory warning and approval layer in normal mode, not a security boundary.
 
 **Single instance.** `.sqwai/lock/<session>.lock` records the owning process pid
 and session id. A second sqwai started in the same project finds a live lock and
@@ -163,6 +169,7 @@ See §3.4 and §7.
   "forked_from": null,
   "sessions": ["a8f2...", "c110..."],
   "applied_event": "a8f2:41",
+  "plan_event_no": 42,
   "goal": {
     "text": "Persist the todo list in the session and show it on Ctrl+T",
     "source": "user",
@@ -173,11 +180,11 @@ See §3.4 and §7.
   },
   "constraints": ["do not change the public session format", "no new dependencies"],
   "acceptance": [
-    {"text": "cmd: cargo test", "status": "pending", "evidence": [],
+    {"id": "0", "text": "cmd: cargo test", "check_hash": "b2a1...", "status": "pending", "evidence": [],
      "validation": {"status": "pending", "receipts": []}},
-    {"text": "cmd: cargo clippy -- -D warnings", "status": "pending", "evidence": [],
+    {"id": "1", "text": "cmd: cargo clippy -- -D warnings", "check_hash": "c3f4...", "status": "pending", "evidence": [],
      "validation": {"status": "pending", "receipts": []}},
-    {"text": "manual: Ctrl+T shows the list", "status": "waived", "by": "user", "reason": "manual check",
+    {"id": "2", "text": "manual: Ctrl+T shows the list", "check_hash": null, "status": "waived", "by": "user", "reason": "manual check",
      "validation": {"status": "waived", "receipts": []}}
   ],
   "steps": [
@@ -209,6 +216,10 @@ Field notes:
 applied_event — scoped reference `session:seq` of the last journal event
 applied to this plan file. The plan is a recoverable projection; on load the
 host replays journal events after applied_event (§2.1.4, §2.2.1).
+plan_event_no — monotonic sequence counter assigned by the project's
+active plan writer, establishing an unambiguous total order across sessions.
+acceptance[].id — stable identifier (`"0"`, `"1"`, ...) referenced by verification receipts.
+acceptance[].check_hash — content hash of runner, command line, and cwd; edits invalidate old receipts.
 forked_from — legacy, ignored on read (fork deleted).
 steps[].kind ∈ research | change | verify (default change). Determines
 what counts as evidence (§2.1.4).
@@ -223,9 +234,9 @@ steps[].status ∈ pending | in_progress | blocked | done | cancelled | reopened
 steps[].validation — `{status, receipts[]}` where
 status ∈ pending | passed | stale | waived. `finish` sets `status: done`
 and never touches `validation`. `passed` is set only by a host-recorded
-`verification_receipt`; `stale` is set by the host when relevant state
-changed after the check (§2.1.4). `waived` is set only by the user via
-host-only `waive`.
+`verification_receipt` or a host-recorded `manual_confirmation`; `stale` is
+set by the host when relevant state changed after the check (§2.1.4).
+`waived` is set only by the user via host-only `waive`.
 acceptance[].validation — same shape as steps[].validation. `complete`
 requires every acceptance item to have `validation.status` of `passed` or
 `waived`; non-stale receipts required (§2.1.4).
@@ -235,12 +246,15 @@ budget — token estimate of the plan as injected; limit derived from model
 context × plan.budget_ratio (default 0.10).
 acceptance[].text may be prefixed `cmd:` (host runs it on `plan verify` and on
 `complete`; the result becomes evidence automatically) or `manual:` (user
-waives). `/init` seeds MEMORY.md ## Project with the project's test/lint/build
+confirms or waives). Items without a registered runner default to `manual:`.
+`/init` seeds MEMORY.md ## Project with the project's test/lint/build
 commands; `plan create` with no acceptance substitutes those as `cmd:` items by
 default (§2.3.5, §7 V).
 Writes are atomic: temp file + rename. On open, a plan that fails schema
-validation is moved to plans/corrupt/ and reported; the agent continues
-without a plan and asks whether to recreate.
+validation is quarantined to `plans/corrupt/<id>-<ts>.json`. The host then
+attempts to rebuild the plan projection by replaying the session journal from
+creation. Only if journal replay fails or no journal exists does the agent report
+the corrupt plan and offer manual recreation.
 
 2.1.3 Operations
 Tool plan accepts one operation per call. The model has no operation that
@@ -294,11 +308,15 @@ checks the evidence already attached to that step. If a model sends an
 `evidence` field, the host ignores it and returns an informational note.
 
 Done is not validated. `finish` moves a step to `done` and leaves
-`validation.status` untouched (still `pending` unless previously waived).
+`validation.status` untouched (still `pending` unless previously waived or confirmed).
 A step reads honestly as "work performed, result not yet checked" until a
-host-recorded `verification_receipt` flips `validation` to `passed`
-(or the user waives it). `complete` never implies correctness by itself;
-only `validation: passed|waived` on every acceptance item does.
+host-recorded `verification_receipt` or user `manual_confirmation` flips `validation`
+to `passed` (or the user waives it).
+
+`complete` means that the completion policy is satisfied; it does not establish
+general correctness.
+- `passed` = the configured check succeeded on the recorded state interval, or the user manually confirmed.
+- `waived` = the user explicitly chose not to require that check.
 
 kind	Requires
 research	≥ 1 host-attached tool_result of any tool since start
@@ -309,32 +327,48 @@ inherited this step_id (§2.2.4). Rejections report counts, for example:
 `step 2 (change): 3 tool_result, 0 file_diff since start`.
 
 For `verify`, `cmd:` acceptance is executed by the host and its result is
-attached automatically. `manual:` acceptance is completed only by the user
-through host-only `waive`. Text acceptances verify against host-attached
-evidence for the referenced step; the model does not select sequence
-numbers.
+attached automatically. `manual:` acceptance can be settled only by the user
+via two host-only operations:
+- `confirm`: the user inspected and approved the result. Records a
+  `manual_confirmation` `{acceptance_id, by: "user", state_digest, reason}`
+  and sets `validation.status: passed`.
+- `waive`: the user explicitly dismissed the check requirement. Records
+  `{acceptance_id, by: "user", reason}` and sets `validation.status: waived`.
+Text acceptances without a registered executable runner cannot be verified by
+ambiguous heuristic match; they default to `manual:` requiring user `confirm`
+or `waive`.
 
-Verification receipt: a record of a check run on a specific state. Every
-successful `verify` (and every `cmd:`/`browser:` acceptance run, §2.6.4)
-appends a `verification_receipt` journal record
-`{acceptance_id, state_digest, command, exit, output_hash}` and sets
-`validation: {status: passed, receipts: [...]}` on the target. The receipt
-binds the verdict to an exact tree state (`state_digest` over source, tests,
-config, lockfile inputs of the check). It becomes `stale` when the relevant
-state changes (any later `file_diff` on covered paths, checkpoint range
-advance, or config/lockfile change): the host flips `validation.status` to
-`stale` and keeps the old receipts for audit. A `stale` check does not count
-toward `complete`; it requires a re-run or an explicit user `waive`.
-A `waive` records `{by: user, reason}` and is never auto-invalidated.
+Verification receipt: a record of a check run bound to an execution interval.
+Every successful `verify` (and every `cmd:`/`browser:` acceptance run, §2.6.4)
+appends a `verification_receipt` journal record:
+`{acceptance_id, check_definition_hash, runner, command, args, cwd, started_at, finished_at, state_before, state_after, exit, output_hash}`
+and sets `validation: {status: passed, receipts: [...]}` on the target.
 
-Journal as source of truth, plan as projection. Every accepted `plan` op is
-first appended to the journal as a `plan` event and only then applied to
-`plans/<plan-id>.json`; `applied_event` is advanced to the event's scoped
-reference in the same atomic step. On load (session start, resume, crash
-recovery) the host reads the journal from `applied_event` forward and
-re-applies `plan` events in seq order; a crash between journal append and
-plan write therefore heals by replay (§2.2.1, §3.7). The plan file alone is
-never trusted without its journal prefix.
+Interval consistency: the receipt requires `state_before == state_after`. If
+relevant source files, configs, or lockfiles change during execution (e.g. from
+a background job or concurrent subagent), the check did not run against a stable
+state; no passing receipt is issued. An impacted subset run (§2.4.11) issues a
+scoped impact receipt sufficient for a `verify` step, but **never** substitutes
+for a full-suite receipt or satisfies `complete`.
+
+Receipt invalidation: a receipt becomes `stale` when relevant state changes after
+the check (subsequent `file_diff` on traversed paths, checkpoint advance, or
+config/lockfile edits). The host marks `validation.status = stale`. A `stale`
+receipt does not count toward `complete`. Waived items are never auto-invalidated.
+Historical immutability: in a `completed` plan, historical receipts remain unchanged
+("verified on state X"); tree match against HEAD is a computed property, not an
+in-place rewrite of an archived plan.
+
+Journal as source of truth, plan as projection. Every state-changing event contains
+the complete accepted payload needed for deterministic replay. Plan projection is
+produced by a versioned reducer over all relevant events, including plan ops,
+evidence attachment, receipts, invalidations, undo, goal revisions, and deletion.
+Every accepted `plan` op is first appended to the journal as a `plan` event and only
+then applied to `plans/<plan-id>.json`; `applied_event` and monotonic `plan_event_no`
+are advanced in the same atomic step. On load (session start, resume, crash
+recovery) the host reads the journal from `applied_event` forward and runs the
+reducer; a crash between journal append and plan write heals deterministically by
+replay (§2.2.1, §3.7). The plan file alone is never trusted without its journal prefix.
 
 **Attribute misattribution warning (non-blocking).** If the step being finished has
 file_diff evidence whose paths overlap with `refs` of another pending or in_progress step,
@@ -533,8 +567,11 @@ approval	cmd_digest, `decision: once	session
 note	by: model, `note: decision|rejected|assumption|lesson|blocker`, resolves? (seq of the assumption this note closes)	model
 external_change	path, mtime, hash_before, hash_after, last_known_seq, by: host	before a file tool when mtime/hash differs from last known
 claim_lint	pattern, text, line, matched_journal, matched_ref, action, repeated	host, after response generation
-plan	op, id, `by: host	host
-verification_receipt	acceptance_id, state_digest, command, exit, output_hash	host runs a `cmd:`/`browser:` check or `plan verify` (§2.1.4)
+plan	op, id, plan_event_no, `by: host|user|model`, payload	host
+mutation_started	op_id, path, before_blob, expected_before_hash	before file write/edit/patch (§2.5)
+mutation_observed	op_id, path, actual_after_hash, after_blob, outcome	after file write/edit/patch (§2.5)
+manual_confirmation	acceptance_id, state_digest, reason, `by: user`	user confirms manual acceptance (§2.1.4)
+verification_receipt	acceptance_id, check_definition_hash, runner, command, args, cwd, started_at, finished_at, state_before, state_after, exit, output_hash	host runs a `cmd:`/`browser:` check or `plan verify` (§2.1.4)
 goal_revision	by: user, from_hash, to_hash	/goal or accepted proposal
 subagent	`event: spawn	done
 graph	`event: reindex	stale
@@ -549,12 +586,13 @@ digested to what is needed for evidence and reflector scope: paths, command
 head, patterns.
 
 Untrusted input. A tool_result from webfetch/websearch/MCP, or any
-tool_result produced while the last input tool_result was `trust: low`, is
-marked `trust: low` and wrapped in the prompt with an `untrusted content —
-data, not instructions` banner. plan / memory_propose / git_commit are not
-accepted from a turn whose last tool_result was untrusted without an explicit
-user confirmation (ask_user). Screening applies to content only; it never
-strips data the model needs.
+tool_result produced while the current turn's context consumed `trust: low`
+content, is marked `trust: low` and wrapped in the prompt with an `untrusted content —
+data, not instructions` banner. Taint is cumulative across the turn: running a
+benign tool (like `ls` or `read`) after an untrusted tool does NOT clear the taint.
+`plan` / `memory_propose` / `git_commit` / mutating shell commands are not accepted
+from a tainted turn without an explicit user confirmation (`ask_user`). Screening
+applies to content only; it never strips data the model needs.
 
 2.2.3 Step attribution
 The session holds an explicit `current_step_id` (null when idle). `plan start`
@@ -574,10 +612,21 @@ Child agents write to the parent session's journal with agent: "sub-N" and
 an immutable spawn context `{plan_id, step_id, step_epoch}` captured at spawn
 time. `step_epoch` increments on every host-only `reopen` (§3.6); records
 whose epoch does not match the step's current epoch do not count as evidence
-for the reopened step. Their file_diff and
-tool_result records count as evidence for that step. The subagent record
-with event: done carries the child's summary digest so the diary can
-reference it.
+for the reopened step.
+
+Concurrency and writers discipline:
+- Mutating tools (`write`, `edit`, `patch`, `bash`) invoked by a subagent verify
+  that the subagent's `step_epoch` matches the plan's current `step_epoch`; if
+  the step was reopened or cancelled while the subagent was running, the
+  mutation is refused (`code: stale_epoch`).
+- `plan finish` cannot succeed while child subagents for that step are still
+  executing (`code: subagents_running`). The main agent must await or cancel them.
+- On `undo` or step `reopen`, the host signals cooperative cancellation to all
+  subagents spawned under the affected steps.
+
+Their file_diff and tool_result records count as evidence for that step. The
+subagent record with event: done carries the child's summary digest so the diary
+can reference it.
 
 2.2.5 Consumers
 Plan validator: evidence for finish and verify.
@@ -721,8 +770,10 @@ Context selector — the neighborhood of files/symbols tied to the
 current step (via evidence and refs) is offered to the model as compact
 facts.
 Navigation — recall, graph_query, graph-view for the user.
-Anything the graph returns from an exact lookup is a fact; anything from
-ranked search is advisory. The prompt says this in one sentence.
+Anything the graph returns from an exact lookup is an index observation
+over parsed AST files; anything from ranked search is advisory. An exact lookup
+reflects parser precision and indexed scope at that adapter's capability level,
+not full semantic compiler type checking. The prompt says this in one sentence.
 
 2.4.2 Storage
 graph/graph.db (SQLite, WAL, synchronous=NORMAL), graph/meta.json
@@ -838,7 +889,7 @@ resolve_ref (which waits or returns unknown).
 
 2.4.8 Verifier integrations
 Where	Behavior
-plan start/add with refs	each ref resolved per intent: `modify`/`remove` require `found` at level ≥ 2 (`not_found` rejects with candidates); `create` requires the path/symbol to be absent (resolves to `not_found` or `unknown` passes; `found` rejects as "already exists"); `unknown` passes for all intents
+plan start/add with refs	each ref resolved per intent: `modify`/`remove` require `found` at level ≥ 2 (`not_found` rejects with candidates); `create` requires the path/symbol to be absent on declaration (`add`/`create`) and initial `start` from `Pending` (if a step is resumed after partial work, symbols created by this step's earlier actions are not treated as collisions); `unknown` passes for all intents
 edit/multi_edit pre-check	if old_string is a single identifier-like token and the file is at level ≥ 2 and resolve_ref is not_found → tool still runs (the string may legitimately be non-symbol text) but the result carries warning: symbol 'foo' not in index for this file
 finish of a change step	host computes blast radius: nodes with `references
 diary/MEMORY.md load	stale markers (§2.3.7)
@@ -873,10 +924,12 @@ GUI and local web view: deferred indefinitely; if built, they consume the
 same projections.
 
 Provenance command `/why <path|symbol|j#N>` (§7 AB), step diff and `/export`
-(PR description built from journal + diary, not from a guessed diff), and
-`/brief` (human-readable anchor for a returning user) are later-phase (J)
+(PR description built from journal + diary, not from a guessed diff) are later-phase (J)
 consumers of the same projections. `/why` unifies journal (when/which step
 changed it), diary (why), and graph (what depends on it) into one answer.
+By contrast, `/brief` (`sqwai brief`, §3.8.4) is a core host-owned reporting
+command derived directly from the plan projection and session journal; it does
+not depend on the graph database and is available in the core loop.
 
 #### 2.4.11 Test impact
 
@@ -903,7 +956,7 @@ is a table in the adapter, not model output.
 | `finish` of a `change` step | host computes `impact.tests[]` and `impact.files[]`, stores them on the step, shows one line in block D: `impact: 7 tests (session::save, tui::todo_panel…) — verify step suggested` |
 | next `verify` step or `plan verify` on a `cmd:` acceptance | the runner executes the impacted set first; a red result short-circuits; a green result is evidence for the step but **not** for `complete` |
 | `complete` | full suite always; impact never replaces it |
-| `impact.tests` empty for a Level ≥ 3 file | warning in the step: `no tests reach <symbol>` — a fact the user may want to know, not a blocker |
+| `impact.tests` empty for a Level ≥ 3 file | warning in the step: `no tests reach <symbol>` — an index observation at the current adapter level, not proof that no tests reach it (e.g. integration tests or macros); not a blocker |
 | reflector | `run` checks may use the impacted set when the criticism names a symbol |
 
 **Confidence.** Each impact result carries `coverage: exact|partial|unknown`
@@ -928,19 +981,42 @@ and no interference with the user's gc/hooks/worktree.
 
 **Layer 1 — per-file copy-on-write (zero git dependency).**
 For `write|edit|multi_edit|patch`, the file about to be modified is known in advance.
-Prior to mutation:
+To guarantee crash consistency across process interruption, file mutation follows a
+strict two-phase protocol:
 
 ```text
-blob = read(path)                      // already in memory: read-guard required read
-hash = blake3(blob)
-write_if_absent(.sqwai/checkpoints/blobs/<hash>, blob)   // zstd, deduplicated by hash
-journal file_diff { path, hash_before, hash_after, mode }
+blob_before = read(path)                    // in memory via read-guard
+hash_before = blake3(blob_before)
+write_if_absent(.sqwai/checkpoints/blobs/<hash_before>, blob_before)
+journal mutation_started { op_id, path, hash_before }
+
+// Execute mutation on disk (atomic temp file + rename)
+
+blob_after = read(path)
+hash_after = blake3(blob_after)
+write_if_absent(.sqwai/checkpoints/blobs/<hash_after>, blob_after)
+journal mutation_observed { op_id, path, hash_before, hash_after, outcome: "ok" }
+// (mutation_observed provides the file_diff evidence record)
 ```
 
-This takes microseconds, preserves exact bytes, has zero dependency on git, and
-works everywhere. This is precisely what powers `/undo step N` and single-file
-reversion: the journal already contains `hash_before` for every `file_diff`. A full
-tree snapshot is never needed for tool-driven file edits.
+**Crash recovery for interrupted mutations:**
+On startup, the host sweeps the journal for `mutation_started` records lacking a
+matching `mutation_observed`:
+1. If the disk file at `path` matches `hash_before`: the write never reached disk.
+   Host logs `mutation_observed { op_id, path, outcome: "interrupted_clean" }`.
+2. If the disk file matches `hash_after` (derivable if new blob was pre-staged):
+   the write succeeded on disk before the journal append. Host appends
+   `mutation_observed { outcome: "healed" }`.
+3. If the disk file matches neither: torn write or external corruption. The host
+   marks the path as compromised, offers restoration from `hash_before`, and
+   refuses to proceed without explicit user acknowledgment.
+
+**Durability scope (process crash vs power loss):**
+The durability guarantees in sqwai are scoped to **process crash resilience**
+(atomic rename, sequential ordering, per-record flushes). Resilience against sudden
+power loss or OS kernel panics requires explicit directory and file descriptor
+`fsync()`. Process-crash durability is standard; `[checkpoints].fsync = false` by
+default to prevent TUI latency penalties on slow filesystems.
 
 **Layer 2 — shadow repository scoped only to bash.**
 Bash is the only case where mutations cannot be predicted in advance. A tree
@@ -966,10 +1042,13 @@ git --git-dir=… --work-tree=… update-ref refs/sessions/<id> <commit>
 
 What this achieves: the user's `.git` is untouched (no `index.lock`, no clutter in
 refs, user's gc/hooks/worktree are bypassed); it works in projects without git;
-`core.autocrlf = false` guarantees snapshots preserve raw bytes; git handles delta
-compression, deduplication, `.gitignore`, and renames automatically; the CLI is
-asynchronous by nature, avoiding TUI freezes; the dependency is the git binary
-present on ~99% of developer machines, allowing libgit2 to be removed from Cargo.toml.
+git handles delta compression, deduplication, `.gitignore`, and renames automatically;
+the CLI is asynchronous by nature, avoiding TUI freezes.
+
+Note on raw bytes: `core.autocrlf = false` avoids CRLF normalization in the shadow
+index, but does not completely bypass repository `.gitattributes` or external smudge/clean
+filters if present. Layer 1 (blake3 content-addressed blobs) remains the authoritative
+guarantee for exact file bytes; Layer 2 shadow git is a tree delta index for untracked bash side effects.
 
 A pre-checkpoint is created only if the tree has changed since the previous one:
 running `git status --porcelain=v2 -uall` on the shadow repo with `untrackedCache`
@@ -1238,10 +1317,13 @@ Full file lists, full journal, and full receipts live in host-state
 act. If over budget, cut from the bottom: diary headings → notes on pending
 steps → files list (keep count). Goal, constraints, acceptance validation,
 the current step, and recent reads are never cut.
-Read-guard after compaction: a file read before compaction counts as read
-only while its hash is still in context (recent-reads line or kept history);
-otherwise the model must re-read it before editing. This keeps the guard
-sound without storing every read in the anchor.
+Read-guard authorization after compaction: a retained read authorizes editing
+only when the relevant file content remains available in the active context (e.g.
+within kept verbatim history, §3.3.2) and its observed hash matches current disk
+state. A recent-reads entry in the anchor or a staged compaction summary line
+(`[read src/x.rs 240 lines...]`, §3.3.1) is a navigational reference, not file
+content, and alone does **not** authorize editing without a fresh `read`. This keeps
+the guard sound without storing full file contents in the anchor.
 
 3.4 Resume (fork deleted)
 sqwai --resume <session> or the session picker:
@@ -1323,8 +1405,13 @@ journal.
 
 C. Executor (LLM, clean context, read-only). Input: Check[] with
 expects stripped, ReflectContext without agent_claims, no criticism
-text. Tools: read grep glob ls git_diff git_log git_show resolve_ref bash_ro. bash_ro: whitelist, timeout, no redirects, no &&|;|| with
-mutating members, safety classifier at threshold "any mutation = refuse".
+text. Tools: read grep glob ls git_diff git_log git_show resolve_ref bash_ro.
+bash_ro: in normal mode, an advisory execution filter (whitelist, timeout,
+no redirects, no compound mutating members, pre/post shadow Git status check;
+if any workspace modification is detected, the check is invalidated as
+`status: error, reason: "mutated_workspace"` and changes are reverted). In
+isolated mode, bash_ro runs in a read-only root or temporary worktree with
+guaranteed non-mutation.
 Output per check: {"id","observed","evidence":[{kind,path,line,snippet}], "status":"observed|not_observable|error"}; no evidence ⇒ not_observable;
 no conclusions, no fixes. Budget: reflect.max_tool_calls (20),
 reflect.timeout_secs (60), reflect.token_budget (12000).
@@ -1374,15 +1461,19 @@ against the last checkpoint, no agent_claims, confidence: low.
 /undo [n] restores the working tree to the n-th previous checkpoint
 (default 1). Effects, in order:
 
-Files restored; journal undo with the file list.
-Plan: for every done step whose file_diff evidence paths are all
-covered by the undo and whose hash_after no longer matches the tree, the
-host sets status: reopened, increments `step_epoch`, resets
-`validation` to `pending`, and appends an automatic note
-(by: host, "reopened by undo to <sha>"). reopened behaves like
-pending for start and requires new evidence to finish.
-Graph: reindex affected paths.
-Anchor rebuilt for the next turn with undo: restored to a1b2 (3 files); steps reopened: 2.
+1. Concurrency drain: `/undo` acquires the project mutation lock, waits for any
+   in-flight file tool calls to finish, and signals cancellation to all active
+   subagents.
+2. Files restored; journal undo with the file list.
+3. Plan: for every done step where **any** file touched by its `file_diff` evidence
+   was reverted or altered by the undo, the host sets `status: reopened`,
+   increments `step_epoch`, resets `validation` to `pending`, and appends an
+   automatic note (by: host, "reopened by undo to <sha>"). Reopening on any partial
+   invalidation is conservative: reverting a subset of changes cannot leave a step
+   marked completed. reopened behaves like pending for start and requires new
+   evidence to finish.
+4. Graph: reindex affected paths.
+5. Anchor rebuilt for the next turn with undo: restored to a1b2 (3 files); steps reopened: 2.
 Redo is not offered in v1; the post-undo tree is itself checkpointed, so
 /undo again is safe.
 3.7 Failures
@@ -1790,12 +1881,14 @@ Dependencies, not chronology. Each item ends in a usable state. **This table is
 the only status in this document** — the sections above describe the design
 regardless of what is built.
 
-Core loop (must be done before benchmark G): F7 (checkpoints) · R (untrusted
-input) · T (provider fallback) · V (executable acceptance) · I4 (resolve_ref).
-Next priority after V is I4. Infrastructure features (J helpers beyond
-checkpoints, K canvas/watcher/LSP-4, L browser, O unattended, AE server split
-beyond the B contract) are deferred until the core integrity loop is proven
-by the benchmark — they must not starve the core loop.
+Core loop (prioritized for benchmark G0/G1):
+- F1b (replay reducer) · F7 (checkpoints) · R (untrusted input)
+- V (executable acceptance) · V1 (receipts & invalidation)
+- G0 (minimal retention benchmark) · S1 (epoch lifecycle) · I4 (resolve_ref).
+
+Infrastructure features (J helpers, K canvas/watcher/LSP-4, L browser, O unattended,
+AE server split) are deferred until the core integrity loop is proven by the
+benchmark — they must not starve the core integrity mechanism.
 
 Status vocabulary: `done` — shipped and behaving as specified; `partial` —
 shipped with a named gap; `next` — unblocked and in line; `planned` —
@@ -1811,19 +1904,22 @@ number; a `partial` one is missing something the design calls for.
 | D | git tools, patch, web tools, subagents | done | B |
 | E | Graph prototype (Cozo, generic + markdown) | done — engine replaced by I1 | — |
 | F1 | plan tool + validator (all rules except evidence/refs) + /plan /goal /constraints /mode; prompt update | done | B |
+| F1b | Event-sourced projection reducer + deterministic replay (`applied_event`, `plan_event_no`, orphan recovery) | done | F1, F2 |
 | F2 | Journal writer at dispatch; all kinds except `diagnostics`, `reflect`, `graph` | done | B |
 | F3 | Evidence rule in `finish`, `verify`, `complete`; nudges; note | done — `verify` accepts evidence from an unrelated step (#6) | F1 |
 | F4 | Diary: host block, triggers, writer call, fallback; memory_read; secrets screening | done — the journal itself is not screened (#11); the diary number post-check of §2.3.2 is a prompt instruction, not host code (#12) | F2 |
 | F5 | MEMORY.md + memory_propose approval; session-start loading | done | F4 |
 | F6 | Compaction anchor; summary=off default; resume per §3.4 (fork deleted); undo→reopen | done | F1–F5 |
-| F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, optional zstd) + layer-2 shadow repo driven by the git CLI through `tokio::process`; restore via diff-tree; `/undo step N` | done, with two stated deviations: git is invoked synchronously (the call sites are already blocking), and `keep_per_session` is reported rather than enforced — truncating a commit chain rewrites the shas the journal recorded — restore is path-scoped and a non-count `/undo` argument is refused (#4, #5); remaining: git2, checkpoints in the user's `.git`, no undo outside git repos (#17) | F1 |
-| G | Goal-retention benchmark (§8.2) | planned | F6 |
+| F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, optional zstd) + layer-2 shadow repo driven by git CLI via `tokio::process`; restore via diff-tree; `/undo step N` | done — git invoked synchronously; restore is path-scoped | F1 |
+| F7b | Two-phase mutation recovery protocol (`mutation_started` → write → `mutation_observed`/`file_diff`) + startup sweep (§2.5) | planned | F7 |
+| G0 | Minimal comparative retention benchmark (§8.2): plan + journal + anchor vs baseline | next | F1b, F6 |
+| G1 | Full integrity benchmark (§8.2): verification receipts, mutation crash harness, claim lint | planned | G0, V1, F7b, I4 |
 | H0 | L0 fact block + criticism detector | planned | F2 |
-| H1 | bash_ro, read-only toolset, Scope/Neutralizer/Executor/Verdict, /verify | planned | H0, D |
-| I1 | Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild | done — rusqlite (bundled) engine with the §2.4.2 schema (files/nodes/edges/nodes_fts/meta, WAL, synchronous=NORMAL); corrupt-db quarantine to `corrupt-<ts>.db`; atomic full rebuild via `graph.db.new` rename; meta.json sidecar (schema_version, generation, built_at, status); generic adapter at Level 1 (`references` edges from path mentions, resolved against the walked file set); section keys now `section:<path>#<slug>` with `-2` collision suffix. One stated deviation: edges are stored by stable keys (`from_key`,`to_key`,`kind`,`source`) rather than node ids, so adapters may emit edges to not-yet-indexed nodes (needed by the memory adapter's `mentions` in §2.4.5) | E |
+| H1 | bash_ro (advisory + post-check), read-only toolset, Scope/Neutralizer/Executor/Verdict, /verify | planned | H0, D |
+| I1 | Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild | done — rusqlite (bundled) engine with §2.4.2 schema | E |
 | I2 | Rust adapter (tree-sitter), qualified keys | planned | I1 |
 | I3 | Freshness: edit/bash/undo/head triggers; status semantics | planned | I1 |
-| I4 | resolve_ref; validator refs; pre-edit warning; stale markers; reflector executor tool | next | I2, I3, F1, H1 |
+| I4 | resolve_ref; validator refs; pre-edit warning; stale markers; reflector executor tool | next | I2, I3, F1 |
 | I5 | Memory adapter; recall/graph_query exposed; context block | planned | I4, F4 |
 | J | Python adapter; LSP diagnostics → journal; graph-view list MVP; checkpoint before/after bash | planned | I5, C |
 | K | Canvas graph-view, watcher, LSP Level 4, blast radius, path view | planned | J |
@@ -1833,18 +1929,20 @@ number; a `partial` one is missing something the design calls for.
 | O | Unattended mode: policy layer, stop conditions, `brief`, `/review`, pending memory | planned | F6, H0, M, Q, T |
 | P | Windows/PowerShell shell-aware safety layer (§5.2) | done | §5.2 |
 | Q | Single-instance lock + read-only fallback for plan/journal/memory/graph | done | F1 |
-| R | Untrusted-input handling (trust:low, banner, confirm gates) + prompt rule | partial — the prompt rule and `trust: low` in the journal are in; the prompt banner and the confirm gates on plan/memory_propose/git_commit are not | F2 |
-| S | Cancel mid-tool (Esc): cancelled result, post-checkpoint, in_progress | done for `bash`, the only tool a mid-flight Esc can reach (other handlers run to completion synchronously); the whole turn stops after a cancellation rather than continuing to the model, a UX choice not specified by §3.7 | F2 |
-| T | Provider fallback chain ([models.x].fallback) | planned — the `fallback` field does not exist on ModelConfig (#8) | §5.1 |
+| R | Untrusted-input handling (trust:low, banner, cumulative taint, confirm gates) + prompt rule | partial — prompt rule and per-tool `trust: low` exist; cumulative taint, banner, and confirm gates missing | F2 |
+| S | Cancel mid-tool (Esc): cancelled result, post-checkpoint, in_progress | done for `bash` | F2 |
+| S1 | Step epoch lifecycle (§2.2.4), writer lock during undo, subagent cancellation on reopen | planned | F1b, D |
+| T | Provider fallback chain ([models.x].fallback) | planned — `fallback` field absent on ModelConfig (#8) | §5.1 |
 | U | Assumption notes: open tracking, finish warning, resolve | done | F3 |
 | V | Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md) | next — cmd:/manual: settling done (#7); remaining: /init seeding of verify commands and their substitution on create | F3 |
+| V1 | Verification receipts (§2.1.4): execution interval digest, check hash, stale invalidation, manual `confirm` vs `waive` | next | V, F1b |
 | W | Plan-first gate (Act first-mutate w/o plan → plan_required) | planned | F3 |
-| X | Staged compaction + recent-reads anchor + USER.md split/load | partial — USER.md split and loading are in; staged pre-compaction (§3.3.1) is not; anchor keeps last-5 reads (§3.3.3), not all reads | F1, F5 |
+| X | Staged compaction + recent-reads anchor + USER.md split/load | partial — USER.md split/loading done; staged pre-compaction (§3.3.1) and context-backed read authorization (§3.3.3) pending | F1, F5 |
 | Y | Claim lint (post-generation verify against journal/resolve_ref) | planned | I4 |
 | Z | Scope guard (step.refs vs file_diff) | planned | I4 |
 | AA | Lessons tied to files (note kind + context-block rule) | planned | I5 |
-| AB | /why provenance, step diff + /undo step, /export, /brief | planned | J |
-| AC | bench command (user-facing wrapper over §8.2 regression harness) | planned | G |
+| AB | /why provenance, step diff + /undo step, /export | planned | J |
+| AC | bench command (user-facing wrapper over §8.2 regression harness) | planned | G0 |
 | AD | Bash isolation/sandbox (container/bwrap/WSL) | open question | — |
 | AE | Core and UI decoupling: headless `serve` (stdio/JSON-RPC) + crates workspace split (`sqwai-core`, `sqwai-tui`, `sqwai-server`) (§5.11) | planned | B |
 | AF | Hardcode linter: scan file_diff for test-shaped literals (warn-layer) | planned | I4 |
@@ -1885,38 +1983,50 @@ scope_mismatch, partial, undetermined, tone invariance, no-journal
 degradation.
 README command list equals /help output (test).
 8.2 Goal-retention benchmark
-Fixture repository (small Rust crate with tests) and 3 scripted tasks of 25–40
-steps each, run with compaction.threshold forced low so that ≥ 3 compactions
-occur. After each compaction the harness sends a hidden probe: "State the
-current goal and constraints verbatim." Scoring per run:
 
-goal fidelity: exact/semantic match (0/0.5/1);
-constraint retention: fraction preserved;
-redundant work: number of file_diff records that revert or re-do a change
-already in a done step;
-fabricated references: resolve_ref failures on symbols the model named in
-text;
-completion: acceptance items with `validation: passed|waived` (stale does not count).
-Baseline: same tasks with plan/journal/anchor disabled and summary=short
-(i.e., a conventional agent). The README's claim stands only if the
-mechanism beats the baseline on every metric across all three tasks.
+Divided into two stages:
+- **G0 (Minimal retention benchmark)**: isolates the core anchor and plan loop
+  (plan + evidence + anchor vs baseline summary=short) without depending on
+  external graph tools, provider fallbacks, or reflector escalation.
+- **G1 (Full integrity benchmark)**: evaluates complete execution integrity,
+  including verification receipts, crash recovery, and claim linting.
+
+Fixture repository (small Rust crate with tests) and 3 scripted tasks of 25–40
+steps each, run with `compaction.threshold` forced low so that ≥ 3 compactions
+occur per run.
+
+Evaluation protocol:
+- **External observer**: an external evaluation harness (independent of the agent's
+  internal journal) observes both runs and writes `bench/<task>/<arm>.eval.jsonl`.
+  The baseline agent runs with plan/journal/anchor disabled and summary=short.
+- **Branching goal probe**: after each compaction, the harness executes a detached
+  fork of the context with the probe: "State the current goal and constraints verbatim."
+  The probe response is scored by the harness and discarded; it is **never**
+  inserted into the active working conversation.
+- **Scoring**:
+  1. *Goal fidelity*: semantic match of active goal (0 / 0.5 / 1.0).
+  2. *Constraint retention*: fraction of initial constraints preserved verbatim.
+  3. *Redundant work*: count of file changes re-doing or reverting changes from completed steps.
+  4. *Fabricated references*: AST-checked references to non-existent symbols/files.
+  5. *Verified completion*: acceptance items with `validation: passed` backed by
+     uninterrupted execution receipts. `waived` items count as unverified (0) in benchmark scoring.
+
+Success criteria:
+Evaluation is performed across 5 repeated runs per task. Success requires
+statistically significant superiority on goal fidelity (≥ 0.90 vs baseline < 0.60),
+constraint retention (≥ 0.95 vs baseline < 0.50), and redundant work reduction,
+with non-inferiority on reference validity.
 
 How to run (dogfooding checklist):
 
 1. Tasks: three fixtures — (a) add a session field + TUI surface, (b) rename
-   a widely used symbol across modules, (c) fix a failing test with an
-   ambiguous issue text. Each ships with a goal sentence, 2–3 constraints,
-   and `cmd:` acceptance (`cargo test`, `cargo clippy -- -D warnings`).
-2. Baseline: run each task with `compaction.summary=short` and plan/journal
-   disabled; save journals as `bench/<task>/baseline.jsonl`.
-3. Mechanism: run each task with the full core loop (plan + evidence +
-   anchor + `verification_receipt`); force `compaction.threshold` low for
-   ≥ 3 compactions; save journals as `bench/<task>/sqwai.jsonl`.
-4. Probe: after every compaction the harness injects the hidden goal probe;
-   score fidelity/retention without showing the score to the agent.
-5. Metrics: `sqwai bench --plan <id>` prints the five scores above plus
-   stale-receipt count and replay-recovery count; `brief` must equal the
-   journal. Green only if sqwai beats baseline on all five, on all three tasks.
+   a widely used symbol across modules, (c) fix a failing test with ambiguous issue text.
+   Each ships with an explicit goal sentence, 2–3 constraints, and `cmd:` acceptance.
+2. Baseline run: harness runs each task with `compaction.summary=short`, no plan/journal tools.
+3. Mechanism run: harness runs each task with the active anchor and plan loop;
+   compaction threshold set low to trigger ≥ 3 compactions.
+4. Analysis: `sqwai bench --plan <id>` outputs comparative scorecards, stale-receipt counts,
+   and cost/token trade-off curves.
 
 8.3 Ongoing metrics (shown in /debug)
 Plan rejections per accepted op; forced ask_user count; host-only diary
