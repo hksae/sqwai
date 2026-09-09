@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn integrity_section_contains_sqwai_blocking_rule() {
         let prompt = builtin_prompt();
-        assert!(prompt.contains("If you attempt to modify or delete .sqwai/ state via bash, the command will be blocked. Inform the user and suggest /plan delete (user command) instead."));
+        assert!(prompt.contains("Do not modify host-owned plan, journal, memory, or checkpoint state through shell commands or general file tools."));
     }
 
     #[test]

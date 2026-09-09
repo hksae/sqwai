@@ -490,8 +490,9 @@ Use instead of grep when whitespace, line breaks or comments vary.",
             kind: Kind::Mutating,
             description: "Run a shell command in the project directory. Destructive or risky commands \
 (rm -rf, sudo, disk ops, force-push, etc.) require user approval and the model should avoid them. \
-Long output is truncated to a tail and the full log path is returned. Use background=true for \
-long-running commands.",
+Long output is truncated to a tail and the full log path is returned. Use background=true when the \
+command is expected to outlast the normal tool timeout or when useful independent work can \
+continue; await its result before dependent changes or reporting success.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -529,7 +530,7 @@ long-running commands.",
         ToolDef {
             name: "think",
             kind: Kind::ReadOnly,
-            description: "A scratchpad with no effects: think through a complex task before acting — the approach, the step order, what could go wrong, which tool fits each step. Use before large refactors, tricky debugging, or when several approaches compete. Returns ok; the value is the reasoning itself.",
+            description: "A scratchpad with no effects: record a short approach and the checks that will validate it when that reasoning is worth keeping in history. Routine reasoning stays in the reply. Returns ok; the value is the reasoning itself.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -728,8 +729,13 @@ long-running commands.",
             description: "Work the structured plan, one operation per call. Ops: create, start, \
 finish, block, unblock, cancel, add, split, verify, complete, show. Call \
 show first if you are unsure of the current step ids. The host owns the goal, the constraints, \
-acceptance status and evidence; to change the goal, propose the full updated plan with \
-propose_plan instead.",
+acceptance status, validation and evidence; to change the goal, propose the full updated plan with \
+propose_plan instead. finish records completion of the step's work with a summary and does not \
+by itself establish that acceptance criteria passed; it requires host-recorded evidence since \
+start (research: a tool_result, change: a file_diff, verify: successful observed execution or \
+clean diagnostics) and rejections return a code and hint to follow. A manual: acceptance can be \
+waived only by the user, never verified by the model. complete requires every step closed and \
+every acceptance validation passed or waived with fresh receipts. Never invent evidence identifiers.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -775,7 +781,7 @@ propose_plan instead.",
                     "title": {"type": "string", "description": "add: new step title"},
                     "kind": {"type": "string", "enum": ["research", "change", "verify"]},
                     "refs": {"type": "array", "items": {"type": "string"}},
-                    "summary": {"type": "string", "description": "finish: what changed and where"},
+                    "summary": {"type": "string", "description": "finish: what was done, where, and any remaining limitations"},
                     "reason": {"type": "string", "description": "block / cancel"},
                     "confirm": {"type": "boolean", "description": "start: re-read a stale step"},
                     "evidence": {"type": "array", "items": {"type": "integer"}, "description": "deprecated informational field; host ignores it"}
