@@ -393,6 +393,131 @@ fn extract_patch_files(root: &std::path::Path, patch: &str) -> Vec<String> {
         .collect()
 }
 
+/// `step_diff`: show what changed in a specific plan step from the shadow checkpoints.
+pub fn step_diff(ctx: &ToolCtx, args: &Value) -> Outcome {
+    let step_id = if let Some(s) = args.get("step_id").and_then(Value::as_str) {
+        s.trim()
+    } else if let Some(s) = args.get("id").and_then(Value::as_str) {
+        s.trim()
+    } else {
+        ""
+    };
+    if step_id.is_empty() {
+        return Outcome::err("step_id is required");
+    }
+    let target_path = args
+        .get("path")
+        .or_else(|| args.get("target"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    // Check plan if present
+    if let Ok(Some(plan)) = crate::plan::open_active_for_session(&ctx.root, Some(&ctx.session_id))
+        && let Some(step) = plan.step(step_id)
+        && step.status == crate::plan::StepStatus::Pending
+    {
+        return Outcome::ok(format!(
+            "step '{step_id}' is pending and has not been started yet"
+        ));
+    }
+
+    let Some(shadow) = crate::agent::checkpoints::shadow_repo(&ctx.root, ctx.shadow_store) else {
+        return Outcome::err("shadow checkpoint repository is not available");
+    };
+
+    // If step is currently in progress, ensure current worktree is snapshotted
+    let _ = crate::agent::checkpoints::snapshot_boundary(
+        &ctx.root,
+        ctx.shadow_store,
+        &ctx.session_id,
+        &format!("step_{step_id}_probe"),
+    );
+
+    // Find commits in the session chain
+    let commits = match shadow.commit_log(&ctx.session_id) {
+        Ok(c) if !c.is_empty() => c,
+        _ => match shadow.commit_log("shared") {
+            Ok(c) => c,
+            Err(e) => return Outcome::err(format!("reading shadow history failed: {e:#}")),
+        },
+    };
+
+    let start_label = format!("step_{step_id}_start");
+    let finish_label = format!("step_{step_id}_finish");
+
+    let mut start_sha: Option<String> = None;
+    let mut finish_sha: Option<String> = None;
+
+    for (sha, label) in &commits {
+        if label.contains(&start_label) && start_sha.is_none() {
+            start_sha = Some(sha.clone());
+        }
+        if label.contains(&finish_label) && finish_sha.is_none() {
+            finish_sha = Some(sha.clone());
+        }
+    }
+
+    // Fallback to journal records if labels not in commit messages
+    if (start_sha.is_none() || finish_sha.is_none())
+        && let Ok(records) = crate::agent::journal::Journal::records_for(&ctx.root, &ctx.session_id)
+    {
+        for r in &records {
+            let matches_step = r.step.as_deref() == Some(step_id)
+                || r.fields.get("step").and_then(Value::as_str) == Some(step_id)
+                || (r.kind == "plan"
+                    && r.fields.get("id").and_then(Value::as_str) == Some(step_id));
+            if !matches_step {
+                continue;
+            }
+            if let Some(sha) = r.fields.get("id").and_then(Value::as_str) {
+                let reason = r.fields.get("reason").and_then(Value::as_str);
+                if reason == Some("step_start") && start_sha.is_none() {
+                    start_sha = Some(sha.to_string());
+                }
+                if reason == Some("step_finish") && finish_sha.is_none() {
+                    finish_sha = Some(sha.to_string());
+                }
+            }
+            if let Some(sha) = r.fields.get("checkpoint").and_then(Value::as_str) {
+                if start_sha.is_none() {
+                    start_sha = Some(sha.to_string());
+                }
+                finish_sha = Some(sha.to_string());
+            }
+        }
+    }
+
+    // If finish is still not found, use latest commit on the session chain
+    if finish_sha.is_none() {
+        finish_sha = shadow
+            .head_of(&ctx.session_id)
+            .or_else(|| shadow.head_of("shared"));
+    }
+
+    let (Some(start), Some(finish)) = (start_sha, finish_sha) else {
+        return Outcome::err(format!(
+            "no checkpoint boundaries found for step '{step_id}'"
+        ));
+    };
+
+    match shadow.diff(&start, &finish, target_path) {
+        Ok(diff) => {
+            let trimmed = diff.trim();
+            if trimmed.is_empty() {
+                if let Some(path) = target_path {
+                    Outcome::ok(format!("no changes to '{path}' in step {step_id}"))
+                } else {
+                    Outcome::ok(format!("no changes recorded for step {step_id}"))
+                }
+            } else {
+                Outcome::ok(trimmed.to_string())
+            }
+        }
+        Err(e) => Outcome::err(format!("git diff failed: {e:#}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -551,6 +551,25 @@ long-running commands.",
             parameters: json!({"type":"object","properties":{"target":{"type":"string"}}}),
         },
         ToolDef {
+            name: "step_diff",
+            kind: Kind::ReadOnly,
+            description: "Show what changed in a specific plan step by comparing shadow checkpoint boundaries. Answers what was modified during that step.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "step_id": {
+                        "type": "string",
+                        "description": "plan step id (e.g. '1', '2')"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "optional path to restrict the diff to"
+                    }
+                },
+                "required": ["step_id"]
+            }),
+        },
+        ToolDef {
             name: "git_log",
             kind: Kind::ReadOnly,
             description: "Show recent Git commits.",
@@ -894,6 +913,15 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             }
         }
         "git_diff" => s("target"),
+        "step_diff" => {
+            let step = s("step_id");
+            let path = s("path");
+            if path.is_empty() {
+                format!("step {step}")
+            } else {
+                format!("step {step} {path}")
+            }
+        }
         "git_commit" => s("message"),
         "git_stage" => {
             let action = match args["action"].as_str() {
@@ -1092,6 +1120,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         ),
         "git_status" => git::status(ctx, args),
         "git_diff" => git::diff(ctx, args),
+        "step_diff" => git::step_diff(ctx, args),
         "git_log" => git::log(ctx, args),
         "git_show" => git::show(ctx, args),
         "git_commit" => git::commit(ctx, args),
@@ -1629,6 +1658,10 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             // §2.1.4: finishing a step that still carries open assumptions is
             // allowed, but the model has to be told — this is the closure
             // moment the `assumption` note kind never had.
+            let starting = match &other {
+                plan::Op::Start { id, .. } => Some(id.clone()),
+                _ => None,
+            };
             let finishing = match &other {
                 plan::Op::Finish { id, .. } => Some(id.clone()),
                 _ => None,
@@ -1637,6 +1670,26 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 Ok(applied) => {
                     if let Err(e) = plan::store(&ctx.root, &active) {
                         return Outcome::err(format!("plan write failed: {e:#}"));
+                    }
+                    if let Some(ref id) = starting
+                        && let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_boundary(
+                            &ctx.root,
+                            ctx.shadow_store,
+                            &ctx.session_id,
+                            &format!("step_{id}_start"),
+                        )
+                    {
+                        ctx.journal.push((sha, format!("step_{id}_start")));
+                    }
+                    if let Some(ref id) = finishing
+                        && let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_boundary(
+                            &ctx.root,
+                            ctx.shadow_store,
+                            &ctx.session_id,
+                            &format!("step_{id}_finish"),
+                        )
+                    {
+                        ctx.journal.push((sha, format!("step_{id}_finish")));
                     }
                     match applied {
                         plan::Applied::Created(_) => Outcome::ok("plan created".to_string()),
@@ -4117,6 +4170,136 @@ end
         let cancel_second = plan_op(&mut ctx, &json!({"op": "cancel", "id": second.id}));
         assert!(cancel_second.ok, "{}", cancel_second.output);
         assert!(cancel_second.output.contains(&second.id));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn step_diff_tool_flow() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "step diff test",
+                "steps": [
+                    {"title": "first step", "kind": "change"},
+                    {"title": "second step", "kind": "change"}
+                ]
+            }),
+        );
+        assert!(created.ok);
+
+        // 1. step_diff requires step_id
+        let no_id = execute(&mut ctx, "step_diff", &json!({}));
+        assert!(!no_id.ok);
+        assert!(no_id.output.contains("step_id is required"));
+
+        // 2. Pending step reports it has not started
+        let pending = execute(&mut ctx, "step_diff", &json!({"step_id": "1"}));
+        assert!(pending.ok);
+        assert!(pending.output.contains("pending"));
+
+        // 3. Start step 1, mutate a file
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        let write1 = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": "src/feature1.rs", "content": "pub fn feat1() {}\n"}),
+        );
+        assert!(write1.ok);
+
+        // Diff while step 1 is in progress
+        let diff_prog = execute(&mut ctx, "step_diff", &json!({"step_id": "1"}));
+        assert!(diff_prog.ok, "{}", diff_prog.output);
+        assert!(diff_prog.output.contains("feat1"));
+        assert!(diff_prog.output.contains("feature1.rs"));
+
+        // Finish step 1
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
+        journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
+        journal
+            .append("plan", json!({"op": "start", "id": "1"}))
+            .unwrap();
+        journal
+            .append_evidence(
+                "file_diff",
+                json!({
+                    "path": "src/feature1.rs",
+                    "added": 1,
+                    "removed": 0,
+                    "hash_after": "abc",
+                    "mode": "100644",
+                }),
+            )
+            .unwrap();
+
+        assert!(
+            plan_op(
+                &mut ctx,
+                &json!({"op": "finish", "id": "1", "summary": "done 1"})
+            )
+            .ok
+        );
+
+        // 4. Start step 2, mutate another file
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "2"})).ok);
+        let write2 = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": "src/feature2.rs", "content": "pub fn feat2() {}\n"}),
+        );
+        assert!(write2.ok);
+
+        let mut journal2 = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
+        journal2.set_attribution(Some("2".into()), Some(plan_id), "main");
+        journal2
+            .append("plan", json!({"op": "start", "id": "2"}))
+            .unwrap();
+        journal2
+            .append_evidence(
+                "file_diff",
+                json!({
+                    "path": "src/feature2.rs",
+                    "added": 1,
+                    "removed": 0,
+                    "hash_after": "xyz",
+                    "mode": "100644",
+                }),
+            )
+            .unwrap();
+
+        assert!(
+            plan_op(
+                &mut ctx,
+                &json!({"op": "finish", "id": "2", "summary": "done 2"})
+            )
+            .ok
+        );
+
+        // 5. Querying step 1 diff shows only step 1 changes
+        let diff1 = execute(&mut ctx, "step_diff", &json!({"step_id": "1"}));
+        assert!(diff1.ok, "{}", diff1.output);
+        assert!(diff1.output.contains("feature1.rs"));
+        assert!(diff1.output.contains("feat1"));
+        assert!(!diff1.output.contains("feature2.rs"));
+
+        // 6. Querying step 2 diff shows only step 2 changes
+        let diff2 = execute(&mut ctx, "step_diff", &json!({"step_id": "2"}));
+        assert!(diff2.ok, "{}", diff2.output);
+        assert!(diff2.output.contains("feature2.rs"));
+        assert!(diff2.output.contains("feat2"));
+        assert!(!diff2.output.contains("feat1"));
+
+        // 7. Path-scoped step diff
+        let diff_path = execute(
+            &mut ctx,
+            "step_diff",
+            &json!({"step_id": "2", "path": "src/feature2.rs"}),
+        );
+        assert!(diff_path.ok, "{}", diff_path.output);
+        assert!(diff_path.output.contains("feature2.rs"));
 
         fs::remove_dir_all(&dir).ok();
     }

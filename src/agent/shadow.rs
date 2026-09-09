@@ -230,6 +230,25 @@ impl Shadow {
         Ok(Some(commit))
     }
 
+    /// Snapshot the worktree even if unchanged from parent. Used for boundary checkpoints.
+    pub fn snapshot_forced(&self, session_id: &str, label: &str) -> Result<String> {
+        self.stage_all()?;
+        let tree = self.git(&["write-tree"])?.trim().to_string();
+        let parent = self.head_of(session_id);
+        let mut args: Vec<String> = vec!["commit-tree".into(), tree, "-m".into(), label.into()];
+        if let Some(parent) = parent {
+            args.push("-p".into());
+            args.push(parent);
+        }
+        let mut command: Vec<&str> =
+            vec!["-c", "user.name=sqwai", "-c", "user.email=sqwai@localhost"];
+        let owned: Vec<&str> = args.iter().map(String::as_str).collect();
+        command.extend(owned);
+        let commit = self.git(&command)?.trim().to_string();
+        self.git(&["update-ref", &session_ref(session_id), &commit])?;
+        Ok(commit)
+    }
+
     /// Paths that differ between `sha` and the worktree, staged files
     /// included. Used when the host cannot enumerate what a `bash` command
     /// touched.
@@ -269,6 +288,31 @@ impl Shadow {
             return Ok(None);
         }
         bail!("git show {sha}:{path} failed: {}", err.trim());
+    }
+
+    /// List commits on a session's chain in reverse chronological order: (sha, label).
+    pub fn commit_log(&self, session_id: &str) -> Result<Vec<(String, String)>> {
+        let out = match self.git(&["log", "--format=%H\t%s", &session_ref(session_id)]) {
+            Ok(out) => out,
+            Err(_) => return Ok(Vec::new()),
+        };
+        Ok(out
+            .lines()
+            .filter_map(|line| {
+                let (sha, label) = line.split_once('\t')?;
+                Some((sha.trim().to_string(), label.trim().to_string()))
+            })
+            .collect())
+    }
+
+    /// Unified diff between two snapshots, optionally limited to one path.
+    pub fn diff(&self, sha1: &str, sha2: &str, path: Option<&str>) -> Result<String> {
+        let mut args = vec!["diff", sha1, sha2];
+        if let Some(p) = path {
+            args.push("--");
+            args.push(p);
+        }
+        self.git(&args)
     }
 }
 

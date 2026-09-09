@@ -28,8 +28,12 @@ use crate::config::ShadowStore;
 
 /// Open the shadow repository, or `None` when layer 2 is unavailable (no git
 /// binary, or `[undo].shadow = "off"`). Layer 1 does not go through here.
-fn shadow(root: &Path, store: ShadowStore) -> Option<Shadow> {
+pub(crate) fn shadow(root: &Path, store: ShadowStore) -> Option<Shadow> {
     Shadow::open(root, store).ok().flatten()
+}
+
+pub fn shadow_repo(root: &Path, store: ShadowStore) -> Option<Shadow> {
+    shadow(root, store)
 }
 
 /// True when a *tree* snapshot is possible — that is, when layer 2 could
@@ -62,6 +66,20 @@ pub fn snapshot_session(
         anyhow::bail!("no shadow repository: git is unavailable or [undo].shadow is off");
     };
     shadow.snapshot(session_id, label)
+}
+
+/// Snapshot the worktree for this session, returning the commit hash representing
+/// this boundary (creating a boundary commit even if tree is unchanged).
+pub fn snapshot_boundary(
+    root: &Path,
+    store: ShadowStore,
+    session_id: &str,
+    label: &str,
+) -> Result<Option<String>> {
+    let Some(shadow) = shadow(root, store) else {
+        return Ok(None);
+    };
+    shadow.snapshot_forced(session_id, label).map(Some)
 }
 
 /// Snapshot with the default store and no session key.

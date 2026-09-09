@@ -1594,7 +1594,44 @@ async fn run_agent(
                         && let Some(id) = plan_step_id
                     {
                         writer.set_attribution(Some(id.to_string()), plan_id, "main");
+                        if let Ok(Some(sha)) = checkpoints::snapshot_boundary(
+                            &root,
+                            shadow_store,
+                            &session_id,
+                            &format!("step_{id}_start"),
+                        ) {
+                            ctx.journal.push((sha.clone(), format!("step_{id}_start")));
+                            let _ = writer.append(
+                                "checkpoint",
+                                serde_json::json!({
+                                    "layer": "shadow",
+                                    "id": sha,
+                                    "reason": "step_start",
+                                    "step": id,
+                                }),
+                            );
+                        }
                     } else if outcome.ok && matches!(op, "finish" | "block" | "cancel") {
+                        if op == "finish"
+                            && let Some(id) = plan_step_id
+                            && let Ok(Some(sha)) = checkpoints::snapshot_boundary(
+                                &root,
+                                shadow_store,
+                                &session_id,
+                                &format!("step_{id}_finish"),
+                            )
+                        {
+                            ctx.journal.push((sha.clone(), format!("step_{id}_finish")));
+                            let _ = writer.append(
+                                "checkpoint",
+                                serde_json::json!({
+                                    "layer": "shadow",
+                                    "id": sha,
+                                    "reason": "step_finish",
+                                    "step": id,
+                                }),
+                            );
+                        }
                         writer.set_attribution(None, plan_id, "main");
                     }
                     if outcome.ok && matches!(op, "finish" | "block" | "cancel") {
