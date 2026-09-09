@@ -21,16 +21,22 @@ jobs:
           python-version: '3.12'
 
       - name: Run update script
-        run: python3 .github/scripts/update_providers.py
+        run: |
+          set -euo pipefail
+          python3 --version
+          python3 .github/scripts/update_providers.py
 
       - name: Commit and push if changed
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if ! git diff --quiet builtin_providers.toml; then
+          git status --porcelain -- builtin_providers.toml
+          if git diff --quiet HEAD -- builtin_providers.toml; then
+            echo "No changes in builtin_providers.toml"
+          else
+            git diff --stat HEAD -- builtin_providers.toml
             git add builtin_providers.toml
             git commit -m "chore(providers): update builtin_providers.toml [skip ci]"
-            git push origin master
-          else
-            echo "No changes in builtin_providers.toml"
+            git push origin HEAD:master
           fi

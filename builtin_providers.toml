@@ -70,86 +70,94 @@ base_url = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
 continuation = true
 
-[models."claude-3-7-sonnet-20250219"]
+[models."claude-opus-4-6"]
 provider = "anthropic"
-id = "claude-3-7-sonnet-20250219"
+id = "claude-opus-4-6"
+context = 1000000
+effort = "high"
+price_in = 5.0
+price_out = 25.0
+
+[models."claude-opus-4-5"]
+provider = "anthropic"
+id = "claude-opus-4-5"
+context = 200000
+effort = "high"
+price_in = 5.0
+price_out = 25.0
+
+[models."claude-sonnet-4-5"]
+provider = "anthropic"
+id = "claude-sonnet-4-5"
 context = 200000
 effort = "high"
 price_in = 3.0
 price_out = 15.0
 
-[models."claude-3-5-sonnet-20241022"]
+[models."claude-sonnet-5"]
 provider = "anthropic"
-id = "claude-3-5-sonnet-20241022"
-context = 200000
-effort = "high"
-price_in = 3.0
-price_out = 15.0
+id = "claude-sonnet-5"
+context = 1000000
+effort = "medium"
+price_in = 2.0
+price_out = 10.0
 
-[models."claude-3-5-haiku-20241022"]
+[models."claude-haiku-4-5"]
 provider = "anthropic"
-id = "claude-3-5-haiku-20241022"
+id = "claude-haiku-4-5"
 context = 200000
 effort = "medium"
-price_in = 0.8
-price_out = 4.0
+price_in = 1.0
+price_out = 5.0
 
-[models."claude-3-opus-20240229"]
-provider = "anthropic"
-id = "claude-3-opus-20240229"
-context = 200000
-effort = "high"
-price_in = 15.0
-price_out = 75.0
-
-# Openai
+# OpenAI
 [providers.openai]
 format = "openai"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 continuation = true
 
-[models."gpt-4o"]
+[models."gpt-5.5"]
 provider = "openai"
-id = "gpt-4o"
-context = 128000
-effort = "off"
-price_in = 2.5
-price_out = 10.0
-
-[models."gpt-4o-mini"]
-provider = "openai"
-id = "gpt-4o-mini"
-context = 128000
-effort = "off"
-price_in = 0.15
-price_out = 0.6
-
-[models."o1"]
-provider = "openai"
-id = "o1"
-context = 200000
+id = "gpt-5.5"
+context = 1050000
 effort = "high"
-price_in = 15.0
-price_out = 60.0
+price_in = 5.0
+price_out = 30.0
 
-[models."o1-mini"]
+[models."gpt-5.4"]
 provider = "openai"
-id = "o1-mini"
-context = 128000
-effort = "medium"
-price_in = 1.1
-price_out = 4.4
+id = "gpt-5.4"
+context = 1050000
+effort = "high"
+price_in = 2.5
+price_out = 15.0
 
-[models."o3-mini"]
+[models."gpt-5.4-mini"]
 provider = "openai"
-id = "o3-mini"
+id = "gpt-5.4-mini"
+context = 272000
+effort = "off"
+price_in = 0.75
+price_out = 4.5
+
+[models."gpt-5.3-codex"]
+provider = "openai"
+id = "gpt-5.3-codex"
+context = 272000
+effort = "high"
+price_in = 1.75
+price_out = 14.0
+
+[models."o4-mini"]
+provider = "openai"
+id = "o4-mini"
 context = 200000
 effort = "medium"
 price_in = 1.1
 price_out = 4.4
 
-# Deepseek
+# DeepSeek
 [providers.deepseek]
 format = "openai"
 base_url = "https://api.deepseek.com"
@@ -179,29 +187,37 @@ base_url = "https://api.x.ai/v1"
 api_key_env = "XAI_API_KEY"
 continuation = true
 
-[models."grok-2-1212"]
+[models."grok-4.6"]
 provider = "grok"
-id = "grok-2-1212"
-context = 131072
-effort = "off"
+id = "grok-4.6"
+context = 500000
+effort = "high"
 price_in = 2.0
-price_out = 10.0
+price_out = 6.0
 
-[models."grok-2-vision-1212"]
+[models."grok-4.5"]
 provider = "grok"
-id = "grok-2-vision-1212"
-context = 32768
-effort = "off"
+id = "grok-4.5"
+context = 500000
+effort = "high"
 price_in = 2.0
-price_out = 10.0
+price_out = 6.0
 
-[models."grok-beta"]
+[models."grok-4.3"]
 provider = "grok"
-id = "grok-beta"
-context = 131072
-effort = "off"
-price_in = 5.0
-price_out = 15.0
+id = "grok-4.3"
+context = 1000000
+effort = "medium"
+price_in = 1.25
+price_out = 2.5
+
+[models."grok-build-0.1"]
+provider = "grok"
+id = "grok-build-0.1"
+context = 256000
+effort = "high"
+price_in = 1.0
+price_out = 2.0
 
 # Kimi
 [providers.kimi]
@@ -210,34 +226,27 @@ base_url = "https://api.moonshot.cn/v1"
 api_key_env = "MOONSHOT_API_KEY"
 continuation = true
 
-[models."moonshot-v1-8k"]
+[models."kimi-k3"]
 provider = "kimi"
-id = "moonshot-v1-8k"
-context = 8192
-effort = "off"
-price_in = 0.19999999999999998
-price_out = 2.0
+id = "kimi-k3"
+context = 1048576
+effort = "high"
+price_in = 3.0
+price_out = 15.0
 
-[models."moonshot-v1-32k"]
+[models."kimi-k2.6"]
 provider = "kimi"
-id = "moonshot-v1-32k"
-context = 32768
-effort = "off"
-price_in = 1.0
-price_out = 3.0
+id = "kimi-k2.6"
+context = 262144
+effort = "medium"
+price_in = 0.95
+price_out = 4.0
 
-[models."moonshot-v1-128k"]
+[models."kimi-k2.7-code"]
 provider = "kimi"
-id = "moonshot-v1-128k"
-context = 131072
-effort = "off"
-price_in = 2.0
-price_out = 5.0
+id = "kimi-k2.7-code"
+context = 262144
+effort = "high"
+price_in = 0.95
+price_out = 4.0
 
-[models."kimi-latest"]
-provider = "kimi"
-id = "kimi-latest"
-context = 131072
-effort = "off"
-price_in = 2.0
-price_out = 5.0

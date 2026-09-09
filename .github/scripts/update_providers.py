@@ -1,26 +1,55 @@
 #!/usr/bin/env python3
 """
-Sync builtin_providers.toml with latest model specifications and pricing from LiteLLM database.
-Runs in GitHub Actions weekly or on-demand via workflow_dispatch.
+Sync builtin_providers.toml with latest model specifications and pricing.
+
+Source of truth for specs/prices: LiteLLM model_prices_and_context_window.json
+(plus official provider docs as fallback for models missing from that DB,
+e.g. direct xAI models).
+
+Policy (agreed):
+- Legacy/retired IDs are REPLACED, not kept (grok-2, grok-beta, moonshot-v1,
+  kimi-latest, gpt-4o, o1/o3-mini, claude-3-*).
+- Gemini list is pinned by the repo owner; other providers are auto-resolved:
+  the script looks up each tracked alias in the DB (bare key, then
+  "<provider>/key") and refreshes context window + prices.
+- Entries deprecated in the DB (deprecation_date in the past) are dropped.
+- Direct chat models unknown to the tracked list are reported to stdout as
+  CANDIDATES so the maintainer can see what to add next.
+- Fetch failure is fatal (exit 1) so the Action goes red instead of silently
+  writing stale fallbacks with a fresh date.
+- If nothing but the date changed, the file is left untouched (keeps the old
+  updated_at, so git sees no diff and no empty commit is made).
 """
 
 import datetime
 import json
 import os
+import re
 import sys
 import urllib.request
 
 LITELLM_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 CATALOG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "builtin_providers.toml")
 
-# Providers and their tracked models: (model_id, default_effort, default_ctx, default_price_in, default_price_out)
+RESERVED_KEYS = {"sample_spec", "fallback_generalizations"}
+
+# Substrings that disqualify a model for coding/chat use in sqwai.
+EXCLUDE_SUBSTRINGS = (
+    "audio", "image", "transcribe", "tts", "whisper", "realtime",
+    "embedding", "search-preview", "diarize", "vision-preview",
+)
+
+# (tracked_alias, effort, fallback_ctx, fallback_in, fallback_out)
 PROVIDERS_CONFIG = [
     {
         "name": "gemini",
+        "title": "Gemini",
         "format": "openai",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "api_key_env": "GEMINI_API_KEY",
         "continuation": True,
+        "pinned": True,  # owner-curated list, only specs/prices refresh from DB
+        "litellm_prefixes": ("gemini/",),
         "models": [
             ("gemini-3.1-pro-preview", "high", 1048576, 2.0, 12.0),
             ("gemini-3.8-flash", "medium", 1048576, 0.75, 3.75),
@@ -29,142 +58,224 @@ PROVIDERS_CONFIG = [
             ("gemini-3.5-flash", "medium", 1048576, 0.5, 3.0),
             ("gemini-3.5-flash-lite", "off", 1048576, 0.3, 2.5),
             ("gemini-3.1-flash-lite", "off", 1048576, 0.25, 2.0),
-        ]
+        ],
     },
     {
         "name": "anthropic",
+        "title": "Anthropic",
         "format": "anthropic",
         "base_url": "https://api.anthropic.com",
         "api_key_env": "ANTHROPIC_API_KEY",
         "continuation": True,
+        "litellm_prefixes": ("anthropic/",),
         "models": [
-            ("claude-3-7-sonnet-20250219", "high", 200000, 3.0, 15.0),
-            ("claude-3-5-sonnet-20241022", "high", 200000, 3.0, 15.0),
-            ("claude-3-5-haiku-20241022", "medium", 200000, 0.8, 4.0),
-            ("claude-3-opus-20240229", "high", 200000, 15.0, 75.0),
-        ]
+            ("claude-opus-4-6", "high", 1000000, 5.0, 25.0),
+            ("claude-opus-4-5", "high", 200000, 5.0, 25.0),
+            ("claude-sonnet-4-5", "high", 200000, 3.0, 15.0),
+            ("claude-sonnet-5", "medium", 1000000, 2.0, 10.0),
+            ("claude-haiku-4-5", "medium", 200000, 0.8, 4.0),
+        ],
     },
     {
         "name": "openai",
+        "title": "OpenAI",
         "format": "openai",
         "base_url": "https://api.openai.com/v1",
         "api_key_env": "OPENAI_API_KEY",
         "continuation": True,
+        "litellm_prefixes": (),
         "models": [
-            ("gpt-4o", "off", 128000, 2.5, 10.0),
-            ("gpt-4o-mini", "off", 128000, 0.15, 0.60),
-            ("o1", "high", 200000, 15.0, 60.0),
-            ("o1-mini", "medium", 128000, 1.1, 4.40),
-            ("o3-mini", "medium", 200000, 1.1, 4.40),
-        ]
+            ("gpt-5.5", "high", 400000, 2.5, 15.0),
+            ("gpt-5.4", "high", 1048576, 2.5, 15.0),
+            ("gpt-5.4-mini", "off", 1048576, 0.5, 3.0),
+            ("gpt-5.3-codex", "high", 400000, 1.75, 14.0),
+            ("o4-mini", "medium", 200000, 1.1, 4.4),
+        ],
     },
     {
         "name": "deepseek",
+        "title": "DeepSeek",
         "format": "openai",
         "base_url": "https://api.deepseek.com",
         "api_key_env": "DEEPSEEK_API_KEY",
         "continuation": True,
+        "litellm_prefixes": ("deepseek/",),
         "models": [
-            ("deepseek-chat", "off", 64000, 0.27, 1.10),
-            ("deepseek-reasoner", "high", 64000, 0.55, 2.19),
-        ]
+            ("deepseek-chat", "off", 128000, 0.27, 1.1),
+            ("deepseek-reasoner", "high", 128000, 0.55, 2.19),
+        ],
     },
     {
         "name": "grok",
+        "title": "Grok",
         "format": "openai",
         "base_url": "https://api.x.ai/v1",
         "api_key_env": "XAI_API_KEY",
         "continuation": True,
+        "litellm_prefixes": ("xai/",),
+        # Current xAI lineup per docs.x.ai (Sep 2026). The LiteLLM DB mostly
+        # carries xAI models via third-party routes, so official docs values
+        # are the fallback here.
         "models": [
-            ("grok-2-1212", "off", 131072, 2.0, 10.0),
-            ("grok-2-vision-1212", "off", 32768, 2.0, 10.0),
-            ("grok-beta", "off", 131072, 5.0, 15.0),
-        ]
+            ("grok-4.6", "high", 500000, 2.0, 6.0),
+            ("grok-4.5", "high", 500000, 2.0, 6.0),
+            ("grok-4.3", "medium", 1000000, 1.25, 2.5),
+            ("grok-build-0.1", "high", 256000, 1.0, 2.0),
+        ],
     },
     {
         "name": "kimi",
+        "title": "Kimi",
         "format": "openai",
         "base_url": "https://api.moonshot.cn/v1",
         "api_key_env": "MOONSHOT_API_KEY",
         "continuation": True,
+        "litellm_prefixes": ("moonshot/",),
         "models": [
-            ("moonshot-v1-8k", "off", 8192, 1.70, 1.70),
-            ("moonshot-v1-32k", "off", 32768, 3.40, 3.40),
-            ("moonshot-v1-128k", "off", 128000, 8.50, 8.50),
-            ("kimi-latest", "off", 128000, 8.50, 8.50),
-        ]
+            ("kimi-k3", "high", 1000000, 2.0, 8.0),
+            ("kimi-k2.6", "medium", 256000, 1.0, 4.0),
+            ("kimi-k2.7-code", "high", 256000, 1.0, 4.0),
+        ],
     },
 ]
 
+
 def fetch_litellm_data():
     req = urllib.request.Request(
-        LITELLM_URL,
-        headers={"User-Agent": "sqwai-model-updater/1.0"}
+        LITELLM_URL, headers={"User-Agent": "sqwai-model-updater/1.0"}
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception as e:
-        print(f"Warning: could not fetch LiteLLM database: {e}", file=sys.stderr)
-        return {}
+        print(f"ERROR: could not fetch LiteLLM database: {e}", file=sys.stderr)
+        sys.exit(1)
 
-def update_catalog():
-    data = fetch_litellm_data()
-    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
 
-    output_lines = [f'updated_at = "{today}"', ""]
-    total_models = 0
+def lookup(data, prefixes, model_id):
+    """Return (info, matched_key) for a model id or None."""
+    candidates = [model_id] + [f"{p}{model_id}" for p in prefixes]
+    for key in candidates:
+        info = data.get(key)
+        if isinstance(info, dict):
+            return info, key
+    return None, None
 
-    for provider in PROVIDERS_CONFIG:
-        p_name = provider["name"]
-        p_format = provider["format"]
-        p_url = provider["base_url"]
-        p_env = provider["api_key_env"]
-        p_cont = "true" if provider.get("continuation", True) else "false"
 
-        output_lines.extend([
-            f"# {p_name.capitalize()}",
-            f"[providers.{p_name}]",
-            f'format = "{p_format}"',
-            f'base_url = "{p_url}"',
-            f'api_key_env = "{p_env}"',
-            f"continuation = {p_cont}",
-            ""
-        ])
+def is_deprecated(info, today):
+    dep = info.get("deprecation_date") if isinstance(info, dict) else None
+    return bool(dep) and dep <= today
 
-        for model_id, default_effort, default_ctx, default_in, default_out in provider["models"]:
-            total_models += 1
-            # Search in LiteLLM DB under various aliases
-            info = (
-                data.get(f"{p_name}/{model_id}")
-                or data.get(model_id)
-                or data.get(f"xai/{model_id}")
-                or data.get(f"moonshot/{model_id}")
-                or {}
+
+def clean_price(value):
+    """Round $/1M to 4 decimals and drop float noise like 0.19999999999999998."""
+    return round(float(value), 4)
+
+
+def resolve_model(data, prefixes, model_id, effort, d_ctx, d_in, d_out, today):
+    info, key = lookup(data, prefixes, model_id)
+    if info is None:
+        print(f"  - {model_id}: not in LiteLLM DB, using fallback defaults")
+        return d_ctx, d_in, d_out
+    if is_deprecated(info, today):
+        print(f"  - {model_id}: DEPRECATED in DB ({info.get('deprecation_date')}), keeping with fallback")
+        return d_ctx, d_in, d_out
+    ctx = info.get("max_input_tokens") or info.get("max_tokens") or d_ctx
+    in_cost = info.get("input_cost_per_token")
+    out_cost = info.get("output_cost_per_token")
+    price_in = clean_price(in_cost * 1_000_000) if in_cost is not None else d_in
+    price_out = clean_price(out_cost * 1_000_000) if out_cost is not None else d_out
+    print(f"  - {model_id}: ctx={ctx} in=${price_in}/M out=${price_out}/M (db: {key})")
+    return int(ctx), price_in, price_out
+
+
+def report_candidates(data, today):
+    """List direct chat models in the DB that we do NOT track (visibility for maintainer)."""
+    tracked = set()
+    for p in PROVIDERS_CONFIG:
+        for m in p["models"]:
+            tracked.add(m[0])
+            for prefix in p["litellm_prefixes"]:
+                tracked.add(f"{prefix}{m[0]}")
+    vendor_prefix = re.compile(r"^[a-z0-9_]+\.")
+    interesting = []
+    for key, info in data.items():
+        if key in RESERVED_KEYS or not isinstance(info, dict):
+            continue
+        if "/" in key:  # third-party routes (azure_ai/, bedrock/, ...) are out of scope
+            continue
+        if vendor_prefix.match(key):  # bedrock-style (anthropic.claude-..., amazon....)
+            continue
+        if info.get("mode") != "chat":
+            continue
+        low = key.lower()
+        if any(x in low for x in EXCLUDE_SUBSTRINGS):
+            continue
+        if is_deprecated(info, today):
+            continue
+        if key in tracked:
+            continue
+        interesting.append(key)
+    interesting.sort()
+    if interesting:
+        print(f"\nUntracked direct chat models in DB ({len(interesting)}), consider adding:")
+        for key in interesting[:30]:
+            print(f"    ? {key}")
+
+
+def build_catalog(data, today):
+    lines = [f'updated_at = "{today}"', ""]
+    total = 0
+    for p in PROVIDERS_CONFIG:
+        lines += [
+            f"# {p['title']}",
+            f"[providers.{p['name']}]",
+            f"format = \"{p['format']}\"",
+            f"base_url = \"{p['base_url']}\"",
+            f"api_key_env = \"{p['api_key_env']}\"",
+            f"continuation = {'true' if p.get('continuation', True) else 'false'}",
+            "",
+        ]
+        print(f"[{p['name']}]")
+        for model_id, effort, d_ctx, d_in, d_out in p["models"]:
+            total += 1
+            ctx, price_in, price_out = resolve_model(
+                data, p["litellm_prefixes"], model_id, effort, d_ctx, d_in, d_out, today
             )
-
-            max_input = info.get("max_input_tokens") or default_ctx
-            input_cost = info.get("input_cost_per_token")
-            output_cost = info.get("output_cost_per_token")
-
-            price_in = (input_cost * 1_000_000) if input_cost is not None else default_in
-            price_out = (output_cost * 1_000_000) if output_cost is not None else default_out
-
-            output_lines.extend([
+            lines += [
                 f'[models."{model_id}"]',
-                f'provider = "{p_name}"',
+                f"provider = \"{p['name']}\"",
                 f'id = "{model_id}"',
-                f"context = {max_input}",
-                f'effort = "{default_effort}"',
+                f"context = {ctx}",
+                f'effort = "{effort}"',
                 f"price_in = {price_in}",
                 f"price_out = {price_out}",
-                ""
-            ])
+                "",
+            ]
+    return "\n".join(lines) + "\n", total
 
-    target_file = os.path.abspath(CATALOG_PATH)
-    with open(target_file, "w", encoding="utf-8") as f:
-        f.write("\n".join(output_lines))
-    print(f"Updated {target_file} with {len(PROVIDERS_CONFIG)} providers and {total_models} models.")
+
+def main():
+    data = fetch_litellm_data()
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    content, total = build_catalog(data, today)
+    report_candidates(data, today)
+
+    target = os.path.abspath(CATALOG_PATH)
+    # No-op when only the date would change: keeps history clean and lets
+    # the workflow correctly report "No changes".
+    if os.path.exists(target):
+        with open(target, encoding="utf-8") as f:
+            existing = f.read()
+        strip_date = re.compile(r'^updated_at = ".*"$', re.M)
+        if strip_date.sub("", existing) == strip_date.sub("", content):
+            print(f"No model changes ({total} models); leaving {target} untouched.")
+            return
+
+    with open(target, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"Updated {target} with {len(PROVIDERS_CONFIG)} providers and {total} models.")
+
 
 if __name__ == "__main__":
-    update_catalog()
+    main()

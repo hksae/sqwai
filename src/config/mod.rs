@@ -1222,7 +1222,25 @@ mod tests {
         }
         assert!(cfg.is_builtin_model("gemini-3.8-flash"));
         assert!(cfg.is_builtin_model("deepseek-chat"));
-        assert!(cfg.is_builtin_model("claude-3-7-sonnet-20250219"));
+        assert!(cfg.is_builtin_model("claude-opus-4-6"));
+        assert!(cfg.is_builtin_model("gpt-5.5"));
+        assert!(cfg.is_builtin_model("grok-4.6"));
+        assert!(cfg.is_builtin_model("kimi-k3"));
+        // retired IDs must be gone, not kept alongside
+        for retired in [
+            "claude-3-7-sonnet-20250219",
+            "gpt-4o",
+            "o1-mini",
+            "grok-2-1212",
+            "grok-beta",
+            "moonshot-v1-8k",
+            "kimi-latest",
+        ] {
+            assert!(
+                !cfg.is_builtin_model(retired),
+                "retired model {retired} still builtin"
+            );
+        }
 
         // user-defined model survives apply_builtins
         cfg.models.insert(
