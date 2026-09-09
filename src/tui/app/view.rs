@@ -2387,8 +2387,7 @@ impl App {
                 hint_items.push(("enter", "continue plan"));
             }
             hint_items.push(("tab", "plan / act"));
-            hint_items.push(("ctrl+s", "sessions"));
-            hint_items.push(("?", "help"));
+            hint_items.push(("/help", "controls"));
             if !data.has_sqwai_dir {
                 hint_items.push(("/init", "set up project"));
             }
@@ -2406,19 +2405,17 @@ impl App {
             if data.active_plan.is_some() {
                 col1_items.push(("enter", "continue plan"));
                 col2_items.push(("tab", "plan / act"));
-                col3_items.push(("ctrl+s", "sessions"));
+                col3_items.push(("/help", "controls"));
 
                 col1_items.push(("type a task to start", ""));
-                col2_items.push(("?", "help"));
                 if !data.has_sqwai_dir {
                     col3_items.push(("/init", "set up project"));
                 }
             } else {
                 col1_items.push(("type a task to start", ""));
                 col2_items.push(("tab", "plan / act"));
-                col3_items.push(("ctrl+s", "sessions"));
+                col3_items.push(("/help", "controls"));
 
-                col1_items.push(("?", "help"));
                 if !data.has_sqwai_dir {
                     col2_items.push(("/init", "set up project"));
                 }

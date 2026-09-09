@@ -1,6 +1,6 @@
 ---
 source: src/tui/app/tests.rs
-assertion_line: 3386
+assertion_line: 3440
 expression: s
 ---
 
@@ -16,8 +16,8 @@ expression: s
 
   enter  continue plan
   tab    plan / act
-  ctrl+s sessions
-  ?      help
+  /help  controls
+
 
 
 

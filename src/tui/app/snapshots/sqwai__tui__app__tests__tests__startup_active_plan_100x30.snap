@@ -1,6 +1,6 @@
 ---
 source: src/tui/app/tests.rs
-assertion_line: 3386
+assertion_line: 3440
 expression: s
 ---
 
@@ -15,8 +15,8 @@ expression: s
           step 2/5 In progress
           memory        graph ready
 
-        enter  continue plan      tab  plan / act         ctrl+s  sessions
-        type a task to start      ?  help
+        enter  continue plan      tab  plan / act         /help  controls
+        type a task to start
 
 
 

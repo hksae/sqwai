@@ -1,6 +1,6 @@
 ---
 source: src/tui/app/tests.rs
-assertion_line: 3416
+assertion_line: 3470
 expression: s
 ---
 
@@ -14,8 +14,8 @@ expression: s
   memory  graph ready
 
   tab    plan / act
-  ctrl+s sessions
-  ?      help
+  /help  controls
+
 
 
 

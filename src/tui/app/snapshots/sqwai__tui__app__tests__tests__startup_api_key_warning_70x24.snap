@@ -1,6 +1,6 @@
 ---
 source: src/tui/app/tests.rs
-assertion_line: 3456
+assertion_line: 3510
 expression: s
 ---
 
@@ -16,8 +16,8 @@ expression: s
   api_key to config.
 
   tab    plan / act
-  ctrl+s sessions
-  ?      help
+  /help  controls
+
 
 
 

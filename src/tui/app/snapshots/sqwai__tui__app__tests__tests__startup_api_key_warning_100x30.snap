@@ -1,6 +1,6 @@
 ---
 source: src/tui/app/tests.rs
-assertion_line: 3456
+assertion_line: 3510
 expression: s
 ---
 
@@ -15,8 +15,8 @@ expression: s
         memory        graph ready
         API key not set for provider 'openai'. Set OPENAI_API_KEY or add api_key to config.
 
-        type a task to start      tab  plan / act         ctrl+s  sessions
-        ?  help
+        type a task to start      tab  plan / act         /help  controls
+
 
 
 

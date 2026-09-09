@@ -25,6 +25,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "/fork",
     "/goal",
     "/graph-rebuild",
+    "/help",
     "/init",
     "/lsp",
     "/mcp",
@@ -132,6 +133,10 @@ pub(super) enum Menu {
     Undo,
     /// pick the default model for new sessions
     PickDefaultModel,
+    /// /help: help sections
+    Help,
+    /// /help -> controls: key combo reference
+    Controls,
     /// single-field form editing one numeric host setting
     EditScalar(ScalarSetting),
     /// single-field form appending one entry to a string list
@@ -285,6 +290,7 @@ pub(super) enum MenuAction {
     OpenSafety,
     OpenUndo,
     OpenPickDefaultModel,
+    OpenControls,
     SetDefaultModel(String),
     CycleDiaryEffort,
     CycleCompactionSummary,
@@ -882,6 +888,7 @@ impl App {
             MenuAction::OpenSafety => self.open_menu(Menu::Safety),
             MenuAction::OpenUndo => self.open_menu(Menu::Undo),
             MenuAction::OpenPickDefaultModel => self.open_menu(Menu::PickDefaultModel),
+            MenuAction::OpenControls => self.open_menu(Menu::Controls),
             MenuAction::SetDefaultModel(key) => {
                 if !self.cfg.models.contains_key(&key) {
                     self.status(&format!("unknown model '{key}'"), StatusKind::Err);
@@ -1629,6 +1636,8 @@ impl App {
             Some(Menu::Safety) => " safety ".into(),
             Some(Menu::Undo) => " undo ".into(),
             Some(Menu::PickDefaultModel) => " default model ".into(),
+            Some(Menu::Help) => " help ".into(),
+            Some(Menu::Controls) => " controls ".into(),
             Some(Menu::EditScalar(setting)) => format!(" edit {} ", setting.label()),
             Some(Menu::AddListItem(section)) => format!(" add {} ", section.title()),
             Some(Menu::DeleteListItems(section)) => {
@@ -1699,6 +1708,46 @@ impl App {
                     .push(section("Skills", MenuAction::OpenSkills));
                 self.menu_rows.push(section("Debug", MenuAction::OpenDebug));
                 self.menu_footer_text = Some("enter: open · esc: close".into());
+            }
+            Menu::Help => {
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(
+                        "  controls".to_string(),
+                        Theme::accent_bold(),
+                    )]),
+                    MenuAction::OpenControls,
+                ));
+                self.menu_footer_text = Some("enter: open · esc: close".into());
+            }
+            Menu::Controls => {
+                const CONTROLS: &[(&str, &str)] = &[
+                    ("enter", "submit · confirm"),
+                    ("tab", "plan / act mode"),
+                    ("esc", "cancel · back"),
+                    ("ctrl+c", "stop · copy"),
+                    ("ctrl+d", "quit if empty"),
+                    ("ctrl+j", "newline"),
+                    ("ctrl+v", "paste"),
+                    ("ctrl+s", "sessions"),
+                    ("ctrl+t", "todo"),
+                    ("ctrl+b", "subagents"),
+                    ("ctrl+p", "providers"),
+                    ("ctrl+l", "plan"),
+                    ("ctrl+o", "settings"),
+                    ("y / n", "confirm · cancel"),
+                    ("a / d", "allow always · deny"),
+                    ("1-9", "pick inline option"),
+                ];
+                for (combo, what) in CONTROLS {
+                    self.menu_rows.push(row(
+                        Line::from(vec![
+                            Span::styled(format!("  {combo:<10}"), Theme::accent_bold()),
+                            Span::styled((*what).to_string(), Theme::dim()),
+                        ]),
+                        MenuAction::None,
+                    ));
+                }
+                self.menu_footer_text = Some("esc: close".into());
             }
             Menu::Mcp => {
                 self.menu_rows

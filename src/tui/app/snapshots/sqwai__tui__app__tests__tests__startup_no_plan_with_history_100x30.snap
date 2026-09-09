@@ -1,6 +1,6 @@
 ---
 source: src/tui/app/tests.rs
-assertion_line: 3416
+assertion_line: 3470
 expression: s
 ---
 
@@ -17,8 +17,8 @@ expression: s
         recent        2025-01-15      Fix login bug           Completed
                       2025-01-14      Add dark mode           Completed
 
-        type a task to start      tab  plan / act         ctrl+s  sessions
-        ?  help
+        type a task to start      tab  plan / act         /help  controls
+
 
 
 

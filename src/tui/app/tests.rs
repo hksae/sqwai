@@ -1662,6 +1662,69 @@ mod tests {
     }
 
     #[test]
+    fn help_menu_lists_controls() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        assert!(COMMANDS.contains(&"/help"));
+        app.command("help");
+        assert!(matches!(app.cur_menu(), Some(Menu::Help)));
+        let labels: Vec<String> = app
+            .menu_rows
+            .iter()
+            .map(|(line, _)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref().to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(labels.iter().any(|t| t.contains("controls")));
+
+        app.run_action(MenuAction::OpenControls);
+        assert!(matches!(app.cur_menu(), Some(Menu::Controls)));
+        let rows: Vec<String> = app
+            .menu_rows
+            .iter()
+            .map(|(line, _)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref().to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            rows.iter()
+                .any(|t| t.contains("ctrl+p") && t.contains("providers"))
+        );
+        assert!(
+            rows.iter()
+                .any(|t| t.contains("ctrl+l") && t.contains("plan"))
+        );
+        assert!(
+            rows.iter()
+                .any(|t| t.contains("ctrl+o") && t.contains("settings"))
+        );
+        assert!(rows.iter().any(|t| t.contains("y / n")));
+    }
+
+    #[test]
+    fn question_mark_key_types_into_input() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Event::Key(KeyEvent::new(
+            KeyCode::Char('?'),
+            KeyModifiers::empty(),
+        )))
+        .unwrap();
+        app.poll_input(&rx).unwrap();
+        assert_eq!(app.input_text(), "?");
+        assert!(!app.segments.iter().any(|s| matches!(
+            s,
+            Segment::Status { text, .. } if text.contains("commands:")
+        )));
+    }
+
+    #[test]
     fn plan_show_alias_is_gone() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.plan_command("/plan show");

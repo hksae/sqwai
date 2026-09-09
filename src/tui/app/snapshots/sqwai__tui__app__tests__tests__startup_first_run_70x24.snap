@@ -1,6 +1,6 @@
 ---
 source: src/tui/app/tests.rs
-assertion_line: 3440
+assertion_line: 3494
 expression: s
 ---
 
@@ -14,9 +14,9 @@ expression: s
   /init create AGENTS.md and memory or just type a task
 
   tab    plan / act
-  ctrl+s sessions
-  ?      help
+  /help  controls
   /init  set up project
+
 
 
 

@@ -1394,7 +1394,7 @@ impl App {
                 let mut parts = rest.split_whitespace();
                 match parts.next().unwrap_or("") {
                     "settings" | "debug" | "theme" | "mcp" | "lsp" | "skill" | "skills"
-                    | "providers" | "models" | "sessions" | "exit" => true,
+                    | "providers" | "models" | "sessions" | "exit" | "help" => true,
                     "plan" => parts.next().is_none(),
                     _ => false,
                 }
@@ -1862,6 +1862,7 @@ impl App {
             }
 
             "/theme" => self.open_menu(Menu::Themes),
+            "/help" => self.open_menu(Menu::Help),
             "/graph-rebuild" => {
                 if self.streaming {
                     self.show_busy_status();

@@ -152,18 +152,6 @@ impl App {
                         && !alt
                         && let KeyCode::Char(c) = k.code
                     {
-                        if c == '?'
-                            && self.input_text().trim().is_empty()
-                            && self.menu_stack.is_empty()
-                            && self.ask_custom_focus.is_none()
-                        {
-                            self.status(
-                                "commands: /settings, /plan, /sessions, /undo, /init, /exit",
-                                StatusKind::Info,
-                            );
-                            self.dirty = true;
-                            continue;
-                        }
                         let mut text_batch = String::new();
                         text_batch.push(c);
                         while let Some(next_ev) = self
