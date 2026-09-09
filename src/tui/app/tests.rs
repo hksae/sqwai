@@ -1242,32 +1242,6 @@ mod tests {
     }
 
     #[test]
-    fn fork_at_copies_prefix_and_switches() {
-        use crate::providers::Role;
-        let mut app = test_app("http://127.0.0.1:9/v1".into());
-        let parent_id = app.session.id.to_string();
-        app.session.push(Role::User, "one");
-        app.session.push(Role::Assistant, "two");
-        app.session.push(Role::User, "three");
-
-        app.run_action(MenuAction::ForkAt(1));
-
-        // now living in the fork with only the first two messages
-        assert_ne!(app.session.id.to_string(), parent_id);
-        assert_eq!(app.session.messages.len(), 2);
-        assert_eq!(
-            app.session.forked_from_id.as_deref(),
-            Some(parent_id.as_str())
-        );
-        let chat: Vec<&Segment> = app
-            .segments
-            .iter()
-            .filter(|s| !matches!(s, Segment::Status { .. }))
-            .collect();
-        assert_eq!(chat.len(), 2, "fork history rendered");
-    }
-
-    #[test]
     fn pin_from_menu_does_not_pollute_chat() {
         use crate::providers::Role;
         let mut app = test_app("http://127.0.0.1:9/v1".into());

@@ -34,8 +34,6 @@ pub struct SessionHeader {
     pub last_message_at: Option<DateTime<Utc>>,
     pub model_key: String,
     pub plan_id: Option<String>,
-    pub forked_from_id: Option<String>,
-    pub forked_from_title: Option<String>,
     pub context_tokens: u64,
     pub calls: usize,
     pub errors: usize,
@@ -65,8 +63,6 @@ impl SessionHeader {
             last_message_at: s.last_message_at,
             model_key: s.model_key.clone(),
             plan_id: s.plan_id.clone(),
-            forked_from_id: s.forked_from_id.clone(),
-            forked_from_title: s.forked_from_title.clone(),
             context_tokens: s.context_tokens_used(),
             calls: s.activity.iter().map(|a| a.calls).sum(),
             errors: s.activity.iter().map(|a| a.errors).sum(),
@@ -121,10 +117,7 @@ pub struct Session {
     pub last_message_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub pinned: bool,
-    /// set when this session was created by /fork
-    #[serde(default)]
-    pub forked_from_id: Option<String>,
-    /// plan copied for this fork, if the parent had an active plan
+    /// plan this session works on, if any
     #[serde(default)]
     pub plan_id: Option<String>,
     /// step this session currently holds (§2.2.3). Set on `plan start`,
@@ -132,9 +125,6 @@ pub struct Session {
     /// via `StepCurrent` events. `None` means idle.
     #[serde(default)]
     pub current_step_id: Option<String>,
-    /// title snapshot of the parent, survives parent deletion
-    #[serde(default)]
-    pub forked_from_title: Option<String>,
     /// last provider-native response id
     #[serde(default)]
     pub last_response_id: Option<String>,
@@ -170,59 +160,14 @@ impl Session {
             cache_confirmed: false,
             last_message_at: None,
             pinned: false,
-            forked_from_id: None,
             plan_id: None,
             current_step_id: None,
-            forked_from_title: None,
             last_response_id: None,
             last_response_model: None,
             checkpoints: Vec::new(),
             activity: Vec::new(),
             turn_notes: Vec::new(),
         }
-    }
-
-    /// create a fork copying messages up to `last_idx` inclusive
-    pub fn fork_upto(&self, last_idx: usize) -> Self {
-        let mut f = Session::new(self.model_key.clone(), self.context_limit);
-        f.title = self.title.clone();
-        if !self.messages.is_empty() {
-            f.messages = self.messages[..=(last_idx.min(self.messages.len() - 1))].to_vec();
-        }
-        f.estimated_tokens = f
-            .messages
-            .iter()
-            .map(|m| m.content.len() as u64)
-            .sum::<u64>()
-            .div_ceil(4);
-        // provider usage describes prompts of the whole original conversation;
-        // carry it over only when everything is copied
-        if f.messages.len() == self.messages.len() {
-            f.usage = self.usage;
-            f.last_usage = self.last_usage;
-        }
-        f.summary = self.summary.clone();
-        f.cache_confirmed = self.cache_confirmed;
-        f.forked_from_id = Some(self.id.to_string());
-        f.plan_id = self.plan_id.clone();
-        f.forked_from_title = Some(self.title.clone());
-        // a continuation reference belongs to the parent conversation
-        f.last_response_id = None;
-        f.last_response_model = None;
-        // UI ranges cannot be copied safely until the fork's transcript is
-        // reconstructed; retain only full-history summaries.
-        if f.messages.len() == self.messages.len() {
-            f.activity = self.activity.clone();
-            f.turn_notes = self.turn_notes.clone();
-        } else {
-            f.turn_notes = self
-                .turn_notes
-                .iter()
-                .filter(|note| note.user_index < f.messages.len())
-                .cloned()
-                .collect();
-        }
-        f
     }
 
     /// pinned sessions first, then by latest activity
@@ -311,7 +256,7 @@ impl Session {
     }
 
     /// Recompute the fallback estimate after the transcript was replaced
-    /// wholesale (compaction, fork, agent outcome).
+    /// wholesale (compaction, agent outcome).
     pub fn refresh_estimate(&mut self) {
         self.estimated_tokens = self
             .messages
@@ -665,30 +610,6 @@ mod tests {
     }
 
     #[test]
-    fn fork_copies_prefix_and_marks_origin() {
-        let mut s = Session::new("m".into(), 1000);
-        s.push(Role::User, "one");
-        s.push(Role::Assistant, "two");
-        s.push(Role::User, "three");
-        s.usage.prompt_tokens = 900;
-
-        // partial fork: no provider usage, estimated tokens from copied text
-        let f = s.fork_upto(1);
-        assert_eq!(f.messages.len(), 2);
-        assert_eq!(f.messages[0].content, "one");
-        assert_eq!(f.usage.prompt_tokens, 0);
-        assert!(f.estimated_tokens > 0);
-        assert_eq!(f.forked_from_id.as_deref(), Some(s.id.to_string().as_str()));
-        assert_eq!(f.forked_from_title.as_deref(), Some(s.title.as_str()));
-        assert!(!f.pinned);
-
-        // full fork carries usage over
-        let full = s.fork_upto(2);
-        assert_eq!(full.messages.len(), 3);
-        assert_eq!(full.usage.prompt_tokens, 900);
-    }
-
-    #[test]
     fn pinned_sessions_sort_first_then_activity() {
         let old = Session::new("m".into(), 10);
         let mut mid = Session::new("m".into(), 10);
@@ -700,13 +621,5 @@ mod tests {
         assert_eq!(v[0].id, pinned_old.id, "pinned first");
         assert_eq!(v[1].id, mid.id, "then latest activity");
         assert_eq!(v[2].id, old.id);
-    }
-
-    #[test]
-    fn fork_empty_session_does_not_panic() {
-        let s = Session::new("m".into(), 1000);
-        let f = s.fork_upto(usize::MAX);
-        assert!(f.messages.is_empty());
-        assert_eq!(f.forked_from_id.as_deref(), Some(s.id.to_string().as_str()));
     }
 }

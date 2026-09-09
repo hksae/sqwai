@@ -410,8 +410,6 @@ pub struct Plan {
     pub id: String,
     pub status: PlanStatus,
     pub created: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub forked_from: Option<String>,
     #[serde(default)]
     pub sessions: Vec<String>,
     /// Scoped `session:seq` of the last journal event applied to this file.
@@ -505,18 +503,6 @@ fn now() -> String {
 }
 
 /// Atomic write: temp file + rename (§2.1.2).
-/// Copy a plan for a forked session while preserving step state and resetting
-/// the mutable revision counter. The original plan is left untouched.
-pub fn fork(root: &Path, source: &Plan, session_id: &str) -> Result<Plan> {
-    let mut copy = source.clone();
-    copy.id = new_id();
-    copy.created = now();
-    copy.forked_from = Some(source.id.clone());
-    copy.sessions = vec![session_id.to_string()];
-    copy.revision = 0;
-    store(root, &copy)?;
-    Ok(copy)
-}
 
 /// Reopen a completed step after host-side undo removed its recorded evidence.
 /// Conservative rule (§3.6): ANY reverted part of the step's result reopens
@@ -1348,7 +1334,6 @@ pub fn create(
         id: new_id(),
         status: PlanStatus::Active,
         created: ts.clone(),
-        forked_from: None,
         sessions: Vec::new(),
         applied_event: None,
         goal: Goal {
@@ -2071,22 +2056,6 @@ mod tests {
     }
 
     #[test]
-    fn fork_copies_plan_with_new_identity_and_reset_revision() {
-        let root = std::env::temp_dir().join(format!("sqwai-plan-fork-{}", std::process::id()));
-        let mut source = new_plan();
-        source.revision = 7;
-        store(&root, &source).unwrap();
-        let copy = fork(&root, &source, "fork-session").unwrap();
-        assert_ne!(copy.id, source.id);
-        assert_eq!(copy.forked_from.as_deref(), Some(source.id.as_str()));
-        assert_eq!(copy.sessions, vec!["fork-session"]);
-        assert_eq!(copy.revision, 0);
-        assert_eq!(copy.steps.len(), source.steps.len());
-        assert!(open(&root, &copy.id).is_ok());
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
     fn undo_reopens_done_step_and_clears_completion_metadata() {
         let mut plan = new_plan();
         apply(
@@ -2610,6 +2579,7 @@ mod tests {
                 "id": id,
                 "status": "active",
                 "created": "2026-01-01T00:00:00+00:00",
+                "forked_from": "01JOLDPARENT00000000000000",
                 "sessions": ["s1"],
                 "goal": {"text": "old goal", "source": "user", "created": "..."},
                 "acceptance": [
@@ -2862,16 +2832,20 @@ mod tests {
     }
 
     #[test]
-    fn fork_and_open_active_resolves_per_session_and_deterministically() {
-        let dir = std::env::temp_dir().join(format!("sqwai-plan-fork-{}", new_id()));
+    fn open_active_resolves_per_session_and_deterministically() {
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-resolve-{}", new_id()));
         let mut parent = new_plan();
         parent.sessions = vec!["sess-parent".into()];
+        parent.created = "2026-01-01T00:00:00+00:00".to_string();
         let parent_id = parent.id.clone();
         store(&dir, &parent).unwrap();
 
-        // Fork plan for child session
-        let forked = fork(&dir, &parent, "sess-child").unwrap();
-        let child_id = forked.id.clone();
+        // Second active plan for another session (no fork: built directly).
+        let mut second = new_plan();
+        second.sessions = vec!["sess-child".into()];
+        second.created = "2026-09-09T00:00:00+00:00".to_string();
+        let child_id = second.id.clone();
+        store(&dir, &second).unwrap();
 
         // Querying with sess-parent returns parent plan
         let resolved_parent = open_active_for_session(&dir, Some("sess-parent"))
@@ -2879,7 +2853,7 @@ mod tests {
             .unwrap();
         assert_eq!(resolved_parent.id, parent_id);
 
-        // Querying with sess-child returns forked plan
+        // Querying with sess-child returns the second plan
         let resolved_child = open_active_for_session(&dir, Some("sess-child"))
             .unwrap()
             .unwrap();

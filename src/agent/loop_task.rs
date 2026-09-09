@@ -2523,7 +2523,7 @@ async fn propose_plan(
         return tools::Outcome::err(format!("plan write failed: {e:#}"));
     }
     // tell the TUI the stored plan's id so it re-links the session before the
-    // tool outcome is processed (fork must copy the new plan, not the old one)
+    // tool outcome is processed
     let _ = tx
         .send(AgentEvent::PlanAccepted { id: new_id.clone() })
         .await;

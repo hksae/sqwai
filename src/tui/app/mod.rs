@@ -1921,15 +1921,6 @@ impl App {
                 self.start_new_session();
             }
             "/sessions" => self.open_menu(Menu::Sessions),
-            "/fork" => {
-                if self.session.messages.is_empty() {
-                    self.status("nothing to fork yet", StatusKind::Warn);
-                } else if self.streaming {
-                    self.show_busy_status();
-                } else {
-                    self.open_menu(Menu::ForkPoint);
-                }
-            }
             "/providers" => {
                 let arg = rest.split_whitespace().nth(1);
                 if arg == Some("update") {

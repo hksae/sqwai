@@ -22,7 +22,6 @@ pub(super) const COMMANDS: &[&str] = &[
     "/debug",
     "/diary",
     "/exit",
-    "/fork",
     "/goal",
     "/graph-rebuild",
     "/help",
@@ -120,8 +119,6 @@ pub(super) enum Menu {
     },
     Sessions,
     DeleteSessions,
-    /// pick a message to copy history up to
-    ForkPoint,
     /// /debug: runtime toggles and diagnostics
     #[allow(dead_code)]
     Debug,
@@ -241,13 +238,10 @@ pub(super) enum MenuAction {
     NewSession,
     RenameSession(String),
     PinSession(String),
-    ForkSessionList,
     /// kept for future use; deletion now goes through the `d` key
     #[allow(dead_code)]
     DeleteSessionList,
     DeleteSession(String),
-    /// fork the current session, copying history up to this message index
-    ForkAt(usize),
     ToggleTypewriter,
     ToggleHttpLog,
     ToggleShowCost,
@@ -1155,44 +1149,6 @@ impl App {
                 SessionHeader::sort_sessions(&mut self.sessions);
                 self.build_menu_rows();
             }
-            MenuAction::ForkSessionList => {
-                self.open_menu(Menu::ForkPoint);
-            }
-            MenuAction::ForkAt(last_idx) => {
-                if self.streaming {
-                    self.show_busy_status();
-                    return;
-                }
-                let parent_id = self.session.id.to_string();
-                let mut fork = self
-                    .session
-                    .fork_upto(last_idx.min(self.session.messages.len().saturating_sub(1)));
-                let root = std::env::current_dir().unwrap_or_default();
-                if let Some(source_plan_id) = self.session.plan_id.clone()
-                    && let Ok(source_plan) = crate::plan::open(&root, &source_plan_id)
-                {
-                    match crate::plan::fork(&root, &source_plan, &fork.id.to_string()) {
-                        Ok(copied_plan) => fork.plan_id = Some(copied_plan.id),
-                        Err(error) => {
-                            self.status(&format!("fork plan: {error:#}"), StatusKind::Err);
-                            return;
-                        }
-                    }
-                }
-                let fork_id = fork.id.to_string();
-                self.apply_session(fork);
-                if let Ok(mut journal) = crate::agent::journal::Journal::open(&root, &fork_id) {
-                    journal.set_attribution(None, self.session.plan_id.clone(), "main");
-                    let _ = journal.append(
-                        "fork",
-                        serde_json::json!({
-                            "from_session": parent_id,
-                            "from_seq": last_idx,
-                            "plan_id": self.session.plan_id,
-                        }),
-                    );
-                }
-            }
             MenuAction::DeleteSessionList => {
                 self.open_menu(Menu::DeleteSessions);
             }
@@ -1630,7 +1586,6 @@ impl App {
                 }
             }
             Some(Menu::DeleteSessions) => " delete session ".into(),
-            Some(Menu::ForkPoint) => " fork this session ".into(),
             Some(Menu::Debug) => " debug ".into(),
             Some(Menu::Agent) => " agent ".into(),
             Some(Menu::Safety) => " safety ".into(),
@@ -2400,18 +2355,11 @@ impl App {
                     } else {
                         " (no matches)"
                     };
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(note.to_string(), Theme::dim())]),
-                        MenuAction::None,
-                    ));
-                }
                 self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        " · fork this session".to_string(),
-                        Theme::FG(),
-                    )]),
-                    MenuAction::ForkSessionList,
+                    Line::from(vec![Span::styled(note.to_string(), Theme::dim())]),
+                    MenuAction::None,
                 ));
+                }
                 if self.sessions_filter.is_empty() {
                     self.menu_rows.push(row(
                         Line::from(Span::styled(" p: pin · d: delete", Theme::dim())),
@@ -2445,36 +2393,6 @@ impl App {
                     Line::from(vec![Span::styled(" esc: back".to_string(), Theme::dim())]),
                     MenuAction::Back,
                 ));
-            }
-            Menu::ForkPoint => {
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        format!(
-                            " whole conversation ({} messages)",
-                            self.session.messages.len()
-                        ),
-                        Theme::ACCENT_SOFT(),
-                    )]),
-                    MenuAction::ForkAt(usize::MAX),
-                ));
-                for (i, m) in self.session.messages.iter().enumerate() {
-                    let who = match m.role {
-                        Role::User => "You",
-                        Role::Assistant => "Agent",
-                        Role::System | Role::Tool => continue,
-                    };
-                    self.menu_rows.push(row(
-                        Line::from(vec![
-                            Span::styled(format!(" {i:>3}. {who}: "), Theme::accent()),
-                            Span::styled(
-                                truncate_chars(m.content.lines().next().unwrap_or(""), 44),
-                                Theme::base(),
-                            ),
-                        ]),
-                        MenuAction::ForkAt(i),
-                    ));
-                }
-                self.menu_footer_text = Some("enter: fork from here · esc: cancel".into());
             }
             Menu::Providers => {
                 self.menu_rows.push(row(
@@ -3113,22 +3031,14 @@ fn session_row(
     is_current: bool,
     framed: Option<usize>,
 ) -> (Line<'static>, MenuAction) {
-    let badge = if s.forked_from_id.is_some() {
-        "[fork] "
-    } else {
-        ""
-    };
     let mark = if is_current { " *" } else { "" };
-    let left = format!(" {badge}{}{mark}", truncate_chars(&s.title, 28));
-    let mut dim = format!(
+    let left = format!(" {}{mark}", truncate_chars(&s.title, 28));
+    let dim = format!(
         "{} · {} · {} tok",
         fmt_date(s.last_activity()),
         truncate_chars(&s.model_key, 14),
         fmt_k(s.context_tokens)
     );
-    if let Some(parent) = &s.forked_from_title {
-        dim.push_str(&format!(" · from '{}'", truncate_chars(parent, 20)));
-    }
     let action = MenuAction::OpenSession(s.id.to_string());
     let Some(frame_w) = framed else {
         return (

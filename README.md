@@ -97,7 +97,7 @@ prompt caching with a stable prefix · two-layer dangerous-command classifier
 with approval dialogs, including PowerShell and cmd on Windows · subagents
 that inherit the current mode · MCP client (stdio and streamable HTTP) ·
 `SKILL.md` skills compatible with existing skill packs · sessions with resume
-and fork · themes · a `/settings` hub. LSP diagnostics are collected;
+· themes · a `/settings` hub. LSP diagnostics are collected;
 feeding them back into the plan is **[in development]**.
 
 ## Install
