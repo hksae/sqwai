@@ -1659,13 +1659,24 @@ async fn run_agent(
                                 })
                                 .await;
                         }
-                        if let Ok(Some(sha)) = checkpoints::snapshot_boundary(
-                            &root,
-                            shadow_store,
-                            &session_id,
-                            &format!("step_{id}_start"),
-                        ) {
-                            ctx.journal.push((sha.clone(), format!("step_{id}_start")));
+                        let tag = format!("step_{id}_start");
+                        let sha = if let Some((s, t)) = ctx.journal.last() && t == &tag {
+                            Some(s.clone())
+                        } else {
+                            checkpoints::snapshot_boundary(
+                                &root,
+                                shadow_store,
+                                &session_id,
+                                &tag,
+                            )
+                            .ok()
+                            .flatten()
+                            .map(|s| {
+                                ctx.journal.push((s.clone(), tag.clone()));
+                                s
+                            })
+                        };
+                        if let Some(sha) = sha {
                             let _ = writer.append(
                                 "checkpoint",
                                 serde_json::json!({
@@ -1679,23 +1690,35 @@ async fn run_agent(
                     } else if outcome.ok && matches!(op, "finish" | "block" | "cancel") {
                         if op == "finish"
                             && let Some(id) = plan_step_id
-                            && let Ok(Some(sha)) = checkpoints::snapshot_boundary(
-                                &root,
-                                shadow_store,
-                                &session_id,
-                                &format!("step_{id}_finish"),
-                            )
                         {
-                            ctx.journal.push((sha.clone(), format!("step_{id}_finish")));
-                            let _ = writer.append(
-                                "checkpoint",
-                                serde_json::json!({
-                                    "layer": "shadow",
-                                    "id": sha,
-                                    "reason": "step_finish",
-                                    "step": id,
-                                }),
-                            );
+                            let tag = format!("step_{id}_finish");
+                            let sha = if let Some((s, t)) = ctx.journal.last() && t == &tag {
+                                Some(s.clone())
+                            } else {
+                                checkpoints::snapshot_boundary(
+                                    &root,
+                                    shadow_store,
+                                    &session_id,
+                                    &tag,
+                                )
+                                .ok()
+                                .flatten()
+                                .map(|s| {
+                                    ctx.journal.push((s.clone(), tag.clone()));
+                                    s
+                                })
+                            };
+                            if let Some(sha) = sha {
+                                let _ = writer.append(
+                                    "checkpoint",
+                                    serde_json::json!({
+                                        "layer": "shadow",
+                                        "id": sha,
+                                        "reason": "step_finish",
+                                        "step": id,
+                                    }),
+                                );
+                            }
                         }
                         writer.set_attribution(None, plan_id, "main");
                         // The session is idle again (§2.2.3).
