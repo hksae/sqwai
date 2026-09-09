@@ -913,6 +913,11 @@ mod tests {
         );
     }
 
+    // Windows-only: on POSIX a backslash is a valid filename character,
+    // so `src\foo.rs` names a different file there and this scenario cannot
+    // occur. The normalization itself is covered cross-platform by
+    // `show_and_diff_handle_windows_backslash_paths`.
+    #[cfg(windows)]
     #[test]
     fn restore_paths_handles_windows_backslash_targets() {
         let repo = tmp_repo();

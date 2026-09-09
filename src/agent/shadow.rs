@@ -564,7 +564,11 @@ mod tests {
         let dir = project();
         let root = dir.path();
         std::fs::create_dir_all(root.join("src").join("sub")).unwrap();
-        std::fs::write(root.join("src").join("sub").join("nested.rs"), b"fn nested() {}").unwrap();
+        std::fs::write(
+            root.join("src").join("sub").join("nested.rs"),
+            b"fn nested() {}",
+        )
+        .unwrap();
         let shadow = open(root);
         let sha1 = shadow.snapshot("s", "one").unwrap().unwrap();
         // Passing Windows-style backslashes to show must succeed
@@ -573,10 +577,16 @@ mod tests {
             b"fn nested() {}"
         );
 
-        std::fs::write(root.join("src").join("sub").join("nested.rs"), b"fn nested() { changed(); }").unwrap();
+        std::fs::write(
+            root.join("src").join("sub").join("nested.rs"),
+            b"fn nested() { changed(); }",
+        )
+        .unwrap();
         let sha2 = shadow.snapshot("s", "two").unwrap().unwrap();
         // Passing Windows-style backslashes to diff must succeed
-        let diff = shadow.diff(&sha1, &sha2, Some("src\\sub\\nested.rs")).unwrap();
+        let diff = shadow
+            .diff(&sha1, &sha2, Some("src\\sub\\nested.rs"))
+            .unwrap();
         assert!(diff.contains("+fn nested() { changed(); }"));
     }
 }

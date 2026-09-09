@@ -255,12 +255,10 @@ impl<'de> Deserialize<'de> for StepRef {
                     #[serde(default)]
                     intent: RefIntent,
                 }
-                Wire::deserialize(de::value::MapAccessDeserializer::new(map)).map(|wire| {
-                    StepRef {
-                        path: wire.path,
-                        symbol: wire.symbol,
-                        intent: wire.intent,
-                    }
+                Wire::deserialize(de::value::MapAccessDeserializer::new(map)).map(|wire| StepRef {
+                    path: wire.path,
+                    symbol: wire.symbol,
+                    intent: wire.intent,
                 })
             }
         }
@@ -568,18 +566,12 @@ pub fn commit(
     args: serde_json::Value,
 ) -> Result<u64> {
     let mut fields = args.as_object().cloned().unwrap_or_default();
-    fields.insert(
-        "op".to_string(),
-        serde_json::Value::String(op.to_string()),
-    );
+    fields.insert("op".to_string(), serde_json::Value::String(op.to_string()));
     fields.insert(
         "plan_id".to_string(),
         serde_json::Value::String(plan.id.clone()),
     );
-    fields.insert(
-        "by".to_string(),
-        serde_json::Value::String(by.to_string()),
-    );
+    fields.insert("by".to_string(), serde_json::Value::String(by.to_string()));
     fields.insert("ok".to_string(), serde_json::Value::Bool(ok));
     let mut journal = crate::agent::journal::Journal::open(root, session_id)?;
     let seq = journal.append("plan", serde_json::Value::Object(fields))?;
@@ -643,17 +635,23 @@ pub fn replay(root: &Path) -> Result<ReplayReport> {
                 }
                 continue;
             }
-            if matches!(record.kind.as_str(), "tool_result" | "file_diff" | "diagnostics")
-                && record.plan.as_deref() == Some(plan.id.as_str())
+            if matches!(
+                record.kind.as_str(),
+                "tool_result" | "file_diff" | "diagnostics"
+            ) && record.plan.as_deref() == Some(plan.id.as_str())
             {
-                let Some(step) = record.step.clone().and_then(|id| {
-                    plan.steps.iter_mut().find(|step| step.id == id)
-                }) else {
+                let Some(step) = record
+                    .step
+                    .clone()
+                    .and_then(|id| plan.steps.iter_mut().find(|step| step.id == id))
+                else {
                     continue;
                 };
-                if !step.evidence.iter().any(|reference| {
-                    reference.session == sess && reference.seq == record.seq
-                }) {
+                if !step
+                    .evidence
+                    .iter()
+                    .any(|reference| reference.session == sess && reference.seq == record.seq)
+                {
                     step.evidence.push(EvidenceRef {
                         session: sess.clone(),
                         seq: record.seq,
@@ -735,10 +733,7 @@ fn replay_orphans(root: &Path, ops_applied: &mut usize) -> Vec<String> {
             let deleted_after = records.iter().any(|other| {
                 other.kind == "plan_deleted"
                     && other.seq > record.seq
-                    && other
-                        .fields
-                        .get("plan_id")
-                        .and_then(|value| value.as_str())
+                    && other.fields.get("plan_id").and_then(|value| value.as_str())
                         == fields.get("result_id").and_then(|value| value.as_str())
             });
             if deleted_after {
@@ -746,9 +741,7 @@ fn replay_orphans(root: &Path, ops_applied: &mut usize) -> Vec<String> {
             }
             match fields.get("op").and_then(|value| value.as_str()) {
                 Some("create") => {
-                    let Some(result_id) = fields
-                        .get("result_id")
-                        .and_then(|value| value.as_str())
+                    let Some(result_id) = fields.get("result_id").and_then(|value| value.as_str())
                     else {
                         continue;
                     };
@@ -761,9 +754,7 @@ fn replay_orphans(root: &Path, ops_applied: &mut usize) -> Vec<String> {
                     }
                 }
                 Some("accept_proposal") => {
-                    let Some(new_id) =
-                        fields.get("new_id").and_then(|value| value.as_str())
-                    else {
+                    let Some(new_id) = fields.get("new_id").and_then(|value| value.as_str()) else {
                         continue;
                     };
                     if plans_dir(root).join(format!("{new_id}.json")).exists() {
@@ -799,12 +790,19 @@ fn rebuild_created(
         .iter()
         .filter_map(|value| value.as_str().map(str::to_string))
         .collect();
-    let steps: Vec<NewStep> = serde_json::from_value(
-        get("steps")?.clone(),
+    let steps: Vec<NewStep> = serde_json::from_value(get("steps")?.clone()).ok()?;
+    let budget_limit = get("budget_limit")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let mut plan = create(
+        goal,
+        constraints,
+        acceptance,
+        steps,
+        budget_limit,
+        &Limits::default(),
     )
     .ok()?;
-    let budget_limit = get("budget_limit").and_then(|value| value.as_u64()).unwrap_or(0);
-    let mut plan = create(goal, constraints, acceptance, steps, budget_limit, &Limits::default()).ok()?;
     plan.id = get("result_id")?.as_str()?.to_string();
     plan.created = get("result_created")?.as_str()?.to_string();
     plan.sessions = get("result_sessions")?
@@ -1488,7 +1486,9 @@ fn start(
             plan,
             "step_busy",
             format!("step {other} is already the current step of this session"),
-            format!("finish, block or cancel step {other} first — or continue it instead of starting step {id}"),
+            format!(
+                "finish, block or cancel step {other} first — or continue it instead of starting step {id}"
+            ),
         );
     }
     if let Some(other) = plan.steps.iter().find_map(|step| {
@@ -1825,9 +1825,7 @@ pub fn verify_acceptance(
                 .acceptance
                 .iter()
                 .enumerate()
-                .filter(|(other, item)| {
-                    *other != index && item.status == AcceptanceStatus::Passed
-                })
+                .filter(|(other, item)| *other != index && item.status == AcceptanceStatus::Passed)
                 .flat_map(|(_, item)| item.evidence.iter())
                 .collect();
             if let Some(clash) = evidence.iter().find(|reference| {
@@ -1877,7 +1875,7 @@ fn complete(plan: &mut Plan) -> Result<Applied, Rejection> {
         return reject(
             plan,
             "steps_open",
-            format!(            "steps still open: {}", pending.join(", ")),
+            format!("steps still open: {}", pending.join(", ")),
             "finish, unblock or cancel them first",
         );
     }
@@ -2395,8 +2393,7 @@ mod tests {
         plan.applied_event = Some("crash:0".to_string());
         store(&dir, &plan).unwrap();
         // The crash: intent journaled, plan file never caught up.
-        let mut journal =
-            crate::agent::journal::Journal::open(&dir, "crash").unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&dir, "crash").unwrap();
         let seq = journal
             .append(
                 "plan",
@@ -2412,10 +2409,7 @@ mod tests {
         assert_eq!(report.ops_applied, 1);
         assert_eq!(report.plans_healed, vec![plan.id.clone()]);
         let healed = open(&dir, &plan.id).unwrap();
-        assert_eq!(
-            healed.step("1").unwrap().status,
-            StepStatus::InProgress
-        );
+        assert_eq!(healed.step("1").unwrap().status, StepStatus::InProgress);
         assert_eq!(healed.applied_event.as_deref(), Some("crash:1"));
 
         // Idempotent: a second run changes nothing and stores nothing.
@@ -2428,8 +2422,7 @@ mod tests {
     #[test]
     fn replay_rebuilds_orphan_create_and_respects_delete() {
         let dir = std::env::temp_dir().join(format!("sqwai-plan-orphan-{}", new_id()));
-        let mut journal =
-            crate::agent::journal::Journal::open(&dir, "orphan").unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&dir, "orphan").unwrap();
         journal
             .append(
                 "plan",
@@ -2461,10 +2454,7 @@ mod tests {
                 serde_json::json!({"plan_id": "01J000ORPHAN00000000000001"}),
             )
             .unwrap();
-        std::fs::remove_file(
-            plans_dir(&dir).join("01J000ORPHAN00000000000001.json"),
-        )
-        .unwrap();
+        std::fs::remove_file(plans_dir(&dir).join("01J000ORPHAN00000000000001.json")).unwrap();
         let report = replay(&dir).unwrap();
         assert!(report.orphans_rebuilt.is_empty());
         assert!(open(&dir, "01J000ORPHAN00000000000001").is_err());
@@ -2490,7 +2480,10 @@ mod tests {
 
         let report = replay(&dir).unwrap();
         assert_eq!(report.ops_applied, 0);
-        assert_eq!(open(&dir, &plan.id).unwrap().step("1").unwrap().status, StepStatus::Pending);
+        assert_eq!(
+            open(&dir, &plan.id).unwrap().step("1").unwrap().status,
+            StepStatus::Pending
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2515,7 +2508,9 @@ mod tests {
         let mut journal = crate::agent::journal::Journal::open(&dir, "rv").unwrap();
         // Seven filler records so the intent lands on seq 8, past the cursor.
         for _ in 0..7 {
-            journal.append("note", serde_json::json!({"note": "x", "kind": "decision"})).unwrap();
+            journal
+                .append("note", serde_json::json!({"note": "x", "kind": "decision"}))
+                .unwrap();
         }
         journal
             .append(
@@ -2634,8 +2629,8 @@ mod tests {
         assert_eq!(create.intent, RefIntent::Create);
         assert_eq!(create.symbol.as_deref(), Some("Thing"));
         // intent defaults to modify when omitted
-        let plain: StepRef = serde_json::from_value(serde_json::json!({"path": "src/x.rs"}))
-            .unwrap();
+        let plain: StepRef =
+            serde_json::from_value(serde_json::json!({"path": "src/x.rs"})).unwrap();
         assert_eq!(plain.intent, RefIntent::Modify);
         assert_eq!(plain.symbol, None);
     }
@@ -2670,15 +2665,9 @@ mod tests {
         let loaded = open(&dir, &plan.id).unwrap();
         assert_eq!(loaded.applied_event.as_deref(), Some("sess:41"));
         assert_eq!(loaded.steps[0].step_epoch, 3);
-        assert_eq!(
-            loaded.steps[0].validation.status,
-            ValidationStatus::Passed
-        );
+        assert_eq!(loaded.steps[0].validation.status, ValidationStatus::Passed);
         assert_eq!(loaded.steps[0].validation.receipts.len(), 1);
-        assert_eq!(
-            loaded.steps[0].validation.receipts[0].state_digest,
-            "abc"
-        );
+        assert_eq!(loaded.steps[0].validation.receipts[0].state_digest, "abc");
         assert_eq!(
             loaded.acceptance[0].validation.status,
             ValidationStatus::Waived

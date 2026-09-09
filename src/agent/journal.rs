@@ -1560,10 +1560,7 @@ mod tests {
         let record = records.iter().find(|r| r.seq == seq).unwrap();
         assert_eq!(record.kind, "verification_receipt");
         assert_eq!(
-            record
-                .fields
-                .get("acceptance_id")
-                .and_then(Value::as_u64),
+            record.fields.get("acceptance_id").and_then(Value::as_u64),
             Some(0)
         );
         assert_eq!(
@@ -1574,10 +1571,7 @@ mod tests {
             record.fields.get("command").and_then(Value::as_str),
             Some("cargo test")
         );
-        assert_eq!(
-            record.fields.get("exit").and_then(Value::as_i64),
-            Some(0)
-        );
+        assert_eq!(record.fields.get("exit").and_then(Value::as_i64), Some(0));
         assert_eq!(
             record.fields.get("output_hash").and_then(Value::as_str),
             Some("outhash")
@@ -1650,9 +1644,13 @@ mod tests {
     fn writer_stamps_inherited_epoch_and_defaults_to_none() {
         let root = root();
         let mut journal = Journal::open(&root, "epoch-stamp").unwrap();
-        let plain = journal.append("note", json!({"text": "main work"})).unwrap();
+        let plain = journal
+            .append("note", json!({"text": "main work"}))
+            .unwrap();
         journal.set_epoch(Some(3));
-        let stamped = journal.append("note", json!({"text": "child work"})).unwrap();
+        let stamped = journal
+            .append("note", json!({"text": "child work"}))
+            .unwrap();
 
         let records = Journal::records_for(&root, "epoch-stamp").unwrap();
         let by_seq = |seq| records.iter().find(|r| r.seq == seq).unwrap().epoch;

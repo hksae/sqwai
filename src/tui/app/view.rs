@@ -1418,8 +1418,7 @@ impl App {
                     .map(|(line, tag)| (indent_line(line, indent), tag))
                     .collect();
                 let (rows, tags) = wrap_tagged(chunk, w);
-                self.seg_cache[idx] =
-                    Some((key, render_w, rows.into_iter().zip(tags).collect()));
+                self.seg_cache[idx] = Some((key, render_w, rows.into_iter().zip(tags).collect()));
             }
             let cached = self.seg_cache[idx].as_ref().unwrap();
             for (line, tag) in &cached.2 {

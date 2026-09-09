@@ -1377,12 +1377,8 @@ impl App {
                                     .flatten()
                                     {
                                         Some(next) => {
-                                            let goal: String = next
-                                                .goal
-                                                .text
-                                                .chars()
-                                                .take(60)
-                                                .collect();
+                                            let goal: String =
+                                                next.goal.text.chars().take(60).collect();
                                             if next.sessions.iter().any(|s| s == &sid) {
                                                 format!(
                                                     "plan deleted; now following active plan '{goal}' (see /plan)"
@@ -2388,10 +2384,10 @@ impl App {
                     } else {
                         " (no matches)"
                     };
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(note.to_string(), Theme::dim())]),
-                    MenuAction::None,
-                ));
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled(note.to_string(), Theme::dim())]),
+                        MenuAction::None,
+                    ));
                 }
                 if self.sessions_filter.is_empty() {
                     self.menu_rows.push(row(

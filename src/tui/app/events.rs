@@ -1077,11 +1077,7 @@ impl PasteReplay {
     }
 }
 
-fn consume_replayed_paste_text(
-    slot: &mut Option<PasteReplay>,
-    text: &str,
-    now: Instant,
-) -> bool {
+fn consume_replayed_paste_text(slot: &mut Option<PasteReplay>, text: &str, now: Instant) -> bool {
     if !PasteReplay::live(slot, now) {
         return false;
     }
@@ -1249,9 +1245,17 @@ mod tests {
     fn split_native_paste_events_are_consumed_without_submission() {
         let now = Instant::now();
         let mut pending = Some(PasteReplay::new("first line\nsecond line".to_string(), now));
-        assert!(consume_replayed_paste_text(&mut pending, "first line\n", now));
+        assert!(consume_replayed_paste_text(
+            &mut pending,
+            "first line\n",
+            now
+        ));
         assert_eq!(pending.as_ref().map(|r| r.remainder()), Some("second line"));
-        assert!(consume_replayed_paste_text(&mut pending, "second line", now));
+        assert!(consume_replayed_paste_text(
+            &mut pending,
+            "second line",
+            now
+        ));
         assert!(pending.is_none());
     }
 
@@ -1261,16 +1265,10 @@ mod tests {
         let mut pending = Some(PasteReplay::new("second line".to_string(), now));
         let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
         assert!(consume_replayed_paste_key(&mut pending, enter, now));
-        assert_eq!(
-            pending.as_ref().map(|r| r.remainder()),
-            Some("second line")
-        );
+        assert_eq!(pending.as_ref().map(|r| r.remainder()), Some("second line"));
         let first = crossterm::event::KeyEvent::new(KeyCode::Char('s'), KeyModifiers::empty());
         assert!(consume_replayed_paste_key(&mut pending, first, now));
-        assert_eq!(
-            pending.as_ref().map(|r| r.remainder()),
-            Some("econd line")
-        );
+        assert_eq!(pending.as_ref().map(|r| r.remainder()), Some("econd line"));
     }
 
     #[test]

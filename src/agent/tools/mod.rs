@@ -1629,8 +1629,18 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             "result_created": created.created,
                             "result_sessions": created.sessions,
                         });
-                        match plan::commit(&ctx.root, &ctx.session_id, &mut created, "create", "model", true, args) {
-                            Ok(_) => Outcome::ok(format!("plan {id} created with {step_count} steps")),
+                        match plan::commit(
+                            &ctx.root,
+                            &ctx.session_id,
+                            &mut created,
+                            "create",
+                            "model",
+                            true,
+                            args,
+                        ) {
+                            Ok(_) => {
+                                Outcome::ok(format!("plan {id} created with {step_count} steps"))
+                            }
                             Err(e) => Outcome::err(format!("plan write failed: {e:#}")),
                         }
                     }
@@ -1666,7 +1676,15 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     target_plan.status = plan::PlanStatus::Abandoned;
                     target_plan.revision += 1;
                     let args = serde_json::json!({"id": pid});
-                    match plan::commit(&ctx.root, &ctx.session_id, &mut target_plan, "cancel", "model", true, args) {
+                    match plan::commit(
+                        &ctx.root,
+                        &ctx.session_id,
+                        &mut target_plan,
+                        "cancel",
+                        "model",
+                        true,
+                        args,
+                    ) {
                         Ok(_) => Outcome::ok(format!("plan {pid} cancelled")),
                         Err(e) => Outcome::err(format!("plan write failed: {e:#}")),
                     }
@@ -1679,7 +1697,15 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         target_plan.revision += 1;
                         let pid = target_plan.id.clone();
                         let args = serde_json::json!({"id": pid});
-                        match plan::commit(&ctx.root, &ctx.session_id, &mut target_plan, "cancel", "model", true, args) {
+                        match plan::commit(
+                            &ctx.root,
+                            &ctx.session_id,
+                            &mut target_plan,
+                            "cancel",
+                            "model",
+                            true,
+                            args,
+                        ) {
                             Ok(_) => return Outcome::ok(format!("plan {pid} cancelled")),
                             Err(e) => return Outcome::err(format!("plan write failed: {e:#}")),
                         }
@@ -1737,8 +1763,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             // Journal-first (§2.1.4): the intent is recorded ahead of the
             // store, carrying the full op for replay. `show` is read-only
             // and keeps the old plain store with no cursor advance.
-            let op_value =
-                serde_json::to_value(&other).unwrap_or(serde_json::Value::Null);
+            let op_value = serde_json::to_value(&other).unwrap_or(serde_json::Value::Null);
             let op_name = op_value
                 .get("op")
                 .and_then(|value| value.as_str())
@@ -1889,7 +1914,8 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
             Vec::new()
         }
         plan::AcceptanceKind::Text(_) => {
-            let Some((step_id, evidence)) = unspent_verify_evidence(&ctx.root, &active, index) else {
+            let Some((step_id, evidence)) = unspent_verify_evidence(&ctx.root, &active, index)
+            else {
                 return rejection(plan::Rejection {
                     code: "no_evidence",
                     reason: format!("acceptance {index} has no host evidence of its own"),
@@ -1921,7 +1947,15 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                 "acceptance": index,
                 "evidence_refs": active.acceptance.get(index).map(|item| item.evidence.clone()).unwrap_or_default(),
             });
-            if let Err(e) = plan::commit(&ctx.root, &ctx.session_id, &mut active, "verify", "model", true, args) {
+            if let Err(e) = plan::commit(
+                &ctx.root,
+                &ctx.session_id,
+                &mut active,
+                "verify",
+                "model",
+                true,
+                args,
+            ) {
                 return Outcome::err(format!("plan write failed: {e:#}"));
             }
             match applied {
@@ -1931,7 +1965,15 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
         }
         Err(r) => {
             let args = serde_json::json!({"acceptance": index});
-            let _ = plan::commit(&ctx.root, &ctx.session_id, &mut active, "verify", "model", false, args);
+            let _ = plan::commit(
+                &ctx.root,
+                &ctx.session_id,
+                &mut active,
+                "verify",
+                "model",
+                false,
+                args,
+            );
             rejection(r)
         }
     }
@@ -2035,9 +2077,7 @@ fn unspent_verify_evidence(
                         .iter()
                         .any(|used| used.session == reference.session && used.seq == reference.seq)
                 })
-                .filter(|reference| {
-                    evidence_epoch_current(root, &active.id, step, reference)
-                })
+                .filter(|reference| evidence_epoch_current(root, &active.id, step, reference))
                 .cloned()
                 .collect();
             (!fresh.is_empty()).then(|| (step.id.clone(), fresh))
@@ -2196,13 +2236,12 @@ fn validate_attached_records(
     let step_epoch = if step_id == "acceptance" {
         None
     } else {
-        plan::read_plan_file(root, plan_id)
-            .and_then(|plan| {
-                plan.steps
-                    .iter()
-                    .find(|step| step.id == step_id)
-                    .map(|step| step.step_epoch)
-            })
+        plan::read_plan_file(root, plan_id).and_then(|plan| {
+            plan.steps
+                .iter()
+                .find(|step| step.id == step_id)
+                .map(|step| step.step_epoch)
+        })
     };
     for reference in evidence {
         let record = crate::agent::journal::Journal::evidence(
@@ -3089,9 +3128,8 @@ mod tests {
             session: "epoch-test".into(),
             seq: stale_seq,
         }];
-        let err =
-            validate_attached_records(&dir, &plan_id, "1", plan::StepKind::Change, &stale)
-                .unwrap_err();
+        let err = validate_attached_records(&dir, &plan_id, "1", plan::StepKind::Change, &stale)
+            .unwrap_err();
         assert!(err.contains("stale_epoch"), "{err}");
 
         let fresh = vec![plan::EvidenceRef {

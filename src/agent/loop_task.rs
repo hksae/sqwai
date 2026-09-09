@@ -2451,7 +2451,10 @@ async fn propose_plan(
     };
     if !accept {
         if let Some(writer) = journal.as_mut() {
-            let _ = writer.append("plan", serde_json::json!({"op": "decline_proposal", "by": "user"}));
+            let _ = writer.append(
+                "plan",
+                serde_json::json!({"op": "decline_proposal", "by": "user"}),
+            );
         }
         return tools::Outcome::ok(
             "the user declined the proposed plan. Ask what was wrong with it, adjust, \
@@ -2506,7 +2509,9 @@ async fn propose_plan(
                     active.applied_event = Some(format!("{session_id}:{seq}"));
                 }
                 if let Err(e) = plan::store(root, &active) {
-                    return tools::Outcome::err(format!("abandoning the previous plan failed: {e:#}"));
+                    return tools::Outcome::err(format!(
+                        "abandoning the previous plan failed: {e:#}"
+                    ));
                 }
             }
             Ok(_) => {}

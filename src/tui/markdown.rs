@@ -1154,10 +1154,7 @@ mod tests {
         // Note: `Line::from(&str)` already splits on newlines in this
         // ratatui version, so build the span explicitly to cover the
         // newline-inside-span path (tool output, pasted text).
-        let input = Line::from(vec![Span::styled(
-            "alpha\nbeta".to_string(),
-            Theme::base(),
-        )]);
+        let input = Line::from(vec![Span::styled("alpha\nbeta".to_string(), Theme::base())]);
         let (rows, _) = wrap_tagged(vec![(input, Some(1))], 80);
 
         let text: Vec<_> = rows.iter().map(line_text_pub).collect();
@@ -1179,7 +1176,11 @@ mod tests {
         let spans = inline(&text, Theme::base());
         // each pair yields one italic span plus its trailing literal space
         assert_eq!(spans.len(), 40_000);
-        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>().join("");
+        let joined: String = spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("");
         assert_eq!(joined, "x ".repeat(20_000));
     }
 
@@ -1197,7 +1198,11 @@ mod tests {
         // repetition costs O(1) amortized instead of re-scanning the tail
         let text = "_a ".repeat(5_000);
         let spans = inline(&text, Theme::base());
-        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>().join("");
+        let joined: String = spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("");
         assert_eq!(joined, text);
     }
 
