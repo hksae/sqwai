@@ -1362,6 +1362,7 @@ async fn run_agent(
                                 ok: !is_error,
                                 diff: None,
                                 file_diff: None,
+                                file_diffs: Vec::new(),
                                 cancelled: false,
                             },
                             Err(e) => tools::Outcome::err(format!("MCP call failed: {e:#}")),
@@ -1551,7 +1552,12 @@ async fn run_agent(
                         }),
                     );
                 }
-                if let Some(metadata) = outcome.file_diff.as_ref() {
+                let diffs: Vec<&tools::FileDiff> = if !outcome.file_diffs.is_empty() {
+                    outcome.file_diffs.iter().collect()
+                } else {
+                    outcome.file_diff.as_ref().into_iter().collect()
+                };
+                for metadata in diffs {
                     let _ = writer.append_evidence(
                         "file_diff",
                         serde_json::json!({

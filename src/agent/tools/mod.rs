@@ -263,6 +263,7 @@ fn host_owned_denial(relative: &Path) -> Option<String> {
     ))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileDiff {
     pub path: String,
     pub added: usize,
@@ -288,6 +289,8 @@ pub struct Outcome {
     pub diff: Option<String>,
     /// host-derived metadata for the journal
     pub file_diff: Option<FileDiff>,
+    /// host-derived metadata for all modified files (e.g. multi-file patch)
+    pub file_diffs: Vec<FileDiff>,
     /// §3.7: the user pressed Esc while this tool was running. Distinct from
     /// an ordinary failure — the journal records `code: "cancelled"` rather
     /// than folding it into an error the model is expected to react to.
@@ -301,6 +304,7 @@ impl Outcome {
             output: output.into(),
             diff: None,
             file_diff: None,
+            file_diffs: Vec::new(),
             cancelled: false,
         }
     }
@@ -310,6 +314,7 @@ impl Outcome {
             output: output.into(),
             diff: None,
             file_diff: None,
+            file_diffs: Vec::new(),
             cancelled: false,
         }
     }
@@ -322,6 +327,7 @@ impl Outcome {
             output: "cancelled by user (Esc)".to_string(),
             diff: None,
             file_diff: None,
+            file_diffs: Vec::new(),
             cancelled: true,
         }
     }
@@ -334,7 +340,16 @@ impl Outcome {
     }
 
     pub fn with_file_diff(mut self, file_diff: FileDiff) -> Self {
-        self.file_diff = Some(file_diff);
+        self.file_diff = Some(file_diff.clone());
+        self.file_diffs.push(file_diff);
+        self
+    }
+
+    pub fn with_file_diffs(mut self, file_diffs: Vec<FileDiff>) -> Self {
+        if let Some(first) = file_diffs.first() {
+            self.file_diff = Some(first.clone());
+        }
+        self.file_diffs.extend(file_diffs);
         self
     }
 }

@@ -305,6 +305,7 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
         output: format!("{status_line}\n{body}"),
         diff: None,
         file_diff: None,
+        file_diffs: Vec::new(),
         cancelled: false,
     }
 }
