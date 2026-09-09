@@ -1947,6 +1947,19 @@ impl App {
         self.dirty = true;
     }
 
+    /// Plan id `/plan delete` would remove: the session's own plan while its
+    /// file is still on disk, otherwise the most recent active plan.
+    /// One shared resolver so the command gate and the confirmed action can
+    /// never disagree about what is being deleted.
+    fn deletable_plan_id(&self) -> Option<String> {
+        let root = &self.project_root;
+        self.session
+            .plan_id
+            .clone()
+            .filter(|id| plan::plans_dir(root).join(format!("{id}.json")).exists())
+            .or_else(|| plan::open_active(root).ok().flatten().map(|plan| plan.id))
+    }
+
     fn plan_command(&mut self, rest: &str) {
         let root = self.project_root.clone();
         let args: Vec<&str> = rest.split_whitespace().skip(1).collect();
@@ -1955,16 +1968,15 @@ impl App {
                 self.open_menu(Menu::Plan);
                 return;
             }
-            Some("delete") => match plan::open_active(&root) {
-                Ok(Some(_active)) => {
+            Some("delete") => match self.deletable_plan_id() {
+                Some(_) => {
                     self.open_menu(Menu::ConfirmDelete {
                         label: "Are you sure? (y/N)".to_string(),
                         action: MenuAction::DeletePlan,
                     });
                     return;
                 }
-                Ok(None) => "no active plan".to_string(),
-                Err(e) => format!("plan load failed: {e:#}"),
+                None => "no active plan".to_string(),
             },
             Some("history") => {
                 let plans = plan::list(&root);

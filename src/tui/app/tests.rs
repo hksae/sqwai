@@ -4379,6 +4379,13 @@ mod tests {
         app.run_confirm_action();
         assert!(!plan_file.exists(), "plan file must be deleted");
         assert_eq!(app.session.plan_id, None, "session plan_id must be cleared");
+        assert!(
+            matches!(
+                app.segments.last(),
+                Some(Segment::Status { text, .. }) if text == "plan deleted"
+            ),
+            "success status must reach chat segments, not vanish with the menu"
+        );
 
         // Verify journal has plan_deleted event
         let records =
@@ -4388,6 +4395,93 @@ mod tests {
             records.iter().any(|r| r.kind == "plan_deleted"
                 && r.fields.get("plan_id").and_then(|v| v.as_str()) == Some(&created.id)),
             "journal must record plan_deleted event"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn plan_delete_prefers_session_plan_over_most_recent() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let temp_dir = std::env::temp_dir().join(format!(
+            "sqwai-test-plan-delete-multi-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        app.project_root = temp_dir.clone();
+
+        let limits = plan::Limits { max_steps: 10 };
+        let mk_plan = |goal: &str| {
+            plan::create(
+                goal.into(),
+                vec![],
+                vec![],
+                vec![plan::NewStep {
+                    title: "step 1".into(),
+                    kind: None,
+                    refs: vec![],
+                }],
+                1000,
+                &limits,
+            )
+            .unwrap()
+        };
+        // session's own (older) plan and a newer unrelated active plan
+        let mut plan_x = mk_plan("session plan");
+        plan_x.created = "2026-01-01T00:00:00+00:00".to_string();
+        plan::store(&temp_dir, &plan_x).unwrap();
+        let mut plan_y = mk_plan("other plan");
+        plan_y.created = "2026-09-09T00:00:00+00:00".to_string();
+        plan::store(&temp_dir, &plan_y).unwrap();
+        app.session.plan_id = Some(plan_x.id.clone());
+
+        let file_x = plan::plans_dir(&temp_dir).join(format!("{}.json", plan_x.id));
+        let file_y = plan::plans_dir(&temp_dir).join(format!("{}.json", plan_y.id));
+
+        app.plan_command("/plan delete");
+        assert!(matches!(app.cur_menu(), Some(Menu::ConfirmDelete { .. })));
+        app.run_confirm_action();
+
+        assert!(!file_x.exists(), "session plan file must be deleted");
+        assert!(file_y.exists(), "unrelated active plan must survive");
+        assert_eq!(app.session.plan_id, None);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn plan_delete_reports_failure_instead_of_lying() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let temp_dir = std::env::temp_dir().join(format!(
+            "sqwai-test-plan-delete-locked-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        app.project_root = temp_dir.clone();
+
+        // an unremovable entry where the plan file should be: remove_file
+        // fails on it on every platform (as with a locked file on Windows)
+        let ghost_id = "ghostplan";
+        let ghost_path = plan::plans_dir(&temp_dir).join(format!("{ghost_id}.json"));
+        std::fs::create_dir_all(&ghost_path).unwrap();
+        app.session.plan_id = Some(ghost_id.into());
+
+        app.plan_command("/plan delete");
+        assert!(matches!(app.cur_menu(), Some(Menu::ConfirmDelete { .. })));
+        app.run_confirm_action();
+
+        assert!(ghost_path.exists(), "unremovable entry must still be there");
+        assert_eq!(
+            app.session.plan_id.as_deref(),
+            Some(ghost_id),
+            "plan_id must be kept while the plan still exists"
+        );
+        assert!(
+            matches!(
+                app.segments.last(),
+                Some(Segment::Status { text, .. }) if text.contains("plan delete failed")
+            ),
+            "status must report the failure, not a fake success"
         );
 
         let _ = std::fs::remove_dir_all(&temp_dir);

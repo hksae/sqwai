@@ -834,35 +834,51 @@ impl App {
                     }
                 }
                 if matches!(&inner, MenuAction::DeletePlan) {
+                    // close the prompt first: with a menu open status()
+                    // writes to menu_status, which nothing renders once the
+                    // menu is gone — the outcome must land in chat segments
+                    self.menu_home();
                     let root = self.project_root.clone();
-                    match crate::plan::open_active(&root) {
-                        Ok(Some(active)) => {
+                    match self.deletable_plan_id() {
+                        Some(id) => {
                             let plan_path =
-                                crate::plan::plans_dir(&root).join(format!("{}.json", active.id));
-                            let _ = std::fs::remove_file(&plan_path);
-                            self.session.plan_id = None;
-                            if let Ok(mut journal) = crate::agent::journal::Journal::open(
-                                &root,
-                                &self.session.id.to_string(),
-                            ) {
-                                let _ = journal.append(
-                                    "plan_deleted",
-                                    serde_json::json!({ "plan_id": active.id }),
-                                );
+                                crate::plan::plans_dir(&root).join(format!("{id}.json"));
+                            // Never claim success the filesystem didn't confirm:
+                            // on Windows a locked file (editor, AV, second
+                            // instance) makes remove_file fail while the plan
+                            // is still on disk.
+                            match std::fs::remove_file(&plan_path) {
+                                Ok(()) if !plan_path.exists() => {
+                                    self.session.plan_id = None;
+                                    if let Ok(mut journal) = crate::agent::journal::Journal::open(
+                                        &root,
+                                        &self.session.id.to_string(),
+                                    ) {
+                                        let _ = journal.append(
+                                            "plan_deleted",
+                                            serde_json::json!({ "plan_id": id }),
+                                        );
+                                    }
+                                    self.status("plan deleted", StatusKind::Ok);
+                                    self.refresh_plan_label();
+                                }
+                                Ok(()) => self.status(
+                                    &format!(
+                                        "plan delete failed: {} is still on disk",
+                                        plan_path.display()
+                                    ),
+                                    StatusKind::Err,
+                                ),
+                                Err(e) => self
+                                    .status(&format!("plan delete failed: {e:#}"), StatusKind::Err),
                             }
-                            self.status("plan deleted", StatusKind::Ok);
-                            self.refresh_plan_label();
                         }
-                        Ok(None) => {
+                        None => {
                             self.session.plan_id = None;
                             self.refresh_plan_label();
                             self.status("no active plan", StatusKind::Info);
                         }
-                        Err(e) => {
-                            self.status(&format!("plan delete failed: {e:#}"), StatusKind::Err)
-                        }
                     }
-                    self.menu_home();
                     self.dirty = true;
                 }
                 self.cfg.save().ok();
