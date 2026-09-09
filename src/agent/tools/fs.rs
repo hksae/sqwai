@@ -216,11 +216,44 @@ pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome
     }
 }
 
+fn normalize_to_crlf(s: &str) -> String {
+    s.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
+fn normalize_to_lf(s: &str) -> String {
+    s.replace("\r\n", "\n")
+}
+
 fn apply_one(content: &str, old: &str, new: &str, replace_all: bool) -> Result<String, String> {
     if old.is_empty() {
         return err("old_string must not be empty");
     }
-    let count = content.matches(old).count();
+    let (target_old, target_new) = if content.matches(old).count() > 0 {
+        (std::borrow::Cow::Borrowed(old), std::borrow::Cow::Borrowed(new))
+    } else {
+        let crlf_old = normalize_to_crlf(old);
+        if content.matches(&crlf_old).count() > 0 {
+            (
+                std::borrow::Cow::Owned(crlf_old),
+                std::borrow::Cow::Owned(normalize_to_crlf(new)),
+            )
+        } else {
+            let lf_old = normalize_to_lf(old);
+            if content.matches(&lf_old).count() > 0 {
+                (
+                    std::borrow::Cow::Owned(lf_old),
+                    std::borrow::Cow::Owned(normalize_to_lf(new)),
+                )
+            } else {
+                (
+                    std::borrow::Cow::Borrowed(old),
+                    std::borrow::Cow::Borrowed(new),
+                )
+            }
+        }
+    };
+
+    let count = content.matches(target_old.as_ref()).count();
     if count == 0 {
         return err("old_string not found in file");
     }
@@ -230,9 +263,9 @@ fn apply_one(content: &str, old: &str, new: &str, replace_all: bool) -> Result<S
         ));
     }
     Ok(if replace_all {
-        content.replace(old, new)
+        content.replace(target_old.as_ref(), target_new.as_ref())
     } else {
-        content.replacen(old, new, 1)
+        content.replacen(target_old.as_ref(), target_new.as_ref(), 1)
     })
 }
 
@@ -568,5 +601,22 @@ mod tests {
         assert!(outcome.ok);
         assert!(outcome.output.contains("…(line truncated)"));
         assert!(outcome.output.len() < 2000);
+    }
+
+    #[test]
+    fn apply_one_crlf_matching() {
+        // File has CRLF, replacement pattern has LF
+        let crlf_content = "line1\r\nline2\r\nline3\r\n";
+        let res = apply_one(crlf_content, "line2\n", "modified\n", false).unwrap();
+        assert_eq!(res, "line1\r\nmodified\r\nline3\r\n");
+
+        // Multi-line replacement
+        let res_multi = apply_one(crlf_content, "line1\nline2\n", "replaced\n", false).unwrap();
+        assert_eq!(res_multi, "replaced\r\nline3\r\n");
+
+        // File has LF, replacement pattern has CRLF
+        let lf_content = "line1\nline2\nline3\n";
+        let res_lf = apply_one(lf_content, "line2\r\n", "modified\r\n", false).unwrap();
+        assert_eq!(res_lf, "line1\nmodified\nline3\n");
     }
 }
