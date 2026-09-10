@@ -180,7 +180,9 @@ impl ValidationStatus {
 }
 
 /// One verification run bound to the exact state it checked (§2.1.4).
-/// `session`/`seq` point at the journal `verification_receipt` record.
+/// `session`/`seq` point at the journal `verification_receipt` (or
+/// `manual_confirmation`) record. Phase-3 fields are all optional so plan
+/// files written before receipts keep loading unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Receipt {
     pub session: String,
@@ -191,6 +193,35 @@ pub struct Receipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<i32>,
     pub at: String,
+    /// blake3 of the check definition (the command text). Re-running a
+    /// rewritten command is a new check, never a refresh of this receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_definition_hash: Option<String>,
+    /// "exec" for host-run commands, "manual" for user confirmations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    /// state digest before/after the run. A passing receipt always has
+    /// `state_before == state_after`: a check that raced a mutation proves
+    /// nothing and is never recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_after: Option<String>,
+    /// blake3 of the captured check output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_hash: Option<String>,
+    /// traversed paths the digest covered. A later `file_diff` on any of
+    /// these marks the receipt (and its item) stale.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -496,7 +527,7 @@ pub fn new_id() -> String {
     out
 }
 
-fn now() -> String {
+pub(crate) fn now() -> String {
     Local::now().to_rfc3339()
 }
 
@@ -874,7 +905,13 @@ fn apply_record(
                 .get("evidence_refs")
                 .and_then(|value| serde_json::from_value(value.clone()).ok())
                 .unwrap_or_default();
-            verify_acceptance(plan, index, evidence, false).map(|_| true)
+            // receipts ride the commit args so replay restores validation
+            // without re-running checks; pre-receipt commits replay to the
+            // legacy shape (status, no validation).
+            let receipt: Option<Receipt> = fields
+                .get("receipt")
+                .and_then(|value| serde_json::from_value(value.clone()).ok());
+            verify_acceptance(plan, index, evidence, false, receipt).map(|_| true)
         }
         Some("waive") => {
             let index = fields
@@ -923,6 +960,40 @@ fn apply_record(
                 _ => return Ok(false),
             }
             plan.revision = plan.revision.saturating_add(1);
+            Ok(true)
+        }
+        Some("confirm") => {
+            // replay pins the journaled confirmation; it never recomputes
+            // digests or appends records (already accepted when journaled)
+            let index = fields
+                .get("index")
+                .and_then(|value| value.as_u64())
+                .ok_or_else(|| Rejection::new("replay_shape", "confirm intent without index", ""))?
+                as usize;
+            let reason = fields
+                .get("reason")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let receipt: Receipt = fields
+                .get("receipt")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .ok_or_else(|| {
+                    Rejection::new("replay_shape", "confirm intent without receipt", "")
+                })?;
+            attach_confirmation(plan, index, reason, receipt).map(|_| true)
+        }
+        Some("invalidate") => {
+            let paths: Vec<String> = fields
+                .get("paths")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            apply_invalidate(plan, &paths);
             Ok(true)
         }
         Some("reopen") => {
@@ -1425,7 +1496,7 @@ pub fn apply(
         Op::Verify {
             acceptance,
             evidence,
-        } => verify_acceptance(plan, acceptance, Vec::new(), !evidence.is_empty()),
+        } => verify_acceptance(plan, acceptance, Vec::new(), !evidence.is_empty(), None),
         Op::Complete => complete(plan),
     }
 }
@@ -1787,6 +1858,68 @@ fn split(
     accept(plan, format!("step {id} split into {}", ids.join(", ")))
 }
 
+/// Manifests that every state digest covers in addition to the traversed
+/// paths: a dependency or toolchain move invalidates checks even when no
+/// tracked file changed.
+const STATE_MANIFESTS: &[&str] = &[
+    "Cargo.toml",
+    "Cargo.lock",
+    "package.json",
+    "package-lock.json",
+];
+
+/// Canonical path form for digest inputs and receipt invalidation. Refs are
+/// declared with forward slashes; diffs may arrive OS-native.
+fn norm_path(path: &str) -> String {
+    path.replace('\\', "/").trim_start_matches("./").to_string()
+}
+
+/// Sorted union of declared step ref paths: the digest input set (§2.1.4,
+/// decision 2+3). Deterministic for a fixed plan, so equal digests mean
+/// nothing relevant moved.
+pub fn digest_paths(plan: &Plan) -> Vec<String> {
+    let mut paths = std::collections::BTreeSet::new();
+    for step in &plan.steps {
+        for r in &step.refs {
+            paths.insert(norm_path(&r.path));
+        }
+    }
+    paths.into_iter().collect()
+}
+
+/// blake3 state digest over traversed file contents (missing files hash as
+/// a tombstone, so creation/deletion moves the digest), manifest contents,
+/// and the check text. Computed before AND after a check run: only equal
+/// halves make a passing receipt.
+pub fn state_digest(root: &Path, paths: &[String], command: &str) -> String {
+    let mut h = blake3::Hasher::new();
+    for path in paths {
+        h.update(path.as_bytes());
+        h.update(b"\0");
+        if let Ok(bytes) = std::fs::read(root.join(path)) {
+            h.update(&bytes);
+        } else {
+            h.update(b"<missing>");
+        }
+        h.update(b"\0");
+    }
+    for manifest in STATE_MANIFESTS {
+        if let Ok(bytes) = std::fs::read(root.join(manifest)) {
+            h.update(manifest.as_bytes());
+            h.update(b"\0");
+            h.update(&bytes);
+            h.update(b"\0");
+        }
+    }
+    h.update(command.as_bytes());
+    h.finalize().to_hex().to_string()
+}
+
+/// Identity of a check definition: same command text, same check.
+pub fn check_definition_hash(command: &str) -> String {
+    blake3::hash(command.as_bytes()).to_hex().to_string()
+}
+
 /// Mark an acceptance item verified on the host's terms.
 ///
 /// `evidence` is what the host is prepared to stand behind for *this* item:
@@ -1805,6 +1938,7 @@ pub fn verify_acceptance(
     index: usize,
     evidence: Vec<EvidenceRef>,
     supplied_evidence: bool,
+    receipt: Option<Receipt>,
 ) -> Result<Applied, Rejection> {
     if index >= plan.acceptance.len() {
         return reject(
@@ -1868,12 +2002,30 @@ pub fn verify_acceptance(
     let item = &mut plan.acceptance[index];
     item.status = AcceptanceStatus::Passed;
     item.evidence = evidence;
+    // passed validation rides with the check that earned it: a host-run
+    // command attaches its interval receipt, evidence-backed items record
+    // the pass itself. Replay of pre-receipt commits passes `None` and
+    // keeps the legacy shape (status without validation).
+    if let Some(receipt) = receipt {
+        item.validation.status = ValidationStatus::Passed;
+        item.validation.receipts.push(receipt);
+    }
     let message = if supplied_evidence {
         format!("acceptance {index} verified (model evidence ignored; host evidence used)")
     } else {
         format!("acceptance {index} verified")
     };
     accept(plan, message)
+}
+
+/// An acceptance item verified under previous rules: `Passed` status with
+/// no validation block at all. New verifies always set validation, and
+/// replay heals it for journaled commits — this clause is only for plan
+/// files that predate receipts.
+fn legacy_passed(item: &Acceptance) -> bool {
+    item.status == AcceptanceStatus::Passed
+        && item.validation.status == ValidationStatus::Pending
+        && item.validation.receipts.is_empty()
 }
 
 fn complete(plan: &mut Plan) -> Result<Applied, Rejection> {
@@ -1899,26 +2051,59 @@ fn complete(plan: &mut Plan) -> Result<Applied, Rejection> {
             "finish, unblock or cancel them first",
         );
     }
-    let unverified: Vec<usize> = plan
+    // §2.1.4: every item needs validation passed|waived. Stale is its own
+    // rejection (state moved under a recorded check: re-verify, don't
+    // complete on it); legacy passes predate receipts and count as-is.
+    let pending: Vec<usize> = plan
         .acceptance
         .iter()
         .enumerate()
-        .filter(|(_, a)| a.status == AcceptanceStatus::Pending)
+        .filter(|(_, a)| {
+            // stale items report through the stale error below, not here
+            a.validation.status != ValidationStatus::Stale
+                && !matches!(
+                    a.validation.status,
+                    ValidationStatus::Passed | ValidationStatus::Waived
+                )
+                && !legacy_passed(a)
+        })
         .map(|(i, _)| i)
         .collect();
-    if !unverified.is_empty() {
+    let stale: Vec<usize> = plan
+        .acceptance
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.validation.status == ValidationStatus::Stale)
+        .map(|(i, _)| i)
+        .collect();
+    if !pending.is_empty() {
         return reject(
             plan,
             "acceptance_pending",
             format!(
                 "acceptance items still pending: {}",
-                unverified
+                pending
                     .iter()
                     .map(usize::to_string)
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
             "verify them, or have the user waive them with /plan waive. Pending acceptance items without cmd: prefix require user waiver (/plan waive <index>) or conversion to verify steps.",
+        );
+    }
+    if !stale.is_empty() {
+        return reject(
+            plan,
+            "acceptance_stale",
+            format!(
+                "acceptance items went stale after verification: {}",
+                stale
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            "tracked files changed under a recorded check; re-verify the items, then complete",
         );
     }
     plan.status = PlanStatus::Completed;
@@ -1968,10 +2153,170 @@ pub fn waive(plan: &mut Plan, index: usize, reason: &str) -> Result<(), Rejectio
     }
     let item = &mut plan.acceptance[index];
     item.status = AcceptanceStatus::Waived;
+    // waived is a validation state too: the complete gate reads validation,
+    // and waived items are never auto-invalidated.
+    item.validation.status = ValidationStatus::Waived;
     item.by = Some("user".to_string());
     item.reason = Some(reason.to_string());
     plan.revision += 1;
     Ok(())
+}
+
+/// User confirms a manual acceptance after inspecting the result (§2.1.4).
+/// Host-only (TUI `/plan confirm`). Only `manual:` items qualify — commands
+/// and evidence-backed text have their own verify paths. Records a
+/// `manual_confirmation` journal record and a point-in-time receipt over
+/// the same digest inputs cmd checks use, so later file moves still stale
+/// the item instead of silently outliving its confirmation.
+pub fn confirm(
+    root: &Path,
+    session_id: &str,
+    plan: &mut Plan,
+    index: usize,
+    reason: &str,
+) -> Result<Applied, Rejection> {
+    if index >= plan.acceptance.len() {
+        return reject(
+            plan,
+            "unknown_acceptance",
+            format!("no acceptance item {index}"),
+            "call /plan to see the acceptance list",
+        );
+    }
+    match plan.acceptance[index].kind() {
+        AcceptanceKind::Manual(_) => {}
+        AcceptanceKind::Command(cmd) => {
+            return reject(
+                plan,
+                "not_manual",
+                format!("acceptance {index} runs a command; verify it instead"),
+                format!("run the check ({cmd}), or waive the item with /plan waive"),
+            );
+        }
+        AcceptanceKind::Text(_) => {
+            return reject(
+                plan,
+                "not_manual",
+                format!("acceptance {index} settles on verify-step evidence"),
+                "close a verify step with evidence for it, or waive it with /plan waive",
+            );
+        }
+    }
+    let paths = digest_paths(plan);
+    let digest = state_digest(root, &paths, "");
+    let at = now();
+    let mut journal = crate::agent::journal::Journal::open(root, session_id)
+        .map_err(|e| Rejection::new("journal_unwritable", format!("{e:#}"), ""))?;
+    let seq = journal
+        .append(
+            "manual_confirmation",
+            serde_json::json!({
+                "acceptance_id": index,
+                "by": "user",
+                "state_digest": digest,
+                "reason": reason,
+            }),
+        )
+        .map_err(|e| Rejection::new("journal_unwritable", format!("{e:#}"), ""))?;
+    attach_confirmation(
+        plan,
+        index,
+        reason,
+        Receipt {
+            session: session_id.to_string(),
+            seq,
+            state_digest: digest.clone(),
+            command: None,
+            exit: None,
+            at,
+            check_definition_hash: None,
+            runner: Some("manual".to_string()),
+            args: None,
+            cwd: Some(root.display().to_string()),
+            started_at: None,
+            finished_at: None,
+            state_before: Some(digest.clone()),
+            state_after: Some(digest),
+            output_hash: None,
+            paths,
+        },
+    )
+}
+
+/// Pure half of `confirm` (and its replay): pin a recorded confirmation to
+/// the item. Replay trusts the journaled payload — it must not recompute
+/// digests or append records.
+pub fn attach_confirmation(
+    plan: &mut Plan,
+    index: usize,
+    reason: &str,
+    receipt: Receipt,
+) -> Result<Applied, Rejection> {
+    if index >= plan.acceptance.len() {
+        return reject(
+            plan,
+            "unknown_acceptance",
+            format!("no acceptance item {index}"),
+            "call /plan to see the acceptance list",
+        );
+    }
+    let item = &mut plan.acceptance[index];
+    item.status = AcceptanceStatus::Passed;
+    item.validation.status = ValidationStatus::Passed;
+    item.validation.receipts.push(receipt);
+    item.by = Some("user".to_string());
+    item.reason = Some(reason.to_string());
+    accept(plan, format!("acceptance {index} confirmed by user"))
+}
+
+/// Mark passed validations stale whose receipt paths intersect `paths`.
+/// Returns true when anything changed. Waived items are never touched.
+pub fn apply_invalidate(plan: &mut Plan, paths: &[String]) -> bool {
+    if paths.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    for item in &mut plan.acceptance {
+        if item.validation.status != ValidationStatus::Passed {
+            continue;
+        }
+        let hit = item
+            .validation
+            .receipts
+            .iter()
+            .any(|r| r.paths.iter().any(|p| paths.iter().any(|q| q == p)));
+        if hit {
+            item.validation.status = ValidationStatus::Stale;
+            changed = true;
+        }
+    }
+    if changed {
+        plan.revision += 1;
+        plan.rejections_in_a_row = 0;
+    }
+    changed
+}
+
+/// Host hook after file_diff outcomes: load the session's active plan and
+/// journal-first commit an invalidation, but only when something actually
+/// went stale — mutating tools must not spam the journal on every call.
+pub fn invalidate_on_diff(root: &Path, session_id: &str, paths: &[String]) -> Result<bool> {
+    let Some(mut plan) = open_active_for_session(root, Some(session_id))? else {
+        return Ok(false);
+    };
+    if !apply_invalidate(&mut plan, paths) {
+        return Ok(false);
+    }
+    commit(
+        root,
+        session_id,
+        &mut plan,
+        "invalidate",
+        "host",
+        true,
+        serde_json::json!({"paths": paths}),
+    )?;
+    Ok(true)
 }
 
 // ---------------------------------------------------------------- rendering
@@ -1992,7 +2337,14 @@ pub fn render(plan: &Plan) -> String {
     if !plan.acceptance.is_empty() {
         out.push_str("acceptance:\n");
         for (i, a) in plan.acceptance.iter().enumerate() {
-            out.push_str(&format!("  [{}] {} {}\n", i, a.status.as_str(), a.text));
+            out.push_str(&format!("  [{}] {} {}", i, a.status.as_str(), a.text));
+            // validation is the complete gate (§2.1.4): surface non-pending
+            // states so a stale check is visible before `complete` rejects it
+            match a.validation.status {
+                ValidationStatus::Pending => {}
+                other => out.push_str(&format!(" [validation: {}]", other.as_str())),
+            }
+            out.push('\n');
         }
     }
     out.push_str(&format!(
@@ -2670,6 +3022,16 @@ mod tests {
                 command: Some("cargo test".to_string()),
                 exit: Some(0),
                 at: "2026-01-01T00:00:00+00:00".to_string(),
+                check_definition_hash: None,
+                runner: None,
+                args: None,
+                cwd: None,
+                started_at: None,
+                finished_at: None,
+                state_before: None,
+                state_after: None,
+                output_hash: None,
+                paths: Vec::new(),
             }],
         };
         plan.acceptance[0].validation = Validation {
@@ -2693,6 +3055,213 @@ mod tests {
             ValidationStatus::Waived
         );
         assert_eq!(loaded.steps[0].refs[0].intent, RefIntent::Create);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn receipt(paths: &[&str]) -> Receipt {
+        Receipt {
+            session: "sess".to_string(),
+            seq: 7,
+            state_digest: "digest".to_string(),
+            command: Some("cmd: check".to_string()),
+            exit: Some(0),
+            at: now(),
+            check_definition_hash: Some(check_definition_hash("cmd: check")),
+            runner: Some("exec".to_string()),
+            args: None,
+            cwd: None,
+            started_at: None,
+            finished_at: None,
+            state_before: Some("digest".to_string()),
+            state_after: Some("digest".to_string()),
+            output_hash: Some("outhash".to_string()),
+            paths: paths.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn close_steps(plan: &mut Plan) {
+        for step in plan.steps.iter_mut() {
+            step.status = StepStatus::Done;
+        }
+    }
+
+    #[test]
+    fn state_digest_tracks_content_and_tombstones() {
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-digest-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "one").unwrap();
+        let d1 = state_digest(&dir, &["a.rs".to_string()], "cmd");
+        // the command text participates: same tree, other check, other digest
+        assert_ne!(d1, state_digest(&dir, &["a.rs".to_string()], "other"));
+        std::fs::write(dir.join("a.rs"), "two").unwrap();
+        let d2 = state_digest(&dir, &["a.rs".to_string()], "cmd");
+        assert_ne!(d1, d2);
+        // deletion is a tombstone, distinct from every content
+        std::fs::remove_file(dir.join("a.rs")).unwrap();
+        let d3 = state_digest(&dir, &["a.rs".to_string()], "cmd");
+        assert_ne!(d2, d3);
+        assert_ne!(d1, d3);
+        assert_eq!(d3, state_digest(&dir, &["a.rs".to_string()], "cmd"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn verify_attaches_receipt_and_stale_blocks_complete_until_reverified() {
+        let mut plan = new_plan();
+        close_steps(&mut plan);
+        verify_acceptance(&mut plan, 0, vec![], false, Some(receipt(&["x.rs"]))).unwrap();
+        assert_eq!(plan.acceptance[0].status, AcceptanceStatus::Passed);
+        assert_eq!(
+            plan.acceptance[0].validation.status,
+            ValidationStatus::Passed
+        );
+        assert_eq!(plan.acceptance[0].validation.receipts.len(), 1);
+        // an unrelated diff changes nothing
+        assert!(!apply_invalidate(&mut plan, &["other.rs".to_string()]));
+        // a diff on traversed paths stales the item and blocks complete
+        assert!(apply_invalidate(&mut plan, &["x.rs".to_string()]));
+        assert_eq!(
+            plan.acceptance[0].validation.status,
+            ValidationStatus::Stale
+        );
+        assert!(
+            render(&plan).contains("[validation: stale]"),
+            "stale must surface before complete rejects it"
+        );
+        let err = apply(&mut plan, Op::Complete, &Limits::default(), None).unwrap_err();
+        assert_eq!(err.code, "acceptance_stale");
+        // re-verifying heals with a second receipt; history accumulates
+        verify_acceptance(&mut plan, 0, vec![], false, Some(receipt(&["x.rs"]))).unwrap();
+        assert_eq!(plan.acceptance[0].validation.receipts.len(), 2);
+        assert!(matches!(
+            apply(&mut plan, Op::Complete, &Limits::default(), None),
+            Ok(Applied::Completed)
+        ));
+    }
+
+    #[test]
+    fn waived_validation_survives_invalidate() {
+        let mut plan = new_plan();
+        waive(&mut plan, 0, "not now").unwrap();
+        assert_eq!(
+            plan.acceptance[0].validation.status,
+            ValidationStatus::Waived
+        );
+        assert!(!apply_invalidate(&mut plan, &["anything.rs".to_string()]));
+        assert_eq!(
+            plan.acceptance[0].validation.status,
+            ValidationStatus::Waived
+        );
+    }
+
+    #[test]
+    fn legacy_passed_without_validation_still_completes() {
+        // plan files written before receipts carry status without validation
+        let mut plan = new_plan();
+        close_steps(&mut plan);
+        plan.acceptance[0].status = AcceptanceStatus::Passed;
+        assert!(matches!(
+            apply(&mut plan, Op::Complete, &Limits::default(), None),
+            Ok(Applied::Completed)
+        ));
+    }
+
+    #[test]
+    fn confirm_manual_records_point_in_time_receipt() {
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-confirm-{}", new_id()));
+        let mut plan = create(
+            "goal".to_string(),
+            Vec::new(),
+            vec!["manual: eyeball it".to_string()],
+            vec![NewStep {
+                title: "t".to_string(),
+                kind: None,
+                refs: Vec::new(),
+            }],
+            20000,
+            &Limits::default(),
+        )
+        .expect("plan creates");
+        confirm(&dir, "sess", &mut plan, 0, "looks good").unwrap();
+        assert_eq!(plan.acceptance[0].status, AcceptanceStatus::Passed);
+        assert_eq!(
+            plan.acceptance[0].validation.status,
+            ValidationStatus::Passed
+        );
+        let receipts = &plan.acceptance[0].validation.receipts;
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].runner.as_deref(), Some("manual"));
+        assert_eq!(receipts[0].state_before, receipts[0].state_after);
+        // the confirmation itself is journaled
+        let records = crate::agent::journal::Journal::records_for(&dir, "sess").unwrap();
+        assert!(records.iter().any(|r| r.kind == "manual_confirmation"
+            && r.fields.get("acceptance_id").and_then(|v| v.as_u64()) == Some(0)));
+        // commands and evidence-backed text refuse: they have own paths
+        let mut cmd_plan = new_plan();
+        let err = confirm(&dir, "sess", &mut cmd_plan, 0, "trust me").unwrap_err();
+        assert_eq!(err.code, "not_manual");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn invalidate_on_diff_commits_only_on_change() {
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-inv-{}", new_id()));
+        let mut plan = new_plan();
+        close_steps(&mut plan);
+        plan.steps[0].refs = vec![StepRef::from("x.rs")];
+        verify_acceptance(&mut plan, 0, vec![], false, Some(receipt(&["x.rs"]))).unwrap();
+        store(&dir, &plan).unwrap();
+        assert!(invalidate_on_diff(&dir, "sess", &["x.rs".to_string()]).unwrap());
+        let reloaded = open_active_for_session(&dir, Some("sess"))
+            .unwrap()
+            .expect("active plan");
+        assert_eq!(
+            reloaded.acceptance[0].validation.status,
+            ValidationStatus::Stale
+        );
+        assert!(reloaded.applied_event.is_some(), "invalidation commits");
+        // unrelated paths: no commit, cursor untouched
+        let cursor = reloaded.applied_event.clone();
+        assert!(!invalidate_on_diff(&dir, "sess", &["y.rs".to_string()]).unwrap());
+        let same = open_active_for_session(&dir, Some("sess"))
+            .unwrap()
+            .expect("active plan");
+        assert_eq!(same.applied_event, cursor);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn replay_restores_verify_receipt_from_commit_args() {
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-repreceipt-{}", new_id()));
+        let mut plan = new_plan();
+        close_steps(&mut plan);
+        plan.applied_event = Some("rr:0".to_string());
+        store(&dir, &plan).unwrap();
+        let receipt_value = serde_json::to_value(receipt(&["x.rs"])).unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&dir, "rr").unwrap();
+        journal
+            .append(
+                "plan",
+                serde_json::json!({
+                    "op": "verify", "acceptance": 0, "evidence_refs": [],
+                    "receipt": receipt_value,
+                    "plan_id": plan.id, "by": "model", "ok": true,
+                }),
+            )
+            .unwrap();
+        replay(&dir).unwrap();
+        let healed = open(&dir, &plan.id).unwrap();
+        assert_eq!(
+            healed.acceptance[0].validation.status,
+            ValidationStatus::Passed
+        );
+        assert_eq!(healed.acceptance[0].validation.receipts.len(), 1);
+        assert_eq!(
+            healed.acceptance[0].validation.receipts[0]
+                .runner
+                .as_deref(),
+            Some("exec")
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

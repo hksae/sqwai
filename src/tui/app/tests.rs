@@ -4954,6 +4954,61 @@ mod tests {
     }
 
     #[test]
+    fn plan_confirm_user_command_flow() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let temp_dir =
+            std::env::temp_dir().join(format!("sqwai-test-plan-confirm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        app.project_root = temp_dir.clone();
+        app.session.plan_id = None;
+
+        // usage without a reason
+        app.plan_command("/plan confirm 0");
+        assert!(matches!(
+            app.segments.last(),
+            Some(Segment::Status { text, .. }) if text.starts_with("usage: /plan confirm")
+        ));
+
+        let limits = plan::Limits { max_steps: 10 };
+        let created = plan::create(
+            "test confirm goal".into(),
+            vec![],
+            vec!["manual: eyeball it".into()],
+            vec![plan::NewStep {
+                title: "step 1".into(),
+                kind: None,
+                refs: vec![],
+            }],
+            1000,
+            &limits,
+        )
+        .unwrap();
+        plan::store(&temp_dir, &created).unwrap();
+        app.session.plan_id = Some(created.id.clone());
+
+        app.plan_command("/plan confirm 0 looks good");
+        assert!(matches!(
+            app.segments.last(),
+            Some(Segment::Status { text, .. }) if text == "acceptance 0 confirmed"
+        ));
+        let reloaded = plan::read_plan_file(&temp_dir, &created.id).unwrap();
+        assert_eq!(
+            reloaded.acceptance[0].validation.status,
+            plan::ValidationStatus::Passed
+        );
+        assert_eq!(
+            reloaded.acceptance[0]
+                .validation
+                .receipts
+                .last()
+                .and_then(|r| r.runner.as_deref()),
+            Some("manual")
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
     fn plan_delete_prefers_session_plan_over_most_recent() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         let temp_dir = std::env::temp_dir().join(format!(

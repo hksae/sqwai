@@ -186,27 +186,18 @@ impl Journal {
     }
 
     /// Record a host-run check bound to the exact state it verified (§2.1.4).
-    /// Wired to the verify path in phase 3; until then it is exercised by
-    /// tests only.
-    #[allow(dead_code)]
+    /// `details` carries the receipt fields (check_definition_hash, runner,
+    /// command, args, cwd, started_at, finished_at, state_before,
+    /// state_after, state_digest, exit, output_hash, paths); the acceptance
+    /// id is stamped here so callers cannot mislabel it.
     pub fn append_verification_receipt(
         &mut self,
         acceptance: usize,
-        state_digest: &str,
-        command: Option<&str>,
-        exit: Option<i32>,
-        output_hash: &str,
+        details: Value,
     ) -> Result<u64> {
-        self.append(
-            "verification_receipt",
-            json!({
-                "acceptance_id": acceptance,
-                "state_digest": state_digest,
-                "command": command,
-                "exit": exit,
-                "output_hash": output_hash,
-            }),
-        )
+        let mut map = details.as_object().cloned().unwrap_or_default();
+        map.insert("acceptance_id".to_string(), Value::from(acceptance as u64));
+        self.append("verification_receipt", Value::Object(map))
     }
 
     #[allow(dead_code)]
@@ -1554,7 +1545,15 @@ mod tests {
         let root = root();
         let mut journal = Journal::open(&root, "verify").unwrap();
         let seq = journal
-            .append_verification_receipt(0, "digest-abc", Some("cargo test"), Some(0), "outhash")
+            .append_verification_receipt(
+                0,
+                json!({
+                    "state_digest": "digest-abc",
+                    "command": "cargo test",
+                    "exit": 0,
+                    "output_hash": "outhash",
+                }),
+            )
             .unwrap();
         let records = Journal::records_for(&root, "verify").unwrap();
         let record = records.iter().find(|r| r.seq == seq).unwrap();

@@ -1886,8 +1886,8 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
         });
     };
 
-    let evidence = match item.kind() {
-        plan::AcceptanceKind::Manual(_) => Vec::new(),
+    let (evidence, receipt) = match item.kind() {
+        plan::AcceptanceKind::Manual(_) => (Vec::new(), None),
         plan::AcceptanceKind::Command(command) => {
             let command = command.to_string();
             // The acceptance text arrives from the model on `plan create`, so
@@ -1915,7 +1915,15 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                 }
                 safety::Verdict::Safe => {}
             }
+            // interval consistency (§2.1.4): digest the traversed state
+            // before AND after the run. A mutation mid-check (background
+            // job, concurrent subagent) means the check proved nothing —
+            // no receipt is issued and the item stays unverified.
+            let paths = plan::digest_paths(&active);
+            let state_before = plan::state_digest(&ctx.root, &paths, &command);
+            let started_at = plan::now();
             let run = exec::bash(ctx, &command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
+            let finished_at = plan::now();
             if !run.ok {
                 return rejection(plan::Rejection {
                     code: "acceptance_failed",
@@ -1926,7 +1934,65 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                     ),
                 });
             }
-            Vec::new()
+            let state_after = plan::state_digest(&ctx.root, &paths, &command);
+            if state_before != state_after {
+                return rejection(plan::Rejection {
+                    code: "state_changed_during_check",
+                    reason: format!(
+                        "acceptance {index} ran while tracked state moved; no receipt issued"
+                    ),
+                    hint: "run verify again on the settled state".to_string(),
+                });
+            }
+            let output_hash = blake3::hash(run.output.as_bytes()).to_hex().to_string();
+            let receipt_fields = serde_json::json!({
+                "check_definition_hash": plan::check_definition_hash(&command),
+                "runner": "exec",
+                "command": command.clone(),
+                "args": serde_json::Value::Null,
+                "cwd": ctx.root.display().to_string(),
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "state_before": state_before,
+                "state_after": state_after,
+                "exit": 0,
+                "output_hash": output_hash,
+                "paths": paths,
+            });
+            let seq = match crate::agent::journal::Journal::open(&ctx.root, &ctx.session_id) {
+                Ok(mut journal) => {
+                    match journal.append_verification_receipt(index, receipt_fields) {
+                        Ok(seq) => seq,
+                        Err(e) => {
+                            return Outcome::err(format!("receipt journal unwritable: {e:#}"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Outcome::err(format!("receipt journal unwritable: {e:#}"));
+                }
+            };
+            // a passing command run exits zero by construction: failures
+            // return above with `acceptance_failed` and no receipt
+            let receipt = plan::Receipt {
+                session: ctx.session_id.clone(),
+                seq,
+                state_digest: state_after.clone(),
+                command: Some(command.clone()),
+                exit: Some(0),
+                at: finished_at.clone(),
+                check_definition_hash: Some(plan::check_definition_hash(&command)),
+                runner: Some("exec".to_string()),
+                args: None,
+                cwd: Some(ctx.root.display().to_string()),
+                started_at: Some(started_at),
+                finished_at: Some(finished_at),
+                state_before: Some(state_before),
+                state_after: Some(state_after),
+                output_hash: Some(output_hash),
+                paths,
+            };
+            (Vec::new(), Some(receipt))
         }
         plan::AcceptanceKind::Text(_) => {
             let Some((step_id, evidence)) = unspent_verify_evidence(&ctx.root, &active, index)
@@ -1952,16 +2018,26 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
             ) {
                 return Outcome::err(message);
             }
-            evidence
+            (evidence, None)
         }
     };
 
-    match plan::verify_acceptance(&mut active, index, evidence, supplied) {
+    match plan::verify_acceptance(&mut active, index, evidence, supplied, receipt) {
         Ok(applied) => {
-            let args = serde_json::json!({
+            // the receipt rides the commit args so replay restores
+            // validation without re-running the check
+            let receipt_value = active
+                .acceptance
+                .get(index)
+                .and_then(|item| item.validation.receipts.last())
+                .and_then(|r| serde_json::to_value(r).ok());
+            let mut args = serde_json::json!({
                 "acceptance": index,
                 "evidence_refs": active.acceptance.get(index).map(|item| item.evidence.clone()).unwrap_or_default(),
             });
+            if let Some(receipt_value) = receipt_value {
+                args["receipt"] = receipt_value;
+            }
             if let Err(e) = plan::commit(
                 &ctx.root,
                 &ctx.session_id,
@@ -2180,6 +2256,14 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
     for (index, acceptance) in active.acceptance.iter().enumerate() {
         if acceptance.status != plan::AcceptanceStatus::Passed {
             continue;
+        }
+        // state moved under a recorded check after verification: the pure
+        // complete gate rejects this too, but failing here names the fix
+        // (re-verify) before the op is even attempted
+        if acceptance.validation.status == plan::ValidationStatus::Stale {
+            return Err(format!(
+                "acceptance_stale: acceptance {index} went stale after verification (tracked files changed); re-verify it, then complete"
+            ));
         }
         match acceptance.kind() {
             plan::AcceptanceKind::Command(command) => {
@@ -3651,6 +3735,87 @@ mod tests {
             "{}",
             completed.output
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `plan verify` on a `cmd:` item records an interval receipt: equal
+    /// before/after digests, exec runner, and a matching journal record.
+    #[test]
+    fn verify_cmd_issues_interval_receipt() {
+        let (mut ctx, dir) = proj();
+        let flag = dir.join("gate.txt");
+        fs::write(&flag, "ok").unwrap();
+        let command = gate_probe_command(&flag);
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "receipts",
+                "acceptance": [format!("cmd: {command}")],
+                "steps": [{"title": "verify", "kind": "verify", "refs": ["gate.txt"]}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+
+        let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(verified.ok, "{}", verified.output);
+
+        let plan = plan::open_active(&dir).unwrap().unwrap();
+        let item = &plan.acceptance[0];
+        assert_eq!(item.status, plan::AcceptanceStatus::Passed);
+        assert_eq!(item.validation.status, plan::ValidationStatus::Passed);
+        assert_eq!(item.validation.receipts.len(), 1);
+        let receipt = &item.validation.receipts[0];
+        assert_eq!(receipt.runner.as_deref(), Some("exec"));
+        assert_eq!(receipt.state_before, receipt.state_after);
+        assert_eq!(receipt.exit, Some(0));
+        assert!(receipt.paths.iter().any(|p| p == "gate.txt"));
+        let records = crate::agent::journal::Journal::records(&dir).unwrap();
+        assert!(
+            records.iter().any(|r| {
+                r.kind == "verification_receipt"
+                    && r.fields.get("acceptance_id").and_then(|v| v.as_u64()) == Some(0)
+                    && r.fields.get("state_before") == r.fields.get("state_after")
+            }),
+            "verification_receipt journal record missing"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A check that races a mutation proves nothing: when the command
+    /// itself moves tracked state mid-run, verify is rejected and no
+    /// receipt is issued.
+    #[test]
+    fn verify_cmd_rejects_when_state_moves_mid_run() {
+        let (mut ctx, dir) = proj();
+        let flag = dir.join("gate.txt");
+        fs::write(&flag, "ok").unwrap();
+        // relative path: the command runs with the project root as cwd,
+        // and quoting a temp path would only muddy the classifier
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "races",
+                "acceptance": ["cmd: echo hi >> gate.txt"],
+                "steps": [{"title": "verify", "kind": "verify", "refs": ["gate.txt"]}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+
+        let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!verified.ok, "{}", verified.output);
+        assert!(
+            verified.output.contains("state_changed_during_check"),
+            "{}",
+            verified.output
+        );
+        let plan = plan::open_active(&dir).unwrap().unwrap();
+        assert_eq!(
+            plan.acceptance[0].validation.status,
+            plan::ValidationStatus::Pending
+        );
+        assert!(plan.acceptance[0].validation.receipts.is_empty());
         fs::remove_dir_all(&dir).ok();
     }
 

@@ -1625,6 +1625,7 @@ async fn run_agent(
                 } else {
                     outcome.file_diff.as_ref().into_iter().collect()
                 };
+                let mut invalidated_paths = Vec::new();
                 for metadata in diffs {
                     let _ = writer.append_evidence(
                         "file_diff",
@@ -1643,6 +1644,20 @@ async fn run_agent(
                             "blob_after": metadata.blob_after,
                         }),
                     );
+                    invalidated_paths.push(
+                        metadata
+                            .path
+                            .replace('\\', "/")
+                            .trim_start_matches("./")
+                            .to_string(),
+                    );
+                }
+                // validation invalidation (§2.1.4): a mutation on traversed
+                // paths stales passed receipts. Best-effort like the
+                // evidence appends above; only commits when something
+                // actually went stale.
+                if !invalidated_paths.is_empty() {
+                    let _ = plan::invalidate_on_diff(&root, &session_id, &invalidated_paths);
                 }
                 if call.name == "plan" {
                     // `plan_op` journals its own intent records ahead of every

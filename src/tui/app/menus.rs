@@ -47,7 +47,9 @@ pub(super) const COMMANDS: &[&str] = &[
 pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
     (
         "/plan",
-        &["history", "limit", "complete", "abandon", "waive", "delete"],
+        &[
+            "history", "limit", "complete", "abandon", "waive", "confirm", "delete",
+        ],
     ),
     ("/undo", &["step"]),
     ("/providers", &["update"]),
@@ -3031,8 +3033,22 @@ fn plan_rows(
                 plan::AcceptanceStatus::Passed => Theme::ok(),
                 plan::AcceptanceStatus::Waived => Theme::warn(),
             };
+            // stale validation overrides the passed color: the item will
+            // not satisfy `complete` until it is re-verified
+            let (st, suffix) = match a.validation.status {
+                plan::ValidationStatus::Stale => (Theme::err(), " [stale — re-verify]"),
+                plan::ValidationStatus::Passed => (st, " [verified]"),
+                plan::ValidationStatus::Waived => (st, " [waived]"),
+                plan::ValidationStatus::Pending => (st, ""),
+            };
             let prefix = format!("    [{i}] {} ", a.status.as_str());
-            push_wrapped(&mut rows, &prefix, &a.text, st, Theme::base());
+            push_wrapped(
+                &mut rows,
+                &prefix,
+                &format!("{}{suffix}", a.text),
+                st,
+                Theme::base(),
+            );
         }
     }
     rows.push(row(

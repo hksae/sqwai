@@ -2452,6 +2452,48 @@ impl App {
                     _ => "usage: /plan waive <acceptance-index> <reason>".to_string(),
                 }
             }
+            Some("confirm") => {
+                let index = args.get(1).and_then(|s| s.parse::<usize>().ok());
+                let reason = args.get(2..).map(|v| v.join(" ")).unwrap_or_default();
+                match (index, reason.trim()) {
+                    (Some(index), reason) if !reason.is_empty() => match self.workable_plan() {
+                        Ok(mut active) => {
+                            let sid = self.session.id.to_string();
+                            match plan::confirm(&root, &sid, &mut active, index, reason) {
+                                Ok(_) => {
+                                    let receipt = active
+                                        .acceptance
+                                        .get(index)
+                                        .and_then(|item| item.validation.receipts.last())
+                                        .and_then(|r| serde_json::to_value(r).ok());
+                                    let mut cargs =
+                                        serde_json::json!({"index": index, "reason": reason});
+                                    if let Some(receipt) = receipt {
+                                        cargs["receipt"] = receipt;
+                                    }
+                                    match plan::commit(
+                                        &root,
+                                        &sid,
+                                        &mut active,
+                                        "confirm",
+                                        "user",
+                                        true,
+                                        cargs,
+                                    ) {
+                                        Ok(_) => format!("acceptance {index} confirmed"),
+                                        Err(e) => format!("plan write failed: {e:#}"),
+                                    }
+                                }
+                                Err(e) => {
+                                    format!("plan confirm rejected [{}]: {}", e.code, e.reason)
+                                }
+                            }
+                        }
+                        Err(message) => message,
+                    },
+                    _ => "usage: /plan confirm <acceptance-index> <reason>".to_string(),
+                }
+            }
             Some(other) => format!("unknown /plan action '{other}'"),
         };
         self.status(&result, StatusKind::Info);
