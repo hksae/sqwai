@@ -876,7 +876,12 @@ impl App {
                     }
                     self.paste_text(&p);
                 }
-                Event::Resize(_, _) => self.dirty = true,
+                Event::Resize(_, _) => {
+                    // timestamp only; the draw path debounces the heavy
+                    // width rebuild until the drag settles
+                    self.last_resize = Some(Instant::now());
+                    self.dirty = true;
+                }
                 _ => {}
             }
         }

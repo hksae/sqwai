@@ -328,6 +328,13 @@ pub struct App {
     last_fresh: usize,
     /// microseconds spent in the last rebuild_cache/rebuild_sub_cache
     last_rebuild_us: u128,
+    /// last terminal resize event; while fresh, width-driven rebuilds wait
+    /// for the size to settle instead of re-rendering the whole transcript
+    /// on every intermediate drag event
+    last_resize: Option<Instant>,
+    /// set by draw when it deferred a width rebuild: the loop must keep
+    /// `dirty` so the next tick retries instead of parking stale rows
+    defer_rebuild: bool,
     /// scroll anchor set by toggles: (view, rowseg tag, screen offset).
     /// Applied after the next rebuild so an expanding block keeps its header
     /// on the same screen row instead of jumping with `follow`.
@@ -751,6 +758,8 @@ impl App {
             last_merge: view::MergeKind::Skip,
             last_fresh: 0,
             last_rebuild_us: 0,
+            last_resize: None,
+            defer_rebuild: false,
             pending_anchor: None,
             press_target: None,
             sub_views: std::collections::HashMap::new(),
@@ -1087,7 +1096,11 @@ impl App {
                 let wraps = crate::tui::markdown::WRAP_TAGGED_CALLS
                     .load(std::sync::atomic::Ordering::Relaxed);
                 self.perf.frame(stat, renders, wraps);
-                self.dirty = false;
+                // a deferred width rebuild keeps dirty set: the 50ms tick
+                // retries, and the rebuild runs once the size settles
+                if !self.defer_rebuild {
+                    self.dirty = false;
+                }
             }
         }
         // Shutdown must never wait for a provider request. A final diary

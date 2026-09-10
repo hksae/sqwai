@@ -2109,6 +2109,14 @@ impl App {
         h.finish()
     }
 
+    /// True while a resize drag is (probably) still in flight: a resize
+    /// event landed less than the settle window ago. Width-driven rebuilds
+    /// defer until this clears; content-driven rebuilds proceed regardless.
+    fn resize_settling(&self) -> bool {
+        self.last_resize
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(150))
+    }
+
     pub(super) fn chat_top(&self, height: u16) -> usize {
         let h = height.max(1) as usize;
         let max = self.cache_lines.len().saturating_sub(h);
@@ -2148,6 +2156,9 @@ impl App {
 
     pub(super) fn draw(&mut self, f: &mut ratatui::Frame) {
         let area = f.area();
+        // cleared every frame: only a deferred width rebuild sets it below,
+        // and the loop keeps `dirty` while it stays set
+        self.defer_rebuild = false;
         if area.width < 20 || area.height < 6 {
             return;
         }
@@ -2179,10 +2190,16 @@ impl App {
         // resize cannot leave rows wider than the rectangle that displays them.
         // Reassembly is gated by the transcript fingerprint: paint-only state
         // (typing, scroll, selection, hover) never rebuilds the transcript.
+        // Width-driven rebuilds additionally wait out an active resize drag
+        // (see resize_settling): repainting the old rows for ~150ms beats a
+        // full transcript re-render on every intermediate drag event.
         if self.cache_w != chat.width {
-            self.seg_cache.clear();
-            self.rebuild_cache(chat.width);
-            self.last_fp = self.transcript_fp(chat.width, &self.seg_meta);
+            if self.resize_settling() {
+                self.defer_rebuild = true;
+            } else {
+                self.rebuild_cache(chat.width);
+                self.last_fp = self.transcript_fp(chat.width, &self.seg_meta);
+            }
         } else {
             let fp = self.transcript_fp(chat.width, &self.seg_meta);
             if fp != self.last_fp {
@@ -2428,7 +2445,9 @@ impl App {
             return;
         };
         let fp = self.transcript_fp(chat.width, &meta);
-        if self.cache_w != chat.width || fp != self.last_fp {
+        if self.cache_w != chat.width && self.resize_settling() {
+            self.defer_rebuild = true;
+        } else if self.cache_w != chat.width || fp != self.last_fp {
             self.rebuild_sub_cache(chat.width, id);
             self.last_fp = fp;
         }

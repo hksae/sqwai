@@ -5806,6 +5806,36 @@ mod tests {
         );
     }
 
+    /// A resize drag repaints but never re-renders: the width rebuild waits
+    /// until no resize event arrived for the settle window, then runs once.
+    #[test]
+    fn resize_defers_full_rebuild_until_size_settles() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.push_segment(Segment::User("q".into()));
+        app.push_segment(Segment::Assistant {
+            text: "a".into(),
+            live: false,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.cache_w, 78);
+        // drag in flight: repaint only, stale width kept for the retry
+        app.last_resize = Some(std::time::Instant::now());
+        app.test_renders = 0;
+        terminal.backend_mut().resize(100, 24);
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.test_renders, 0, "resize drag must not re-render");
+        assert_eq!(app.cache_w, 78, "width rebuild must wait for settle");
+        assert!(app.defer_rebuild);
+        // settled: the same draw rebuilds everything once
+        app.last_resize = None;
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(app.test_renders > 0, "settled resize must rebuild");
+        assert_eq!(app.cache_w, 98);
+        assert!(!app.defer_rebuild);
+    }
+
     /// Subagent summary rows belong to the call site: with a live answer
     /// slot open, two spawns must land before it (in spawn order) — never
     /// appended after the finished answer as stray `✓ subagent-N` lines.
