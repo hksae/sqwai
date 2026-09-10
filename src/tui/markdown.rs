@@ -1271,6 +1271,58 @@ fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
 pub static WRAP_TAGGED_CALLS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Replace control characters with their visible terminal behavior before
+/// any width math runs. Ratatui models them as zero-width cells while the
+/// real terminal acts on them — that disagreement shifts every later cell
+/// and sprays neighbor-row fragments across the screen (seen on tool
+/// expand/collapse with tabbed output like `read`'s `{:>6}\tline` rows or
+/// `\r` progress bars). Tabs become spaces to the next multiple-of-8 stop,
+/// a carriage return keeps only the tail after its last occurrence
+/// (overwrite semantics), and other C0/C1 controls are dropped for lack of
+/// a form both sides agree on.
+/// `\n` passes through: the wrapper below splits rows on it. Lines without
+/// controls return untouched (no allocation on the streaming hot path).
+fn sanitize_line(line: Line<'static>) -> Line<'static> {
+    if !line
+        .spans
+        .iter()
+        .any(|s| s.content.chars().any(|c| c.is_control()))
+    {
+        return line;
+    }
+    let mut spans = Vec::with_capacity(line.spans.len());
+    let mut col = 0usize;
+    for span in line.spans {
+        let text = span.content.as_ref();
+        // carriage return overwrites the row: anything before the last one
+        // was never visible. `\r` is one byte, so `i + 1` is a boundary.
+        let text = match text.rfind('\r') {
+            Some(i) => &text[i + 1..],
+            None => text,
+        };
+        let mut buf = String::with_capacity(text.len());
+        for ch in text.chars() {
+            if ch == '\t' {
+                let spaces = 8 - col % 8;
+                for _ in 0..spaces {
+                    buf.push(' ');
+                }
+                col += spaces;
+            } else if ch == '\n' {
+                buf.push(ch);
+                col = 0;
+            } else if ch.is_control() {
+                // dropped: zero width on both sides, no visible form
+            } else {
+                col += UnicodeWidthChar::width(ch).unwrap_or(0);
+                buf.push(ch);
+            }
+        }
+        spans.push(Span::styled(buf, span.style));
+    }
+    Line::from(spans)
+}
+
 pub fn wrap_tagged(
     lines: Vec<(Line<'static>, Option<usize>)>,
     width: u16,
@@ -1283,6 +1335,11 @@ pub fn wrap_tagged(
     let mut tags: Vec<Option<usize>> = Vec::new();
 
     for (line, tag) in lines {
+        // tool outputs and pasted text carry raw terminal controls. Ratatui
+        // treats them as zero-width cells, but the real terminal EXECUTES
+        // them (tab stops, carriage return), desyncing every cell after the
+        // character: fragments of neighboring rows spray across toggles.
+        let line = sanitize_line(line);
         // blank line: render an explicit empty styled row so the buffer cell
         // is reset (a span-less line would leave stale content behind)
         if line.spans.iter().all(|s| s.content.is_empty()) {
@@ -1431,6 +1488,38 @@ mod tests {
         let (rows, _) = wrap_tagged(vec![(input, None)], 80);
         let text: Vec<_> = rows.iter().map(line_text_pub).collect();
         assert_eq!(text, vec!["alpha"]);
+    }
+
+    #[test]
+    fn wrap_expands_tabs_to_terminal_stops() {
+        // `read` numbers rows as `{:>6}\tline`: a raw tab would reach the
+        // terminal as a cursor jump the buffer model cannot see, desyncing
+        // the row and spraying neighbor fragments. Six columns in, the next
+        // multiple-of-8 stop is column 8.
+        let input = Line::from(vec![Span::styled(
+            "     1\t[package]".to_string(),
+            Theme::base(),
+        )]);
+        let (rows, _) = wrap_tagged(vec![(input, Some(1))], 80);
+        let text: Vec<_> = rows.iter().map(line_text_pub).collect();
+        assert_eq!(text, vec!["     1  [package]"]);
+    }
+
+    #[test]
+    fn wrap_keeps_only_text_after_carriage_return() {
+        // progress-bar overwrites: only the visible tail survives
+        let input = Line::from(vec![Span::styled("50%\r100%".to_string(), Theme::base())]);
+        let (rows, _) = wrap_tagged(vec![(input, None)], 80);
+        let text: Vec<_> = rows.iter().map(line_text_pub).collect();
+        assert_eq!(text, vec!["100%"]);
+    }
+
+    #[test]
+    fn wrap_drops_other_control_characters() {
+        let input = Line::from(vec![Span::styled("a\x07b\x00c".to_string(), Theme::base())]);
+        let (rows, _) = wrap_tagged(vec![(input, None)], 80);
+        let text: Vec<_> = rows.iter().map(line_text_pub).collect();
+        assert_eq!(text, vec!["abc"]);
     }
 
     #[test]

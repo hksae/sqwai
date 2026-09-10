@@ -5712,6 +5712,100 @@ mod tests {
         );
     }
 
+    /// Toggling a tool whose output carries terminal controls (tabs from
+    /// `read`'s `{:>6}\tline` rows, `\r` progress bars) must never leak
+    /// them into terminal cells: raw controls desync ratatui's cursor model
+    /// and spray neighbor-row fragments in both toggle directions.
+    #[test]
+    fn toggled_tool_with_tabbed_output_leaves_no_control_cells() {
+        fn assert_clean_buffer(terminal: &Terminal<TestBackend>, when: &str) {
+            let buffer = terminal.backend().buffer();
+            for cell in buffer.content.iter() {
+                assert!(
+                    !cell.symbol().contains(['\t', '\r']),
+                    "{when}: control cell {:?}",
+                    cell.symbol()
+                );
+            }
+        }
+        fn screen_text(terminal: &Terminal<TestBackend>) -> Vec<String> {
+            let buffer = terminal.backend().buffer();
+            let area = buffer.area;
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| {
+                            buffer
+                                .cell((x, y))
+                                .map(|c| c.symbol())
+                                .unwrap_or_default()
+                                .to_string()
+                        })
+                        .collect()
+                })
+                .collect()
+        }
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.push_segment(Segment::Assistant {
+            text: "Проверь файл и кратко ответь.".into(),
+            live: false,
+        });
+        let tool_idx = app.segments.len();
+        app.push_segment(Segment::Tool {
+            name: "read".into(),
+            args: "Cargo.toml".into(),
+            ok: Some(true),
+            output: "     1\t[package]\n     2\tname = \"sqwai\"\nprogress 50%\rprogress 100%"
+                .into(),
+            diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
+            expanded: false,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_clean_buffer(&terminal, "collapsed");
+        // expand: numbered rows keep number, tab stop, and text, in order
+        let header = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(tool_idx))
+            .expect("tool header assembled");
+        app.click(header);
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_clean_buffer(&terminal, "expanded");
+        let rows = screen_text(&terminal);
+        // tab stops are absolute to the row start: the 6-cell tool rail
+        // pushes the content tab to column 16, i.e. four spaces here
+        assert!(
+            rows.iter().any(|r| r.contains("1    [package]")),
+            "tab stop lost: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("progress 100%")),
+            "carriage overwrite lost: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("50%")),
+            "overwritten progress survived: {rows:?}"
+        );
+        // collapse again: the dialog keeps no tool fragments either
+        let header = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(tool_idx))
+            .expect("tool header survives expand");
+        app.click(header);
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_clean_buffer(&terminal, "re-collapsed");
+        let rows = screen_text(&terminal);
+        assert!(
+            !rows.iter().any(|r| r.contains("[package]")),
+            "collapsed tool body visible: {rows:?}"
+        );
+    }
+
     /// Subagent summary rows belong to the call site: with a live answer
     /// slot open, two spawns must land before it (in spawn order) — never
     /// appended after the finished answer as stray `✓ subagent-N` lines.
