@@ -22,6 +22,7 @@ pub struct GraphBatch {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IndexReport {
     pub indexed_files: usize,
+    pub unchanged_files: usize,
     pub skipped_files: usize,
     pub removed_files: usize,
     pub warnings: Vec<String>,
@@ -325,7 +326,38 @@ pub fn index_project_excluding(
                 continue;
             }
         };
-        let content = match read_bounded(path) {
+        // adapter choice is path-pure, so the skip check runs before any
+        // read: a healthy row under the current adapter build skips on
+        // stat agreement, and the content hash arbitrates touches.
+        let use_markdown = markdown.supports(path);
+        let (adapter_name, adapter_version): (&str, &str) = if use_markdown {
+            ("markdown", MARKDOWN_ADAPTER_VERSION)
+        } else {
+            ("generic", GENERIC_ADAPTER_VERSION)
+        };
+        let recorded = store.indexed_file(&relative_path)?;
+        let adapter_current = recorded.as_ref().is_some_and(|record| {
+            record.status == "ok"
+                && record.adapter.as_deref() == Some(adapter_name)
+                && record.adapter_version.as_deref() == Some(adapter_version)
+        });
+        if adapter_current && let Ok(meta) = path.metadata() {
+            let size = meta.len() as i64;
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as i64)
+                .unwrap_or(0);
+            if recorded
+                .as_ref()
+                .is_some_and(|r| r.size == Some(size) && r.mtime == Some(mtime))
+            {
+                report.unchanged_files += 1;
+                continue;
+            }
+        }
+        let (content, mtime) = match read_bounded(path) {
             Ok(content) => content,
             Err(error) => {
                 report.warnings.push(format!("{relative_path}: {error}"));
@@ -333,7 +365,21 @@ pub fn index_project_excluding(
                 continue;
             }
         };
-        let mut batch = if markdown.supports(path) {
+        // hash guarantee: same bytes under a new mtime skip the reindex
+        // but refresh the stat, so the next run skips at the stat gate
+        // instead of re-reading forever (mass touches like checkouts)
+        if adapter_current
+            && recorded
+                .as_ref()
+                .is_some_and(|r| r.hash.as_deref() == Some(content_hash(&content).as_str()))
+            && store
+                .refresh_file_stat(&relative_path, content.len() as i64, mtime)
+                .is_ok()
+        {
+            report.unchanged_files += 1;
+            continue;
+        }
+        let mut batch = if use_markdown {
             match markdown.index(&relative_path, &content) {
                 Ok(batch) => batch,
                 Err(error) => {
@@ -373,6 +419,9 @@ pub fn index_project_excluding(
             }
         };
         batch.edges.retain(resolve_edge);
+        // inventory metadata the content adapters never see: the walk's
+        // mtime stat lands on the file node here, in one place
+        stamp_file_mtime(&mut batch, &relative_path, mtime);
         store
             .replace_file_subgraph(
                 &relative_path,
@@ -386,6 +435,19 @@ pub fn index_project_excluding(
 
     report.removed_files = store.prune_file_subgraphs(&retained_paths)?;
     Ok(report)
+}
+
+/// Inventory metadata the content adapters never see: the walk's mtime
+/// stat belongs to the file node, stamped here rather than threaded
+/// through every adapter signature.
+fn stamp_file_mtime(batch: &mut GraphBatch, relative_path: &str, mtime: i64) {
+    if let Some(node) = batch
+        .nodes
+        .iter_mut()
+        .find(|n| n.kind == NodeKind::File && n.path.as_deref() == Some(relative_path))
+    {
+        node.properties.insert("mtime_nanos".into(), json!(mtime));
+    }
 }
 
 /// Full rebuild with §2.4.2 atomicity: index into `graph.db.new`, then swap
@@ -522,8 +584,19 @@ fn relative_path(root: &Path, path: &Path) -> Result<String> {
     Ok(relative.to_string_lossy().replace('\\', "/"))
 }
 
-fn read_bounded(path: &Path) -> Result<Vec<u8>> {
-    let size = path.metadata()?.len();
+fn read_bounded(path: &Path) -> Result<(Vec<u8>, i64)> {
+    let metadata = path.metadata()?;
+    let size = metadata.len();
+    // captured with the same stat as the size gate so the skip check below
+    // compares one instant, not two races. Nanoseconds, not seconds: a
+    // same-size rewrite inside one second must still move the needle, or
+    // the stat gate would blind the index to it permanently.
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0);
     if size > MAX_INDEX_FILE_BYTES {
         bail!("file exceeds {MAX_INDEX_FILE_BYTES} byte indexing limit");
     }
@@ -532,7 +605,7 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>> {
     if bytes.contains(&0) {
         bail!("binary file skipped");
     }
-    Ok(bytes)
+    Ok((bytes, mtime))
 }
 
 /// Compile the exclude patterns, ignoring ones that do not parse rather than
@@ -569,6 +642,8 @@ fn language_for_path(path: &Path) -> Option<&'static str> {
         "json" => Some("json"),
         "toml" => Some("toml"),
         "yaml" | "yml" => Some("yaml"),
+        "md" | "markdown" => Some("markdown"),
+        "sh" => Some("sh"),
         _ => None,
     }
 }
@@ -860,6 +935,109 @@ mod tests {
         assert_eq!(report.removed_files, 1);
         assert!(store.find_node("file:stale.md").unwrap().is_none());
         assert!(store.find_node("document:stale.md").unwrap().is_none());
+    }
+
+    /// Stage B DoD: a second pass over an untouched tree reads nothing —
+    /// same adapter build plus same size and mtime skips the file.
+    #[test]
+    fn second_index_skips_unchanged_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Old\n").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "hi\n").unwrap();
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        let first = index_project(&mut store, dir.path()).unwrap();
+        assert_eq!(first.indexed_files, 2);
+        assert_eq!(first.unchanged_files, 0);
+
+        let second = index_project(&mut store, dir.path()).unwrap();
+        assert_eq!(second.indexed_files, 0);
+        assert_eq!(second.unchanged_files, 2);
+        assert!(store.find_node("section:README.md#old").unwrap().is_some());
+    }
+
+    /// Only the changed file pays for a reindex; the rest skip.
+    #[test]
+    fn modified_file_reindexes_only_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Old\n").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "hi\n").unwrap();
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        index_project(&mut store, dir.path()).unwrap();
+
+        // different size: the stat gate alone catches it, deterministically
+        std::fs::write(dir.path().join("README.md"), "# Brand new heading here\n").unwrap();
+        let report = index_project(&mut store, dir.path()).unwrap();
+        assert_eq!(report.indexed_files, 1);
+        assert_eq!(report.unchanged_files, 1);
+        assert!(store.find_node("section:README.md#old").unwrap().is_none());
+    }
+
+    /// Same bytes under a new mtime refresh the stat without a reindex;
+    /// same-size new bytes with a moved mtime do reindex.
+    #[test]
+    fn touch_without_change_refreshes_stat() {
+        use std::time::{Duration, SystemTime};
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("notes.txt");
+        std::fs::write(&target, "aaa").unwrap();
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        index_project(&mut store, dir.path()).unwrap();
+
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        // touch only: content identical, mtime moved
+        std::fs::File::options()
+            .write(true)
+            .open(&target)
+            .unwrap()
+            .set_modified(base)
+            .unwrap();
+        let report = index_project(&mut store, dir.path()).unwrap();
+        assert_eq!(report.indexed_files, 0);
+        assert_eq!(report.unchanged_files, 1);
+
+        // same size, other bytes, moved mtime: the hash leg must catch it
+        std::fs::write(&target, "bbb").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&target)
+            .unwrap()
+            .set_modified(base + Duration::from_secs(60))
+            .unwrap();
+        let report = index_project(&mut store, dir.path()).unwrap();
+        assert_eq!(report.indexed_files, 1);
+        assert_eq!(report.unchanged_files, 0);
+        let recorded = store.indexed_file("notes.txt").unwrap().expect("row");
+        assert_eq!(
+            recorded.hash.as_deref(),
+            Some(content_hash(b"bbb").as_str())
+        );
+    }
+
+    /// Unsupported languages yield file facts and nothing else: no symbol
+    /// nodes, no fake resolution, honest empty capabilities.
+    #[test]
+    fn unsupported_files_yield_file_facts_only() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("data.xyz"), "call save()\n").unwrap();
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        let report = index_project(&mut store, dir.path()).unwrap();
+        assert_eq!(report.indexed_files, 1);
+        assert!(store.find_node("file:data.xyz").unwrap().is_some());
+        let projection = store
+            .neighbors(
+                "file:data.xyz",
+                NeighborQuery {
+                    direction: Direction::Both,
+                    depth: 3,
+                    limit: 50,
+                },
+            )
+            .unwrap();
+        assert_eq!(projection.nodes.len(), 1);
+        assert!(projection.edges.is_empty());
+        let recorded = store.indexed_file("data.xyz").unwrap().expect("row");
+        assert_eq!(recorded.adapter.as_deref(), Some("generic"));
+        assert!(recorded.capabilities.is_empty());
     }
 
     #[test]

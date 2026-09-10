@@ -129,6 +129,20 @@ pub struct GraphProjection {
     pub truncated_reason: Option<String>,
 }
 
+/// What the index recorded for one file: the inputs of the skip-if-unchanged
+/// check (§2.4.7). `mtime + size` is the cheap stat gate; `hash` is the
+/// guarantee, compared after reading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedFile {
+    pub hash: Option<String>,
+    pub size: Option<i64>,
+    pub mtime: Option<i64>,
+    pub adapter: Option<String>,
+    pub adapter_version: Option<String>,
+    pub capabilities: Vec<String>,
+    pub status: String,
+}
+
 pub trait GraphStore {
     fn schema_version(&self) -> Result<u32>;
     /// current write generation: stamp for the next file batch. Writers
@@ -150,6 +164,11 @@ pub trait GraphStore {
     fn prune_file_subgraphs(&mut self, retained_paths: &BTreeSet<String>) -> Result<usize>;
     fn find_node(&self, stable_key: &str) -> Result<Option<Node>>;
     fn occurrences_in_file(&self, path: &str) -> Result<Vec<Occurrence>>;
+    /// The recorded file row, if this path was ever indexed.
+    fn indexed_file(&self, path: &str) -> Result<Option<IndexedFile>>;
+    /// Refresh size/mtime after a hash-confirmed no-change touch, so the
+    /// next run skips at the stat gate instead of re-reading.
+    fn refresh_file_stat(&mut self, path: &str, size: i64, mtime: i64) -> Result<()>;
     fn neighbors(&self, stable_key: &str, query: NeighborQuery) -> Result<GraphProjection>;
 }
 
@@ -679,6 +698,41 @@ impl GraphStore for SqliteGraphStore {
         Ok(out)
     }
 
+    fn refresh_file_stat(&mut self, path: &str, size: i64, mtime: i64) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE files SET size = ?1, mtime = ?2 WHERE path = ?3",
+                rusqlite::params![size, mtime, path],
+            )
+            .context("refresh file stat")?;
+        Ok(())
+    }
+
+    fn indexed_file(&self, path: &str) -> Result<Option<IndexedFile>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT hash, size, mtime, adapter, adapter_version, capabilities, status
+                 FROM files WHERE path = ?1",
+            )
+            .context("prepare file record lookup")?;
+        let row = stmt
+            .query_row([path], |row| {
+                Ok(IndexedFile {
+                    hash: row.get(0)?,
+                    size: row.get(1)?,
+                    mtime: row.get(2)?,
+                    adapter: row.get(3)?,
+                    adapter_version: row.get(4)?,
+                    capabilities: parse_json_array(&row.get::<_, String>(5)?),
+                    status: row.get(6)?,
+                })
+            })
+            .optional()
+            .context("read file record")?;
+        Ok(row)
+    }
+
     fn neighbors(&self, stable_key: &str, query: NeighborQuery) -> Result<GraphProjection> {
         let depth = query.depth.clamp(1, MAX_QUERY_DEPTH);
         let limit = query.limit.clamp(1, MAX_QUERY_RESULTS);
@@ -880,11 +934,16 @@ fn record_file(tx: &rusqlite::Transaction, path: &str, file_node: Option<&Node>)
     let size = file_node
         .and_then(|node| node.properties.get("size_bytes"))
         .and_then(Value::as_u64);
+    let mtime = file_node
+        .and_then(|node| node.properties.get("mtime_nanos"))
+        .and_then(Value::as_u64)
+        .map(|value| value as i64);
     tx.execute(
-        "INSERT INTO files(path, hash, size, lang, adapter, adapter_version, capabilities, indexed_at, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'ok')
+        "INSERT INTO files(path, hash, size, mtime, lang, adapter, adapter_version, capabilities, indexed_at, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'ok')
          ON CONFLICT(path) DO UPDATE SET
-            hash = excluded.hash, size = excluded.size, lang = excluded.lang,
+            hash = excluded.hash, size = excluded.size, mtime = excluded.mtime,
+            lang = excluded.lang,
             adapter = excluded.adapter,
             adapter_version = excluded.adapter_version,
             capabilities = excluded.capabilities,
@@ -893,6 +952,7 @@ fn record_file(tx: &rusqlite::Transaction, path: &str, file_node: Option<&Node>)
             path,
             hash,
             size.map(|value| value as i64),
+            mtime,
             file_node.and_then(|node| node.language.as_deref()),
             adapter,
             version,
