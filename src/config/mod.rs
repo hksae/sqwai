@@ -241,6 +241,9 @@ pub struct ModelConfig {
     /// $ per 1M output tokens
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_out: Option<f64>,
+    /// Optional fallback model key (same or other provider)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
 }
 
 /// A model's declared effort behaviour, resolved against its wire format.
@@ -601,6 +604,14 @@ impl Default for UndoConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanFirstMode {
+    #[default]
+    Soft,
+    Off,
+}
+
 /// `[plan]` — the host's own limits on the structured plan (§5.9).
 ///
 /// These are host values on purpose. The plan budget used to be computed from
@@ -618,6 +629,10 @@ pub struct PlanConfig {
     /// to update the plan
     #[serde(default = "default_plan_nudge_after")]
     pub nudge_after: usize,
+    /// plan-first gate: in Act mode, first mutating tool call without an active plan
+    /// requires a plan first unless user message is heuristic-trivial
+    #[serde(default)]
+    pub plan_first: PlanFirstMode,
 }
 
 impl Default for PlanConfig {
@@ -626,6 +641,7 @@ impl Default for PlanConfig {
             budget_ratio: default_plan_budget_ratio(),
             max_steps: default_plan_max_steps(),
             nudge_after: default_plan_nudge_after(),
+            plan_first: PlanFirstMode::default(),
         }
     }
 }
@@ -975,6 +991,33 @@ impl Config {
         })
     }
 
+    /// Resolve the chain of fallback models starting from `model_key`.
+    /// Protects against cycles and returns an ordered list of resolved fallback model configs and providers.
+    pub fn resolve_fallback_chain(&self, model_key: &str) -> Vec<(String, ModelConfig, ResolvedProvider)> {
+        let mut chain = Vec::new();
+        let mut visited = std::collections::BTreeSet::new();
+        visited.insert(model_key.to_string());
+
+        let mut current_key = model_key.to_string();
+        while let Some(mc) = self.models.get(&current_key) {
+            if let Some(ref next_key) = mc.fallback {
+                if !visited.insert(next_key.clone()) {
+                    // Cycle detected, break to prevent infinite fallback loop
+                    break;
+                }
+                if let Some(next_mc) = self.models.get(next_key) {
+                    if let Ok(resolved) = self.resolve_provider(next_mc) {
+                        chain.push((next_key.clone(), next_mc.clone(), resolved));
+                        current_key = next_key.clone();
+                        continue;
+                    }
+                }
+            }
+            break;
+        }
+        chain
+    }
+
     /// implicit env variable name for a provider: `open-router` -> `OPEN_ROUTER_API_KEY`
     pub fn conventional_env_name(provider: &str) -> String {
         let mut s = String::new();
@@ -1284,10 +1327,117 @@ mod tests {
                 effort_always_on: false,
                 price_in: None,
                 price_out: None,
+                fallback: None,
             },
         );
         cfg.apply_builtins();
         assert!(cfg.models.contains_key("my-custom-model"));
         assert!(!cfg.is_builtin_model("my-custom-model"));
+    }
+
+    #[test]
+    fn test_model_config_fallback_and_plan_first_deserialization() {
+        let toml_str = r#"
+            [models.primary]
+            provider = "openai"
+            id = "gpt-4o"
+            context = 128000
+            effort = "off"
+            fallback = "secondary"
+
+            [models.secondary]
+            provider = "anthropic"
+            id = "claude-3-5-sonnet"
+            context = 200000
+            effort = "off"
+
+            [plan]
+            plan_first = "off"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.models["primary"].fallback.as_deref(), Some("secondary"));
+        assert_eq!(cfg.models["secondary"].fallback, None);
+        assert_eq!(cfg.plan.plan_first, PlanFirstMode::Off);
+
+        // Test default plan_first is Soft
+        let default_plan: PlanConfig = toml::from_str("").unwrap();
+        assert_eq!(default_plan.plan_first, PlanFirstMode::Soft);
+    }
+
+    #[test]
+    fn test_resolve_fallback_chain_handles_order_and_cycles() {
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "p1".into(),
+            ProviderConfig {
+                format: WireFormat::Openai,
+                base_url: "http://localhost:1".into(),
+                api_key: Some("dummy".into()),
+                api_key_env: None,
+                continuation: true,
+            },
+        );
+        cfg.providers.insert(
+            "p2".into(),
+            ProviderConfig {
+                format: WireFormat::Anthropic,
+                base_url: "http://localhost:2".into(),
+                api_key: Some("dummy".into()),
+                api_key_env: None,
+                continuation: true,
+            },
+        );
+
+        // A -> B -> C -> A (cycle)
+        cfg.models.insert(
+            "m_a".into(),
+            ModelConfig {
+                provider: "p1".into(),
+                id: "id_a".into(),
+                context: 1000,
+                effort: EffortLevel::Off,
+                effort_control: None,
+                effort_always_on: false,
+                price_in: None,
+                price_out: None,
+                fallback: Some("m_b".into()),
+            },
+        );
+        cfg.models.insert(
+            "m_b".into(),
+            ModelConfig {
+                provider: "p2".into(),
+                id: "id_b".into(),
+                context: 2000,
+                effort: EffortLevel::Off,
+                effort_control: None,
+                effort_always_on: false,
+                price_in: None,
+                price_out: None,
+                fallback: Some("m_c".into()),
+            },
+        );
+        cfg.models.insert(
+            "m_c".into(),
+            ModelConfig {
+                provider: "p1".into(),
+                id: "id_c".into(),
+                context: 3000,
+                effort: EffortLevel::Off,
+                effort_control: None,
+                effort_always_on: false,
+                price_in: None,
+                price_out: None,
+                fallback: Some("m_a".into()), // cycle back to A
+            },
+        );
+
+        let chain = cfg.resolve_fallback_chain("m_a");
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].0, "m_b");
+        assert_eq!(chain[0].1.id, "id_b");
+        assert_eq!(chain[1].0, "m_c");
+        assert_eq!(chain[1].1.id, "id_c");
+        // m_c fallback to m_a was not added due to cycle protection
     }
 }

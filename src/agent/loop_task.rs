@@ -177,7 +177,21 @@ pub enum AgentEvent {
         delay_secs: u64,
         error: String,
     },
+    /// switched to a fallback model on retry-exhausted network/5xx (§5.1, §7 T)
+    FallbackSwitched {
+        from: String,
+        to: String,
+    },
     Completed(Result<AgentOutcome, String>),
+}
+
+#[derive(Clone)]
+pub struct FallbackCandidate {
+    pub key: String,
+    pub model_id: String,
+    pub provider: SharedProvider,
+    pub effort_support: crate::config::EffortSupport,
+    pub context_limit: u64,
 }
 
 #[derive(Debug)]
@@ -228,6 +242,7 @@ impl Drop for AgentHandle {
 pub struct AgentInput {
     pub provider: SharedProvider,
     pub model_id: String,
+    pub model_key: String,
     pub effort: Option<EffortLevel>,
     /// what the target model does with that level (§5.1); threaded through so
     /// providers never have to guess and the UI never has to re-derive it
@@ -282,6 +297,8 @@ pub struct AgentInput {
     /// `None` for main agents. The child stamps it on its journal records
     /// and refuses mutations once the step moves to a newer epoch.
     pub parent_step: Option<plan::StepContext>,
+    /// Optional fallback models to switch to if primary model fails with retry-exhausted network/5xx (§5.1, §7 T).
+    pub fallback_chain: Vec<FallbackCandidate>,
 }
 
 const RETRY_WINDOW: Duration = Duration::from_secs(3600);
@@ -511,6 +528,7 @@ async fn run_subagent(
     let child = spawn_agent(AgentInput {
         provider: provider.clone(),
         model_id: model_id.to_string(),
+        model_key: format!("sub-{id}"),
         effort,
         effort_support,
         max_tokens,
@@ -535,6 +553,7 @@ async fn run_subagent(
         shadow_store,
         subagent_depth: 1,
         parent_step,
+        fallback_chain: Vec::new(),
     });
     let mut child = child;
     let mut output = String::new();
@@ -648,6 +667,99 @@ pub fn spawn_agent(input: AgentInput) -> AgentHandle {
     }
 }
 
+/// Heuristic check for trivial user prompts (§2.1.9, §7 W).
+///
+/// In ACT mode, unprompted file mutations without an active plan require
+/// a plan first (`plan_required`) unless the prompt is trivial:
+/// e.g. single-file typo fixes, simple renames, comments, whitespace,
+/// or very short, non-complex requests affecting <= 1 file.
+pub fn is_heuristic_trivial(messages: &[Message]) -> bool {
+    let last_user_text = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::User)
+        .map(|m| m.content.trim());
+
+    let text = match last_user_text {
+        Some(t) if !t.is_empty() => t,
+        _ => return false,
+    };
+
+    // If there are task lists / checkboxes or multiple lines
+    if text.contains("- [ ]") || text.contains("- [x]") {
+        return false;
+    }
+    let lines: Vec<&str> = text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    if lines.len() > 3 || text.len() > 250 {
+        return false;
+    }
+
+    let lower = text.to_lowercase();
+
+    // Complex / high-effort keywords indicating planning is required
+    const COMPLEX_TERMS: &[&str] = &[
+        "implement",
+        "refactor",
+        "feature",
+        "architecture",
+        "rewrite",
+        "redesign",
+        "migrate",
+        "benchmark",
+        "stage ",
+        "add support for",
+        "build a",
+        "create a new",
+    ];
+    for term in COMPLEX_TERMS {
+        if lower.contains(term) {
+            return false;
+        }
+    }
+
+    // Check count of referenced file paths (words ending with known code/config extensions)
+    let mut file_count = 0;
+    for token in lower.split_whitespace() {
+        let clean = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '_' && c != '/' && c != '\\');
+        if clean.contains('.') {
+            if let Some(ext) = clean.rsplit('.').next() {
+                if matches!(
+                    ext,
+                    "rs" | "py" | "ts" | "js" | "toml" | "md" | "json" | "yaml" | "yml" | "html" | "css" | "go" | "c" | "cpp" | "h" | "sh" | "txt"
+                ) {
+                    file_count += 1;
+                }
+            }
+        }
+    }
+    if file_count > 1 {
+        return false;
+    }
+
+    // Trivial keywords: typo, rename, format, whitespace, spelling, comment, lint
+    const TRIVIAL_TERMS: &[&str] = &[
+        "typo",
+        "rename",
+        "format",
+        "whitespace",
+        "spelling",
+        "comment",
+        "lint",
+    ];
+    for term in TRIVIAL_TERMS {
+        if lower.contains(term) {
+            return true;
+        }
+    }
+
+    // Short single-sentence request without complex terms and <= 1 file
+    if lines.len() == 1 && text.len() <= 50 {
+        return true;
+    }
+
+    false
+}
+
 async fn run_agent(
     input: AgentInput,
     tx: mpsc::Sender<AgentEvent>,
@@ -655,10 +767,11 @@ async fn run_agent(
     cancel_tool: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let AgentInput {
-        provider,
-        model_id,
+        mut provider,
+        mut model_id,
+        model_key,
         mut effort,
-        effort_support,
+        mut effort_support,
         max_tokens,
         system,
         mut messages,
@@ -666,7 +779,7 @@ async fn run_agent(
         session_id,
         blocked_patterns,
         plan_mode,
-        context_limit,
+        mut context_limit,
         enable_tools,
         read_only,
         mut previous_response_id,
@@ -681,7 +794,9 @@ async fn run_agent(
         shadow_store,
         subagent_depth,
         parent_step,
+        mut fallback_chain,
     } = input;
+    let mut current_model_key = model_key;
 
     for pat in &blocked_patterns {
         if let Err(e) = regex::Regex::new(pat) {
@@ -726,8 +841,8 @@ async fn run_agent(
         None
     };
 
-    let caps = provider.capabilities();
-    let policy = context::Policy::with_compaction(
+    let mut caps = provider.capabilities();
+    let mut policy = context::Policy::with_compaction(
         context_limit,
         compaction.anchor_ratio,
         compaction.keep_turns,
@@ -1046,6 +1161,7 @@ async fn run_agent(
             &mut ctl,
             &mut previous_response_id,
             &mut prompt_size,
+            !fallback_chain.is_empty(),
         )
         .await
         {
@@ -1181,6 +1297,49 @@ async fn run_agent(
                         .await;
                     break;
                 }
+                // Stage T: Provider Fallback Chain on retry-exhausted network / 5xx error (§5.1, §7 T)
+                let can_fallback = matches!(
+                    failure.class,
+                    Some(ErrorClass::Network | ErrorClass::Server)
+                ) || failure.retries > 0;
+                if can_fallback && !fallback_chain.is_empty() {
+                    let next = fallback_chain.remove(0);
+                    if let Some(writer) = journal.as_mut() {
+                        let _ = writer.append(
+                            "provider_error",
+                            serde_json::json!({
+                                "class": failure.class.map(|c| c.as_str()).unwrap_or("unclassified"),
+                                "retries": failure.retries,
+                                "recovered": true,
+                                "switched_to": next.key,
+                                "by": "host",
+                            }),
+                        );
+                    }
+                    let _ = tx
+                        .send(AgentEvent::FallbackSwitched {
+                            from: current_model_key.clone(),
+                            to: next.key.clone(),
+                        })
+                        .await;
+                    current_model_key = next.key;
+                    model_id = next.model_id;
+                    provider = next.provider;
+                    caps = provider.capabilities();
+                    effort_support = next.effort_support;
+                    context_limit = next.context_limit;
+                    ctx.context_limit = next.context_limit;
+                    policy = context::Policy::with_compaction(
+                        context_limit,
+                        compaction.anchor_ratio,
+                        compaction.keep_turns,
+                        compaction.stage_ratio,
+                        matches!(compaction.summary, crate::config::CompactionSummary::Short),
+                    );
+                    previous_response_id = None;
+                    continue;
+                }
+
                 let _ = tx.send(AgentEvent::Completed(Err(failure.message))).await;
                 break;
             }
@@ -1266,6 +1425,23 @@ async fn run_agent(
                      user to switch to ACT (Tab) before changing anything.",
                     call.name
                 ))
+            } else if !plan_mode
+                && subagent_depth == 0
+                && plan_limits.plan_first == crate::config::PlanFirstMode::Soft
+                && tools::is_mutating_call(&call.name, &call.args)
+                && call.name != "plan"
+                && crate::plan::open_active_for_session(&root, Some(&session_id)).ok().flatten().is_none()
+                && !is_heuristic_trivial(&messages)
+            {
+                tools::Outcome::err(
+                    serde_json::json!({
+                        "ok": false,
+                        "code": "plan_required",
+                        "reason": "In ACT mode, mutating tools require an active plan first. Create a plan with 'plan create' before modifying project files.",
+                        "hint": "Call 'plan create' with your goal, acceptance criteria, and initial steps."
+                    })
+                    .to_string(),
+                )
             } else {
                 match call.name.as_str() {
                     "ask_user" if subagent_depth > 0 => tools::Outcome::err(
@@ -2044,6 +2220,7 @@ async fn run_turn(
     _ctl: &mut mpsc::Receiver<ControlMsg>,
     response_id: &mut Option<String>,
     prompt_size: &mut u64,
+    has_fallback: bool,
 ) -> Result<TurnOutcome, TurnFailure> {
     use futures::StreamExt;
 
@@ -2240,9 +2417,13 @@ async fn run_turn(
 
         let now = Instant::now();
         let dl = *deadline.get_or_insert(now + RETRY_WINDOW);
-        if now >= dl {
+        if now >= dl || (has_fallback && attempt >= 1) {
             return Err(TurnFailure::new(
-                format!("{err} — giving up after 1h of retries"),
+                if has_fallback && attempt >= 1 {
+                    format!("{err} — giving up after {attempt} retries (fallback model configured)")
+                } else {
+                    format!("{err} — giving up after 1h of retries")
+                },
                 class,
                 attempt,
             ));
@@ -3069,6 +3250,7 @@ mod effort_tests {
             &mut ctl,
             &mut response_id,
             &mut prompt_size,
+            false,
         )
         .await
         .unwrap_or_else(|e| {
@@ -3231,6 +3413,7 @@ mod effort_tests {
             &mut ctl,
             &mut response_id,
             &mut prompt_size,
+            false,
         )
         .await
         .unwrap_or_else(|e| panic!("turn failed: {}", e.message));
@@ -3288,5 +3471,295 @@ mod effort_tests {
         ] {
             assert!(!rejects_effort_parameter(err), "should not match: {err}");
         }
+    }
+
+    #[test]
+    fn test_is_heuristic_trivial_rules() {
+        let msg = |text: &str| vec![Message::new(Role::User, text)];
+
+        // Trivial: single file typo fix, renames, format, comments, etc.
+        assert!(is_heuristic_trivial(&msg("fix typo in src/config/mod.rs")));
+        assert!(is_heuristic_trivial(&msg("fix spelling in README.md")));
+        assert!(is_heuristic_trivial(&msg("rename foo to bar in test.rs")));
+        assert!(is_heuristic_trivial(&msg("format Cargo.toml")));
+        assert!(is_heuristic_trivial(&msg("just fix whitespace in main.rs")));
+        assert!(is_heuristic_trivial(&msg("add comment to lib.rs")));
+
+        // Trivial: short single-sentence request without complex verbs and <= 1 file
+        assert!(is_heuristic_trivial(&msg("cleanup unused import in main.rs")));
+
+        // Non-trivial: multi-file mentions
+        assert!(!is_heuristic_trivial(&msg("fix typo in foo.rs and bar.rs")));
+        assert!(!is_heuristic_trivial(&msg("update src/config/mod.rs and src/agent/loop_task.rs")));
+
+        // Non-trivial: complex terms
+        assert!(!is_heuristic_trivial(&msg("implement Stage T and Stage W")));
+        assert!(!is_heuristic_trivial(&msg("refactor provider error handling")));
+        assert!(!is_heuristic_trivial(&msg("feature: add fallback support to models")));
+        assert!(!is_heuristic_trivial(&msg("rewrite the plan loop")));
+        assert!(!is_heuristic_trivial(&msg("build a new benchmark harness")));
+        assert!(!is_heuristic_trivial(&msg("migrate sqlite schema")));
+
+        // Non-trivial: task lists or multi-line checklists
+        assert!(!is_heuristic_trivial(&msg("Please do:\n- [ ] step 1\n- [ ] step 2")));
+        assert!(!is_heuristic_trivial(&msg("Line 1\nLine 2\nLine 3\nLine 4")));
+
+        // Empty / no user message
+        assert!(!is_heuristic_trivial(&[]));
+        assert!(!is_heuristic_trivial(&[Message::new(Role::Assistant, "hello")]));
+    }
+
+    struct MockTestProvider {
+        events: std::sync::Mutex<Vec<Vec<crate::providers::StreamResult>>>,
+    }
+
+    impl crate::providers::Provider for MockTestProvider {
+        fn stream_chat(
+            &self,
+            _req: crate::providers::ChatRequest,
+        ) -> futures::stream::BoxStream<'static, crate::providers::StreamResult> {
+            use futures::StreamExt;
+            let mut guard = self.events.lock().unwrap();
+            let batch = if !guard.is_empty() {
+                guard.remove(0)
+            } else {
+                vec![Err(anyhow::anyhow!("provider returned 500: internal server error"))]
+            };
+            futures::stream::iter(batch).boxed()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_provider_fallback_chain_switch_on_failure() {
+        let primary_provider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(vec![vec![Err(anyhow::anyhow!(
+                "provider returned 500: internal server error"
+            ))]]),
+        });
+
+        let fallback_provider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(vec![vec![Ok(
+                crate::providers::StreamEvent::Text("fallback response".into()),
+            )]]),
+        });
+
+        let fallback = FallbackCandidate {
+            key: "fallback-model".into(),
+            model_id: "m-fallback".into(),
+            provider: fallback_provider,
+            effort_support: crate::config::EffortSupport::default(),
+            context_limit: 10000,
+        };
+
+        let temp_dir = std::env::temp_dir().join(format!("sqwai-test-fallback-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let input = AgentInput {
+            provider: primary_provider,
+            model_id: "m-primary".into(),
+            model_key: "primary-model".into(),
+            effort: None,
+            effort_support: crate::config::EffortSupport::default(),
+            max_tokens: None,
+            system: vec![],
+            messages: vec![Message::new(Role::User, "hello")],
+            root: temp_dir.clone(),
+            session_id: "test-fallback-sess".into(),
+            blocked_patterns: vec![],
+            plan_mode: false,
+            context_limit: 10000,
+            enable_tools: false,
+            read_only: false,
+            previous_response_id: None,
+            summary: None,
+            mcp: Default::default(),
+            lsp: Default::default(),
+            compact_only: false,
+            diary: Default::default(),
+            memory: Default::default(),
+            compaction: Default::default(),
+            plan_limits: Default::default(),
+            shadow_store: crate::config::ShadowStore::Off,
+            subagent_depth: 0,
+            parent_step: None,
+            fallback_chain: vec![fallback],
+        };
+
+        let mut handle = spawn_agent(input);
+        let mut switched = false;
+        let mut got_fallback_text = false;
+
+        while let Some(ev) = handle.rx.recv().await {
+            match ev {
+                AgentEvent::FallbackSwitched { from, to } => {
+                    assert_eq!(from, "primary-model");
+                    assert_eq!(to, "fallback-model");
+                    switched = true;
+                }
+                AgentEvent::TextDelta(text) => {
+                    if text == "fallback response" {
+                        got_fallback_text = true;
+                    }
+                }
+                AgentEvent::Completed(Ok(_)) => break,
+                AgentEvent::Completed(Err(e)) => panic!("unexpected agent error: {e}"),
+                _ => {}
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        assert!(switched, "should have received FallbackSwitched event");
+        assert!(got_fallback_text, "should have received text from fallback provider");
+    }
+
+    #[tokio::test]
+    async fn test_plan_first_gate_blocks_and_allows_mutations() {
+        // 1. Blocked when non-trivial prompt and no plan in Act mode
+        let blocked_provider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(vec![
+                vec![
+                    Ok(crate::providers::StreamEvent::ToolCall(crate::providers::ToolCallReq::new(
+                        "c1",
+                        "write",
+                        serde_json::json!({
+                            "file_path": "new_feature.rs",
+                            "content": "pub fn hello() {}"
+                        }),
+                    ))),
+                ],
+                vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
+            ]),
+        });
+
+        let temp_dir = std::env::temp_dir().join(format!("sqwai-test-planfirst-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let input = AgentInput {
+            provider: blocked_provider,
+            model_id: "m".into(),
+            model_key: "primary".into(),
+            effort: None,
+            effort_support: crate::config::EffortSupport::default(),
+            max_tokens: None,
+            system: vec![],
+            messages: vec![Message::new(Role::User, "implement new authentication feature")],
+            root: temp_dir.clone(),
+            session_id: "test-plan-first-sess".into(),
+            blocked_patterns: vec![],
+            plan_mode: false,
+            context_limit: 10000,
+            enable_tools: true,
+            read_only: false,
+            previous_response_id: None,
+            summary: None,
+            mcp: Default::default(),
+            lsp: Default::default(),
+            compact_only: false,
+            diary: Default::default(),
+            memory: Default::default(),
+            compaction: Default::default(),
+            plan_limits: crate::config::PlanConfig {
+                plan_first: crate::config::PlanFirstMode::Soft,
+                ..Default::default()
+            },
+            shadow_store: crate::config::ShadowStore::Off,
+            subagent_depth: 0,
+            parent_step: None,
+            fallback_chain: vec![],
+        };
+
+        let mut handle = spawn_agent(input);
+        let mut saw_tool_notice = false;
+
+        while let Some(ev) = handle.rx.recv().await {
+            match ev {
+                AgentEvent::ToolNotice { name, ok, .. } => {
+                    assert_eq!(name, "write");
+                    assert!(!ok, "plan-first gate should have rejected the mutation");
+                    saw_tool_notice = true;
+                }
+                AgentEvent::Completed(Ok(outcome)) => {
+                    if let Some(tool_msg) = outcome.messages.iter().find(|m| m.role == Role::Tool) {
+                        assert!(tool_msg.content.contains("plan_required"), "outcome message: {}", tool_msg.content);
+                    }
+                    break;
+                }
+                AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
+                _ => {}
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        assert!(saw_tool_notice, "should have seen tool notice");
+    }
+
+    #[tokio::test]
+    async fn test_plan_first_gate_allows_when_mode_is_off() {
+        let provider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(vec![
+                vec![
+                    Ok(crate::providers::StreamEvent::ToolCall(crate::providers::ToolCallReq::new(
+                        "c1",
+                        "write",
+                        serde_json::json!({
+                            "file_path": "foo.txt",
+                            "content": "hello"
+                        }),
+                    ))),
+                ],
+                vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
+            ]),
+        });
+
+        let temp_dir = std::env::temp_dir().join(format!("sqwai-test-planfirst-off-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let input = AgentInput {
+            provider,
+            model_id: "m".into(),
+            model_key: "primary".into(),
+            effort: None,
+            effort_support: crate::config::EffortSupport::default(),
+            max_tokens: None,
+            system: vec![],
+            messages: vec![Message::new(Role::User, "implement full rewrite")],
+            root: temp_dir.clone(),
+            session_id: "test-plan-first-off-sess".into(),
+            blocked_patterns: vec![],
+            plan_mode: false,
+            context_limit: 10000,
+            enable_tools: true,
+            read_only: false,
+            previous_response_id: None,
+            summary: None,
+            mcp: Default::default(),
+            lsp: Default::default(),
+            compact_only: false,
+            diary: Default::default(),
+            memory: Default::default(),
+            compaction: Default::default(),
+            plan_limits: crate::config::PlanConfig {
+                plan_first: crate::config::PlanFirstMode::Off,
+                ..Default::default()
+            },
+            shadow_store: crate::config::ShadowStore::Off,
+            subagent_depth: 0,
+            parent_step: None,
+            fallback_chain: vec![],
+        };
+
+        let mut handle = spawn_agent(input);
+        let mut saw_tool_notice = false;
+
+        while let Some(ev) = handle.rx.recv().await {
+            match ev {
+                AgentEvent::ToolNotice { name, ok, .. } => {
+                    assert_eq!(name, "write");
+                    assert!(ok, "mutation should be allowed when plan_first is Off");
+                    saw_tool_notice = true;
+                }
+                AgentEvent::Completed(Ok(_)) => break,
+                AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
+                _ => {}
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        assert!(saw_tool_notice, "should have seen tool notice");
     }
 }

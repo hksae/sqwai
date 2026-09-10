@@ -570,6 +570,7 @@ impl App {
                     effort_always_on: previous.as_ref().is_some_and(|p| p.effort_always_on),
                     price_in: previous.as_ref().and_then(|p| p.price_in),
                     price_out: previous.as_ref().and_then(|p| p.price_out),
+                    fallback: previous.as_ref().and_then(|p| p.fallback.clone()),
                 };
                 self.cfg.models.insert(new_key.clone(), updated.clone());
                 if self.session.model_key == new_key {

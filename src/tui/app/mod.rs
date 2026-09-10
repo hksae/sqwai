@@ -668,6 +668,7 @@ impl App {
                 effort_always_on: false,
                 price_in: None,
                 price_out: None,
+                fallback: None,
             });
         let resolved = cfg.resolve_provider(&model_cfg)?;
         let provider = providers::create(&resolved)?;
@@ -1712,9 +1713,26 @@ impl App {
         let system = self.system_block();
         let msgs: Vec<PMessage> = self.session.messages.clone();
         let root = std::env::current_dir().unwrap_or_default();
+        let fallback_chain = self
+            .cfg
+            .resolve_fallback_chain(&self.session.model_key)
+            .into_iter()
+            .filter_map(|(key, mc, resolved)| {
+                let provider = providers::create(&resolved).ok()?;
+                let effort_support = mc.effort_support(resolved.format);
+                Some(crate::agent::loop_task::FallbackCandidate {
+                    key,
+                    model_id: mc.id.clone(),
+                    provider,
+                    effort_support,
+                    context_limit: mc.context,
+                })
+            })
+            .collect();
         let input = crate::agent::loop_task::AgentInput {
             provider: self.provider.clone(),
             model_id: self.model_cfg.id.clone(),
+            model_key: self.session.model_key.clone(),
             effort: if self.model_cfg.effort == EffortLevel::Off {
                 None
             } else {
@@ -1751,6 +1769,7 @@ impl App {
             shadow_store: self.cfg.undo.shadow,
             subagent_depth: 0,
             parent_step: None,
+            fallback_chain,
         };
         self.context_bootstrap_pending = false;
         self.agent = Some(spawn_agent(input));
@@ -1800,6 +1819,7 @@ impl App {
         let input = crate::agent::loop_task::AgentInput {
             provider: self.provider.clone(),
             model_id: self.model_cfg.id.clone(),
+            model_key: self.session.model_key.clone(),
             effort: None,
             effort_support: self.effort_support(),
             max_tokens: None,
@@ -1825,6 +1845,7 @@ impl App {
             shadow_store: self.cfg.undo.shadow,
             subagent_depth: 0,
             parent_step: None,
+            fallback_chain: Vec::new(),
         };
         self.agent = Some(spawn_agent(input));
         self.streaming = true;
@@ -3083,6 +3104,22 @@ impl App {
                         }
                     }
                     self.retry_line = Some(format!("retry #{attempt} in {delay_secs}s — {error}"));
+                    self.dirty = true;
+                }
+                AgentEvent::FallbackSwitched { from, to } => {
+                    self.push_segment(Segment::Status {
+                        text: format!("primary model '{from}' failed; switched to fallback '{to}'"),
+                        kind: StatusKind::Warn,
+                        expanded: false,
+                    });
+                    self.session.model_key = to.clone();
+                    if let Some(mc) = self.cfg.models.get(&to) {
+                        self.model_cfg = mc.clone();
+                        self.session.context_limit = mc.context;
+                    }
+                    self.retry_line = None;
+                    self.retry_notified = false;
+                    self.status(&format!("switched to fallback model: {to}"), StatusKind::Warn);
                     self.dirty = true;
                 }
                 AgentEvent::Completed(res) => {

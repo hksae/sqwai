@@ -74,6 +74,7 @@ mod tests {
                 effort_always_on: false,
                 price_in: None,
                 price_out: None,
+                fallback: None,
             },
         );
         let cfg = Config {
@@ -173,6 +174,7 @@ mod tests {
                 effort_always_on: false,
                 price_in: None,
                 price_out: None,
+                fallback: None,
             },
         );
         let cfg = Config {
@@ -993,6 +995,7 @@ mod tests {
                 effort_always_on: false,
                 price_in: None,
                 price_out: None,
+                fallback: None,
             },
         );
         let mut s = Session::new("m2".into(), 2000);
@@ -4835,6 +4838,7 @@ mod tests {
                 effort_always_on: false,
                 price_in: None,
                 price_out: None,
+                fallback: None,
             },
         );
         let cfg = Config {
@@ -5395,6 +5399,7 @@ mod tests {
                 effort_always_on: false,
                 price_in: Some(5.0),
                 price_out: Some(30.0),
+                fallback: None,
             },
         );
         app.open_menu(Menu::Models {
