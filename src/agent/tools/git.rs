@@ -34,18 +34,21 @@ fn run_git(ctx: &ToolCtx, args: &[&str]) -> Outcome {
         format!("{}\n{}", stdout.trim(), stderr.trim())
     };
     let text = truncate(&text);
+    let code = output.status.code();
     if output.status.success() {
         Outcome::ok(if text.is_empty() {
             "ok".to_string()
         } else {
             text
         })
+        .with_exit_code(code)
     } else {
         Outcome::err(if text.is_empty() {
             format!("git failed with {}", output.status)
         } else {
             text
         })
+        .with_exit_code(code)
     }
 }
 

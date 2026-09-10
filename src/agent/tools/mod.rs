@@ -295,6 +295,10 @@ pub struct Outcome {
     pub ok: bool,
     /// short result the model (and the collapsed TUI row) sees
     pub output: String,
+    /// process exit code when this outcome came from a child process.
+    /// `None` for host-side results (reads, listings, rejections) and for
+    /// outcomes whose producer does not report one.
+    pub exit_code: Option<i32>,
     /// unified diff of a file mutation, shown in the TUI when expanded
     pub diff: Option<String>,
     /// host-derived metadata for the journal
@@ -312,6 +316,7 @@ impl Outcome {
         Self {
             ok: true,
             output: output.into(),
+            exit_code: None,
             diff: None,
             file_diff: None,
             file_diffs: Vec::new(),
@@ -322,6 +327,7 @@ impl Outcome {
         Self {
             ok: false,
             output: output.into(),
+            exit_code: None,
             diff: None,
             file_diff: None,
             file_diffs: Vec::new(),
@@ -335,11 +341,17 @@ impl Outcome {
         Self {
             ok: false,
             output: "cancelled by user (Esc)".to_string(),
+            exit_code: None,
             diff: None,
             file_diff: None,
             file_diffs: Vec::new(),
             cancelled: true,
         }
+    }
+    /// attach the child exit code to a host-built outcome
+    pub fn with_exit_code(mut self, code: Option<i32>) -> Self {
+        self.exit_code = code;
+        self
     }
     /// attach a unified diff, keeping the short summary
     pub fn with_diff(mut self, diff: String) -> Self {
@@ -1945,6 +1957,11 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                 });
             }
             let output_hash = blake3::hash(run.output.as_bytes()).to_hex().to_string();
+            // exit travels with the outcome now: receipts only issue on
+            // `ok` runs, so this is zero in practice, but sourced rather
+            // than assumed — a nonzero code with ok would be a loud bug,
+            // not a silent receipt
+            let exit_code = run.exit_code;
             let receipt_fields = serde_json::json!({
                 "check_definition_hash": plan::check_definition_hash(&command),
                 "runner": "exec",
@@ -1955,7 +1972,7 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                 "finished_at": finished_at,
                 "state_before": state_before,
                 "state_after": state_after,
-                "exit": 0,
+                "exit": exit_code,
                 "output_hash": output_hash,
                 "paths": paths,
             });
@@ -1972,14 +1989,14 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                     return Outcome::err(format!("receipt journal unwritable: {e:#}"));
                 }
             };
-            // a passing command run exits zero by construction: failures
-            // return above with `acceptance_failed` and no receipt
+            // receipts issue only on `ok` runs (failures return above),
+            // so the sourced code below is zero — kept as data, not dogma
             let receipt = plan::Receipt {
                 session: ctx.session_id.clone(),
                 seq,
                 state_digest: state_after.clone(),
                 command: Some(command.clone()),
-                exit: Some(0),
+                exit: exit_code,
                 at: finished_at.clone(),
                 check_definition_hash: Some(plan::check_definition_hash(&command)),
                 runner: Some("exec".to_string()),
@@ -2018,7 +2035,58 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
             ) {
                 return Outcome::err(message);
             }
-            (evidence, None)
+            // attachment receipt (§2.1.4): the evidence records are
+            // immutable, but the world they describe is not. Pin a
+            // point-in-time digest over the traversed inputs so a later
+            // file move stales this item through the same machinery as
+            // command checks — instead of letting verified evidence
+            // silently outlive the state it attested.
+            let paths = plan::digest_paths(&active);
+            let digest = plan::state_digest(&ctx.root, &paths, "");
+            let at = plan::now();
+            let receipt_fields = serde_json::json!({
+                "runner": "evidence",
+                "step_id": step_id,
+                "evidence_refs": evidence.clone(),
+                "cwd": ctx.root.display().to_string(),
+                "finished_at": at,
+                "state_before": digest,
+                "state_after": digest,
+                "state_digest": digest,
+                "paths": paths,
+            });
+            let seq = match crate::agent::journal::Journal::open(&ctx.root, &ctx.session_id) {
+                Ok(mut journal) => {
+                    match journal.append_verification_receipt(index, receipt_fields) {
+                        Ok(seq) => seq,
+                        Err(e) => {
+                            return Outcome::err(format!("receipt journal unwritable: {e:#}"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Outcome::err(format!("receipt journal unwritable: {e:#}"));
+                }
+            };
+            let receipt = plan::Receipt {
+                session: ctx.session_id.clone(),
+                seq,
+                state_digest: digest.clone(),
+                command: None,
+                exit: None,
+                at: at.clone(),
+                check_definition_hash: None,
+                runner: Some("evidence".to_string()),
+                args: None,
+                cwd: Some(ctx.root.display().to_string()),
+                started_at: None,
+                finished_at: Some(at),
+                state_before: Some(digest.clone()),
+                state_after: Some(digest),
+                output_hash: None,
+                paths,
+            };
+            (evidence, Some(receipt))
         }
     };
 
@@ -3613,6 +3681,65 @@ mod tests {
         assert_eq!(
             plan::open_active(&dir).unwrap().unwrap().acceptance[1].status,
             plan::AcceptanceStatus::Pending
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A text acceptance verified on step evidence pins an attachment
+    /// receipt, so a later move of the traversed files stales it through
+    /// the same machinery as command checks — instead of letting verified
+    /// evidence silently outlive the state it attested.
+    #[test]
+    fn text_verify_pins_attachment_receipt_and_later_diff_stales_it() {
+        let (mut ctx, dir) = proj();
+        fs::write(dir.join("tracked.rs"), "one").unwrap();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "evidence with a receipt",
+                "acceptance": ["the code is formatted"],
+                "steps": [{"title": "verify", "kind": "verify", "refs": ["tracked.rs"]}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        let mut journal = crate::agent::journal::Journal::open(&dir, "verify-rules").unwrap();
+        journal.set_attribution(Some("1".into()), Some(plan_id), "main");
+        journal
+            .append_evidence("tool_result", json!({"tool": "bash", "ok": true}))
+            .unwrap();
+
+        let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(verified.ok, "{}", verified.output);
+        let plan = plan::open_active(&dir).unwrap().unwrap();
+        let item = &plan.acceptance[0];
+        assert_eq!(item.validation.status, plan::ValidationStatus::Passed);
+        assert_eq!(item.validation.receipts.len(), 1);
+        let receipt = &item.validation.receipts[0];
+        assert_eq!(receipt.runner.as_deref(), Some("evidence"));
+        assert_eq!(receipt.state_before, receipt.state_after);
+        assert!(receipt.paths.iter().any(|p| p == "tracked.rs"));
+
+        // close the step so `complete` reaches the acceptance gate; a
+        // later move of the traversed file must then refuse completion
+        // until the item is re-verified
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        assert!(
+            plan_op(
+                &mut ctx,
+                &json!({"op": "cancel", "id": "1", "reason": "done here"})
+            )
+            .ok
+        );
+        let sid = ctx.session_id.clone();
+        assert!(plan::invalidate_on_diff(&dir, &sid, &["tracked.rs".to_string()]).unwrap());
+        let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
+        assert!(!completed.ok, "{}", completed.output);
+        assert!(
+            completed.output.contains("acceptance_stale"),
+            "{}",
+            completed.output
         );
         fs::remove_dir_all(&dir).ok();
     }

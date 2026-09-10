@@ -303,6 +303,7 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
     Outcome {
         ok,
         output: format!("{status_line}\n{body}"),
+        exit_code: code,
         diff: None,
         file_diff: None,
         file_diffs: Vec::new(),
@@ -510,6 +511,19 @@ mod tests {
 
     fn ctx() -> ToolCtx {
         ToolCtx::new(std::env::temp_dir())
+    }
+
+    /// The exit code travels with the outcome instead of living only in
+    /// the human-readable status line: receipts record the sourced code.
+    #[test]
+    fn exit_codes_travel_with_the_outcome() {
+        let mut c = ctx();
+        let ok_run = bash(&mut c, "echo hi", Some(30), false);
+        assert!(ok_run.ok, "{}", ok_run.output);
+        assert_eq!(ok_run.exit_code, Some(0));
+        let bad_run = bash(&mut c, "exit 3", Some(30), false);
+        assert!(!bad_run.ok);
+        assert_eq!(bad_run.exit_code, Some(3));
     }
 
     /// A command that blocks well past any test deadline on this platform and

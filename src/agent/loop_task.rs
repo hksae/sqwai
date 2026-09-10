@@ -1428,6 +1428,7 @@ async fn run_agent(
                             Ok((output, is_error)) => tools::Outcome {
                                 output,
                                 ok: !is_error,
+                                exit_code: None,
                                 diff: None,
                                 file_diff: None,
                                 file_diffs: Vec::new(),
