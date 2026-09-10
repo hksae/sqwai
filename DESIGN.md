@@ -782,18 +782,26 @@ status: ok|building|stale|corrupt).
 
 SQL
 
-files   (path PK, hash, size, mtime, lang, level, adapter, adapter_version,
-         indexed_at, status, error)
+files   (path PK, hash, size, mtime, lang, adapter, adapter_version,
+         capabilities JSON, indexed_at, status, error)
 nodes   (id INTEGER PK, key UNIQUE, kind, name, path, lang, line_start, line_end,
-         signature, props JSON, hash, source, confidence, generation)
-edges   (from_id, to_id, kind, source, confidence, props JSON, PRIMARY KEY(from_id,to_id,kind,source))
+         signature, roles JSON, props JSON, hash, source, confidence, generation)
+occurrences (id INTEGER PK, path, name, kind, line, source_hash, generation)
+edges   (from_id, to_id, kind, source, confidence, source_hash, generation,
+         limitations JSON, props JSON, PRIMARY KEY(from_id,to_id,kind,source))
 nodes_fts USING fts5(key, name, path, signature, text, content='nodes')
 meta    (k PK, v)
--- indexes: nodes(kind), nodes(path), nodes(name), edges(to_id), files(status)
-Bounded traversal is a WITH RECURSIVE with depth ≤ graph.max_depth (3)
-and LIMIT. One file reindex is one transaction. Full rebuild writes to
-graph.db.new and renames on success, so a half-built graph is never
-published. A corrupt DB is renamed to graph/corrupt-<ts>.db, status: corrupt is shown, and /graph-rebuild is offered.
+-- indexes: nodes(kind), nodes(path), nodes(name), edges(to_id), files(status), occurrences(path)
+Occurrences (a call site naming `save`) live apart from resolved edges
+(that call bound to `Session.save`): unresolved and ambiguous references
+are stored as such — no guessed edges from a bare name match. When the
+target symbol disappears, its resolved edges stop being current.
+Bounded traversal is BFS in Rust over indexed queries with depth, visited
+and edge budgets: a bare SQL LIMIT does not bound the cost of an arbitrary
+recursive query. One file reindex is one transaction replacing everything
+that file owns. Full rebuild publishes a complete generation; the switch
+accounts for WAL and open readers instead of renaming a live SQLite file.
+A corrupt DB is renamed to graph/corrupt-<ts>.db, status: corrupt is shown, and /graph-rebuild is offered.
 
 2.4.3 Model and stable keys
 Node kinds: file folder document section module namespace function method class struct enum interface trait impl variable constant type macro test memory decision. Edge kinds: contains defined_in imports references calls uses implements extends links_to mentions about supports contradicts supersedes.
@@ -816,20 +824,24 @@ fall back to sym:<path>::<kind>::<name>#<n> where n is the ordinal of that
 reordering of same-named symbols, which is acceptable. A rename produces a new
 key; the old node is deleted on reindex (no rename tracking in core; LSP may
 add supersedes later).
+Declarations carry `roles[]`: `test` is a role of a function or class, not
+a node kind. Memory nodes always carry `source: model` — an indexed note
+keeps its author and journal reference but never becomes a parser fact.
 
-2.4.4 Adapters and capability levels
+2.4.4 Adapters and capabilities
 text
 
-Level 0  file node                                   any file
-Level 1  + imports/path mentions (regex)             generic adapter
-Level 2  + declarations, sections, ranges            tree-sitter / markdown / toml
-Level 3  + references, calls                         tree-sitter queries where reliable
-Level 4  + semantic relations                        LSP (optional, later)
+declarations · imports · definitions · references · call_hierarchy —
+each unavailable, syntactic, or semantic per analyzer output, stored on
+the files row. No single 0–4 ladder: an analyzer may offer syntactic
+declarations without references, or semantic definitions via LSP.
+Generic fallback is mandatory: file facts, bounded text search, path
+mentions, and honest absence of symbol resolution for unsupported files.
 Adapter contract: input (path, bytes, lang); output nodes, edges, warnings;
 never emits paths outside the root; deterministic; must not panic on malformed
 input; records adapter_version so a bumped adapter triggers reindex of its
-files. Initial adapters: generic, markdown, toml, rust (tree-sitter,
-Level 2–3), then python (proof of universality), then memory (§2.4.5).
+files. Initial adapters: generic, markdown, toml, rust (tree-sitter),
+then python (proof of universality), then memory (§2.4.5).
 
 2.4.5 Memory adapter
 Reads memory/*.md and journal note records; emits memory|decision nodes
@@ -838,7 +850,9 @@ for those that do not (kept for stale detection), and supersedes from a
 Corrections bullet to the entry it corrects when the bullet contains a
 j#N or a date reference. This replaces the earlier remember tool: memory
 is written through diary/MEMORY.md and indexed, never written into the graph
-directly.
+directly. Memory nodes are model claims, not parser facts: they keep their
+author and journal reference through indexing, recall surfaces both, and
+indexing never upgrades a note into a verified fact.
 
 2.4.6 Operations
 resolve_ref (host API and reflector tool; also exposed to the main
@@ -848,20 +862,27 @@ JSON
 
 {"ref":"src/session/mod.rs::fn::save"}            // key or shorthand
 {"path":"src/session/mod.rs","symbol":"save"}
-→ {"status":"found","key":"sym:…","kind":"function","line":142,"signature":"pub fn save(&self) -> Result<()>","level":3}
-→ {"status":"not_found","level":3,"candidates":[{"key":"…","score":0.8},…]}   // ≤5, name similarity + same file first
-→ {"status":"unknown","level":1,"reason":"file indexed at level 1; symbol resolution unavailable"}
+→ {"status":"found","key":"sym:…","kind":"function","line":142,"signature":"pub fn save(&self) -> Result<()>","source_hash":"…","capabilities":["declarations"]}
+→ {"status":"not_found","capabilities":["declarations"],"candidates":[{"key":"…","score":0.8},…]}   // ≤5, name similarity + same file first
+→ {"status":"ambiguous","candidates":[…]}   // several fitting candidates, no guessing
+→ {"status":"unknown","reason":"file indexed without declarations; symbol resolution unavailable"}
 unknown is not not_found: the validator and pre-edit check only act on
-not_found at level ≥ 2. Freshness is guaranteed by §2.4.7 before answering.
+not_found where the file's capabilities include declarations (syntactic or
+better), and never on unknown. Every response carries source_hash, scope
+and provenance; limitations lists what the analyzer could not do (e.g.
+["macro_expansion_unavailable"]). Freshness is guaranteed by §2.4.7 before
+answering.
 
 recall — bounded FTS over names, paths, headings, signatures, memory
 text; limit default 8, max 20; deterministic ranking (exact key > exact name
 
 path prefix > FTS rank); returns keys, kinds, paths, one-line snippet,
-provenance; never file contents.
+provenance, author and journal ref for memory nodes; never file contents.
+Search results are candidates, not facts.
 
 graph_query — node, direction, relations[], kinds[], depth ≤ 3,
-limit ≤ 50; returns a projection (nodes, edges, truncated flag).
+limit ≤ 50; bounded BFS in Rust over indexed queries with a visited/edge
+budget; returns a projection (nodes, edges, truncated flag plus the reason).
 
 memory_read(date) — not a graph op but listed here because recall
 results of kind memory point to it.
@@ -887,10 +908,16 @@ receives graph facts from a store whose status is building or corrupt;
 it receives stale-flagged facts only for recall/graph_query, never for
 resolve_ref (which waits or returns unknown).
 
+Execution: a single writer task owns all graph writes; parsing runs in a
+bounded worker pool outside the write transaction; repeat jobs for one
+file coalesce. Every analysis result carries the generation it was
+computed from, and a stale result never overwrites a newer one: start A
+→ get B → write B → finish A means A's result is dropped.
+
 2.4.8 Verifier integrations
 Where	Behavior
-plan start/add with refs	each ref resolved per intent: `modify`/`remove` require `found` at level ≥ 2 (`not_found` rejects with candidates); `create` requires the path/symbol to be absent on declaration (`add`/`create`) and initial `start` from `Pending` (if a step is resumed after partial work, symbols created by this step's earlier actions are not treated as collisions); `unknown` passes for all intents
-edit/multi_edit pre-check	if old_string is a single identifier-like token and the file is at level ≥ 2 and resolve_ref is not_found → tool still runs (the string may legitimately be non-symbol text) but the result carries warning: symbol 'foo' not in index for this file
+plan start/add with refs	each ref resolved per intent: `modify`/`remove` require `found` where the file's capabilities include declarations (syntactic or better) (`not_found` rejects with candidates); `create` requires the path/symbol to be absent on declaration (`add`/`create`) and initial `start` from `Pending` (if a step is resumed after partial work, symbols created by this step's earlier actions are not treated as collisions); `unknown` passes for all intents
+edit/multi_edit pre-check	if old_string is a single identifier-like token and the file's capabilities include declarations and resolve_ref is not_found → tool still runs (the string may legitimately be non-symbol text) but the result carries warning: symbol 'foo' not in index for this file
 finish of a change step	host computes blast radius: nodes with `references
 diary/MEMORY.md load	stale markers (§2.3.7)
 reflector executor	resolve_ref is its primary tool for exists checks
@@ -942,7 +969,7 @@ functions in `#[cfg(test)]` modules, files under `tests/`; Python: `test_*`
 functions and classes, pytest fixtures as `uses`) and `calls|uses|references`
 edges from tests to code. Reverse traversal from changed symbols, depth ≤
 `graph.impact_depth` (3), through `calls|uses|implements|extends`; stop at
-`test` nodes. Files at capability Level < 3 contribute nothing (no false precision).
+`test` nodes. Files whose capabilities lack references contribute nothing (no false precision).
 
 **Command synthesis** per language, from `MEMORY.md ## Project` test command
 or defaults: Rust `cargo test <mod>::<name> -- --exact` batched per crate;
@@ -956,11 +983,11 @@ is a table in the adapter, not model output.
 | `finish` of a `change` step | host computes `impact.tests[]` and `impact.files[]`, stores them on the step, shows one line in block D: `impact: 7 tests (session::save, tui::todo_panel…) — verify step suggested` |
 | next `verify` step or `plan verify` on a `cmd:` acceptance | the runner executes the impacted set first; a red result short-circuits; a green result is evidence for the step but **not** for `complete` |
 | `complete` | full suite always; impact never replaces it |
-| `impact.tests` empty for a Level ≥ 3 file | warning in the step: `no tests reach <symbol>` — an index observation at the current adapter level, not proof that no tests reach it (e.g. integration tests or macros); not a blocker |
+| `impact.tests` empty for a file with references capability | warning in the step: `no tests reach <symbol>` — an index observation at the current adapter capabilities, not proof that no tests reach it (e.g. integration tests or macros); not a blocker |
 | reflector | `run` checks may use the impacted set when the criticism names a symbol |
 
 **Confidence.** Each impact result carries `coverage: exact|partial|unknown`
-based on the lowest capability level among traversed files; the runner prints
+based on the weakest capabilities among traversed files; the runner prints
 it. Dynamic dispatch, macros, reflection, and integration tests that reach
 code through I/O are known gaps; the full-suite rule at `complete` exists
 because of them.
@@ -970,7 +997,7 @@ that: full suite), `plan.verify_impact_first = true`.
 
 **Tests.** Fixture crate: change one function → exactly its callers' tests
 selected; change a trait method → implementors' tests included; change a file
-at Level 1 → `coverage: unknown`, full suite; `complete` after green impact run
+indexed without references → `coverage: unknown`, full suite; `complete` after green impact run
 still runs the full suite.
 
 ### 2.5 Checkpoints and undo
@@ -1711,7 +1738,7 @@ awaits diagnostics up to lsp.diag_timeout_ms (1500), writes a diagnostics
 journal record, and appends an error summary to the tool result. finish of
 a change step warns (or rejects, if plan.require_clean_diagnostics) when
 changed files have errors. Navigation tools (definition, references) feed
-the graph at Level 4 later.
+the graph as semantic capabilities later.
 
 5.7 Skills
 SKILL.md with name, description, triggers frontmatter; directories:
@@ -1917,12 +1944,12 @@ number; a `partial` one is missing something the design calls for.
 | H0 | L0 fact block + criticism detector | planned | F2 |
 | H1 | bash_ro (advisory + post-check), read-only toolset, Scope/Neutralizer/Executor/Verdict, /verify | planned | H0, D |
 | I1 | Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild | done — rusqlite (bundled) engine with §2.4.2 schema | E |
-| I2 | Rust adapter (tree-sitter), qualified keys | planned | I1 |
-| I3 | Freshness: edit/bash/undo/head triggers; status semantics | planned | I1 |
+| I2 | Rust + Python + TypeScript adapters (tree-sitter, minimal: declarations) | planned | I1 |
+| I3 | Freshness: edit/bash/undo/head triggers; status semantics; out-of-order protection (mandatory) | planned | I1 |
 | I4 | resolve_ref; validator refs; pre-edit warning; stale markers; reflector executor tool | next | I2, I3, F1 |
 | I5 | Memory adapter; recall/graph_query exposed; context block | planned | I4, F4 |
-| J | Python adapter; LSP diagnostics → journal; graph-view list MVP; checkpoint before/after bash | planned | I5, C |
-| K | Canvas graph-view, watcher, LSP Level 4, blast radius, path view | planned | J |
+| J | Python references; LSP diagnostics → journal; graph-view list MVP; checkpoint before/after bash | planned | I5, C |
+| K | Canvas graph-view, watcher, LSP semantic capabilities, blast radius, path view | planned | J |
 | L | Browser: CDP driver, tree pipeline, tools, safety, trust, acceptance runner, artifacts | planned | K, F3, H0 |
 | M | Test impact: `test` nodes in Rust/Python adapters, reverse traversal, command synthesis, runner integration | planned | I5, acceptance runners |
 | N | Plan from issue: fetch, extract, resolve, review UI, drafts | planned | I4, F1, secrets/trust |
@@ -1977,6 +2004,8 @@ Diary entries never contain a test count or exit code absent from the host
 block (post-check test).
 remember-style direct writes to the graph do not exist; rm -rf .sqwai/graph followed by /graph-rebuild restores identical recall
 results for memory nodes.
+Incremental projection == full rebuild: reindexing files one by one yields
+the same normalized projection as a full rebuild (mandatory test).
 /undo reopens exactly the steps whose evidence was reverted.
 Reflector scenario suite (§3.5) passes: agent_error, claim_not_confirmed,
 scope_mismatch, partial, undetermined, tone invariance, no-journal
