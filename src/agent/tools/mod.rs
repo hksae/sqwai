@@ -733,30 +733,31 @@ continue; await its result before dependent changes or reporting success.",
             name: "resolve_ref",
             kind: Kind::ReadOnly,
             description: "Resolve a code reference (file path and/or symbol name) against the project graph. \
-Returns definition location, signature, source hash, and capabilities, or suggestions if not found.",
+Guarantees disk freshness by verifying file byte hash before resolution. \
+Returns definition location, signature, provenance (source_hash, generation, freshness, precision), and capabilities, or suggestions if not found.",
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "ref": {
-                        "type": "string",
-                        "description": "reference key (sym:path::kind::name) or shorthand (path::symbol)"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "project-relative file path"
-                    },
-                    "symbol": {
-                        "type": "string",
-                        "description": "symbol name or scoped name"
-                    }
+                "ref": {
+                    "type": "string",
+                    "description": "reference key (sym:path::kind::name) or shorthand (path::symbol)"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "project-relative file path"
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "symbol name or scoped name"
                 }
-            }),
+            }}),
         },
         ToolDef {
             name: "recall",
             kind: Kind::ReadOnly,
-            description: "Bounded full-text and ranked search over names, paths, signatures, and memory/diary notes in the project graph. \
-Returns matching items with keys, kinds, paths, one-line snippets, and author/journal provenance for memory nodes.",
+            description: "Search code and memory graph by symbol name, path, concept, or memory text snippet using deterministic ranking. \
+Returns matching items with canonical keys (sym:..., file:..., mem:...), kinds, paths, one-line snippets, and provenance. \
+Always prefer using the canonical keys returned by recall in subsequent graph_query calls.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -775,37 +776,53 @@ Returns matching items with keys, kinds, paths, one-line snippets, and author/jo
         ToolDef {
             name: "graph_query",
             kind: Kind::ReadOnly,
-            description: "Traverse the project graph neighborhood from a starting node or symbol name using bounded breadth-first search. \
-Returns connected nodes, incident edges, and truncation status.",
+            description: "Traverse relationships in the code and memory graph from a starting node using bounded breadth-first search. \
+Accepts canonical keys (sym:..., file:..., mem:...) or shorthand (path::symbol, symbol name). \
+If the starting node is unresolvable or ambiguous, returns an explicit error with candidates (use recall to find canonical keys). \
+By default, uses the 'dependencies' preset and does not expand file containers into sibling declarations. \
+Returns connected nodes, incident edges, and explicit truncation status.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "node": {
                         "type": "string",
-                        "description": "node key (sym:..., mem:..., file:...) or symbol name"
+                        "description": "canonical node key (sym:..., file:..., mem:...) or shorthand (path::symbol, symbol name)"
+                    },
+                    "preset": {
+                        "type": "string",
+                        "enum": ["dependencies", "structure", "related_notes", "all"],
+                        "description": "relation preset: 'dependencies' (calls, imports, references, about; default), 'structure' (hierarchy/containment), 'related_notes' (memories/decisions), 'all'"
                     },
                     "direction": {
                         "type": "string",
                         "enum": ["both", "incoming", "outgoing"],
                         "description": "traversal direction (default 'both')"
                     },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "traversal depth 1..=3 (default 2)"
+                    },
+                    "max_nodes": {
+                        "type": "integer",
+                        "description": "maximum node budget 1..=100 (default 30)"
+                    },
+                    "max_edges": {
+                        "type": "integer",
+                        "description": "maximum edge budget 1..=100 (default 50)"
+                    },
+                    "max_output_tokens": {
+                        "type": "integer",
+                        "description": "maximum token budget for formatted output (default 2000)"
+                    },
                     "relations": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "optional edge kind filter (e.g. ['about', 'contains', 'supersedes'])"
+                        "description": "custom edge kind filter overriding preset (e.g. ['calls', 'imports'])"
                     },
                     "kinds": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "optional node kind filter (e.g. ['decision', 'memory', 'function', 'struct'])"
-                    },
-                    "depth": {
-                        "type": "integer",
-                        "description": "traversal depth 1..=3 (default 1)"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "maximum edges budget 1..=50 (default 50)"
+                        "description": "optional node kind filter (e.g. ['function', 'struct', 'decision'])"
                     }
                 },
                 "required": ["node"]
@@ -1402,14 +1419,30 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
                 Some(n) if !n.trim().is_empty() => n.trim(),
                 _ => return Outcome::err("graph_query requires a non-empty 'node' argument"),
             };
+            let preset = args["preset"].as_str().map(String::from);
             let dir_str = args["direction"].as_str().unwrap_or("both");
             let direction = match dir_str.to_ascii_lowercase().as_str() {
                 "in" | "incoming" => crate::agent::graph::Direction::Incoming,
                 "out" | "outgoing" => crate::agent::graph::Direction::Outgoing,
                 _ => crate::agent::graph::Direction::Both,
             };
-            let depth = args["depth"].as_u64().unwrap_or(1).clamp(1, 3) as u8;
-            let limit = args["limit"].as_u64().unwrap_or(50).clamp(1, 50) as usize;
+            let depth = args["max_depth"]
+                .as_u64()
+                .or_else(|| args["depth"].as_u64())
+                .unwrap_or(crate::agent::graph::DEFAULT_MAX_DEPTH as u64)
+                .clamp(1, 3) as u8;
+            let max_nodes = args["max_nodes"]
+                .as_u64()
+                .unwrap_or(crate::agent::graph::DEFAULT_MAX_NODES as u64)
+                .clamp(1, 100) as usize;
+            let max_edges = args["max_edges"]
+                .as_u64()
+                .or_else(|| args["limit"].as_u64())
+                .unwrap_or(crate::agent::graph::DEFAULT_MAX_EDGES as u64)
+                .clamp(1, 100) as usize;
+            let max_output_tokens = args["max_output_tokens"]
+                .as_u64()
+                .unwrap_or(2000) as usize;
             let relations: Vec<String> = args["relations"]
                 .as_array()
                 .map(|arr| {
@@ -1435,22 +1468,26 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
                 node,
                 crate::agent::graph::GraphQuery {
                     direction,
+                    preset: preset.clone(),
                     depth,
-                    limit,
+                    max_nodes,
+                    max_edges,
+                    limit: max_edges,
                     relations,
                     kinds,
                 },
             ) {
                 Ok(proj) => {
+                    let preset_label = preset.as_deref().unwrap_or("dependencies");
                     let mut out = format!(
-                        "Graph query for '{node}': {} nodes, {} edges (depth={depth}, limit={limit})\n",
+                        "Graph query for '{node}': {} nodes, {} edges (preset={preset_label}, depth={depth}, max_nodes={max_nodes}, max_edges={max_edges})\n",
                         proj.nodes.len(),
                         proj.edges.len()
                     );
                     if proj.truncated {
                         out.push_str(&format!(
                             "[truncated: {}]\n",
-                            proj.truncated_reason.as_deref().unwrap_or("limit reached")
+                            proj.truncated_reason.as_deref().unwrap_or("budget reached")
                         ));
                     }
                     out.push_str("Nodes:\n");
@@ -1478,9 +1515,40 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
                             e.from, e.kind, e.to
                         ));
                     }
+
+                    // Token / character budget truncation
+                    let max_chars = max_output_tokens * 4;
+                    if out.len() > max_chars {
+                        let cut = out.floor_char_boundary(max_chars);
+                        out.truncate(cut);
+                        out.push_str(&format!(
+                            "\n[truncated: output budget reached ({max_output_tokens} tokens); remaining output omitted]\n"
+                        ));
+                    }
                     Outcome::ok(out)
                 }
-                Err(e) => Outcome::err(format!("graph_query failed: {e:#}")),
+                Err(e) => {
+                    let err_str = format!("{e:#}");
+                    if err_str.contains("unresolved_start:") {
+                        let hint = err_str.strip_prefix("unresolved_start:").unwrap_or(&err_str).trim();
+                        Outcome::err(serde_json::to_string_pretty(&serde_json::json!({
+                            "ok": false,
+                            "code": "unresolved_start",
+                            "node": node,
+                            "hint": hint,
+                        })).unwrap_or_else(|_| format!("unresolved start node '{node}': {hint}")))
+                    } else if err_str.contains("ambiguous_start:") {
+                        let hint = err_str.strip_prefix("ambiguous_start:").unwrap_or(&err_str).trim();
+                        Outcome::err(serde_json::to_string_pretty(&serde_json::json!({
+                            "ok": false,
+                            "code": "ambiguous_start",
+                            "node": node,
+                            "hint": hint,
+                        })).unwrap_or_else(|_| format!("ambiguous start node '{node}': {hint}")))
+                    } else {
+                        Outcome::err(format!("graph_query failed: {e:#}"))
+                    }
+                }
             }
         }
         "note" => {
@@ -5496,6 +5564,26 @@ end
             "journal tool must retrieve the original record #42: {}",
             journal_out.output
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn graph_query_tool_unresolved_start_returns_structured_error() {
+        let (mut ctx, dir) = proj();
+        let mut store = crate::agent::graph::SqliteGraphStore::open(&dir).unwrap();
+        crate::agent::graph_index::index_project(&mut store, &dir).unwrap();
+
+        let out = execute(
+            &mut ctx,
+            "graph_query",
+            &json!({
+                "node": "nonexistent::FooBar"
+            }),
+        );
+        assert!(!out.ok, "must fail for nonexistent start");
+        assert!(out.output.contains("unresolved_start"), "must contain unresolved_start code: {}", out.output);
+        assert!(out.output.contains("hint"), "must contain hint: {}", out.output);
 
         fs::remove_dir_all(&dir).ok();
     }

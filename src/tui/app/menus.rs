@@ -3084,7 +3084,10 @@ impl App {
                             &focus_key,
                             crate::agent::graph::GraphQuery {
                                 direction: crate::agent::graph::Direction::Both,
+                                preset: Some("all".to_string()),
                                 depth,
+                                max_nodes: 50,
+                                max_edges: 50,
                                 limit: 50,
                                 relations: Vec::new(),
                                 kinds: Vec::new(),

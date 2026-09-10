@@ -630,7 +630,10 @@ mod tests {
         // Verify decision node exists and is connected to Session with `about` edge
         let query = GraphQuery {
             direction: Direction::Incoming,
+            preset: None,
             depth: 1,
+            max_nodes: 30,
+            max_edges: 10,
             limit: 10,
             relations: vec!["about".into()],
             kinds: vec!["decision".into()],
@@ -667,7 +670,10 @@ mod tests {
             "mem:journal:sess1:8",
             GraphQuery {
                 direction: Direction::Outgoing,
+                preset: None,
                 depth: 1,
+                max_nodes: 30,
+                max_edges: 10,
                 limit: 10,
                 relations: vec!["supersedes".into()],
                 kinds: Vec::new(),
