@@ -1698,48 +1698,12 @@ mod tests {
     }
 
     #[test]
-    fn help_menu_lists_controls() {
+    fn help_menu_is_empty() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         assert!(COMMANDS.contains(&"/help"));
         app.command("help");
         assert!(matches!(app.cur_menu(), Some(Menu::Help)));
-        let labels: Vec<String> = app
-            .menu_rows
-            .iter()
-            .map(|(line, _)| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref().to_string())
-                    .collect::<String>()
-            })
-            .collect();
-        assert!(labels.iter().any(|t| t.contains("controls")));
-
-        app.run_action(MenuAction::OpenControls);
-        assert!(matches!(app.cur_menu(), Some(Menu::Controls)));
-        let rows: Vec<String> = app
-            .menu_rows
-            .iter()
-            .map(|(line, _)| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref().to_string())
-                    .collect::<String>()
-            })
-            .collect();
-        assert!(
-            rows.iter()
-                .any(|t| t.contains("ctrl+p") && t.contains("providers"))
-        );
-        assert!(
-            rows.iter()
-                .any(|t| t.contains("ctrl+l") && t.contains("plan"))
-        );
-        assert!(
-            rows.iter()
-                .any(|t| t.contains("ctrl+o") && t.contains("settings"))
-        );
-        assert!(rows.iter().any(|t| t.contains("y / n")));
+        assert!(app.menu_rows.is_empty());
     }
 
     #[test]

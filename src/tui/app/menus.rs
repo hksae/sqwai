@@ -135,6 +135,7 @@ pub(super) enum Menu {
     /// /help: help sections
     Help,
     /// /help -> controls: key combo reference
+    #[allow(dead_code)]
     Controls,
     /// single-field form editing one numeric host setting
     EditScalar(ScalarSetting),
@@ -297,6 +298,7 @@ pub(super) enum MenuAction {
     OpenSafety,
     OpenUndo,
     OpenPickDefaultModel,
+    #[allow(dead_code)]
     OpenControls,
     SetDefaultModel(String),
     CycleDiaryEffort,
@@ -1808,14 +1810,7 @@ impl App {
                 self.menu_footer_text = Some("enter: open · esc: close".into());
             }
             Menu::Help => {
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        "  controls".to_string(),
-                        Theme::accent_bold(),
-                    )]),
-                    MenuAction::OpenControls,
-                ));
-                self.menu_footer_text = Some("enter: open · esc: close".into());
+                self.menu_footer_text = Some("esc: close".into());
             }
             Menu::Controls => {
                 const CONTROLS: &[(&str, &str)] = &[
