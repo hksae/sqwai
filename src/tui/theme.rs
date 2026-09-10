@@ -1,31 +1,4 @@
-use ratatui::style::{Color, Modifier, Style};
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// one full color scheme; every role keeps the lightness of the original
-/// rose theme, only hues move
-#[derive(Clone, Copy)]
-pub struct Palette {
-    pub bg: Color,
-    pub surface: Color,
-    /// stronger one-step panel used for full-width user-message strips
-    pub user_surface: Color,
-    pub fg: Color,
-    pub dim: Color,
-    pub accent: Color,
-    pub accent_soft: Color,
-    #[allow(dead_code)]
-    pub border: Color,
-    pub border_dim: Color,
-    pub ok: Color,
-    pub err: Color,
-    pub warn: Color,
-}
-
-pub struct ThemeDef {
-    /// placeholder name until the final naming pass
-    pub name: &'static str,
-    pub p: Palette,
-}
+﻿use ratatui::style::{Color, Modifier, Style};
 
 /// HSV -> RGB as a const fn (s and v are percentages 0..=100)
 const fn hsv(h: u32, s: u32, v: u32) -> Color {
@@ -49,190 +22,58 @@ const fn hsv(h: u32, s: u32, v: u32) -> Color {
     Color::Rgb(r as u8, g as u8, b as u8)
 }
 
-/// build a full palette around one base hue, mirroring the original rose
-/// saturation/value of every role
-const fn pal(h: u32) -> Palette {
-    Palette {
-        bg: hsv(h, 33, 9),
-        surface: hsv(h, 33, 13),
-        user_surface: hsv(h, 36, 17),
-        fg: hsv(h, 5, 93),
-        dim: hsv(h, 21, 59),
-        accent: hsv(h, 57, 100),
-        accent_soft: hsv(h, 44, 84),
-        border: hsv(h, 59, 87),
-        border_dim: hsv(h, 31, 35),
-        ok: hsv(h + 150, 37, 78),
-        err: hsv(h + 29, 55, 94),
-        warn: hsv(h + 64, 53, 92),
-    }
-}
-
-pub const THEMES: [ThemeDef; 21] = [
-    // neutral default first, followed by the hue-ordered palettes
-    ThemeDef {
-        name: "white",
-        p: Palette {
-            bg: hsv(220, 10, 8),
-            surface: hsv(220, 10, 12),
-            user_surface: hsv(220, 12, 17),
-            fg: hsv(0, 0, 95),
-            dim: hsv(0, 0, 62),
-            accent: hsv(0, 0, 100),
-            accent_soft: hsv(0, 0, 82),
-            border: hsv(0, 0, 84),
-            border_dim: hsv(0, 0, 40),
-            ok: hsv(145, 45, 72),
-            err: hsv(0, 60, 88),
-            warn: hsv(45, 60, 88),
-        },
-    },
-    ThemeDef {
-        name: "rose",
-        p: pal(335),
-    },
-    ThemeDef {
-        name: "plasma",
-        p: pal(320),
-    },
-    ThemeDef {
-        name: "orchid",
-        p: pal(305),
-    },
-    ThemeDef {
-        name: "grape",
-        p: pal(290),
-    },
-    ThemeDef {
-        name: "violet",
-        p: pal(275),
-    },
-    ThemeDef {
-        name: "indigo",
-        p: pal(250),
-    },
-    ThemeDef {
-        name: "denim",
-        p: pal(235),
-    },
-    ThemeDef {
-        name: "cobalt",
-        p: pal(220),
-    },
-    ThemeDef {
-        name: "sky",
-        p: pal(195),
-    },
-    ThemeDef {
-        name: "lagoon",
-        p: pal(182),
-    },
-    ThemeDef {
-        name: "aquamarine",
-        p: pal(168),
-    },
-    ThemeDef {
-        name: "slime",
-        p: pal(156),
-    },
-    ThemeDef {
-        name: "mint",
-        p: pal(145),
-    },
-    ThemeDef {
-        name: "lime",
-        p: pal(125),
-    },
-    ThemeDef {
-        name: "citrus",
-        p: pal(105),
-    },
-    ThemeDef {
-        name: "gold",
-        p: pal(60),
-    },
-    ThemeDef {
-        name: "amber",
-        p: pal(35),
-    },
-    ThemeDef {
-        name: "peach",
-        p: pal(22),
-    },
-    ThemeDef {
-        name: "ember",
-        p: pal(10),
-    },
-    ThemeDef {
-        name: "bubblegum",
-        p: pal(352),
-    },
-];
-
-static CURRENT: AtomicUsize = AtomicUsize::new(0);
-
-fn cur() -> Palette {
-    THEMES[CURRENT.load(Ordering::Relaxed)].p
-}
-
-/// select the active theme by index (clamped); returns the effective index
-pub fn set_theme(idx: usize) -> usize {
-    let i = idx.min(THEMES.len() - 1);
-    CURRENT.store(i, Ordering::Relaxed);
-    i
-}
-
-pub fn theme_index() -> usize {
-    CURRENT.load(Ordering::Relaxed)
-}
-
+/// Single fixed palette for the TUI (currently using neutral dark "white" values).
 pub struct Theme;
 
 impl Theme {
     #[allow(non_snake_case)]
-    pub fn BG() -> Color {
-        cur().bg
+    pub const fn BG() -> Color {
+        hsv(220, 10, 8)
     }
     #[allow(non_snake_case)]
-    pub fn SURFACE() -> Color {
-        cur().surface
+    pub const fn SURFACE() -> Color {
+        hsv(220, 10, 12)
     }
     #[allow(non_snake_case)]
-    pub fn USER_SURFACE() -> Color {
-        cur().user_surface
+    pub const fn USER_SURFACE() -> Color {
+        hsv(220, 12, 17)
     }
     #[allow(non_snake_case)]
-    pub fn FG() -> Color {
-        cur().fg
+    pub const fn FG() -> Color {
+        hsv(0, 0, 95)
     }
     #[allow(non_snake_case)]
-    pub fn DIM() -> Color {
-        cur().dim
+    pub const fn DIM() -> Color {
+        hsv(0, 0, 62)
     }
     #[allow(non_snake_case)]
-    pub fn ACCENT() -> Color {
-        cur().accent
+    pub const fn ACCENT() -> Color {
+        hsv(0, 0, 100)
     }
     #[allow(non_snake_case)]
-    pub fn ACCENT_SOFT() -> Color {
-        cur().accent_soft
+    pub const fn ACCENT_SOFT() -> Color {
+        hsv(0, 0, 82)
     }
     #[allow(non_snake_case)]
     #[allow(dead_code)]
-    pub fn BORDER() -> Color {
-        cur().border
+    pub const fn BORDER() -> Color {
+        hsv(0, 0, 84)
     }
     #[allow(non_snake_case)]
-    pub fn OK() -> Color {
-        cur().ok
+    pub const fn BORDER_DIM() -> Color {
+        hsv(0, 0, 40)
     }
     #[allow(non_snake_case)]
-    pub fn ERR() -> Color {
-        cur().err
+    pub const fn OK() -> Color {
+        hsv(145, 45, 72)
     }
     #[allow(non_snake_case)]
-    pub fn WARN() -> Color {
-        cur().warn
+    pub const fn ERR() -> Color {
+        hsv(0, 60, 88)
+    }
+    #[allow(non_snake_case)]
+    pub const fn WARN() -> Color {
+        hsv(45, 60, 88)
     }
 
     pub fn base() -> Style {
@@ -250,7 +91,7 @@ impl Theme {
             .bg(Self::BG())
             .add_modifier(Modifier::BOLD)
     }
-    #[allow(dead_code)] // labels removed from UI; kept for popups later
+    #[allow(dead_code)]
     pub fn label_user() -> Style {
         Self::accent_bold()
     }
@@ -265,9 +106,9 @@ impl Theme {
     pub fn border_focused() -> Style {
         Style::new().fg(Self::BORDER()).bg(Self::BG())
     }
-    #[allow(dead_code)] // reserved: unfocused input border
+    #[allow(dead_code)]
     pub fn border_dim() -> Style {
-        Style::new().fg(Self::DIM()).bg(Self::BG())
+        Style::new().fg(Self::BORDER_DIM()).bg(Self::BG())
     }
     pub fn status_chip() -> Style {
         Style::new()
@@ -287,10 +128,10 @@ impl Theme {
 
     /// Slightly quieter border used only around fenced code blocks.
     pub fn code_border() -> Color {
-        fn mix(a: u8, b: u8) -> u8 {
+        const fn mix(a: u8, b: u8) -> u8 {
             ((a as u16 * 3 + b as u16) / 4) as u8
         }
-        match (cur().border_dim, cur().bg) {
+        match (Self::BORDER_DIM(), Self::BG()) {
             (Color::Rgb(r, g, b), Color::Rgb(br, bg, bb)) => {
                 Color::Rgb(mix(r, br), mix(g, bg), mix(b, bb))
             }
@@ -300,6 +141,6 @@ impl Theme {
 
     /// table separators / horizontal rules
     pub fn rule_color() -> Color {
-        cur().border_dim
+        Self::BORDER_DIM()
     }
 }

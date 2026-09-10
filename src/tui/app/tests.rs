@@ -1687,12 +1687,6 @@ mod tests {
     }
 
     #[test]
-    fn white_is_first_theme_and_default() {
-        assert_eq!(crate::tui::theme::THEMES[0].name, "white");
-        assert_eq!(Config::default().ui.theme, 0);
-    }
-
-    #[test]
     fn command_popup_contains_only_command_names() {
         assert!(COMMANDS.iter().all(|command| !command.contains(' ')));
         assert!(COMMANDS.contains(&"/undo"));
@@ -2013,9 +2007,6 @@ mod tests {
 
         app.run_action(MenuAction::OpenAppearance);
         assert!(matches!(app.cur_menu(), Some(Menu::Appearance)));
-        app.run_action(MenuAction::OpenThemes);
-        assert!(matches!(app.cur_menu(), Some(Menu::Themes)));
-        app.menu_back();
         app.menu_back();
         app.run_action(MenuAction::OpenProviders);
         assert!(matches!(app.cur_menu(), Some(Menu::Providers)));
@@ -2299,55 +2290,6 @@ mod tests {
         app.run_action(MenuAction::ToggleShowCost);
         assert_eq!(app.cfg.ui.show_cost, !before);
         assert!(matches!(app.cur_menu(), Some(Menu::Appearance)));
-    }
-
-    #[test]
-    fn themes_menu_applies_and_stays_open() {
-        let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.open_menu(Menu::Themes);
-        // Static themes are listed back-to-back (no header/separator).
-        let total = crate::tui::theme::THEMES.len();
-        assert_eq!(app.menu_rows.len(), total, "all palettes listed");
-        // every theme row carries its own name (swatch squares were removed)
-        let rows: Vec<String> = app
-            .menu_rows
-            .iter()
-            .map(|r| {
-                r.0.spans
-                    .iter()
-                    .map(|s| s.content.as_ref().to_string())
-                    .collect::<String>()
-            })
-            .collect();
-        for t in crate::tui::theme::THEMES.iter() {
-            assert!(
-                rows.iter().any(|n| n.contains(t.name)),
-                "static theme {} listed",
-                t.name
-            );
-        }
-        app.run_action(MenuAction::SetTheme(5));
-        assert_eq!(crate::tui::theme::theme_index(), 5);
-        assert_eq!(app.cfg.ui.theme, 5, "choice persisted");
-        // render caches are invalidated so nothing keeps the old palette
-        assert!(app.seg_cache.is_empty());
-        assert!(app.cache_lines.is_empty());
-        assert!(
-            matches!(app.cur_menu(), Some(Menu::Themes)),
-            "menu must stay open after applying"
-        );
-        assert!(
-            app.menu_status.is_none(),
-            "no status note is shown on theme switch"
-        );
-        // only one "*" marker total
-        let stars = app
-            .menu_rows
-            .iter()
-            .filter(|(l, _)| l.spans.iter().any(|s| s.content.contains(" *")))
-            .count();
-        assert_eq!(stars, 1, "exactly one theme is marked active");
-        crate::tui::theme::set_theme(0); // restore default for other tests
     }
 
     #[test]
@@ -3107,22 +3049,22 @@ mod tests {
     fn startup_command_keeps_startup_screen() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = true;
-        app.input = App::fresh_input("/theme".into());
+        app.input = App::fresh_input("/help".into());
 
         app.submit();
 
         // a command popup no longer dismisses the startup screen: the screen
         // belongs to the empty session, so it must survive opening/closing
-        // menus like /theme or /plan
+        // menus like /help or /plan
         assert!(app.startup);
-        assert!(matches!(app.cur_menu(), Some(Menu::Themes)));
+        assert!(matches!(app.cur_menu(), Some(Menu::Help)));
     }
 
     #[test]
     fn startup_screen_survives_menu_close() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = true;
-        app.input = App::fresh_input("/theme".into());
+        app.input = App::fresh_input("/help".into());
         app.submit();
         app.menu_home();
 

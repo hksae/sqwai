@@ -2181,7 +2181,6 @@ impl App {
                 self.status("automatic Skills loading restored", StatusKind::Ok);
             }
 
-            "/theme" => self.open_menu(Menu::Themes),
             "/help" => self.open_menu(Menu::Help),
             "/graph-rebuild" => {
                 if self.streaming {
@@ -3791,41 +3790,6 @@ impl App {
             })
             .collect();
         self.session.save().ok();
-        self.dirty = true;
-    }
-
-    /// switch the palette and repaint everything that caches colors
-    fn apply_theme(&mut self, idx: usize) {
-        let applied = crate::tui::theme::set_theme(idx);
-        self.cfg.ui.theme = applied;
-        self.cfg.save().ok();
-        // rendered lines are cached by text length only — drop them so every
-        // message repaints in the new palette (otherwise old accents linger).
-        // theme_rev also flips so the transcript fingerprint forces a rebuild
-        // even where per-segment revisions did not move.
-        self.theme_rev += 1;
-        self.seg_cache.clear();
-        self.cache_lines.clear();
-        self.cache_rowseg.clear();
-        self.asm_tags.clear();
-        self.asm_lens.clear();
-        self.main_store = StoredView::default();
-        self.sub_stores.clear();
-        // textareas capture their styles at creation time
-        let restyle = |ta: &mut TextArea<'static>| {
-            ta.set_style(Theme::base());
-            ta.set_cursor_line_style(Style::new().bg(Theme::SURFACE()));
-            ta.set_cursor_style(Style::new().bg(Theme::ACCENT()).fg(Theme::BG()));
-            ta.set_selection_style(Style::new().bg(Theme::ACCENT()).fg(Theme::BG()));
-        };
-        restyle(&mut self.input);
-        for f in self.form_fields.iter_mut() {
-            if let FormField::Text { ta, .. } = f {
-                restyle(ta);
-            }
-        }
-        // no status note on theme switch — the live repaint is the feedback
-        self.build_menu_rows();
         self.dirty = true;
     }
 

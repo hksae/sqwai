@@ -478,9 +478,6 @@ pub struct UiConfig {
     /// append failed request details to debug.log
     #[serde(default)]
     pub http_log: bool,
-    /// index into tui::theme::THEMES
-    #[serde(default)]
-    pub theme: usize,
     /// show $ spent in the header (needs price_in/price_out on the model)
     #[serde(default)]
     pub show_cost: bool,
@@ -491,7 +488,6 @@ impl Default for UiConfig {
         Self {
             typewriter: true,
             http_log: false,
-            theme: 0,
             show_cost: false,
         }
     }

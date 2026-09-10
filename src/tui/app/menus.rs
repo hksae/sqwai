@@ -37,7 +37,6 @@ pub(super) const COMMANDS: &[&str] = &[
     "/settings",
     "/skill",
     "/skills",
-    "/theme",
     "/undo",
 ];
 
@@ -163,8 +162,6 @@ pub(super) enum Menu {
     },
     /// pick an LSP server to delete
     DeleteLspServer,
-    /// /theme: palette browser
-    Themes,
     /// single-field form to rename a session
     EditSessionTitle {
         id: String,
@@ -230,7 +227,6 @@ pub(super) enum MenuAction {
     GraphDepth(i8),
     OpenModels(String),
     OpenAppearance,
-    OpenThemes,
     OpenProviders,
     OpenMcp,
     OpenLsp,
@@ -267,7 +263,6 @@ pub(super) enum MenuAction {
     ToggleEffortAlwaysOn,
     ToggleMode,
     OpenSessions,
-    SetTheme(usize),
     Confirm(Box<MenuAction>),
     DeletePlan,
     UpdateBuiltins,
@@ -977,7 +972,6 @@ impl App {
                 self.dirty = true;
             }
             MenuAction::OpenAppearance => self.open_menu(Menu::Appearance),
-            MenuAction::OpenThemes => self.open_menu(Menu::Themes),
             MenuAction::OpenProviders => self.open_menu(Menu::Providers),
             MenuAction::OpenMcp => self.open_menu(Menu::Mcp),
             MenuAction::OpenLsp => self.open_menu(Menu::Lsp),
@@ -1353,9 +1347,6 @@ impl App {
             }
             MenuAction::OpenSessions => {
                 self.open_menu(Menu::Sessions);
-            }
-            MenuAction::SetTheme(idx) => {
-                self.apply_theme(idx);
             }
             MenuAction::DeleteSession(id) => {
                 let title = self
@@ -1754,7 +1745,6 @@ impl App {
             },
             Some(Menu::LspServer { .. }) => " lsp server ".into(),
             Some(Menu::DeleteLspServer) => " delete LSP server ".into(),
-            Some(Menu::Themes) => " themes ".into(),
             Some(Menu::EditSessionTitle { .. }) => " rename session ".into(),
             Some(Menu::ConfirmDelete { .. }) => " confirm ".into(),
             Some(Menu::Effort) => " effort ".into(),
@@ -2082,11 +2072,6 @@ impl App {
                     )
                 };
                 self.menu_rows.push(setting(
-                    "Themes",
-                    "open theme picker",
-                    MenuAction::OpenThemes,
-                ));
-                self.menu_rows.push(setting(
                     "Typewriter",
                     on_off(self.cfg.ui.typewriter).as_str(),
                     MenuAction::ToggleTypewriter,
@@ -2311,25 +2296,6 @@ impl App {
                     ));
                 }
                 self.menu_footer_text = Some("enter: delete · esc: back".into());
-            }
-            Menu::Themes => {
-                let cur = crate::tui::theme::theme_index();
-                for (i, t) in crate::tui::theme::THEMES.iter().enumerate() {
-                    let mark = if i == cur { " *" } else { "" };
-                    // the name glows in its own accent color (no swatch square)
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(
-                            format!("  {}{mark}", t.name),
-                            Style::new()
-                                .fg(t.p.accent)
-                                .bg(Theme::BG())
-                                .add_modifier(Modifier::BOLD),
-                        )]),
-                        MenuAction::SetTheme(i),
-                    ));
-                }
-                self.menu_footer_text =
-                    Some("enter: apply · selection stays open · esc: close".into());
             }
             Menu::Debug => {
                 let setting = |l: &str, val: String, a: MenuAction| {

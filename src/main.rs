@@ -64,7 +64,6 @@ fn main() -> Result<()> {
     }));
 
     providers::set_http_log(cfg.ui.http_log);
-    tui::theme::set_theme(cfg.ui.theme);
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(run(cfg, resume_id, project_lock.read_only))
