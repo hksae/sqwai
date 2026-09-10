@@ -12,7 +12,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 pub const GRAPH_SCHEMA_VERSION: u32 = 2;
@@ -118,6 +118,45 @@ impl Default for NeighborQuery {
             limit: 50,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct GraphQuery {
+    pub direction: Direction,
+    pub depth: u8,
+    pub limit: usize,
+    pub relations: Vec<String>,
+    pub kinds: Vec<String>,
+}
+
+impl Default for GraphQuery {
+    fn default() -> Self {
+        Self {
+            direction: Direction::Both,
+            depth: 1,
+            limit: 50,
+            relations: Vec::new(),
+            kinds: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecallItem {
+    pub key: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub snippet: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub journal_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<String>,
+    pub score: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,6 +269,8 @@ pub trait GraphStore {
     /// Refresh size/mtime after a hash-confirmed no-change touch, so the
     /// next run skips at the stat gate instead of re-reading.
     fn refresh_file_stat(&mut self, path: &str, size: i64, mtime: i64) -> Result<()>;
+    fn recall(&self, query: &str, limit: usize) -> Result<Vec<RecallItem>>;
+    fn graph_query(&self, stable_key: &str, query: GraphQuery) -> Result<GraphProjection>;
     fn neighbors(&self, stable_key: &str, query: NeighborQuery) -> Result<GraphProjection>;
 }
 
@@ -1190,25 +1231,171 @@ impl GraphStore for SqliteGraphStore {
         Ok(row)
     }
 
-    fn neighbors(&self, stable_key: &str, query: NeighborQuery) -> Result<GraphProjection> {
+    fn recall(&self, query: &str, limit: usize) -> Result<Vec<RecallItem>> {
+        let limit = limit.clamp(1, 20);
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut candidate_map: BTreeMap<String, (Node, f64)> = BTreeMap::new();
+
+        // 1. Exact key match
+        let mut key_stmt = self.conn.prepare(
+            "SELECT key, kind, name, path, lang, line_start, line_end, signature, roles, props, hash
+             FROM nodes WHERE key = ?1",
+        )?;
+        if let Some(node) = key_stmt.query_row([trimmed], row_to_node).optional()? {
+            let key = node.stable_key.clone();
+            candidate_map.insert(key, (node, 1.0));
+        }
+
+        // 2. Exact name match
+        let mut name_stmt = self.conn.prepare(
+            "SELECT key, kind, name, path, lang, line_start, line_end, signature, roles, props, hash
+             FROM nodes WHERE name = ?1 LIMIT 10",
+        )?;
+        let name_rows = name_stmt.query_map([trimmed], row_to_node)?;
+        for node in name_rows.flatten() {
+            let key = node.stable_key.clone();
+            candidate_map.entry(key).or_insert((node, 0.9));
+        }
+
+        // 3. Path prefix / contains match
+        let mut path_stmt = self.conn.prepare(
+            "SELECT key, kind, name, path, lang, line_start, line_end, signature, roles, props, hash
+             FROM nodes WHERE path = ?1 OR path LIKE ?2 LIMIT 10",
+        )?;
+        let like_path = format!("%{trimmed}%");
+        let path_rows = path_stmt.query_map(rusqlite::params![trimmed, like_path], row_to_node)?;
+        for node in path_rows.flatten() {
+            let key = node.stable_key.clone();
+            candidate_map.entry(key).or_insert((node, 0.75));
+        }
+
+        // 4. FTS search
+        let sanitized: String = trimmed
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '_' { c } else { ' ' })
+            .collect();
+        let terms: Vec<&str> = sanitized.split_whitespace().filter(|s| !s.is_empty()).collect();
+        if !terms.is_empty() {
+            let fts_query = terms
+                .iter()
+                .map(|t| format!("\"{t}\"*"))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let mut fts_stmt = self.conn.prepare(
+                "SELECT n.key, n.kind, n.name, n.path, n.lang, n.line_start, n.line_end, n.signature, n.roles, n.props, n.hash, f.rank
+                 FROM nodes_fts f
+                 JOIN nodes n ON f.rowid = n.id
+                 WHERE nodes_fts MATCH ?1
+                 ORDER BY f.rank
+                 LIMIT ?2",
+            )?;
+            let fts_rows = fts_stmt.query_map(rusqlite::params![fts_query, (limit * 2) as i64], |row| {
+                let node = row_to_node(row)?;
+                let rank: f64 = row.get(11)?;
+                Ok((node, rank))
+            });
+            if let Ok(rows) = fts_rows {
+                for item in rows.flatten() {
+                    let (node, rank) = item;
+                    let key = node.stable_key.clone();
+                    let score = 0.5 + ((-rank).clamp(0.0, 10.0) / 25.0);
+                    candidate_map.entry(key).or_insert((node, score));
+                }
+            }
+        }
+
+        let mut items: Vec<RecallItem> = candidate_map
+            .into_values()
+            .map(|(node, score)| {
+                let snippet = if let Some(text) = node.properties.get("text").and_then(|v| v.as_str()) {
+                    let first_line = text.lines().next().unwrap_or("").trim();
+                    if first_line.len() > 120 {
+                        format!("{}...", &first_line[..first_line.floor_char_boundary(117)])
+                    } else {
+                        first_line.to_string()
+                    }
+                } else if let Some(sig) = &node.signature {
+                    sig.clone()
+                } else if let Some(name) = &node.name {
+                    name.clone()
+                } else {
+                    node.path.clone().unwrap_or_else(|| node.stable_key.clone())
+                };
+
+                let author = node.properties.get("author").and_then(|v| v.as_str()).map(String::from);
+                let journal_ref = node.properties.get("journal_ref").and_then(|v| v.as_str()).map(String::from);
+                let provenance = node
+                    .properties
+                    .get("provenance")
+                    .or_else(|| node.properties.get("date"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+
+                RecallItem {
+                    key: node.stable_key,
+                    kind: node_kind_name(&node.kind).to_string(),
+                    name: node.name,
+                    path: node.path,
+                    snippet,
+                    author,
+                    journal_ref,
+                    provenance,
+                    score: (score * 100.0).round() / 100.0,
+                }
+            })
+            .collect();
+
+        items.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.key.cmp(&b.key))
+        });
+
+        items.truncate(limit);
+        Ok(items)
+    }
+
+    fn graph_query(&self, stable_key: &str, query: GraphQuery) -> Result<GraphProjection> {
         let depth = query.depth.clamp(1, MAX_QUERY_DEPTH);
         let limit = query.limit.clamp(1, MAX_QUERY_RESULTS);
-        let mut visited: BTreeSet<String> = BTreeSet::from([stable_key.to_string()]);
+
+        let start_key = if let Some(node) = self.find_node(stable_key)? {
+            node.stable_key
+        } else if let Some(k) = self
+            .conn
+            .query_row(
+                "SELECT key FROM nodes WHERE name = ?1 OR path = ?1 LIMIT 1",
+                [stable_key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            k
+        } else {
+            stable_key.to_string()
+        };
+
+        let mut visited: BTreeSet<String> = BTreeSet::from([start_key.clone()]);
         let mut seen: BTreeSet<(String, String, String, String)> = BTreeSet::new();
         let mut edges = Vec::new();
         let mut truncated_reason: Option<String> = None;
-        let mut frontier = vec![stable_key.to_string()];
+        let mut frontier = vec![start_key.clone()];
         let mut remaining = depth;
-        // sorted frontier plus ORDER BY inside incident_edges keeps the walk
-        // (and therefore truncation) deterministic
+
         while remaining > 0 && !frontier.is_empty() && truncated_reason.is_none() {
             frontier.sort();
             frontier.dedup();
             let mut next = Vec::new();
             for key in &frontier {
-                // +1 probe per node: enough to notice budget exhaustion
-                // without ever fetching an unbounded adjacency
                 for edge in self.incident_edges(key, query.direction, limit + 1)? {
+                    if !query.relations.is_empty() && !query.relations.contains(&edge.kind) {
+                        continue;
+                    }
                     let id = (
                         edge.from.clone(),
                         edge.to.clone(),
@@ -1251,7 +1438,11 @@ impl GraphStore for SqliteGraphStore {
                 .optional()
                 .context("look up graph node")?
             {
-                nodes.push(node);
+                let is_root = node.stable_key == start_key;
+                let kind_name = node_kind_name(&node.kind);
+                if query.kinds.is_empty() || is_root || query.kinds.iter().any(|k| k == kind_name) {
+                    nodes.push(node);
+                }
             }
         }
 
@@ -1261,6 +1452,19 @@ impl GraphStore for SqliteGraphStore {
             truncated: truncated_reason.is_some(),
             truncated_reason,
         })
+    }
+
+    fn neighbors(&self, stable_key: &str, query: NeighborQuery) -> Result<GraphProjection> {
+        self.graph_query(
+            stable_key,
+            GraphQuery {
+                direction: query.direction,
+                depth: query.depth,
+                limit: query.limit,
+                relations: Vec::new(),
+                kinds: Vec::new(),
+            },
+        )
     }
 }
 
@@ -1308,6 +1512,13 @@ fn write_node(tx: &rusqlite::Transaction, node: &Node, generation: u64) -> Resul
 fn write_fts(tx: &rusqlite::Transaction, node_id: i64, node: &Node) -> Result<()> {
     tx.execute("DELETE FROM nodes_fts WHERE rowid = ?1", [node_id])
         .context("refresh graph fts row")?;
+    let text = node
+        .properties
+        .get("text")
+        .or_else(|| node.properties.get("summary"))
+        .or_else(|| node.properties.get("doc"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     tx.execute(
         "INSERT INTO nodes_fts(rowid, key, name, path, signature, text)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1317,7 +1528,7 @@ fn write_fts(tx: &rusqlite::Transaction, node_id: i64, node: &Node) -> Result<()
             node.name,
             node.path,
             node.signature,
-            "",
+            text,
         ],
     )
     .map(|_| ())
@@ -2160,5 +2371,170 @@ mod tests {
         let all_nodes = store.nodes_in_file("src/lib.rs").unwrap();
         // File node + 2 symbol nodes
         assert_eq!(all_nodes.len(), 3);
+    }
+
+    #[test]
+    fn recall_exact_and_fts() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/calc.rs"),
+            "pub fn calculate_sum() -> i32 { 42 }\n",
+        )
+        .unwrap();
+
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        crate::agent::graph_index::index_project(&mut store, dir.path()).unwrap();
+
+        // Also add a custom memory node with text and author properties
+        let mut props = std::collections::BTreeMap::new();
+        props.insert("text".into(), serde_json::json!("We decided to persist todos inside the session file"));
+        props.insert("author".into(), serde_json::json!("model"));
+        props.insert("journal_ref".into(), serde_json::json!("j#42"));
+        let mem_node = Node {
+            stable_key: "mem:2026-09-10#12-00:decision:1".into(),
+            kind: NodeKind::Decision,
+            name: Some("Persist todos decision".into()),
+            path: Some(".sqwai/memory/2026-09-10.md".into()),
+            language: None,
+            line_start: Some(10),
+            line_end: Some(12),
+            signature: None,
+            roles: Vec::new(),
+            properties: props,
+            content_hash: None,
+        };
+        store.replace_file_subgraph(
+            ".sqwai/memory/2026-09-10.md",
+            &[mem_node],
+            &[],
+            &[],
+        ).unwrap();
+
+        // 1. Recall by exact name
+        let res_code = store.recall("calculate_sum", 8).unwrap();
+        assert!(!res_code.is_empty(), "must find calculate_sum");
+        assert_eq!(res_code[0].name.as_deref(), Some("calculate_sum"));
+        assert!(res_code[0].score >= 0.9);
+
+        // 2. Recall memory by FTS text
+        let res_mem = store.recall("persist todos session", 8).unwrap();
+        assert!(!res_mem.is_empty(), "must find memory by text");
+        assert_eq!(res_mem[0].key, "mem:2026-09-10#12-00:decision:1");
+        assert_eq!(res_mem[0].author.as_deref(), Some("model"));
+        assert_eq!(res_mem[0].journal_ref.as_deref(), Some("j#42"));
+        assert!(res_mem[0].snippet.contains("persist todos"));
+    }
+
+    #[test]
+    fn graph_query_with_filters_and_budget() {
+        let dir = tempdir().unwrap();
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+
+        let n1 = Node {
+            stable_key: "sym:src/session/mod.rs::struct::Session".into(),
+            kind: NodeKind::Struct,
+            name: Some("Session".into()),
+            path: Some("src/session/mod.rs".into()),
+            language: Some("rust".into()),
+            line_start: Some(1),
+            line_end: Some(10),
+            signature: Some("pub struct Session".into()),
+            roles: Vec::new(),
+            properties: std::collections::BTreeMap::new(),
+            content_hash: None,
+        };
+        let n2 = Node {
+            stable_key: "mem:2026-09-10#12-00:decision:1".into(),
+            kind: NodeKind::Decision,
+            name: Some("todos in session".into()),
+            path: Some(".sqwai/memory/2026-09-10.md".into()),
+            language: None,
+            line_start: Some(5),
+            line_end: Some(7),
+            signature: None,
+            roles: Vec::new(),
+            properties: std::collections::BTreeMap::new(),
+            content_hash: None,
+        };
+        let n3 = Node {
+            stable_key: "sym:src/session/mod.rs::fn::save".into(),
+            kind: NodeKind::Function,
+            name: Some("save".into()),
+            path: Some("src/session/mod.rs".into()),
+            language: Some("rust".into()),
+            line_start: Some(20),
+            line_end: Some(30),
+            signature: Some("pub fn save()".into()),
+            roles: Vec::new(),
+            properties: std::collections::BTreeMap::new(),
+            content_hash: None,
+        };
+
+        let e1 = Edge {
+            from: "mem:2026-09-10#12-00:decision:1".into(),
+            to: "sym:src/session/mod.rs::struct::Session".into(),
+            kind: "about".into(),
+            confidence: Some(100),
+            source: Some("memory".into()),
+            source_hash: None,
+            limitations: Vec::new(),
+            properties: std::collections::BTreeMap::new(),
+        };
+        let e2 = Edge {
+            from: "sym:src/session/mod.rs::struct::Session".into(),
+            to: "sym:src/session/mod.rs::fn::save".into(),
+            kind: "contains".into(),
+            confidence: Some(100),
+            source: Some("rust".into()),
+            source_hash: None,
+            limitations: Vec::new(),
+            properties: std::collections::BTreeMap::new(),
+        };
+
+        store.replace_file_subgraph("src/session/mod.rs", &[n1, n3], &[e2], &[]).unwrap();
+        store.replace_file_subgraph(".sqwai/memory/2026-09-10.md", &[n2], &[e1], &[]).unwrap();
+
+        // Query incoming edges with relations filter ["about"]
+        let res = store.graph_query(
+            "sym:src/session/mod.rs::struct::Session",
+            GraphQuery {
+                direction: Direction::Incoming,
+                depth: 1,
+                limit: 10,
+                relations: vec!["about".into()],
+                kinds: Vec::new(),
+            },
+        ).unwrap();
+        assert_eq!(res.edges.len(), 1);
+        assert_eq!(res.edges[0].kind, "about");
+        assert_eq!(res.edges[0].from, "mem:2026-09-10#12-00:decision:1");
+
+        // Query with relation filter ["contains"] on incoming -> none found
+        let res_none = store.graph_query(
+            "sym:src/session/mod.rs::struct::Session",
+            GraphQuery {
+                direction: Direction::Incoming,
+                depth: 1,
+                limit: 10,
+                relations: vec!["contains".into()],
+                kinds: Vec::new(),
+            },
+        ).unwrap();
+        assert_eq!(res_none.edges.len(), 0);
+
+        // Query with small limit triggers truncation
+        let res_trunc = store.graph_query(
+            "sym:src/session/mod.rs::struct::Session",
+            GraphQuery {
+                direction: Direction::Both,
+                depth: 2,
+                limit: 1,
+                relations: Vec::new(),
+                kinds: Vec::new(),
+            },
+        ).unwrap();
+        assert!(res_trunc.truncated);
+        assert!(res_trunc.truncated_reason.unwrap().contains("budget exhausted"));
     }
 }

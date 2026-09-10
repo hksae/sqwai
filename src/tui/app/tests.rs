@@ -5928,4 +5928,171 @@ mod tests {
             .collect();
         assert_eq!(kinds, vec!["user", "sub", "sub", "answer"]);
     }
+
+    #[test]
+    fn graph_view_navigation_and_details() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let temp = tempfile::tempdir().unwrap();
+        app.project_root = temp.path().to_path_buf();
+
+        use crate::agent::graph::{GraphStore, Node, NodeKind, SqliteGraphStore};
+        let mut store = SqliteGraphStore::open(&app.project_root).unwrap();
+        let sym_node = Node {
+            stable_key: "sym:src/main.rs::run".into(),
+            kind: NodeKind::Function,
+            name: Some("run".into()),
+            path: Some("src/main.rs".into()),
+            language: Some("rust".into()),
+            line_start: Some(10),
+            line_end: Some(25),
+            signature: Some("pub fn run()".into()),
+            roles: vec![],
+            properties: Default::default(),
+            content_hash: None,
+        };
+        let dec_node = Node {
+            stable_key: "dec:journal:01956789-abcd".into(),
+            kind: NodeKind::Decision,
+            name: Some("01956789-abcd".into()),
+            path: Some(".sqwai/journal/2026-03.jsonl".into()),
+            language: None,
+            line_start: None,
+            line_end: None,
+            signature: None,
+            roles: vec![],
+            properties: {
+                let mut p = std::collections::BTreeMap::new();
+                p.insert("author".into(), serde_json::json!("model"));
+                p.insert("journal_ref".into(), serde_json::json!("01956789-abcd"));
+                p.insert("text".into(), serde_json::json!("Refactored run to use async"));
+                p
+            },
+            content_hash: None,
+        };
+        store.upsert_node(&sym_node).unwrap();
+        store.upsert_node(&dec_node).unwrap();
+        store
+            .upsert_edge(&crate::agent::graph::Edge {
+                from: dec_node.stable_key.clone(),
+                to: sym_node.stable_key.clone(),
+                kind: "about".into(),
+                confidence: Some(100),
+                source: Some("model".into()),
+                source_hash: None,
+                limitations: vec![],
+                properties: Default::default(),
+            })
+            .unwrap();
+
+        // Open graph view with sym_node
+        app.open_menu(Menu::GraphView {
+            focus_key: sym_node.stable_key.clone(),
+            trail: Vec::new(),
+            depth: 1,
+            search_filter: None,
+        });
+        assert!(matches!(app.cur_menu(), Some(Menu::GraphView { .. })));
+        app.build_menu_rows();
+
+        // Check rows contain connected decision node
+        let rendered: Vec<String> = app
+            .menu_rows
+            .iter()
+            .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect();
+        assert!(rendered.iter().any(|r| r.contains("sym:src/main.rs::run")));
+        assert!(rendered.iter().any(|r| r.contains("[dec]") && r.contains("01956789-abcd")));
+
+        // Test depth adjustment
+        app.run_action(MenuAction::GraphDepth(1));
+        if let Some(Menu::GraphView { depth, .. }) = app.cur_menu() {
+            assert_eq!(*depth, 2);
+        } else {
+            panic!("Expected GraphView");
+        }
+
+        app.run_action(MenuAction::GraphDepth(-1));
+        if let Some(Menu::GraphView { depth, .. }) = app.cur_menu() {
+            assert_eq!(*depth, 1);
+        } else {
+            panic!("Expected GraphView");
+        }
+
+        // Test GraphFocus to decision node
+        app.run_action(MenuAction::GraphFocus(dec_node.stable_key.clone()));
+        if let Some(Menu::GraphView { focus_key, trail, .. }) = app.cur_menu() {
+            assert_eq!(focus_key, &dec_node.stable_key);
+            assert_eq!(trail, &vec![sym_node.stable_key.clone()]);
+        } else {
+            panic!("Expected GraphView");
+        }
+
+        // Test GraphBack
+        app.run_action(MenuAction::GraphBack);
+        if let Some(Menu::GraphView { focus_key, trail, .. }) = app.cur_menu() {
+            assert_eq!(focus_key, &sym_node.stable_key);
+            assert!(trail.is_empty());
+        } else {
+            panic!("Expected GraphView");
+        }
+
+        // Close menu
+        app.menu_back();
+        assert!(app.menu_stack.is_empty());
+
+        // Test open_graph_view helper
+        app.open_graph_view();
+        assert!(matches!(app.cur_menu(), Some(Menu::GraphView { .. })));
+        app.menu_back();
+        assert!(app.menu_stack.is_empty());
+    }
+
+    #[test]
+    fn graph_view_render_wide_and_narrow() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let temp = tempfile::tempdir().unwrap();
+        app.project_root = temp.path().to_path_buf();
+
+        use crate::agent::graph::{GraphStore, Node, NodeKind, SqliteGraphStore};
+        let mut store = SqliteGraphStore::open(&app.project_root).unwrap();
+        let sym_node = Node {
+            stable_key: "sym:src/main.rs::run".into(),
+            kind: NodeKind::Function,
+            name: Some("run".into()),
+            path: Some("src/main.rs".into()),
+            language: Some("rust".into()),
+            line_start: Some(10),
+            line_end: Some(25),
+            signature: Some("pub fn run()".into()),
+            roles: vec![],
+            properties: Default::default(),
+            content_hash: None,
+        };
+        store.upsert_node(&sym_node).unwrap();
+
+        app.open_menu(Menu::GraphView {
+            focus_key: sym_node.stable_key.clone(),
+            trail: Vec::new(),
+            depth: 1,
+            search_filter: None,
+        });
+
+        // Test narrow terminal (< 110)
+        let backend_narrow = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal_narrow = ratatui::Terminal::new(backend_narrow).unwrap();
+        terminal_narrow
+            .draw(|f| {
+                app.draw_menu(f, f.area());
+            })
+            .unwrap();
+
+        // Test wide terminal (>= 110)
+        let backend_wide = ratatui::backend::TestBackend::new(120, 30);
+        let mut terminal_wide = ratatui::Terminal::new(backend_wide).unwrap();
+        terminal_wide
+            .draw(|f| {
+                app.draw_menu(f, f.area());
+            })
+            .unwrap();
+    }
 }

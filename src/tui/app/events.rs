@@ -370,6 +370,13 @@ impl App {
                                     self.menu_sel = 0;
                                     self.build_menu_rows();
                                     self.dirty = true;
+                                } else if let Some(Menu::GraphView { search_filter, .. }) = self.cur_menu_mut()
+                                    && search_filter.is_some()
+                                {
+                                    *search_filter = None;
+                                    self.menu_sel = 0;
+                                    self.build_menu_rows();
+                                    self.dirty = true;
                                 } else {
                                     self.menu_back();
                                 }
@@ -587,6 +594,17 @@ impl App {
                         {
                             self.open_menu(Menu::Settings);
                         }
+                        KeyCode::Char('g') | KeyCode::Char('G')
+                            if ctrl
+                                && (self.menu_stack.is_empty()
+                                    || matches!(self.cur_menu(), Some(Menu::GraphView { .. }))) =>
+                        {
+                            if matches!(self.cur_menu(), Some(Menu::GraphView { .. })) {
+                                self.menu_back();
+                            } else {
+                                self.open_graph_view();
+                            }
+                        }
                         KeyCode::Char('r')
                             if matches!(self.cur_menu(), Some(Menu::Sessions))
                                 && self.sessions_filter.is_empty() =>
@@ -620,6 +638,54 @@ impl App {
                         }
                         KeyCode::Backspace if matches!(self.cur_menu(), Some(Menu::Sessions)) => {
                             self.sessions_filter.pop();
+                            self.menu_sel = 0;
+                            self.build_menu_rows();
+                            self.dirty = true;
+                        }
+                        // graph view controls
+                        KeyCode::Char('+') | KeyCode::Char('=')
+                            if matches!(self.cur_menu(), Some(Menu::GraphView { search_filter: None, .. })) =>
+                        {
+                            self.run_action(MenuAction::GraphDepth(1));
+                        }
+                        KeyCode::Char('-')
+                            if matches!(self.cur_menu(), Some(Menu::GraphView { search_filter: None, .. })) =>
+                        {
+                            self.run_action(MenuAction::GraphDepth(-1));
+                        }
+                        KeyCode::Char('f') | KeyCode::Char('F') | KeyCode::Char('/')
+                            if matches!(self.cur_menu(), Some(Menu::GraphView { search_filter: None, .. })) =>
+                        {
+                            if let Some(Menu::GraphView { search_filter, .. }) = self.cur_menu_mut() {
+                                *search_filter = Some(String::new());
+                            }
+                            self.menu_sel = 0;
+                            self.build_menu_rows();
+                            self.dirty = true;
+                        }
+                        KeyCode::Backspace
+                            if matches!(self.cur_menu(), Some(Menu::GraphView { search_filter: None, .. })) =>
+                        {
+                            self.run_action(MenuAction::GraphBack);
+                        }
+                        KeyCode::Backspace
+                            if matches!(self.cur_menu(), Some(Menu::GraphView { search_filter: Some(_), .. })) =>
+                        {
+                            if let Some(Menu::GraphView { search_filter: Some(filter), .. }) = self.cur_menu_mut() {
+                                filter.pop();
+                            }
+                            self.menu_sel = 0;
+                            self.build_menu_rows();
+                            self.dirty = true;
+                        }
+                        KeyCode::Char(c)
+                            if !ctrl
+                                && !alt
+                                && matches!(self.cur_menu(), Some(Menu::GraphView { search_filter: Some(_), .. })) =>
+                        {
+                            if let Some(Menu::GraphView { search_filter: Some(filter), .. }) = self.cur_menu_mut() {
+                                filter.push(c);
+                            }
                             self.menu_sel = 0;
                             self.build_menu_rows();
                             self.dirty = true;
@@ -806,7 +872,14 @@ impl App {
                         } else {
                             // inside: pick a row; outside: act like esc
                             if self.in_menu_rect(m.row, m.column) {
-                                self.menu_click(m.row);
+                                if matches!(self.cur_menu(), Some(Menu::GraphView { .. }))
+                                    && self.menu_rect.width >= 100
+                                    && m.column >= self.menu_rect.x + 54
+                                {
+                                    // clicked inside details pane, ignore
+                                } else {
+                                    self.menu_click(m.row);
+                                }
                             } else {
                                 self.sel = None;
                                 self.menu_back();

@@ -5,6 +5,7 @@ pub mod diary;
 pub mod graph;
 pub mod graph_index;
 pub mod graph_lang;
+pub mod graph_memory;
 pub mod journal;
 pub mod loop_task;
 pub mod memory;

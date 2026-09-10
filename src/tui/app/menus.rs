@@ -211,12 +211,22 @@ pub(super) enum Menu {
     },
     /// all delegated child agents, opened with Ctrl+A
     Subagents,
+    /// code graph neighborhood and details, opened with Ctrl+G (§2.4.10)
+    GraphView {
+        focus_key: String,
+        trail: Vec<String>,
+        depth: u8,
+        search_filter: Option<String>,
+    },
 }
 
 #[derive(Clone)]
 pub(super) enum MenuAction {
     None,
     Back,
+    GraphFocus(String),
+    GraphBack,
+    GraphDepth(i8),
     OpenModels(String),
     OpenAppearance,
     OpenThemes,
@@ -585,6 +595,48 @@ impl App {
         self.menu_stack.last()
     }
 
+    pub(super) fn cur_menu_mut(&mut self) -> Option<&mut Menu> {
+        self.menu_stack.last_mut()
+    }
+
+    pub(super) fn open_graph_view(&mut self) {
+        use crate::agent::graph::GraphStore;
+        let plan = self.session_plan();
+        let focus = plan
+            .as_ref()
+            .and_then(|p| {
+                p.steps.iter().find(|s| {
+                    s.status == crate::plan::StepStatus::InProgress
+                        || s.status == crate::plan::StepStatus::Pending
+                })
+            })
+            .and_then(|s| s.refs.first())
+            .map(|r| {
+                if let Some(sym) = &r.symbol {
+                    format!("sym:{}::{sym}", r.path)
+                } else {
+                    format!("file:{}", r.path)
+                }
+            })
+            .or_else(|| {
+                crate::agent::graph::SqliteGraphStore::open(&self.project_root)
+                    .ok()
+                    .and_then(|s| {
+                        s.recall("", 1)
+                            .ok()
+                            .and_then(|items| items.first().map(|i| i.key.clone()))
+                    })
+            })
+            .unwrap_or_else(|| "file:src/main.rs".to_string());
+
+        self.open_menu(Menu::GraphView {
+            focus_key: focus,
+            trail: Vec::new(),
+            depth: 1,
+            search_filter: None,
+        });
+    }
+
     pub(super) fn open_menu(&mut self, menu: Menu) {
         self.menu_stack.push(menu);
         self.menu_sel = 0;
@@ -874,6 +926,54 @@ impl App {
         match action {
             MenuAction::None => {}
             MenuAction::Back => self.menu_back(),
+            MenuAction::GraphFocus(new_key) => {
+                if let Some(Menu::GraphView {
+                    focus_key,
+                    trail,
+                    search_filter,
+                    ..
+                }) = self.cur_menu_mut()
+                {
+                    trail.push(focus_key.clone());
+                    *focus_key = new_key;
+                    *search_filter = None;
+                }
+                self.menu_sel = 0;
+                self.menu_scroll = 0;
+                self.build_menu_rows();
+                self.dirty = true;
+            }
+            MenuAction::GraphBack => {
+                if let Some(Menu::GraphView {
+                    focus_key,
+                    trail,
+                    search_filter,
+                    ..
+                }) = self.cur_menu_mut()
+                {
+                    if let Some(prev) = trail.pop() {
+                        *focus_key = prev;
+                        *search_filter = None;
+                    }
+                }
+                self.menu_sel = 0;
+                self.menu_scroll = 0;
+                self.build_menu_rows();
+                self.dirty = true;
+            }
+            MenuAction::GraphDepth(delta) => {
+                if let Some(Menu::GraphView { depth, .. }) = self.cur_menu_mut() {
+                    if delta > 0 && *depth < 3 {
+                        *depth += 1;
+                    } else if delta < 0 && *depth > 1 {
+                        *depth -= 1;
+                    }
+                }
+                self.menu_sel = 0;
+                self.menu_scroll = 0;
+                self.build_menu_rows();
+                self.dirty = true;
+            }
             MenuAction::OpenAppearance => self.open_menu(Menu::Appearance),
             MenuAction::OpenThemes => self.open_menu(Menu::Themes),
             MenuAction::OpenProviders => self.open_menu(Menu::Providers),
@@ -1669,6 +1769,7 @@ impl App {
             Some(Menu::Plan) => " plan ".into(),
             Some(Menu::PlanPreview { .. }) => " proposed plan ".into(),
             Some(Menu::Subagents) => " subagents ".into(),
+            Some(Menu::GraphView { .. }) => " graph view (Ctrl+G) ".into(),
             None => String::new(),
         }
     }
@@ -2937,10 +3038,152 @@ impl App {
                 ));
                 self.menu_footer_text = Some("up/down: scroll · esc: back".into());
             }
+            Menu::GraphView {
+                focus_key,
+                trail,
+                depth,
+                search_filter,
+            } => {
+                use crate::agent::graph::GraphStore;
+                let store = crate::agent::graph::SqliteGraphStore::open(&self.project_root).ok();
+                let focus_node = store.as_ref().and_then(|s| s.find_node(&focus_key).ok().flatten());
+                let kind_badge = focus_node.as_ref().map(|n| node_badge(&n.kind)).unwrap_or("[?]");
+
+                // Header row
+                let mut title_spans = vec![
+                    Span::styled(format!(" {kind_badge} "), Theme::accent_bold()),
+                    Span::styled(focus_key.clone(), Theme::base().add_modifier(ratatui::style::Modifier::BOLD)),
+                ];
+                if !trail.is_empty() {
+                    title_spans.push(Span::styled(format!(" (trail: {})", trail.len()), Theme::dim()));
+                }
+                title_spans.push(Span::styled(format!(" [depth: {depth}]"), Theme::dim()));
+                self.menu_rows.push(row(Line::from(title_spans), MenuAction::None));
+
+                // Back button if trail not empty
+                if let Some(prev) = trail.last() {
+                    self.menu_rows.push(row(
+                        Line::from(vec![
+                            Span::styled("  <- Back to ", Theme::accent()),
+                            Span::styled(prev.clone(), Theme::dim()),
+                        ]),
+                        MenuAction::GraphBack,
+                    ));
+                }
+
+                // Filter row if active
+                if let Some(ref filter) = search_filter {
+                    self.menu_rows.push(row(
+                        Line::from(vec![
+                            Span::styled("  Filter: ", Theme::accent()),
+                            Span::styled(filter.clone(), Theme::base()),
+                        ]),
+                        MenuAction::None,
+                    ));
+                }
+
+                // Query neighbors
+                if let Some(store) = store {
+                    let proj = store
+                        .graph_query(
+                            &focus_key,
+                            crate::agent::graph::GraphQuery {
+                                direction: crate::agent::graph::Direction::Both,
+                                depth,
+                                limit: 50,
+                                relations: Vec::new(),
+                                kinds: Vec::new(),
+                            },
+                        )
+                        .unwrap_or_else(|_| crate::agent::graph::GraphProjection {
+                            nodes: Vec::new(),
+                            edges: Vec::new(),
+                            truncated: false,
+                            truncated_reason: None,
+                        });
+
+                    if proj.edges.is_empty() {
+                        self.menu_rows.push(row(
+                            Line::from(vec![Span::styled(
+                                "  (no connected nodes found)",
+                                Theme::dim(),
+                            )]),
+                            MenuAction::None,
+                        ));
+                    } else {
+                        // Collect neighbors
+                        for edge in &proj.edges {
+                            let (other_key, dir_symbol) = if edge.from == focus_key {
+                                (&edge.to, "->")
+                            } else {
+                                (&edge.from, "<-")
+                            };
+
+                            if let Some(ref filter) = search_filter {
+                                if !filter.is_empty()
+                                    && !other_key.to_lowercase().contains(&filter.to_lowercase())
+                                {
+                                    continue;
+                                }
+                            }
+
+                            let other_node = proj.nodes.iter().find(|n| &n.stable_key == other_key);
+                            let other_badge = other_node
+                                .map(|n| node_badge(&n.kind))
+                                .unwrap_or("[?]");
+                            let name_or_key = other_node
+                                .and_then(|n| n.name.as_deref())
+                                .unwrap_or(other_key);
+
+                            self.menu_rows.push(row(
+                                Line::from(vec![
+                                    Span::styled(
+                                        format!("  {dir_symbol} ({}) ", edge.kind),
+                                        Theme::dim(),
+                                    ),
+                                    Span::styled(format!("{other_badge} "), Theme::accent()),
+                                    Span::styled(name_or_key.to_string(), Theme::base()),
+                                    Span::styled(format!(" ({other_key})"), Theme::dim()),
+                                ]),
+                                MenuAction::GraphFocus(other_key.clone()),
+                            ));
+                        }
+                    }
+                }
+                self.menu_footer_text = Some("enter: focus · backspace: back · f: search · +/-: depth · esc: close".into());
+            }
         }
         if self.menu_sel >= self.menu_rows.len() {
             self.menu_sel = self.menu_rows.len().saturating_sub(1);
         }
+    }
+}
+
+pub(super) fn node_badge(kind: &crate::agent::graph::NodeKind) -> &'static str {
+    use crate::agent::graph::NodeKind;
+    match kind {
+        NodeKind::File => "[f]",
+        NodeKind::Folder => "[dir]",
+        NodeKind::Document => "[doc]",
+        NodeKind::Section => "[sec]",
+        NodeKind::Module => "[mod]",
+        NodeKind::Namespace => "[ns]",
+        NodeKind::Function => "[fn]",
+        NodeKind::Method => "[m]",
+        NodeKind::Class => "[cls]",
+        NodeKind::Struct => "[st]",
+        NodeKind::Enum => "[e]",
+        NodeKind::Interface => "[if]",
+        NodeKind::Trait => "[tr]",
+        NodeKind::Variable => "[v]",
+        NodeKind::Constant => "[c]",
+        NodeKind::Type => "[ty]",
+        NodeKind::Macro => "[mac]",
+        NodeKind::Test => "[test]",
+        NodeKind::Memory => "[mem]",
+        NodeKind::Decision => "[dec]",
+        NodeKind::Commit => "[cmt]",
+        NodeKind::Branch => "[br]",
     }
 }
 

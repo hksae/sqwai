@@ -2578,8 +2578,12 @@ impl App {
         let h = (inner as u16 + 2).clamp(4, max_h);
         // Width cap order matters: the 30-column minimum must not win over
         // the terminal's real width — in a 20..29-column terminal that would
-        // push the menu rectangle past the right edge (§TUI invariants).
-        let w = 78.min(area.width.saturating_sub(4)).max(30).min(area.width);
+        let is_graph_wide = matches!(self.cur_menu(), Some(Menu::GraphView { .. })) && area.width >= 110;
+        let w = if is_graph_wide {
+            110.min(area.width.saturating_sub(4)).max(30).min(area.width)
+        } else {
+            78.min(area.width.saturating_sub(4)).max(30).min(area.width)
+        };
         let rect = Rect {
             x: area.x + (area.width.saturating_sub(w)) / 2,
             y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -2698,7 +2702,6 @@ impl App {
             }
         }
 
-        f.render_widget(Clear, rect);
         let mut block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Plain)
@@ -2728,7 +2731,128 @@ impl App {
                     .right_aligned(),
             );
         }
-        f.render_widget(Paragraph::new(rows).style(Theme::base()).block(block), rect);
+
+        if is_graph_wide {
+            let left_w = 54.min(rect.width.saturating_sub(30));
+            let list_rect = Rect {
+                x: rect.x,
+                y: rect.y,
+                width: left_w,
+                height: rect.height,
+            };
+            let details_rect = Rect {
+                x: rect.x + left_w,
+                y: rect.y,
+                width: rect.width.saturating_sub(left_w),
+                height: rect.height,
+            };
+
+            f.render_widget(Clear, list_rect);
+            f.render_widget(Paragraph::new(rows).style(Theme::base()).block(block), list_rect);
+
+            f.render_widget(Clear, details_rect);
+            let (focus_key, trail) = if let Some(Menu::GraphView { focus_key, trail, .. }) = self.cur_menu() {
+                (focus_key.clone(), trail.clone())
+            } else {
+                (String::new(), Vec::new())
+            };
+            let inspected_key = self
+                .menu_rows
+                .get(self.menu_sel)
+                .and_then(|(_, action)| match action {
+                    MenuAction::GraphFocus(k) => Some(k.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| focus_key.clone());
+
+            use crate::agent::graph::GraphStore;
+            let store = crate::agent::graph::SqliteGraphStore::open(&self.project_root).ok();
+            let node = store.as_ref().and_then(|s| s.find_node(&inspected_key).ok().flatten());
+
+            let mut detail_lines: Vec<Line> = Vec::new();
+            let badge = node
+                .as_ref()
+                .map(|n| crate::tui::app::menus::node_badge(&n.kind))
+                .unwrap_or("[?]");
+            let name_or_key = node
+                .as_ref()
+                .and_then(|n| n.name.as_deref())
+                .unwrap_or(&inspected_key);
+
+            detail_lines.push(Line::from(vec![
+                Span::styled(format!(" {badge} "), Theme::accent_bold()),
+                Span::styled(name_or_key.to_string(), Theme::base().add_modifier(ratatui::style::Modifier::BOLD)),
+            ]));
+
+            detail_lines.push(Line::from(vec![
+                Span::styled(" Key: ", Theme::dim()),
+                Span::styled(inspected_key.clone(), Theme::base()),
+            ]));
+
+            if let Some(node) = &node {
+                if let Some(p) = &node.path {
+                    detail_lines.push(Line::from(vec![
+                        Span::styled(" Path: ", Theme::dim()),
+                        Span::styled(p.clone(), Theme::base()),
+                    ]));
+                }
+                if let (Some(s), Some(e)) = (node.line_start, node.line_end) {
+                    detail_lines.push(Line::from(vec![
+                        Span::styled(" Lines: ", Theme::dim()),
+                        Span::styled(format!("{s}..{e}"), Theme::base()),
+                    ]));
+                }
+                if let Some(sig) = &node.signature {
+                    detail_lines.push(Line::from(vec![
+                        Span::styled(" Sig: ", Theme::dim()),
+                        Span::styled(sig.clone(), Theme::accent()),
+                    ]));
+                }
+                if let Some(author) = node.properties.get("author").and_then(|v| v.as_str()) {
+                    detail_lines.push(Line::from(vec![
+                        Span::styled(" Author: ", Theme::dim()),
+                        Span::styled(author.to_string(), Theme::base()),
+                    ]));
+                }
+                if let Some(jref) = node.properties.get("journal_ref").and_then(|v| v.as_str()) {
+                    detail_lines.push(Line::from(vec![
+                        Span::styled(" Ref: ", Theme::dim()),
+                        Span::styled(jref.to_string(), Theme::base()),
+                    ]));
+                }
+                if let Some(text) = node.properties.get("text").and_then(|v| v.as_str()) {
+                    detail_lines.push(Line::from(""));
+                    for l in text.lines().take(10) {
+                        detail_lines.push(Line::from(Span::styled(format!(" {l}"), Theme::base())));
+                    }
+                }
+            }
+
+            if !trail.is_empty() {
+                detail_lines.push(Line::from(""));
+                detail_lines.push(Line::from(vec![
+                    Span::styled(" Trail: ", Theme::dim()),
+                    Span::styled(trail.join(" -> "), Theme::dim()),
+                ]));
+            }
+
+            let details_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Theme::border_dim())
+                .title(Span::styled(" Node Details ", Theme::dim()));
+
+            f.render_widget(
+                Paragraph::new(detail_lines)
+                    .style(Theme::base())
+                    .block(details_block)
+                    .wrap(ratatui::widgets::Wrap { trim: true }),
+                details_rect,
+            );
+        } else {
+            f.render_widget(Clear, rect);
+            f.render_widget(Paragraph::new(rows).style(Theme::base()).block(block), rect);
+        }
 
         // draw the focused text field as a real textarea: same block cursor
         // and editing behavior as the message input

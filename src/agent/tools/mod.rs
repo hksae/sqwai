@@ -12,6 +12,7 @@ mod git;
 mod outline;
 pub(crate) mod web;
 
+use crate::agent::graph::GraphStore;
 use crate::agent::safety;
 use crate::plan;
 use serde_json::{Value, json};
@@ -752,6 +753,65 @@ Returns definition location, signature, source hash, and capabilities, or sugges
             }),
         },
         ToolDef {
+            name: "recall",
+            kind: Kind::ReadOnly,
+            description: "Bounded full-text and ranked search over names, paths, signatures, and memory/diary notes in the project graph. \
+Returns matching items with keys, kinds, paths, one-line snippets, and author/journal provenance for memory nodes.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "search query (symbol, path, concept, or memory text)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "maximum results to return (default 8, max 20)"
+                    }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolDef {
+            name: "graph_query",
+            kind: Kind::ReadOnly,
+            description: "Traverse the project graph neighborhood from a starting node or symbol name using bounded breadth-first search. \
+Returns connected nodes, incident edges, and truncation status.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "node": {
+                        "type": "string",
+                        "description": "node key (sym:..., mem:..., file:...) or symbol name"
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["both", "incoming", "outgoing"],
+                        "description": "traversal direction (default 'both')"
+                    },
+                    "relations": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "optional edge kind filter (e.g. ['about', 'contains', 'supersedes'])"
+                    },
+                    "kinds": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "optional node kind filter (e.g. ['decision', 'memory', 'function', 'struct'])"
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "description": "traversal depth 1..=3 (default 1)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "maximum edges budget 1..=50 (default 50)"
+                    }
+                },
+                "required": ["node"]
+            }),
+        },
+        ToolDef {
             name: "propose_plan",
             kind: Kind::ReadOnly,
             description: "Propose a new full plan or a replacement for the active one. \
@@ -1064,6 +1124,12 @@ pub fn call_summary(name: &str, args: &Value) -> String {
                 "resolve_ref".to_string()
             }
         }
+        "recall" => format!("recall {}", s("query")),
+        "graph_query" => {
+            let node = s("node");
+            let dir = args["direction"].as_str().unwrap_or("both");
+            format!("graph_query {node} ({dir})")
+        }
         "journal" => {
             let op = args["op"].as_str().unwrap_or("read");
             if op == "assumptions" {
@@ -1290,6 +1356,131 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             match store.resolve_ref(raw_ref, path, symbol) {
                 Ok(res) => Outcome::ok(serde_json::to_string_pretty(&res).unwrap_or_default()),
                 Err(e) => Outcome::err(format!("resolve_ref failed: {e:#}")),
+            }
+        }
+        "recall" => {
+            let query = match args["query"].as_str() {
+                Some(q) if !q.trim().is_empty() => q.trim(),
+                _ => return Outcome::err("recall requires a non-empty 'query' argument"),
+            };
+            let limit = args["limit"].as_u64().unwrap_or(8) as usize;
+            let store = match crate::agent::graph::SqliteGraphStore::open(&ctx.root) {
+                Ok(s) => s,
+                Err(e) => return Outcome::err(format!("cannot open graph: {e:#}")),
+            };
+            match store.recall(query, limit) {
+                Ok(items) => {
+                    if items.is_empty() {
+                        Outcome::ok(format!("No recall matches found for '{query}'."))
+                    } else {
+                        let mut out = format!("Recall results for '{query}' ({} matches):\n", items.len());
+                        for (i, item) in items.iter().enumerate() {
+                            out.push_str(&format!(
+                                "{}. [{}] {} (score: {:.2})\n   snippet: {}\n",
+                                i + 1,
+                                item.kind,
+                                item.key,
+                                item.score,
+                                item.snippet
+                            ));
+                            if let Some(author) = &item.author {
+                                out.push_str(&format!("   author: {author}"));
+                                if let Some(jref) = &item.journal_ref {
+                                    out.push_str(&format!(" ({jref})"));
+                                }
+                                out.push('\n');
+                            }
+                        }
+                        Outcome::ok(out)
+                    }
+                }
+                Err(e) => Outcome::err(format!("recall failed: {e:#}")),
+            }
+        }
+        "graph_query" => {
+            let node = match args["node"].as_str() {
+                Some(n) if !n.trim().is_empty() => n.trim(),
+                _ => return Outcome::err("graph_query requires a non-empty 'node' argument"),
+            };
+            let dir_str = args["direction"].as_str().unwrap_or("both");
+            let direction = match dir_str.to_ascii_lowercase().as_str() {
+                "in" | "incoming" => crate::agent::graph::Direction::Incoming,
+                "out" | "outgoing" => crate::agent::graph::Direction::Outgoing,
+                _ => crate::agent::graph::Direction::Both,
+            };
+            let depth = args["depth"].as_u64().unwrap_or(1).clamp(1, 3) as u8;
+            let limit = args["limit"].as_u64().unwrap_or(50).clamp(1, 50) as usize;
+            let relations: Vec<String> = args["relations"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let kinds: Vec<String> = args["kinds"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let store = match crate::agent::graph::SqliteGraphStore::open(&ctx.root) {
+                Ok(s) => s,
+                Err(e) => return Outcome::err(format!("cannot open graph: {e:#}")),
+            };
+            match store.graph_query(
+                node,
+                crate::agent::graph::GraphQuery {
+                    direction,
+                    depth,
+                    limit,
+                    relations,
+                    kinds,
+                },
+            ) {
+                Ok(proj) => {
+                    let mut out = format!(
+                        "Graph query for '{node}': {} nodes, {} edges (depth={depth}, limit={limit})\n",
+                        proj.nodes.len(),
+                        proj.edges.len()
+                    );
+                    if proj.truncated {
+                        out.push_str(&format!(
+                            "[truncated: {}]\n",
+                            proj.truncated_reason.as_deref().unwrap_or("limit reached")
+                        ));
+                    }
+                    out.push_str("Nodes:\n");
+                    for n in &proj.nodes {
+                        out.push_str(&format!(
+                            "  - [{}] {}",
+                            crate::agent::graph::node_kind_name(&n.kind),
+                            n.stable_key
+                        ));
+                        if let Some(name) = &n.name {
+                            out.push_str(&format!(" ({name})"));
+                        }
+                        if let Some(text) = n.properties.get("text").and_then(|v| v.as_str()) {
+                            let preview = text.lines().next().unwrap_or("");
+                            if !preview.is_empty() {
+                                out.push_str(&format!(": \"{preview}\""));
+                            }
+                        }
+                        out.push('\n');
+                    }
+                    out.push_str("Edges:\n");
+                    for e in &proj.edges {
+                        out.push_str(&format!(
+                            "  - {} --({})--> {}\n",
+                            e.from, e.kind, e.to
+                        ));
+                    }
+                    Outcome::ok(out)
+                }
+                Err(e) => Outcome::err(format!("graph_query failed: {e:#}")),
             }
         }
         "note" => {
@@ -5212,6 +5403,98 @@ end
             !out2.output.contains("warning: symbol 'add' not in index"),
             "should not warn for indexed symbol: {}",
             out2.output
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn dod_symbol_to_decision_to_original_record() {
+        let (mut ctx, dir) = proj();
+
+        // 1. Create a Rust source file defining Session
+        fs::write(
+            dir.join("src/session.rs"),
+            "pub struct Session {\n    pub id: String,\n}\n",
+        )
+        .unwrap();
+
+        // 2. Create diary file in .sqwai/memory/2026-09-10.md referencing `Session`
+        let mem_dir = dir.join(".sqwai/memory");
+        fs::create_dir_all(&mem_dir).unwrap();
+        let diary_content = r#"
+## 12:00 · session sess_1 · plan 01J123 · "Session storage"
+
+### Decisions
+- We decided that `Session` must persist todos into disk. (j#42)
+"#;
+        fs::write(mem_dir.join("2026-09-10.md"), diary_content).unwrap();
+
+        // 3. Create journal with note record j#42
+        let journal_dir = dir.join(".sqwai/journal");
+        fs::create_dir_all(&journal_dir).unwrap();
+        let note_record = json!({
+            "seq": 42,
+            "ts": "2026-09-10T12:00:00Z",
+            "step": "1",
+            "plan": "01J123",
+            "agent": "main",
+            "kind": "note",
+            "by": "model",
+            "note": "decision",
+            "text": "We decided that `Session` must persist todos into disk."
+        });
+        fs::write(journal_dir.join("sess_1.jsonl"), format!("{note_record}\n")).unwrap();
+
+        // Index the project
+        let mut store = crate::agent::graph::SqliteGraphStore::open(&dir).unwrap();
+        crate::agent::graph_index::index_project(&mut store, &dir).unwrap();
+
+        // 4. graph_query tool execution:
+        // Transition: Symbol -> Decision
+        let gq_out = execute(
+            &mut ctx,
+            "graph_query",
+            &json!({
+                "node": "Session",
+                "direction": "incoming",
+                "relations": ["about"]
+            }),
+        );
+        assert!(gq_out.ok, "graph_query must succeed: {}", gq_out.output);
+        assert!(
+            gq_out.output.contains("mem:2026-09-10#12-00:decision:1"),
+            "must find incoming about edge from decision node: {}",
+            gq_out.output
+        );
+
+        // 5. Verify the decision node points to original journal ref j#42 via recall
+        let recall_out = execute(
+            &mut ctx,
+            "recall",
+            &json!({"query": "persist todos"}),
+        );
+        assert!(recall_out.ok, "recall must succeed: {}", recall_out.output);
+        assert!(
+            recall_out.output.contains("j#42"),
+            "recall must surface original journal ref j#42: {}",
+            recall_out.output
+        );
+
+        // 6. Transition: Decision -> Original record in journal
+        let journal_out = execute(
+            &mut ctx,
+            "journal",
+            &json!({
+                "session": "sess_1",
+                "query": "persist todos"
+            }),
+        );
+        assert!(journal_out.ok, "journal tool must succeed: {}", journal_out.output);
+        assert!(
+            journal_out.output.contains("#42"),
+            "journal tool must retrieve the original record #42: {}",
+            journal_out.output
         );
 
         fs::remove_dir_all(&dir).ok();
