@@ -1,6 +1,6 @@
 //! Language-independent project graph indexing.
 
-use super::graph::{Edge, GraphStore, Node, NodeKind};
+use super::graph::{Edge, GraphStore, Node, NodeKind, Occurrence};
 use anyhow::{Context, Result, bail};
 use ignore::WalkBuilder;
 use serde_json::{Value, json};
@@ -16,6 +16,7 @@ const MAX_INDEX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 pub struct GraphBatch {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
+    pub occurrences: Vec<Occurrence>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -110,7 +111,7 @@ impl SourceAdapter for GenericAdapter {
             language,
             "generic",
             GENERIC_ADAPTER_VERSION,
-            1,
+            &[],
         ));
         let text = String::from_utf8_lossy(content);
         for mention in path_mentions(&text) {
@@ -168,7 +169,7 @@ impl SourceAdapter for MarkdownAdapter {
             Some("markdown"),
             "markdown",
             MARKDOWN_ADAPTER_VERSION,
-            2,
+            &["declarations"],
         ));
         batch.nodes.push(Node {
             stable_key: document_key.clone(),
@@ -179,9 +180,9 @@ impl SourceAdapter for MarkdownAdapter {
             line_start: Some(1),
             line_end: Some(text.lines().count().max(1) as u32),
             signature: None,
+            roles: Vec::new(),
             properties: properties([
                 ("source_adapter", json!("markdown")),
-                ("adapter_level", json!(2)),
                 ("adapter_version", json!(MARKDOWN_ADAPTER_VERSION)),
             ]),
             content_hash: Some(content_hash(content)),
@@ -219,6 +220,7 @@ impl SourceAdapter for MarkdownAdapter {
                 line_start: Some(heading.line),
                 line_end: Some(end_line.max(heading.line)),
                 signature: Some(format!("h{}", heading.level)),
+                roles: Vec::new(),
                 properties: properties([
                     ("source_adapter", json!("markdown")),
                     ("heading_level", json!(heading.level)),
@@ -343,9 +345,10 @@ pub fn index_project_excluding(
                             None,
                             "generic",
                             GENERIC_ADAPTER_VERSION,
-                            1,
+                            &[],
                         )],
                         edges: vec![],
+                        occurrences: vec![],
                     }
                 }
             }
@@ -361,16 +364,22 @@ pub fn index_project_excluding(
                             None,
                             "generic",
                             GENERIC_ADAPTER_VERSION,
-                            1,
+                            &[],
                         )],
                         edges: vec![],
+                        occurrences: vec![],
                     }
                 }
             }
         };
         batch.edges.retain(resolve_edge);
         store
-            .replace_file_subgraph(&relative_path, &batch.nodes, &batch.edges)
+            .replace_file_subgraph(
+                &relative_path,
+                &batch.nodes,
+                &batch.edges,
+                &batch.occurrences,
+            )
             .with_context(|| format!("index {relative_path}"))?;
         report.indexed_files += 1;
     }
@@ -396,9 +405,10 @@ pub fn rebuild_project(root: &Path) -> Result<IndexReport> {
     let report = {
         let mut store = super::graph::SqliteGraphStore::open_unmanaged(&new_db, root.clone())
             .context("open fresh graph database for rebuild")?;
-        let report = index_project_excluding(&mut store, &root, &secret_exclude_globs())?;
+        // bump before indexing so every row of this generation is stamped
+        // with the generation being published
         store.bump_generation().context("bump graph generation")?;
-        report
+        index_project_excluding(&mut store, &root, &secret_exclude_globs())?
     };
 
     let db_path = graph_dir.join("graph.db");
@@ -444,7 +454,7 @@ fn file_node(
     language: Option<&str>,
     adapter: &str,
     adapter_version: &str,
-    level: u8,
+    capabilities: &[&str],
 ) -> Node {
     Node {
         stable_key: file_key(relative_path),
@@ -455,9 +465,18 @@ fn file_node(
         line_start: None,
         line_end: None,
         signature: None,
+        roles: Vec::new(),
         properties: properties([
             ("source_adapter", json!(adapter)),
-            ("adapter_level", json!(level)),
+            (
+                "capabilities",
+                Value::Array(
+                    capabilities
+                        .iter()
+                        .map(|c| Value::String(c.to_string()))
+                        .collect(),
+                ),
+            ),
             ("adapter_version", json!(adapter_version)),
             ("size_bytes", json!(content.len())),
         ]),
@@ -472,6 +491,8 @@ fn edge(from: &str, to: &str, kind: &str, source: &str) -> Edge {
         kind: kind.into(),
         confidence: Some(100),
         source: Some(source.into()),
+        source_hash: None,
+        limitations: Vec::new(),
         properties: BTreeMap::new(),
     }
 }

@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-pub const GRAPH_SCHEMA_VERSION: u32 = 1;
+pub const GRAPH_SCHEMA_VERSION: u32 = 2;
 const MAX_QUERY_DEPTH: u8 = 8;
 const MAX_QUERY_RESULTS: usize = 500;
 
@@ -56,6 +56,10 @@ pub struct Node {
     pub line_start: Option<u32>,
     pub line_end: Option<u32>,
     pub signature: Option<String>,
+    /// roles of this declaration (e.g. `test`); kinds stay structural —
+    /// `test` is never a kind (§2.4.3)
+    #[serde(default)]
+    pub roles: Vec<String>,
     #[serde(default)]
     pub properties: std::collections::BTreeMap<String, Value>,
     pub content_hash: Option<String>,
@@ -68,8 +72,28 @@ pub struct Edge {
     pub kind: String,
     pub confidence: Option<u8>,
     pub source: Option<String>,
+    /// hash of the source bytes this resolution was computed from; a
+    /// reindex whose bytes differ produces a new resolution
+    #[serde(default)]
+    pub source_hash: Option<String>,
+    /// what the resolving analyzer could not do (never a guess in place
+    /// of a missing edge — see `Occurrence`)
+    #[serde(default)]
+    pub limitations: Vec<String>,
     #[serde(default)]
     pub properties: std::collections::BTreeMap<String, Value>,
+}
+
+/// An unresolved or ambiguous name use: "file X mentions a call named
+/// `save` at line N". Stored apart from `edges` so a bare name match can
+/// never look like a confirmed relation (§2.4.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Occurrence {
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+    pub line: u32,
+    pub source_hash: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,16 +125,31 @@ pub struct GraphProjection {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     pub truncated: bool,
+    /// why the projection was cut (edge budget, depth); None when whole
+    pub truncated_reason: Option<String>,
 }
 
 pub trait GraphStore {
     fn schema_version(&self) -> Result<u32>;
+    /// current write generation: stamp for the next file batch. Writers
+    /// that computed against an older generation must drop their result
+    /// (§2.4.7 out-of-order protection, wired in stage D).
+    fn generation(&self) -> Result<u64>;
     fn upsert_node(&mut self, node: &Node) -> Result<()>;
     fn upsert_edge(&mut self, edge: &Edge) -> Result<()>;
     fn apply_batch(&mut self, nodes: &[Node], edges: &[Edge]) -> Result<()>;
-    fn replace_file_subgraph(&mut self, path: &str, nodes: &[Node], edges: &[Edge]) -> Result<()>;
+    /// Replace everything one file owns — nodes, edges, occurrences — in a
+    /// single transaction, stamped with the current generation.
+    fn replace_file_subgraph(
+        &mut self,
+        path: &str,
+        nodes: &[Node],
+        edges: &[Edge],
+        occurrences: &[Occurrence],
+    ) -> Result<()>;
     fn prune_file_subgraphs(&mut self, retained_paths: &BTreeSet<String>) -> Result<usize>;
     fn find_node(&self, stable_key: &str) -> Result<Option<Node>>;
+    fn occurrences_in_file(&self, path: &str) -> Result<Vec<Occurrence>>;
     fn neighbors(&self, stable_key: &str, query: NeighborQuery) -> Result<GraphProjection>;
 }
 
@@ -254,9 +293,9 @@ impl SqliteGraphStore {
                 size INTEGER,
                 mtime INTEGER,
                 lang TEXT,
-                level INTEGER,
                 adapter TEXT,
                 adapter_version TEXT,
+                capabilities TEXT NOT NULL DEFAULT '[]',
                 indexed_at INTEGER,
                 status TEXT NOT NULL DEFAULT 'ok',
                 error TEXT
@@ -271,6 +310,7 @@ impl SqliteGraphStore {
                 line_start INTEGER,
                 line_end INTEGER,
                 signature TEXT,
+                roles TEXT NOT NULL DEFAULT '[]',
                 props TEXT NOT NULL DEFAULT '{}',
                 hash TEXT,
                 source TEXT,
@@ -280,12 +320,25 @@ impl SqliteGraphStore {
             CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
             CREATE INDEX IF NOT EXISTS idx_nodes_path ON nodes(path);
             CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
+            CREATE TABLE IF NOT EXISTS occurrences(
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                line INTEGER NOT NULL,
+                source_hash TEXT NOT NULL,
+                generation INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_occurrences_path ON occurrences(path);
             CREATE TABLE IF NOT EXISTS edges(
                 from_key TEXT NOT NULL,
                 to_key TEXT NOT NULL,
                 kind TEXT NOT NULL,
                 source TEXT NOT NULL DEFAULT '',
                 confidence INTEGER,
+                source_hash TEXT,
+                generation INTEGER NOT NULL DEFAULT 0,
+                limitations TEXT NOT NULL DEFAULT '[]',
                 props TEXT NOT NULL DEFAULT '{}',
                 PRIMARY KEY(from_key, to_key, kind, source)
             );
@@ -379,7 +432,7 @@ impl SqliteGraphStore {
         let mut stmt = self
             .conn
             .prepare(&format!(
-                "SELECT from_key, to_key, kind, source, confidence, props
+                "SELECT from_key, to_key, kind, source, confidence, source_hash, limitations, props
                  FROM edges WHERE {rule}
                  ORDER BY from_key, to_key, kind, source LIMIT ?2"
             ))
@@ -392,19 +445,23 @@ impl SqliteGraphStore {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, Option<i64>>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             })
             .context("read incident edges")?;
         let mut edges = Vec::new();
         for row in rows {
-            let (from, to, kind, source, confidence, props) = row?;
+            let (from, to, kind, source, confidence, source_hash, limitations, props) = row?;
             edges.push(Edge {
                 from,
                 to,
                 kind,
                 confidence: confidence.map(|c| c as u8),
                 source: (!source.is_empty()).then_some(source),
+                source_hash,
+                limitations: parse_json_array(&limitations),
                 properties: parse_props(&props)?,
             });
         }
@@ -418,8 +475,31 @@ fn is_version_mismatch(error: &anyhow::Error) -> bool {
         .contains("incompatible with supported version")
 }
 
+/// Current write generation (0 when no rebuild ever bumped it). Works on
+/// a live connection and inside a transaction; row writes stamp this.
+fn read_generation(conn: &Connection) -> Result<u64> {
+    let generation: Option<String> = conn
+        .query_row("SELECT v FROM meta WHERE k = 'generation'", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .context("read graph generation")?;
+    match generation {
+        Some(value) => value
+            .parse()
+            .map_err(|e| anyhow!("graph generation is invalid: {e}")),
+        None => Ok(0),
+    }
+}
+
 fn parse_props(text: &str) -> Result<std::collections::BTreeMap<String, Value>> {
     serde_json::from_str(text).context("decode graph properties")
+}
+
+/// Decode a JSON string array column, tolerating legacy or corrupt values
+/// as empty rather than failing the whole read.
+fn parse_json_array(text: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(text).unwrap_or_default()
 }
 
 impl GraphStore for SqliteGraphStore {
@@ -437,10 +517,15 @@ impl GraphStore for SqliteGraphStore {
             .map_err(|e| anyhow!("graph schema version is invalid: {e}"))
     }
 
+    fn generation(&self) -> Result<u64> {
+        read_generation(&self.conn)
+    }
+
     fn upsert_node(&mut self, node: &Node) -> Result<()> {
         validate_node(node)?;
         let tx = self.conn.transaction().context("begin graph transaction")?;
-        let id = write_node(&tx, node)?;
+        let generation = read_generation(&tx)?;
+        let id = write_node(&tx, node, generation)?;
         write_fts(&tx, id, node)?;
         tx.commit().context("commit graph transaction")
     }
@@ -448,7 +533,8 @@ impl GraphStore for SqliteGraphStore {
     fn upsert_edge(&mut self, edge: &Edge) -> Result<()> {
         validate_edge(edge)?;
         let tx = self.conn.transaction().context("begin graph transaction")?;
-        write_edge(&tx, edge)?;
+        let generation = read_generation(&tx)?;
+        write_edge(&tx, edge, generation)?;
         tx.commit().context("commit graph transaction")
     }
 
@@ -461,21 +547,28 @@ impl GraphStore for SqliteGraphStore {
         }
         let tx = self.conn.transaction().context("begin graph transaction")?;
         let result = (|| {
+            let generation = read_generation(&tx)?;
             let mut ids = std::collections::HashMap::new();
             for node in nodes {
-                let id = write_node(&tx, node)?;
+                let id = write_node(&tx, node, generation)?;
                 write_fts(&tx, id, node)?;
                 ids.insert(node.stable_key.as_str(), id);
             }
             for edge in edges {
-                write_edge(&tx, edge)?;
+                write_edge(&tx, edge, generation)?;
             }
             Ok(())
         })();
         finish(tx, result)
     }
 
-    fn replace_file_subgraph(&mut self, path: &str, nodes: &[Node], edges: &[Edge]) -> Result<()> {
+    fn replace_file_subgraph(
+        &mut self,
+        path: &str,
+        nodes: &[Node],
+        edges: &[Edge],
+        occurrences: &[Occurrence],
+    ) -> Result<()> {
         if path.trim().is_empty() {
             bail!("graph file path must not be empty");
         }
@@ -485,20 +578,27 @@ impl GraphStore for SqliteGraphStore {
         for edge in edges {
             validate_edge(edge)?;
         }
+        for occurrence in occurrences {
+            validate_occurrence(occurrence)?;
+        }
 
         let tx = self.conn.transaction().context("begin graph transaction")?;
         let result = (|| {
+            let generation = read_generation(&tx)?;
             remove_file_subgraph(&tx, path)?;
             let mut file_meta = None;
             for node in nodes {
-                let id = write_node(&tx, node)?;
+                let id = write_node(&tx, node, generation)?;
                 write_fts(&tx, id, node)?;
                 if node.kind == NodeKind::File && node.path.as_deref() == Some(path) {
                     file_meta = Some(node.clone());
                 }
             }
             for edge in edges {
-                write_edge(&tx, edge)?;
+                write_edge(&tx, edge, generation)?;
+            }
+            for occurrence in occurrences {
+                write_occurrence(&tx, occurrence, generation)?;
             }
             record_file(&tx, path, file_meta.as_ref())?;
             Ok(())
@@ -542,7 +642,7 @@ impl GraphStore for SqliteGraphStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT key, kind, name, path, lang, line_start, line_end, signature, props, hash
+                "SELECT key, kind, name, path, lang, line_start, line_end, signature, roles, props, hash
                  FROM nodes WHERE key = ?1",
             )
             .context("prepare node lookup")?;
@@ -553,89 +653,89 @@ impl GraphStore for SqliteGraphStore {
         Ok(node)
     }
 
-    fn neighbors(&self, stable_key: &str, query: NeighborQuery) -> Result<GraphProjection> {
-        let depth = query.depth.clamp(1, MAX_QUERY_DEPTH) as i64;
-        let limit = query.limit.clamp(1, MAX_QUERY_RESULTS);
-        let join = match query.direction {
-            Direction::Outgoing => "e.from_key = w.key",
-            Direction::Incoming => "e.to_key = w.key",
-            Direction::Both => "(e.from_key = w.key OR e.to_key = w.key)",
-        };
-        let edge_rule = match query.direction {
-            Direction::Outgoing => "e.from_key IN (SELECT key FROM walk)",
-            Direction::Incoming => "e.to_key IN (SELECT key FROM walk)",
-            Direction::Both => {
-                "(e.from_key IN (SELECT key FROM walk) OR e.to_key IN (SELECT key FROM walk))"
-            }
-        };
-        // UNION (not UNION ALL) dedups visited keys, so cycles terminate;
-        // BFS row order makes the first discovery of a key the shortest one.
-        let sql = format!(
-            "WITH RECURSIVE walk(key, depth) AS (
-                 SELECT ?1, 0
-                 UNION
-                 SELECT CASE WHEN e.from_key = w.key THEN e.to_key ELSE e.from_key END,
-                        w.depth + 1
-                 FROM walk w JOIN edges e ON {join}
-                 WHERE w.depth < ?2
-             )
-             SELECT e.from_key, e.to_key, e.kind, e.source, e.confidence, e.props
-             FROM edges e
-             WHERE {edge_rule}
-                 AND e.from_key IN (SELECT key FROM walk)
-                 AND e.to_key IN (SELECT key FROM walk)
-             ORDER BY e.from_key, e.to_key, e.kind, e.source
-             LIMIT ?3"
-        );
-
-        let mut stmt = self.conn.prepare(&sql).context("prepare neighbor query")?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![stable_key, depth, limit as i64 + 1],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, Option<i64>>(4)?,
-                        row.get::<_, String>(5)?,
-                    ))
-                },
+    fn occurrences_in_file(&self, path: &str) -> Result<Vec<Occurrence>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT path, name, kind, line, source_hash FROM occurrences
+                 WHERE path = ?1 ORDER BY line, name",
             )
-            .context("read neighbor edges")?;
-
-        let mut edges = Vec::new();
-        let mut truncated = false;
-        let mut visited: BTreeSet<String> = BTreeSet::from([stable_key.to_string()]);
+            .context("prepare occurrence lookup")?;
+        let rows = stmt
+            .query_map([path], |row| {
+                Ok(Occurrence {
+                    path: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    line: row.get::<_, i64>(3)? as u32,
+                    source_hash: row.get(4)?,
+                })
+            })
+            .context("read file occurrences")?;
+        let mut out = Vec::new();
         for row in rows {
-            let (from, to, kind, source, confidence, props) = row?;
-            if edges.len() == limit {
-                truncated = true;
-                break;
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    fn neighbors(&self, stable_key: &str, query: NeighborQuery) -> Result<GraphProjection> {
+        let depth = query.depth.clamp(1, MAX_QUERY_DEPTH);
+        let limit = query.limit.clamp(1, MAX_QUERY_RESULTS);
+        let mut visited: BTreeSet<String> = BTreeSet::from([stable_key.to_string()]);
+        let mut seen: BTreeSet<(String, String, String, String)> = BTreeSet::new();
+        let mut edges = Vec::new();
+        let mut truncated_reason: Option<String> = None;
+        let mut frontier = vec![stable_key.to_string()];
+        let mut remaining = depth;
+        // sorted frontier plus ORDER BY inside incident_edges keeps the walk
+        // (and therefore truncation) deterministic
+        while remaining > 0 && !frontier.is_empty() && truncated_reason.is_none() {
+            frontier.sort();
+            frontier.dedup();
+            let mut next = Vec::new();
+            for key in &frontier {
+                // +1 probe per node: enough to notice budget exhaustion
+                // without ever fetching an unbounded adjacency
+                for edge in self.incident_edges(key, query.direction, limit + 1)? {
+                    let id = (
+                        edge.from.clone(),
+                        edge.to.clone(),
+                        edge.kind.clone(),
+                        edge.source.clone().unwrap_or_default(),
+                    );
+                    if !seen.insert(id) {
+                        continue;
+                    }
+                    if edges.len() >= limit {
+                        truncated_reason = Some(format!("edge budget exhausted (limit {limit})"));
+                        break;
+                    }
+                    for endpoint in [&edge.from, &edge.to] {
+                        if visited.insert(endpoint.clone()) {
+                            next.push(endpoint.clone());
+                        }
+                    }
+                    edges.push(edge);
+                }
+                if truncated_reason.is_some() {
+                    break;
+                }
             }
-            visited.insert(from.clone());
-            visited.insert(to.clone());
-            edges.push(Edge {
-                from,
-                to,
-                kind,
-                confidence: confidence.map(|c| c as u8),
-                source: (!source.is_empty()).then_some(source),
-                properties: parse_props(&props)?,
-            });
+            frontier = next;
+            remaining -= 1;
         }
 
+        let mut node_stmt = self
+            .conn
+            .prepare(
+                "SELECT key, kind, name, path, lang, line_start, line_end, signature, roles, props, hash
+                 FROM nodes WHERE key = ?1",
+            )
+            .context("prepare node lookup")?;
         let mut nodes = Vec::new();
         for key in &visited {
-            let mut stmt = self
-                .conn
-                .prepare(
-                    "SELECT key, kind, name, path, lang, line_start, line_end, signature, props, hash
-                     FROM nodes WHERE key = ?1",
-                )
-                .context("prepare node lookup")?;
-            if let Some(node) = stmt
+            if let Some(node) = node_stmt
                 .query_row([key], row_to_node)
                 .optional()
                 .context("look up graph node")?
@@ -643,12 +743,12 @@ impl GraphStore for SqliteGraphStore {
                 nodes.push(node);
             }
         }
-        nodes.sort_by(|left, right| left.stable_key.cmp(&right.stable_key));
 
         Ok(GraphProjection {
             nodes,
             edges,
-            truncated,
+            truncated: truncated_reason.is_some(),
+            truncated_reason,
         })
     }
 }
@@ -661,15 +761,16 @@ fn finish(tx: rusqlite::Transaction, result: Result<()>) -> Result<()> {
     tx.commit().context("commit graph transaction")
 }
 
-fn write_node(tx: &rusqlite::Transaction, node: &Node) -> Result<i64> {
+fn write_node(tx: &rusqlite::Transaction, node: &Node, generation: u64) -> Result<i64> {
     tx.execute(
-        "INSERT INTO nodes(key, kind, name, path, lang, line_start, line_end, signature, props, hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "INSERT INTO nodes(key, kind, name, path, lang, line_start, line_end, signature, roles, props, hash, generation)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(key) DO UPDATE SET
             kind = excluded.kind, name = excluded.name, path = excluded.path,
             lang = excluded.lang, line_start = excluded.line_start,
             line_end = excluded.line_end, signature = excluded.signature,
-            props = excluded.props, hash = excluded.hash",
+            roles = excluded.roles, props = excluded.props, hash = excluded.hash,
+            generation = excluded.generation",
         rusqlite::params![
             node.stable_key,
             node_kind_name(&node.kind),
@@ -679,8 +780,10 @@ fn write_node(tx: &rusqlite::Transaction, node: &Node) -> Result<i64> {
             node.line_start.map(i64::from),
             node.line_end.map(i64::from),
             node.signature,
+            serde_json::to_string(&node.roles)?,
             serde_json::to_string(&node.properties)?,
             node.content_hash,
+            generation as i64,
         ],
     )
     .context("write graph node")?;
@@ -710,18 +813,23 @@ fn write_fts(tx: &rusqlite::Transaction, node_id: i64, node: &Node) -> Result<()
     .context("write graph fts row")
 }
 
-fn write_edge(tx: &rusqlite::Transaction, edge: &Edge) -> Result<()> {
+fn write_edge(tx: &rusqlite::Transaction, edge: &Edge, generation: u64) -> Result<()> {
     tx.execute(
-        "INSERT INTO edges(from_key, to_key, kind, source, confidence, props)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO edges(from_key, to_key, kind, source, confidence, source_hash, generation, limitations, props)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(from_key, to_key, kind, source) DO UPDATE SET
-            confidence = excluded.confidence, props = excluded.props",
+            confidence = excluded.confidence, source_hash = excluded.source_hash,
+            generation = excluded.generation, limitations = excluded.limitations,
+            props = excluded.props",
         rusqlite::params![
             edge.from,
             edge.to,
             edge.kind,
             edge.source.clone().unwrap_or_default(),
             edge.confidence.map(i64::from),
+            edge.source_hash,
+            generation as i64,
+            serde_json::to_string(&edge.limitations)?,
             serde_json::to_string(&edge.properties)?,
         ],
     )
@@ -729,16 +837,41 @@ fn write_edge(tx: &rusqlite::Transaction, edge: &Edge) -> Result<()> {
     .context("write graph edge")
 }
 
+fn write_occurrence(
+    tx: &rusqlite::Transaction,
+    occurrence: &Occurrence,
+    generation: u64,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO occurrences(path, name, kind, line, source_hash, generation)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            occurrence.path,
+            occurrence.name,
+            occurrence.kind,
+            occurrence.line as i64,
+            occurrence.source_hash,
+            generation as i64,
+        ],
+    )
+    .map(|_| ())
+    .context("write graph occurrence")
+}
+
 /// Record the `files` row from the file node of a batch, if present.
+/// Capabilities come from the file node's `capabilities` prop (a JSON
+/// string array set by the owning adapter); anything else means the file
+/// was analyzed without a capability claim.
 fn record_file(tx: &rusqlite::Transaction, path: &str, file_node: Option<&Node>) -> Result<()> {
     let adapter = file_node
         .and_then(|node| node.properties.get("source_adapter"))
         .and_then(Value::as_str)
         .unwrap_or("generic");
-    let level = file_node
-        .and_then(|node| node.properties.get("adapter_level"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as i64;
+    let capabilities = file_node
+        .and_then(|node| node.properties.get("capabilities"))
+        .filter(|value| value.is_array())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "[]".to_string());
     let version = file_node
         .and_then(|node| node.properties.get("adapter_version"))
         .and_then(Value::as_str)
@@ -748,21 +881,22 @@ fn record_file(tx: &rusqlite::Transaction, path: &str, file_node: Option<&Node>)
         .and_then(|node| node.properties.get("size_bytes"))
         .and_then(Value::as_u64);
     tx.execute(
-        "INSERT INTO files(path, hash, size, lang, level, adapter, adapter_version, indexed_at, status)
+        "INSERT INTO files(path, hash, size, lang, adapter, adapter_version, capabilities, indexed_at, status)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'ok')
          ON CONFLICT(path) DO UPDATE SET
             hash = excluded.hash, size = excluded.size, lang = excluded.lang,
-            level = excluded.level, adapter = excluded.adapter,
+            adapter = excluded.adapter,
             adapter_version = excluded.adapter_version,
+            capabilities = excluded.capabilities,
             indexed_at = excluded.indexed_at, status = 'ok', error = NULL",
         rusqlite::params![
             path,
             hash,
             size.map(|value| value as i64),
             file_node.and_then(|node| node.language.as_deref()),
-            level,
             adapter,
             version,
+            capabilities,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
@@ -785,6 +919,9 @@ fn remove_file_subgraph(tx: &rusqlite::Transaction, path: &str) -> Result<()> {
         [path],
     )
     .context("remove graph edges")?;
+    tx.execute("DELETE FROM occurrences WHERE path = ?1", [path])
+        .map(|_| ())
+        .context("remove graph occurrences")?;
     tx.execute("DELETE FROM nodes WHERE path = ?1", [path])
         .map(|_| ())
         .context("remove graph nodes")
@@ -800,6 +937,16 @@ fn validate_node(node: &Node) -> Result<()> {
         .is_some_and(|(start, end)| start > end)
     {
         bail!("graph node line_start must not exceed line_end");
+    }
+    Ok(())
+}
+
+fn validate_occurrence(occurrence: &Occurrence) -> Result<()> {
+    if occurrence.path.trim().is_empty()
+        || occurrence.name.trim().is_empty()
+        || occurrence.kind.trim().is_empty()
+    {
+        bail!("graph occurrence requires path, name, and kind");
     }
     Ok(())
 }
@@ -823,8 +970,9 @@ fn row_to_node(row: &rusqlite::Row) -> rusqlite::Result<Node> {
         line_start: row.get::<_, Option<i64>>(5)?.map(|v| v as u32),
         line_end: row.get::<_, Option<i64>>(6)?.map(|v| v as u32),
         signature: row.get(7)?,
-        properties: parse_props(&row.get::<_, String>(8)?).unwrap_or_default(),
-        content_hash: row.get(9)?,
+        roles: parse_json_array(&row.get::<_, String>(8)?),
+        properties: parse_props(&row.get::<_, String>(9)?).unwrap_or_default(),
+        content_hash: row.get(10)?,
     })
 }
 
@@ -902,6 +1050,7 @@ mod tests {
             line_start: None,
             line_end: None,
             signature: None,
+            roles: Vec::new(),
             properties: std::collections::BTreeMap::new(),
             content_hash: None,
         }
@@ -914,6 +1063,8 @@ mod tests {
             kind: kind.into(),
             confidence: Some(100),
             source: Some("test".into()),
+            source_hash: None,
+            limitations: Vec::new(),
             properties: std::collections::BTreeMap::new(),
         }
     }
@@ -994,6 +1145,171 @@ mod tests {
         let projection = store.neighbors("a", NeighborQuery::default()).unwrap();
         assert_eq!(projection.nodes.len(), 2);
         assert_eq!(projection.edges.len(), 2);
+    }
+
+    fn occurrence(path: &str, name: &str) -> Occurrence {
+        Occurrence {
+            path: path.into(),
+            name: name.into(),
+            kind: "call".into(),
+            line: 10,
+            source_hash: "hash".into(),
+        }
+    }
+
+    fn fts_hits(store: &SqliteGraphStore, key: &str) -> i64 {
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM nodes_fts WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// Stage A DoD: file-scoped replace writes nodes, edges and occurrences
+    /// together, and re-replacing with an empty batch removes all three —
+    /// no stale FTS rows, no dangling edges, no orphan occurrences.
+    #[test]
+    fn replace_file_subgraph_owns_occurrences_fts_and_edges() {
+        let dir = tempdir().unwrap();
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        let mut file_node = node("file:a.rs", NodeKind::File);
+        file_node.path = Some("a.rs".into());
+        let mut fun = node("sym:a.rs::fn::f", NodeKind::Function);
+        fun.path = Some("a.rs".into());
+        let mut other = node("sym:b.rs::fn::g", NodeKind::Function);
+        other.path = Some("b.rs".into());
+        store
+            .replace_file_subgraph(
+                "a.rs",
+                &[file_node, fun],
+                &[edge("file:a.rs", "sym:a.rs::fn::f", "contains")],
+                &[occurrence("a.rs", "save"), occurrence("a.rs", "load")],
+            )
+            .unwrap();
+        assert_eq!(store.occurrences_in_file("a.rs").unwrap().len(), 2);
+        assert_eq!(fts_hits(&store, "sym:a.rs::fn::f"), 1);
+        // an edge into another file's node resolves while both live
+        store
+            .replace_file_subgraph(
+                "b.rs",
+                &[other],
+                &[edge("sym:a.rs::fn::f", "sym:b.rs::fn::g", "calls")],
+                &[],
+            )
+            .unwrap();
+
+        store.replace_file_subgraph("a.rs", &[], &[], &[]).unwrap();
+        assert!(store.find_node("file:a.rs").unwrap().is_none());
+        assert!(store.find_node("sym:a.rs::fn::f").unwrap().is_none());
+        assert!(store.occurrences_in_file("a.rs").unwrap().is_empty());
+        assert_eq!(fts_hits(&store, "sym:a.rs::fn::f"), 0);
+        // the cross-file edge died with its source node: nothing dangles
+        let projection = store
+            .neighbors(
+                "sym:b.rs::fn::g",
+                NeighborQuery {
+                    direction: Direction::Incoming,
+                    depth: 1,
+                    limit: 10,
+                },
+            )
+            .unwrap();
+        assert!(projection.edges.is_empty());
+        // the surviving file is untouched
+        assert!(store.find_node("sym:b.rs::fn::g").unwrap().is_some());
+    }
+
+    #[test]
+    fn neighbors_bfs_truncation_carries_a_reason() {
+        let dir = tempdir().unwrap();
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        let nodes = [
+            node("a", NodeKind::Function),
+            node("b", NodeKind::Function),
+            node("c", NodeKind::Function),
+            node("d", NodeKind::Function),
+        ];
+        let edges = [
+            edge("a", "b", "calls"),
+            edge("b", "c", "calls"),
+            edge("c", "d", "calls"),
+        ];
+        store.apply_batch(&nodes, &edges).unwrap();
+        let projection = store
+            .neighbors(
+                "a",
+                NeighborQuery {
+                    direction: Direction::Outgoing,
+                    depth: 5,
+                    limit: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(projection.edges.len(), 1);
+        assert!(projection.truncated);
+        assert!(
+            projection
+                .truncated_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("edge budget"),
+            "reason: {:?}",
+            projection.truncated_reason
+        );
+        // same query twice: truncation is deterministic
+        let again = store
+            .neighbors(
+                "a",
+                NeighborQuery {
+                    direction: Direction::Outgoing,
+                    depth: 5,
+                    limit: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(projection.edges, again.edges);
+    }
+
+    #[test]
+    fn file_capabilities_come_from_the_owning_adapter() {
+        let dir = tempdir().unwrap();
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        let mut file_node = node("file:a.md", NodeKind::File);
+        file_node.path = Some("a.md".into());
+        file_node
+            .properties
+            .insert("capabilities".into(), serde_json::json!(["declarations"]));
+        store
+            .replace_file_subgraph("a.md", &[file_node], &[], &[])
+            .unwrap();
+        let capabilities: String = store
+            .conn
+            .query_row(
+                "SELECT capabilities FROM files WHERE path = 'a.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(capabilities.contains("declarations"), "{capabilities}");
+
+        // no claim from the adapter: honest empty set, not a level of zero
+        let mut bare = node("file:b.txt", NodeKind::File);
+        bare.path = Some("b.txt".into());
+        store
+            .replace_file_subgraph("b.txt", &[bare], &[], &[])
+            .unwrap();
+        let capabilities: String = store
+            .conn
+            .query_row(
+                "SELECT capabilities FROM files WHERE path = 'b.txt'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(capabilities, "[]");
     }
 
     #[test]
