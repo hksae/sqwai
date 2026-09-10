@@ -4698,6 +4698,33 @@ mod tests {
     }
 
     #[test]
+    fn commentary_left_alignment_matches_tool_call() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.push_segment(Segment::Commentary("Checking files...".into()));
+        app.push_segment(Segment::Tool {
+            name: "read_file".into(),
+            args: "src/main.rs".into(),
+            ok: Some(true),
+            output: String::new(),
+            diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
+            expanded: false,
+        });
+
+        let commentary_rows = app.render_segment(&app.segments, 0, 80, true);
+        let tool_rows = app.render_segment(&app.segments, 1, 80, true);
+
+        let comm_text: String = commentary_rows[0].0.spans.iter().map(|s| s.content.as_ref()).collect();
+        let tool_text: String = tool_rows[0].0.spans.iter().map(|s| s.content.as_ref()).collect();
+
+        assert!(comm_text.starts_with("  "), "commentary must start with 2 spaces: {comm_text:?}");
+        assert!(!comm_text.starts_with("   "), "commentary must not start with 3 spaces");
+        assert!(tool_text.starts_with("  "), "tool must start with 2 spaces: {tool_text:?}");
+        assert!(!tool_text.starts_with("   "), "tool must not start with 3 spaces");
+    }
+
+    #[test]
     fn load_history_restores_commentary_when_assistant_message_has_content() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.session.messages = vec![

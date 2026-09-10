@@ -1238,8 +1238,9 @@ impl App {
                 }
             }
             Segment::Commentary(text) => {
-                for l in render(text, w, &self.hl) {
-                    out.push((l, Some(idx)));
+                let inner_w = w.saturating_sub(2).max(1);
+                for l in render(text, inner_w, &self.hl) {
+                    out.push((indent_line(l, 2), Some(idx)));
                 }
             }
             Segment::AskUser {
