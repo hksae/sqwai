@@ -74,6 +74,10 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_error: bool,
+    /// Opaque provider state attached to this turn, returned verbatim on the
+    /// next request of the same turn. The host never interprets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_state: Option<serde_json::Value>,
 }
 
 impl Message {
@@ -84,6 +88,7 @@ impl Message {
             tool_calls: Vec::new(),
             tool_call_id: None,
             is_error: false,
+            provider_state: None,
         }
     }
 
@@ -98,11 +103,17 @@ impl Message {
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.into()),
             is_error,
+            provider_state: None,
         }
     }
 
     pub fn with_tool_calls(mut self, calls: Vec<ToolCallReq>) -> Self {
         self.tool_calls = calls;
+        self
+    }
+
+    pub fn with_provider_state(mut self, state: Option<serde_json::Value>) -> Self {
+        self.provider_state = state;
         self
     }
 }
@@ -275,6 +286,8 @@ pub enum StreamEvent {
     ResponseId(String),
     /// the model finished a request to run a tool (arguments are complete)
     ToolCall(ToolCallReq),
+    /// Opaque provider-owned state attached to this turn (reasoning items, phase).
+    ProviderState(serde_json::Value),
 }
 
 pub type StreamResult = anyhow::Result<StreamEvent>;

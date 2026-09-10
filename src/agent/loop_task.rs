@@ -366,6 +366,8 @@ struct TurnOutcome {
     /// the provider rejected the effort parameter outright, so the turn was
     /// retried without it and the session must stop sending it
     effort_rejected: bool,
+    /// provider-owned opaque state attached to this turn (reasoning items, phase)
+    provider_state: Option<serde_json::Value>,
 }
 
 const MAX_SUBAGENTS_PER_CALL: usize = 8;
@@ -1187,12 +1189,18 @@ async fn run_agent(
 
         if turn.calls.is_empty() {
             // final answer
-            messages.push(Message::new(Role::Assistant, turn.text));
+            messages.push(
+                Message::new(Role::Assistant, turn.text).with_provider_state(turn.provider_state),
+            );
             break;
         }
 
         // assistant requested tools; record the call(s)
-        messages.push(Message::new(Role::Assistant, turn.text).with_tool_calls(turn.calls.clone()));
+        messages.push(
+            Message::new(Role::Assistant, turn.text)
+                .with_tool_calls(turn.calls.clone())
+                .with_provider_state(turn.provider_state),
+        );
 
         // §3.7 / §7 S: once the user cancels one call, no further calls in
         // this batch run and no further model turns are requested — Esc means
@@ -2042,6 +2050,7 @@ async fn run_turn(
         let mut failed: Option<anyhow::Error> = None;
         let mut text = String::new();
         let mut calls: Vec<ToolCallReq> = Vec::new();
+        let mut provider_state: Option<serde_json::Value> = None;
 
         let mut stream = provider.stream_chat(req.clone());
         while let Some(ev) = stream.next().await {
@@ -2103,6 +2112,9 @@ async fn run_turn(
                         calls.push(tc);
                     }
                 }
+                Ok(StreamEvent::ProviderState(s)) => {
+                    provider_state = Some(s);
+                }
                 Err(e) => failed = Some(e),
             }
             if failed.is_some() {
@@ -2141,6 +2153,7 @@ async fn run_turn(
                 saw_reasoning,
                 effort_rejected,
                 retries: attempt,
+                provider_state,
             });
         };
         let class = crate::providers::class_of(&error);
@@ -3079,6 +3092,7 @@ mod effort_tests {
             reasoning_tokens,
             saw_reasoning: false,
             effort_rejected,
+            provider_state: None,
         }
     }
 

@@ -36,8 +36,28 @@ fn input_items(req: &ChatRequest) -> Vec<Value> {
             Role::System => input.push(json!({"role": "system", "content": m.content})),
             Role::User => input.push(json!({"role": "user", "content": m.content})),
             Role::Assistant => {
+                // Replay reasoning items ahead of the assistant message they
+                // belong to, in order. Under previous_response_id continuation,
+                // the provider already holds them, so they must not be resent.
+                if req.previous_response_id.is_none()
+                    && let Some(state) = &m.provider_state
+                    && let Some(items) = state.get("reasoning_items").and_then(|v| v.as_array())
+                {
+                    for item in items {
+                        input.push(item.clone());
+                    }
+                }
                 if !m.content.is_empty() {
-                    input.push(json!({"role": "assistant", "content": m.content}));
+                    let mut msg = json!({"role": "assistant", "content": m.content});
+                    if let Some(phase) = m
+                        .provider_state
+                        .as_ref()
+                        .and_then(|s| s.get("phase"))
+                        .and_then(|p| p.as_str())
+                    {
+                        msg["phase"] = json!(phase);
+                    }
+                    input.push(msg);
                 }
                 for call in &m.tool_calls {
                     input.push(json!({
@@ -183,6 +203,8 @@ impl Provider for ResponsesProvider {
             let mut response_id_sent = false;
             // item id -> call being assembled
             let mut partials: BTreeMap<String, PartialCall> = BTreeMap::new();
+            let mut reasoning_items: Vec<Value> = Vec::new();
+            let mut phase: Option<String> = None;
             while let Some(ev) = es.next().await {
                 match ev {
                     Ok(ev) => {
@@ -242,6 +264,10 @@ impl Provider for ResponsesProvider {
                                     if let Some(args) = v.pointer("/item/arguments").and_then(|x| x.as_str()) {
                                         slot.args.push_str(args);
                                     }
+                                } else if v.pointer("/item/type").and_then(|t| t.as_str()) == Some("message")
+                                    && let Some(p) = v.pointer("/item/phase").and_then(|x| x.as_str())
+                                {
+                                    phase = Some(p.to_string());
                                 }
                             }
                             "response.function_call_arguments.delta" => {
@@ -261,24 +287,37 @@ impl Provider for ResponsesProvider {
                                 }
                             }
                             "response.output_item.done" => {
-                                if v.pointer("/item/type").and_then(|t| t.as_str()) == Some("function_call")
-                                    && let Some(id) = v.pointer("/item/id").and_then(|x| x.as_str())
-                                {
-                                    let mut slot = partials.remove(id).unwrap_or_default();
-                                    if let Some(call_id) = v.pointer("/item/call_id").and_then(|x| x.as_str()) {
-                                        slot.call_id = call_id.to_string();
+                                match v.pointer("/item/type").and_then(|t| t.as_str()) {
+                                    Some("function_call") => {
+                                        if let Some(id) = v.pointer("/item/id").and_then(|x| x.as_str()) {
+                                            let mut slot = partials.remove(id).unwrap_or_default();
+                                            if let Some(call_id) = v.pointer("/item/call_id").and_then(|x| x.as_str()) {
+                                                slot.call_id = call_id.to_string();
+                                            }
+                                            if let Some(name) = v.pointer("/item/name").and_then(|x| x.as_str()) {
+                                                slot.name = name.to_string();
+                                            }
+                                            if let Some(args) = v.pointer("/item/arguments").and_then(|x| x.as_str())
+                                                && !args.is_empty()
+                                            {
+                                                slot.args = args.to_string();
+                                            }
+                                            if let Some(call) = slot.finish() {
+                                                yield Ok(StreamEvent::ToolCall(call));
+                                            }
+                                        }
                                     }
-                                    if let Some(name) = v.pointer("/item/name").and_then(|x| x.as_str()) {
-                                        slot.name = name.to_string();
+                                    Some("reasoning") => {
+                                        if let Some(item) = v.get("item") {
+                                            reasoning_items.push(item.clone());
+                                        }
                                     }
-                                    if let Some(args) = v.pointer("/item/arguments").and_then(|x| x.as_str())
-                                        && !args.is_empty()
-                                    {
-                                        slot.args = args.to_string();
+                                    Some("message") => {
+                                        if let Some(p) = v.pointer("/item/phase").and_then(|x| x.as_str()) {
+                                            phase = Some(p.to_string());
+                                        }
                                     }
-                                    if let Some(call) = slot.finish() {
-                                        yield Ok(StreamEvent::ToolCall(call));
-                                    }
+                                    _ => {}
                                 }
                             }
                             "response.completed" | "response.incomplete" => {
@@ -325,6 +364,16 @@ impl Provider for ResponsesProvider {
                     }
                     Err(e) => { yield Err(anyhow!("stream error: {e}")); return; }
                 }
+            }
+            if !reasoning_items.is_empty() || phase.is_some() {
+                let mut state = json!({});
+                if !reasoning_items.is_empty() {
+                    state["reasoning_items"] = json!(reasoning_items);
+                }
+                if let Some(p) = phase {
+                    state["phase"] = json!(p);
+                }
+                yield Ok(StreamEvent::ProviderState(state));
             }
         }
         .boxed()
@@ -699,5 +748,180 @@ mod tests {
         assert!(first.is_some());
         let err = first.unwrap().unwrap_err();
         assert!(err.to_string().contains("server overloaded"), "{err}");
+    }
+
+    /// Reasoning items (with encrypted_content) and phase are captured from
+    /// output_item.done and emitted as ProviderState at the end of the turn.
+    #[tokio::test]
+    async fn streamed_reasoning_items_and_phase_are_captured_in_provider_state() {
+        let body = concat!(
+            "event: response.created\n",
+            "data: {\"response\":{\"id\":\"resp_1\"}}\n\n",
+            "event: response.output_item.added\n",
+            "data: {\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[]}}\n\n",
+            "event: response.reasoning_text.delta\n",
+            "data: {\"item_id\":\"rs_1\",\"delta\":\"thinking\"}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"thinking\"}],\"encrypted_content\":\"ENC_SECRET_BLOB\"}}\n\n",
+            "event: response.output_item.added\n",
+            "data: {\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[]}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"item_id\":\"msg_1\",\"delta\":\"I am looking into it\"}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"I am looking into it\"}]}}\n\n",
+            "event: response.completed\n",
+            "data: {\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\n",
+        )
+        .to_string();
+        let (url, h) = sse_server(body);
+        let events = collect(url).await;
+        h.join().unwrap();
+
+        let state = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::ProviderState(s) => Some(s.clone()),
+                _ => None,
+            })
+            .expect("provider state must be emitted");
+
+        let reasoning_items = state["reasoning_items"]
+            .as_array()
+            .expect("reasoning items present");
+        assert_eq!(reasoning_items.len(), 1);
+        assert_eq!(reasoning_items[0]["type"], "reasoning");
+        assert_eq!(reasoning_items[0]["id"], "rs_1");
+        assert_eq!(reasoning_items[0]["encrypted_content"], "ENC_SECRET_BLOB");
+        assert_eq!(state["phase"], "commentary");
+    }
+
+    /// Replaying reasoning items ahead of the assistant message in order, and
+    /// preserving phase on the assistant message.
+    #[test]
+    fn reasoning_items_and_phase_are_replayed_ahead_of_assistant_message() {
+        let req = ChatRequest {
+            model_id: "gpt-5.3-codex".into(),
+            system: vec![],
+            messages: vec![
+                Message::new(Role::User, "run check"),
+                Message::new(Role::Assistant, "checking now")
+                    .with_provider_state(Some(json!({
+                        "reasoning_items": [
+                            {
+                                "type": "reasoning",
+                                "id": "rs_42",
+                                "encrypted_content": "ENCRYPTED_OPAQUE_DATA",
+                                "summary": [{"type": "summary_text", "text": "let me verify"}]
+                            }
+                        ],
+                        "phase": "commentary"
+                    })))
+                    .with_tool_calls(vec![crate::providers::ToolCallReq::new(
+                        "c1",
+                        "check",
+                        json!({}),
+                    )]),
+                Message::tool_result("c1", "all ok", false),
+            ],
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: None,
+            tools: vec![crate::providers::ToolSpec {
+                name: "check".into(),
+                description: "run checks".into(),
+                parameters: json!({"type": "object"}),
+            }],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        let b = build_body(&req);
+        let input = b["input"].as_array().unwrap();
+        assert_eq!(
+            input.len(),
+            5,
+            "user, reasoning, assistant with phase, call, output: {input:#?}"
+        );
+
+        // input[0]: user
+        assert_eq!(input[0]["role"], "user");
+
+        // input[1]: reasoning item replayed verbatim ahead of assistant
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[1]["id"], "rs_42");
+        assert_eq!(input[1]["encrypted_content"], "ENCRYPTED_OPAQUE_DATA");
+
+        // input[2]: assistant message with phase
+        assert_eq!(input[2]["role"], "assistant");
+        assert_eq!(input[2]["content"], "checking now");
+        assert_eq!(input[2]["phase"], "commentary");
+
+        // input[3]: function_call
+        assert_eq!(input[3]["type"], "function_call");
+        assert_eq!(input[3]["call_id"], "c1");
+
+        // input[4]: function_call_output
+        assert_eq!(input[4]["type"], "function_call_output");
+        assert_eq!(input[4]["call_id"], "c1");
+    }
+
+    /// Under previous_response_id continuation, reasoning items must not be
+    /// replayed because the provider already holds them.
+    #[test]
+    fn reasoning_items_are_not_replayed_under_previous_response_id_continuation() {
+        let req = ChatRequest {
+            model_id: "gpt-5.3-codex".into(),
+            system: vec![],
+            messages: vec![
+                Message::new(Role::Assistant, "done").with_provider_state(Some(json!({
+                    "reasoning_items": [
+                        {
+                            "type": "reasoning",
+                            "id": "rs_100",
+                            "encrypted_content": "OPAQUE"
+                        }
+                    ],
+                    "phase": "final_answer"
+                }))),
+                Message::new(Role::User, "next question"),
+            ],
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: Some("resp_999".into()),
+            context_transport: crate::providers::ContextTransport::PreviousResponse,
+        };
+        let b = build_body(&req);
+        let input = b["input"].as_array().unwrap();
+        assert!(
+            !input
+                .iter()
+                .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("reasoning"))
+        );
+    }
+
+    /// Serializing a message without provider_state omits the field, and
+    /// legacy JSON without provider_state deserializes with None.
+    #[test]
+    fn message_without_provider_state_omits_field_and_deserializes() {
+        let m = Message::new(Role::Assistant, "hello");
+        let serialized = serde_json::to_string(&m).unwrap();
+        assert!(
+            !serialized.contains("provider_state"),
+            "none field must be omitted: {serialized}"
+        );
+
+        let parsed: Message =
+            serde_json::from_str(r#"{"role":"assistant","content":"hello"}"#).unwrap();
+        assert!(parsed.provider_state.is_none());
+
+        let with_state = m.with_provider_state(Some(json!({"phase": "final_answer"})));
+        let serialized_state = serde_json::to_string(&with_state).unwrap();
+        assert!(serialized_state.contains("provider_state"));
+        let parsed_state: Message = serde_json::from_str(&serialized_state).unwrap();
+        assert_eq!(
+            parsed_state.provider_state.unwrap()["phase"],
+            "final_answer"
+        );
     }
 }
