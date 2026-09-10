@@ -1,6 +1,7 @@
 //! Language-independent project graph indexing.
 
 use super::graph::{Edge, GraphStore, Node, NodeKind, Occurrence};
+use super::graph_lang::{TsAdapter, TsLang};
 use anyhow::{Context, Result, bail};
 use ignore::WalkBuilder;
 use serde_json::{Value, json};
@@ -330,10 +331,11 @@ pub fn index_project_excluding(
         // read: a healthy row under the current adapter build skips on
         // stat agreement, and the content hash arbitrates touches.
         let use_markdown = markdown.supports(path);
-        let (adapter_name, adapter_version): (&str, &str) = if use_markdown {
-            ("markdown", MARKDOWN_ADAPTER_VERSION)
-        } else {
-            ("generic", GENERIC_ADAPTER_VERSION)
+        let ts_lang = TsLang::for_path(Path::new(&relative_path));
+        let (adapter_name, adapter_version): (&str, &str) = match ts_lang {
+            Some(lang) => (lang.adapter_name(), lang.adapter_version()),
+            None if use_markdown => ("markdown", MARKDOWN_ADAPTER_VERSION),
+            None => ("generic", GENERIC_ADAPTER_VERSION),
         };
         let recorded = store.indexed_file(&relative_path)?;
         let adapter_current = recorded.as_ref().is_some_and(|record| {
@@ -379,42 +381,27 @@ pub fn index_project_excluding(
             report.unchanged_files += 1;
             continue;
         }
-        let mut batch = if use_markdown {
-            match markdown.index(&relative_path, &content) {
-                Ok(batch) => batch,
-                Err(error) => {
-                    report.warnings.push(format!("{relative_path}: {error}"));
-                    GraphBatch {
-                        nodes: vec![file_node(
-                            &relative_path,
-                            &content,
-                            None,
-                            "generic",
-                            GENERIC_ADAPTER_VERSION,
-                            &[],
-                        )],
-                        edges: vec![],
-                        occurrences: vec![],
-                    }
-                }
-            }
-        } else {
-            match generic.index(&relative_path, &content) {
-                Ok(batch) => batch,
-                Err(error) => {
-                    report.warnings.push(format!("{relative_path}: {error}"));
-                    GraphBatch {
-                        nodes: vec![file_node(
-                            &relative_path,
-                            &content,
-                            None,
-                            "generic",
-                            GENERIC_ADAPTER_VERSION,
-                            &[],
-                        )],
-                        edges: vec![],
-                        occurrences: vec![],
-                    }
+        let mut batch = match match ts_lang {
+            Some(lang) => TsAdapter(lang).index(&relative_path, &content),
+            None if use_markdown => markdown.index(&relative_path, &content),
+            None => generic.index(&relative_path, &content),
+        } {
+            Ok(batch) => batch,
+            // an adapter failure still records the file node (honest
+            // file facts), never a half-built analysis
+            Err(error) => {
+                report.warnings.push(format!("{relative_path}: {error}"));
+                GraphBatch {
+                    nodes: vec![file_node(
+                        &relative_path,
+                        &content,
+                        None,
+                        "generic",
+                        GENERIC_ADAPTER_VERSION,
+                        &[],
+                    )],
+                    edges: vec![],
+                    occurrences: vec![],
                 }
             }
         };
@@ -510,7 +497,7 @@ fn secret_exclude_globs() -> Vec<String> {
     crate::config::SecretsConfig::default().exclude_globs
 }
 
-fn file_node(
+pub(crate) fn file_node(
     relative_path: &str,
     content: &[u8],
     language: Option<&str>,
@@ -546,7 +533,7 @@ fn file_node(
     }
 }
 
-fn edge(from: &str, to: &str, kind: &str, source: &str) -> Edge {
+pub(crate) fn edge(from: &str, to: &str, kind: &str, source: &str) -> Edge {
     Edge {
         from: from.into(),
         to: to.into(),
@@ -652,7 +639,7 @@ fn content_hash(content: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(content))
 }
 
-fn properties<const N: usize>(items: [(&str, Value); N]) -> BTreeMap<String, Value> {
+pub(crate) fn properties<const N: usize>(items: [(&str, Value); N]) -> BTreeMap<String, Value> {
     items
         .into_iter()
         .map(|(key, value)| (key.to_string(), value))
@@ -1093,31 +1080,35 @@ mod tests {
             projection
                 .edges
                 .iter()
-                .any(|edge| edge.kind == "references" && edge.to == "file:src/b.rs"),
+                .any(|edge| (edge.kind == "references" || edge.kind == "imports")
+                    && edge.to == "file:src/b.rs"),
             "{:?}",
             projection.edges
         );
-        // a mention of a file that does not exist is dropped by the indexer
-        fs::write(dir.path().join("c.rs"), "// see src/ghost.rs\n").unwrap();
+        // an import/mention of a file that does not exist is dropped
+        fs::write(dir.path().join("c.rs"), "include!(\"src/ghost.rs\");\n").unwrap();
+        fs::write(dir.path().join("d.txt"), "see src/ghost.rs\n").unwrap();
         index_project(&mut store, dir.path()).unwrap();
-        let projection = store
-            .neighbors(
-                "file:c.rs",
-                NeighborQuery {
-                    direction: Direction::Outgoing,
-                    depth: 1,
-                    limit: 10,
-                },
-            )
-            .unwrap();
-        assert!(
-            !projection
-                .edges
-                .iter()
-                .any(|edge| edge.to == "file:src/ghost.rs"),
-            "{:?}",
-            projection.edges
-        );
+        for target_file in ["file:c.rs", "file:d.txt"] {
+            let projection = store
+                .neighbors(
+                    target_file,
+                    NeighborQuery {
+                        direction: Direction::Outgoing,
+                        depth: 1,
+                        limit: 10,
+                    },
+                )
+                .unwrap();
+            assert!(
+                !projection
+                    .edges
+                    .iter()
+                    .any(|edge| edge.to == "file:src/ghost.rs"),
+                "{target_file}: {:?}",
+                projection.edges
+            );
+        }
     }
 
     #[test]
@@ -1150,6 +1141,113 @@ mod tests {
                 .find_node("section:README.md#hello")
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// Stage C DoD: a mixed-language tree (Rust, Python, TypeScript,
+    /// Markdown, and generic text) indexes every file with its own adapter,
+    /// emits declarations and scopes under their stable keys, and assigns
+    /// honest capabilities without core-schema changes.
+    #[test]
+    fn mixed_language_repository_indexes_each_file_with_its_adapter() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub struct App;\nimpl App {\n    pub fn run(&self) {}\n}\n",
+        )
+        .unwrap();
+
+        fs::create_dir_all(dir.path().join("scripts")).unwrap();
+        fs::write(
+            dir.path().join("scripts/build.py"),
+            "class Builder:\n    def build(self):\n        pass\n",
+        )
+        .unwrap();
+
+        fs::create_dir_all(dir.path().join("web")).unwrap();
+        fs::write(
+            dir.path().join("web/app.ts"),
+            "export function start(): void {}\n",
+        )
+        .unwrap();
+
+        fs::create_dir_all(dir.path().join("docs")).unwrap();
+        fs::write(dir.path().join("docs/intro.md"), "# Intro\nOverview text\n").unwrap();
+
+        fs::write(dir.path().join("notes.txt"), "plain notes\n").unwrap();
+
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        let report = index_project(&mut store, dir.path()).unwrap();
+        assert_eq!(report.indexed_files, 5);
+        assert_eq!(report.warnings.len(), 0, "{:?}", report.warnings);
+
+        // Rust declarations & scopes
+        assert!(store.find_node("file:src/lib.rs").unwrap().is_some());
+        assert!(
+            store
+                .find_node("sym:src/lib.rs::struct::App")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .find_node("sym:src/lib.rs::impl<App>::fn::run")
+                .unwrap()
+                .is_some()
+        );
+        let rust_file = store.indexed_file("src/lib.rs").unwrap().unwrap();
+        assert_eq!(rust_file.adapter.as_deref(), Some("rust"));
+        assert!(rust_file.capabilities.contains(&"declarations".to_string()));
+        assert!(rust_file.capabilities.contains(&"imports".to_string()));
+
+        // Python declarations & scopes
+        assert!(store.find_node("file:scripts/build.py").unwrap().is_some());
+        assert!(
+            store
+                .find_node("sym:scripts/build.py::class::Builder")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .find_node("sym:scripts/build.py::class::Builder::fn::build")
+                .unwrap()
+                .is_some()
+        );
+        let py_file = store.indexed_file("scripts/build.py").unwrap().unwrap();
+        assert_eq!(py_file.adapter.as_deref(), Some("python"));
+
+        // TypeScript declarations
+        assert!(store.find_node("file:web/app.ts").unwrap().is_some());
+        assert!(
+            store
+                .find_node("sym:web/app.ts::fn::start")
+                .unwrap()
+                .is_some()
+        );
+        let ts_file = store.indexed_file("web/app.ts").unwrap().unwrap();
+        assert_eq!(ts_file.adapter.as_deref(), Some("typescript"));
+
+        // Markdown document and section
+        assert!(store.find_node("file:docs/intro.md").unwrap().is_some());
+        assert!(store.find_node("document:docs/intro.md").unwrap().is_some());
+        assert!(
+            store
+                .find_node("section:docs/intro.md#intro")
+                .unwrap()
+                .is_some()
+        );
+        let md_file = store.indexed_file("docs/intro.md").unwrap().unwrap();
+        assert_eq!(md_file.adapter.as_deref(), Some("markdown"));
+
+        // Generic fallback file
+        assert!(store.find_node("file:notes.txt").unwrap().is_some());
+        let txt_file = store.indexed_file("notes.txt").unwrap().unwrap();
+        assert_eq!(txt_file.adapter.as_deref(), Some("generic"));
+        assert!(
+            txt_file.capabilities.is_empty(),
+            "generic has no symbol claims"
         );
     }
 }
