@@ -729,6 +729,29 @@ continue; await its result before dependent changes or reporting success.",
             parameters: json!({"type":"object","properties":{"section":{"type":"string","enum":["Project","Conventions","User","Agreements"]},"scope":{"type":"string","enum":["project","user"]},"text":{"type":"string"},"replaces":{"type":"string"}},"required":["section","text"]}),
         },
         ToolDef {
+            name: "resolve_ref",
+            kind: Kind::ReadOnly,
+            description: "Resolve a code reference (file path and/or symbol name) against the project graph. \
+Returns definition location, signature, source hash, and capabilities, or suggestions if not found.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "ref": {
+                        "type": "string",
+                        "description": "reference key (sym:path::kind::name) or shorthand (path::symbol)"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "project-relative file path"
+                    },
+                    "symbol": {
+                        "type": "string",
+                        "description": "symbol name or scoped name"
+                    }
+                }
+            }),
+        },
+        ToolDef {
             name: "propose_plan",
             kind: Kind::ReadOnly,
             description: "Propose a new full plan or a replacement for the active one. \
@@ -1029,6 +1052,18 @@ pub fn call_summary(name: &str, args: &Value) -> String {
         }
         "plan" => format!("plan {}", s("op")),
         "propose_plan" => s("goal"),
+        "resolve_ref" => {
+            if let Some(r) = args["ref"].as_str() {
+                format!("resolve_ref {r}")
+            } else if let Some(p) = args["path"].as_str() {
+                let sym = args["symbol"].as_str().unwrap_or("*");
+                format!("resolve_ref {p}::{sym}")
+            } else if let Some(s) = args["symbol"].as_str() {
+                format!("resolve_ref {s}")
+            } else {
+                "resolve_ref".to_string()
+            }
+        }
         "journal" => {
             let op = args["op"].as_str().unwrap_or("read");
             if op == "assumptions" {
@@ -1239,6 +1274,22 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
                 ),
                 Ok(_) => Outcome::err("memory proposal text must not be empty"),
                 Err(error) => Outcome::err(error),
+            }
+        }
+        "resolve_ref" => {
+            let raw_ref = args["ref"].as_str();
+            let path = args["path"].as_str();
+            let symbol = args["symbol"].as_str();
+            if raw_ref.is_none() && path.is_none() && symbol.is_none() {
+                return Outcome::err("resolve_ref requires 'ref', 'path', or 'symbol'");
+            }
+            let mut store = match crate::agent::graph::SqliteGraphStore::open(&ctx.root) {
+                Ok(s) => s,
+                Err(e) => return Outcome::err(format!("cannot open graph: {e:#}")),
+            };
+            match store.resolve_ref(raw_ref, path, symbol) {
+                Ok(res) => Outcome::ok(serde_json::to_string_pretty(&res).unwrap_or_default()),
+                Err(e) => Outcome::err(format!("resolve_ref failed: {e:#}")),
             }
         }
         "note" => {
@@ -1591,6 +1642,86 @@ fn parse_time_bound(s: &str, end_of_day: bool) -> Option<chrono::DateTime<chrono
     None
 }
 
+/// Validate step references against the code graph per §2.4.8:
+/// - `modify` / `remove` require `found` where the file's capabilities include declarations (`not_found` rejects with candidates)
+/// - `create` requires the symbol to be absent on declaration (`not_found` or `unknown`), rejecting `found` on initial start or add
+/// - `unknown` passes for all intents
+fn validate_plan_refs(
+    root: &Path,
+    refs: &[crate::plan::StepRef],
+    is_create_intent: bool,
+) -> Result<(), plan::Rejection> {
+    if refs.is_empty() {
+        return Ok(());
+    }
+    let mut store = match crate::agent::graph::SqliteGraphStore::open(root) {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+
+    for step_ref in refs {
+        let res = match store.resolve_ref(None, Some(&step_ref.path), step_ref.symbol.as_deref()) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        match step_ref.intent {
+            crate::plan::RefIntent::Modify | crate::plan::RefIntent::Remove => match res {
+                crate::agent::graph::ResolveRefResult::NotFound { candidates, .. } => {
+                    let hint = if candidates.is_empty() {
+                        "verify the file path and symbol name or check resolve_ref".to_string()
+                    } else {
+                        format!(
+                            "candidates: {}",
+                            candidates
+                                .iter()
+                                .map(|c| c.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    };
+                    let target = step_ref.symbol.as_deref().unwrap_or(&step_ref.path);
+                    return Err(plan::Rejection::new(
+                        "ref_not_found",
+                        format!("ref '{target}' not found in {}", step_ref.path),
+                        hint,
+                    ));
+                }
+                crate::agent::graph::ResolveRefResult::Ambiguous { candidates, .. } => {
+                    return Err(plan::Rejection::new(
+                        "ref_ambiguous",
+                        format!(
+                            "ref '{}' in {} is ambiguous ({} candidates)",
+                            step_ref.symbol.as_deref().unwrap_or(&step_ref.path),
+                            step_ref.path,
+                            candidates.len()
+                        ),
+                        "disambiguate by specifying the scope or kind (e.g. fn::foo)",
+                    ));
+                }
+                crate::agent::graph::ResolveRefResult::Found { .. }
+                | crate::agent::graph::ResolveRefResult::Unknown { .. } => {}
+            },
+            crate::plan::RefIntent::Create => {
+                if is_create_intent {
+                    if let crate::agent::graph::ResolveRefResult::Found { .. } = res {
+                        let target = step_ref.symbol.as_deref().unwrap_or(&step_ref.path);
+                        return Err(plan::Rejection::new(
+                            "ref_collision",
+                            format!(
+                                "cannot create ref '{target}': already exists in {}",
+                                step_ref.path
+                            ),
+                            "choose a different symbol name or change intent to modify",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The `plan` tool: one operation per call, validated by the host (§2.1.3).
 fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let op: plan::Op = match serde_json::from_value(args.clone()) {
@@ -1637,6 +1768,11 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     .max(MIN_PLAN_BUDGET_TOKENS);
                 match plan::create(goal, constraints, acceptance, steps, budget_limit, &limits) {
                     Ok(mut created) => {
+                        for s in &created.steps {
+                            if let Err(rej) = validate_plan_refs(&ctx.root, &s.refs, true) {
+                                return rejection(rej);
+                            }
+                        }
                         created.sessions = vec![ctx.session_id.clone()];
                         let id = created.id.clone();
                         let step_count = created.steps.len();
@@ -1797,6 +1933,19 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 .unwrap_or("unknown")
                 .to_string();
             let readonly_show = op_name == "show";
+            if let plan::Op::Start { ref id, .. } = other {
+                if let Some(step) = active.step(id) {
+                    let is_initial_start = step.status == plan::StepStatus::Pending;
+                    if let Err(rej) = validate_plan_refs(&ctx.root, &step.refs, is_initial_start) {
+                        return rejection(rej);
+                    }
+                }
+            }
+            if let plan::Op::Add { ref refs, .. } = other {
+                if let Err(rej) = validate_plan_refs(&ctx.root, refs, true) {
+                    return rejection(rej);
+                }
+            }
             match plan::apply(&mut active, other, &limits, ctx.current_step.as_deref()) {
                 Ok(applied) => {
                     if readonly_show {
@@ -4919,6 +5068,151 @@ end
         );
         assert!(diff_path.ok, "{}", diff_path.output);
         assert!(diff_path.output.contains("feature2.rs"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_ref_tool_execution() {
+        let (mut ctx, dir) = proj();
+        fs::write(
+            dir.join("src/calc.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        )
+        .unwrap();
+
+        let mut store = crate::agent::graph::SqliteGraphStore::open(&dir).unwrap();
+        crate::agent::graph_index::index_project(&mut store, &dir).unwrap();
+
+        let outcome = execute(
+            &mut ctx,
+            "resolve_ref",
+            &json!({"path": "src/calc.rs", "symbol": "add"}),
+        );
+        assert!(outcome.ok, "{}", outcome.output);
+        assert!(outcome.output.contains("pub fn add"));
+        assert!(outcome.output.contains("\"status\": \"found\""));
+
+        let not_found = execute(
+            &mut ctx,
+            "resolve_ref",
+            &json!({"ref": "src/calc.rs::subtract"}),
+        );
+        assert!(not_found.ok, "{}", not_found.output);
+        assert!(not_found.output.contains("\"status\": \"not_found\""));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn plan_refs_validation_enforces_intent() {
+        let (mut ctx, dir) = proj();
+        fs::write(
+            dir.join("src/calc.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        )
+        .unwrap();
+        fs::write(dir.join("notes.txt"), "plain notes\n").unwrap();
+
+        let mut store = crate::agent::graph::SqliteGraphStore::open(&dir).unwrap();
+        crate::agent::graph_index::index_project(&mut store, &dir).unwrap();
+
+        // 1. Create plan with modify intent on missing symbol -> rejected!
+        let rej = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "test goal",
+                "steps": [{
+                    "title": "step 1",
+                    "kind": "change",
+                    "refs": [{"path": "src/calc.rs", "symbol": "nonexistent", "intent": "modify"}]
+                }]
+            }),
+        );
+        assert!(!rej.ok, "should reject missing ref on modify");
+        assert!(rej.output.contains("ref_not_found"), "{}", rej.output);
+
+        // 2. Create plan with modify intent on plain txt (unknown capabilities) -> passes!
+        let pass_unknown = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "test goal",
+                "steps": [{
+                    "title": "step 1",
+                    "kind": "change",
+                    "refs": [{"path": "notes.txt", "symbol": "anything", "intent": "modify"}]
+                }]
+            }),
+        );
+        assert!(pass_unknown.ok, "unknown must pass: {}", pass_unknown.output);
+
+        // 3. Add step with create intent on an already existing symbol -> rejected!
+        let rej_create = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "add",
+                "title": "step 2",
+                "kind": "change",
+                "refs": [{"path": "src/calc.rs", "symbol": "add", "intent": "create"}]
+            }),
+        );
+        assert!(!rej_create.ok, "should reject existing ref on create intent");
+        assert!(rej_create.output.contains("ref_collision"), "{}", rej_create.output);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pre_edit_warning_emitted_for_unindexed_symbol() {
+        let (mut ctx, dir) = proj();
+        fs::write(
+            dir.join("src/calc.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 {\n    let dummy = 1;\n    a + b\n}\n",
+        )
+        .unwrap();
+
+        let mut store = crate::agent::graph::SqliteGraphStore::open(&dir).unwrap();
+        crate::agent::graph_index::index_project(&mut store, &dir).unwrap();
+
+        // read first to satisfy read guard
+        execute(&mut ctx, "read", &json!({"file_path": "src/calc.rs"}));
+
+        // Edit an unindexed identifier `dummy`
+        let out = execute(
+            &mut ctx,
+            "edit",
+            &json!({
+                "file_path": "src/calc.rs",
+                "old_string": "dummy",
+                "new_string": "real_val"
+            }),
+        );
+        assert!(out.ok, "edit must succeed");
+        assert!(
+            out.output.contains("warning: symbol 'dummy' not in index for this file"),
+            "output was: {}",
+            out.output
+        );
+
+        // Edit a known indexed symbol `add`
+        execute(&mut ctx, "read", &json!({"file_path": "src/calc.rs"}));
+        let out2 = execute(
+            &mut ctx,
+            "edit",
+            &json!({
+                "file_path": "src/calc.rs",
+                "old_string": "add",
+                "new_string": "plus"
+            }),
+        );
+        assert!(out2.ok, "edit must succeed");
+        assert!(
+            !out2.output.contains("warning: symbol 'add' not in index"),
+            "should not warn for indexed symbol: {}",
+            out2.output
+        );
 
         fs::remove_dir_all(&dir).ok();
     }

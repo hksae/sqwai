@@ -144,6 +144,48 @@ pub struct IndexedFile {
     pub status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RefCandidate {
+    pub key: String,
+    pub name: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ResolveRefResult {
+    Found {
+        key: String,
+        kind: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        line: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_hash: Option<String>,
+        capabilities: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        limitations: Vec<String>,
+    },
+    NotFound {
+        capabilities: Vec<String>,
+        candidates: Vec<RefCandidate>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        limitations: Vec<String>,
+    },
+    Ambiguous {
+        candidates: Vec<RefCandidate>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        limitations: Vec<String>,
+    },
+    Unknown {
+        reason: String,
+    },
+}
+
 pub trait GraphStore {
     fn schema_version(&self) -> Result<u32>;
     /// current write generation: stamp for the next file batch. Writers
@@ -180,6 +222,8 @@ pub trait GraphStore {
     fn remove_file(&mut self, path: &str) -> Result<()>;
     fn prune_file_subgraphs(&mut self, retained_paths: &BTreeSet<String>) -> Result<usize>;
     fn find_node(&self, stable_key: &str) -> Result<Option<Node>>;
+    fn nodes_in_file(&self, path: &str) -> Result<Vec<Node>>;
+    fn file_outline(&self, path: &str) -> Result<Vec<Node>>;
     fn occurrences_in_file(&self, path: &str) -> Result<Vec<Occurrence>>;
     /// The recorded file row, if this path was ever indexed.
     fn indexed_file(&self, path: &str) -> Result<Option<IndexedFile>>;
@@ -504,6 +548,336 @@ impl SqliteGraphStore {
         }
         Ok(edges)
     }
+
+    /// Resolve a code reference (key, file path, symbol, or path::symbol) (§2.4.3).
+    /// Guarantees freshness by reindexing stale/modified target paths before resolving (§2.4.7).
+    pub fn resolve_ref(
+        &mut self,
+        raw_ref: Option<&str>,
+        path: Option<&str>,
+        symbol: Option<&str>,
+    ) -> Result<ResolveRefResult> {
+        let mut target_path: Option<String> = path.map(|p| p.replace('\\', "/").trim_start_matches("./").to_string());
+        let mut target_symbol: Option<String> = symbol.map(|s| s.to_string());
+
+        if let Some(r) = raw_ref {
+            let trimmed = r.trim();
+            if let Some(rest) = trimmed.strip_prefix("sym:") {
+                if let Ok(Some(node)) = self.find_node(trimmed) {
+                    let caps = node.path.as_deref()
+                        .and_then(|p| self.indexed_file(p).ok().flatten())
+                        .map(|f| f.capabilities)
+                        .unwrap_or_default();
+                    return Ok(ResolveRefResult::Found {
+                        key: node.stable_key,
+                        kind: node_kind_name(&node.kind).to_string(),
+                        line: node.line_start,
+                        signature: node.signature,
+                        source_hash: node.content_hash,
+                        capabilities: caps,
+                        limitations: Vec::new(),
+                    });
+                }
+                if let Some((p, s)) = split_path_symbol(rest) {
+                    if target_path.is_none() { target_path = Some(p); }
+                    if target_symbol.is_none() { target_symbol = Some(s); }
+                } else if target_symbol.is_none() {
+                    target_symbol = Some(rest.to_string());
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("file:") {
+                let norm = rest.replace('\\', "/").trim_start_matches("./").to_string();
+                if target_path.is_none() { target_path = Some(norm); }
+            } else if trimmed.contains("::") {
+                if let Some((p, s)) = split_path_symbol(trimmed) {
+                    if target_path.is_none() { target_path = Some(p); }
+                    if target_symbol.is_none() { target_symbol = Some(s); }
+                } else if target_symbol.is_none() {
+                    target_symbol = Some(trimmed.to_string());
+                }
+            } else if target_path.is_none() && target_symbol.is_none() {
+                let norm = trimmed.replace('\\', "/").trim_start_matches("./").to_string();
+                if self.project_root.join(&norm).is_file() || norm.contains('.') {
+                    target_path = Some(norm);
+                } else {
+                    target_symbol = Some(trimmed.to_string());
+                }
+            }
+        }
+
+        // Freshness guarantee (§2.4.7): if target path is known, check stat/hash and reindex if changed
+        if let Some(ref p) = target_path {
+            let full = self.project_root.join(p);
+            if full.is_file() {
+                let needs_reindex = match self.indexed_file(p)? {
+                    None => true,
+                    Some(ref recorded) => {
+                        if let Ok(meta) = full.metadata() {
+                            let size = meta.len() as i64;
+                            let mtime = meta
+                                .modified()
+                                .ok()
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|d| d.as_nanos() as i64)
+                                .unwrap_or(0);
+                            recorded.size != Some(size) || recorded.mtime != Some(mtime)
+                        } else {
+                            false
+                        }
+                    }
+                };
+                if needs_reindex {
+                    let root = self.project_root.clone();
+                    let _ = crate::agent::graph_index::reindex_paths(self, &root, &[p.clone()]);
+                }
+            }
+        }
+
+        if let Some(ref p) = target_path {
+            let recorded = self.indexed_file(p)?;
+            let full = self.project_root.join(p);
+            if !full.exists() && recorded.is_none() {
+                return Ok(ResolveRefResult::NotFound {
+                    capabilities: Vec::new(),
+                    candidates: Vec::new(),
+                    limitations: Vec::new(),
+                });
+            }
+
+            let caps = recorded.as_ref().map(|r| r.capabilities.clone()).unwrap_or_default();
+            let has_declarations = caps.iter().any(|c| c == "declarations");
+
+            if target_symbol.is_none() {
+                let file_key = format!("file:{p}");
+                if let Ok(Some(file_node)) = self.find_node(&file_key) {
+                    return Ok(ResolveRefResult::Found {
+                        key: file_node.stable_key,
+                        kind: "file".to_string(),
+                        line: None,
+                        signature: None,
+                        source_hash: file_node.content_hash,
+                        capabilities: caps,
+                        limitations: Vec::new(),
+                    });
+                }
+                return Ok(ResolveRefResult::NotFound {
+                    capabilities: caps,
+                    candidates: Vec::new(),
+                    limitations: Vec::new(),
+                });
+            }
+
+            if !has_declarations {
+                return Ok(ResolveRefResult::Unknown {
+                    reason: format!("file indexed without declarations; symbol resolution unavailable for '{p}'"),
+                });
+            }
+
+            let nodes = self.nodes_in_file(p)?;
+            let sym = target_symbol.as_ref().unwrap();
+
+            let mut exact_matches = Vec::new();
+            for node in &nodes {
+                if node.stable_key == *sym
+                    || node.name.as_deref() == Some(sym.as_str())
+                    || node.stable_key.ends_with(&format!("::{sym}"))
+                {
+                    exact_matches.push(node.clone());
+                }
+            }
+
+            if exact_matches.len() == 1 {
+                let node = &exact_matches[0];
+                return Ok(ResolveRefResult::Found {
+                    key: node.stable_key.clone(),
+                    kind: node_kind_name(&node.kind).to_string(),
+                    line: node.line_start,
+                    signature: node.signature.clone(),
+                    source_hash: node.content_hash.clone(),
+                    capabilities: caps,
+                    limitations: Vec::new(),
+                });
+            }
+
+            if exact_matches.len() > 1 {
+                let candidates = exact_matches
+                    .into_iter()
+                    .map(|n| RefCandidate {
+                        key: n.stable_key,
+                        name: n.name.unwrap_or_default(),
+                        kind: node_kind_name(&n.kind).to_string(),
+                        line: n.line_start,
+                        score: 1.0,
+                    })
+                    .collect();
+                return Ok(ResolveRefResult::Ambiguous {
+                    candidates,
+                    limitations: Vec::new(),
+                });
+            }
+
+            let mut scored: Vec<RefCandidate> = Vec::new();
+            for node in &nodes {
+                if matches!(
+                    node.kind,
+                    NodeKind::File | NodeKind::Folder | NodeKind::Document | NodeKind::Section
+                ) {
+                    continue;
+                }
+                let cand_name = node.name.as_deref().unwrap_or("");
+                let score = similarity_score(sym, cand_name);
+                if score >= 0.3 {
+                    scored.push(RefCandidate {
+                        key: node.stable_key.clone(),
+                        name: cand_name.to_string(),
+                        kind: node_kind_name(&node.kind).to_string(),
+                        line: node.line_start,
+                        score: (score * 100.0).round() / 100.0,
+                    });
+                }
+            }
+            scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            scored.truncate(5);
+
+            return Ok(ResolveRefResult::NotFound {
+                capabilities: caps,
+                candidates: scored,
+                limitations: Vec::new(),
+            });
+        }
+
+        let sym = target_symbol.as_deref().unwrap_or_default();
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT key, kind, name, path, lang, line_start, line_end, signature, roles, props, hash
+                 FROM nodes WHERE kind NOT IN ('file', 'folder', 'document', 'section')
+                 AND (name = ?1 OR key LIKE '%::' || ?1)
+                 ORDER BY line_start ASC, name ASC",
+            )
+            .context("prepare global symbol query")?;
+        let rows = stmt.query_map([sym], row_to_node)?;
+        let mut exact_matches = Vec::new();
+        for row in rows {
+            exact_matches.push(row?);
+        }
+
+        if exact_matches.len() == 1 {
+            let node = &exact_matches[0];
+            let caps = node
+                .path
+                .as_deref()
+                .and_then(|p| self.indexed_file(p).ok().flatten())
+                .map(|f| f.capabilities)
+                .unwrap_or_default();
+            return Ok(ResolveRefResult::Found {
+                key: node.stable_key.clone(),
+                kind: node_kind_name(&node.kind).to_string(),
+                line: node.line_start,
+                signature: node.signature.clone(),
+                source_hash: node.content_hash.clone(),
+                capabilities: caps,
+                limitations: Vec::new(),
+            });
+        }
+
+        if exact_matches.len() > 1 {
+            let candidates = exact_matches
+                .into_iter()
+                .map(|n| RefCandidate {
+                    key: n.stable_key,
+                    name: n.name.unwrap_or_default(),
+                    kind: node_kind_name(&n.kind).to_string(),
+                    line: n.line_start,
+                    score: 1.0,
+                })
+                .collect();
+            return Ok(ResolveRefResult::Ambiguous {
+                candidates,
+                limitations: Vec::new(),
+            });
+        }
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT key, kind, name, path, lang, line_start, line_end, signature, roles, props, hash
+                 FROM nodes WHERE kind NOT IN ('file', 'folder', 'document', 'section')
+                 ORDER BY name ASC",
+            )
+            .context("prepare global candidate scan")?;
+        let rows = stmt.query_map([], row_to_node)?;
+        let mut scored = Vec::new();
+        for row in rows {
+            let node = row?;
+            let cand_name = node.name.as_deref().unwrap_or("");
+            let score = similarity_score(sym, cand_name);
+            if score >= 0.3 {
+                scored.push(RefCandidate {
+                    key: node.stable_key,
+                    name: cand_name.to_string(),
+                    kind: node_kind_name(&node.kind).to_string(),
+                    line: node.line_start,
+                    score: (score * 100.0).round() / 100.0,
+                });
+            }
+        }
+        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(5);
+
+        Ok(ResolveRefResult::NotFound {
+            capabilities: Vec::new(),
+            candidates: scored,
+            limitations: Vec::new(),
+        })
+    }
+}
+
+fn split_path_symbol(s: &str) -> Option<(String, String)> {
+    if let Some((left, right)) = s.split_once("::") {
+        let left_clean = left.replace('\\', "/").trim_start_matches("./").to_string();
+        if left_clean.contains('/') || left_clean.contains('.') {
+            return Some((left_clean, right.to_string()));
+        }
+    }
+    None
+}
+
+pub fn similarity_score(query: &str, candidate: &str) -> f64 {
+    if query.is_empty() || candidate.is_empty() {
+        return 0.0;
+    }
+    if query == candidate {
+        return 1.0;
+    }
+    if query.eq_ignore_ascii_case(candidate) {
+        return 0.95;
+    }
+    let query_chars: Vec<char> = query.chars().collect();
+    let cand_chars: Vec<char> = candidate.chars().collect();
+    let max_len = query_chars.len().max(cand_chars.len());
+
+    let mut prev: Vec<usize> = (0..=cand_chars.len()).collect();
+    let mut curr: Vec<usize> = vec![0; cand_chars.len() + 1];
+    for (i, &ca) in query_chars.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in cand_chars.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        prev.copy_from_slice(&curr);
+    }
+    let dist = prev[cand_chars.len()];
+    let lev_sim = 1.0 - (dist as f64 / max_len as f64);
+
+    let query_lower = query.to_ascii_lowercase();
+    let cand_lower = candidate.to_ascii_lowercase();
+    let sub_sim = if cand_lower.contains(&query_lower) || query_lower.contains(&cand_lower) {
+        0.8 * (query.len().min(candidate.len()) as f64 / query.len().max(candidate.len()) as f64)
+    } else {
+        0.0
+    };
+
+    lev_sim.max(sub_sim).clamp(0.0, 1.0)
 }
 
 fn is_version_mismatch(error: &anyhow::Error) -> bool {
@@ -714,6 +1088,44 @@ impl GraphStore for SqliteGraphStore {
             .optional()
             .context("look up graph node")?;
         Ok(node)
+    }
+
+    fn nodes_in_file(&self, path: &str) -> Result<Vec<Node>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT key, kind, name, path, lang, line_start, line_end, signature, roles, props, hash
+                 FROM nodes WHERE path = ?1 ORDER BY line_start ASC, name ASC",
+            )
+            .context("prepare nodes_in_file lookup")?;
+        let rows = stmt
+            .query_map([path], row_to_node)
+            .context("query nodes_in_file")?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    fn file_outline(&self, path: &str) -> Result<Vec<Node>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT key, kind, name, path, lang, line_start, line_end, signature, roles, props, hash
+                 FROM nodes WHERE path = ?1
+                 AND kind NOT IN ('file', 'folder', 'document', 'section')
+                 ORDER BY line_start ASC, name ASC",
+            )
+            .context("prepare file_outline lookup")?;
+        let rows = stmt
+            .query_map([path], row_to_node)
+            .context("query file_outline")?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     fn occurrences_in_file(&self, path: &str) -> Result<Vec<Occurrence>> {
@@ -1088,7 +1500,7 @@ fn row_to_node(row: &rusqlite::Row) -> rusqlite::Result<Node> {
     })
 }
 
-fn node_kind_name(kind: &NodeKind) -> &'static str {
+pub(crate) fn node_kind_name(kind: &NodeKind) -> &'static str {
     match kind {
         NodeKind::File => "file",
         NodeKind::Folder => "folder",
@@ -1552,5 +1964,201 @@ mod tests {
         assert!(error.to_string().contains("incompatible"), "{error}");
         // the database is left in place
         assert!(dir.path().join(".sqwai/graph/graph.db").exists());
+    }
+
+    #[test]
+    fn resolve_ref_found_exact() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub fn calculate(x: i32) -> i32 {\n    x + 1\n}\n",
+        )
+        .unwrap();
+
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        crate::agent::graph_index::index_project(&mut store, dir.path()).unwrap();
+
+        // Lookup by path and symbol
+        let res = store
+            .resolve_ref(None, Some("src/lib.rs"), Some("calculate"))
+            .unwrap();
+        match res {
+            ResolveRefResult::Found {
+                key,
+                kind,
+                line,
+                signature,
+                capabilities,
+                ..
+            } => {
+                assert!(key.contains("fn::calculate"), "key is {key}");
+                assert_eq!(kind, "function");
+                assert_eq!(line, Some(1));
+                assert!(signature.unwrap().contains("pub fn calculate"));
+                assert!(capabilities.contains(&"declarations".to_string()));
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        // Lookup by shorthand path::symbol
+        let res2 = store
+            .resolve_ref(Some("src/lib.rs::calculate"), None, None)
+            .unwrap();
+        assert!(matches!(res2, ResolveRefResult::Found { .. }));
+
+        // Lookup by file path only
+        let res3 = store
+            .resolve_ref(Some("src/lib.rs"), None, None)
+            .unwrap();
+        match res3 {
+            ResolveRefResult::Found { kind, key, .. } => {
+                assert_eq!(kind, "file");
+                assert_eq!(key, "file:src/lib.rs");
+            }
+            other => panic!("expected Found file, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_ref_not_found_with_candidates() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub fn calculate(x: i32) -> i32 { x + 1 }\npub fn calculate_fast() {}\n",
+        )
+        .unwrap();
+
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        crate::agent::graph_index::index_project(&mut store, dir.path()).unwrap();
+
+        // Typo search "calculat"
+        let res = store
+            .resolve_ref(None, Some("src/lib.rs"), Some("calculat"))
+            .unwrap();
+        match res {
+            ResolveRefResult::NotFound {
+                capabilities,
+                candidates,
+                ..
+            } => {
+                assert!(capabilities.contains(&"declarations".to_string()));
+                assert!(!candidates.is_empty(), "candidates must not be empty");
+                assert!(
+                    candidates.iter().any(|c| c.name == "calculate"),
+                    "candidates should include calculate: {candidates:?}"
+                );
+                assert!(candidates[0].score >= 0.5);
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_ref_ambiguous() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/a.rs"),
+            "pub fn helper() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("src/b.rs"),
+            "pub fn helper() {}\n",
+        )
+        .unwrap();
+
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        crate::agent::graph_index::index_project(&mut store, dir.path()).unwrap();
+
+        // Project-wide lookup for "helper" without path
+        let res = store.resolve_ref(None, None, Some("helper")).unwrap();
+        match res {
+            ResolveRefResult::Ambiguous { candidates, .. } => {
+                assert_eq!(candidates.len(), 2);
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_ref_unknown_for_unsupported_language() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "some plain text\n").unwrap();
+
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        crate::agent::graph_index::index_project(&mut store, dir.path()).unwrap();
+
+        let res = store
+            .resolve_ref(None, Some("notes.txt"), Some("some_func"))
+            .unwrap();
+        match res {
+            ResolveRefResult::Unknown { reason } => {
+                assert!(reason.contains("without declarations"), "{reason}");
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_ref_freshness_triggers_reindex() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub fn v1() {}\n",
+        )
+        .unwrap();
+
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        crate::agent::graph_index::index_project(&mut store, dir.path()).unwrap();
+        assert!(matches!(
+            store.resolve_ref(None, Some("src/lib.rs"), Some("v1")).unwrap(),
+            ResolveRefResult::Found { .. }
+        ));
+
+        // Sleep briefly to ensure mtime changes on disk
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub fn v2() {}\n",
+        )
+        .unwrap();
+
+        // resolve_ref must trigger incremental reindex automatically!
+        let res = store
+            .resolve_ref(None, Some("src/lib.rs"), Some("v2"))
+            .unwrap();
+        assert!(matches!(res, ResolveRefResult::Found { .. }), "freshness should find v2");
+
+        let old = store
+            .resolve_ref(None, Some("src/lib.rs"), Some("v1"))
+            .unwrap();
+        assert!(matches!(old, ResolveRefResult::NotFound { .. }), "v1 must be gone");
+    }
+
+    #[test]
+    fn file_outline_and_nodes_in_file() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub struct MyStruct;\npub fn my_func() {}\n",
+        )
+        .unwrap();
+
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        crate::agent::graph_index::index_project(&mut store, dir.path()).unwrap();
+
+        let outline = store.file_outline("src/lib.rs").unwrap();
+        assert_eq!(outline.len(), 2);
+        assert_eq!(outline[0].name.as_deref(), Some("MyStruct"));
+        assert_eq!(outline[1].name.as_deref(), Some("my_func"));
+
+        let all_nodes = store.nodes_in_file("src/lib.rs").unwrap();
+        // File node + 2 symbol nodes
+        assert_eq!(all_nodes.len(), 3);
     }
 }

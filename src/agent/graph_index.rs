@@ -261,6 +261,12 @@ impl SourceAdapter for MarkdownAdapter {
 /// Two passes: the first collects the walked file set so that Level 1
 /// `references` edges can be resolved against it — an adapter never needs to
 /// know what else exists, and no dangling `file:` edges are stored.
+/// Index the project with default secret exclusions.
+#[allow(dead_code)]
+pub fn index_project(store: &mut impl GraphStore, root: &Path) -> Result<IndexReport> {
+    index_project_excluding(store, root, &secret_exclude_globs())
+}
+
 pub fn index_project_excluding(
     store: &mut impl GraphStore,
     root: &Path,
@@ -913,11 +919,6 @@ mod tests {
     use crate::agent::graph::{Direction, NeighborQuery, SqliteGraphStore};
     use std::fs;
     use tempfile::tempdir;
-
-    /// Incremental indexing with the default secret exclusions.
-    fn index_project(store: &mut impl GraphStore, root: &Path) -> Result<IndexReport> {
-        index_project_excluding(store, root, &secret_exclude_globs())
-    }
 
     /// §2.3.6: credential files stay out of the index. Their contents would
     /// land in node properties and the FTS table, which is durable state the

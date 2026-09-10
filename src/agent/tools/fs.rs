@@ -272,6 +272,40 @@ fn apply_one(content: &str, old: &str, new: &str, replace_all: bool) -> Result<S
     })
 }
 
+fn is_single_identifier(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    if !first.is_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Pre-check for edit/multi_edit (§2.4.8):
+/// If old_string is a single identifier-like token, the file has declarations
+/// capability, and resolve_ref returns not_found -> emit warning banner.
+fn check_symbol_pre_edit(root: &Path, file_path: &Path, old_string: &str) -> Option<String> {
+    let trimmed = old_string.trim();
+    if !is_single_identifier(trimmed) {
+        return None;
+    }
+    let Ok(rel) = file_path.strip_prefix(root) else {
+        return None;
+    };
+    let norm = rel.to_string_lossy().replace('\\', "/");
+    let mut store = crate::agent::graph::SqliteGraphStore::open(root).ok()?;
+    match store.resolve_ref(None, Some(&norm), Some(trimmed)).ok()? {
+        crate::agent::graph::ResolveRefResult::NotFound { .. } => {
+            Some(format!("warning: symbol '{trimmed}' not in index for this file"))
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn edit(
     ctx: &mut ToolCtx,
     raw: &str,
@@ -294,6 +328,7 @@ pub(super) fn edit(
         Ok(u) => u,
         Err(e) => return Outcome::err(e),
     };
+    let warn = check_symbol_pre_edit(&ctx.root, &p, old);
     checkpoint(ctx, &p, "edit");
     let checkpoint_id = ctx.journal.last().map(|(sha, _)| sha.clone());
     if let Err(e) = fs::write(&p, &updated) {
@@ -311,10 +346,15 @@ pub(super) fn edit(
         checkpoint_id,
         &diff,
     );
-    Outcome::ok(format!(
+    let mut out_msg = format!(
         "edited {} (+{add}/-{rem})",
         rel_label(&ctx.root, &p)
-    ))
+    );
+    if let Some(w) = warn {
+        out_msg.push('\n');
+        out_msg.push_str(&w);
+    }
+    Outcome::ok(out_msg)
     .with_diff(diff)
     .with_file_diff(metadata)
 }
@@ -343,6 +383,14 @@ pub(super) fn multi_edit(
         }
         staged = apply_one(&staged, old, new, *all).unwrap_or(staged.clone());
     }
+    let mut warnings = Vec::new();
+    for (old, _, _) in edits {
+        if let Some(w) = check_symbol_pre_edit(&ctx.root, &p, old) {
+            if !warnings.contains(&w) {
+                warnings.push(w);
+            }
+        }
+    }
     checkpoint(ctx, &p, "multi_edit");
     let checkpoint_id = ctx.journal.last().map(|(sha, _)| sha.clone());
     let before = content;
@@ -362,11 +410,16 @@ pub(super) fn multi_edit(
         checkpoint_id,
         &diff,
     );
-    Outcome::ok(format!(
+    let mut out_msg = format!(
         "applied {} edit(s) to {} (+{add}/-{rem})",
         edits.len(),
         rel_label(&ctx.root, &p)
-    ))
+    );
+    if !warnings.is_empty() {
+        out_msg.push('\n');
+        out_msg.push_str(&warnings.join("\n"));
+    }
+    Outcome::ok(out_msg)
     .with_diff(diff)
     .with_file_diff(metadata)
 }

@@ -1213,7 +1213,7 @@ pub struct Rejection {
 }
 
 impl Rejection {
-    fn new(code: &'static str, reason: impl Into<String>, hint: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, reason: impl Into<String>, hint: impl Into<String>) -> Self {
         Self {
             code,
             reason: reason.into(),
