@@ -417,6 +417,10 @@ pub struct App {
 
     // mouse selection
     press: Option<CellPos>,
+    /// semantic drag anchor: (view, segment id, offset within the segment's
+    /// contiguous row run). Rows shift under a press while streaming; the id
+    /// + offset still names the pressed content when the drag continues.
+    press_anchor: Option<(Option<u64>, u64, usize)>,
     dragging: bool,
     sel: Option<Selection>,
     input_dragging: bool,
@@ -472,12 +476,21 @@ impl App {
         let pos = pos.min(self.segments.len());
         self.segments.insert(pos, seg);
         self.seg_meta.insert(pos, SegMeta { id, rev: 0 });
+        // cached rows bake in the positional row tag, so every segment whose
+        // index shifted re-renders with its new tag
+        for m in self.seg_meta.iter_mut().skip(pos + 1) {
+            m.rev += 1;
+        }
     }
 
     fn remove_segment(&mut self, i: usize) {
         if i < self.segments.len() {
             self.segments.remove(i);
             self.seg_meta.remove(i);
+            // see insert_segment: the shifted tail must repaint its tags
+            for m in self.seg_meta.iter_mut().skip(i) {
+                m.rev += 1;
+            }
         }
     }
 
@@ -498,11 +511,21 @@ impl App {
     /// Retain segments by predicate, keeping identity metadata aligned.
     /// Dropped ids are never reused, so cache entries and click targets that
     /// still reference them simply miss instead of hitting new content.
+    /// Survivors whose index shifted repaint (cached rows carry the old
+    /// positional tag); survivors that kept their index are untouched.
     fn retain_segments(&mut self, mut pred: impl FnMut(&Segment) -> bool) {
         let mut kept_segs = Vec::with_capacity(self.segments.len());
         let mut kept_meta = Vec::with_capacity(self.seg_meta.len());
-        for (seg, meta) in self.segments.drain(..).zip(self.seg_meta.drain(..)) {
+        for (old_i, (seg, mut meta)) in self
+            .segments
+            .drain(..)
+            .zip(self.seg_meta.drain(..))
+            .enumerate()
+        {
             if pred(&seg) {
+                if kept_segs.len() != old_i {
+                    meta.rev += 1;
+                }
                 kept_segs.push(seg);
                 kept_meta.push(meta);
             }
@@ -534,6 +557,7 @@ impl App {
     }
 
     /// Insert into a subagent transcript, keeping identity aligned.
+    /// The shifted tail repaints (cached rows carry the old positional tag).
     fn sub_insert(&mut self, id: u64, pos: usize, seg: Segment) {
         let nid = self.alloc_seg_id();
         if let Some(chat) = self.subagent_chats.get_mut(&id) {
@@ -541,6 +565,9 @@ impl App {
             chat.insert(pos, seg);
             if let Some(meta) = self.subagent_meta.get_mut(&id) {
                 meta.insert(pos, SegMeta { id: nid, rev: 0 });
+                for m in meta.iter_mut().skip(pos + 1) {
+                    m.rev += 1;
+                }
             }
         }
     }
@@ -745,6 +772,7 @@ impl App {
             agents_click: None,
             status_y: 0,
             press: None,
+            press_anchor: None,
             dragging: false,
             sel: None,
             input_dragging: false,

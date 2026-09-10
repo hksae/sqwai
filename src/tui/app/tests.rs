@@ -4507,11 +4507,26 @@ mod tests {
 
         app.rebuild_cache(80);
         assert_eq!(app.seg_meta.len(), 3);
-        // old ids keep their rows; only the newcomer renders fresh
-        for (id, rows) in ids_before.iter().zip(rows_before.iter()) {
-            let cached = app.seg_cache.get(id).expect("old entry must survive");
-            assert_eq!(cached.rows.len(), *rows, "segment {id} must not re-render");
-        }
+        // the unshifted prefix keeps its rows without re-rendering; the
+        // shifted tail re-renders exactly once so its rows carry the NEW
+        // positional tag — reusing the old rows would misroute clicks and
+        // selection onto the wrong segment.
+        let qid = ids_before[0];
+        let cached_q = app.seg_cache.get(&qid).expect("prefix entry survives");
+        assert_eq!(cached_q.rows.len(), rows_before[0]);
+        assert!(
+            cached_q.rows.iter().all(|(_, t)| *t != Some(2)),
+            "prefix rows must not carry the shifted tag"
+        );
+        let aid = ids_before[1];
+        let cached_a = app.seg_cache.get(&aid).expect("tail entry survives");
+        assert!(
+            cached_a
+                .rows
+                .iter()
+                .all(|(_, t)| t.is_none() || *t == Some(2)),
+            "shifted rows must carry the new positional tag"
+        );
         assert_eq!(app.seg_cache.len(), 3);
     }
 
@@ -5571,5 +5586,83 @@ mod tests {
         assert_eq!(strip_row_chrome("      indented"), "      indented");
         assert_eq!(strip_row_chrome("  two spaces"), "  two spaces");
         assert_eq!(strip_row_chrome("text │"), "text");
+    }
+
+    /// Hovering an ask option highlights it; moving the mouse out of the
+    /// chat rectangle clears the highlight instead of saturating onto row 0
+    /// and lighting up whatever sits on top.
+    #[test]
+    fn hover_outside_chat_clears_ask_highlight() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        push_inline_ask(&mut app, ask_fixture());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let ask_idx = app.active_ask_seg().expect("ask must be active");
+        let start = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(ask_idx))
+            .expect("ask block assembled");
+        // header row + question row, then option 0 (lockstep with ask_decode)
+        let opt_abs = start + 2;
+        let y = app.last_chat.y;
+        let h = app.last_chat.height;
+        app.mouse_move(y + (opt_abs - app.chat_top(h)) as u16);
+        assert!(app.ask_hover.is_some(), "option hover must highlight");
+        app.mouse_move(y + h + 1); // input area: below the chat rectangle
+        assert!(
+            app.ask_hover.is_none(),
+            "leaving the chat must clear the highlight"
+        );
+    }
+
+    /// Drag selection tracks pressed CONTENT, not a stale row number: rows
+    /// inserted above the press point (a stream event racing the drag) shift
+    /// the layout, and the selection start must follow the pressed segment.
+    #[test]
+    fn drag_anchor_survives_rows_inserted_above() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.push_segment(Segment::User("question".into()));
+        app.push_segment(Segment::Assistant {
+            text: "first answer line with enough text to map columns".into(),
+            live: false,
+        });
+        app.push_segment(Segment::Assistant {
+            text: "second answer line also fairly long for column mapping".into(),
+            live: false,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let abs_a2 = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(2))
+            .expect("second answer assembled");
+        let y = app.last_chat.y;
+        let x = app.last_chat.x;
+        app.mouse_down(
+            y + (abs_a2 - app.chat_top(app.last_chat.height)) as u16,
+            x + 2,
+        );
+        // a stream event lands above the press point before the drag continues
+        app.insert_segment(0, Segment::User("new first".into()));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let new_a2 = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(3))
+            .expect("second answer shifted");
+        assert!(new_a2 > abs_a2, "insert must shift rows down");
+        // drag within the same (shifted) row, wide column so it counts as a drag
+        let h = app.last_chat.height;
+        app.mouse_drag(y + (new_a2 - app.chat_top(h)) as u16, x + 40);
+        let sel = app.sel.expect("drag must select");
+        let (first, _) = sel.ordered();
+        assert_eq!(
+            first.row, new_a2,
+            "selection start must track the pressed content"
+        );
     }
 }

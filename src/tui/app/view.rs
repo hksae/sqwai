@@ -408,6 +408,7 @@ impl App {
     pub(super) fn mouse_down(&mut self, row: u16, col: u16) {
         if !self.in_chat_rect(row) {
             self.press = None;
+            self.press_anchor = None;
             self.press_target = None;
             self.dragging = false;
             return;
@@ -418,8 +419,51 @@ impl App {
             row: abs_r,
             col: char_col,
         });
+        // semantic drag anchor alongside the raw row: if rows shift before
+        // the drag continues (streaming), the segment id + intra-run offset
+        // still names the pressed content. Group headers and structural
+        // blanks keep the raw row (today's behavior).
+        let tag = self.cache_rowseg.get(abs_r).copied().flatten();
+        self.press_anchor = tag.filter(|t| *t < GROUP_BASE).and_then(|idx| {
+            let (_, meta) = self.view_transcript();
+            let id = meta.get(idx).map(|m| m.id)?;
+            let mut start = abs_r;
+            while start > 0 && self.cache_rowseg.get(start - 1) == Some(&Some(idx)) {
+                start -= 1;
+            }
+            Some((self.active_subagent, id, abs_r - start))
+        });
         self.press_target = self.resolve_target(row, abs_r);
         self.dragging = false;
+    }
+
+    /// Press point re-resolved against the current layout. Falls back to the
+    /// raw row when the anchor's view/segment is gone (deleted mid-press).
+    fn reanchored_press(&self, pressed: CellPos) -> CellPos {
+        let Some((view, id, off)) = self.press_anchor else {
+            return pressed;
+        };
+        if view != self.active_subagent {
+            return pressed;
+        }
+        let (_, meta) = self.view_transcript();
+        let Some(idx) = meta.iter().position(|m| m.id == id) else {
+            return pressed;
+        };
+        let Some(start) = self.cache_rowseg.iter().position(|t| *t == Some(idx)) else {
+            return pressed;
+        };
+        let mut end = start;
+        while end < self.cache_rowseg.len() && self.cache_rowseg[end] == Some(idx) {
+            end += 1;
+        }
+        if end <= start {
+            return pressed;
+        }
+        CellPos {
+            row: start + off.min(end - start - 1),
+            col: pressed.col,
+        }
     }
 
     /// Semantic target under a chat row, resolved against the shown frame.
@@ -481,7 +525,8 @@ impl App {
     }
 
     pub(super) fn mouse_drag(&mut self, row: u16, col: u16) {
-        let Some(p0) = self.press else { return };
+        let Some(pressed) = self.press else { return };
+        let p0 = self.reanchored_press(pressed);
         let abs_r = self.abs_row(row);
         let char_col = self.screen_col_to_char(abs_r, col);
         let cur = CellPos {
@@ -505,6 +550,7 @@ impl App {
             && self.menu_stack.is_empty()
         {
             self.press = None;
+            self.press_anchor = None;
             self.dragging = false;
             self.sel = None;
             self.open_menu(Menu::Subagents);
@@ -517,12 +563,14 @@ impl App {
             && self.menu_stack.is_empty()
         {
             self.press = None;
+            self.press_anchor = None;
             self.dragging = false;
             self.sel = None;
             self.open_menu(Menu::Effort);
             return;
         }
         let _pressed = self.press.take();
+        self.press_anchor = None;
         let target = self.press_target.take();
         let was_drag = std::mem::take(&mut self.dragging);
         if was_drag {
@@ -562,7 +610,17 @@ impl App {
             }
             return;
         }
-        // hover highlight for the inline ask (chat rows, not an overlay)
+        // hover highlight for the inline ask (chat rows, not an overlay).
+        // Outside the chat rectangle the row must not saturate onto row 0:
+        // a header/tab hover would otherwise light up whatever sits on top.
+        if !self.in_chat_rect(row) {
+            if self.ask_hover.is_some() || self.proposal_hover.is_some() {
+                self.ask_hover = None;
+                self.proposal_hover = None;
+                self.dirty = true;
+            }
+            return;
+        }
         if self.menu_stack.is_empty()
             && (self.active_ask_seg().is_some() || self.active_proposal_seg().is_some())
         {
