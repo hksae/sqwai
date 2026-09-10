@@ -1961,11 +1961,11 @@ number; a `partial` one is missing something the design calls for.
 | R | Untrusted-input handling (trust:low, banner, cumulative taint, confirm gates) + prompt rule | partial — prompt rule and per-tool `trust: low` exist; cumulative taint, banner, and confirm gates missing | F2 |
 | S | Cancel mid-tool (Esc): cancelled result, post-checkpoint, in_progress | done for `bash` | F2 |
 | S1 | Step epoch lifecycle (§2.2.4), writer lock during undo, subagent cancellation on reopen | planned | F1b, D |
-| T | Provider fallback chain ([models.x].fallback) | planned — `fallback` field absent on ModelConfig (#8) | §5.1 |
+| T | Provider fallback chain ([models.x].fallback) | done — transparent switch on Network/Server errors or retry-exhausted; `FallbackCandidate` chain, `FallbackSwitched` event, fast-fail `run_turn` | §5.1 |
 | U | Assumption notes: open tracking, finish warning, resolve | done | F3 |
 | V | Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md) | partial — cmd:/manual: settling done (#7); remaining: /init seeding of verify commands and their substitution on create | F3 |
 | V1 | Verification receipts (§2.1.4): execution interval digest, check hash, stale invalidation, manual `confirm` vs `waive` | done — interval digest, check hash, stale invalidation on diff, manual /plan confirm, replay restoration | V, F1b |
-| W | Plan-first gate (Act first-mutate w/o plan → plan_required) | planned | F3 |
+| W | Plan-first gate (Act first-mutate w/o plan → plan_required) | done — `plan_first: soft|off` in PlanConfig; heuristic trivial bypass; gate blocks unprompted mutations in Act mode without an active plan | F3 |
 | X | Staged compaction + recent-reads anchor + USER.md split/load | partial — USER.md split/loading done; staged pre-compaction (§3.3.1) and context-backed read authorization (§3.3.3) pending | F1, F5 |
 | Y | Claim lint (post-generation verify against journal/resolve_ref) | planned | I4 |
 | Z | Scope guard (step.refs vs file_diff) | planned | I4 |
