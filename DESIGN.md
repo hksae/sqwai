@@ -450,7 +450,7 @@ Repeated rejections of model‑proposed proposals trigger the forced ask_user me
 2.1.7 User surface
 /plan — full plan document (goal, constraints, acceptance, steps, folded).
 /plan history — completed/abandoned plans.
-/plan complete | abandon | limit N | waive <acceptance-index> "reason".
+/plan complete | abandon | limit N | waive <acceptance-index> "reason" | confirm <acceptance-index> "reason".
 /plan delete — user-only: removes the session's plan file after confirmation,
 unlinks the session (`plan_id: None`), journals `plan_deleted`. A linked
 completed/abandoned plan is shown as read-only history with an explicit
@@ -461,7 +461,9 @@ silently resurrects a stale foreign plan as "yours".
 /goal <text>, /constraints add|remove <text>.
 TUI todo panel (Ctrl+T) — derived view: current step highlighted, counts.
 Mode switching is Tab or /mode plan|act (§5.3). /plan no longer
-switches mode.
+switches mode. Acceptance rows carry their validation state
+([verified], [stale — re-verify], [waived]) so a check that will not
+satisfy `complete` is visible before it is attempted.
 
 #### 2.1.8 Plan from issue
 
@@ -1724,7 +1726,7 @@ a step shows its combined diff (all `file_diff` of that step from its first
 checkpoint to the last — §7 AB) and offers `/undo step N` (reverts one step if
 its files do not overlap later steps; otherwise refuses with an explanation).
 
-Commands: /new /sessions /resume /undo /compact /diary /plan [history| complete|abandon|limit|waive|delete] /plan from /run /brief /review /goal /constraints /mode /verify [--full] /graph-rebuild /why /export /bench /settings /providers /models /themes /skills /skill /mcp /lsp /init /debug /exit. `/fork` is deleted (was deferred to v2; removal decided instead — no fork code, no fork record, `forked_from` ignored on read). README must list the same set; a test diffs the two.
+Commands: /new /sessions /resume /undo /compact /diary /plan [history| complete|abandon|limit|waive|confirm|delete] /plan from /run /brief /review /goal /constraints /mode /verify [--full] /graph-rebuild /why /export /bench /settings /providers /models /themes /skills /skill /mcp /lsp /init /debug /exit. `/fork` is deleted (was deferred to v2; removal decided instead — no fork code, no fork record, `forked_from` ignored on read). README must list the same set; a test diffs the two.
 
 5.5 MCP
 rmcp client; stdio and streamable HTTP; tool discovery at session start
@@ -2061,6 +2063,12 @@ How to run (dogfooding checklist):
 Plan rejections per accepted op; forced ask_user count; host-only diary
 ratio; reflector outcomes distribution; graph unknown ratio per language;
 cache hit ratio.
+
+/debug also holds runtime toggles: typewriter, http debug log (request
+log next to the config), and perf frame log — one line per drawn frame
+(draw/rebuild microseconds, merge kind, render/wrap deltas, segment/row
+counts, tick, streaming/running flags, view) plus tool markers, into a
+fresh temp file per toggle-on. The row shows the path while recording.
 
 9. Open questions
 agent_claims extraction: regex vs a cheap model call — decide after H0
