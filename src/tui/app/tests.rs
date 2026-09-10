@@ -6086,4 +6086,238 @@ mod tests {
             })
             .unwrap();
     }
+
+    #[test]
+    fn test_node_badge_method_and_memory() {
+        use crate::agent::graph::NodeKind;
+        use crate::tui::app::menus::node_badge;
+
+        assert_eq!(node_badge(&NodeKind::Method), "[meth]");
+        assert_eq!(node_badge(&NodeKind::Memory), "[mem]");
+        assert_eq!(node_badge(&NodeKind::Function), "[fn]");
+        assert_eq!(node_badge(&NodeKind::Struct), "[st]");
+        assert_eq!(node_badge(&NodeKind::Enum), "[e]");
+    }
+
+    #[test]
+    fn test_graph_view_aggregates_duplicate_edges() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let temp = tempfile::tempdir().unwrap();
+        app.project_root = temp.path().to_path_buf();
+
+        use crate::agent::graph::{Edge, GraphStore, Node, NodeKind, SqliteGraphStore};
+        let mut store = SqliteGraphStore::open(&app.project_root).unwrap();
+
+        let file_mcp = Node {
+            stable_key: "file:src/mcp.rs".into(),
+            kind: NodeKind::File,
+            name: Some("mcp.rs".into()),
+            path: Some("src/mcp.rs".into()),
+            language: Some("rust".into()),
+            line_start: Some(1),
+            line_end: Some(100),
+            signature: None,
+            roles: vec![],
+            properties: Default::default(),
+            content_hash: None,
+        };
+        let file_main = Node {
+            stable_key: "file:src/main.rs".into(),
+            kind: NodeKind::File,
+            name: Some("main.rs".into()),
+            path: Some("src/main.rs".into()),
+            language: Some("rust".into()),
+            line_start: Some(1),
+            line_end: Some(100),
+            signature: None,
+            roles: vec![],
+            properties: Default::default(),
+            content_hash: None,
+        };
+        let meth_node = Node {
+            stable_key: "sym:src/mcp.rs::impl<Registry>::fn::from_config".into(),
+            kind: NodeKind::Method,
+            name: Some("from_config".into()),
+            path: Some("src/mcp.rs".into()),
+            language: Some("rust".into()),
+            line_start: Some(20),
+            line_end: Some(30),
+            signature: Some("pub async fn from_config(...)".into()),
+            roles: vec![],
+            properties: Default::default(),
+            content_hash: None,
+        };
+
+        store.upsert_node(&file_mcp).unwrap();
+        store.upsert_node(&file_main).unwrap();
+        store.upsert_node(&meth_node).unwrap();
+
+        // Edge 1: file_mcp contains meth_node
+        store
+            .upsert_edge(&Edge {
+                from: file_mcp.stable_key.clone(),
+                to: meth_node.stable_key.clone(),
+                kind: "contains".into(),
+                confidence: Some(100),
+                source: Some("rust-tree-sitter".into()),
+                source_hash: None,
+                limitations: vec![],
+                properties: Default::default(),
+            })
+            .unwrap();
+
+        // Two duplicate edges from file_main to file_mcp (e.g. from different sources or duplicate imports)
+        store
+            .upsert_edge(&Edge {
+                from: file_main.stable_key.clone(),
+                to: file_mcp.stable_key.clone(),
+                kind: "imports".into(),
+                confidence: Some(100),
+                source: Some("source_a".into()),
+                source_hash: None,
+                limitations: vec![],
+                properties: Default::default(),
+            })
+            .unwrap();
+        store
+            .upsert_edge(&Edge {
+                from: file_main.stable_key.clone(),
+                to: file_mcp.stable_key.clone(),
+                kind: "imports".into(),
+                confidence: Some(100),
+                source: Some("source_b".into()),
+                source_hash: None,
+                limitations: vec![],
+                properties: Default::default(),
+            })
+            .unwrap();
+
+        app.open_menu(Menu::GraphView {
+            focus_key: file_mcp.stable_key.clone(),
+            trail: Vec::new(),
+            depth: 1,
+            search_filter: None,
+        });
+        app.build_menu_rows();
+
+        let rendered: Vec<String> = app
+            .menu_rows
+            .iter()
+            .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect();
+
+        // Check that meth_node has [meth] badge, NOT [m]
+        assert!(rendered.iter().any(|r| r.contains("[meth] from_config")));
+
+        // Check that the two duplicate imports edges from main.rs are aggregated with ×2
+        assert!(rendered.iter().any(|r| r.contains("main.rs") && r.contains("×2")));
+        // Verify main.rs only appears once in the connection list
+        let main_rows: Vec<_> = rendered.iter().filter(|r| r.contains("file:src/main.rs")).collect();
+        assert_eq!(main_rows.len(), 1);
+    }
+
+    #[test]
+    fn test_graph_view_multi_hop_attribution() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let temp = tempfile::tempdir().unwrap();
+        app.project_root = temp.path().to_path_buf();
+
+        use crate::agent::graph::{Edge, GraphStore, Node, NodeKind, SqliteGraphStore};
+        let mut store = SqliteGraphStore::open(&app.project_root).unwrap();
+
+        let mcp = Node {
+            stable_key: "file:src/mcp.rs".into(),
+            kind: NodeKind::File,
+            name: Some("mcp.rs".into()),
+            path: Some("src/mcp.rs".into()),
+            language: Some("rust".into()),
+            line_start: Some(1),
+            line_end: Some(100),
+            signature: None,
+            roles: vec![],
+            properties: Default::default(),
+            content_hash: None,
+        };
+        let main = Node {
+            stable_key: "file:src/main.rs".into(),
+            kind: NodeKind::File,
+            name: Some("main.rs".into()),
+            path: Some("src/main.rs".into()),
+            language: Some("rust".into()),
+            line_start: Some(1),
+            line_end: Some(100),
+            signature: None,
+            roles: vec![],
+            properties: Default::default(),
+            content_hash: None,
+        };
+        let lock = Node {
+            stable_key: "file:src/lock.rs".into(),
+            kind: NodeKind::File,
+            name: Some("lock.rs".into()),
+            path: Some("src/lock.rs".into()),
+            language: Some("rust".into()),
+            line_start: Some(1),
+            line_end: Some(50),
+            signature: None,
+            roles: vec![],
+            properties: Default::default(),
+            content_hash: None,
+        };
+
+        store.upsert_node(&mcp).unwrap();
+        store.upsert_node(&main).unwrap();
+        store.upsert_node(&lock).unwrap();
+
+        // main -> imports -> mcp
+        store
+            .upsert_edge(&Edge {
+                from: main.stable_key.clone(),
+                to: mcp.stable_key.clone(),
+                kind: "imports".into(),
+                confidence: Some(100),
+                source: Some("rust".into()),
+                source_hash: None,
+                limitations: vec![],
+                properties: Default::default(),
+            })
+            .unwrap();
+
+        // main -> imports -> lock
+        store
+            .upsert_edge(&Edge {
+                from: main.stable_key.clone(),
+                to: lock.stable_key.clone(),
+                kind: "imports".into(),
+                confidence: Some(100),
+                source: Some("rust".into()),
+                source_hash: None,
+                limitations: vec![],
+                properties: Default::default(),
+            })
+            .unwrap();
+
+        // Focus on mcp with depth = 2
+        app.open_menu(Menu::GraphView {
+            focus_key: mcp.stable_key.clone(),
+            trail: Vec::new(),
+            depth: 2,
+            search_filter: None,
+        });
+        app.build_menu_rows();
+
+        let rendered: Vec<String> = app
+            .menu_rows
+            .iter()
+            .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect();
+
+        // main.rs should be direct (depth 1)
+        assert!(rendered.iter().any(|r| r.contains("<- (imports)") && r.contains("main.rs")));
+        // lock.rs should be 2nd-hop (+2) via main.rs, NOT rendered as incoming edge to mcp
+        assert!(rendered.iter().any(|r| r.contains("+2") && r.contains("lock.rs") && r.contains("via main.rs")));
+        // main.rs should NOT be duplicated as a fake incoming edge
+        let main_rows: Vec<_> = rendered.iter().filter(|r| r.contains("file:src/main.rs")).collect();
+        assert_eq!(main_rows.len(), 1);
+    }
 }

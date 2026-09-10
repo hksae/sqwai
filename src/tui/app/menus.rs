@@ -3109,41 +3109,149 @@ impl App {
                             MenuAction::None,
                         ));
                     } else {
-                        // Collect neighbors
+                        // Compute shortest-path distance from focus_key in BFS order
+                        let mut distances: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
+                        distances.insert(focus_key.clone(), 0);
+                        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+                        queue.push_back(focus_key.clone());
+
+                        while let Some(curr) = queue.pop_front() {
+                            let curr_d = *distances.get(&curr).unwrap_or(&0);
+                            for edge in &proj.edges {
+                                let neighbor = if edge.from == curr {
+                                    Some(&edge.to)
+                                } else if edge.to == curr {
+                                    Some(&edge.from)
+                                } else {
+                                    None
+                                };
+                                if let Some(n) = neighbor {
+                                    if !distances.contains_key(n) {
+                                        distances.insert(n.clone(), curr_d + 1);
+                                        queue.push_back(n.clone());
+                                    }
+                                }
+                            }
+                        }
+
+                        // Determine directed connection relative to focus_key and aggregate duplicates
+                        struct AggregatedNeighbor {
+                            dir: &'static str,
+                            kind: String,
+                            target_key: String,
+                            depth: u8,
+                            via: Option<String>,
+                            count: usize,
+                        }
+
+                        let mut aggregated: Vec<AggregatedNeighbor> = Vec::new();
+
                         for edge in &proj.edges {
-                            let (other_key, dir_symbol) = if edge.from == focus_key {
-                                (&edge.to, "->")
+                            let (dir, target, depth_num, via) = if edge.from == focus_key {
+                                ("->", edge.to.clone(), 1, None)
+                            } else if edge.to == focus_key {
+                                ("<-", edge.from.clone(), 1, None)
                             } else {
-                                (&edge.from, "<-")
+                                let d_from = distances.get(&edge.from).copied().unwrap_or(99);
+                                let d_to = distances.get(&edge.to).copied().unwrap_or(99);
+                                if d_to > d_from {
+                                    ("->", edge.to.clone(), d_to, Some(edge.from.clone()))
+                                } else if d_from > d_to {
+                                    ("<-", edge.from.clone(), d_from, Some(edge.to.clone()))
+                                } else {
+                                    // Lateral cross-edge between nodes at equal distance:
+                                    // do not misattribute to focus_key
+                                    continue;
+                                }
                             };
 
+                            if let Some(existing) = aggregated.iter_mut().find(|a| {
+                                a.dir == dir
+                                    && a.kind == edge.kind
+                                    && a.target_key == target
+                                    && a.depth == depth_num
+                            }) {
+                                existing.count += 1;
+                            } else {
+                                aggregated.push(AggregatedNeighbor {
+                                    dir,
+                                    kind: edge.kind.clone(),
+                                    target_key: target,
+                                    depth: depth_num,
+                                    via,
+                                    count: 1,
+                                });
+                            }
+                        }
+
+                        // Sort entries: direct neighbors first (depth 1), then multi-hop (depth > 1), then by direction/target
+                        aggregated.sort_by(|a, b| {
+                            a.depth
+                                .cmp(&b.depth)
+                                .then_with(|| a.dir.cmp(b.dir))
+                                .then_with(|| a.target_key.cmp(&b.target_key))
+                                .then_with(|| a.kind.cmp(&b.kind))
+                        });
+
+                        let mut rendered_count = 0;
+                        for agg in aggregated {
+                            let other_node = proj.nodes.iter().find(|n| n.stable_key == agg.target_key);
+                            let name_or_key = other_node
+                                .and_then(|n| n.name.as_deref())
+                                .unwrap_or(&agg.target_key);
+
                             if let Some(ref filter) = search_filter {
-                                if !filter.is_empty()
-                                    && !other_key.to_lowercase().contains(&filter.to_lowercase())
-                                {
-                                    continue;
+                                if !filter.is_empty() {
+                                    let fl = filter.to_lowercase();
+                                    let matches_key = agg.target_key.to_lowercase().contains(&fl);
+                                    let matches_name = name_or_key.to_lowercase().contains(&fl);
+                                    if !matches_key && !matches_name {
+                                        continue;
+                                    }
                                 }
                             }
 
-                            let other_node = proj.nodes.iter().find(|n| &n.stable_key == other_key);
                             let other_badge = other_node
                                 .map(|n| node_badge(&n.kind))
                                 .unwrap_or("[?]");
-                            let name_or_key = other_node
-                                .and_then(|n| n.name.as_deref())
-                                .unwrap_or(other_key);
+
+                            let prefix = if agg.depth > 1 {
+                                format!("  +{} {} ({}) ", agg.depth, agg.dir, agg.kind)
+                            } else {
+                                format!("  {} ({}) ", agg.dir, agg.kind)
+                            };
+
+                            let mut spans = vec![
+                                Span::styled(prefix, Theme::dim()),
+                                Span::styled(format!("{other_badge} "), Theme::accent()),
+                                Span::styled(name_or_key.to_string(), Theme::base()),
+                                Span::styled(format!(" ({})", agg.target_key), Theme::dim()),
+                            ];
+
+                            if let Some(ref via) = agg.via {
+                                let via_node = proj.nodes.iter().find(|n| &n.stable_key == via);
+                                let via_name = via_node.and_then(|n| n.name.as_deref()).unwrap_or(via);
+                                spans.push(Span::styled(format!(" via {via_name}"), Theme::dim()));
+                            }
+
+                            if agg.count > 1 {
+                                spans.push(Span::styled(format!("  ×{}", agg.count), Theme::accent_bold()));
+                            }
 
                             self.menu_rows.push(row(
-                                Line::from(vec![
-                                    Span::styled(
-                                        format!("  {dir_symbol} ({}) ", edge.kind),
-                                        Theme::dim(),
-                                    ),
-                                    Span::styled(format!("{other_badge} "), Theme::accent()),
-                                    Span::styled(name_or_key.to_string(), Theme::base()),
-                                    Span::styled(format!(" ({other_key})"), Theme::dim()),
-                                ]),
-                                MenuAction::GraphFocus(other_key.clone()),
+                                Line::from(spans),
+                                MenuAction::GraphFocus(agg.target_key),
+                            ));
+                            rendered_count += 1;
+                        }
+
+                        if rendered_count == 0 && search_filter.is_some() {
+                            self.menu_rows.push(row(
+                                Line::from(vec![Span::styled(
+                                    "  (no matching connected nodes)",
+                                    Theme::dim(),
+                                )]),
+                                MenuAction::None,
                             ));
                         }
                     }
@@ -3167,7 +3275,7 @@ pub(super) fn node_badge(kind: &crate::agent::graph::NodeKind) -> &'static str {
         NodeKind::Module => "[mod]",
         NodeKind::Namespace => "[ns]",
         NodeKind::Function => "[fn]",
-        NodeKind::Method => "[m]",
+        NodeKind::Method => "[meth]",
         NodeKind::Class => "[cls]",
         NodeKind::Struct => "[st]",
         NodeKind::Enum => "[e]",
