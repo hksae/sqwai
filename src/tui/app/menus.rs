@@ -1457,10 +1457,7 @@ impl App {
             }
             MenuAction::OpenSubagent(id) => {
                 self.menu_home();
-                self.active_subagent = Some(id);
-                self.follow = true;
-                self.view_top = 0;
-                self.dirty = true;
+                self.open_subagent_view(id);
             }
             MenuAction::SetEffort(level) => {
                 self.model_cfg.effort = level;

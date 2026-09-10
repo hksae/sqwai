@@ -238,6 +238,7 @@ impl App {
                                     && let Some(slot) = custom.get_mut(q)
                                 {
                                     slot.push_str(&text_batch);
+                                    self.touch_segment(seg);
                                     self.follow = true;
                                 }
                             } else {
@@ -343,10 +344,7 @@ impl App {
                         }
                         KeyCode::Esc => {
                             if self.active_subagent.is_some() {
-                                self.active_subagent = None;
-                                self.follow = true;
-                                self.view_top = 0;
-                                self.dirty = true;
+                                self.close_subagent_view();
                             } else if !self.menu_stack.is_empty() {
                                 // If custom is focused, Esc blurs it first
                                 if self.ask_custom_focus.is_some() {
@@ -647,6 +645,7 @@ impl App {
                                     }
                                     _ => {}
                                 }
+                                self.touch_segment(seg);
                                 self.follow = true;
                                 self.dirty = true;
                             }

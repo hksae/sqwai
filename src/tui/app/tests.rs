@@ -286,7 +286,7 @@ mod tests {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         // Simulate an agent stream: think, two tools, think again.
         app.streaming = true;
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::Assistant {
             text: String::new(),
             live: true,
         });
@@ -385,23 +385,25 @@ mod tests {
 
     /// one finished turn: user, thinking, one tool, answer
     fn finished_turn(app: &mut App, ok: bool) {
-        app.segments.push(Segment::User("do it".into()));
-        app.segments.push(Segment::Thinking {
+        app.push_segment(Segment::User("do it".into()));
+        app.push_segment(Segment::Thinking {
             text: "hmm".into(),
             expanded: false,
             started: None,
             duration_ms: 0,
             live: false,
         });
-        app.segments.push(Segment::Tool {
+        app.push_segment(Segment::Tool {
             name: "read".into(),
             args: "a.rs".into(),
             ok: Some(ok),
             output: String::new(),
             diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
             expanded: false,
         });
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::Assistant {
             text: "done".into(),
             live: false,
         });
@@ -410,7 +412,7 @@ mod tests {
     #[test]
     fn thinking_duration_freezes_when_block_closes() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.segments.push(Segment::Thinking {
+        app.push_segment(Segment::Thinking {
             text: "work".into(),
             expanded: false,
             started: Some(std::time::Instant::now() - std::time::Duration::from_millis(1200)),
@@ -488,31 +490,35 @@ mod tests {
     #[test]
     fn abort_remaps_activity_group_ranges_past_dropped_rows() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.segments.push(Segment::User("go".into()));
-        app.segments.push(Segment::Tool {
+        app.push_segment(Segment::User("go".into()));
+        app.push_segment(Segment::Tool {
             name: "subagent".into(),
             args: "task".into(),
             ok: Some(true),
             output: String::new(),
             diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
             expanded: false,
         });
-        app.segments.push(Segment::Thinking {
+        app.push_segment(Segment::Thinking {
             text: "hmm".into(),
             expanded: false,
             started: None,
             duration_ms: 0,
             live: false,
         });
-        app.segments.push(Segment::Tool {
+        app.push_segment(Segment::Tool {
             name: "read".into(),
             args: "a.rs".into(),
             ok: Some(true),
             output: String::new(),
             diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
             expanded: false,
         });
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::Assistant {
             text: "done".into(),
             live: false,
         });
@@ -546,7 +552,7 @@ mod tests {
         app.status("first\nsecond\nthird", StatusKind::Err);
         let idx = app.segments.len() - 1;
 
-        let rows = app.render_segment(idx, 100);
+        let rows = app.render_segment(&app.segments, idx, 100, true);
         assert_eq!(rows.len(), 1, "collapsed to a single row");
         let line: String = rows[0]
             .0
@@ -565,7 +571,7 @@ mod tests {
 
         // a single line wider than the row collapses too
         app.status(&"x".repeat(200), StatusKind::Err);
-        let wide = app.render_segment(app.segments.len() - 1, 100);
+        let wide = app.render_segment(&app.segments, app.segments.len() - 1, 100, true);
         assert_eq!(wide.len(), 1, "wide single line capped: {wide:?}");
 
         // click unfolds the first one back to all three lines
@@ -591,14 +597,16 @@ mod tests {
     #[test]
     fn failed_turn_without_an_answer_still_groups_its_tools() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.segments.push(Segment::User("go".into()));
+        app.push_segment(Segment::User("go".into()));
         for name in ["read", "write"] {
-            app.segments.push(Segment::Tool {
+            app.push_segment(Segment::Tool {
                 name: name.into(),
                 args: "a.rs".into(),
                 ok: Some(true),
                 output: String::new(),
                 diff: None,
+                preview: Vec::new(),
+                preview_total: 0,
                 expanded: false,
             });
         }
@@ -634,13 +642,15 @@ mod tests {
         finished_turn(&mut app, true);
         app.finalize_activity_group(false);
         // second turn: tools ran, then a provider error with no streamed text
-        app.segments.push(Segment::User("again".into()));
-        app.segments.push(Segment::Tool {
+        app.push_segment(Segment::User("again".into()));
+        app.push_segment(Segment::Tool {
             name: "read".into(),
             args: "b.rs".into(),
             ok: Some(true),
             output: String::new(),
             diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
             expanded: false,
         });
         app.finalize_activity_group(true);
@@ -662,7 +672,7 @@ mod tests {
     fn activity_group_renders_live_while_the_turn_streams() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.streaming = true;
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::Assistant {
             text: String::new(),
             live: true,
         });
@@ -1019,7 +1029,7 @@ mod tests {
             Message::tool_result("call-1", "file contents", false),
             Message::new(Role::Assistant, "done"),
         ];
-        app.segments.clear();
+        app.clear_segments();
         app.load_history_segments();
         assert!(matches!(app.segments[0], Segment::User(ref text) if text == "inspect"));
         assert!(
@@ -1096,7 +1106,7 @@ mod tests {
                 user_index: Some(2),
             },
         ];
-        app.segments.clear();
+        app.clear_segments();
         app.load_history_segments();
 
         assert_eq!(app.activity_groups.len(), 2, "two turns, two groups");
@@ -1133,7 +1143,7 @@ mod tests {
                 ..a.clone()
             })
             .collect();
-        legacy.segments.clear();
+        legacy.clear_segments();
         legacy.load_history_segments();
         assert_eq!(legacy.activity_groups.len(), 2);
         assert_eq!(legacy.activity_groups[0].calls, 1);
@@ -1145,7 +1155,7 @@ mod tests {
         let mut stopped = test_app("http://127.0.0.1:9/v1".into());
         stopped.session.push(Role::User, "first");
         stopped.turn_user_index = Some(0);
-        stopped.segments.push(Segment::Assistant {
+        stopped.push_segment(Segment::Assistant {
             text: String::new(),
             live: true,
         });
@@ -1159,7 +1169,7 @@ mod tests {
         let mut failed = test_app("http://127.0.0.1:9/v1".into());
         failed.session.push(Role::User, "second");
         failed.turn_user_index = Some(0);
-        failed.segments.push(Segment::Assistant {
+        failed.push_segment(Segment::Assistant {
             text: String::new(),
             live: true,
         });
@@ -1202,7 +1212,7 @@ mod tests {
                 is_error: true,
             },
         ];
-        app.segments.clear();
+        app.clear_segments();
         app.load_history_segments();
 
         let rows: Vec<(&str, StatusKind)> = app
@@ -1366,19 +1376,21 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect();
         assert!(text.contains("agents:1/2"), "bar: {text}");
-        app.segments.push(Segment::Subagent {
+        app.push_segment(Segment::Subagent {
             id: 1,
             task: "one".into(),
             status: "running".into(),
             output: String::new(),
             expanded: false,
         });
-        app.segments.push(Segment::Tool {
+        app.push_segment(Segment::Tool {
             name: "subagent".into(),
             args: "2 tasks".into(),
             ok: None,
             output: String::new(),
             diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
             expanded: false,
         });
         app.clear_subagent_ui_on_stop();
@@ -1393,7 +1405,7 @@ mod tests {
     fn typewriter_reveals_gradually_and_drains() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.pending_reveal = "Hello".into();
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::Assistant {
             text: String::new(),
             live: true,
         });
@@ -1426,7 +1438,7 @@ mod tests {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.session.push(Role::User, "write a poem");
         app.streaming = true;
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::Assistant {
             text: String::new(),
             live: true,
         });
@@ -1450,14 +1462,14 @@ mod tests {
         // session and in the visible transcript)
         app.session.push(Role::User, "hello");
         app.session.push(Role::Assistant, "hello!");
-        app.segments.push(Segment::User("hello".into()));
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::User("hello".into()));
+        app.push_segment(Segment::Assistant {
             text: "hello!".into(),
             live: false,
         });
         app.streaming = true;
-        app.segments.push(Segment::User("how are you".into()));
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::User("how are you".into()));
+        app.push_segment(Segment::Assistant {
             text: String::new(),
             live: true,
         });
@@ -1523,9 +1535,13 @@ mod tests {
                 ok: Some(true),
                 output: "contents".into(),
                 diff: None,
+                preview: Vec::new(),
+                preview_total: 0,
                 expanded: false,
             }],
         );
+        app.subagent_meta
+            .insert(7, vec![crate::tui::app::view::SegMeta { id: 77, rev: 0 }]);
         app.cache_rowseg = vec![Some(0)];
         app.click(0);
         assert_eq!(app.active_subagent, Some(7));
@@ -1813,15 +1829,17 @@ mod tests {
     #[test]
     fn edit_row_shows_colored_change_counts() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.segments.push(Segment::Tool {
+        app.push_segment(Segment::Tool {
             name: "edit".into(),
             args: "src/a-very-long-file-name.rs".into(),
             ok: Some(true),
             output: "done".into(),
             diff: Some("--- old\n+++ new\n-old\n+new\n+more".into()),
+            preview: Vec::new(),
+            preview_total: 0,
             expanded: false,
         });
-        let rows = app.render_segment(0, 80);
+        let rows = app.render_segment(&app.segments, 0, 80, true);
         let text: String = rows[0]
             .0
             .spans
@@ -1835,15 +1853,17 @@ mod tests {
     #[test]
     fn expanded_tool_output_uses_left_rail_and_truncates() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.segments.push(Segment::Tool {
+        app.push_segment(Segment::Tool {
             name: "patch".into(),
             args: String::new(),
             ok: Some(true),
             output: "a very long line with wide chars 界界界界 and more text".into(),
             diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
             expanded: true,
         });
-        let rows = app.render_segment(0, 18);
+        let rows = app.render_segment(&app.segments, 0, 18, true);
         use unicode_width::UnicodeWidthStr;
         let text: Vec<String> = rows
             .iter()
@@ -1870,8 +1890,8 @@ mod tests {
     #[test]
     fn user_prompt_is_a_padded_full_width_surface_strip() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.segments.push(Segment::User("one\ntwo".into()));
-        let rows = app.render_segment(0, 30);
+        app.push_segment(Segment::User("one\ntwo".into()));
+        let rows = app.render_segment(&app.segments, 0, 30, true);
         let text: Vec<String> = rows
             .iter()
             .map(|(line, _)| {
@@ -1906,7 +1926,7 @@ mod tests {
     fn user_surface_strip_fills_the_entire_terminal_row() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
-        app.segments.push(Segment::User("full width".into()));
+        app.push_segment(Segment::User("full width".into()));
         let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
@@ -1931,12 +1951,14 @@ mod tests {
     #[test]
     fn resized_terminal_rebuilds_tool_frames_at_chat_width() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.segments.push(Segment::Tool {
+        app.push_segment(Segment::Tool {
             name: "patch".into(),
             args: String::new(),
             ok: Some(true),
             output: "a very long line with wide chars 界界界界 and more text".into(),
             diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
             expanded: true,
         });
         app.startup = false;
@@ -3255,7 +3277,7 @@ mod tests {
         app.startup = false;
         app.segments
             .push(Segment::User("Explain this snippet.".into()));
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::Assistant {
             text: "Here is the explanation:\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\nThe `main` function is the program entry point. It calls `println!` which writes to stdout. This is very idiomatic Rust and the canonical hello-world example.".into(),
             live: false,
         });
@@ -3269,32 +3291,38 @@ mod tests {
     fn snap_chat_three_tool_calls_one_failed() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
-        app.segments.push(Segment::User("Do the thing.".into()));
-        app.segments.push(Segment::Tool {
+        app.push_segment(Segment::User("Do the thing.".into()));
+        app.push_segment(Segment::Tool {
             name: "read_file".into(),
             args: r#"{"path":"src/main.rs"}"#.into(),
             ok: Some(true),
             output: "fn main() {}".into(),
             diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
             expanded: false,
         });
-        app.segments.push(Segment::Tool {
+        app.push_segment(Segment::Tool {
             name: "bash".into(),
             args: r#"{"cmd":"cargo build"}"#.into(),
             ok: Some(false),
             output: "error[E0425]: cannot find value `foo`".into(),
             diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
             expanded: false,
         });
-        app.segments.push(Segment::Tool {
+        app.push_segment(Segment::Tool {
             name: "write_file".into(),
             args: r#"{"path":"out.txt"}"#.into(),
             ok: Some(true),
             output: "written".into(),
             diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
             expanded: false,
         });
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::Assistant {
             text: "Done, though one step failed.".into(),
             live: false,
         });
@@ -3311,15 +3339,17 @@ mod tests {
     fn snap_chat_twelve_successful_tool_calls_collapsed() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
-        app.segments.push(Segment::User("Do many things.".into()));
+        app.push_segment(Segment::User("Do many things.".into()));
         let seg_start = app.segments.len();
         for i in 0..12 {
-            app.segments.push(Segment::Tool {
+            app.push_segment(Segment::Tool {
                 name: format!("tool_{i}"),
                 args: r#"{}"#.into(),
                 ok: Some(true),
                 output: format!("output {i}"),
                 diff: None,
+                preview: Vec::new(),
+                preview_total: 0,
                 expanded: false,
             });
         }
@@ -3335,7 +3365,7 @@ mod tests {
             turn_user: None,
             expanded: false,
         });
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::Assistant {
             text: "All done!".into(),
             live: false,
         });
@@ -3352,19 +3382,21 @@ mod tests {
     fn snap_chat_bash_tool_still_running() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
-        app.segments.push(Segment::User("Run the tests.".into()));
-        app.segments.push(Segment::Tool {
+        app.push_segment(Segment::User("Run the tests.".into()));
+        app.push_segment(Segment::Tool {
             name: "bash".into(),
             args: r#"{"cmd":"cargo test"}"#.into(),
             ok: None, // still running
             output: String::new(),
             diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
             expanded: false,
         });
         // production always holds the live answer slot while streaming; the
         // group logic keys off the work rows, not the slot, but the frame
         // must show what a real running turn looks like
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::Assistant {
             text: String::new(),
             live: true,
         });
@@ -3381,16 +3413,16 @@ mod tests {
         // Activity group: 6 calls, 2 thinking blocks, 1 error — collapsed by default
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
-        app.segments.push(Segment::User("Complex task.".into()));
+        app.push_segment(Segment::User("Complex task.".into()));
         let seg_start = app.segments.len();
-        app.segments.push(Segment::Thinking {
+        app.push_segment(Segment::Thinking {
             text: "Let me think about this carefully.".into(),
             expanded: false,
             started: None,
             duration_ms: 800,
             live: false,
         });
-        app.segments.push(Segment::Thinking {
+        app.push_segment(Segment::Thinking {
             text: "More reasoning here.".into(),
             expanded: false,
             started: None,
@@ -3398,29 +3430,35 @@ mod tests {
             live: false,
         });
         for i in 0..4 {
-            app.segments.push(Segment::Tool {
+            app.push_segment(Segment::Tool {
                 name: format!("tool_{i}"),
                 args: r#"{}"#.into(),
                 ok: Some(true),
                 output: format!("ok {i}"),
                 diff: None,
+                preview: Vec::new(),
+                preview_total: 0,
                 expanded: false,
             });
         }
-        app.segments.push(Segment::Tool {
+        app.push_segment(Segment::Tool {
             name: "risky_tool".into(),
             args: r#"{"x":1}"#.into(),
             ok: Some(false),
             output: "Error: permission denied".into(),
             diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
             expanded: false,
         });
-        app.segments.push(Segment::Tool {
+        app.push_segment(Segment::Tool {
             name: "cleanup".into(),
             args: r#"{}"#.into(),
             ok: Some(true),
             output: "cleaned".into(),
             diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
             expanded: false,
         });
         let seg_end = app.segments.len();
@@ -3435,7 +3473,7 @@ mod tests {
             turn_user: None,
             expanded: false, // collapsed by default
         });
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::Assistant {
             text: "Completed with one error.".into(),
             live: false,
         });
@@ -3452,8 +3490,8 @@ mod tests {
     fn snap_chat_models_picker_popup() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
-        app.segments.push(Segment::User("Hello".into()));
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::User("Hello".into()));
+        app.push_segment(Segment::Assistant {
             text: "Hi there!".into(),
             live: false,
         });
@@ -3475,8 +3513,8 @@ mod tests {
             "Step 2: Implement feature".into(),
             "Step 3: Write tests".into(),
         ];
-        app.segments.push(Segment::User("What is the plan?".into()));
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::User("What is the plan?".into()));
+        app.push_segment(Segment::Assistant {
             text: "See the plan panel.".into(),
             live: false,
         });
@@ -3826,18 +3864,20 @@ mod tests {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         assert!(!app.tool_running(), "no tool segment at all");
 
-        app.segments.push(Segment::Tool {
+        app.push_segment(Segment::Tool {
             name: "bash".into(),
             args: "sleep 30".into(),
             ok: None,
             output: String::new(),
             diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
             expanded: false,
         });
         assert!(app.tool_running());
 
         // In real execution, a live Assistant segment trails behind the tool call
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::Assistant {
             text: String::new(),
             live: true,
         });
@@ -3959,6 +3999,7 @@ mod tests {
                             {
                                 content_length = value;
                             }
+                            // NOTE: review-checklist TUI perf tests live at the end of this module.
                         }
                     }
                 }
@@ -4238,7 +4279,7 @@ mod tests {
     fn inline_ask_lands_before_the_answer_inside_activity() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         // a running turn: thinking, a tool, the live answer slot
-        app.segments.push(Segment::Thinking {
+        app.push_segment(Segment::Thinking {
             text: "hmm".to_string(),
             expanded: false,
             started: None,
@@ -4246,7 +4287,7 @@ mod tests {
             live: false,
         });
         app.handle_tool_start("read".to_string(), "a.rs".to_string());
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::Assistant {
             text: String::new(),
             live: true,
         });
@@ -4278,14 +4319,14 @@ mod tests {
     #[test]
     fn active_ask_survives_index_shifts() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.segments.push(Segment::Thinking {
+        app.push_segment(Segment::Thinking {
             text: String::new(),
             expanded: false,
             started: None,
             duration_ms: 0,
             live: false,
         });
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::Assistant {
             text: String::new(),
             live: true,
         });
@@ -4293,7 +4334,7 @@ mod tests {
         assert_eq!(app.active_ask_seg(), Some(1));
         // finish_turn drops empty thinking rows, shifting every later index
         // — index-based tracking would now point at the answer slot
-        app.segments.remove(0);
+        app.remove_segment(0);
         let after = app.active_ask_seg().expect("ask must survive the shift");
         assert_eq!(after, 0);
         match &app.segments[after] {
@@ -4361,17 +4402,16 @@ mod tests {
         // Populate a conversation with multiple past segments
         for i in 0..10 {
             if i % 2 == 0 {
-                app.segments
-                    .push(Segment::User(format!("User question {i} with code `foo`")));
+                app.push_segment(Segment::User(format!("User question {i} with code `foo`")));
             } else {
-                app.segments.push(Segment::Assistant {
+                app.push_segment(Segment::Assistant {
                     text: format!("Assistant answer {i} with details"),
                     live: false,
                 });
             }
         }
         // Add a live assistant segment at the end
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::Assistant {
             text: "Initial token".into(),
             live: true,
         });
@@ -4380,11 +4420,12 @@ mod tests {
         app.rebuild_cache(80);
         assert_eq!(app.seg_cache.len(), 11);
 
-        // Snapshot cache keys and pointers/line counts of all previous segments (0..10)
-        let previous_snapshots: Vec<(usize, u16, usize)> = (0..10)
+        // Snapshot cache entries of all previous segments by stable id
+        let previous: Vec<(u64, u64, u16, usize)> = (0..10)
             .map(|i| {
-                let cached = app.seg_cache[i].as_ref().expect("segment cached");
-                (cached.0, cached.1, cached.2.len())
+                let id = app.seg_meta[i].id;
+                let cached = app.seg_cache.get(&id).expect("segment cached");
+                (id, cached.rev, cached.width, cached.rows.len())
             })
             .collect();
 
@@ -4394,54 +4435,63 @@ mod tests {
                 " and more streamed tokens across multiple lines\n```rust\nfn bar() {}\n```\n",
             );
         }
+        app.touch_segment(10);
 
         // Rebuild cache (as happens on each frame during streaming)
         app.rebuild_cache(80);
 
-        // Verify that past segments 0..10 were NOT wiped or recomputed
-        for (i, expected) in previous_snapshots.iter().enumerate() {
-            let cached = app.seg_cache[i]
-                .as_ref()
+        // Past segments must keep identical cache entries (same id+rev)
+        for (id, rev, width, rows) in &previous {
+            let cached = app
+                .seg_cache
+                .get(id)
                 .expect("past segment must remain cached");
-            assert_eq!(cached.0, expected.0, "past segment {i} key must not change");
+            assert_eq!(cached.rev, *rev, "past segment {id} rev must not change");
             assert_eq!(
-                cached.1, expected.1,
-                "past segment {i} width must not change"
+                cached.width, *width,
+                "past segment {id} width must not change"
             );
             assert_eq!(
-                cached.2.len(),
-                expected.2,
-                "past segment {i} line count must not change"
+                cached.rows.len(),
+                *rows,
+                "past segment {id} row count must not change"
             );
         }
 
         // The live segment at index 10 MUST have updated cache
-        let live_cached = app.seg_cache[10]
-            .as_ref()
+        let live_id = app.seg_meta[10].id;
+        let live_cached = app
+            .seg_cache
+            .get(&live_id)
             .expect("live segment must be cached");
         assert!(
-            live_cached.2.len() > 1,
+            live_cached.rows.len() > 1,
             "live segment should have rendered the code block"
         );
     }
 
     #[test]
-    fn structural_segment_changes_invalidate_seg_cache() {
+    fn structural_insert_preserves_other_segment_caches() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
 
-        app.segments.push(Segment::User("Question".into()));
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::User("Question".into()));
+        app.push_segment(Segment::Assistant {
             text: "Answer".into(),
             live: false,
         });
 
         app.rebuild_cache(80);
-        let layout_before = app.seg_layout.clone();
-        assert_eq!(layout_before.len(), 2);
+        let ids_before: Vec<u64> = app.seg_meta.iter().map(|m| m.id).collect();
+        assert_eq!(ids_before.len(), 2);
+        let rows_before: Vec<usize> = ids_before
+            .iter()
+            .map(|id| app.seg_cache.get(id).expect("cached").rows.len())
+            .collect();
 
-        // Insert a tool segment between question and answer
-        app.segments.insert(
+        // Insert a tool segment between question and answer: unlike the old
+        // positional cache, id-keyed entries for the other segments survive.
+        app.insert_segment(
             1,
             Segment::Tool {
                 name: "bash".into(),
@@ -4449,17 +4499,19 @@ mod tests {
                 ok: Some(true),
                 output: "hi".into(),
                 diff: None,
+                preview: Vec::new(),
+                preview_total: 0,
                 expanded: false,
             },
         );
 
-        // Rebuilding cache should detect structural change and update layout
         app.rebuild_cache(80);
-        assert_ne!(
-            app.seg_layout, layout_before,
-            "layout must change when a segment is inserted"
-        );
-        assert_eq!(app.seg_layout.len(), 3);
+        assert_eq!(app.seg_meta.len(), 3);
+        // old ids keep their rows; only the newcomer renders fresh
+        for (id, rows) in ids_before.iter().zip(rows_before.iter()) {
+            let cached = app.seg_cache.get(id).expect("old entry must survive");
+            assert_eq!(cached.rows.len(), *rows, "segment {id} must not re-render");
+        }
         assert_eq!(app.seg_cache.len(), 3);
     }
 
@@ -4468,8 +4520,8 @@ mod tests {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
         app.streaming = true;
-        app.segments.push(Segment::User("fix bug".into()));
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::User("fix bug".into()));
+        app.push_segment(Segment::Assistant {
             text: String::new(),
             live: true,
         });
@@ -4584,7 +4636,7 @@ mod tests {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
         app.streaming = true;
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::Assistant {
             text: String::new(),
             live: true,
         });
@@ -4637,7 +4689,7 @@ mod tests {
             crate::providers::Message::tool_result("call-1", "file contents", false),
             crate::providers::Message::new(crate::providers::Role::Assistant, "done"),
         ];
-        app.segments.clear();
+        app.clear_segments();
         app.load_history_segments();
 
         assert_eq!(app.segments.len(), 4);
@@ -4668,7 +4720,7 @@ mod tests {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
         app.streaming = true;
-        app.segments.push(Segment::Assistant {
+        app.push_segment(Segment::Assistant {
             text: String::new(),
             live: true,
         });
@@ -5258,5 +5310,266 @@ mod tests {
                 .any(|t| t.contains("1.05m") && t.contains("$5/$30")),
             "rows: {texts:?}"
         );
+    }
+
+    /// Review checklist 1–2: composer input, scrolling and selection are
+    /// paint-only — an idle frame must not re-render any segment nor wrap
+    /// any row.
+    #[test]
+    fn idle_draw_skips_transcript_pipeline() {
+        use std::sync::atomic::Ordering;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.push_segment(Segment::User("hello".into()));
+        app.push_segment(Segment::Assistant {
+            text: "world".into(),
+            live: false,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        app.test_renders = 0;
+        crate::tui::markdown::WRAP_TAGGED_CALLS.swap(0, Ordering::SeqCst);
+        app.input.insert_str("typing");
+        app.scroll(4);
+        app.sel = Some(Selection {
+            a: CellPos { row: 0, col: 0 },
+            b: CellPos { row: 1, col: 2 },
+        });
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.test_renders, 0, "idle frame re-rendered segments");
+        assert_eq!(
+            crate::tui::markdown::WRAP_TAGGED_CALLS.load(Ordering::SeqCst),
+            0,
+            "idle frame wrapped rows"
+        );
+    }
+
+    /// Review checklist 3: appending one segment renders exactly that
+    /// segment; every previously assembled row stays byte-identical.
+    #[test]
+    fn append_renders_only_the_new_segment() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        for i in 0..5 {
+            app.push_segment(Segment::User(format!("q{i}")));
+            app.push_segment(Segment::Assistant {
+                text: format!("a{i}"),
+                live: false,
+            });
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let before: Vec<String> = app
+            .cache_lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+            .collect();
+        app.test_renders = 0;
+        app.push_segment(Segment::Status {
+            text: "done".into(),
+            kind: StatusKind::Info,
+            expanded: false,
+        });
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.test_renders, 1, "append re-rendered old segments");
+        let after: Vec<String> = app
+            .cache_lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+            .collect();
+        assert_eq!(
+            &after[..before.len()],
+            &before[..],
+            "append rewrote previously assembled rows"
+        );
+    }
+
+    /// Review checklist 4 (patch 1): expanding a tool keeps its header on
+    /// the same screen row instead of jumping with `follow`.
+    #[test]
+    fn toggle_keeps_header_on_screen_row() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        for i in 0..3 {
+            app.push_segment(Segment::User(format!("q{i}")));
+        }
+        let tool_idx = app.segments.len();
+        app.push_segment(Segment::Tool {
+            name: "read".into(),
+            args: "f".into(),
+            ok: Some(true),
+            output: "l1\nl2\nl3".into(),
+            diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
+            expanded: false,
+        });
+        for i in 0..25 {
+            app.push_segment(Segment::Assistant {
+                text: format!("filler {i}"),
+                live: false,
+            });
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let header = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(tool_idx))
+            .expect("tool header assembled");
+        app.follow = false;
+        app.view_top = header - 5;
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let h = app.last_chat.height;
+        let screen_before = header - app.chat_top(h);
+        assert_eq!(screen_before, 5);
+        app.click(header);
+        assert!(!app.follow, "toggle must leave follow disengaged");
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let header_after = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(tool_idx))
+            .expect("tool header survives expand");
+        assert_eq!(
+            header_after - app.chat_top(h),
+            5,
+            "header moved on screen after expand"
+        );
+        assert!(
+            matches!(
+                app.segments.get(tool_idx),
+                Some(Segment::Tool { expanded: true, .. })
+            ),
+            "tool did not expand"
+        );
+    }
+
+    /// Review checklist 5: a repeat draw of an unchanged subagent view
+    /// clones no transcript and renders nothing; closing restores the main
+    /// rows whole, again with zero renders.
+    #[test]
+    fn subagent_redraw_reuses_cache_and_switch_restores_whole() {
+        use std::sync::atomic::Ordering;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.push_segment(Segment::User("main q".into()));
+        app.push_segment(Segment::Assistant {
+            text: "main a".into(),
+            live: false,
+        });
+        app.subagent_chats.insert(
+            7,
+            vec![Segment::Tool {
+                name: "read".into(),
+                args: "src/main.rs".into(),
+                ok: Some(true),
+                output: "contents".into(),
+                diff: None,
+                preview: Vec::new(),
+                preview_total: 0,
+                expanded: false,
+            }],
+        );
+        app.subagent_meta
+            .insert(7, vec![crate::tui::app::view::SegMeta { id: 77, rev: 0 }]);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        app.open_subagent_view(7);
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        app.test_renders = 0;
+        crate::tui::markdown::WRAP_TAGGED_CALLS.swap(0, Ordering::SeqCst);
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.test_renders, 0, "subagent redraw re-rendered rows");
+        assert_eq!(
+            crate::tui::markdown::WRAP_TAGGED_CALLS.load(Ordering::SeqCst),
+            0,
+            "subagent redraw wrapped rows"
+        );
+        app.close_subagent_view();
+        app.test_renders = 0;
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(
+            app.test_renders, 0,
+            "returning to main reassembled instead of restoring"
+        );
+        assert_eq!(app.active_subagent, None);
+    }
+
+    /// A press resolved against one layout must not fire at whatever slid
+    /// under the old row number: the pressed tool is removed before release,
+    /// so the surviving tool stays collapsed.
+    #[test]
+    fn stale_click_target_ignored() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        for name in ["first", "second"] {
+            app.push_segment(Segment::Tool {
+                name: name.into(),
+                args: String::new(),
+                ok: Some(true),
+                output: "out".into(),
+                diff: None,
+                preview: Vec::new(),
+                preview_total: 0,
+                expanded: false,
+            });
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let abs0 = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(0))
+            .expect("first tool header assembled");
+        let row = app.last_chat.y + (abs0 - app.chat_top(app.last_chat.height)) as u16;
+        let col = app.last_chat.x + 2;
+        app.mouse_down(row, col);
+        app.remove_segment(0);
+        app.mouse_up(row, col);
+        assert_eq!(app.segments.len(), 1);
+        assert!(
+            matches!(
+                app.segments.first(),
+                Some(Segment::Tool {
+                    expanded: false,
+                    ..
+                })
+            ),
+            "stale press toggled the wrong tool"
+        );
+    }
+
+    /// Multi-line selections order whole points: a bottom-up drag keeps the
+    /// start's column at the start and the end's column at the end.
+    #[test]
+    fn selection_orders_whole_points_before_columns() {
+        let rev = Selection {
+            a: CellPos { row: 12, col: 3 },
+            b: CellPos { row: 10, col: 20 },
+        };
+        let (first, second) = rev.ordered();
+        assert!(first.row == 10 && first.col == 20);
+        assert!(second.row == 12 && second.col == 3);
+        let same_row = Selection {
+            a: CellPos { row: 5, col: 9 },
+            b: CellPos { row: 5, col: 2 },
+        };
+        let (first, second) = same_row.ordered();
+        assert!(first.row == 5 && first.col == 2);
+        assert!(second.row == 5 && second.col == 9);
+    }
+
+    /// Copying strips UI chrome but never real indentation: only exact known
+    /// decorations go, code indent survives byte-for-byte.
+    #[test]
+    fn strip_row_chrome_preserves_code_indent() {
+        use super::view::strip_row_chrome;
+        assert_eq!(strip_row_chrome("    │ body"), "body");
+        assert_eq!(strip_row_chrome("│ code"), "code");
+        assert_eq!(strip_row_chrome("› hi"), "hi");
+        assert_eq!(strip_row_chrome("      indented"), "      indented");
+        assert_eq!(strip_row_chrome("  two spaces"), "  two spaces");
+        assert_eq!(strip_row_chrome("text │"), "text");
     }
 }

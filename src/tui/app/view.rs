@@ -19,6 +19,119 @@ use crate::session::Session;
 use crate::tui::markdown::{Highlighter, render, wrap_tagged};
 use crate::tui::theme::Theme;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SegMeta {
+    pub id: u64,
+    pub rev: u64,
+}
+
+/// One wrapped-cache entry, keyed by segment id (not position): appends and
+/// stream updates never invalidate other segments' rows.
+pub(super) struct SegCacheEntry {
+    pub rev: u64,
+    pub width: u16,
+    pub key: usize,
+    pub rows: Vec<(Line<'static>, Option<usize>)>,
+}
+
+/// Chunk identity of one assembled transcript. Segments are pinned by stable
+/// id; structural rows (blank spacers, group headers) by ordinal among the
+/// structural pushes of one assembly pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AsmTag {
+    Seg(u64),
+    Struct(u64),
+}
+
+/// Assembled rows of one view (main chat or one subagent), parked whole on
+/// view switch so coming back never reassembles: `tags`/`lens` describe the
+/// chunk map of `lines`/`rowseg`, `fp` is the fingerprint it was built from.
+#[derive(Default)]
+pub(super) struct StoredView {
+    pub lines: Vec<Line<'static>>,
+    pub rowseg: Vec<Option<usize>>,
+    pub tags: Vec<AsmTag>,
+    pub lens: Vec<usize>,
+    pub fp: u64,
+}
+
+/// One assembly chunk: its tag plus wrapped rows. A `fresh` chunk carries
+/// rows built this pass; a reused chunk carries an empty placeholder — the
+/// merge step takes its rows from the live buffers instead of cloning them.
+type RowChunk = (AsmTag, Vec<(Line<'static>, Option<usize>)>);
+
+/// Semantic click target resolved at mouse-down against the shown frame.
+/// Re-validated at mouse-up by segment id, so a layout shift between press
+/// and release cannot fire a stale row number at the wrong control.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum ClickTarget {
+    Proposal {
+        seg: u64,
+        row: ProposalRow,
+    },
+    Ask {
+        seg: u64,
+        row: AskRow,
+    },
+    Toggle {
+        seg: u64,
+        screen: u16,
+    },
+    /// `start` is the group's `seg_start`, not its position in
+    /// `activity_groups`: a turn can finalize between press and release,
+    /// shifting indices — toggling by position could fold the wrong turn.
+    Group {
+        start: usize,
+        screen: u16,
+    },
+    OpenSubagent {
+        seg: u64,
+    },
+    /// Fenced-block index resolved at press: the fire step only indexes the
+    /// segment's source blocks, so a layout shift in between cannot retarget
+    /// the copy to a row that moved under the old screen line.
+    Code {
+        seg: u64,
+        block: usize,
+    },
+}
+
+/// Preview of a tool's shown body, computed once when the output lands —
+/// never re-cloned and re-split on every rebuild.
+pub(super) fn tool_preview(diff: Option<&str>, output: &str) -> (Vec<String>, usize) {
+    const MAX_ROWS: usize = 40;
+    let body = diff.unwrap_or(output);
+    let mut total = 0usize;
+    let mut lines = Vec::new();
+    for line in body.lines() {
+        if lines.len() < MAX_ROWS {
+            lines.push(line.to_string());
+        }
+        total += 1;
+    }
+    (lines, total)
+}
+
+/// Fenced code blocks in assistant source text, in order.
+pub(super) fn code_blocks(text: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut in_code = false;
+    let mut current = String::new();
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            if in_code {
+                blocks.push(current.trim_end_matches('\n').to_string());
+                current.clear();
+            }
+            in_code = !in_code;
+        } else if in_code {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    blocks
+}
+
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)] // chat rows are short-lived render state
 pub(super) enum Segment {
@@ -79,6 +192,11 @@ pub(super) enum Segment {
         ok: Option<bool>,
         output: String,
         diff: Option<String>,
+        /// first rows of the shown body (diff preferred), computed once when
+        /// the output lands; rendering truncates per width from these
+        preview: Vec<String>,
+        /// total source lines of the shown body, for the "… N more" row
+        preview_total: usize,
         expanded: bool,
     },
     Status {
@@ -119,7 +237,7 @@ pub(super) const GROUP_BASE: usize = 1 << 40;
 
 /// One interactive row inside an inline AskUser segment, used for mouse
 /// hover/click mapping. Headers, questions and separators are not targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum AskRow {
     Option { q: usize, opt: usize },
     Custom { q: usize },
@@ -127,7 +245,7 @@ pub(super) enum AskRow {
 }
 
 /// One interactive row inside an inline plan-proposal segment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum ProposalRow {
     View,
     Accept,
@@ -214,8 +332,34 @@ pub(super) struct Selection {
 }
 
 impl Selection {
-    pub(super) fn rows(&self) -> (usize, usize) {
-        (self.a.row.min(self.b.row), self.a.row.max(self.b.row))
+    /// Endpoints in document order. For a multi-line selection dragging
+    /// bottom-up the start keeps its own column and the end keeps its own —
+    /// columns must never be sorted independently of their rows.
+    pub(super) fn ordered(&self) -> (CellPos, CellPos) {
+        if (self.a.row, self.a.col) <= (self.b.row, self.b.col) {
+            (self.a, self.b)
+        } else {
+            (self.b, self.a)
+        }
+    }
+}
+
+/// Strip UI chrome prefixes/suffixes from a copied row. Only exact known
+/// decorations are removed ("    │ " tool rail, "│ " code rail, "› " user
+/// marker, one trailing " │" frame cap); every other leading space — real
+/// code indent included — survives, unlike a blind trim of lookalike chars.
+pub(super) fn strip_row_chrome(line: &str) -> String {
+    let mut s = line;
+    for prefix in ["    │ ", "│ ", "› "] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest;
+            break;
+        }
+    }
+    if let Some(rest) = s.strip_suffix(" │") {
+        rest.trim_end().to_string()
+    } else {
+        s.trim_end().to_string()
     }
 }
 
@@ -254,14 +398,86 @@ impl App {
         char_idx
     }
 
+    /// Row is inside the chat rectangle at all? Clicks above it (tabs,
+    /// header) must not map into row 0 via saturating arithmetic.
+    fn in_chat_rect(&self, row: u16) -> bool {
+        let h = self.last_chat.height.max(1);
+        row >= self.last_chat.y && row < self.last_chat.y.saturating_add(h)
+    }
+
     pub(super) fn mouse_down(&mut self, row: u16, col: u16) {
+        if !self.in_chat_rect(row) {
+            self.press = None;
+            self.press_target = None;
+            self.dragging = false;
+            return;
+        }
         let abs_r = self.abs_row(row);
         let char_col = self.screen_col_to_char(abs_r, col);
         self.press = Some(CellPos {
             row: abs_r,
             col: char_col,
         });
+        self.press_target = self.resolve_target(row, abs_r);
         self.dragging = false;
+    }
+
+    /// Semantic target under a chat row, resolved against the shown frame.
+    /// `screen` is the press row for anchoring; `abs` indexes the layout
+    /// this frame was painted from.
+    fn resolve_target(&self, screen: u16, abs: usize) -> Option<ClickTarget> {
+        // Proposal/ask rows only exist in the main view; in a subagent view
+        // the same absolute rows belong to a different transcript.
+        if self.active_subagent.is_none() && self.menu_stack.is_empty() {
+            if let Some((seg_idx, row)) = self.proposal_row_at(abs) {
+                let id = self.seg_meta.get(seg_idx).map(|m| m.id)?;
+                return Some(ClickTarget::Proposal { seg: id, row });
+            }
+            if let Some((seg_idx, row)) = self.ask_row_at(abs) {
+                let id = self.seg_meta.get(seg_idx).map(|m| m.id)?;
+                return Some(ClickTarget::Ask { seg: id, row });
+            }
+        }
+        let tag = self.cache_rowseg.get(abs).copied()??;
+        if tag >= GROUP_BASE {
+            let gi = tag - GROUP_BASE;
+            // resolve the positional index to a stable group identity now:
+            // the live turn's start, or the frozen group's seg_start
+            let start = if gi < self.activity_groups.len() {
+                self.activity_groups[gi].seg_start
+            } else {
+                self.trailing_work_run().map(|run| run.0)?
+            };
+            return Some(ClickTarget::Group { start, screen });
+        }
+        let (segs, meta) = self.view_transcript();
+        let id = meta.get(tag).map(|m| m.id)?;
+        // code lives in assistant text only: probe the wrapped rows solely
+        // for those segments (and never for tool/thinking/status rows)
+        if matches!(segs.get(tag), Some(Segment::Assistant { .. }))
+            && let Some(block) = self.code_block_index(id, abs)
+        {
+            return Some(ClickTarget::Code { seg: id, block });
+        }
+        match segs.get(tag) {
+            Some(Segment::Subagent { .. }) => Some(ClickTarget::OpenSubagent { seg: id }),
+            Some(Segment::Thinking { .. } | Segment::Tool { .. } | Segment::Status { .. }) => {
+                Some(ClickTarget::Toggle { seg: id, screen })
+            }
+            _ => None,
+        }
+    }
+
+    /// Current view's transcript + identity, without cloning: main chat or
+    /// the open subagent's rows.
+    fn view_transcript(&self) -> (&[Segment], &[SegMeta]) {
+        if let Some(id) = self.active_subagent
+            && let (Some(chat), Some(meta)) =
+                (self.subagent_chats.get(&id), self.subagent_meta.get(&id))
+        {
+            return (chat, meta);
+        }
+        (&self.segments, &self.seg_meta)
     }
 
     pub(super) fn mouse_drag(&mut self, row: u16, col: u16) {
@@ -306,7 +522,8 @@ impl App {
             self.open_menu(Menu::Effort);
             return;
         }
-        let pressed = self.press.take();
+        let _pressed = self.press.take();
+        let target = self.press_target.take();
         let was_drag = std::mem::take(&mut self.dragging);
         if was_drag {
             if let Some(sel) = self.sel {
@@ -327,8 +544,8 @@ impl App {
             self.apply_command_insert(&item);
             return;
         }
-        if let Some(p) = pressed {
-            self.click(p.row);
+        if let Some(target) = target {
+            self.fire_target(target);
         }
     }
 
@@ -457,126 +674,201 @@ impl App {
         }
     }
 
+    /// Atomic helper for tests: resolve and fire in one frame, where no
+    /// layout shift can intervene.
+    #[cfg(test)]
     pub(super) fn click(&mut self, abs_row: usize) {
-        if let Some(id) = self.active_subagent {
-            self.click_subagent_chat(id, abs_row);
-            return;
+        let screen = self.last_chat.y.saturating_add(
+            (abs_row.saturating_sub(self.chat_top(self.last_chat.height.max(1)))) as u16,
+        );
+        if let Some(target) = self.resolve_target(screen, abs_row) {
+            self.fire_target(target);
         }
-        // inline plan proposal: view opens the draft popup, accept/decline
-        // answer the tool — a click must never dismiss the question
-        if self.menu_stack.is_empty()
-            && let Some((_, row)) = self.proposal_row_at(abs_row)
-        {
-            match row {
-                ProposalRow::View => self.open_proposal_preview(),
-                ProposalRow::Accept => self.proposal_answer(true),
-                ProposalRow::Decline => self.proposal_answer(false),
-            }
-            return;
-        }
-        // inline AskUser first: a click on an option must select it, never
-        // dismiss the whole question (the old overlay did exactly that via
-        // an outside-rect Esc path).
-        if self.menu_stack.is_empty()
-            && let Some((seg_idx, row)) = self.ask_row_at(abs_row)
-        {
-            match row {
-                AskRow::Option { q, opt } => {
-                    let multiple = matches!(
-                        self.segments.get(seg_idx),
-                        Some(Segment::AskUser { questions, .. })
-                            if questions.get(q).is_some_and(|qq| qq.multiple)
-                    );
-                    if multiple {
-                        self.inline_ask_toggle(q, opt);
-                    } else {
-                        self.inline_ask_select(q, opt);
-                    }
-                }
-                AskRow::Custom { q } => {
-                    self.inline_ask_focus(q);
-                    self.ask_custom_focus = Some(q);
-                    self.dirty = true;
-                }
-                AskRow::Confirm => self.inline_ask_confirm(),
-            }
-            return;
-        }
-        if let Some(Some(tag)) = self.cache_rowseg.get(abs_row).copied() {
-            // An activity-group header folds the whole block; segment indices
-            // never reach the GROUP_BASE range.
-            if tag >= GROUP_BASE {
-                self.toggle_activity_group(tag - GROUP_BASE);
-                return;
-            }
-            let seg_idx = tag;
-            if let Some(text) = self.code_at_row(seg_idx, abs_row) {
-                match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
-                    Ok(()) => self.status("code copied to clipboard", StatusKind::Info),
-                    Err(e) => self.status(&format!("copy failed: {e}"), StatusKind::Err),
-                }
-                return;
-            }
-            // clicking an error line folds/unfolds its full text (it arrives
-            // collapsed); full text stays selectable by drag like any row
-            let toggle = match self.segments.get(seg_idx) {
-                Some(Segment::Status {
-                    kind: StatusKind::Err,
-                    expanded,
-                    ..
-                }) => Some(!*expanded),
-                Some(Segment::Thinking { expanded, .. }) => Some(!*expanded),
-                Some(Segment::Subagent { id, .. }) => {
-                    self.active_subagent = Some(*id);
-                    self.follow = true;
-                    self.view_top = 0;
-                    self.dirty = true;
+    }
+
+    /// Execute a mouse-down-resolved target against the CURRENT layout.
+    /// Every arm re-validates by segment id: a target whose segment vanished
+    /// (or changed kind) between press and release is ignored, never fired
+    /// at a stale row number.
+    fn fire_target(&mut self, target: ClickTarget) {
+        match target {
+            ClickTarget::Proposal { seg, row } => {
+                let Some(idx) = self.index_of_seg(seg) else {
+                    return;
+                };
+                if Some(idx) != self.active_proposal_seg() {
                     return;
                 }
-                // a finished tool row reveals its full output or diff
-                Some(Segment::Tool {
-                    ok: Some(_),
-                    expanded,
-                    ..
-                }) => Some(!*expanded),
-                _ => None,
-            };
-            if let Some(v) = toggle {
-                match self.segments.get_mut(seg_idx) {
-                    Some(Segment::Thinking { expanded, .. }) => *expanded = v,
-                    Some(Segment::Subagent { expanded, .. }) => *expanded = v,
-                    Some(Segment::Tool { expanded, .. }) => *expanded = v,
-                    Some(Segment::Status { expanded, .. }) => *expanded = v,
-                    _ => {}
+                if !matches!(
+                    self.segments.get(idx),
+                    Some(Segment::PlanProposal { decided: None, .. })
+                ) {
+                    return;
                 }
-                self.dirty = true;
+                // inline plan proposal: view opens the draft popup,
+                // accept/decline answer the tool — a click must never
+                // dismiss the question
+                match row {
+                    ProposalRow::View => self.open_proposal_preview(),
+                    ProposalRow::Accept => self.proposal_answer(true),
+                    ProposalRow::Decline => self.proposal_answer(false),
+                }
+            }
+            ClickTarget::Ask { seg, row } => {
+                let Some(idx) = self.index_of_seg(seg) else {
+                    return;
+                };
+                if Some(idx) != self.active_ask_seg() {
+                    return;
+                }
+                if !matches!(
+                    self.segments.get(idx),
+                    Some(Segment::AskUser { answered: None, .. })
+                ) {
+                    return;
+                }
+                // a click on an option must select it, never dismiss the
+                // whole question (the old overlay did exactly that via an
+                // outside-rect Esc path)
+                match row {
+                    AskRow::Option { q, opt } => {
+                        let multiple = matches!(
+                            self.segments.get(idx),
+                            Some(Segment::AskUser { questions, .. })
+                                if questions.get(q).is_some_and(|qq| qq.multiple)
+                        );
+                        if multiple {
+                            self.inline_ask_toggle(q, opt);
+                        } else {
+                            self.inline_ask_select(q, opt);
+                        }
+                    }
+                    AskRow::Custom { q } => {
+                        self.inline_ask_focus(q);
+                        self.ask_custom_focus = Some(q);
+                        self.dirty = true;
+                    }
+                    AskRow::Confirm => self.inline_ask_confirm(),
+                }
+            }
+            ClickTarget::Toggle { seg, screen } => {
+                if self.active_subagent.is_some() {
+                    if let Some(id) = self.active_subagent {
+                        self.click_subagent_seg(id, seg, screen);
+                    }
+                    return;
+                }
+                let Some(idx) = self.index_of_seg(seg) else {
+                    return;
+                };
+                // clicking an error line folds/unfolds its full text (it
+                // arrives collapsed); full text stays selectable by drag
+                // like any row. A finished tool row reveals its output.
+                let toggle = match self.segments.get(idx) {
+                    Some(Segment::Status {
+                        kind: StatusKind::Err,
+                        expanded,
+                        ..
+                    }) => Some(!*expanded),
+                    Some(Segment::Thinking { expanded, .. }) => Some(!*expanded),
+                    Some(Segment::Tool {
+                        ok: Some(_),
+                        expanded,
+                        ..
+                    }) => Some(!*expanded),
+                    _ => None,
+                };
+                if let Some(v) = toggle {
+                    // anchor the header row BEFORE flipping so the block
+                    // keeps its screen line instead of jumping with follow
+                    self.capture_anchor_for_view(None, idx, screen);
+                    match self.segments.get_mut(idx) {
+                        Some(Segment::Thinking { expanded, .. }) => *expanded = v,
+                        Some(Segment::Subagent { expanded, .. }) => *expanded = v,
+                        Some(Segment::Tool { expanded, .. }) => *expanded = v,
+                        Some(Segment::Status { expanded, .. }) => *expanded = v,
+                        _ => {}
+                    }
+                    self.touch_segment(idx);
+                    self.dirty = true;
+                }
+            }
+            ClickTarget::Group { start, screen } => {
+                // re-resolve by seg_start against the CURRENT groups: a stale
+                // index is ignored instead of folding the wrong turn
+                let gi = self
+                    .activity_groups
+                    .iter()
+                    .position(|g| g.seg_start == start)
+                    .or_else(|| {
+                        (self.streaming
+                            && self.trailing_work_run().is_some_and(|run| run.0 == start))
+                        .then_some(self.activity_groups.len())
+                    });
+                let Some(gi) = gi else { return };
+                if self.toggle_activity_group(gi) {
+                    self.capture_anchor_for_view(None, GROUP_BASE + gi, screen);
+                }
+            }
+            ClickTarget::OpenSubagent { seg } => {
+                let Some(idx) = self.index_of_seg(seg) else {
+                    return;
+                };
+                if let Some(Segment::Subagent { id, .. }) = self.segments.get(idx) {
+                    let id = *id;
+                    self.open_subagent_view(id);
+                }
+            }
+            ClickTarget::Code { seg, block } => {
+                let (segs, meta) = self.view_transcript();
+                let Some(idx) = meta.iter().position(|m| m.id == seg) else {
+                    return;
+                };
+                let Some(Segment::Assistant { text, .. }) = segs.get(idx) else {
+                    return;
+                };
+                // block was pinned at press time; if the source changed since
+                // (or the block is gone) the click is ignored, never retargeted
+                if let Some(text) = code_blocks(text).into_iter().nth(block) {
+                    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+                        Ok(()) => self.status("code copied to clipboard", StatusKind::Info),
+                        Err(e) => self.status(&format!("copy failed: {e}"), StatusKind::Err),
+                    }
+                }
             }
         }
     }
 
     /// Fold or unfold one activity group. Index `activity_groups.len()` is the
     /// running turn: its state lives in `live_group_collapsed` until the turn
-    /// ends and the group is frozen.
-    fn toggle_activity_group(&mut self, g: usize) {
+    /// ends and the group is frozen. Returns false (no anchor, no scroll
+    /// change) when the index no longer addresses a live group.
+    fn toggle_activity_group(&mut self, g: usize) -> bool {
         if g < self.activity_groups.len() {
             self.activity_groups[g].expanded = !self.activity_groups[g].expanded;
         } else if g == self.activity_groups.len() && self.streaming {
             self.live_group_collapsed = !self.live_group_collapsed;
         } else {
             // stale tag from a turn that has since ended
-            return;
+            return false;
         }
         self.dirty = true;
+        true
     }
 
-    fn click_subagent_chat(&mut self, id: u64, abs_row: usize) {
-        let Some(Some(seg_idx)) = self.cache_rowseg.get(abs_row).copied() else {
+    /// Toggle one subagent-chat row by stable id. No cache is cleared: the
+    /// id-keyed entries stay valid and the fingerprint gate decides the rest.
+    fn click_subagent_seg(&mut self, id: u64, seg: u64, screen: u16) {
+        let Some(meta) = self.subagent_meta.get(&id) else {
             return;
         };
-        let Some(chat) = self.subagent_chats.get_mut(&id) else {
+        let Some(idx) = meta.iter().position(|m| m.id == seg) else {
             return;
         };
-        let toggle = match chat.get(seg_idx) {
+        let Some(chat) = self.subagent_chats.get(&id) else {
+            return;
+        };
+        let toggle = match chat.get(idx) {
             Some(Segment::Thinking { expanded, .. }) => Some(!*expanded),
             Some(Segment::Tool {
                 ok: Some(_),
@@ -585,68 +877,111 @@ impl App {
             }) => Some(!*expanded),
             _ => None,
         };
-        if let Some(expanded) = toggle {
-            match chat.get_mut(seg_idx) {
+        let Some(v) = toggle else { return };
+        // anchor BEFORE mutating so the header keeps its screen line
+        if let Some(tag) = self.cache_rowseg.iter().position(|t| *t == Some(idx)) {
+            self.capture_anchor_for_view(Some(id), tag, screen);
+        } else {
+            self.pause_follow_for_inspection();
+        }
+        if let Some(chat) = self.subagent_chats.get_mut(&id) {
+            match chat.get_mut(idx) {
                 Some(Segment::Thinking {
                     expanded: state, ..
                 })
                 | Some(Segment::Tool {
                     expanded: state, ..
-                }) => *state = expanded,
+                }) => *state = v,
                 _ => {}
             }
-            self.seg_cache.clear();
-            self.dirty = true;
         }
+        self.sub_touch(id, idx);
+        self.dirty = true;
     }
 
-    fn code_at_row(&self, seg_idx: usize, abs_row: usize) -> Option<String> {
-        let rendered = line_text(self.cache_lines.get(abs_row)?);
-        if !rendered.trim_start().starts_with('│') && !rendered.contains("│ ") {
-            return None;
-        }
-        let Segment::Assistant { text, .. } = self.segments.get(seg_idx)? else {
-            return None;
-        };
-        let mut blocks = Vec::new();
+    /// Anchor a header in an explicit view (main passes `None`).
+    fn capture_anchor_for_view(&mut self, view: Option<u64>, tag: usize, screen: u16) {
+        let h = self.last_chat.height.max(1);
+        let top = self.chat_top(h);
+        self.view_top = top;
+        self.follow = false;
+        let y = self.last_chat.y;
+        let offset = (screen.saturating_sub(y)) as usize;
+        let found = self
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(tag))
+            .is_some();
+        self.pending_anchor = found.then_some((view, tag, offset));
+    }
+
+    /// Which fenced code block of a segment contains an absolute row, by
+    /// walking that segment's cached wrapped rows and tracking code-frame
+    /// borders (`╭` opens, `╰` closes). Tables use `┌`-corners, so a `│`
+    /// heuristic can no longer mistake a table row for code.
+    /// View-aware: resolves the id in the currently shown transcript.
+    fn code_block_index(&self, seg: u64, abs_row: usize) -> Option<usize> {
+        let (_, meta) = self.view_transcript();
+        let idx = meta.iter().position(|m| m.id == seg)?;
+        let (start, _) = self.ask_block_range(idx)?;
+        let mut block = 0usize;
         let mut in_code = false;
-        let mut current = String::new();
-        for line in text.lines() {
-            if line.trim_start().starts_with("```") {
-                if in_code {
-                    blocks.push(current.trim_end_matches('\n').to_string());
-                    current.clear();
-                }
-                in_code = !in_code;
-            } else if in_code {
-                current.push_str(line);
-                current.push('\n');
+        for row in start..=abs_row.min(self.cache_lines.len().saturating_sub(1)) {
+            // only rows of this segment participate; anything else ends scan
+            if self.cache_rowseg.get(row) != Some(&Some(idx)) {
+                break;
+            }
+            // never index directly: hit-testing must survive transiently
+            // desynced buffers (a missing row ends the scan, not the app)
+            let Some(line) = self.cache_lines.get(row) else {
+                break;
+            };
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let trimmed = text.trim_start();
+            if trimmed.starts_with('╭') {
+                in_code = true;
+                block += 1;
+            } else if in_code && trimmed.starts_with('╰') {
+                in_code = false;
             }
         }
-        blocks.into_iter().next()
+        in_code.then_some(block.saturating_sub(1))
     }
 
+    /// Strip UI chrome from a copied row WITHOUT eating real indentation:
+    /// only exact known decorations go (tool rail, code rail, user marker,
+    /// one trailing frame cap). Everything else — including code indent and
+    /// the 2-column group nesting indent — is preserved byte-for-byte, so a
+    /// copied snippet stays faithful to the source text.
     pub(super) fn copy_selection(&mut self, sel: &Selection) {
-        let (r0, r1) = sel.rows();
-        let max_row = self.cache_lines.len().saturating_sub(1);
+        // Order whole points first: for a multi-line selection dragging
+        // bottom-up, start keeps its own column and end keeps its own.
+        // Sorting columns independently would splice the wrong edges.
+        let (first, second) = if (sel.a.row, sel.a.col) <= (sel.b.row, sel.b.col) {
+            (sel.a, sel.b)
+        } else {
+            (sel.b, sel.a)
+        };
+        let (r0, r1) = (first.row, second.row);
+        if self.cache_lines.is_empty() || r0 >= self.cache_lines.len() {
+            return;
+        }
+        let max_row = self.cache_lines.len() - 1;
         let mut out = String::new();
         for r in r0..=r1.min(max_row) {
             let chars: Vec<char> = line_text(&self.cache_lines[r]).chars().collect();
             let start = if r == r0 {
-                sel.a.col.min(sel.b.col).min(chars.len())
+                first.col.min(chars.len())
             } else {
                 0
             };
             let end = if r == r1 {
-                sel.a.col.max(sel.b.col).min(chars.len())
+                second.col.min(chars.len())
             } else {
                 chars.len()
             };
-            let mut line: String = chars[start..end].iter().collect();
-            line = line
-                .trim_start_matches([' ', '│', '╭', '╰', '─'])
-                .trim_end_matches([' ', '│', '╮', '╯', '─'])
-                .to_string();
+            let mut line: String = chars[start..end.min(start.max(end))].iter().collect();
+            line = strip_row_chrome(&line);
             if !out.is_empty() {
                 out.push('\n');
             }
@@ -739,12 +1074,21 @@ impl App {
             Segment::Thinking {
                 text,
                 expanded,
+                live,
                 started,
                 ..
             } => {
+                // content identity is (id, rev); the key carries paint state
+                // only. Elapsed seconds advance while live — a finished block
+                // must not re-render every second for a clock that froze.
                 text.len() * 2
                     + *expanded as usize
-                    + started.map(|t| t.elapsed().as_secs() as usize).unwrap_or(0) / 8
+                    + usize::from(*live) * 3
+                    + if *live {
+                        started.map(|t| t.elapsed().as_secs() as usize).unwrap_or(0)
+                    } else {
+                        0
+                    }
             }
             Segment::Tool {
                 name,
@@ -753,6 +1097,7 @@ impl App {
                 output,
                 diff,
                 expanded,
+                ..
             } => {
                 let mut k = name.len()
                     + args.len()
@@ -767,13 +1112,40 @@ impl App {
                 };
                 k
             }
-            Segment::Status { expanded, .. } => usize::from(*expanded),
+            Segment::Status {
+                text,
+                kind,
+                expanded,
+            } => {
+                // content identity is (id, rev) — statuses are always pushed
+                // with a fresh id — but the key must still see text and kind,
+                // or two statuses would alias one cache entry. The old key
+                // (`expanded` alone) repainted stale rows for same-state
+                // updates whenever revisions aligned.
+                text.len() * 3
+                    + usize::from(*expanded)
+                    + match kind {
+                        StatusKind::Info => 0,
+                        StatusKind::Ok => 7,
+                        StatusKind::Warn => 14,
+                        StatusKind::Err => 21,
+                    }
+            }
         }
     }
 
-    pub(super) fn render_segment(&self, idx: usize, w: u16) -> Vec<(Line<'static>, Option<usize>)> {
+    /// Render one segment. `segs` is the owning transcript (main chat or one
+    /// subagent's), `interactive` enables live ask/proposal highlight — only
+    /// the main view is interactive; subagent rows always render inactive.
+    pub(super) fn render_segment(
+        &self,
+        segs: &[Segment],
+        idx: usize,
+        w: u16,
+        interactive: bool,
+    ) -> Vec<(Line<'static>, Option<usize>)> {
         let mut out: Vec<(Line<'static>, Option<usize>)> = Vec::new();
-        match &self.segments[idx] {
+        match &segs[idx] {
             Segment::User(text) => {
                 for l in user_box(text, w, &self.hl) {
                     out.push((l, Some(idx)));
@@ -799,7 +1171,7 @@ impl App {
             } => {
                 let width = usize::from(w).max(1);
                 let live = answered.is_none();
-                let is_active_seg = self.active_ask_seg() == Some(idx);
+                let is_active_seg = interactive && self.active_ask_seg() == Some(idx);
                 for (q_idx, q) in questions.iter().enumerate() {
                     let is_focused = live && is_active_seg && q_idx == *focus;
                     let header_style = if is_focused {
@@ -952,7 +1324,7 @@ impl App {
             Segment::PlanProposal { draft, decided, .. } => {
                 let width = usize::from(w).max(1);
                 let live = decided.is_none();
-                let is_active_seg = self.active_proposal_seg() == Some(idx);
+                let is_active_seg = interactive && self.active_proposal_seg() == Some(idx);
                 out.push((
                     Line::from(vec![Span::styled(
                         truncate_display_width(" ▸ proposed plan", width),
@@ -1112,6 +1484,8 @@ impl App {
                 ok,
                 output,
                 diff,
+                preview,
+                preview_total,
                 expanded,
             } => {
                 // Every tool uses the same three-part row: state marker, tool
@@ -1167,7 +1541,16 @@ impl App {
                     // `args` (not the JSON), so never try to parse it: show
                     // the question summary and the recorded answer instead of
                     // an empty expansion.
-                    let body = if name == "ask_user" {
+                    // Preview normally arrives precomputed with the output;
+                    // the on-the-fly fallback only serves fixtures and legacy
+                    // rows that predate it — never the live transcript.
+                    let (preview, preview_total) =
+                        if preview.is_empty() && (!output.is_empty() || diff.is_some()) {
+                            tool_preview(diff.as_deref(), output)
+                        } else {
+                            (preview.clone(), *preview_total)
+                        };
+                    let shown: Vec<String> = if name == "ask_user" {
                         let mut s = String::new();
                         if !args.is_empty() {
                             s.push_str(&format!("Q: {args}\n"));
@@ -1179,13 +1562,18 @@ impl App {
                         } else {
                             s.push_str("A: (no answer yet)");
                         }
-                        s
+                        let shown: Vec<String> = s.lines().map(str::to_string).collect();
+                        shown
                     } else {
-                        diff.clone().unwrap_or_else(|| output.clone())
+                        // Precomputed at output-arrival time: no clone of the
+                        // full body and no full line scan on every rebuild.
+                        preview.clone()
                     };
-                    const MAX_ROWS: usize = 40;
-                    let rows: Vec<&str> = body.lines().collect();
-                    let shown = &rows[..rows.len().min(MAX_ROWS)];
+                    let total = if name == "ask_user" {
+                        shown.len()
+                    } else {
+                        preview_total
+                    };
                     let border = Theme::border_dim();
                     let width = usize::from(w).saturating_sub(6).max(1);
                     // Expanded output has no surrounding box. Keep one quiet
@@ -1195,7 +1583,7 @@ impl App {
                         Line::from(vec![Span::styled("    │".to_string(), border)]),
                         Some(idx),
                     ));
-                    for l in shown {
+                    for l in &shown {
                         let st = if l.starts_with('+') && !l.starts_with("+++") {
                             Theme::ok()
                         } else if l.starts_with('-') && !l.starts_with("---") {
@@ -1205,17 +1593,18 @@ impl App {
                         } else {
                             Theme::dim()
                         };
-                        let line = truncate_display_width(l, width);
+                        // single truncation: the line is already capped, do
+                        // not re-truncate the truncated result
                         out.push((
                             Line::from(vec![
                                 Span::styled("    │ ", border),
-                                Span::styled(truncate_display_width(&line, width), st),
+                                Span::styled(truncate_display_width(l, width), st),
                             ]),
                             Some(idx),
                         ));
                     }
-                    if rows.len() > MAX_ROWS {
-                        let more = format!("… {} more lines", rows.len() - MAX_ROWS);
+                    if total > shown.len() {
+                        let more = format!("… {} more lines", total - shown.len());
                         out.push((
                             Line::from(vec![
                                 Span::styled("    │ ", border),
@@ -1272,26 +1661,24 @@ impl App {
     }
 
     pub(super) fn rebuild_cache(&mut self, width: u16) {
-        // Segment rows depend on the available width. Reusing a segment cache
-        // built for the previous terminal size would feed old frame geometry
-        // into wrap_tagged, which can split a right border onto the next row.
-        if self.cache_w != width {
-            self.seg_cache.clear();
-        }
+        // No cache wipe on width change: every entry carries its own width,
+        // so only rows wrapped for the old size re-render — the rest survive.
         let w = width.saturating_sub(2).max(10); // side padding
-        let mut logical: Vec<(Line<'static>, Option<usize>)> = Vec::new();
+        // chunks of the new assembly + whether each was (re)built this pass.
+        // Untouched segments contribute an empty placeholder: the merge step
+        // reuses their live rows without cloning them.
+        let mut chunks: Vec<RowChunk> = Vec::new();
+        let mut fresh: Vec<bool> = Vec::new();
+        let mut struct_ord = 0u64;
+        macro_rules! struct_row {
+            ($line:expr, $tag:expr) => {{
+                chunks.push(struct_chunk(struct_ord, $line, $tag, w));
+                fresh.push(true);
+                struct_ord += 1;
+            }};
+        }
         let mut in_group = false; // inside one "agent" turn
         let mut last_block = BlockKind::None;
-
-        // seg_cache is positional: inserting/removing a segment shifts every
-        // later entry. Detect that structural change before reusing any cache,
-        // otherwise old tool lines can appear under the wrong segment.
-        let layout: Vec<u64> = self.segments.iter().map(segment_layout_key).collect();
-        if layout != self.seg_layout {
-            self.seg_cache.clear();
-            self.seg_layout = layout;
-        }
-        self.seg_cache.resize(self.segments.len(), None);
 
         // A turn's working content is wrapped in one activity group. Finished
         // turns are frozen in `activity_groups`; the running turn is recomputed
@@ -1314,16 +1701,11 @@ impl App {
             if gi < groups.len() && idx == groups[gi].seg_start {
                 let g = &groups[gi];
                 if !in_group {
-                    push_wrapped(&mut logical, blank(), None, w);
+                    struct_row!(blank(), None);
                     in_group = true;
                 }
                 last_block = BlockKind::Activity;
-                push_wrapped(
-                    &mut logical,
-                    activity_header_line(g),
-                    Some(GROUP_BASE + gi),
-                    w,
-                );
+                struct_row!(activity_header_line(g), Some(GROUP_BASE + gi));
                 if g.expanded {
                     inside_until = g.seg_end;
                 } else {
@@ -1346,34 +1728,34 @@ impl App {
                 Segment::AskUser { .. } | Segment::PlanProposal { .. } => {
                     in_group = false;
                     last_block = BlockKind::None;
-                    push_wrapped(&mut logical, blank(), None, w);
+                    struct_row!(blank(), None);
                 }
                 Segment::User(_) => {
                     in_group = false;
                     last_block = BlockKind::None;
-                    push_wrapped(&mut logical, blank(), None, w);
+                    struct_row!(blank(), None);
                 }
                 Segment::Assistant { .. } => {
                     if !in_group {
-                        push_wrapped(&mut logical, blank(), None, w);
+                        struct_row!(blank(), None);
                         in_group = true;
                     } else if last_block == BlockKind::ThoughtExpanded {
-                        push_wrapped(&mut logical, blank(), None, w);
+                        struct_row!(blank(), None);
                     }
                     last_block = BlockKind::Answer;
                 }
                 Segment::Commentary(_) => {
                     if !in_group {
-                        push_wrapped(&mut logical, blank(), None, w);
+                        struct_row!(blank(), None);
                         in_group = true;
                     }
                 }
                 Segment::Thinking { expanded, .. } => {
                     if !in_group {
-                        push_wrapped(&mut logical, blank(), None, w);
+                        struct_row!(blank(), None);
                         in_group = true;
                     } else if last_block == BlockKind::Answer {
-                        push_wrapped(&mut logical, blank(), None, w);
+                        struct_row!(blank(), None);
                     }
                     last_block = if *expanded {
                         BlockKind::ThoughtExpanded
@@ -1383,14 +1765,14 @@ impl App {
                 }
                 Segment::Subagent { .. } => {
                     if !in_group {
-                        push_wrapped(&mut logical, blank(), None, w);
+                        struct_row!(blank(), None);
                         in_group = true;
                     }
                 }
                 Segment::Tool { .. } => {
                     // tool rows belong to the agent's turn, keep them grouped
                     if !in_group {
-                        push_wrapped(&mut logical, blank(), None, w);
+                        struct_row!(blank(), None);
                         in_group = true;
                     }
                 }
@@ -1398,43 +1780,246 @@ impl App {
             }
 
             // expensive part: reuse rendered AND wrapped lines unless the
-            // text changed. Re-wrapping the whole history on every streamed
-            // frame was the long-chat lag; wrapping is per-line independent,
-            // so per-segment chunks concatenate exactly like one whole-list
-            // pass. Indent goes in before wrapping, same as before.
+            // segment changed. Entries are keyed by stable segment id, so an
+            // append or a stream update to one segment never invalidates the
+            // others; only (id, rev, width, interactive key) all matching
+            // reuses the cached rows. Indent goes in before wrapping, same
+            // as a whole-list pass would do (wrapping is per-line
+            // independent, so chunks concatenate exactly).
             let key = self.seg_key(seg);
+            let meta = self
+                .seg_meta
+                .get(idx)
+                .copied()
+                .unwrap_or(SegMeta { id: 0, rev: 0 });
             // nested rows render narrower so the indent cannot push them past
             // the chat width; the width is part of the cache check so a segment
             // that moves in or out of a group is repainted at the right size.
             let render_w = w.saturating_sub(indent as u16);
-            let needs_render = match self.seg_cache[idx].as_ref() {
-                Some((k, cw, _)) => *k != key || *cw != render_w,
-                None => true,
-            };
-            if needs_render {
-                let lines = self.render_segment(idx, render_w);
-                let chunk: Vec<(Line<'static>, Option<usize>)> = lines
-                    .into_iter()
-                    .map(|(line, tag)| (indent_line(line, indent), tag))
-                    .collect();
-                let (rows, tags) = wrap_tagged(chunk, w);
-                self.seg_cache[idx] = Some((key, render_w, rows.into_iter().zip(tags).collect()));
+            let hit = matches!(self.seg_cache.get(&meta.id), Some(entry)
+                if entry.rev == meta.rev && entry.width == render_w && entry.key == key);
+            if hit {
+                // live rows are reused by the merge step: no clone here
+                chunks.push((AsmTag::Seg(meta.id), Vec::new()));
+                fresh.push(false);
+                continue;
             }
-            let cached = self.seg_cache[idx].as_ref().unwrap();
-            for (line, tag) in &cached.2 {
-                logical.push((line.clone(), *tag));
+            #[cfg(test)]
+            {
+                self.test_renders += 1;
+            }
+            let lines = self.render_segment(&self.segments, idx, render_w, true);
+            let chunk: Vec<(Line<'static>, Option<usize>)> = lines
+                .into_iter()
+                .map(|(line, tag)| (indent_line(line, indent), tag))
+                .collect();
+            let (rows, tags) = wrap_tagged(chunk, w);
+            let rows: Vec<(Line<'static>, Option<usize>)> = rows.into_iter().zip(tags).collect();
+            self.seg_cache.insert(
+                meta.id,
+                SegCacheEntry {
+                    rev: meta.rev,
+                    width: render_w,
+                    key,
+                    rows: rows.clone(),
+                },
+            );
+            chunks.push((AsmTag::Seg(meta.id), rows));
+            fresh.push(true);
+        }
+        // Drop cache entries for segments that no longer exist anywhere (main
+        // transcript or any open subagent chat). Ids are never reused, so a
+        // surviving entry always belongs to live content.
+        self.prune_seg_cache();
+        self.merge_chunks(chunks, fresh);
+        self.cache_w = width;
+    }
+
+    /// Forget wrapped rows whose segment id is gone from every transcript.
+    fn prune_seg_cache(&mut self) {
+        let mut live = std::collections::HashSet::new();
+        for meta in &self.seg_meta {
+            live.insert(meta.id);
+        }
+        for chat_meta in self.subagent_meta.values() {
+            for meta in chat_meta {
+                live.insert(meta.id);
             }
         }
-        self.seg_cache.truncate(self.segments.len());
-        let mut lines = Vec::with_capacity(logical.len());
-        let mut rowseg = Vec::with_capacity(logical.len());
-        for (line, tag) in logical {
-            lines.push(line);
-            rowseg.push(tag);
+        self.seg_cache.retain(|id, _| live.contains(id));
+    }
+
+    /// Cached rows for one chunk tag, for assembly paths whose fresh rows
+    /// are unavailable. Segment chunks always come from the id-keyed cache;
+    /// structural chunks are rebuilt every pass, so a miss means empty.
+    fn chunk_rows(&self, tag: AsmTag) -> Vec<(Line<'static>, Option<usize>)> {
+        match tag {
+            AsmTag::Seg(id) => self
+                .seg_cache
+                .get(&id)
+                .map(|e| e.rows.clone())
+                .unwrap_or_default(),
+            AsmTag::Struct(_) => Vec::new(),
+        }
+    }
+
+    /// Do the live buffers already hold `rows` at `[at, at + len)`?
+    /// Structural chunks (blanks, group headers) are rebuilt every pass but
+    /// almost always identical — skipping the no-op splice avoids an O(tail)
+    /// memmove per rebuild for rows that did not change.
+    fn range_eq(&self, at: usize, len: usize, rows: &[(Line<'static>, Option<usize>)]) -> bool {
+        if rows.len() != len {
+            return false;
+        }
+        let end = at.checked_add(len);
+        let (Some(old_l), Some(old_t)) = (
+            end.and_then(|e| self.cache_lines.get(at..e)),
+            end.and_then(|e| self.cache_rowseg.get(at..e)),
+        ) else {
+            return false;
+        };
+        old_l
+            .iter()
+            .zip(old_t.iter())
+            .zip(rows.iter())
+            .all(|((l, t), (nl, nt))| l == nl && t == nt)
+    }
+
+    /// Same chunk-tag sequence as the live buffers: splice only rebuilt
+    /// chunks in place. Untouched segments cost nothing — no render, no wrap,
+    /// no row clones. The caller verifies buffer consistency first, so every
+    /// `[at, at + old_len)` range below is in bounds.
+    fn splice_chunks(&mut self, built: Vec<RowChunk>, fresh: Vec<bool>) {
+        let mut at = 0usize;
+        for (i, (tag, rows)) in built.into_iter().enumerate() {
+            let old_len = self.asm_lens.get(i).copied().unwrap_or(0);
+            if !fresh.get(i).copied().unwrap_or(false) {
+                at += old_len;
+                continue;
+            }
+            // structural chunks (blanks, group headers) are rebuilt every
+            // pass but almost always identical: skip the no-op splice and
+            // its O(tail) memmove
+            if matches!(tag, AsmTag::Struct(_)) && self.range_eq(at, old_len, &rows) {
+                at += old_len;
+                continue;
+            }
+            let new_len = rows.len();
+            let (ls, ts): (Vec<Line>, Vec<Option<usize>>) = rows.into_iter().unzip();
+            self.cache_lines.splice(at..at + old_len, ls);
+            self.cache_rowseg.splice(at..at + old_len, ts);
+            if let Some(lens) = self.asm_lens.get_mut(i) {
+                *lens = new_len;
+            }
+            at += new_len;
+        }
+    }
+
+    /// Concatenate every chunk into fresh buffers (group fold, mid-list
+    /// insert/remove, or most chunks rebuilt e.g. after a resize).
+    fn concat_chunks(&mut self, built: Vec<RowChunk>, fresh: Vec<bool>) {
+        let mut tags = Vec::with_capacity(built.len());
+        let mut lens = Vec::with_capacity(built.len());
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut rowseg: Vec<Option<usize>> = Vec::new();
+        for (i, (tag, rows)) in built.into_iter().enumerate() {
+            let rows = if fresh.get(i).copied().unwrap_or(false) {
+                rows
+            } else {
+                self.chunk_rows(tag)
+            };
+            tags.push(tag);
+            lens.push(rows.len());
+            for (l, t) in rows {
+                lines.push(l);
+                rowseg.push(t);
+            }
         }
         self.cache_lines = lines;
         self.cache_rowseg = rowseg;
-        self.cache_w = width;
+        self.asm_tags = tags;
+        self.asm_lens = lens;
+    }
+
+    /// Merge freshly built chunks into the live row buffers. An identical
+    /// tag sequence splices only rebuilt chunks (hot path); an old sequence
+    /// that is a strict prefix pushes the appended tail; anything else
+    /// concatenates fully. Appends and stream tokens therefore never
+    /// re-clone the history.
+    fn merge_chunks(&mut self, built: Vec<RowChunk>, fresh: Vec<bool>) {
+        debug_assert_eq!(built.len(), fresh.len());
+        let new_tags: Vec<AsmTag> = built.iter().map(|(t, _)| *t).collect();
+        // the chunk map must describe the live buffers exactly, or no fast
+        // path is safe: fall back to full concatenation
+        let total: usize = self.asm_lens.iter().sum();
+        let consistent = self.asm_lens.len() == self.asm_tags.len()
+            && total == self.cache_lines.len()
+            && total == self.cache_rowseg.len();
+        if consistent && new_tags == self.asm_tags {
+            if fresh.iter().filter(|b| **b).count() * 2 <= new_tags.len().max(1) {
+                self.splice_chunks(built, fresh);
+            } else {
+                self.concat_chunks(built, fresh);
+            }
+            return;
+        }
+        if consistent
+            && new_tags.len() > self.asm_tags.len()
+            && new_tags[..self.asm_tags.len()] == self.asm_tags[..]
+        {
+            // append-only tail: push the new chunks' rows, keep the map
+            // aligned. A tail chunk is normally freshly built; a non-fresh
+            // one falls back to its cache entry (defensive, ids are unique).
+            let tail_start = self.asm_tags.len();
+            for (n, ((_, rows), tag)) in built
+                .into_iter()
+                .skip(tail_start)
+                .zip(new_tags[tail_start..].iter())
+                .enumerate()
+            {
+                let i = tail_start + n;
+                let rows = if fresh.get(i).copied().unwrap_or(false) {
+                    rows
+                } else {
+                    self.chunk_rows(*tag)
+                };
+                let len = rows.len();
+                let (ls, ts): (Vec<Line>, Vec<Option<usize>>) = rows.into_iter().unzip();
+                self.cache_lines.extend(ls);
+                self.cache_rowseg.extend(ts);
+                self.asm_tags.push(*tag);
+                self.asm_lens.push(len);
+            }
+            return;
+        }
+        self.concat_chunks(built, fresh);
+    }
+
+    /// Cheap transcript fingerprint: identities + revisions in order, group
+    /// fold state, animation and hover bits, theme and width. Same input to
+    /// this function always assembles the same rows, so a draw whose
+    /// fingerprint matches the last one skips reassembly entirely — typing,
+    /// scrolling, selection and hover never rebuild the transcript.
+    /// O(segments), small integers only: no content hashing.
+    fn transcript_fp(&self, width: u16, meta: &[SegMeta]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        width.hash(&mut h);
+        self.theme_rev.hash(&mut h);
+        for m in meta {
+            m.id.hash(&mut h);
+            m.rev.hash(&mut h);
+        }
+        self.activity_groups.len().hash(&mut h);
+        for g in &self.activity_groups {
+            g.expanded.hash(&mut h);
+        }
+        self.live_group_collapsed.hash(&mut h);
+        self.spinner_tick.hash(&mut h);
+        self.ask_hover.hash(&mut h);
+        self.proposal_hover.hash(&mut h);
+        self.ask_custom_focus.hash(&mut h);
+        h.finish()
     }
 
     pub(super) fn chat_top(&self, height: u16) -> usize {
@@ -1444,6 +2029,33 @@ impl App {
             max
         } else {
             self.view_top.min(max)
+        }
+    }
+
+    /// Freeze the current viewport and stop following: the next layout change
+    /// (toggle, stream append) no longer yanks the screen. Call before any
+    /// inspection-driven mutation.
+    pub(super) fn pause_follow_for_inspection(&mut self) {
+        let top = self.chat_top(self.last_chat.height.max(1));
+        self.view_top = top;
+        self.follow = false;
+        self.pending_anchor = None;
+    }
+
+    /// Restore a captured anchor against the freshly rebuilt rows. Drops it
+    /// when the tagged row is gone (segment removed concurrently).
+    fn apply_pending_anchor(&mut self, view: Option<u64>) {
+        let Some((anchor_view, tag, screen)) = self.pending_anchor.take() else {
+            return;
+        };
+        if anchor_view != view {
+            return;
+        }
+        let h = self.last_chat.height.max(1) as usize;
+        let max = self.cache_lines.len().saturating_sub(h);
+        if let Some(abs) = self.cache_rowseg.iter().position(|t| *t == Some(tag)) {
+            self.view_top = abs.saturating_sub(screen).min(max);
+            self.follow = false;
         }
     }
 
@@ -1478,11 +2090,22 @@ impl App {
         // The transcript is rendered inside `chat`, not the outer frame. Use
         // that exact width for cache invalidation and frame construction so a
         // resize cannot leave rows wider than the rectangle that displays them.
-        if self.dirty || self.cache_w != chat.width {
+        // Reassembly is gated by the transcript fingerprint: paint-only state
+        // (typing, scroll, selection, hover) never rebuilds the transcript.
+        if self.cache_w != chat.width {
+            self.seg_cache.clear();
             self.rebuild_cache(chat.width);
+            self.last_fp = self.transcript_fp(chat.width, &self.seg_meta);
+        } else {
+            let fp = self.transcript_fp(chat.width, &self.seg_meta);
+            if fp != self.last_fp {
+                self.rebuild_cache(chat.width);
+                self.last_fp = fp;
+            }
         }
         self.last_chat = chat;
         self.last_input = layout[2];
+        self.apply_pending_anchor(None);
 
         f.render_widget(Block::new().style(Theme::base()), area);
 
@@ -1521,7 +2144,11 @@ impl App {
                 .skip(top)
                 .take(chat.height as usize)
                 .map(|(abs, l)| match sel {
-                    Some(s) if abs >= s.rows().0 && abs <= s.rows().1 => {
+                    Some(s) => {
+                        let (first, second) = s.ordered();
+                        if abs < first.row || abs > second.row {
+                            return l.clone();
+                        }
                         let chars = line_text(l).chars().count();
                         if chars == 0 {
                             // empty row inside the selection: full-width highlight
@@ -1530,13 +2157,13 @@ impl App {
                                 Style::new().add_modifier(Modifier::REVERSED),
                             )]);
                         }
-                        let cs = if abs == s.rows().0 {
-                            s.a.col.min(s.b.col).min(chars)
+                        let cs = if abs == first.row {
+                            first.col.min(chars)
                         } else {
                             0
                         };
-                        let ce = if abs == s.rows().1 {
-                            s.a.col.max(s.b.col).min(chars)
+                        let ce = if abs == second.row {
+                            second.col.min(chars)
                         } else {
                             chars
                         };
@@ -1600,6 +2227,86 @@ impl App {
         self.draw_menu(f, area);
     }
 
+    /// Open a subagent transcript, restoring its saved scroll position.
+    /// The main view's scroll is stashed aside (not destroyed); closing the
+    /// view restores it, so visiting a subagent no longer yanks the main chat.
+    /// Park the active view's assembled rows into a `StoredView`, leaving
+    /// empty live buffers behind. `last_fp` is poisoned so a draw without a
+    /// loaded store rebuilds instead of trusting empty rows.
+    fn take_active_store(&mut self) -> StoredView {
+        let store = StoredView {
+            lines: std::mem::take(&mut self.cache_lines),
+            rowseg: std::mem::take(&mut self.cache_rowseg),
+            tags: std::mem::take(&mut self.asm_tags),
+            lens: std::mem::take(&mut self.asm_lens),
+            fp: self.last_fp,
+        };
+        self.last_fp = u64::MAX;
+        store
+    }
+
+    /// Make a parked view live: its rows, chunk map and fingerprint move
+    /// back into the active buffers, so the next draw's fingerprint gate
+    /// hits and skips reassembly entirely.
+    fn load_active_store(&mut self, store: StoredView) {
+        self.cache_lines = store.lines;
+        self.cache_rowseg = store.rowseg;
+        self.asm_tags = store.tags;
+        self.asm_lens = store.lens;
+        self.last_fp = store.fp;
+    }
+
+    pub(super) fn open_subagent_view(&mut self, id: u64) {
+        if let Some(cur) = self.active_subagent {
+            if cur == id {
+                return;
+            }
+            // A -> B: park A's rows and scroll before loading B
+            self.sub_views.insert(cur, (self.view_top, self.follow));
+            let parked = self.take_active_store();
+            self.sub_stores.insert(cur, parked);
+        } else {
+            // Stash only when coming from the main view: opening B while
+            // viewing A must not overwrite the stashed main rows with A's.
+            self.stashed_main_scroll = Some((self.view_top, self.follow));
+            self.main_store = self.take_active_store();
+        }
+        let (top, follow) = self.sub_views.get(&id).copied().unwrap_or((0, true));
+        self.view_top = top;
+        self.follow = follow;
+        if let Some(store) = self.sub_stores.remove(&id) {
+            self.load_active_store(store);
+        }
+        // else: buffers are empty with a poisoned fp, so the next draw
+        // assembles this transcript from the id-keyed segment cache
+        self.active_subagent = Some(id);
+        self.press_target = None;
+        self.dirty = true;
+    }
+
+    /// Close the subagent view, parking its rows + scroll first so a revisit
+    /// restores them whole, then restoring the stashed main rows + scroll.
+    /// The main transcript may have grown meanwhile (background streaming):
+    /// its stored fingerprint is stale then, and the next draw splices only
+    /// the new tail instead of reassembling.
+    pub(super) fn close_subagent_view(&mut self) {
+        if let Some(id) = self.active_subagent.take() {
+            self.sub_views.insert(id, (self.view_top, self.follow));
+            let parked = self.take_active_store();
+            self.sub_stores.insert(id, parked);
+            let main = std::mem::take(&mut self.main_store);
+            self.load_active_store(main);
+        }
+        if let Some((top, follow)) = self.stashed_main_scroll.take() {
+            self.view_top = top;
+            self.follow = follow;
+        } else {
+            self.follow = true;
+        }
+        self.press_target = None;
+        self.dirty = true;
+    }
+
     fn draw_subagent_chat(&mut self, f: &mut ratatui::Frame, area: Rect, id: u64) {
         let layout = Layout::vertical([
             Constraint::Length(1),
@@ -1622,15 +2329,25 @@ impl App {
             .style(Theme::base()),
             layout[0],
         );
-        let saved_segments = std::mem::take(&mut self.segments);
-        // Group ranges index the main transcript; they would fold the wrong
-        // rows while a subagent's segments are swapped in.
-        let saved_groups = std::mem::take(&mut self.activity_groups);
-        let saved_live = std::mem::replace(&mut self.live_group_collapsed, false);
-        if let Some(segments) = self.subagent_chats.get(&id).cloned() {
-            self.segments = segments;
+        // Render the subagent transcript through the SAME id-keyed cache and
+        // fingerprint gate as the main view — no transcript cloning, no
+        // dataset swap, no cache wipe. Entries for both transcripts coexist
+        // because segment ids are globally unique. The live buffers already
+        // hold this view's rows (loaded by open, parked by close), so a
+        // repeat draw with matching fingerprint reassembles nothing.
+        let Some(meta) = self.subagent_meta.get(&id).cloned() else {
+            self.last_chat = chat;
+            self.last_input = Rect::default();
+            return;
+        };
+        let fp = self.transcript_fp(chat.width, &meta);
+        if self.cache_w != chat.width || fp != self.last_fp {
+            self.rebuild_sub_cache(chat.width, id);
+            self.last_fp = fp;
         }
-        self.rebuild_cache(chat.width);
+        self.last_chat = chat;
+        self.last_input = Rect::default();
+        self.apply_pending_anchor(Some(id));
         let top = self.chat_top(chat.height);
         let visible: Vec<Line> = self
             .cache_lines
@@ -1640,19 +2357,75 @@ impl App {
             .cloned()
             .collect();
         f.render_widget(Paragraph::new(visible).style(Theme::base()), chat);
-        self.segments = saved_segments;
-        self.activity_groups = saved_groups;
-        self.live_group_collapsed = saved_live;
-        self.seg_cache.clear();
-        self.seg_layout.clear();
-        self.dirty = true;
+        // scroll is parked by close/switch, not here: persisting mid-view is
+        // what the old code did for the fingerprint, and it is unnecessary
+        // now that the live buffers (and last_fp) ARE this view's state
+        self.last_chat = chat;
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(" esc close", Theme::dim())))
                 .style(Theme::base()),
             layout[2],
         );
-        self.last_chat = chat;
-        self.last_input = Rect::default();
+    }
+
+    /// Assemble one subagent transcript into the live buffers.
+    /// Same pipeline as the main view (render → wrap → id-keyed cache),
+    /// minus activity groups (a subagent chat has no turn folding).
+    /// Borrows are scoped per index so the cache insert never aliases the
+    /// transcript slice it was rendered from.
+    fn rebuild_sub_cache(&mut self, width: u16, id: u64) {
+        // No cache wipe on width change: entries carry their own width.
+        let w = width.saturating_sub(2).max(10);
+        let count = self
+            .subagent_chats
+            .get(&id)
+            .map(|chat| chat.len())
+            .unwrap_or(0);
+        let mut chunks: Vec<RowChunk> = Vec::new();
+        let mut fresh: Vec<bool> = Vec::new();
+        for idx in 0..count {
+            let (mid, mrev, key) = match (self.subagent_chats.get(&id), self.subagent_meta.get(&id))
+            {
+                (Some(chat), Some(meta)) => match (chat.get(idx), meta.get(idx)) {
+                    (Some(seg), Some(m)) => (m.id, m.rev, self.seg_key(seg)),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            let hit = matches!(self.seg_cache.get(&mid), Some(entry)
+                if entry.rev == mrev && entry.width == w && entry.key == key);
+            if hit {
+                // live rows are reused by the merge step: no clone here
+                chunks.push((AsmTag::Seg(mid), Vec::new()));
+                fresh.push(false);
+                continue;
+            }
+            #[cfg(test)]
+            {
+                self.test_renders += 1;
+            }
+            let lines = {
+                // immutable borrow ends before the cache insert below
+                let chat = self.subagent_chats.get(&id).unwrap();
+                self.render_segment(chat, idx, w, false)
+            };
+            let (rows, tags) = wrap_tagged(lines, w);
+            let rows: Vec<(Line<'static>, Option<usize>)> = rows.into_iter().zip(tags).collect();
+            self.seg_cache.insert(
+                mid,
+                SegCacheEntry {
+                    rev: mrev,
+                    width: w,
+                    key,
+                    rows: rows.clone(),
+                },
+            );
+            chunks.push((AsmTag::Seg(mid), rows));
+            fresh.push(true);
+        }
+        self.prune_seg_cache();
+        self.merge_chunks(chunks, fresh);
+        self.cache_w = width;
     }
 
     pub(super) fn draw_menu(&mut self, f: &mut ratatui::Frame, area: Rect) {
@@ -2656,46 +3429,14 @@ mod frame_tests {
     }
 }
 
-pub(super) fn segment_layout_key(seg: &Segment) -> u64 {
-    // Detect structural changes (insertions/removals/reordering/discriminant shifts)
-    // in O(1) per segment so positional caches don't point to the wrong segment.
-    // Content changes are seg_key's job (which invalidates individual segment
-    // render caches without blowing away the entire conversation history).
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    std::mem::discriminant(seg).hash(&mut h);
-    match seg {
-        Segment::User(_) | Segment::Assistant { .. } | Segment::Commentary(_) => {}
-        Segment::AskUser { questions, .. } => {
-            questions.len().hash(&mut h);
-        }
-        Segment::PlanProposal { draft, .. } => {
-            draft.steps.len().hash(&mut h);
-        }
-        Segment::Thinking { .. } => {}
-        Segment::Subagent { id, .. } => {
-            id.hash(&mut h);
-        }
-        Segment::Tool { name, .. } => {
-            name.hash(&mut h);
-        }
-        Segment::Status { kind, .. } => {
-            std::mem::discriminant(kind).hash(&mut h);
-        }
-    }
-    h.finish()
-}
-
 /// Push one structural row wrapped immediately: separators and group
 /// headers are final on their own, so they never wait for a whole-list
 /// wrap pass — segment chunks are wrapped at cache time instead.
-fn push_wrapped(
-    out: &mut Vec<(Line<'static>, Option<usize>)>,
-    line: Line<'static>,
-    tag: Option<usize>,
-    width: u16,
-) {
+/// Wrap one structural row (blank spacer, group header) as its own assembly
+/// chunk, so the merge step can splice it independently of segment rows.
+fn struct_chunk(ord: u64, line: Line<'static>, tag: Option<usize>, width: u16) -> RowChunk {
     let (rows, tags) = wrap_tagged(vec![(line, tag)], width);
-    out.extend(rows.into_iter().zip(tags));
+    (AsmTag::Struct(ord), rows.into_iter().zip(tags).collect())
 }
 
 pub(super) fn blank() -> Line<'static> {

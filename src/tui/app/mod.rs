@@ -101,7 +101,7 @@ mod view;
 
 use forms::FormField;
 use menus::{Menu, MenuAction};
-use view::{ActivityGroup, AskRow, CellPos, ProposalRow, Segment, Selection};
+use view::{ActivityGroup, AskRow, CellPos, ProposalRow, SegMeta, Segment, Selection, StoredView};
 
 use menus::COMMANDS;
 
@@ -294,16 +294,57 @@ pub struct App {
     cache_w: u16,
     cache_lines: Vec<Line<'static>>,
     cache_rowseg: Vec<Option<usize>>,
+    /// chunk map of the live row buffers above: `asm_tags[i]` owns
+    /// `asm_lens[i]` rows starting at the running offset. Powers the splice
+    /// fast path — unchanged chunks are never re-cloned on rebuild.
+    asm_tags: Vec<view::AsmTag>,
+    asm_lens: Vec<usize>,
     last_chat: Rect,
     last_input: Rect,
-    /// per-segment render cache: (content key at render time, width used,
-    /// content lines). Segments nested in an activity group render narrower,
-    /// so the width has to be part of the check.
-    #[allow(clippy::type_complexity)]
-    // tuple structure matches render pipeline; aliasing adds indirection
-    seg_cache: Vec<Option<(usize, u16, Vec<(Line<'static>, Option<usize>)>)>>,
-    /// stable order/identity of segments used to invalidate positional caches
-    seg_layout: Vec<u64>,
+    /// per-segment render cache keyed by segment id (not position):
+    /// appends and stream updates never invalidate other segments' rows.
+    /// Entry holds (revision, width, content key, wrapped rows).
+    seg_cache: std::collections::HashMap<u64, view::SegCacheEntry>,
+    /// identity + revision per segment, aligned 1:1 with `segments`.
+    /// Maintained ONLY through the push/insert/remove/set/clear/touch
+    /// helpers below so the render cache survives appends and stream updates
+    /// instead of being wiped on every structural change.
+    seg_meta: Vec<view::SegMeta>,
+    /// monotonic segment id source; never reused, so a removed id can never
+    /// collide with a later segment (no ABA in cache keys or click targets)
+    next_seg_id: u64,
+    /// bumped on palette switch; part of the transcript fingerprint so a
+    /// theme change always rebuilds even when no segment changed
+    theme_rev: u64,
+    /// fingerprint of the last assembled transcript; a draw whose fingerprint
+    /// matches skips reassembly entirely (typing, scroll, selection, hover)
+    last_fp: u64,
+    /// scroll anchor set by toggles: (view, rowseg tag, screen offset).
+    /// Applied after the next rebuild so an expanding block keeps its header
+    /// on the same screen row instead of jumping with `follow`.
+    pending_anchor: Option<(Option<u64>, usize, usize)>,
+    /// semantic click target resolved at mouse-down; re-validated by id at
+    /// mouse-up so a layout shift in between cannot hit a stale row number
+    press_target: Option<view::ClickTarget>,
+    /// per-subagent scroll: (view_top, follow). Assembled rows live in
+    /// `sub_stores`; the main view's rows live in `main_store` while parked.
+    /// The ACTIVE view always owns `cache_lines`/`cache_rowseg`/`asm_*`/
+    /// `view_top`/`follow`/`last_fp` directly, so painting and hit-testing
+    /// never care which transcript is shown — only open/close move buffers.
+    sub_views: std::collections::HashMap<u64, (usize, bool)>,
+    /// parked assembled rows of the main transcript while a subagent view
+    /// is open (restored whole on close, no reassembly)
+    main_store: StoredView,
+    /// parked assembled rows per subagent view
+    sub_stores: std::collections::HashMap<u64, StoredView>,
+    /// renders performed by the last rebuild (tests only: proves idle
+    /// frames skip the transcript pipeline entirely)
+    #[cfg(test)]
+    test_renders: u32,
+    /// main scroll stashed while a subagent view is open; restored on close
+    stashed_main_scroll: Option<(usize, bool)>,
+    /// identity per subagent-chat row, aligned with `subagent_chats` vecs
+    subagent_meta: std::collections::BTreeMap<u64, Vec<view::SegMeta>>,
 
     /// Clipboard text inserted by Ctrl+V, used to consume the terminal's
     /// replay of the same payload before it reaches normal key handling.
@@ -403,6 +444,118 @@ impl App {
     fn rebuild_session_environment(&mut self) {
         let root = std::env::current_dir().unwrap_or_default();
         self.session_environment = crate::prompts::env::session_block(&root);
+    }
+
+    // ---------- segment identity ----------
+    //
+    // `segments` and `seg_meta` are always the same length; every mutation
+    // goes through these helpers so render-cache keys and click targets stay
+    // bound to stable segment ids instead of shifting positions.
+
+    fn alloc_seg_id(&mut self) -> u64 {
+        let id = self.next_seg_id;
+        self.next_seg_id += 1;
+        id
+    }
+
+    /// Append a segment; returns its index. The render cache entry is created
+    /// lazily on the next rebuild — nothing already cached is touched.
+    fn push_segment(&mut self, seg: Segment) -> usize {
+        let id = self.alloc_seg_id();
+        self.segments.push(seg);
+        self.seg_meta.push(SegMeta { id, rev: 0 });
+        self.segments.len() - 1
+    }
+
+    fn insert_segment(&mut self, pos: usize, seg: Segment) {
+        let id = self.alloc_seg_id();
+        let pos = pos.min(self.segments.len());
+        self.segments.insert(pos, seg);
+        self.seg_meta.insert(pos, SegMeta { id, rev: 0 });
+    }
+
+    fn remove_segment(&mut self, i: usize) {
+        if i < self.segments.len() {
+            self.segments.remove(i);
+            self.seg_meta.remove(i);
+        }
+    }
+
+    /// Whole-content replacement: logically a new segment, so a fresh id.
+    fn set_segment(&mut self, i: usize, seg: Segment) {
+        if i < self.segments.len() {
+            let id = self.alloc_seg_id();
+            self.segments[i] = seg;
+            self.seg_meta[i] = SegMeta { id, rev: 0 };
+        }
+    }
+
+    fn clear_segments(&mut self) {
+        self.segments.clear();
+        self.seg_meta.clear();
+    }
+
+    /// Retain segments by predicate, keeping identity metadata aligned.
+    /// Dropped ids are never reused, so cache entries and click targets that
+    /// still reference them simply miss instead of hitting new content.
+    fn retain_segments(&mut self, mut pred: impl FnMut(&Segment) -> bool) {
+        let mut kept_segs = Vec::with_capacity(self.segments.len());
+        let mut kept_meta = Vec::with_capacity(self.seg_meta.len());
+        for (seg, meta) in self.segments.drain(..).zip(self.seg_meta.drain(..)) {
+            if pred(&seg) {
+                kept_segs.push(seg);
+                kept_meta.push(meta);
+            }
+        }
+        self.segments = kept_segs;
+        self.seg_meta = kept_meta;
+    }
+
+    /// Bump the revision of one subagent-chat row (see `touch_segment`).
+    fn sub_touch(&mut self, id: u64, pos: usize) {
+        if let Some(meta) = self
+            .subagent_meta
+            .get_mut(&id)
+            .and_then(|meta| meta.get_mut(pos))
+        {
+            meta.rev += 1;
+        }
+    }
+
+    /// Bump every row of one subagent transcript. Subagent chats are short
+    /// and viewed on demand; coarse invalidation here keeps the main
+    /// transcript's cache precise without borrow puzzles at each call site.
+    fn sub_touch_all(&mut self, id: u64) {
+        if let Some(meta) = self.subagent_meta.get_mut(&id) {
+            for m in meta.iter_mut() {
+                m.rev += 1;
+            }
+        }
+    }
+
+    /// Insert into a subagent transcript, keeping identity aligned.
+    fn sub_insert(&mut self, id: u64, pos: usize, seg: Segment) {
+        let nid = self.alloc_seg_id();
+        if let Some(chat) = self.subagent_chats.get_mut(&id) {
+            let pos = pos.min(chat.len());
+            chat.insert(pos, seg);
+            if let Some(meta) = self.subagent_meta.get_mut(&id) {
+                meta.insert(pos, SegMeta { id: nid, rev: 0 });
+            }
+        }
+    }
+
+    /// Mark a segment's content changed after in-place mutation through
+    /// `segments.get_mut`. Call at every site that writes through the
+    /// borrow — an unchanged rev with changed content paints stale rows.
+    fn touch_segment(&mut self, i: usize) {
+        if let Some(meta) = self.seg_meta.get_mut(i) {
+            meta.rev += 1;
+        }
+    }
+
+    fn index_of_seg(&self, id: u64) -> Option<usize> {
+        self.seg_meta.iter().position(|meta| meta.id == id)
     }
 
     /// Assemble the system block for one request.
@@ -550,10 +703,24 @@ impl App {
             cache_w: 0,
             cache_lines: Vec::new(),
             cache_rowseg: Vec::new(),
+            asm_tags: Vec::new(),
+            asm_lens: Vec::new(),
             last_chat: Rect::default(),
             last_input: Rect::default(),
-            seg_cache: Vec::new(),
-            seg_layout: Vec::new(),
+            seg_cache: std::collections::HashMap::new(),
+            seg_meta: Vec::new(),
+            next_seg_id: 1,
+            theme_rev: 0,
+            last_fp: 0,
+            pending_anchor: None,
+            press_target: None,
+            sub_views: std::collections::HashMap::new(),
+            main_store: StoredView::default(),
+            sub_stores: std::collections::HashMap::new(),
+            #[cfg(test)]
+            test_renders: 0,
+            stashed_main_scroll: None,
+            subagent_meta: std::collections::BTreeMap::new(),
             hover: None,
             popup_dismiss: false,
             popup_scroll: 0,
@@ -660,7 +827,7 @@ impl App {
                     }
                     previous_user = Some(message_index);
                     turn_user = Some(message_index);
-                    self.segments.push(Segment::User(m.content.clone()));
+                    self.push_segment(Segment::User(m.content.clone()));
                 }
                 Role::Assistant if m.tool_calls.is_empty() => {
                     if let Some(seg_start) = work_start.take() {
@@ -674,7 +841,7 @@ impl App {
                             false,
                         );
                     }
-                    self.segments.push(Segment::Assistant {
+                    self.push_segment(Segment::Assistant {
                         text: m.content.clone(),
                         live: false,
                     });
@@ -683,16 +850,17 @@ impl App {
                     work_start.get_or_insert(self.segments.len());
                     let trimmed = m.content.trim();
                     if !trimmed.is_empty() {
-                        self.segments.push(Segment::Commentary(trimmed.to_string()));
+                        self.push_segment(Segment::Commentary(trimmed.to_string()));
                     }
                     for call in &m.tool_calls {
-                        let idx = self.segments.len();
-                        self.segments.push(Segment::Tool {
+                        let idx = self.push_segment(Segment::Tool {
                             name: call.name.clone(),
                             args: crate::agent::tools::call_summary(&call.name, &call.args),
                             ok: None,
                             output: String::new(),
                             diff: None,
+                            preview: Vec::new(),
+                            preview_total: 0,
                             expanded: false,
                         });
                         pending_tools.insert(call.id.clone(), idx);
@@ -701,10 +869,20 @@ impl App {
                 Role::Tool => {
                     if let Some(call_id) = m.tool_call_id.as_ref()
                         && let Some(idx) = pending_tools.remove(call_id)
-                        && let Some(Segment::Tool { ok, output, .. }) = self.segments.get_mut(idx)
                     {
-                        *ok = Some(!m.is_error);
-                        *output = m.content.clone();
+                        if let Some(Segment::Tool {
+                            ok,
+                            output,
+                            preview,
+                            preview_total,
+                            ..
+                        }) = self.segments.get_mut(idx)
+                        {
+                            *ok = Some(!m.is_error);
+                            *output = m.content.clone();
+                            (*preview, *preview_total) = view::tool_preview(None, &m.content);
+                        }
+                        self.touch_segment(idx);
                     }
                 }
                 Role::System => {}
@@ -762,7 +940,7 @@ impl App {
 
     fn restore_turn_notes(&mut self, notes: &[TurnNote], user_index: usize) {
         for note in notes.iter().filter(|note| note.user_index == user_index) {
-            self.segments.push(Segment::Status {
+            self.push_segment(Segment::Status {
                 text: note.text.clone(),
                 kind: if note.is_error {
                     StatusKind::Err
@@ -945,7 +1123,7 @@ impl App {
             .iter()
             .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
             .unwrap_or(self.segments.len());
-        self.segments.insert(pos, seg);
+        self.insert_segment(pos, seg);
         self.active_ask_id = Some(id);
         self.ask_hover = None;
         self.ask_custom_focus = None;
@@ -1037,6 +1215,7 @@ impl App {
             }
             *focus = q;
         }
+        self.touch_segment(seg);
         self.ask_custom_focus = None;
         self.follow = true;
         self.dirty = true;
@@ -1054,6 +1233,7 @@ impl App {
             *v = !*v;
             *focus = q;
         }
+        self.touch_segment(seg);
         self.ask_custom_focus = None;
         self.follow = true;
         self.dirty = true;
@@ -1071,6 +1251,7 @@ impl App {
         {
             *focus = q;
         }
+        self.touch_segment(seg);
         self.ask_custom_focus = None;
         self.dirty = true;
     }
@@ -1107,6 +1288,7 @@ impl App {
         if let Some(Segment::AskUser { answered, .. }) = self.segments.get_mut(seg) {
             *answered = Some(text.clone());
         }
+        self.touch_segment(seg);
         if let Some(agent) = &self.agent {
             let _ = agent.control.try_send(ControlMsg::AskAnswer { id, text });
         }
@@ -1127,6 +1309,7 @@ impl App {
         if let Some(Segment::AskUser { answered, .. }) = self.segments.get_mut(seg) {
             *answered = Some(note.to_string());
         }
+        self.touch_segment(seg);
         self.active_ask_id = None;
         self.ask_hover = None;
         self.ask_custom_focus = None;
@@ -1165,7 +1348,7 @@ impl App {
             .iter()
             .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
             .unwrap_or(self.segments.len());
-        self.segments.insert(pos, seg);
+        self.insert_segment(pos, seg);
         self.active_proposal_id = Some(id);
         self.proposal_hover = None;
         self.follow = true;
@@ -1196,6 +1379,7 @@ impl App {
         if let Some(Segment::PlanProposal { decided, .. }) = self.segments.get_mut(seg) {
             *decided = Some(accept);
         }
+        self.touch_segment(seg);
         if let Some(agent) = &self.agent {
             let _ = agent
                 .control
@@ -1218,6 +1402,7 @@ impl App {
         if let Some(Segment::PlanProposal { decided, .. }) = self.segments.get_mut(seg) {
             *decided = Some(false);
         }
+        self.touch_segment(seg);
         self.active_proposal_id = None;
         self.proposal_hover = None;
         self.dirty = true;
@@ -1443,7 +1628,7 @@ impl App {
         self.startup = false;
         // pick up any provider/key change made since the last turn
         self.rebuild_provider();
-        self.segments.push(Segment::User(text.clone()));
+        self.push_segment(Segment::User(text.clone()));
         self.session.push(Role::User, &text);
         self.turn_user_index = Some(self.session.messages.len().saturating_sub(1));
 
@@ -1503,8 +1688,7 @@ impl App {
         self.live_group_collapsed = false;
         // show the thinking placeholder right away so the indicator is visible
         // from turn start even before any reasoning deltas arrive
-        let tpos = self.segments.len();
-        self.segments.push(Segment::Thinking {
+        let tpos = self.push_segment(Segment::Thinking {
             text: String::new(),
             expanded: false,
             // Do not start the thinking stopwatch at request start: connection
@@ -1515,7 +1699,7 @@ impl App {
         });
         self.thinking_idx = Some(tpos);
         self.thinking_open = true;
-        self.segments.push(Segment::Assistant {
+        self.push_segment(Segment::Assistant {
             text: String::new(),
             live: true,
         });
@@ -1620,13 +1804,25 @@ impl App {
         }
         // defensive: never let a legacy system turn back into the transcript
         self.session.strip_system_messages();
-        self.segments.clear();
+        self.clear_segments();
         self.seg_cache.clear();
         // the transcript is replaced: old group ranges point nowhere
         self.activity_groups.clear();
         self.active_subagent = None;
         self.subagents.clear();
         self.subagent_chats.clear();
+        self.subagent_meta.clear();
+        self.sub_views.clear();
+        // live + parked rows belong to the old transcript: drop them whole
+        // so the next draw assembles from scratch instead of splicing
+        // against a stale chunk map
+        self.cache_lines.clear();
+        self.cache_rowseg.clear();
+        self.asm_tags.clear();
+        self.asm_lens.clear();
+        self.main_store = StoredView::default();
+        self.sub_stores.clear();
+        self.stashed_main_scroll = None;
         self.todos.clear();
         self.turn_user_index = None;
         self.active_ask_id = None;
@@ -1689,12 +1885,21 @@ impl App {
         // refresh runs in the background so /new returns instantly
         self.startup = true;
         self.refresh_startup_data();
-        self.segments.clear();
+        self.clear_segments();
         self.seg_cache.clear();
+        self.cache_lines.clear();
+        self.cache_rowseg.clear();
+        self.asm_tags.clear();
+        self.asm_lens.clear();
+        self.main_store = StoredView::default();
+        self.sub_stores.clear();
         self.activity_groups.clear();
         self.active_subagent = None;
         self.subagents.clear();
         self.subagent_chats.clear();
+        self.subagent_meta.clear();
+        self.sub_views.clear();
+        self.stashed_main_scroll = None;
         self.todos.clear();
         self.turn_user_index = None;
         self.active_ask_id = None;
@@ -2259,7 +2464,7 @@ impl App {
     const BUSY_STATUS: &'static str = "busy · esc to stop";
 
     fn show_busy_status(&mut self) {
-        self.segments.retain(
+        self.retain_segments(
             |segment| !matches!(segment, Segment::Status { text, .. } if text == Self::BUSY_STATUS),
         );
         self.status(Self::BUSY_STATUS, StatusKind::Warn);
@@ -2268,7 +2473,7 @@ impl App {
 
     fn status(&mut self, text: &str, kind: StatusKind) {
         if text == Self::BUSY_STATUS {
-            self.segments.retain(|segment| {
+            self.retain_segments(|segment| {
                 !matches!(segment, Segment::Status { text: existing, .. } if text == existing)
             });
         }
@@ -2277,7 +2482,7 @@ impl App {
         }
         if self.menu_stack.is_empty() {
             // with no menu open the chat carries the message
-            self.segments.push(Segment::Status {
+            self.push_segment(Segment::Status {
                 text: text.to_string(),
                 kind,
                 expanded: false,
@@ -2312,6 +2517,7 @@ impl App {
             && let Some(Segment::Assistant { text, .. }) = self.segments.get_mut(pos)
         {
             text.push_str(&chunk);
+            self.touch_segment(pos);
         }
         !chunk.is_empty()
     }
@@ -2520,7 +2726,16 @@ impl App {
                             },
                         ],
                     );
-                    self.segments.push(Segment::Subagent {
+                    // Identity for every chat row, aligned with the vec above.
+                    let mut meta = Vec::new();
+                    for _ in 0..3 {
+                        meta.push(SegMeta {
+                            id: self.alloc_seg_id(),
+                            rev: 0,
+                        });
+                    }
+                    self.subagent_meta.insert(id, meta);
+                    self.push_segment(Segment::Subagent {
                         id,
                         task,
                         status: "running".into(),
@@ -2540,6 +2755,7 @@ impl App {
                     {
                         current.push_str(&text);
                     }
+                    self.sub_touch_all(id);
                     self.dirty = true;
                 }
                 AgentEvent::SubagentText { id, text } => {
@@ -2551,51 +2767,70 @@ impl App {
                     {
                         current.push_str(&text);
                     }
+                    self.sub_touch_all(id);
                     self.dirty = true;
                 }
                 AgentEvent::SubagentToolStart { id, name, summary } => {
-                    if let Some(chat) = self.subagent_chats.get_mut(&id) {
-                        if let Some(pos) = chat.iter().rposition(|segment| {
-                            matches!(segment, Segment::Assistant { live: true, .. })
-                        }) {
-                            let preamble =
+                    // Compute positions/texts first (borrowing the chat),
+                    // mutate through the aligned helpers afterwards.
+                    let preamble: Option<(usize, String)> = if let Some(chat) =
+                        self.subagent_chats.get_mut(&id)
+                    {
+                        chat.iter()
+                            .rposition(|segment| {
+                                matches!(segment, Segment::Assistant { live: true, .. })
+                            })
+                            .and_then(|pos| {
                                 if let Some(Segment::Assistant { text, .. }) = chat.get_mut(pos) {
                                     let t = text.trim();
                                     if !t.is_empty() {
-                                        let full = std::mem::take(text);
-                                        Some(full)
+                                        Some((pos, std::mem::take(text)))
                                     } else {
                                         text.clear();
                                         None
                                     }
                                 } else {
                                     None
-                                };
-                            if let Some(p) = preamble {
-                                let trimmed = p.trim();
-                                if !trimmed.is_empty() {
-                                    chat.insert(pos, Segment::Commentary(trimmed.to_string()));
                                 }
-                            }
+                            })
+                    } else {
+                        None
+                    };
+                    if let Some((pos, p)) = preamble {
+                        let trimmed = p.trim();
+                        if !trimmed.is_empty() {
+                            self.sub_insert(id, pos, Segment::Commentary(trimmed.to_string()));
                         }
-                        let pos = chat
-                            .iter()
-                            .rposition(|segment| {
+                    }
+                    // the take/clear above emptied a live row in place (both
+                    // the Some and the whitespace-clear None path): bump
+                    // revisions so its cached rows are re-rendered
+                    self.sub_touch_all(id);
+                    let tool_pos = self
+                        .subagent_chats
+                        .get(&id)
+                        .and_then(|chat| {
+                            chat.iter().rposition(|segment| {
                                 matches!(segment, Segment::Assistant { live: true, .. })
                             })
-                            .unwrap_or(chat.len());
-                        chat.insert(
-                            pos,
-                            Segment::Tool {
-                                name,
-                                args: summary,
-                                ok: None,
-                                output: String::new(),
-                                diff: None,
-                                expanded: false,
-                            },
-                        );
-                    }
+                        })
+                        .unwrap_or_else(|| {
+                            self.subagent_chats.get(&id).map(|c| c.len()).unwrap_or(0)
+                        });
+                    self.sub_insert(
+                        id,
+                        tool_pos,
+                        Segment::Tool {
+                            name,
+                            args: summary,
+                            ok: None,
+                            output: String::new(),
+                            diff: None,
+                            preview: Vec::new(),
+                            preview_total: 0,
+                            expanded: false,
+                        },
+                    );
                     self.dirty = true;
                 }
                 AgentEvent::SubagentToolDone {
@@ -2606,12 +2841,22 @@ impl App {
                     diff,
                 } => {
                     if let Some(chat) = self.subagent_chats.get_mut(&id)
-                        && let Some(Segment::Tool { ok: state, output, diff: current_diff, .. }) = chat.iter_mut().rev().find(|segment| matches!(segment, Segment::Tool { name: current, ok: None, .. } if current == &name))
+                        && let Some(Segment::Tool {
+                            ok: state,
+                            output,
+                            diff: current_diff,
+                            preview,
+                            preview_total,
+                            ..
+                        }) = chat.iter_mut().rev().find(|segment| matches!(segment, Segment::Tool { name: current, ok: None, .. } if current == &name))
                     {
                         *state = Some(ok);
                         *output = summary;
                         *current_diff = diff;
+                        (*preview, *preview_total) =
+                            view::tool_preview(current_diff.as_deref(), output.as_str());
                     }
+                    self.sub_touch_all(id);
                     self.dirty = true;
                 }
                 AgentEvent::SubagentDone { id, ok, output } => {
@@ -2627,15 +2872,15 @@ impl App {
                         };
                         *current = output.clone();
                     }
-                    if let Some(Segment::Subagent {
-                        status,
-                        output: current,
-                        ..
-                    }) = self
+                    if let Some(pos) = self
                         .segments
-                        .iter_mut()
-                        .rev()
-                        .find(|s| matches!(s, Segment::Subagent { id: sid, .. } if *sid == id))
+                        .iter()
+                        .rposition(|s| matches!(s, Segment::Subagent { id: sid, .. } if *sid == id))
+                        && let Some(Segment::Subagent {
+                            status,
+                            output: current,
+                            ..
+                        }) = self.segments.get_mut(pos)
                     {
                         *status = if ok {
                             "completed".into()
@@ -2643,6 +2888,7 @@ impl App {
                             "failed".into()
                         };
                         *current = output;
+                        self.touch_segment(pos);
                     }
                     if let Some(chat) = self.subagent_chats.get_mut(&id) {
                         for segment in chat {
@@ -2653,6 +2899,7 @@ impl App {
                             }
                         }
                     }
+                    self.sub_touch_all(id);
                     if matches!(self.cur_menu(), Some(Menu::Subagents)) {
                         self.build_menu_rows();
                     }
@@ -2737,7 +2984,7 @@ impl App {
                         // the full text of the first failure goes into the chat:
                         // the status bar below keeps only a truncated indicator,
                         // while here it stays readable and copyable (click to unfold)
-                        self.segments.push(Segment::Status {
+                        self.push_segment(Segment::Status {
                             text: format!("request failed — retrying with backoff: {error}"),
                             kind: StatusKind::Err,
                             expanded: false,
@@ -2787,6 +3034,7 @@ impl App {
             }
             *live = false;
         }
+        self.touch_segment(index);
     }
 
     /// append reasoning text, opening a fresh thinking row when none is open.
@@ -2802,7 +3050,7 @@ impl App {
                 .iter()
                 .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
                 .unwrap_or(self.segments.len());
-            self.segments.insert(
+            self.insert_segment(
                 pos,
                 Segment::Thinking {
                     text: String::new(),
@@ -2821,6 +3069,7 @@ impl App {
                 *started = Some(std::time::Instant::now());
             }
             text.push_str(&t);
+            self.touch_segment(i);
         }
         self.dirty = true;
     }
@@ -2846,13 +3095,13 @@ impl App {
             if let Some(Segment::Assistant { text: seg_text, .. }) = self.segments.get_mut(pos) {
                 seg_text.clear();
             }
+            self.touch_segment(pos);
         }
         let trimmed = text.trim();
         if !trimmed.is_empty()
             && let Some(pos) = pos
         {
-            self.segments
-                .insert(pos, Segment::Commentary(trimmed.to_string()));
+            self.insert_segment(pos, Segment::Commentary(trimmed.to_string()));
             self.dirty = true;
         }
     }
@@ -2870,7 +3119,7 @@ impl App {
                     Some(Segment::Thinking { text, .. }) if text.is_empty()
                 );
                 if empty {
-                    self.segments.remove(i);
+                    self.remove_segment(i);
                 }
             }
             self.thinking_open = false;
@@ -2889,6 +3138,8 @@ impl App {
             ok: None,
             output: String::new(),
             diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
             expanded: false,
         };
         // The model may stream a short preamble before emitting its tool call.
@@ -2899,7 +3150,7 @@ impl App {
             .iter()
             .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
             .unwrap_or(self.segments.len());
-        self.segments.insert(pos, tool);
+        self.insert_segment(pos, tool);
         self.dirty = true;
     }
 
@@ -2927,22 +3178,31 @@ impl App {
                     ok: slot,
                     output,
                     diff: dslot,
+                    preview,
+                    preview_total,
                     ..
                 }) = self.segments.get_mut(i)
                 {
                     *slot = Some(ok);
                     *output = summary;
                     *dslot = diff;
+                    (*preview, *preview_total) =
+                        view::tool_preview(dslot.as_deref(), output.as_str());
                 }
+                self.touch_segment(i);
             }
             None => {
                 self.flush_assistant_preamble_to_commentary();
+                let (preview, preview_total) =
+                    view::tool_preview(diff.as_deref(), summary.as_str());
                 let tool = Segment::Tool {
                     name,
                     args: String::new(),
                     ok: Some(ok),
                     output: summary,
                     diff,
+                    preview,
+                    preview_total,
                     expanded: false,
                 };
                 let pos = self
@@ -2950,7 +3210,7 @@ impl App {
                     .iter()
                     .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
                     .unwrap_or(self.segments.len());
-                self.segments.insert(pos, tool);
+                self.insert_segment(pos, tool);
             }
         }
         self.dirty = true;
@@ -2967,7 +3227,7 @@ impl App {
                     Some(Segment::Thinking { text, .. }) if text.is_empty()
                 );
                 if empty {
-                    self.segments.remove(i);
+                    self.remove_segment(i);
                 }
             }
             self.thinking_open = false;
@@ -3014,7 +3274,7 @@ impl App {
     }
 
     fn clear_busy_statuses(&mut self) {
-        self.segments.retain(
+        self.retain_segments(
             |segment| !matches!(segment, Segment::Status { text, .. } if text == Self::BUSY_STATUS),
         );
         self.busy_until = None;
@@ -3030,7 +3290,7 @@ impl App {
             .map(|(i, _)| i)
             .collect();
         if !removed.is_empty() {
-            self.segments.retain(|s| !Self::is_subagent_row(s));
+            self.retain_segments(|s| !Self::is_subagent_row(s));
             // Group ranges index the transcript. Shift them past the removals
             // instead of dropping the folds the user already made.
             for g in &mut self.activity_groups {
@@ -3246,7 +3506,7 @@ impl App {
             .map(|(i, _)| i)
             .collect();
         for i in empties.into_iter().rev() {
-            self.segments.remove(i);
+            self.remove_segment(i);
         }
         // On a successful completion the agent already replaced the session
         // wholesale (finish_turn_ok), so the last assistant message there is
@@ -3271,10 +3531,13 @@ impl App {
                 .iter()
                 .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
             {
-                self.segments[pos] = Segment::Assistant {
-                    text: t.clone(),
-                    live: false,
-                };
+                self.set_segment(
+                    pos,
+                    Segment::Assistant {
+                        text: t.clone(),
+                        live: false,
+                    },
+                );
             }
         } else if !text.is_empty() {
             if let Some(pos) = self
@@ -3282,10 +3545,13 @@ impl App {
                 .iter()
                 .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
             {
-                self.segments[pos] = Segment::Assistant {
-                    text: text.clone(),
-                    live: false,
-                };
+                self.set_segment(
+                    pos,
+                    Segment::Assistant {
+                        text: text.clone(),
+                        live: false,
+                    },
+                );
             }
             // the partial answer that was actually streamed is preserved
             self.session.push(Role::Assistant, text.clone());
@@ -3297,7 +3563,7 @@ impl App {
                 .iter()
                 .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
             {
-                self.segments.remove(pos);
+                self.remove_segment(pos);
             }
         }
         self.streaming = false;
@@ -3361,10 +3627,17 @@ impl App {
         self.cfg.ui.theme = applied;
         self.cfg.save().ok();
         // rendered lines are cached by text length only — drop them so every
-        // message repaints in the new palette (otherwise old accents linger)
+        // message repaints in the new palette (otherwise old accents linger).
+        // theme_rev also flips so the transcript fingerprint forces a rebuild
+        // even where per-segment revisions did not move.
+        self.theme_rev += 1;
         self.seg_cache.clear();
         self.cache_lines.clear();
         self.cache_rowseg.clear();
+        self.asm_tags.clear();
+        self.asm_lens.clear();
+        self.main_store = StoredView::default();
+        self.sub_stores.clear();
         // textareas capture their styles at creation time
         let restyle = |ta: &mut TextArea<'static>| {
             ta.set_style(Theme::base());
