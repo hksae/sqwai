@@ -1946,11 +1946,11 @@ number; a `partial` one is missing something the design calls for.
 | H0 | L0 fact block + criticism detector | planned | F2 |
 | H1 | bash_ro (advisory + post-check), read-only toolset, Scope/Neutralizer/Executor/Verdict, /verify | planned | H0, D |
 | I1 | Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild | done — rusqlite (bundled) engine with §2.4.2 schema | E |
-| I2 | Rust + Python + TypeScript adapters (tree-sitter, minimal: declarations) | planned | I1 |
-| I3 | Freshness: edit/bash/undo/head triggers; status semantics; out-of-order protection (mandatory) | planned | I1 |
-| I4 | resolve_ref; validator refs; pre-edit warning; stale markers; reflector executor tool | next | I2, I3, F1 |
-| I5 | Memory adapter; recall/graph_query exposed; context block | planned | I4, F4 |
-| J | Python references; LSP diagnostics → journal; graph-view list MVP; checkpoint before/after bash | planned | I5, C |
+| I2 | Rust + Python + TypeScript adapters (tree-sitter, minimal: declarations) | done — tree-sitter declarations and lexical imports for Rust, Python, TypeScript | I1 |
+| I3 | Freshness: edit/bash/undo/head triggers; status semantics; out-of-order protection (mandatory) | done — generation stamps, replace_file_subgraph_stamped, out-of-order protection, disk-hash freshness | I1 |
+| I4 | resolve_ref; validator refs; pre-edit warning; stale markers; reflector executor tool | done — resolve_ref, validator refs, pre-edit warning, stale markers, rich provenance and freshness | I2, I3, F1 |
+| I5 | Memory adapter; recall/graph_query exposed; context block | done — memory adapter, recall, graph_query with scoped presets/budgets, context block | I4, F4 |
+| J | Python references; LSP diagnostics → journal; graph-view list MVP; checkpoint before/after bash | partial — graph-view list MVP done (with aggregation/multi-hop navigation), checkpoint before dangerous bash done; Python semantic references and LSP diagnostics -> journal pending | I5, C |
 | K | Canvas graph-view, watcher, LSP semantic capabilities, blast radius, path view | planned | J |
 | L | Browser: CDP driver, tree pipeline, tools, safety, trust, acceptance runner, artifacts | planned | K, F3, H0 |
 | M | Test impact: `test` nodes in Rust/Python adapters, reverse traversal, command synthesis, runner integration | planned | I5, acceptance runners |
@@ -1963,8 +1963,8 @@ number; a `partial` one is missing something the design calls for.
 | S1 | Step epoch lifecycle (§2.2.4), writer lock during undo, subagent cancellation on reopen | planned | F1b, D |
 | T | Provider fallback chain ([models.x].fallback) | planned — `fallback` field absent on ModelConfig (#8) | §5.1 |
 | U | Assumption notes: open tracking, finish warning, resolve | done | F3 |
-| V | Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md) | next — cmd:/manual: settling done (#7); remaining: /init seeding of verify commands and their substitution on create | F3 |
-| V1 | Verification receipts (§2.1.4): execution interval digest, check hash, stale invalidation, manual `confirm` vs `waive` | next | V, F1b |
+| V | Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md) | partial — cmd:/manual: settling done (#7); remaining: /init seeding of verify commands and their substitution on create | F3 |
+| V1 | Verification receipts (§2.1.4): execution interval digest, check hash, stale invalidation, manual `confirm` vs `waive` | done — interval digest, check hash, stale invalidation on diff, manual /plan confirm, replay restoration | V, F1b |
 | W | Plan-first gate (Act first-mutate w/o plan → plan_required) | planned | F3 |
 | X | Staged compaction + recent-reads anchor + USER.md split/load | partial — USER.md split/loading done; staged pre-compaction (§3.3.1) and context-backed read authorization (§3.3.3) pending | F1, F5 |
 | Y | Claim lint (post-generation verify against journal/resolve_ref) | planned | I4 |
