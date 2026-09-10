@@ -936,13 +936,7 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
     fn root() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "sqwai-journal-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+        tempfile::tempdir().unwrap().into_path()
     }
 
     #[test]

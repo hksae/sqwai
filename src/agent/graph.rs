@@ -140,6 +140,7 @@ pub struct IndexedFile {
     pub adapter: Option<String>,
     pub adapter_version: Option<String>,
     pub capabilities: Vec<String>,
+    pub generation: u64,
     pub status: String,
 }
 
@@ -147,20 +148,36 @@ pub trait GraphStore {
     fn schema_version(&self) -> Result<u32>;
     /// current write generation: stamp for the next file batch. Writers
     /// that computed against an older generation must drop their result
-    /// (§2.4.7 out-of-order protection, wired in stage D).
+    /// (§2.4.7 out-of-order protection).
     fn generation(&self) -> Result<u64>;
     fn upsert_node(&mut self, node: &Node) -> Result<()>;
     fn upsert_edge(&mut self, edge: &Edge) -> Result<()>;
     fn apply_batch(&mut self, nodes: &[Node], edges: &[Edge]) -> Result<()>;
     /// Replace everything one file owns — nodes, edges, occurrences — in a
-    /// single transaction, stamped with the current generation.
+    /// single transaction, stamped with the current generation. Returns
+    /// true if written, false if dropped by the out-of-order guard.
     fn replace_file_subgraph(
         &mut self,
         path: &str,
         nodes: &[Node],
         edges: &[Edge],
         occurrences: &[Occurrence],
-    ) -> Result<()>;
+    ) -> Result<bool> {
+        self.replace_file_subgraph_stamped(path, nodes, edges, occurrences, None)
+    }
+    /// Replace with an explicit generation stamp. If the recorded generation
+    /// for `path` is newer than `generation`, the write is dropped to prevent
+    /// slow background parses from overwriting newer edits (§2.4.7).
+    fn replace_file_subgraph_stamped(
+        &mut self,
+        path: &str,
+        nodes: &[Node],
+        edges: &[Edge],
+        occurrences: &[Occurrence],
+        generation: Option<u64>,
+    ) -> Result<bool>;
+    /// Remove a file and everything it owns (nodes, FTS, edges, occurrences).
+    fn remove_file(&mut self, path: &str) -> Result<()>;
     fn prune_file_subgraphs(&mut self, retained_paths: &BTreeSet<String>) -> Result<usize>;
     fn find_node(&self, stable_key: &str) -> Result<Option<Node>>;
     fn occurrences_in_file(&self, path: &str) -> Result<Vec<Occurrence>>;
@@ -206,7 +223,7 @@ pub fn write_meta(graph_dir: &Path, meta: &GraphMeta) -> Result<()> {
 }
 
 pub struct SqliteGraphStore {
-    conn: Connection,
+    pub(crate) conn: Connection,
     project_root: PathBuf,
     graph_dir: PathBuf,
 }
@@ -315,6 +332,7 @@ impl SqliteGraphStore {
                 adapter TEXT,
                 adapter_version TEXT,
                 capabilities TEXT NOT NULL DEFAULT '[]',
+                generation INTEGER NOT NULL DEFAULT 0,
                 indexed_at INTEGER,
                 status TEXT NOT NULL DEFAULT 'ok',
                 error TEXT
@@ -581,13 +599,14 @@ impl GraphStore for SqliteGraphStore {
         finish(tx, result)
     }
 
-    fn replace_file_subgraph(
+    fn replace_file_subgraph_stamped(
         &mut self,
         path: &str,
         nodes: &[Node],
         edges: &[Edge],
         occurrences: &[Occurrence],
-    ) -> Result<()> {
+        generation: Option<u64>,
+    ) -> Result<bool> {
         if path.trim().is_empty() {
             bail!("graph file path must not be empty");
         }
@@ -602,27 +621,52 @@ impl GraphStore for SqliteGraphStore {
         }
 
         let tx = self.conn.transaction().context("begin graph transaction")?;
-        let result = (|| {
-            let generation = read_generation(&tx)?;
-            remove_file_subgraph(&tx, path)?;
-            let mut file_meta = None;
-            for node in nodes {
-                let id = write_node(&tx, node, generation)?;
-                write_fts(&tx, id, node)?;
-                if node.kind == NodeKind::File && node.path.as_deref() == Some(path) {
-                    file_meta = Some(node.clone());
-                }
+        let target_gen = match generation {
+            Some(g) => g,
+            None => read_generation(&tx)?,
+        };
+
+        // Out-of-order guard (§2.4.7): if a newer generation already wrote
+        // this file, drop the stale analysis result.
+        let existing_gen: Option<i64> = tx
+            .query_row(
+                "SELECT generation FROM files WHERE path = ?1",
+                [path],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(existing) = existing_gen {
+            if existing as u64 > target_gen {
+                return Ok(false);
             }
-            for edge in edges {
-                write_edge(&tx, edge, generation)?;
+        }
+
+        remove_file_subgraph(&tx, path)?;
+        let mut file_meta = None;
+        for node in nodes {
+            let id = write_node(&tx, node, target_gen)?;
+            write_fts(&tx, id, node)?;
+            if node.kind == NodeKind::File && node.path.as_deref() == Some(path) {
+                file_meta = Some(node.clone());
             }
-            for occurrence in occurrences {
-                write_occurrence(&tx, occurrence, generation)?;
-            }
-            record_file(&tx, path, file_meta.as_ref())?;
-            Ok(())
-        })();
-        finish(tx, result)
+        }
+        for edge in edges {
+            write_edge(&tx, edge, target_gen)?;
+        }
+        for occurrence in occurrences {
+            write_occurrence(&tx, occurrence, target_gen)?;
+        }
+        record_file(&tx, path, file_meta.as_ref(), target_gen)?;
+        tx.commit().context("commit graph transaction")?;
+        Ok(true)
+    }
+
+    fn remove_file(&mut self, path: &str) -> Result<()> {
+        let tx = self.conn.transaction().context("begin graph transaction")?;
+        remove_file_subgraph(&tx, path)?;
+        tx.execute("DELETE FROM files WHERE path = ?1", [path])
+            .context("remove file record")?;
+        tx.commit().context("commit graph transaction")
     }
 
     fn prune_file_subgraphs(&mut self, retained_paths: &BTreeSet<String>) -> Result<usize> {
@@ -712,7 +756,7 @@ impl GraphStore for SqliteGraphStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT hash, size, mtime, adapter, adapter_version, capabilities, status
+                "SELECT hash, size, mtime, adapter, adapter_version, capabilities, generation, status
                  FROM files WHERE path = ?1",
             )
             .context("prepare file record lookup")?;
@@ -725,7 +769,8 @@ impl GraphStore for SqliteGraphStore {
                     adapter: row.get(3)?,
                     adapter_version: row.get(4)?,
                     capabilities: parse_json_array(&row.get::<_, String>(5)?),
-                    status: row.get(6)?,
+                    generation: row.get::<_, i64>(6)? as u64,
+                    status: row.get(7)?,
                 })
             })
             .optional()
@@ -916,7 +961,12 @@ fn write_occurrence(
 /// Capabilities come from the file node's `capabilities` prop (a JSON
 /// string array set by the owning adapter); anything else means the file
 /// was analyzed without a capability claim.
-fn record_file(tx: &rusqlite::Transaction, path: &str, file_node: Option<&Node>) -> Result<()> {
+fn record_file(
+    tx: &rusqlite::Transaction,
+    path: &str,
+    file_node: Option<&Node>,
+    generation: u64,
+) -> Result<()> {
     let adapter = file_node
         .and_then(|node| node.properties.get("source_adapter"))
         .and_then(Value::as_str)
@@ -939,14 +989,15 @@ fn record_file(tx: &rusqlite::Transaction, path: &str, file_node: Option<&Node>)
         .and_then(Value::as_u64)
         .map(|value| value as i64);
     tx.execute(
-        "INSERT INTO files(path, hash, size, mtime, lang, adapter, adapter_version, capabilities, indexed_at, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'ok')
+        "INSERT INTO files(path, hash, size, mtime, lang, adapter, adapter_version, capabilities, generation, indexed_at, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'ok')
          ON CONFLICT(path) DO UPDATE SET
             hash = excluded.hash, size = excluded.size, mtime = excluded.mtime,
             lang = excluded.lang,
             adapter = excluded.adapter,
             adapter_version = excluded.adapter_version,
             capabilities = excluded.capabilities,
+            generation = excluded.generation,
             indexed_at = excluded.indexed_at, status = 'ok', error = NULL",
         rusqlite::params![
             path,
@@ -957,6 +1008,7 @@ fn record_file(tx: &rusqlite::Transaction, path: &str, file_node: Option<&Node>)
             adapter,
             version,
             capabilities,
+            generation as i64,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
@@ -1370,6 +1422,75 @@ mod tests {
             )
             .unwrap();
         assert_eq!(capabilities, "[]");
+    }
+
+    #[test]
+    fn out_of_order_stale_generation_write_is_dropped() {
+        let dir = tempdir().unwrap();
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        let mut file_node_v2 = node("file:a.rs", NodeKind::File);
+        file_node_v2.path = Some("a.rs".into());
+        let mut fun_v2 = node("sym:a.rs::fn::v2", NodeKind::Function);
+        fun_v2.path = Some("a.rs".into());
+
+        // Fast write B finishes first at generation 2
+        assert!(store
+            .replace_file_subgraph_stamped(
+                "a.rs",
+                &[file_node_v2, fun_v2],
+                &[],
+                &[],
+                Some(2),
+            )
+            .unwrap());
+        assert!(store.find_node("sym:a.rs::fn::v2").unwrap().is_some());
+
+        // Slow worker A finishes later, but computed its result at generation 1
+        let mut file_node_v1 = node("file:a.rs", NodeKind::File);
+        file_node_v1.path = Some("a.rs".into());
+        let mut fun_v1 = node("sym:a.rs::fn::v1", NodeKind::Function);
+        fun_v1.path = Some("a.rs".into());
+        let written = store
+            .replace_file_subgraph_stamped(
+                "a.rs",
+                &[file_node_v1, fun_v1],
+                &[],
+                &[],
+                Some(1),
+            )
+            .unwrap();
+        // Out-of-order write is dropped!
+        assert!(!written, "stale generation write must be dropped");
+        // And the store still has v2, not overwritten by v1!
+        assert!(store.find_node("sym:a.rs::fn::v2").unwrap().is_some());
+        assert!(store.find_node("sym:a.rs::fn::v1").unwrap().is_none());
+    }
+
+    #[test]
+    fn remove_file_cleans_nodes_edges_and_occurrences() {
+        let dir = tempdir().unwrap();
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        let mut file_node = node("file:a.rs", NodeKind::File);
+        file_node.path = Some("a.rs".into());
+        let mut fun = node("sym:a.rs::fn::f", NodeKind::Function);
+        fun.path = Some("a.rs".into());
+        store
+            .replace_file_subgraph(
+                "a.rs",
+                &[file_node, fun],
+                &[edge("file:a.rs", "sym:a.rs::fn::f", "contains")],
+                &[occurrence("a.rs", "helper")],
+            )
+            .unwrap();
+        assert!(store.find_node("file:a.rs").unwrap().is_some());
+        assert_eq!(store.occurrences_in_file("a.rs").unwrap().len(), 1);
+
+        store.remove_file("a.rs").unwrap();
+        assert!(store.find_node("file:a.rs").unwrap().is_none());
+        assert!(store.find_node("sym:a.rs::fn::f").unwrap().is_none());
+        assert!(store.occurrences_in_file("a.rs").unwrap().is_empty());
+        assert_eq!(fts_hits(&store, "sym:a.rs::fn::f"), 0);
+        assert!(store.indexed_file("a.rs").unwrap().is_none());
     }
 
     #[test]

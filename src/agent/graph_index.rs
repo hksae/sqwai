@@ -424,6 +424,142 @@ pub fn index_project_excluding(
     Ok(report)
 }
 
+/// Incrementally reindex an explicit set of changed paths (e.g. from an
+/// edit, patch, undo, or watcher event). Existing files are parsed and
+/// replaced; deleted files are removed from the store and un-dangle edges.
+/// Unmentioned files are not walked or parsed.
+#[allow(dead_code)]
+pub fn reindex_paths(
+    store: &mut impl GraphStore,
+    root: &Path,
+    paths: &[String],
+) -> Result<IndexReport> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("canonicalize project root {}", root.display()))?;
+    let excluded = build_globset(&secret_exclude_globs());
+    let markdown = MarkdownAdapter;
+    let generic = GenericAdapter;
+    let mut report = IndexReport::default();
+
+    for raw in paths {
+        let norm = raw.replace('\\', "/").trim_start_matches("./").to_string();
+        if norm.is_empty() {
+            continue;
+        }
+        let full = root.join(&norm);
+        if is_internal_graph_path(&root, &full) {
+            continue;
+        }
+        if let Some(excluded) = &excluded {
+            let name = Path::new(&norm)
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new(""));
+            if excluded.is_match(name) || excluded.is_match(&norm) {
+                report.skipped_files += 1;
+                continue;
+            }
+        }
+        if !full.exists() {
+            store.remove_file(&norm)?;
+            report.removed_files += 1;
+            continue;
+        }
+        if !full.is_file() {
+            continue;
+        }
+
+        let use_markdown = markdown.supports(&full);
+        let ts_lang = TsLang::for_path(&full);
+        let (adapter_name, adapter_version): (&str, &str) = match ts_lang {
+            Some(lang) => (lang.adapter_name(), lang.adapter_version()),
+            None if use_markdown => ("markdown", MARKDOWN_ADAPTER_VERSION),
+            None => ("generic", GENERIC_ADAPTER_VERSION),
+        };
+
+        let recorded = store.indexed_file(&norm)?;
+        let adapter_current = recorded.as_ref().is_some_and(|record| {
+            record.status == "ok"
+                && record.adapter.as_deref() == Some(adapter_name)
+                && record.adapter_version.as_deref() == Some(adapter_version)
+        });
+        if adapter_current && let Ok(meta) = full.metadata() {
+            let size = meta.len() as i64;
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as i64)
+                .unwrap_or(0);
+            if recorded
+                .as_ref()
+                .is_some_and(|r| r.size == Some(size) && r.mtime == Some(mtime))
+            {
+                report.unchanged_files += 1;
+                continue;
+            }
+        }
+        let (content, mtime) = match read_bounded(&full) {
+            Ok(content) => content,
+            Err(error) => {
+                report.warnings.push(format!("{norm}: {error}"));
+                report.skipped_files += 1;
+                continue;
+            }
+        };
+        if adapter_current
+            && recorded
+                .as_ref()
+                .is_some_and(|r| r.hash.as_deref() == Some(content_hash(&content).as_str()))
+            && store
+                .refresh_file_stat(&norm, content.len() as i64, mtime)
+                .is_ok()
+        {
+            report.unchanged_files += 1;
+            continue;
+        }
+        let mut batch = match match ts_lang {
+            Some(lang) => TsAdapter(lang).index(&norm, &content),
+            None if use_markdown => markdown.index(&norm, &content),
+            None => generic.index(&norm, &content),
+        } {
+            Ok(batch) => batch,
+            Err(error) => {
+                report.warnings.push(format!("{norm}: {error}"));
+                GraphBatch {
+                    nodes: vec![file_node(
+                        &norm,
+                        &content,
+                        None,
+                        "generic",
+                        GENERIC_ADAPTER_VERSION,
+                        &[],
+                    )],
+                    edges: vec![],
+                    occurrences: vec![],
+                }
+            }
+        };
+        batch.edges.retain(|edge| {
+            if let Some(target) = edge.to.strip_prefix("file:") {
+                root.join(target).is_file()
+            } else {
+                true
+            }
+        });
+        stamp_file_mtime(&mut batch, &norm, mtime);
+        store.replace_file_subgraph(
+            &norm,
+            &batch.nodes,
+            &batch.edges,
+            &batch.occurrences,
+        )?;
+        report.indexed_files += 1;
+    }
+
+    Ok(report)
+}
+
 /// Inventory metadata the content adapters never see: the walk's mtime
 /// stat belongs to the file node, stamped here rather than threaded
 /// through every adapter signature.
@@ -1249,5 +1385,214 @@ mod tests {
             txt_file.capabilities.is_empty(),
             "generic has no symbol claims"
         );
+    }
+
+    #[test]
+    fn reindex_paths_updates_changed_and_removes_deleted() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "pub fn foo() {}\n").unwrap();
+        fs::write(dir.path().join("b.txt"), "hello\n").unwrap();
+
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        index_project(&mut store, dir.path()).unwrap();
+        assert!(store.find_node("sym:a.rs::fn::foo").unwrap().is_some());
+        assert!(store.find_node("file:b.txt").unwrap().is_some());
+
+        // modify a.rs and delete b.txt
+        fs::write(dir.path().join("a.rs"), "pub fn bar() {}\n").unwrap();
+        fs::remove_file(dir.path().join("b.txt")).unwrap();
+
+        let report = reindex_paths(
+            &mut store,
+            dir.path(),
+            &["a.rs".to_string(), "b.txt".to_string()],
+        )
+        .unwrap();
+        assert_eq!(report.indexed_files, 1);
+        assert_eq!(report.removed_files, 1);
+
+        assert!(store.find_node("sym:a.rs::fn::bar").unwrap().is_some());
+        assert!(store.find_node("sym:a.rs::fn::foo").unwrap().is_none());
+        assert!(store.find_node("file:b.txt").unwrap().is_none());
+    }
+
+    /// Stage D DoD (§8.1 Core DoD):
+    /// Incremental projection == full rebuild.
+    /// Reindexing files incrementally as edits occur yields the exact same
+    /// normalized graph projection as a full rebuild from scratch on the
+    /// final repository tree.
+    #[test]
+    fn incremental_projection_equals_full_rebuild() {
+        let dir_inc = tempdir().unwrap();
+        let dir_full = tempdir().unwrap();
+
+        // 1. Initial multi-language tree
+        for dir in [dir_inc.path(), dir_full.path()] {
+            fs::create_dir_all(dir.join("src")).unwrap();
+            fs::write(
+                dir.join("src/main.rs"),
+                "fn main() { foo(); }\nfn foo() {}\n",
+            )
+            .unwrap();
+            fs::write(
+                dir.join("src/lib.py"),
+                "def calc():\n    return 1\n",
+            )
+            .unwrap();
+            fs::write(
+                dir.join("src/app.ts"),
+                "export function run(): void {}\n",
+            )
+            .unwrap();
+            fs::create_dir_all(dir.join("docs")).unwrap();
+            fs::write(dir.join("docs/spec.md"), "# Spec\nInitial text\n").unwrap();
+            fs::write(dir.join("extra.txt"), "plain\n").unwrap();
+        }
+
+        // Build initial index in the incremental store
+        let mut store_inc = SqliteGraphStore::open(dir_inc.path()).unwrap();
+        index_project(&mut store_inc, dir_inc.path()).unwrap();
+
+        // 2. Perform various mutations: edits, additions, and deletions
+        let mutations = |dir: &Path| {
+            fs::write(
+                dir.join("src/main.rs"),
+                "fn main() { bar(); }\nfn bar() {}\nfn extra() {}\n",
+            )
+            .unwrap();
+            fs::write(
+                dir.join("src/lib.py"),
+                "class Math:\n    def calc(self):\n        return 2\n",
+            )
+            .unwrap();
+            fs::write(
+                dir.join("src/app.ts"),
+                "export function execute(): void {}\n",
+            )
+            .unwrap();
+            fs::write(dir.join("docs/spec.md"), "# Updated Spec\nNew text\n").unwrap();
+            fs::write(dir.join("src/new_mod.rs"), "pub struct NewStruct;\n").unwrap();
+            fs::remove_file(dir.join("extra.txt")).unwrap();
+        };
+        mutations(dir_inc.path());
+        mutations(dir_full.path());
+
+        // 3. Incrementally update store_inc for the changed paths
+        let changed = vec![
+            "src/main.rs".to_string(),
+            "src/lib.py".to_string(),
+            "src/app.ts".to_string(),
+            "docs/spec.md".to_string(),
+            "src/new_mod.rs".to_string(),
+            "extra.txt".to_string(),
+        ];
+        reindex_paths(&mut store_inc, dir_inc.path(), &changed).unwrap();
+
+        // 4. Perform full rebuild from scratch on dir_full
+        rebuild_project(dir_full.path()).unwrap();
+        let store_full = SqliteGraphStore::open(dir_full.path()).unwrap();
+
+        // 5. Compare normalized projections across all tables!
+        type NodeRow = (String, String, Option<String>, Option<String>, Option<String>, Option<u32>, Option<u32>, Option<String>, Vec<String>, Option<String>);
+        let query_nodes = |store: &SqliteGraphStore| -> Vec<NodeRow> {
+            let mut stmt = store
+                .conn
+                .prepare("SELECT key, kind, name, path, lang, line_start, line_end, signature, roles, hash FROM nodes ORDER BY key")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get::<_, Option<i64>>(5)?.map(|v| v as u32),
+                        row.get::<_, Option<i64>>(6)?.map(|v| v as u32),
+                        row.get(7)?,
+                        serde_json::from_str::<Vec<String>>(&row.get::<_, String>(8)?).unwrap_or_default(),
+                        row.get(9)?,
+                    ))
+                })
+                .unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+
+        type EdgeRow = (String, String, String, String, Option<i64>);
+        let query_edges = |store: &SqliteGraphStore| -> Vec<EdgeRow> {
+            let mut stmt = store
+                .conn
+                .prepare("SELECT from_key, to_key, kind, source, confidence FROM edges ORDER BY from_key, to_key, kind, source")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+
+        type OccurRow = (String, String, String, u32);
+        let query_occurrences = |store: &SqliteGraphStore| -> Vec<OccurRow> {
+            let mut stmt = store
+                .conn
+                .prepare("SELECT path, name, kind, line FROM occurrences ORDER BY path, line, name")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get::<_, i64>(3)? as u32,
+                    ))
+                })
+                .unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+
+        type FileRow = (String, Option<String>, Option<String>, Option<String>, Option<String>, String, String);
+        let query_files = |store: &SqliteGraphStore| -> Vec<FileRow> {
+            let mut stmt = store
+                .conn
+                .prepare("SELECT path, hash, lang, adapter, adapter_version, capabilities, status FROM files ORDER BY path")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                })
+                .unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+
+        let nodes_inc = query_nodes(&store_inc);
+        let nodes_full = query_nodes(&store_full);
+        assert_eq!(nodes_inc, nodes_full, "nodes projection must match full rebuild");
+
+        let edges_inc = query_edges(&store_inc);
+        let edges_full = query_edges(&store_full);
+        assert_eq!(edges_inc, edges_full, "edges projection must match full rebuild");
+
+        let occ_inc = query_occurrences(&store_inc);
+        let occ_full = query_occurrences(&store_full);
+        assert_eq!(occ_inc, occ_full, "occurrences projection must match full rebuild");
+
+        let files_inc = query_files(&store_inc);
+        let files_full = query_files(&store_full);
+        assert_eq!(files_inc, files_full, "files table must match full rebuild");
     }
 }
