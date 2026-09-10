@@ -2769,41 +2769,7 @@ impl App {
                     ));
                 }
                 AgentEvent::SubagentStart { id, task } => {
-                    self.subagents
-                        .push((id, task.clone(), "running".into(), String::new(), false));
-                    self.subagent_chats.insert(
-                        id,
-                        vec![
-                            Segment::User(task.clone()),
-                            Segment::Thinking {
-                                text: String::new(),
-                                expanded: false,
-                                started: None,
-                                duration_ms: 0,
-                                live: true,
-                            },
-                            Segment::Assistant {
-                                text: String::new(),
-                                live: true,
-                            },
-                        ],
-                    );
-                    // Identity for every chat row, aligned with the vec above.
-                    let mut meta = Vec::new();
-                    for _ in 0..3 {
-                        meta.push(SegMeta {
-                            id: self.alloc_seg_id(),
-                            rev: 0,
-                        });
-                    }
-                    self.subagent_meta.insert(id, meta);
-                    self.push_segment(Segment::Subagent {
-                        id,
-                        task,
-                        status: "running".into(),
-                        output: String::new(),
-                        expanded: false,
-                    });
+                    self.handle_subagent_start(id, task);
                     if matches!(self.cur_menu(), Some(Menu::Subagents)) {
                         self.build_menu_rows();
                     }
@@ -3215,6 +3181,57 @@ impl App {
             .unwrap_or(self.segments.len());
         self.insert_segment(pos, tool);
         self.dirty = true;
+    }
+
+    /// Register a spawned child agent: bookkeeping, its private transcript,
+    /// and one summary row at the CALL SITE — inserted before the live
+    /// answer, like tool rows. Appending would strand the row after the
+    /// answer once the live slot fills, leaving stray `✓ subagent-N` lines
+    /// under finished turns.
+    fn handle_subagent_start(&mut self, id: u64, task: String) {
+        self.subagents
+            .push((id, task.clone(), "running".into(), String::new(), false));
+        self.subagent_chats.insert(
+            id,
+            vec![
+                Segment::User(task.clone()),
+                Segment::Thinking {
+                    text: String::new(),
+                    expanded: false,
+                    started: None,
+                    duration_ms: 0,
+                    live: true,
+                },
+                Segment::Assistant {
+                    text: String::new(),
+                    live: true,
+                },
+            ],
+        );
+        // Identity for every chat row, aligned with the vec above.
+        let mut meta = Vec::new();
+        for _ in 0..3 {
+            meta.push(SegMeta {
+                id: self.alloc_seg_id(),
+                rev: 0,
+            });
+        }
+        self.subagent_meta.insert(id, meta);
+        let pos = self
+            .segments
+            .iter()
+            .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
+            .unwrap_or(self.segments.len());
+        self.insert_segment(
+            pos,
+            Segment::Subagent {
+                id,
+                task,
+                status: "running".into(),
+                output: String::new(),
+                expanded: false,
+            },
+        );
     }
 
     /// attach a tool result to the running row opened by handle_tool_start,

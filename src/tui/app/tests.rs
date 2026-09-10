@@ -5711,4 +5711,42 @@ mod tests {
             "selection start must track the pressed content"
         );
     }
+
+    /// Subagent summary rows belong to the call site: with a live answer
+    /// slot open, two spawns must land before it (in spawn order) — never
+    /// appended after the finished answer as stray `✓ subagent-N` lines.
+    #[test]
+    fn subagent_rows_land_at_call_site_not_after_answer() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.push_segment(Segment::User("q".into()));
+        app.push_segment(Segment::Assistant {
+            text: String::new(),
+            live: true,
+        });
+        app.handle_subagent_start(1, "t1".into());
+        app.handle_subagent_start(2, "t2".into());
+        // the answer streams into the live slot afterwards
+        let live = app
+            .segments
+            .iter()
+            .position(|s| matches!(s, Segment::Assistant { live: true, .. }))
+            .expect("live slot survives");
+        if let Some(Segment::Assistant { text, live }) = app.segments.get_mut(live) {
+            *text = "done".to_string();
+            *live = false;
+        }
+        app.touch_segment(live);
+        let kinds: Vec<&str> = app
+            .segments
+            .iter()
+            .map(|s| match s {
+                Segment::User(_) => "user",
+                Segment::Assistant { .. } => "answer",
+                Segment::Subagent { .. } => "sub",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["user", "sub", "sub", "answer"]);
+    }
 }
