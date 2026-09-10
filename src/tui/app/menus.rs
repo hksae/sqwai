@@ -244,6 +244,7 @@ pub(super) enum MenuAction {
     DeleteSession(String),
     ToggleTypewriter,
     ToggleHttpLog,
+    TogglePerfLog,
     ToggleShowCost,
     CycleModelEffort,
     CycleDefaultEffort,
@@ -1165,6 +1166,19 @@ impl App {
                 crate::providers::set_http_log(self.cfg.ui.http_log);
                 let on = self.cfg.ui.http_log;
                 self.status(&format!("http debug log: {}", on_off(on)), StatusKind::Ok);
+                self.build_menu_rows();
+            }
+            MenuAction::TogglePerfLog => {
+                // per-frame transcript timings for lag hunting: one line per
+                // drawn frame plus tool markers, into a fresh temp file
+                let on = !self.perf.enabled();
+                let renders = self.test_renders;
+                let wraps = crate::tui::markdown::WRAP_TAGGED_CALLS
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                match self.perf.set_enabled(on, renders, wraps) {
+                    Ok(msg) => self.status(&msg, StatusKind::Ok),
+                    Err(msg) => self.status(&msg, StatusKind::Err),
+                }
                 self.build_menu_rows();
             }
             MenuAction::ToggleShowCost => {
@@ -2253,6 +2267,15 @@ impl App {
                     "http debug log",
                     on_off(self.cfg.ui.http_log),
                     MenuAction::ToggleHttpLog,
+                ));
+                self.menu_rows.push(setting(
+                    "perf frame log",
+                    if self.perf.enabled() {
+                        self.perf.path().to_string()
+                    } else {
+                        on_off(false)
+                    },
+                    MenuAction::TogglePerfLog,
                 ));
                 self.menu_rows.push(setting(
                     "effort",

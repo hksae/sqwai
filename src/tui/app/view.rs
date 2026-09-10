@@ -60,6 +60,29 @@ pub(super) struct StoredView {
 /// merge step takes its rows from the live buffers instead of cloning them.
 type RowChunk = (AsmTag, Vec<(Line<'static>, Option<usize>)>);
 
+/// How the last rebuild merged chunks into the live buffers. Recorded for
+/// the `/debug` perf log: Skip means the fingerprint gate skipped the
+/// rebuild entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum MergeKind {
+    #[default]
+    Skip,
+    Splice,
+    Append,
+    Concat,
+}
+
+impl MergeKind {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            MergeKind::Skip => "skip",
+            MergeKind::Splice => "splice",
+            MergeKind::Append => "append",
+            MergeKind::Concat => "concat",
+        }
+    }
+}
+
 /// Semantic click target resolved at mouse-down against the shown frame.
 /// Re-validated at mouse-up by segment id, so a layout shift between press
 /// and release cannot fire a stale row number at the wrong control.
@@ -1719,6 +1742,9 @@ impl App {
     }
 
     pub(super) fn rebuild_cache(&mut self, width: u16) {
+        // timed for the `/debug` perf log (two clock reads per rebuild —
+        // noise next to any real render work)
+        let t0 = std::time::Instant::now();
         // No cache wipe on width change: every entry carries its own width,
         // so only rows wrapped for the old size re-render — the rest survive.
         let w = width.saturating_sub(2).max(10); // side padding
@@ -1862,10 +1888,7 @@ impl App {
                 fresh.push(false);
                 continue;
             }
-            #[cfg(test)]
-            {
-                self.test_renders += 1;
-            }
+            self.test_renders += 1;
             let lines = self.render_segment(&self.segments, idx, render_w, true);
             let chunk: Vec<(Line<'static>, Option<usize>)> = lines
                 .into_iter()
@@ -1891,6 +1914,7 @@ impl App {
         self.prune_seg_cache();
         self.merge_chunks(chunks, fresh);
         self.cache_w = width;
+        self.last_rebuild_us = t0.elapsed().as_micros();
     }
 
     /// Forget wrapped rows whose segment id is gone from every transcript.
@@ -2006,6 +2030,7 @@ impl App {
     /// re-clone the history.
     fn merge_chunks(&mut self, built: Vec<RowChunk>, fresh: Vec<bool>) {
         debug_assert_eq!(built.len(), fresh.len());
+        self.last_fresh = fresh.iter().filter(|b| **b).count();
         let new_tags: Vec<AsmTag> = built.iter().map(|(t, _)| *t).collect();
         // the chunk map must describe the live buffers exactly, or no fast
         // path is safe: fall back to full concatenation
@@ -2014,10 +2039,12 @@ impl App {
             && total == self.cache_lines.len()
             && total == self.cache_rowseg.len();
         if consistent && new_tags == self.asm_tags {
-            if fresh.iter().filter(|b| **b).count() * 2 <= new_tags.len().max(1) {
+            if self.last_fresh * 2 <= new_tags.len().max(1) {
                 self.splice_chunks(built, fresh);
+                self.last_merge = MergeKind::Splice;
             } else {
                 self.concat_chunks(built, fresh);
+                self.last_merge = MergeKind::Concat;
             }
             return;
         }
@@ -2048,9 +2075,11 @@ impl App {
                 self.asm_tags.push(*tag);
                 self.asm_lens.push(len);
             }
+            self.last_merge = MergeKind::Append;
             return;
         }
         self.concat_chunks(built, fresh);
+        self.last_merge = MergeKind::Concat;
     }
 
     /// Cheap transcript fingerprint: identities + revisions in order, group
@@ -2432,6 +2461,8 @@ impl App {
     /// Borrows are scoped per index so the cache insert never aliases the
     /// transcript slice it was rendered from.
     fn rebuild_sub_cache(&mut self, width: u16, id: u64) {
+        // timed for the `/debug` perf log, like the main rebuild
+        let t0 = std::time::Instant::now();
         // No cache wipe on width change: entries carry their own width.
         let w = width.saturating_sub(2).max(10);
         let count = self
@@ -2458,10 +2489,7 @@ impl App {
                 fresh.push(false);
                 continue;
             }
-            #[cfg(test)]
-            {
-                self.test_renders += 1;
-            }
+            self.test_renders += 1;
             let lines = {
                 // immutable borrow ends before the cache insert below
                 let chat = self.subagent_chats.get(&id).unwrap();
@@ -2484,6 +2512,7 @@ impl App {
         self.prune_seg_cache();
         self.merge_chunks(chunks, fresh);
         self.cache_w = width;
+        self.last_rebuild_us = t0.elapsed().as_micros();
     }
 
     pub(super) fn draw_menu(&mut self, f: &mut ratatui::Frame, area: Rect) {

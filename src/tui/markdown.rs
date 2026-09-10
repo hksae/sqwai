@@ -1266,7 +1266,8 @@ fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
 
 /// Greedy word wrap preserving span styles and carrying a per-source-line tag
 /// through to every visual row it produces.
-#[cfg(test)]
+/// Call counter (also feeds the `/debug` perf log); a single relaxed
+/// atomic add, negligible next to the wrap itself.
 pub static WRAP_TAGGED_CALLS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
@@ -1274,7 +1275,6 @@ pub fn wrap_tagged(
     lines: Vec<(Line<'static>, Option<usize>)>,
     width: u16,
 ) -> (Vec<Line<'static>>, Vec<Option<usize>>) {
-    #[cfg(test)]
     WRAP_TAGGED_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let width = (width as usize).max(1);
     let fallback = Style::new().fg(Theme::rule_color()).bg(Theme::BG());

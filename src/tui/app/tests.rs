@@ -1355,6 +1355,52 @@ mod tests {
     }
 
     #[test]
+    fn debug_perf_log_toggle_writes_frame_lines_to_temp_file() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::Debug);
+        let find_toggle = |app: &App| {
+            app.menu_rows
+                .iter()
+                .position(|(_, action)| matches!(action, MenuAction::TogglePerfLog))
+                .expect("perf log row")
+        };
+        app.menu_sel = find_toggle(&app);
+        assert!(!app.perf.enabled());
+        app.menu_activate();
+        assert!(app.perf.enabled());
+        let path = app.perf.path().to_string();
+        assert!(path.contains("sqwai-perf"), "temp file path: {path}");
+        app.perf.frame(
+            super::perf::FrameStat {
+                draw_us: 10,
+                rebuild_us: 5,
+                merge: "splice",
+                fresh: 1,
+                segs: 2,
+                rows: 3,
+                tick: 7,
+                streaming: true,
+                running: false,
+                view: 0,
+            },
+            4,
+            9,
+        );
+        app.perf.event("tool_start read");
+        app.menu_sel = find_toggle(&app);
+        app.menu_activate();
+        assert!(!app.perf.enabled());
+        let content = std::fs::read_to_string(&path).expect("log file written");
+        assert!(content.contains("# frame draw_us"), "header:\n{content}");
+        assert!(
+            content.lines().any(|l| l.starts_with("1 10 5 splice")),
+            "frame line:\n{content}"
+        );
+        assert!(content.contains("EVT"), "event line:\n{content}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn error_status_shows_in_bar() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.status("provider boom", StatusKind::Err);

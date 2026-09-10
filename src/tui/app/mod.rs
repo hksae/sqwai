@@ -95,6 +95,7 @@ pub type Terminal = ratatui::Terminal<CrosstermBackend<std::io::Stdout>>;
 mod events;
 mod forms;
 mod menus;
+mod perf;
 #[cfg(test)]
 mod tests;
 mod view;
@@ -319,6 +320,14 @@ pub struct App {
     /// fingerprint of the last assembled transcript; a draw whose fingerprint
     /// matches skips reassembly entirely (typing, scroll, selection, hover)
     last_fp: u64,
+    /// per-frame perf log behind the `/debug` toggle; disabled by default
+    perf: perf::PerfLog,
+    /// how the last rebuild merged chunks (Skip = fingerprint gate hit)
+    last_merge: view::MergeKind,
+    /// segment chunks rebuilt in the last rebuild
+    last_fresh: usize,
+    /// microseconds spent in the last rebuild_cache/rebuild_sub_cache
+    last_rebuild_us: u128,
     /// scroll anchor set by toggles: (view, rowseg tag, screen offset).
     /// Applied after the next rebuild so an expanding block keeps its header
     /// on the same screen row instead of jumping with `follow`.
@@ -337,9 +346,8 @@ pub struct App {
     main_store: StoredView,
     /// parked assembled rows per subagent view
     sub_stores: std::collections::HashMap<u64, StoredView>,
-    /// renders performed by the last rebuild (tests only: proves idle
-    /// frames skip the transcript pipeline entirely)
-    #[cfg(test)]
+    /// segment renders performed by rebuilds (cumulative). Tests reset and
+    /// assert it; the `/debug` perf log differences it per frame.
     test_renders: u32,
     /// main scroll stashed while a subagent view is open; restored on close
     stashed_main_scroll: Option<(usize, bool)>,
@@ -739,12 +747,15 @@ impl App {
             next_seg_id: 1,
             theme_rev: 0,
             last_fp: 0,
+            perf: perf::PerfLog::new(),
+            last_merge: view::MergeKind::Skip,
+            last_fresh: 0,
+            last_rebuild_us: 0,
             pending_anchor: None,
             press_target: None,
             sub_views: std::collections::HashMap::new(),
             main_store: StoredView::default(),
             sub_stores: std::collections::HashMap::new(),
-            #[cfg(test)]
             test_renders: 0,
             stashed_main_scroll: None,
             subagent_meta: std::collections::BTreeMap::new(),
@@ -1052,7 +1063,30 @@ impl App {
                 self.dirty = true;
             }
             if self.dirty {
+                // frame timing for the `/debug` perf log: total draw vs the
+                // transcript rebuild slice; counters travel as running
+                // totals and are differenced inside the log
+                let t0 = Instant::now();
+                self.last_merge = view::MergeKind::Skip;
+                self.last_rebuild_us = 0;
+                self.last_fresh = 0;
                 terminal.draw(|f| self.draw(f))?;
+                let stat = perf::FrameStat {
+                    draw_us: t0.elapsed().as_micros(),
+                    rebuild_us: self.last_rebuild_us,
+                    merge: self.last_merge.as_str(),
+                    fresh: self.last_fresh,
+                    segs: self.segments.len(),
+                    rows: self.cache_lines.len(),
+                    tick: self.spinner_tick,
+                    streaming: self.streaming,
+                    running: self.tool_running(),
+                    view: self.active_subagent.unwrap_or(0),
+                };
+                let renders = self.test_renders;
+                let wraps = crate::tui::markdown::WRAP_TAGGED_CALLS
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                self.perf.frame(stat, renders, wraps);
                 self.dirty = false;
             }
         }
@@ -3160,6 +3194,7 @@ impl App {
         if name == "ask_user" || name == "propose_plan" {
             return;
         }
+        self.perf.event(&format!("tool_start {name}"));
         let tool = Segment::Tool {
             name,
             args: summary,
@@ -3195,6 +3230,7 @@ impl App {
         if name == "ask_user" || name == "propose_plan" {
             return;
         }
+        self.perf.event(&format!("tool_done {name} ok={ok}"));
         // close the row opened by ToolStart; fall back to a new one
         let hit = self
             .segments
