@@ -8,17 +8,25 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::theme::Theme;
 
 /// Terminal markdown renderer with syntax-highlighted code blocks.
+///
+/// The syntax/theme dumps are process-wide singletons: loading them takes
+/// ~a second in debug builds, and every test builds its own `App` (plus a
+/// dozen markdown unit tests build one directly). Sharing costs nothing —
+/// both tables are read-only after load.
 pub struct Highlighter {
-    ps: SyntaxSet,
-    ts: ThemeSet,
+    ps: &'static SyntaxSet,
+    ts: &'static ThemeSet,
     theme_name: &'static str,
 }
+
+static SYNTAX_SET: std::sync::OnceLock<SyntaxSet> = std::sync::OnceLock::new();
+static THEME_SET: std::sync::OnceLock<ThemeSet> = std::sync::OnceLock::new();
 
 impl Highlighter {
     pub fn new() -> Self {
         Self {
-            ps: SyntaxSet::load_defaults_newlines(),
-            ts: ThemeSet::load_defaults(),
+            ps: SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines),
+            ts: THEME_SET.get_or_init(ThemeSet::load_defaults),
             theme_name: "base16-eighties.dark",
         }
     }
@@ -39,7 +47,7 @@ impl Highlighter {
         let mut hl = HighlightLines::new(syntax, self.theme());
         let mut out = Vec::new();
         for line in syntect::util::LinesWithEndings::from(code) {
-            let Ok(regions) = hl.highlight_line(line, &self.ps) else {
+            let Ok(regions) = hl.highlight_line(line, self.ps) else {
                 // never drop source text on a highlighter error: fall back
                 // to the plain line so failures stay visible, not silent
                 out.push(Line::from(Span::styled(
