@@ -1721,6 +1721,17 @@ mod tests {
         app.draw_menu(&mut buf, area);
         assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
         assert!(app.menu_rect.width > 0 && app.menu_rect.height > 0);
+        // progress dots: High is index 3, so 4 filled dots, 2 hollow
+        let dots: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert_eq!(dots.matches('●').count(), want + 1, "{dots:?}");
+        assert_eq!(
+            dots.matches('○').count(),
+            EffortLevel::SELECTABLE.len() - want - 1
+        );
         // hover the max dot previews nothing (no mutation without click)
         let (_, max_idx) = app.effort_hits.last().copied().expect("max hit");
         let (rect, _) = app.effort_hits[max_idx];

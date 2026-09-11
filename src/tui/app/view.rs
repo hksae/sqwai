@@ -3016,10 +3016,12 @@ impl App {
         let mut cells: Vec<(&str, Style)> = vec![(" ", Theme::base()); total];
         for i in 0..n {
             let dx = i * COL_W as usize + dot_off;
+            // progress dots: every level up to the selection is filled,
+            // the selection itself additionally bold; the rest are hollow
             let (dot, dot_style) = if i == sel {
                 ("●", active_style)
             } else if i < sel {
-                ("○", fill)
+                ("●", fill)
             } else {
                 ("○", dim)
             };
