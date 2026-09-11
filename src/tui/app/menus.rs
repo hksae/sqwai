@@ -3224,7 +3224,7 @@ impl App {
                                 format!("  {} ({}) ", agg.dir, agg.kind)
                             };
 
-                            let mut spans = vec![
+    let mut spans = vec![
                                 Span::styled(prefix, Theme::dim()),
                                 Span::styled(format!("{other_badge} "), Theme::accent()),
                                 Span::styled(name_or_key.to_string(), Theme::base()),
@@ -3448,41 +3448,94 @@ fn session_row(
     is_current: bool,
     framed: Option<usize>,
 ) -> (Line<'static>, MenuAction) {
-    let mark = if is_current { " *" } else { "" };
-    let left = format!(" {}{mark}", truncate_chars(&s.title, 28));
-    let dim = format!(
-        "{} · {} · {} tok",
-        fmt_date(s.last_activity()),
-        truncate_chars(&s.model_key, 14),
-        fmt_k(s.context_tokens)
-    );
+    const TITLE_MAX: usize = 28;
+    const MODEL_MAX: usize = 16;
+    const TOK_W: usize = 7;
+    // everything except title+model: lead space, gaps, fixed date, gaps, tok
+    const FIXED: usize = 1 + 2 + 11 + 2 + 2 + TOK_W;
     let action = MenuAction::OpenSession(s.id.to_string());
+    // narrow frames yield title first, then model; tokens (rightmost) are
+    // the last thing the exact-fit pass below may touch
+    let (title_w, model_w) = match framed {
+        None => (TITLE_MAX, MODEL_MAX),
+        Some(budget) => {
+            let title_w = budget.saturating_sub(FIXED + 4).clamp(4, TITLE_MAX);
+            let model_w = budget
+                .saturating_sub(title_w + FIXED)
+                .clamp(4, MODEL_MAX);
+            (title_w, model_w)
+        }
+    };
+    let mark = if is_current { " *" } else { "" };
+    let title = fit_cell(&format!(" {}{mark}", s.title), title_w);
+    let date = fmt_date(s.last_activity());
+    let model = fit_cell(&s.model_key, model_w);
+    let tok_raw = super::view::truncate_display_width(&fmt_k(s.context_tokens), TOK_W);
+    let tok = format!(
+        "{}{tok_raw}",
+        " ".repeat(TOK_W.saturating_sub(super::view::cols(&tok_raw)))
+    );
+    let gap = || Span::styled("  ".to_string(), Theme::dim());
+    let spans = vec![
+        Span::styled(title, Theme::FG()),
+        gap(),
+        Span::styled(date, Theme::dim()),
+        gap(),
+        Span::styled(model, Theme::dim()),
+        gap(),
+        Span::styled(tok, Theme::dim()),
+    ];
     let Some(frame_w) = framed else {
-        return (
-            Line::from(vec![
-                Span::styled(left, Theme::FG()),
-                Span::styled(format!("  {dim}"), Theme::dim()),
-            ]),
-            action,
-        );
+        return (Line::from(spans), action);
     };
-    let left_w = super::view::cols(&left);
-    let avail_for_dim = frame_w.saturating_sub(left_w + 2);
-    let dim_truncated = if super::view::cols(&dim) > avail_for_dim {
-        super::view::truncate_display_width(&dim, avail_for_dim)
-    } else {
-        dim
-    };
-    let dim_w = super::view::cols(&dim_truncated);
-    let pad = frame_w.saturating_sub(left_w + 2 + dim_w);
+    // rails + exact fit: every framed row matches the borders column-wise
+    let mut full = vec![Span::styled("│".to_string(), Theme::rule_color())];
+    full.extend(spans);
+    full.push(Span::styled("│".to_string(), Theme::rule_color()));
     (
-        Line::from(vec![
-            Span::styled("│".to_string(), Theme::rule_color()),
-            Span::styled(left, Theme::FG()),
-            Span::styled(format!("  {dim_truncated}"), Theme::dim()),
-            Span::styled(" ".repeat(pad), Theme::base()),
-            Span::styled("│".to_string(), Theme::rule_color()),
-        ]),
+        fit_line_width(Line::from(full), frame_w + 2),
         action,
     )
+}
+
+/// truncate + pad to exactly `w` display columns (never chars: a CJK title
+/// must not shift every column after it)
+fn fit_cell(s: &str, w: usize) -> String {
+    let t = super::view::truncate_display_width(s, w);
+    format!("{t}{}", " ".repeat(w.saturating_sub(super::view::cols(&t))))
+}
+
+/// cut or pad a styled line to exactly `width` display columns, keeping
+/// span styles on the surviving fragments
+fn fit_line_width(line: Line<'static>, width: usize) -> Line<'static> {
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for s in line.spans {
+        let w = unicode_width::UnicodeWidthStr::width(s.content.as_ref());
+        if used + w <= width {
+            used += w;
+            out.push(s);
+        } else {
+            let mut kept = String::new();
+            let mut cw = 0usize;
+            for ch in s.content.chars() {
+                let chw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if used + cw + chw > width {
+                    break;
+                }
+                kept.push(ch);
+                cw += chw;
+            }
+            used += cw;
+            out.push(Span::styled(kept, s.style));
+            break;
+        }
+    }
+    if used < width {
+        out.push(Span::styled(
+            " ".repeat(width - used),
+            Style::new(),
+        ));
+    }
+    Line::from(out)
 }

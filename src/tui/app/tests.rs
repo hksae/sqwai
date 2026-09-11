@@ -1342,7 +1342,6 @@ mod tests {
             .expect("pinned row rail");
         assert_eq!(rail.1.style().fg, Some(Color::DarkGray));
     }
-
     #[test]
     fn pinned_session_frame_aligns_columns_and_respects_narrow_terminal() {
         use crate::providers::Role;
@@ -1387,6 +1386,42 @@ mod tests {
         assert_eq!(w_top, w_bot, "top and bottom borders must match");
         assert_eq!(w_top, w_row, "row and borders must match in display width");
         assert!(w_top <= 40, "must fit within menu rect width: {w_top} > 40");
+    }
+
+    #[test]
+    fn sessions_rows_share_date_model_token_columns() {
+        use crate::providers::Role;
+        use unicode_width::UnicodeWidthStr;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let mut a = Session::new("m".into(), 1000);
+        a.push(Role::User, "hi");
+        let mut b = Session::new("m".into(), 1000);
+        b.push(Role::User, "a medium length title!");
+        app.sessions = vec![
+            SessionHeader::from_session(&a),
+            SessionHeader::from_session(&b),
+        ];
+        app.open_menu(Menu::Sessions);
+        let rows: Vec<String> = app
+            .menu_rows
+            .iter()
+            .filter(|(_, act)| matches!(act, MenuAction::OpenSession(_)))
+            .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        // `{title:28}  {date:11}  {model:16}  {tok:>7}` — every row 68 cols
+        // (the leading space lives inside the title cell)
+        for r in &rows {
+            assert_eq!(UnicodeWidthStr::width(r.as_str()), 68, "{r:?}");
+            let date = &r[30..41];
+            assert!(
+                date.as_bytes()[2] == b'.' && date.as_bytes()[8] == b':',
+                "date must start at column 30: {r:?}"
+            );
+            assert!(!r.contains("tok"), "token unit must be gone: {r:?}");
+        }
+        assert!(rows[0].contains("hi"));
+        assert!(rows[1].contains("a medium length title!"));
     }
 
     #[test]
