@@ -815,9 +815,11 @@ impl App {
     }
 
     pub(super) fn menu_hover(&mut self, row: u16) -> Option<usize> {
-        // effort slider has its own column-aware hit-testing (see
-        // `effort_hover_at`); the row-only path must not fight it
-        if matches!(self.cur_menu(), Some(Menu::Effort)) {
+        // effort slider has its own column-aware hit-testing and hover
+        // previews nothing — but only while the slider card is actually
+        // drawn (wide terminal). The narrow fallback list hovers by row
+        // like every other menu.
+        if matches!(self.cur_menu(), Some(Menu::Effort)) && !self.effort_hits.is_empty() {
             return Some(self.menu_sel);
         }
         let r = self.menu_rect;

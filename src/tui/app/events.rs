@@ -890,9 +890,11 @@ impl App {
                         } else {
                             // inside: pick a row; outside: act like esc
                             if self.in_menu_rect(m.row, m.column) {
-                                if matches!(self.cur_menu(), Some(Menu::Effort)) {
-                                    // click moves the slider preview, the popup
-                                    // stays open; Enter commits, Esc cancels
+                                if matches!(self.cur_menu(), Some(Menu::Effort))
+                                    && !self.effort_hits.is_empty()
+                                {
+                                    // slider card: click moves the preview, the
+                                    // popup stays open; Enter commits, Esc cancels
                                     if let Some(idx) = self.effort_index_at(m.row, m.column)
                                         && idx != self.menu_sel
                                     {
@@ -914,11 +916,7 @@ impl App {
                         }
                     }
                     MouseEventKind::Moved if !self.menu_stack.is_empty() => {
-                        // effort slider: hover previews nothing (only click
-                        // or arrows change the level)
-                        if !matches!(self.cur_menu(), Some(Menu::Effort)) {
-                            let _ = self.menu_hover(m.row);
-                        }
+                        let _ = self.menu_hover(m.row);
                     }
                     MouseEventKind::Down(MouseButton::Left)
                         if self.in_input_rect(m.row, m.column) =>

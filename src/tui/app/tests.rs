@@ -1733,8 +1733,29 @@ mod tests {
     }
 
     #[test]
-    fn effort_slider_colors_span_gray_to_magenta() {
-        use crate::tui::theme::Theme;
+    fn effort_narrow_fallback_list_hovers_and_clicks_by_row() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.model_cfg.effort = EffortLevel::Low;
+        app.open_menu(crate::tui::app::menus::Menu::Effort);
+        // narrow terminal: slider card stays off, plain row list instead
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+        app.draw_menu(&mut buf, area);
+        assert!(app.effort_hits.is_empty(), "slider must not render narrow");
+        // hover the first row moves the selection (unlike the slider card)
+        let first_row = app.menu_rect.y + 1;
+        assert_eq!(app.menu_hover(first_row), Some(0));
+        assert_eq!(app.menu_sel, 0);
+        // click commits the row's level and closes the menu
+        app.menu_click(first_row);
+        assert_eq!(app.model_cfg.effort, EffortLevel::Off);
+        assert!(app.menu_stack.is_empty(), "menu must close on commit");
+    }
+
+    #[test]
+    fn effort_slider_colors_span_gray_to_magenta() {        use crate::tui::theme::Theme;
         use ratatui::style::Color;
         assert_eq!(
             Theme::effort_color(EffortLevel::Off),
