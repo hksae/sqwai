@@ -95,7 +95,9 @@ fn reopen_undone_steps(
     reopened
 }
 
-pub type Terminal = ratatui::Terminal<crate::tui::clear_tail::ClearTailBackend<std::io::Stdout>>;
+pub type Terminal = ratatui::Terminal<
+    crate::tui::clear_tail::ClearTailBackend<std::io::BufWriter<std::io::Stdout>>,
+>;
 
 mod events;
 mod forms;
@@ -1058,13 +1060,21 @@ impl App {
 
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Adaptive frame pacing: EMA of measured draw time (which includes
+        // blocking stdout writes into ConPTY). When the terminal can't drain
+        // as fast as we submit, the pace stretches so frames stop compounding
+        // into multi-second lag; when it drains fast we stay at ~120 FPS max.
+        let mut frame_ema = MIN_FRAME_INTERVAL;
         while !self.quit {
             // Event-driven wakeup: a mouse/key event wakes the loop instantly
             // instead of waiting up to 50ms for the next tick. The tick stays
             // for spinner/typewriter/background polls while idle. The frame
-            // deadline branch paces bursts to ~120 FPS max without ever
-            // leaving a dirty frame unpresented.
-            let frame_deadline = self.last_frame + MIN_FRAME_INTERVAL;
+            // deadline branch paces bursts without ever leaving a dirty frame
+            // unpresented.
+            let pace = MIN_FRAME_INTERVAL
+                .max(frame_ema)
+                .min(Duration::from_millis(100));
+            let frame_deadline = self.last_frame + pace;
             tokio::select! {
                 _ = input_notify.notified() => {},
                 _ = tick.tick() => {},
@@ -1107,7 +1117,7 @@ impl App {
                 self.spinner_tick = self.spinner_tick.wrapping_add(1);
                 self.dirty = true;
             }
-            if self.dirty && self.last_frame.elapsed() >= MIN_FRAME_INTERVAL {
+            if self.dirty && self.last_frame.elapsed() >= pace {
                 // frame timing for the `/debug` perf log: total draw vs the
                 // transcript rebuild slice; counters travel as running
                 // totals and are differenced inside the log
@@ -1135,6 +1145,8 @@ impl App {
                 })();
                 draw_res?;
                 end_res?;
+                let frame_us = t0.elapsed();
+                frame_ema = frame_ema.mul_f32(0.7) + frame_us.mul_f32(0.3);
                 self.last_frame = Instant::now();
                 let stat = perf::FrameStat {
                     draw_us: t0.elapsed().as_micros(),

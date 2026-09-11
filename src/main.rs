@@ -102,7 +102,13 @@ fn init_terminal() -> Result<tui::app::Terminal> {
         crossterm::event::EnableMouseCapture,
         crossterm::cursor::Hide
     )?;
-    let backend = crate::tui::clear_tail::ClearTailBackend::new(stdout);
+    // BufWriter coalesces the hundreds of small per-cell writes of a frame
+    // into one or two syscalls; every frame still ends with an explicit
+    // flush, so no output ever sits in the buffer across frames.
+    let backend = crate::tui::clear_tail::ClearTailBackend::new(io::BufWriter::with_capacity(
+        64 * 1024,
+        stdout,
+    ));
     Ok(tui::app::Terminal::new(backend)?)
 }
 
