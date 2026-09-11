@@ -821,7 +821,10 @@ impl App {
                             self.hover = None;
                             self.dirty = true;
                         } else {
-                            self.scroll(4);
+                            // 3 lines per notch (was 4): smaller steps read as
+                            // smoother motion now that each notch draws its own
+                            // frame instead of batching into a 50ms tick.
+                            self.scroll(3);
                         }
                     }
                     MouseEventKind::ScrollDown => {
@@ -840,7 +843,7 @@ impl App {
                             self.hover = None;
                             self.dirty = true;
                         } else {
-                            self.scroll(-4);
+                            self.scroll(-3);
                         }
                     }
                     MouseEventKind::Down(MouseButton::Left) if !self.menu_stack.is_empty() => {

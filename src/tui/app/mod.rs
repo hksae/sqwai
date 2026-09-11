@@ -17,6 +17,12 @@ use crate::session::{ActivitySummary, Session, SessionHeader, TurnNote};
 use crate::tui::markdown::Highlighter;
 use crate::tui::theme::Theme;
 
+/// Minimum frame interval: redraws are clamped to ~120 FPS max (same bound as
+/// Codex `frame_rate_limiter::MIN_FRAME_INTERVAL`), so input bursts (fast
+/// wheel, hover floods) coalesce into paced frames instead of burning CPU
+/// with one draw per event.
+const MIN_FRAME_INTERVAL: Duration = Duration::from_nanos(8_333_334);
+
 fn reopened_step_ids(
     active: &plan::Plan,
     records: &[crate::agent::journal::Record],
@@ -286,6 +292,8 @@ pub struct App {
     /// absolute top line of the viewport when not following (None-equivalent: follow == true)
     view_top: usize,
     spinner_tick: usize,
+    /// last time a frame was presented; gates redraws to `MIN_FRAME_INTERVAL`
+    last_frame: Instant,
     /// last time draw_menu rebuilt menu_rows (throttled background refresh)
     menu_built_at: Option<std::time::Instant>,
     quit: bool,
@@ -739,6 +747,7 @@ impl App {
             follow: true,
             view_top: 0,
             spinner_tick: 0,
+            last_frame: Instant::now(),
             menu_built_at: None,
             quit: false,
             dirty: true,
@@ -1039,10 +1048,15 @@ impl App {
         while !self.quit {
             // Event-driven wakeup: a mouse/key event wakes the loop instantly
             // instead of waiting up to 50ms for the next tick. The tick stays
-            // for spinner/typewriter/background polls while idle.
+            // for spinner/typewriter/background polls while idle. The frame
+            // deadline branch paces bursts to ~120 FPS max without ever
+            // leaving a dirty frame unpresented.
+            let frame_deadline = self.last_frame + MIN_FRAME_INTERVAL;
             tokio::select! {
                 _ = input_notify.notified() => {},
                 _ = tick.tick() => {},
+                _ = tokio::time::sleep_until(frame_deadline.into()),
+                    if self.dirty && Instant::now() < frame_deadline => {},
             }
             if self.enter_gate.flush(Instant::now()) {
                 self.submit();
@@ -1080,7 +1094,7 @@ impl App {
                 self.spinner_tick = self.spinner_tick.wrapping_add(1);
                 self.dirty = true;
             }
-            if self.dirty {
+            if self.dirty && self.last_frame.elapsed() >= MIN_FRAME_INTERVAL {
                 // frame timing for the `/debug` perf log: total draw vs the
                 // transcript rebuild slice; counters travel as running
                 // totals and are differenced inside the log
@@ -1108,6 +1122,7 @@ impl App {
                 })();
                 draw_res?;
                 end_res?;
+                self.last_frame = Instant::now();
                 let stat = perf::FrameStat {
                     draw_us: t0.elapsed().as_micros(),
                     rebuild_us: self.last_rebuild_us,
