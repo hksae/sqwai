@@ -3990,38 +3990,96 @@ mod tests {
             }
         }
     }
-    /// The working shimmer reads as part of the model group, right of the
-    /// model name: the text "Working" (brightness wave) immediately after it.
     #[test]
-    fn working_shimmer_sits_right_of_the_model() {
+    fn live_activity_header_shimmers_finished_stays_dim() {
+        use super::view::{ActivityGroup, activity_header_line};
+        let g = ActivityGroup {
+            seg_start: 0,
+            seg_end: 0,
+            calls: 3,
+            thinking: 0,
+            duration_ms: 5000,
+            errors: 0,
+            rejected: 0,
+            expanded: true,
+            turn_user: None,
+        };
+        // finished header: static dim text
+        let still = activity_header_line(&g, None);
+        let text: String = still
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("activity · 3 calls"), "{text:?}");
+        assert!(
+            still.spans.iter().all(|s| s.style == Theme::dim()),
+            "finished header must stay dim: {still:?}"
+        );
+        // live header at mid-sweep: same text, shaded letters
+        let live = activity_header_line(&g, Some(crate::tui::shimmer::SHIMMER_PERIOD_TICKS / 4));
+        let live_text: String = live
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(live_text, text, "shimmer must not change the text");
+        // the 8 "activity" letters carry more than one brightness step
+        let word: String = live
+            .spans
+            .iter()
+            .skip(1)
+            .take(8)
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(word, "activity");
+        let styles: std::collections::HashSet<String> = live
+            .spans
+            .iter()
+            .skip(1)
+            .take(8)
+            .map(|s| format!("{:?}", s.style))
+            .collect();
+        assert!(
+            styles.len() > 1,
+            "live header must shade the word differently: {styles:?}"
+        );
+    }
+
+    /// The working spinner reads as part of the model group, right of the
+    /// model name, in the chip's accent colour but without its inverted
+    /// background.
+    #[test]
+    fn working_spinner_sits_right_of_the_model_without_chip_background() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
         app.streaming = true;
-        // mid-sweep tick: the band sits on the word, not off-text
-        app.spinner_tick = crate::tui::shimmer::SHIMMER_PERIOD_TICKS / 4;
 
         let spans = app.status_bar_spans(100);
         let model_at = spans
             .iter()
             .position(|s| s.content.contains("test-model"))
             .expect("model span rendered");
-        let tail: String = spans[model_at + 1..]
+        let spinner_at = spans
             .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(
-            tail.starts_with("Working "),
-            "shimmer must sit immediately right of the model: {tail:?}"
+            .position(|s| {
+                let text = s.content.trim();
+                text.chars().count() == 1
+                    && text
+                        .chars()
+                        .next()
+                        .is_some_and(|c| WORKING_SPINNER.contains(&c))
+            })
+            .expect("spinner span rendered while streaming");
+        assert_eq!(
+            spinner_at,
+            model_at + 1,
+            "spinner must sit immediately right of the model"
         );
-        // the wave actually varies brightness across the word
-        let styles: std::collections::HashSet<String> = spans[model_at + 1..]
-            .iter()
-            .take_while(|s| !s.content.contains(' '))
-            .map(|s| format!("{:?}", s.style))
-            .collect();
-        assert!(
-            styles.len() > 1,
-            "shimmer band must shade letters differently: {styles:?}"
+        assert_eq!(
+            spans[spinner_at].style,
+            ratatui::style::Style::new().fg(crate::tui::theme::Theme::ACCENT_SOFT()),
+            "spinner uses the chip accent without its background block"
         );
     }
     /// The provider menu carries a connection probe: dispatching it marks the

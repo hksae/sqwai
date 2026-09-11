@@ -1793,7 +1793,13 @@ impl App {
                     in_group = true;
                 }
                 last_block = BlockKind::Activity;
-                struct_row!(activity_header_line(g), Some(GROUP_BASE + gi));
+                // the running turn's group (if any) sits past the finished
+                // ones: only its "activity" word shimmers, the rest is static
+                let live = self.streaming && gi == self.activity_groups.len();
+                struct_row!(
+                    activity_header_line(g, live.then_some(self.spinner_tick)),
+                    Some(GROUP_BASE + gi)
+                );
                 if g.expanded {
                     inside_until = g.seg_end;
                 } else {
@@ -3281,17 +3287,13 @@ impl App {
         let mut ctx_metrics_label = format!(" cache {cp}% · {ctx_pct}% · {tok_str} ·");
 
         let model_label = format!(" {} ", self.model_cfg.id);
-        // Codex-style activity header: a brightness wave sweeping "Working"
-        // while the agent runs (tick-driven, one frame per UI tick).
-        // Tool rows keep the braille spinner; this label is the agent one.
-        let working_width: usize = if self.streaming { "Working ".len() } else { 0 };
-        let working_spans: Vec<Span> = if self.streaming {
-            let mut spans =
-                crate::tui::shimmer::shimmer_spans("Working", self.spinner_tick);
-            spans.push(Span::styled(" ".to_string(), Theme::base()));
-            spans
+        let working_label = if self.streaming {
+            format!(
+                "{} ",
+                WORKING_SPINNER[self.spinner_tick % WORKING_SPINNER.len()]
+            )
         } else {
-            Vec::new()
+            String::new()
         };
         // reports the effective mapping, not the raw selection (§5.1)
         let effort_plan = self.effort_plan();
@@ -3340,7 +3342,7 @@ impl App {
         let mut fixed_len: usize = 1
             + cols(&agents_label)
             + cols(&ctx_metrics_label)
-            + working_width
+            + cols(&working_label)
             + cols(&model_label)
             + cols(&ef_label)
             + cols(&lsp_label); // mode chip always present
@@ -3349,7 +3351,7 @@ impl App {
             ctx_metrics_label.clear();
             fixed_len = 1
                 + cols(&agents_label)
-                + working_width
+                + cols(&working_label)
                 + cols(&model_label)
                 + cols(&ef_label)
                 + cols(&lsp_label);
@@ -3407,11 +3409,18 @@ impl App {
         spans.push(Span::styled(ctx_metrics_label.clone(), Theme::dim()));
         let model_x0 = agents_x0 + cols(&agents_label) as u16 + cols(&ctx_metrics_label) as u16;
         spans.push(Span::styled(model_label, Theme::dim()));
-        // The working shimmer reads as part of the model group, right of the
-        // model name. Click targets below are measured from the same
+        // The working spinner reads as part of the model group, right of the
+        // model name, in the chip's accent colour — but without the chip's
+        // inverted background: a highlight block around a spinning glyph reads
+        // as a selection. Click targets below are measured from the same
         // numbers, so `ef_x0` accounts for its width.
-        let ef_x0 = model_x0 + cols(&self.model_cfg.id) as u16 + 2 + working_width as u16;
-        spans.extend(working_spans);
+        let ef_x0 = model_x0 + cols(&self.model_cfg.id) as u16 + 2 + cols(&working_label) as u16;
+        if !working_label.is_empty() {
+            spans.push(Span::styled(
+                working_label,
+                Style::new().fg(Theme::ACCENT_SOFT()),
+            ));
+        }
         let ef_style = if self.model_cfg.effort == EffortLevel::Off || !effort_plan.is_honoured() {
             // a level the model will not act on must not be lit up as if it
             // were doing work
@@ -3958,14 +3967,24 @@ pub(super) fn blank() -> Line<'static> {
 
 /// The one-line summary of a turn's working content. Failures are spelled out
 /// here: a collapsed block must never hide the fact that something broke.
-fn activity_header_line(g: &ActivityGroup) -> Line<'static> {
+/// While the turn runs (`live_tick` set), the "activity" word shimmers
+/// Codex-style; finished headers stay static dim.
+pub(super) fn activity_header_line(
+    g: &ActivityGroup,
+    live_tick: Option<usize>,
+) -> Line<'static> {
     let arrow = if g.expanded { "▾" } else { "▸" };
-    let mut text = format!("  {arrow} activity · {} calls", g.calls);
+    let mut spans = vec![Span::styled(format!("  {arrow} "), Theme::dim())];
+    match live_tick {
+        Some(tick) => spans.extend(crate::tui::shimmer::shimmer_spans("activity", tick)),
+        None => spans.push(Span::styled("activity".to_string(), Theme::dim())),
+    }
+    let mut text = format!(" · {} calls", g.calls);
     if g.thinking > 0 {
         text.push_str(&format!(" · {} thinking", g.thinking));
     }
     text.push_str(&format!(" · {}s", g.duration_ms / 1000));
-    let mut spans = vec![Span::styled(text, Theme::dim())];
+    spans.push(Span::styled(text, Theme::dim()));
     if g.errors > 0 {
         spans.push(Span::styled(format!(" · {} error", g.errors), Theme::err()));
     }
