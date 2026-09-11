@@ -2925,10 +2925,7 @@ impl App {
         for (n, item) in items.iter().skip(skip).take(shown).enumerate() {
             let hovered = self.hover.as_deref() == Some(item.as_str());
             let cmd_style = if hovered {
-                Style::new()
-                    .fg(Theme::BG())
-                    .bg(Theme::ACCENT_SOFT())
-                    .add_modifier(Modifier::BOLD)
+                Theme::accent_bold()
             } else {
                 Theme::base()
             };
