@@ -20,9 +20,11 @@ impl Theme {
     pub const fn SURFACE() -> Color {
         Color::Reset
     }
+    /// User message band: Codex-style white-12%-over-dark (~#262626).
+    /// A 256-color gray (not a custom RGB): present on every modern terminal.
     #[allow(non_snake_case)]
     pub const fn USER_SURFACE() -> Color {
-        Color::Reset
+        Color::Indexed(235)
     }
     #[allow(non_snake_case)]
     pub const fn FG() -> Color {
