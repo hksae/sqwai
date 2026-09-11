@@ -3281,13 +3281,17 @@ impl App {
         let mut ctx_metrics_label = format!(" cache {cp}% · {ctx_pct}% · {tok_str} ·");
 
         let model_label = format!(" {} ", self.model_cfg.id);
-        let working_label = if self.streaming {
-            format!(
-                "{} ",
-                WORKING_SPINNER[self.spinner_tick % WORKING_SPINNER.len()]
-            )
+        // Codex-style activity header: a brightness wave sweeping "Working"
+        // while the agent runs (tick-driven, one frame per UI tick).
+        // Tool rows keep the braille spinner; this label is the agent one.
+        let working_width: usize = if self.streaming { "Working ".len() } else { 0 };
+        let working_spans: Vec<Span> = if self.streaming {
+            let mut spans =
+                crate::tui::shimmer::shimmer_spans("Working", self.spinner_tick);
+            spans.push(Span::styled(" ".to_string(), Theme::base()));
+            spans
         } else {
-            String::new()
+            Vec::new()
         };
         // reports the effective mapping, not the raw selection (§5.1)
         let effort_plan = self.effort_plan();
@@ -3336,7 +3340,7 @@ impl App {
         let mut fixed_len: usize = 1
             + cols(&agents_label)
             + cols(&ctx_metrics_label)
-            + cols(&working_label)
+            + working_width
             + cols(&model_label)
             + cols(&ef_label)
             + cols(&lsp_label); // mode chip always present
@@ -3345,7 +3349,7 @@ impl App {
             ctx_metrics_label.clear();
             fixed_len = 1
                 + cols(&agents_label)
-                + cols(&working_label)
+                + working_width
                 + cols(&model_label)
                 + cols(&ef_label)
                 + cols(&lsp_label);
@@ -3403,18 +3407,11 @@ impl App {
         spans.push(Span::styled(ctx_metrics_label.clone(), Theme::dim()));
         let model_x0 = agents_x0 + cols(&agents_label) as u16 + cols(&ctx_metrics_label) as u16;
         spans.push(Span::styled(model_label, Theme::dim()));
-        // The working spinner reads as part of the model group, right of the
-        // model name, in the chip's accent colour — but without the chip's
-        // inverted background: a highlight block around a spinning glyph reads
-        // as a selection. Click targets below are measured from the same
+        // The working shimmer reads as part of the model group, right of the
+        // model name. Click targets below are measured from the same
         // numbers, so `ef_x0` accounts for its width.
-        let ef_x0 = model_x0 + cols(&self.model_cfg.id) as u16 + 2 + cols(&working_label) as u16;
-        if !working_label.is_empty() {
-            spans.push(Span::styled(
-                working_label,
-                Style::new().fg(Theme::ACCENT_SOFT()),
-            ));
-        }
+        let ef_x0 = model_x0 + cols(&self.model_cfg.id) as u16 + 2 + working_width as u16;
+        spans.extend(working_spans);
         let ef_style = if self.model_cfg.effort == EffortLevel::Off || !effort_plan.is_honoured() {
             // a level the model will not act on must not be lit up as if it
             // were doing work
