@@ -649,10 +649,27 @@ fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
     if !(after.is_empty() || after.starts_with(' ') || after.starts_with('\t')) {
         return None;
     }
-    let rest = after.trim_start_matches([' ', '\t']);
+    let mut rest = after.trim_start_matches([' ', '\t']);
+    // Optional closing run (`## Title ##`): trailing `#`s preceded by a
+    // space are syntax, not content.
+    {
+        let bytes = rest.as_bytes();
+        let mut end = bytes.len();
+        while end > 0 && bytes[end - 1] == b'#' {
+            end -= 1;
+        }
+        if end < bytes.len()
+            && end > 0
+            && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t')
+        {
+            rest = rest[..end].trim_end();
+        }
+    }
     // Headings: h1 bold+underlined, h2 bold, h3 bold+cyan, h4-h6 dim
     // italic. h3/h4+ deliberately do not rely on italic alone: terminals
     // without italic support (conhost) would render them as plain text.
+    // The `#` markers are syntax, not content: they are never printed,
+    // the heading style alone carries the level.
     let style = match level {
         1 => Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         2 => Style::new().add_modifier(Modifier::BOLD),
@@ -663,9 +680,7 @@ fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
             .fg(Theme::DIM())
             .add_modifier(Modifier::ITALIC),
     };
-    let mut spans = vec![Span::styled(format!("{} ", "#".repeat(level)), style)];
-    spans.extend(inline(rest, style));
-    Some(spans)
+    Some(inline(rest, style))
 }
 
 fn try_list(s: &str) -> Option<(String, &str)> {
@@ -1525,7 +1540,7 @@ mod tests {
     }
 
     #[test]
-    fn headings_keep_markers_codex_style() {
+    fn headings_hide_markers_keep_level_style() {
         let hl = Highlighter::new();
         let lines = render("# Catalog\ndescription\n# Additional example", 80, &hl);
         assert_eq!(lines.len(), 3);
@@ -1534,7 +1549,8 @@ mod tests {
             .iter()
             .map(|s| s.content.to_string())
             .collect();
-        assert_eq!(first, "# Catalog");
+        // markers are syntax, not content: never printed
+        assert_eq!(first, "Catalog");
         assert!(
             lines[0]
                 .spans
@@ -1556,7 +1572,7 @@ mod tests {
             .iter()
             .map(|s| s.content.to_string())
             .collect();
-        assert_eq!(h2text, "## Sub");
+        assert_eq!(h2text, "Sub");
         assert!(
             h2[0]
                 .spans
@@ -1567,6 +1583,12 @@ mod tests {
             h2[0]
         );
         let h3 = render("### Deep", 80, &hl);
+        let h3text: String = h3[0]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert_eq!(h3text, "Deep");
         assert!(
             h3[0].spans.iter().all(|s| s.style.add_modifier.contains(Modifier::BOLD)
                 && s.style.add_modifier.contains(Modifier::ITALIC)
@@ -1574,6 +1596,14 @@ mod tests {
             "h3 must be bold+italic cyan: {:?}",
             h3[0]
         );
+        // closed ATX (`### Deep ###`) drops the closing run too
+        let closed = render("### Deep ###", 80, &hl);
+        let closed_text: String = closed[0]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert_eq!(closed_text, "Deep");
         let h4 = render("#### Fine", 80, &hl);
         assert!(
             h4[0].spans.iter().all(|s| s.style.add_modifier.contains(Modifier::ITALIC)
