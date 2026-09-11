@@ -2717,18 +2717,13 @@ impl App {
             {
                 let abs = self.menu_scroll + n;
                 if abs == self.menu_sel {
+                    // Codex-style selection: the whole row goes cyan bold,
+                    // no inverted block.
                     rows.push(Line::from(
                         line.spans
                             .iter()
                             .map(|s| {
-                                Span::styled(
-                                    s.content.to_string(),
-                                    s.style
-                                        .patch(Style::new())
-                                        .fg(Theme::BG())
-                                        .bg(Theme::ACCENT())
-                                        .add_modifier(Modifier::BOLD),
-                                )
+                                Span::styled(s.content.to_string(), Theme::accent_bold())
                             })
                             .collect::<Vec<_>>(),
                     ));

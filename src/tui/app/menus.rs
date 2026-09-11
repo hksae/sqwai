@@ -1783,7 +1783,7 @@ impl App {
                     row(
                         Line::from(vec![Span::styled(
                             format!("  {label}"),
-                            Theme::accent_bold(),
+                            Theme::FG(),
                         )]),
                         action,
                     )
@@ -2011,8 +2011,8 @@ impl App {
             Menu::Skills => {
                 self.menu_rows.push(row(
                     Line::from(vec![
-                        Span::styled(format!("  {:<18}", "auto-load"), Theme::dim()),
-                        Span::styled(on_off(self.cfg.skills.auto_load), Theme::accent()),
+                        Span::styled(format!("  {:<18}", "auto-load"), Theme::FG()),
+                        Span::styled(on_off(self.cfg.skills.auto_load), Theme::dim()),
                     ]),
                     MenuAction::ToggleSkillsAutoLoad,
                 ));
@@ -2069,7 +2069,7 @@ impl App {
                 let setting = |label: &str, detail: &str, action: MenuAction| {
                     row(
                         Line::from(vec![
-                            Span::styled(format!("  {label:<16}"), Theme::accent_bold()),
+                            Span::styled(format!("  {label:<16}"), Theme::FG()),
                             Span::styled(detail.to_string(), Theme::dim()),
                         ]),
                         action,
@@ -2097,8 +2097,8 @@ impl App {
                 let scalar = |label: &str, val: String, s: ScalarSetting| {
                     row(
                         Line::from(vec![
-                            Span::styled(format!("  {label:<18}"), Theme::dim()),
-                            Span::styled(val, Theme::accent()),
+                            Span::styled(format!("  {label:<18}"), Theme::FG()),
+                            Span::styled(val, Theme::dim()),
                         ]),
                         MenuAction::EditScalar(s),
                     )
@@ -2148,8 +2148,8 @@ impl App {
                 ));
                 self.menu_rows.push(row(
                     Line::from(vec![
-                        Span::styled(format!("  {:<18}", "effort"), Theme::dim()),
-                        Span::styled(self.cfg.diary.effort.as_str().to_string(), Theme::accent()),
+                        Span::styled(format!("  {:<18}", "effort"), Theme::FG()),
+                        Span::styled(self.cfg.diary.effort.as_str().to_string(), Theme::dim()),
                     ]),
                     MenuAction::CycleDiaryEffort,
                 ));
@@ -2191,10 +2191,10 @@ impl App {
                 ));
                 self.menu_rows.push(row(
                     Line::from(vec![
-                        Span::styled(format!("  {:<18}", "summary"), Theme::dim()),
+                        Span::styled(format!("  {:<18}", "summary"), Theme::FG()),
                         Span::styled(
                             self.cfg.compaction.summary.as_str().to_string(),
-                            Theme::accent(),
+                            Theme::dim(),
                         ),
                     ]),
                     MenuAction::CycleCompactionSummary,
@@ -2237,8 +2237,8 @@ impl App {
                 let scalar = |label: &str, val: String, s: ScalarSetting| {
                     row(
                         Line::from(vec![
-                            Span::styled(format!("  {label:<18}"), Theme::dim()),
-                            Span::styled(val, Theme::accent()),
+                            Span::styled(format!("  {label:<18}"), Theme::FG()),
+                            Span::styled(val, Theme::dim()),
                         ]),
                         MenuAction::EditScalar(s),
                     )
@@ -2260,8 +2260,8 @@ impl App {
                 ));
                 self.menu_rows.push(row(
                     Line::from(vec![
-                        Span::styled(format!("  {:<18}", "shadow"), Theme::dim()),
-                        Span::styled(self.cfg.undo.shadow.as_str().to_string(), Theme::accent()),
+                        Span::styled(format!("  {:<18}", "shadow"), Theme::FG()),
+                        Span::styled(self.cfg.undo.shadow.as_str().to_string(), Theme::dim()),
                     ]),
                     MenuAction::CycleUndoShadow,
                 ));
@@ -2281,7 +2281,7 @@ impl App {
                     };
                     self.menu_rows.push(row(
                         Line::from(vec![
-                            Span::styled(format!(" {k}{mark}"), Theme::accent()),
+                            Span::styled(format!(" {k}{mark}"), Theme::FG()),
                             Span::styled(format!("  {}", m.provider), Theme::dim()),
                         ]),
                         MenuAction::SetDefaultModel(k.clone()),
@@ -2305,8 +2305,8 @@ impl App {
                 let setting = |l: &str, val: String, a: MenuAction| {
                     row(
                         Line::from(vec![
-                            Span::styled(format!(" {l:<18}"), Theme::dim()),
-                            Span::styled(val, Theme::accent()),
+                            Span::styled(format!(" {l:<18}"), Theme::FG()),
+                            Span::styled(val, Theme::dim()),
                         ]),
                         a,
                     )
@@ -2514,17 +2514,17 @@ impl App {
             Menu::Providers => {
                 self.menu_rows.push(row(
                     Line::from(vec![
-                        Span::styled(format!("  {:<16}", "default model"), Theme::dim()),
-                        Span::styled(self.cfg.default_model.clone(), Theme::accent()),
+                        Span::styled(format!("  {:<16}", "default model"), Theme::FG()),
+                        Span::styled(self.cfg.default_model.clone(), Theme::dim()),
                     ]),
                     MenuAction::OpenPickDefaultModel,
                 ));
                 self.menu_rows.push(row(
                     Line::from(vec![
-                        Span::styled(format!("  {:<16}", "default effort"), Theme::dim()),
+                        Span::styled(format!("  {:<16}", "default effort"), Theme::FG()),
                         Span::styled(
                             self.cfg.default_effort.as_str().to_string(),
-                            Theme::accent(),
+                            Theme::dim(),
                         ),
                     ]),
                     MenuAction::CycleDefaultEffort,
@@ -2547,7 +2547,7 @@ impl App {
                     let badge = if is_builtin { " [builtin]" } else { "" };
                     self.menu_rows.push(row(
                         Line::from(vec![
-                            Span::styled(format!(" {name}{badge}"), Theme::accent()),
+                            Span::styled(format!(" {name}{badge}"), Theme::FG()),
                             Span::styled(
                                 format!("  {} · {models} models · {key_state}", pc.base_url),
                                 Theme::dim(),
@@ -2587,7 +2587,7 @@ impl App {
                         };
                         self.menu_rows.push(row(
                             Line::from(vec![
-                                Span::styled(format!(" {k}{mark}"), Theme::accent()),
+                                Span::styled(format!(" {k}{mark}"), Theme::FG()),
                                 Span::styled(
                                     format!(
                                         "  {} · {}{} · {}",
@@ -2670,7 +2670,7 @@ impl App {
                         let mark = if current { " *current" } else { "" };
                         self.menu_rows.push(row(
                             Line::from(vec![
-                                Span::styled(format!(" {k}"), Theme::accent()),
+                                Span::styled(format!(" {k}"), Theme::FG()),
                                 Span::styled(format!("  {}{mark}", m.id), Theme::dim()),
                             ]),
                             MenuAction::UseModel(k.clone()),
@@ -2760,7 +2760,7 @@ impl App {
                     self.menu_rows.push(row(
                         Line::from(vec![Span::styled(
                             format!(" {}", q.question),
-                            Theme::accent_bold(),
+                            Theme::FG(),
                         )]),
                         MenuAction::None,
                     ));
@@ -2791,7 +2791,7 @@ impl App {
                             }
                         };
                         let mut spans = vec![
-                            Span::styled(format!("{checked}{}. ", o_idx + 1), Theme::accent()),
+                            Span::styled(format!("{checked}{}. ", o_idx + 1), Theme::LIGHT_BLUE()),
                             Span::styled(
                                 label,
                                 if is_recommended {
@@ -2963,7 +2963,7 @@ impl App {
                     for (i, item) in self.todos.iter().enumerate() {
                         self.menu_rows.push(row(
                             Line::from(vec![
-                                Span::styled(format!("  {}. ", i + 1), Theme::accent()),
+                                Span::styled(format!("  {}. ", i + 1), Theme::LIGHT_BLUE()),
                                 Span::styled(item.clone(), Theme::base()),
                             ]),
                             MenuAction::None,
@@ -3329,7 +3329,7 @@ fn plan_rows(
         &mut rows,
         "  goal: ",
         &plan.goal.text,
-        Theme::accent(),
+        Theme::dim(),
         Theme::base(),
     );
     if !plan.constraints.is_empty() {
@@ -3427,7 +3427,7 @@ fn session_row(
     let Some(frame_w) = framed else {
         return (
             Line::from(vec![
-                Span::styled(left, Theme::accent()),
+                Span::styled(left, Theme::FG()),
                 Span::styled(format!("  {dim}"), Theme::dim()),
             ]),
             action,
@@ -3445,7 +3445,7 @@ fn session_row(
     (
         Line::from(vec![
             Span::styled("│".to_string(), Theme::rule_color()),
-            Span::styled(left, Theme::accent()),
+            Span::styled(left, Theme::FG()),
             Span::styled(format!("  {dim_truncated}"), Theme::dim()),
             Span::styled(" ".repeat(pad), Theme::base()),
             Span::styled("│".to_string(), Theme::rule_color()),
