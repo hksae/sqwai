@@ -26,10 +26,9 @@
 //!   the inner stock `draw` assumes that entry state (same assumption it makes
 //!   after its own reset trailer).
 //!
-//! Runs shorter than [`MIN_EL_RUN`] stay plain spaces: below that the EL
-//! preamble costs more than the spaces it replaces.
+//! Runs shorter than the EL threshold (see presenter core) stay plain
+//! spaces: below that the EL preamble costs more than the spaces it replaces.
 
-use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use crossterm::cursor::MoveTo;
@@ -41,10 +40,6 @@ use crossterm::terminal::{Clear as ClearCmd, ClearType as CClearType};
 use ratatui::backend::{Backend, ClearType, CrosstermBackend, WindowSize};
 use ratatui::buffer::Cell;
 use ratatui::layout::{Position, Size};
-use ratatui::style::{Color as RColor, Modifier};
-
-/// Minimum trailing blank run (cells) worth replacing with a single EL.
-const MIN_EL_RUN: usize = 8;
 
 /// Shared, byte-counting terminal writer.
 ///
@@ -145,39 +140,6 @@ impl<W: Write> ClearTailBackend<W> {
     }
 }
 
-fn map_color(c: RColor) -> CColor {
-    match c {
-        RColor::Reset => CColor::Reset,
-        RColor::Black => CColor::Black,
-        RColor::Red => CColor::DarkRed,
-        RColor::Green => CColor::DarkGreen,
-        RColor::Yellow => CColor::DarkYellow,
-        RColor::Blue => CColor::DarkBlue,
-        RColor::Magenta => CColor::DarkMagenta,
-        RColor::Cyan => CColor::DarkCyan,
-        RColor::Gray => CColor::Grey,
-        RColor::DarkGray => CColor::DarkGrey,
-        RColor::LightRed => CColor::Red,
-        RColor::LightGreen => CColor::Green,
-        RColor::LightBlue => CColor::Blue,
-        RColor::LightYellow => CColor::Yellow,
-        RColor::LightMagenta => CColor::Magenta,
-        RColor::LightCyan => CColor::Cyan,
-        RColor::White => CColor::White,
-        RColor::Indexed(i) => CColor::AnsiValue(i),
-        RColor::Rgb(r, g, b) => CColor::Rgb { r, g, b },
-    }
-}
-
-/// Whether setting this cell to blank is visually identical to clearing it
-/// with EL on background `bg`.
-fn clearable(cell: &Cell, bg: RColor) -> bool {
-    cell.symbol() == " "
-        && cell.modifier == Modifier::empty()
-        && cell.bg == bg
-        && cell.underline_color == RColor::Reset
-}
-
 impl<W: Write> Backend for ClearTailBackend<W> {
     fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
     where
@@ -185,48 +147,15 @@ impl<W: Write> Backend for ClearTailBackend<W> {
     {
         let cells: Vec<(u16, u16, Cell)> =
             content.map(|(x, y, c)| (x, y, c.clone())).collect();
-        // Indexes into `cells` replaced by an EL, plus the ELs to emit.
-        let mut skip = vec![false; cells.len()];
-        let mut els: Vec<(u16, u16, RColor)> = Vec::new();
-        if !cells.is_empty() {
-            let width = self.width();
-            let mut rows: BTreeMap<u16, Vec<usize>> = BTreeMap::new();
-            for (i, &(_, y, _)) in cells.iter().enumerate() {
-                rows.entry(y).or_default().push(i);
-            }
-            for (&y, idxs) in &rows {
-                let mut ord = idxs.clone();
-                ord.sort_by_key(|&i| cells[i].0);
-                let &last = ord.last().expect("row index list is never empty");
-                // The run must reach the last terminal column ...
-                if cells[last].0.checked_add(1) != Some(width) {
-                    continue;
-                }
-                let bg = cells[last].2.bg;
-                // ... and be exactly contiguous backwards from it.
-                let mut run: usize = 0;
-                for &i in ord.iter().rev() {
-                    let expect_x = width - 1 - run as u16;
-                    if cells[i].0 != expect_x || !clearable(&cells[i].2, bg) {
-                        break;
-                    }
-                    run += 1;
-                }
-                if run >= MIN_EL_RUN {
-                    for &i in &ord[ord.len() - run..] {
-                        skip[i] = true;
-                    }
-                    els.push((width - run as u16, y, bg));
-                }
-            }
-        }
-        els.sort_unstable_by_key(|&(x, y, _)| (x, y));
+        // EL planning lives in the presenter core (shared, tested there).
+        use super::presenter::{coalesce_trailing_blanks, map_crossterm_color};
+        let (skip, els) = coalesce_trailing_blanks(&cells, self.width());
         for &(x, y, bg) in &els {
             // EL clears with the *current* background, so reset attributes
             // first (same order as the stock backend's own sequences).
             crossterm::queue!(self.inner, MoveTo(x, y))?;
             crossterm::queue!(self.inner, SetAttribute(CAttribute::Reset))?;
-            crossterm::queue!(self.inner, SetBackgroundColor(map_color(bg)))?;
+            crossterm::queue!(self.inner, SetBackgroundColor(map_crossterm_color(bg)))?;
             crossterm::queue!(self.inner, ClearCmd(CClearType::UntilNewLine))?;
         }
         if !els.is_empty() {
@@ -299,6 +228,7 @@ impl<W: Write> Write for ClearTailBackend<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::{Color as RColor, Modifier};
 
     #[derive(Clone, Default)]
     struct VecWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -426,6 +356,7 @@ mod tests {
 
     #[test]
     fn map_color_covers_named_and_indexed_colors() {
+        use crate::tui::presenter::map_crossterm_color as map_color;
         assert_eq!(map_color(RColor::Reset), CColor::Reset);
         assert_eq!(map_color(RColor::Red), CColor::DarkRed);
         assert_eq!(map_color(RColor::LightBlue), CColor::Blue);
