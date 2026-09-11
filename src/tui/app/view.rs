@@ -4,10 +4,11 @@ use super::*;
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::backend::CrosstermBackend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget};
 use std::hash::{Hash, Hasher};
 use tui_textarea::TextArea;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -2159,6 +2160,14 @@ impl App {
 
     pub(super) fn draw(&mut self, f: &mut ratatui::Frame) {
         let area = f.area();
+        self.render_into(f.buffer_mut(), area);
+    }
+
+    /// Terminal-independent render: paints the whole UI into `buf` without
+    /// touching a `Terminal`, so the frame can be produced on the UI thread
+    /// and presented by a dedicated presenter thread. `draw` stays as a thin
+    /// wrapper for tests.
+    pub(super) fn render_into(&mut self, buf: &mut Buffer, area: Rect) {
         // cleared every frame: only a deferred width rebuild sets it below,
         // and the loop keeps `dirty` while it stays set
         self.defer_rebuild = false;
@@ -2166,7 +2175,7 @@ impl App {
             return;
         }
         if let Some(id) = self.active_subagent {
-            self.draw_subagent_chat(f, area, id);
+            self.draw_subagent_chat(buf, area, id);
             return;
         }
         let input_rows = self.input.lines().len().clamp(1, 6) as u16;
@@ -2214,10 +2223,10 @@ impl App {
         self.last_input = layout[2];
         self.apply_pending_anchor(None);
 
-        f.render_widget(Block::new().style(Theme::base()), area);
+        Block::new().style(Theme::base()).render(area, buf);
 
         if self.startup && self.menu_stack.is_empty() {
-            self.render_startup_screen(f, chat);
+            self.render_startup_screen(buf, chat);
         } else {
             let top = self.chat_top(chat.height);
             // User-message surface strips intentionally extend beyond the chat
@@ -2236,11 +2245,9 @@ impl App {
                         width: area.width,
                         height: 1,
                     };
-                    f.render_widget(
-                        Paragraph::new(" ".repeat(area.width as usize))
-                            .style(Style::new().bg(Theme::USER_SURFACE())),
-                        strip,
-                    );
+                    Paragraph::new(" ".repeat(area.width as usize))
+                        .style(Style::new().bg(Theme::USER_SURFACE()))
+                        .render(strip, buf);
                 }
             }
             let sel = self.sel;
@@ -2281,7 +2288,7 @@ impl App {
                 .collect();
             // Lines carry their own styles. Do not apply the base background at
             // widget level: it would override USER_SURFACE on user-strip rows.
-            f.render_widget(Paragraph::new(visible), chat);
+            Paragraph::new(visible).render(chat, buf);
             // The transcript widget repaints its own rectangle, so apply the
             // full-width fill again afterwards to restore the two outer gutters.
             for (screen_row, abs_row) in (top..top + chat.height as usize).enumerate() {
@@ -2293,23 +2300,23 @@ impl App {
                 if is_user {
                     let y = chat.y + screen_row as u16;
                     let fill = Paragraph::new(" ").style(Style::new().bg(Theme::USER_SURFACE()));
-                    f.render_widget(
-                        fill.clone(),
+                    fill.clone().render(
                         Rect {
                             x: area.x,
                             y,
                             width: 1,
                             height: 1,
                         },
+                        buf,
                     );
-                    f.render_widget(
-                        fill,
+                    fill.render(
                         Rect {
                             x: area.x + area.width.saturating_sub(1),
                             y,
                             width: 1,
                             height: 1,
                         },
+                        buf,
                     );
                 }
             }
@@ -2320,7 +2327,7 @@ impl App {
             Theme::border_dim(),
         )))
         .style(Theme::base());
-        f.render_widget(rule.clone(), layout[1]);
+        rule.clone().render(layout[1], buf);
         self.input.set_block(Self::input_block());
         // the cursor is rendered by tui-textarea; the input has no frame.
         // `› ` marks the top input row (like the user strip); the textarea
@@ -2333,28 +2340,29 @@ impl App {
             height: layout[2].height,
         };
         if marker_w > 0 {
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "› ",
-                    Style::new().add_modifier(Modifier::BOLD | Modifier::DIM),
-                ))),
+            Paragraph::new(Line::from(Span::styled(
+                "› ",
+                Style::new().add_modifier(Modifier::BOLD | Modifier::DIM),
+            )))
+            .render(
                 Rect {
                     x: layout[2].x,
                     y: layout[2].y,
                     width: marker_w,
                     height: 1,
                 },
+                buf,
             );
         }
-        f.render_widget(&self.input, input_rect);
-        f.render_widget(rule, layout[3]);
+        self.input.render(input_rect, buf);
+        rule.render(layout[3], buf);
 
         self.status_y = layout[4].y;
         let sb = self.status_bar(area.width);
-        f.render_widget(sb, layout[4]);
+        sb.render(layout[4], buf);
 
-        self.draw_popup(f, layout[2]);
-        self.draw_menu(f, area);
+        self.draw_popup(buf, layout[2]);
+        self.draw_menu(buf, area);
     }
 
     /// Open a subagent transcript, restoring its saved scroll position.
@@ -2437,7 +2445,7 @@ impl App {
         self.dirty = true;
     }
 
-    fn draw_subagent_chat(&mut self, f: &mut ratatui::Frame, area: Rect, id: u64) {
+    fn draw_subagent_chat(&mut self, buf: &mut Buffer, area: Rect, id: u64) {
         let layout = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(3),
@@ -2450,15 +2458,13 @@ impl App {
             width: area.width.saturating_sub(2),
             height: layout[1].height,
         };
-        f.render_widget(Block::new().style(Theme::base()), area);
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!(" subagent-{id}"),
-                Theme::accent_bold(),
-            )))
-            .style(Theme::base()),
-            layout[0],
-        );
+        Block::new().style(Theme::base()).render(area, buf);
+        Paragraph::new(Line::from(Span::styled(
+            format!(" subagent-{id}"),
+            Theme::accent_bold(),
+        )))
+        .style(Theme::base())
+        .render(layout[0], buf);
         // Render the subagent transcript through the SAME id-keyed cache and
         // fingerprint gate as the main view — no transcript cloning, no
         // dataset swap, no cache wipe. Entries for both transcripts coexist
@@ -2488,16 +2494,14 @@ impl App {
             .take(chat.height as usize)
             .cloned()
             .collect();
-        f.render_widget(Paragraph::new(visible).style(Theme::base()), chat);
+        Paragraph::new(visible).style(Theme::base()).render(chat, buf);
         // scroll is parked by close/switch, not here: persisting mid-view is
         // what the old code did for the fingerprint, and it is unnecessary
         // now that the live buffers (and last_fp) ARE this view's state
         self.last_chat = chat;
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(" esc close", Theme::dim())))
-                .style(Theme::base()),
-            layout[2],
-        );
+        Paragraph::new(Line::from(Span::styled(" esc close", Theme::dim())))
+            .style(Theme::base())
+            .render(layout[2], buf);
     }
 
     /// Assemble one subagent transcript into the live buffers.
@@ -2560,7 +2564,7 @@ impl App {
         self.last_rebuild_us = t0.elapsed().as_micros();
     }
 
-    pub(super) fn draw_menu(&mut self, f: &mut ratatui::Frame, area: Rect) {
+    pub(super) fn draw_menu(&mut self, buf: &mut Buffer, area: Rect) {
         let menu = self.cur_menu().cloned();
         if menu.is_none() || area.height < 8 || area.width < 20 {
             return;
@@ -2622,7 +2626,7 @@ impl App {
         // preserving its text, then paint the menu at normal contrast.
         for y in area.y..area.bottom() {
             for x in area.x..area.right() {
-                if let Some(cell) = f.buffer_mut().cell_mut((x, y)) {
+                if let Some(cell) = buf.cell_mut((x, y)) {
                     let style = cell.style();
                     cell.set_style(style.fg(Theme::DIM()).bg(Theme::BG()));
                 }
@@ -2773,10 +2777,10 @@ impl App {
                 height: rect.height,
             };
 
-            f.render_widget(Clear, list_rect);
-            f.render_widget(Paragraph::new(rows).style(Theme::base()).block(block), list_rect);
+            Clear.render(list_rect, buf);
+            Paragraph::new(rows).style(Theme::base()).block(block).render(list_rect, buf);
 
-            f.render_widget(Clear, details_rect);
+            Clear.render(details_rect, buf);
             let (focus_key, trail) = if let Some(Menu::GraphView { focus_key, trail, .. }) = self.cur_menu() {
                 (focus_key.clone(), trail.clone())
             } else {
@@ -2868,16 +2872,14 @@ impl App {
                 .border_style(Theme::border_dim())
                 .title(Span::styled(" Node Details ", Theme::dim()));
 
-            f.render_widget(
-                Paragraph::new(detail_lines)
-                    .style(Theme::base())
-                    .block(details_block)
-                    .wrap(ratatui::widgets::Wrap { trim: true }),
-                details_rect,
-            );
+            Paragraph::new(detail_lines)
+                .style(Theme::base())
+                .block(details_block)
+                .wrap(ratatui::widgets::Wrap { trim: true })
+                .render(details_rect, buf);
         } else {
-            f.render_widget(Clear, rect);
-            f.render_widget(Paragraph::new(rows).style(Theme::base()).block(block), rect);
+            Clear.render(rect, buf);
+            Paragraph::new(rows).style(Theme::base()).block(block).render(rect, buf);
         }
 
         // draw the focused text field as a real textarea: same block cursor
@@ -2885,11 +2887,11 @@ impl App {
         if let Some((idx, field_rect)) = focused_field_rect
             && let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(idx)
         {
-            f.render_widget(ta.as_ref(), field_rect);
+            ta.as_ref().render(field_rect, buf);
         }
     }
 
-    pub(super) fn draw_popup(&mut self, f: &mut ratatui::Frame, input_area: Rect) {
+    pub(super) fn draw_popup(&mut self, buf: &mut Buffer, input_area: Rect) {
         if !self.popup_visible() {
             self.popup_rows.clear();
             return;
@@ -2937,16 +2939,13 @@ impl App {
             self.popup_rows.push((rect.y + 1 + n as u16, item.clone()));
         }
 
-        f.render_widget(Clear, rect);
-        f.render_widget(
-            Paragraph::new(rows).style(Theme::base()).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Plain)
-                    .border_style(Theme::border_dim()),
-            ),
-            rect,
-        );
+        Clear.render(rect, buf);
+        Paragraph::new(rows).style(Theme::base()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Theme::border_dim()),
+        ).render(rect, buf);
         // mini scrollbar on the right border when the list overflows
         if max_scroll > 0 {
             let track = shown;
@@ -2954,8 +2953,7 @@ impl App {
             let pos = skip * (track - thumb) / max_scroll.max(1);
             let bx = rect.right() - 1;
             for i in 0..track {
-                if let Some(cell) = f
-                    .buffer_mut()
+                if let Some(cell) = buf
                     .cell_mut(ratatui::layout::Position::new(bx, rect.y + 1 + i as u16))
                     && i >= pos
                     && i < pos + thumb
@@ -3230,7 +3228,7 @@ impl App {
         spans
     }
 
-    pub(super) fn render_startup_screen(&self, f: &mut ratatui::Frame, chat: Rect) {
+    pub(super) fn render_startup_screen(&self, buf: &mut Buffer, chat: Rect) {
         if chat.width < 20 || chat.height < 4 {
             return;
         }
@@ -3569,10 +3567,7 @@ impl App {
             width: chat.width,
             height: render_lines.len() as u16,
         };
-        f.render_widget(
-            Paragraph::new(render_lines).style(Theme::base()),
-            render_rect,
-        );
+        Paragraph::new(render_lines).style(Theme::base()).render(render_rect, buf);
     }
 }
 

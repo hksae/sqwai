@@ -6031,7 +6031,8 @@ mod tests {
         let mut terminal_narrow = ratatui::Terminal::new(backend_narrow).unwrap();
         terminal_narrow
             .draw(|f| {
-                app.draw_menu(f, f.area());
+                let area = f.area();
+                app.draw_menu(f.buffer_mut(), area);
             })
             .unwrap();
 
@@ -6040,7 +6041,8 @@ mod tests {
         let mut terminal_wide = ratatui::Terminal::new(backend_wide).unwrap();
         terminal_wide
             .draw(|f| {
-                app.draw_menu(f, f.area());
+                let area = f.area();
+                app.draw_menu(f.buffer_mut(), area);
             })
             .unwrap();
     }
