@@ -5,8 +5,8 @@
 //! frame log → on, then read offline:
 //!
 //! ```text
-//! # frame t_ms draw_us rebuild_us bytes pace_us render_us latency_us dropped merge fresh renders wraps segs rows tick streaming running view
-//! 12 345 1843 1502 4096 8333 900 1200 0 splice 1 1 3 9 42 45 1 1 0
+//! # frame t_ms draw_us rebuild_us bytes flush_us pace_us render_us latency_us dropped merge fresh renders wraps segs rows tick streaming running view
+//! 12 345 1843 1502 4096 1700 8333 900 1200 0 splice 1 1 3 9 42 45 1 1 0
 //! EVT 1234 tool_start read
 //! ```
 //!
@@ -22,6 +22,9 @@ pub struct FrameStat {
     pub rebuild_us: u128,
     /// terminal bytes produced by the frame (pre-kernel write volume)
     pub bytes: u64,
+    /// blocking terminal write only (excludes diff/queue prep):
+    /// flush_us ≈ draw_us means ConPTY/terminal backpressure
+    pub flush_us: u128,
     /// adaptive pace in force for this frame (µs): separates "paced" lag
     /// (high pace_us) from genuine stalls (low pace_us, high draw_us)
     pub pace_us: u128,
@@ -93,7 +96,7 @@ impl PerfLog {
                 let mut out = std::io::BufWriter::new(f);
                 let _ = writeln!(
                     out,
-                    "# frame t_ms draw_us rebuild_us bytes pace_us render_us latency_us dropped merge fresh renders wraps segs rows tick streaming running view"
+                    "# frame t_ms draw_us rebuild_us bytes flush_us pace_us render_us latency_us dropped merge fresh renders wraps segs rows tick streaming running view"
                 );
                 self.path = path.display().to_string();
                 self.out = Some(out);
@@ -118,12 +121,13 @@ impl PerfLog {
         self.frames += 1;
         let _ = writeln!(
             out,
-            "{} {} {} {} {} {} {} {} {} {} {renders} {wraps} {} {} {} {} {} {} {}",
+            "{} {} {} {} {} {} {} {} {} {} {} {renders} {wraps} {} {} {} {} {} {} {}",
             self.frames,
             self.t0.elapsed().as_millis(),
             s.draw_us,
             s.rebuild_us,
             s.bytes,
+            s.flush_us,
             s.pace_us,
             s.render_us,
             s.latency_us,

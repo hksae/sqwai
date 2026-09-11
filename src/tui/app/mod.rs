@@ -1225,6 +1225,7 @@ impl App {
                     draw_us: rep.draw_us,
                     rebuild_us,
                     bytes: rep.bytes,
+                    flush_us: rep.flush_us,
                     pace_us,
                     render_us,
                     latency_us,

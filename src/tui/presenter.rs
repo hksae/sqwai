@@ -51,6 +51,8 @@ pub struct FrameData {
 pub struct FrameReport {
     pub seq: u64,
     pub draw_us: u128,
+    /// blocking terminal write only (excludes diff/queue prep)
+    pub flush_us: u128,
     pub bytes: u64,
     pub presented_at: Instant,
 }
@@ -306,6 +308,8 @@ impl<W: Write> Presenter<W> {
         let cells: Vec<(u16, u16, Cell)> = self.prev.diff(&frame.buf).into_iter()
             .map(|(x, y, c)| (x, y, c.clone()))
             .collect();
+        // 0 when the diff was empty (nothing written at all)
+        let mut flush_us: u128 = 0;
         let bytes = if cells.is_empty() {
             0
         } else {
@@ -344,13 +348,19 @@ impl<W: Write> Presenter<W> {
                 self.backend,
                 crossterm::terminal::EndSynchronizedUpdate
             )?;
+            // Everything above is memory-only (diff + queue into the
+            // BufWriter). The single blocking point is this flush: if it
+            // dominates draw_us, the terminal/ConPTY is backpressuring us.
+            let t_flush = Instant::now();
             Backend::flush(&mut self.backend)?;
+            flush_us = t_flush.elapsed().as_micros();
             self.tap.swap(0, Ordering::Relaxed)
         };
         self.prev = frame.buf;
         Ok(FrameReport {
             seq: frame.seq,
             draw_us: t0.elapsed().as_micros(),
+            flush_us,
             bytes,
             presented_at: Instant::now(),
         })

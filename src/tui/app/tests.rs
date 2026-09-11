@@ -1378,6 +1378,7 @@ mod tests {
                 draw_us: 10,
                 rebuild_us: 5,
                 bytes: 2048,
+                flush_us: 7,
                 pace_us: 8333,
                 render_us: 900,
                 latency_us: 1200,
@@ -1408,11 +1409,12 @@ mod tests {
                     && parts[2] == "10"
                     && parts[3] == "5"
                     && parts[4] == "2048"
-                    && parts[5] == "8333"
-                    && parts[6] == "900"
-                    && parts[7] == "1200"
-                    && parts[8] == "2"
-                    && parts[9] == "splice"
+                    && parts[5] == "7"
+                    && parts[6] == "8333"
+                    && parts[7] == "900"
+                    && parts[8] == "1200"
+                    && parts[9] == "2"
+                    && parts[10] == "splice"
             }),
             "frame line:\n{content}"
         );
