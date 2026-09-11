@@ -54,6 +54,9 @@ fn main() -> Result<()> {
     };
 
     std::panic::set_hook(Box::new(|info| {
+        // TUI is not active yet here (presenter starts inside run()); a plain
+        // direct restore is correct. The in-TUI hook installed in run()
+        // replaces this one and drains through the presenter first.
         let _ = crossterm::execute!(
             std::io::stdout(),
             crossterm::event::DisableMouseCapture,
@@ -67,6 +70,15 @@ fn main() -> Result<()> {
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(run(cfg, resume_id, project_lock.read_only))
+}
+
+/// Handles for the dedicated presenter thread (sole terminal writer).
+struct PresenterHandles {
+    tx: tui::presenter::FrameTx,
+    stats_rx: std::sync::mpsc::Receiver<tui::presenter::FrameReport>,
+    alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    size: ratatui::layout::Size,
+    join: std::thread::JoinHandle<()>,
 }
 
 struct TerminalGuard;
@@ -87,13 +99,36 @@ async fn run(cfg: config::Config, resume_id: Option<String>, read_only: bool) ->
         }
     };
 
-    let (terminal, frame_bytes) = init_terminal()?;
+    let pres = init_presenter()?;
     let _guard = TerminalGuard;
+    // From here on the presenter is the sole terminal writer. On panic:
+    // stop it first (with a grace period), then restore directly — the only
+    // legitimate raw-stdout write while the TUI is up (emergency path).
+    let panic_tx = pres.tx.clone();
+    std::panic::set_hook(Box::new(move |info| {
+        panic_tx.shutdown();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let _ = restore_terminal();
+        eprintln!("{info}");
+    }));
     let app = tui::app::App::new(cfg, session, startup, read_only)?;
-    app.run(terminal, frame_bytes).await
+    let res = app
+        .run(pres.tx.clone(), pres.stats_rx, pres.alive, pres.size)
+        .await;
+    // Sequenced shutdown: no frame can interleave the restore below,
+    // because the presenter has exited before it runs.
+    pres.tx.shutdown();
+    let _ = pres.join.join();
+    restore_terminal()?;
+    res
 }
 
-fn init_terminal() -> Result<(tui::app::Terminal, crate::tui::clear_tail::TerminalWriter)> {
+/// Start raw mode + alternate screen, then hand the terminal to the
+/// dedicated presenter thread. One `terminal::size()` call per session here;
+/// steady-state sizes arrive via Resize events. Returns the UI-side handles
+/// plus the join handle (joined before restore, so no frame can interleave
+/// the restore sequence).
+fn init_presenter() -> Result<PresenterHandles> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
     crossterm::execute!(
@@ -102,16 +137,30 @@ fn init_terminal() -> Result<(tui::app::Terminal, crate::tui::clear_tail::Termin
         crossterm::event::EnableMouseCapture,
         crossterm::cursor::Hide
     )?;
+    let (cols, rows) = crossterm::terminal::size()?;
     // BufWriter coalesces the hundreds of small per-cell writes of a frame
     // into one or two syscalls; every frame still ends with an explicit
     // flush, so no output ever sits in the buffer across frames.
-    // SharedWriter counts frame bytes for the /debug perf log.
-    let shared = crate::tui::clear_tail::TerminalWriter::new(io::BufWriter::with_capacity(
-        256 * 1024,
-        stdout,
-    ));
-    let backend = crate::tui::clear_tail::ClearTailBackend::new(shared.clone());
-    Ok((tui::app::Terminal::new(backend)?, shared))
+    // TapWriter counts frame wire bytes for the /debug perf log.
+    let tap = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let backend = ratatui::backend::CrosstermBackend::new(
+        tui::presenter::TapWriter::new(
+            io::BufWriter::with_capacity(256 * 1024, io::stdout()),
+            std::sync::Arc::clone(&tap),
+        ),
+    );
+    let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let presenter = tui::presenter::Presenter::new(backend, tap, std::sync::Arc::clone(&alive));
+    let (tx, rx) = tui::presenter::mailbox();
+    let (stats_tx, stats_rx) = std::sync::mpsc::channel();
+    let join = tui::presenter::spawn(presenter, rx, stats_tx);
+    Ok(PresenterHandles {
+        tx,
+        stats_rx,
+        alive,
+        size: ratatui::layout::Size::new(cols, rows),
+        join,
+    })
 }
 
 fn restore_terminal() -> Result<()> {

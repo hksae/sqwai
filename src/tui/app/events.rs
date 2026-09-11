@@ -958,10 +958,11 @@ impl App {
                     }
                     self.paste_text(&p);
                 }
-                Event::Resize(_, _) => {
+                Event::Resize(w, h) => {
                     // timestamp only; the draw path debounces the heavy
                     // width rebuild until the drag settles
                     self.last_resize = Some(Instant::now());
+                    self.term_size = ratatui::layout::Size::new(w, h);
                     self.dirty = true;
                 }
                 _ => {}

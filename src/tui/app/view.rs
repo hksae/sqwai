@@ -2158,6 +2158,9 @@ impl App {
         }
     }
 
+    /// Test/compat entry: production renders via [`Self::render_into`]
+    /// for the presenter thread.
+    #[cfg(test)]
     pub(super) fn draw(&mut self, f: &mut ratatui::Frame) {
         let area = f.area();
         self.render_into(f.buffer_mut(), area);

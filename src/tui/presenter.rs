@@ -36,11 +36,12 @@ pub const MIN_PRESENT_INTERVAL: Duration = Duration::from_nanos(8_333_334);
 /// Minimum trailing blank run (cells) worth replacing with a single EL.
 pub(crate) const MIN_EL_RUN: usize = 8;
 
-/// One frame built by the UI thread.
+/// One frame built by the UI thread. (Build time travels separately in
+/// the UI-side pending queue keyed by `seq`; the presenter only needs the
+/// pixels.)
 #[derive(Debug)]
 pub struct FrameData {
     pub seq: u64,
-    pub ts_built: Instant,
     pub area: Rect,
     pub buf: Buffer,
 }
@@ -438,7 +439,6 @@ mod tests {
         }
         FrameData {
             seq,
-            ts_built: Instant::now(),
             area,
             buf,
         }

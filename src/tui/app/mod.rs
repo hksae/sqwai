@@ -17,11 +17,16 @@ use crate::session::{ActivitySummary, Session, SessionHeader, TurnNote};
 use crate::tui::markdown::Highlighter;
 use crate::tui::theme::Theme;
 
-/// Minimum frame interval: redraws are clamped to ~120 FPS max (same bound as
-/// Codex `frame_rate_limiter::MIN_FRAME_INTERVAL`), so input bursts (fast
-/// wheel, hover floods) coalesce into paced frames instead of burning CPU
-/// with one draw per event.
-const MIN_FRAME_INTERVAL: Duration = Duration::from_nanos(8_333_334);
+/// In-flight frame built by the UI thread, awaiting the presenter's report.
+/// Joined by sequence number when the report arrives (perf log correlation).
+struct PendingFrame {
+    seq: u64,
+    ts_built: Instant,
+    render_us: Duration,
+    rebuild_us: u128,
+    merge: &'static str,
+    fresh: usize,
+}
 
 fn reopened_step_ids(
     active: &plan::Plan,
@@ -94,10 +99,6 @@ fn reopen_undone_steps(
     }
     reopened
 }
-
-pub type Terminal = ratatui::Terminal<
-    crate::tui::clear_tail::ClearTailBackend<crate::tui::clear_tail::TerminalWriter>,
->;
 
 mod events;
 mod forms;
@@ -294,8 +295,15 @@ pub struct App {
     /// absolute top line of the viewport when not following (None-equivalent: follow == true)
     view_top: usize,
     spinner_tick: usize,
-    /// last time a frame was presented; gates redraws to `MIN_FRAME_INTERVAL`
-    last_frame: Instant,
+    /// cached terminal size (set at startup, refreshed on Resize events);
+    /// frames are built for exactly this area, the presenter resets on change
+    term_size: ratatui::layout::Size,
+    /// built-frame sequence (mailbox latest-wins, reports join by seq)
+    frame_seq: u64,
+    last_reported_seq: u64,
+    pending_frames: std::collections::VecDeque<PendingFrame>,
+    last_presented_at: Option<Instant>,
+    renderer_dead_reported: bool,
     /// last time draw_menu rebuilt menu_rows (throttled background refresh)
     menu_built_at: Option<std::time::Instant>,
     quit: bool,
@@ -749,7 +757,12 @@ impl App {
             follow: true,
             view_top: 0,
             spinner_tick: 0,
-            last_frame: Instant::now(),
+            term_size: ratatui::layout::Size::default(),
+            frame_seq: 0,
+            last_reported_seq: 0,
+            pending_frames: std::collections::VecDeque::new(),
+            last_presented_at: None,
+            renderer_dead_reported: false,
             menu_built_at: None,
             quit: false,
             dirty: true,
@@ -1046,9 +1059,12 @@ impl App {
 
     pub async fn run(
         mut self,
-        mut terminal: Terminal,
-        frame_bytes: crate::tui::clear_tail::TerminalWriter,
+        frame_tx: crate::tui::presenter::FrameTx,
+        stats_rx: std::sync::mpsc::Receiver<crate::tui::presenter::FrameReport>,
+        presenter_alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        term_size: ratatui::layout::Size,
     ) -> Result<()> {
+        self.term_size = term_size;
         let (ev_tx, ev_rx) = std::sync::mpsc::channel::<crossterm::event::Event>();
         let input_notify = std::sync::Arc::new(tokio::sync::Notify::new());
         let input_notify_tx = std::sync::Arc::clone(&input_notify);
@@ -1064,26 +1080,26 @@ impl App {
 
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // Adaptive frame pacing: EMA of measured draw time (which includes
-        // blocking stdout writes into ConPTY). When the terminal can't drain
-        // as fast as we submit, the pace stretches so frames stop compounding
-        // into multi-second lag; when it drains fast we stay at ~120 FPS max.
-        let mut frame_ema = MIN_FRAME_INTERVAL;
+        // UI-side build gate: widget render is memory-fast, but there is no
+        // point rebuilding buffers faster than the presenter can show them.
+        // Slow presents coalesce in the mailbox structurally (no EMA needed).
+        let mut last_build =
+            Instant::now() - crate::tui::presenter::MIN_PRESENT_INTERVAL;
         while !self.quit {
             // Event-driven wakeup: a mouse/key event wakes the loop instantly
             // instead of waiting up to 50ms for the next tick. The tick stays
-            // for spinner/typewriter/background polls while idle. The frame
-            // deadline branch paces bursts without ever leaving a dirty frame
-            // unpresented.
-            let pace = MIN_FRAME_INTERVAL
-                .max(frame_ema)
-                .min(Duration::from_millis(100));
-            let frame_deadline = self.last_frame + pace;
+            // for spinner/typewriter/background polls while idle. Presenting
+            // happens on the presenter thread: this loop never blocks on
+            // terminal I/O.
             tokio::select! {
                 _ = input_notify.notified() => {},
                 _ = tick.tick() => {},
-                _ = tokio::time::sleep_until(frame_deadline.into()),
-                    if self.dirty && Instant::now() < frame_deadline => {},
+            }
+            let presenter_gone =
+                !presenter_alive.load(std::sync::atomic::Ordering::Relaxed);
+            if presenter_gone && !self.renderer_dead_reported {
+                self.renderer_dead_reported = true;
+                self.status("renderer thread died - restart sqwai", StatusKind::Err);
             }
             if self.enter_gate.flush(Instant::now()) {
                 self.submit();
@@ -1121,51 +1137,96 @@ impl App {
                 self.spinner_tick = self.spinner_tick.wrapping_add(1);
                 self.dirty = true;
             }
-            if self.dirty && self.last_frame.elapsed() >= pace {
-                // frame timing for the `/debug` perf log: total draw vs the
-                // transcript rebuild slice; counters travel as running
-                // totals and are differenced inside the log
-                let t0 = Instant::now();
-                self.last_merge = view::MergeKind::Skip;
-                self.last_rebuild_us = 0;
-                self.last_fresh = 0;
-                // DEC Mode 2026 synchronized update: the terminal buffers the
-                // whole frame and presents it in one refresh, instead of
-                // painting rows piecemeal (tearing/flicker on fast scroll).
-                // Unsupported terminals ignore the sequence (safe fallback).
-                // End is always sent so a draw error can't wedge the display.
-                use ratatui::backend::Backend as _;
-                crossterm::queue!(
-                    terminal.backend_mut(),
-                    crossterm::terminal::BeginSynchronizedUpdate
-                )?;
-                let draw_res = terminal.draw(|f| self.draw(f)).map(|_| ());
-                let end_res = (|| -> std::io::Result<()> {
-                    crossterm::queue!(
-                        terminal.backend_mut(),
-                        crossterm::terminal::EndSynchronizedUpdate
-                    )?;
-                    terminal.backend_mut().flush()
-                })();
-                draw_res?;
-                end_res?;
-                let frame_us = t0.elapsed();
-                // Asymmetric EMA: stretch the pace quickly when draws stall,
-                // recover quickly when they are fast again, so one slow patch
-                // cannot pin the UI at a sluggish pace for seconds.
-                frame_ema = if frame_us > frame_ema {
-                    frame_ema.mul_f32(0.7) + frame_us.mul_f32(0.3)
-                } else {
-                    frame_ema.mul_f32(0.4) + frame_us.mul_f32(0.6)
+            if self.dirty
+                && last_build.elapsed() >= crate::tui::presenter::MIN_PRESENT_INTERVAL
+            {
+                let area = ratatui::layout::Rect::new(
+                    0,
+                    0,
+                    self.term_size.width,
+                    self.term_size.height,
+                );
+                // cleared every frame (as the old draw path did): only a
+                // deferred width rebuild sets it below
+                self.defer_rebuild = false;
+                if area.width >= 20 && area.height >= 6 && !presenter_gone {
+                    // render timing for the `/debug` perf log; the present
+                    // timing arrives later with the presenter's report and is
+                    // joined by sequence number below
+                    let t0 = Instant::now();
+                    self.last_merge = view::MergeKind::Skip;
+                    self.last_rebuild_us = 0;
+                    self.last_fresh = 0;
+                    let mut buf = ratatui::buffer::Buffer::empty(area);
+                    self.render_into(&mut buf, area);
+                    let render_us = t0.elapsed();
+                    self.frame_seq += 1;
+                    let seq = self.frame_seq;
+                    self.pending_frames.push_back(PendingFrame {
+                        seq,
+                        ts_built: t0,
+                        render_us,
+                        rebuild_us: self.last_rebuild_us,
+                        merge: self.last_merge.as_str(),
+                        fresh: self.last_fresh,
+                    });
+                    frame_tx.submit(crate::tui::presenter::FrameData {
+                        seq,
+                        area,
+                        buf,
+                    });
+                }
+                last_build = Instant::now();
+                // a deferred width rebuild keeps dirty set: the 50ms tick
+                // retries, and the rebuild runs once the size settles
+                if !self.defer_rebuild {
+                    self.dirty = false;
+                }
+            }
+            // Drain presenter reports (nonblocking, FIFO from one sender):
+            // log presented frames, count coalesced drops by sequence gaps.
+            while let Ok(rep) = stats_rx.try_recv() {
+                let dropped = rep.seq.saturating_sub(self.last_reported_seq + 1);
+                self.last_reported_seq = self.last_reported_seq.max(rep.seq);
+                let mut render_us = 0u128;
+                let mut rebuild_us = 0u128;
+                let mut merge = "skip";
+                let mut fresh = 0usize;
+                let mut ts_built = rep.presented_at;
+                self.pending_frames.retain(|p| {
+                    if p.seq == rep.seq {
+                        render_us = p.render_us.as_micros();
+                        rebuild_us = p.rebuild_us;
+                        merge = p.merge;
+                        fresh = p.fresh;
+                        ts_built = p.ts_built;
+                        false
+                    } else {
+                        p.seq > rep.seq
+                    }
+                });
+                let latency_us = rep
+                    .presented_at
+                    .saturating_duration_since(ts_built)
+                    .as_micros();
+                let pace_us = match self.last_presented_at {
+                    Some(prev) => rep
+                        .presented_at
+                        .saturating_duration_since(prev)
+                        .as_micros(),
+                    None => 0,
                 };
-                self.last_frame = Instant::now();
+                self.last_presented_at = Some(rep.presented_at);
                 let stat = perf::FrameStat {
-                    draw_us: frame_us.as_micros(),
-                    rebuild_us: self.last_rebuild_us,
-                    bytes: frame_bytes.take_bytes(),
-                    pace_us: pace.as_micros(),
-                    merge: self.last_merge.as_str(),
-                    fresh: self.last_fresh,
+                    draw_us: rep.draw_us,
+                    rebuild_us,
+                    bytes: rep.bytes,
+                    pace_us,
+                    render_us,
+                    latency_us,
+                    dropped,
+                    merge,
+                    fresh,
                     segs: self.segments.len(),
                     rows: self.cache_lines.len(),
                     tick: self.spinner_tick,
@@ -1177,11 +1238,6 @@ impl App {
                 let wraps = crate::tui::markdown::WRAP_TAGGED_CALLS
                     .load(std::sync::atomic::Ordering::Relaxed);
                 self.perf.frame(stat, renders, wraps);
-                // a deferred width rebuild keeps dirty set: the 50ms tick
-                // retries, and the rebuild runs once the size settles
-                if !self.defer_rebuild {
-                    self.dirty = false;
-                }
             }
         }
         // Shutdown must never wait for a provider request. A final diary

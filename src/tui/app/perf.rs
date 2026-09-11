@@ -5,8 +5,8 @@
 //! frame log → on, then read offline:
 //!
 //! ```text
-//! # frame t_ms draw_us rebuild_us bytes pace_us merge fresh renders wraps segs rows tick streaming running view
-//! 12 345 1843 1502 4096 8333 splice 1 1 3 9 42 45 1 1 0
+//! # frame t_ms draw_us rebuild_us bytes pace_us render_us latency_us dropped merge fresh renders wraps segs rows tick streaming running view
+//! 12 345 1843 1502 4096 8333 900 1200 0 splice 1 1 3 9 42 45 1 1 0
 //! EVT 1234 tool_start read
 //! ```
 //!
@@ -25,6 +25,13 @@ pub struct FrameStat {
     /// adaptive pace in force for this frame (µs): separates "paced" lag
     /// (high pace_us) from genuine stalls (low pace_us, high draw_us)
     pub pace_us: u128,
+    /// widget render time on the UI thread (µs): separates render-bound
+    /// frames from terminal-bound ones together with draw_us
+    pub render_us: u128,
+    /// end-to-end latency (µs): frame build to flush completion
+    pub latency_us: u128,
+    /// frames coalesced (dropped) between the previous report and this one
+    pub dropped: u64,
     pub merge: &'static str,
     pub fresh: usize,
     pub segs: usize,
@@ -86,7 +93,7 @@ impl PerfLog {
                 let mut out = std::io::BufWriter::new(f);
                 let _ = writeln!(
                     out,
-                    "# frame t_ms draw_us rebuild_us bytes pace_us merge fresh renders wraps segs rows tick streaming running view"
+                    "# frame t_ms draw_us rebuild_us bytes pace_us render_us latency_us dropped merge fresh renders wraps segs rows tick streaming running view"
                 );
                 self.path = path.display().to_string();
                 self.out = Some(out);
@@ -111,13 +118,16 @@ impl PerfLog {
         self.frames += 1;
         let _ = writeln!(
             out,
-            "{} {} {} {} {} {} {} {renders} {wraps} {} {} {} {} {} {} {}",
+            "{} {} {} {} {} {} {} {} {} {} {renders} {wraps} {} {} {} {} {} {} {}",
             self.frames,
             self.t0.elapsed().as_millis(),
             s.draw_us,
             s.rebuild_us,
             s.bytes,
             s.pace_us,
+            s.render_us,
+            s.latency_us,
+            s.dropped,
             s.merge,
             s.fresh,
             s.segs,

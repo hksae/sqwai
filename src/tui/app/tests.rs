@@ -1379,6 +1379,9 @@ mod tests {
                 rebuild_us: 5,
                 bytes: 2048,
                 pace_us: 8333,
+                render_us: 900,
+                latency_us: 1200,
+                dropped: 2,
                 merge: "splice",
                 fresh: 1,
                 segs: 2,
@@ -1406,7 +1409,10 @@ mod tests {
                     && parts[3] == "5"
                     && parts[4] == "2048"
                     && parts[5] == "8333"
-                    && parts[6] == "splice"
+                    && parts[6] == "900"
+                    && parts[7] == "1200"
+                    && parts[8] == "2"
+                    && parts[9] == "splice"
             }),
             "frame line:\n{content}"
         );
