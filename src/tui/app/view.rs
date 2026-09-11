@@ -2891,6 +2891,31 @@ impl App {
             Clear.render(rect, buf);
             Paragraph::new(rows).style(Theme::base()).block(block).render(rect, buf);
         }
+        // mini scrollbar inside the right border when the list overflows —
+        // exactly like the command popup (last content column, border intact)
+        if !is_form && !is_graph_wide && !self.menu_rows.is_empty() {
+            let total = self.menu_rows.len();
+            let shown = total
+                .saturating_sub(self.menu_scroll)
+                .min(content_rows)
+                .max(1);
+            let max_scroll = total.saturating_sub(content_rows);
+            if max_scroll > 0 {
+                let thumb = 1.max(shown * shown / total);
+                let pos = self.menu_scroll * (shown - thumb) / max_scroll.max(1);
+                let bx = rect.right().saturating_sub(2);
+                for i in 0..shown {
+                    if let Some(cell) = buf
+                        .cell_mut(ratatui::layout::Position::new(bx, rect.y + 1 + i as u16))
+                        && i >= pos
+                        && i < pos + thumb
+                    {
+                        cell.set_symbol("▐")
+                            .set_style(Style::new().fg(Theme::rule_color()));
+                    }
+                }
+            }
+        }
 
         // draw the focused text field as a real textarea: same block cursor
         // and editing behavior as the message input
@@ -2904,7 +2929,7 @@ impl App {
     /// Horizontal effort slider card: level names above, ○/● dots on a
     /// track below (off/gray on the left, max/magenta on the right). The
     /// filled part of the track takes the selected level's color; the rest
-    /// stays dim. Arrows move, click on a label/dot commits, Enter commits.
+    /// stays dim. Arrows preview, click previews, Enter commits.
     fn draw_effort_slider(&mut self, buf: &mut Buffer, area: Rect) {
         use crate::config::EffortLevel;
         const COL_W: u16 = 8;

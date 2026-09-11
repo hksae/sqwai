@@ -1288,6 +1288,51 @@ mod tests {
     }
 
     #[test]
+    fn menu_list_shows_popup_style_scrollbar_on_overflow() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::Controls);
+        assert!(app.menu_rows.len() > 6, "need overflow for a scrollbar");
+        // short card: only a window of rows fits, the rest scrolls
+        let area = Rect::new(0, 0, 80, 12);
+        let mut buf = Buffer::empty(area);
+        app.draw_menu(&mut buf, area);
+        let symbols: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            symbols.contains('▐'),
+            "overflowed menu must draw a thumb like the popup"
+        );
+    }
+
+    #[test]
+    fn pinned_sessions_frame_renders_white() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::Color;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let mut s = Session::new("m".into(), 1000);
+        s.pinned = true;
+        app.sessions = vec![crate::session::SessionHeader::from_session(&s)];
+        app.open_menu(Menu::Sessions);
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        app.draw_menu(&mut buf, area);
+        let frame_cell = buf
+            .content()
+            .iter()
+            .find(|c| c.symbol() == "┌")
+            .expect("pinned frame top border");
+        assert_eq!(frame_cell.style().fg, Some(Color::White));
+        let rail_cell = buf
+            .content()
+            .iter()
+            .find(|c| c.symbol() == "│")
+            .expect("pinned row rail");
+        assert_eq!(rail_cell.style().fg, Some(Color::White));
+    }
+
+    #[test]
     fn pinned_session_frame_aligns_columns_and_respects_narrow_terminal() {
         use crate::providers::Role;
         use unicode_width::UnicodeWidthStr;
