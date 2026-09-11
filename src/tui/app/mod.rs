@@ -1089,7 +1089,26 @@ impl App {
                 self.last_merge = view::MergeKind::Skip;
                 self.last_rebuild_us = 0;
                 self.last_fresh = 0;
-                terminal.draw(|f| self.draw(f))?;
+                // DEC Mode 2026 synchronized update: the terminal buffers the
+                // whole frame and presents it in one refresh, instead of
+                // painting rows piecemeal (tearing/flicker on fast scroll).
+                // Unsupported terminals ignore the sequence (safe fallback).
+                // End is always sent so a draw error can't wedge the display.
+                use ratatui::backend::Backend as _;
+                crossterm::queue!(
+                    terminal.backend_mut(),
+                    crossterm::terminal::BeginSynchronizedUpdate
+                )?;
+                let draw_res = terminal.draw(|f| self.draw(f)).map(|_| ());
+                let end_res = (|| -> std::io::Result<()> {
+                    crossterm::queue!(
+                        terminal.backend_mut(),
+                        crossterm::terminal::EndSynchronizedUpdate
+                    )?;
+                    terminal.backend_mut().flush()
+                })();
+                draw_res?;
+                end_res?;
                 let stat = perf::FrameStat {
                     draw_us: t0.elapsed().as_micros(),
                     rebuild_us: self.last_rebuild_us,
