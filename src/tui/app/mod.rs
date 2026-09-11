@@ -1646,11 +1646,14 @@ impl App {
 
     /// Second-level completion target: `<cmd> <tail>` filters that
     /// command's subcommand list from [`menus::SUBCOMMANDS`].
+    /// Gated commands (e.g. `/test` without the experimental flag)
+    /// complete nothing.
     fn popup_level2_cmd(&self) -> Option<&'static str> {
         let t = self.input_text();
         menus::SUBCOMMANDS
             .iter()
             .map(|(cmd, _)| *cmd)
+            .filter(|cmd| *cmd != "/test" || self.experimental_test())
             .find(|cmd| t.starts_with(&format!("{cmd} ")))
     }
 
@@ -1682,9 +1685,16 @@ impl App {
         }
         COMMANDS
             .iter()
+            .filter(|cmd| **cmd != "/test" || self.experimental_test())
             .filter(|cmd| cmd.starts_with(&t))
             .map(|cmd| cmd.to_string())
             .collect()
+    }
+
+    /// experimental `/test ...` commands are unlocked in
+    /// /settings -> Experimental (off by default)
+    fn experimental_test(&self) -> bool {
+        self.cfg.ui.experimental_test
     }
 
     pub(super) fn popup_scroll_by(&mut self, delta: i32) -> bool {
@@ -2310,7 +2320,15 @@ impl App {
             .to_string();
         match name.as_str() {
             "/settings" => self.open_menu(Menu::Settings),
-            "/test" => self.open_menu(Menu::TestAnims),
+            "/test" => {
+                if !self.experimental_test() {
+                    self.status("unknown command /test", StatusKind::Warn);
+                } else if rest.split_whitespace().nth(1) == Some("animations") {
+                    self.open_menu(Menu::TestAnims);
+                } else {
+                    self.status("/test takes: animations", StatusKind::Warn);
+                }
+            }
             "/debug" => self.open_menu(Menu::Debug),
             "/mcp" => self.status(
                 "MCP settings are available from /settings (runtime coming in phase 4)",

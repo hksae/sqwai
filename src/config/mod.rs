@@ -482,6 +482,9 @@ pub struct UiConfig {
     /// show $ spent in the header (needs price_in/price_out on the model)
     #[serde(default)]
     pub show_cost: bool,
+    /// unlock /test ... commands (off by default, /settings -> Experimental)
+    #[serde(default)]
+    pub experimental_test: bool,
 }
 
 impl Default for UiConfig {
@@ -490,6 +493,7 @@ impl Default for UiConfig {
             typewriter: true,
             http_log: false,
             show_cost: false,
+            experimental_test: false,
         }
     }
 }

@@ -1995,10 +1995,11 @@ mod tests {
         use ratatui::layout::Rect;
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         assert!(COMMANDS.contains(&"/test"));
-        app.command("test");
+        app.cfg.ui.experimental_test = true;
+        app.command("test animations");
         assert!(
             matches!(app.cur_menu(), Some(Menu::TestAnims)),
-            "/test must open the gallery"
+            "/test animations must open the gallery"
         );
         assert_eq!(
             app.menu_rows.len(),
@@ -2032,11 +2033,69 @@ mod tests {
         assert!(app.menu_stack.is_empty(), "gallery must close on commit");
     }
 
+    #[test]
+    fn test_animations_gated_behind_experimental_flag() {
+        // off by default: unknown command, hidden from both popup levels
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        assert!(!app.cfg.ui.experimental_test, "flag defaults to off");
+        app.command("test animations");
+        assert!(
+            app.menu_stack.is_empty(),
+            "gated command must not open anything"
+        );
+        app.input = App::fresh_input("/test".into());
+        assert!(
+            !app.popup_items().iter().any(|i| i.starts_with("/test")),
+            "level-1 popup must hide /test"
+        );
+        app.input = App::fresh_input("/test ".into());
+        assert!(
+            app.popup_items().is_empty(),
+            "level-2 popup must offer nothing, got {:?}",
+            app.popup_items()
+        );
+        // on: full command works and both popup levels list it
+        app.cfg.ui.experimental_test = true;
+        app.input = App::fresh_input("/test".into());
+        assert!(app.popup_items().contains(&"/test".to_string()));
+        app.input = App::fresh_input("/test ".into());
+        assert_eq!(app.popup_items(), vec!["/test animations".to_string()]);
+        app.command("test animations");
+        assert!(matches!(app.cur_menu(), Some(Menu::TestAnims)));
+        // bare /test with the flag on hints at the subcommand
+        let mut app2 = test_app("http://127.0.0.1:9/v1".into());
+        app2.cfg.ui.experimental_test = true;
+        app2.command("test");
+        assert!(app2.menu_stack.is_empty(), "bare /test opens nothing");
+    }
+
+    #[test]
+    fn experimental_section_sits_above_debug_and_toggles() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::Settings);
+        let pos = |a: &MenuAction| {
+            app.menu_rows
+                .iter()
+                .position(|(_, act)| std::mem::discriminant(act) == std::mem::discriminant(a))
+        };
+        let exp = pos(&MenuAction::OpenExperimental).expect("experimental row");
+        let dbg = pos(&MenuAction::OpenDebug).expect("debug row");
+        assert!(exp + 1 == dbg, "experimental must sit right above debug");
+        // toggle flips the persisted flag and rebuilds the row
+        app.run_action(MenuAction::ToggleExperimentalTest);
+        assert!(app.cfg.ui.experimental_test);
+        app.open_menu(Menu::Experimental);
+        assert_eq!(app.menu_rows.len(), 1, "one toggle row for now");
+        app.run_action(MenuAction::ToggleExperimentalTest);
+        assert!(!app.cfg.ui.experimental_test);
+    }
+
     fn wheel_test_app() -> (crate::tui::app::App, usize) {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.command("test");
+        app.cfg.ui.experimental_test = true;
+        app.command("test animations");
         assert!(
             crate::tui::spinners::ALL.len() > 20,
             "gallery must be longer than one window"

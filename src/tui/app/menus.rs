@@ -52,6 +52,7 @@ pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
         ],
     ),
     ("/undo", &["step"]),
+    ("/test", &["animations"]),
     ("/providers", &["update"]),
     ("/constraints", &["add", "remove"]),
     ("/mode", &["plan", "act"]),
@@ -124,6 +125,8 @@ pub(super) enum Menu {
     /// /debug: runtime toggles and diagnostics
     #[allow(dead_code)]
     Debug,
+    /// /settings -> Experimental: opt-in unfinished things (/test ...)
+    Experimental,
     /// /settings -> Agent: plan, memory, diary and compaction scalars
     Agent,
     /// /settings -> Safety: secrets globs and blocked patterns
@@ -182,7 +185,7 @@ pub(super) enum Menu {
         provider: String,
     },
     Effort,
-    /// /test: spinner/animation showcase gallery (eye candy, picks welcome)
+    /// /test animations: spinner/animation showcase gallery (eye candy, picks welcome)
     TestAnims,
     /// the model asked the user structured questions (ask_user)
     /// legacy modal path; live asks render inline in the chat instead
@@ -235,6 +238,7 @@ pub(super) enum MenuAction {
     OpenLsp,
     OpenSkills,
     OpenDebug,
+    OpenExperimental,
     AddProvider,
     EditProvider(String),
     DeleteProvider(String),
@@ -256,6 +260,7 @@ pub(super) enum MenuAction {
     DeleteSession(String),
     ToggleTypewriter,
     ToggleHttpLog,
+    ToggleExperimentalTest,
     TogglePerfLog,
     ToggleShowCost,
     CycleModelEffort,
@@ -1048,6 +1053,7 @@ impl App {
             MenuAction::OpenLsp => self.open_menu(Menu::Lsp),
             MenuAction::OpenSkills => self.open_menu(Menu::Skills),
             MenuAction::OpenDebug => self.open_menu(Menu::Debug),
+            MenuAction::OpenExperimental => self.open_menu(Menu::Experimental),
             MenuAction::OpenAgent => self.open_menu(Menu::Agent),
             MenuAction::OpenSafety => self.open_menu(Menu::Safety),
             MenuAction::OpenUndo => self.open_menu(Menu::Undo),
@@ -1335,6 +1341,16 @@ impl App {
                 crate::providers::set_http_log(self.cfg.ui.http_log);
                 let on = self.cfg.ui.http_log;
                 self.status(&format!("http debug log: {}", on_off(on)), StatusKind::Ok);
+                self.build_menu_rows();
+            }
+            MenuAction::ToggleExperimentalTest => {
+                self.cfg.ui.experimental_test = !self.cfg.ui.experimental_test;
+                self.cfg.save().ok();
+                let on = self.cfg.ui.experimental_test;
+                self.status(
+                    &format!("experimental test commands: {}", on_off(on)),
+                    StatusKind::Ok,
+                );
                 self.build_menu_rows();
             }
             MenuAction::TogglePerfLog => {
@@ -1795,6 +1811,7 @@ impl App {
             }
             Some(Menu::DeleteSessions) => " Delete session ".into(),
             Some(Menu::Debug) => " Debug ".into(),
+            Some(Menu::Experimental) => " Experimental ".into(),
             Some(Menu::Agent) => " Agent ".into(),
             Some(Menu::Safety) => " Safety ".into(),
             Some(Menu::Undo) => " Undo ".into(),
@@ -1864,6 +1881,8 @@ impl App {
                 self.menu_rows.push(section("LSP", MenuAction::OpenLsp));
                 self.menu_rows
                     .push(section("Skills", MenuAction::OpenSkills));
+                self.menu_rows
+                    .push(section("Experimental", MenuAction::OpenExperimental));
                 self.menu_rows.push(section("Debug", MenuAction::OpenDebug));
                 self.menu_footer_text = Some("enter: open · esc: close".into());
             }
@@ -2365,6 +2384,19 @@ impl App {
                     ));
                 }
                 self.menu_footer_text = Some("enter: delete · esc: back".into());
+            }
+            Menu::Experimental => {
+                self.menu_rows.push(row(
+                    Line::from(vec![
+                        Span::styled(format!(" {:<18}", "test commands"), Theme::FG()),
+                        Span::styled(
+                            on_off(self.cfg.ui.experimental_test),
+                            Theme::dim(),
+                        ),
+                    ]),
+                    MenuAction::ToggleExperimentalTest,
+                ));
+                self.menu_footer_text = Some("enter: toggle value · esc: back".into());
             }
             Menu::Debug => {
                 let setting = |l: &str, val: String, a: MenuAction| {

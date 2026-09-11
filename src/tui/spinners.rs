@@ -1,4 +1,4 @@
-//! Spinner/animation showcase for the `/test` gallery menu.
+//! Spinner/animation showcase for the `/test animations` gallery menu.
 //!
 //! Test-only eye candy: one entry per animation, each a name plus its frame
 //! cycle. The gallery renders `frame(entry, tick)` per row, so every style
