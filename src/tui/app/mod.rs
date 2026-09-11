@@ -295,6 +295,11 @@ pub struct App {
     /// absolute top line of the viewport when not following (None-equivalent: follow == true)
     view_top: usize,
     spinner_tick: usize,
+    /// wall-clock origin for animation ticks: loop iterations run at
+    /// wildly varying rates (input bursts vs idle), so the tick is derived
+    /// from elapsed time — otherwise shimmer/spinners speed up and slow
+    /// down with the input flood
+    tick_origin: Instant,
     /// cached terminal size (set at startup, refreshed on Resize events);
     /// frames are built for exactly this area, the presenter resets on change
     term_size: ratatui::layout::Size,
@@ -764,6 +769,7 @@ impl App {
             follow: true,
             view_top: 0,
             spinner_tick: 0,
+            tick_origin: Instant::now(),
             term_size: ratatui::layout::Size::default(),
             frame_seq: 0,
             last_reported_seq: 0,
@@ -1143,7 +1149,10 @@ impl App {
             }
             let animating = self.streaming || self.tool_running();
             if animating {
-                self.spinner_tick = self.spinner_tick.wrapping_add(1);
+                // fixed 20 FPS animation rate from the wall clock, not per
+                // loop iteration: bursts would otherwise fast-forward it
+                self.spinner_tick =
+                    (self.tick_origin.elapsed().as_millis() / 50) as usize;
                 self.dirty = true;
             }
             if self.dirty
