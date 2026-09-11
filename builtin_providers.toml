@@ -310,8 +310,7 @@ continuation = true
 provider = "kimi"
 id = "kimi-k3"
 context = 1048576
-effort = "max"
-effort_always_on = true
+effort = "high"
 price_in = 3.0
 price_out = 15.0
 

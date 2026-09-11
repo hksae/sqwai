@@ -446,7 +446,11 @@ impl App {
                         KeyCode::PageUp if !self.menu_stack.is_empty() => self.menu_nav(-2),
                         KeyCode::PageDown if !self.menu_stack.is_empty() => self.menu_nav(2),
                         KeyCode::Left | KeyCode::Right if !self.menu_stack.is_empty() => {
-                            self.form_nav_key(k)
+                            if matches!(self.cur_menu(), Some(Menu::Effort)) {
+                                self.menu_nav(if k.code == KeyCode::Left { -1 } else { 1 })
+                            } else {
+                                self.form_nav_key(k)
+                            }
                         }
                         KeyCode::Home | KeyCode::End if !self.menu_stack.is_empty() => {
                             if self.is_form_menu() {
@@ -881,7 +885,12 @@ impl App {
                         } else {
                             // inside: pick a row; outside: act like esc
                             if self.in_menu_rect(m.row, m.column) {
-                                if matches!(self.cur_menu(), Some(Menu::GraphView { .. }))
+                                if matches!(self.cur_menu(), Some(Menu::Effort)) {
+                                    // click a dot/label commits the level at once
+                                    if self.effort_hover_at(m.row, m.column).is_some() {
+                                        self.menu_activate();
+                                    }
+                                } else if matches!(self.cur_menu(), Some(Menu::GraphView { .. }))
                                     && self.menu_rect.width >= 100
                                     && m.column >= self.menu_rect.x + 54
                                 {
@@ -896,7 +905,11 @@ impl App {
                         }
                     }
                     MouseEventKind::Moved if !self.menu_stack.is_empty() => {
-                        let _ = self.menu_hover(m.row);
+                        if matches!(self.cur_menu(), Some(Menu::Effort)) {
+                            let _ = self.effort_hover_at(m.row, m.column);
+                        } else {
+                            let _ = self.menu_hover(m.row);
+                        }
                     }
                     MouseEventKind::Down(MouseButton::Left)
                         if self.in_input_rect(m.row, m.column) =>

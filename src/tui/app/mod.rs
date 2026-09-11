@@ -420,6 +420,9 @@ pub struct App {
     menu_status: Option<(String, StatusKind)>,
     menu_rows: Vec<(Line<'static>, MenuAction)>,
     menu_rect: Rect,
+    /// click/hover targets of the effort slider (rect → SELECTABLE index),
+    /// rebuilt on every slider draw; empty when another menu is open
+    effort_hits: Vec<(Rect, usize)>,
     form_fields: Vec<FormField>,
     form_focus: usize,
     /// cached session list for the sessions menus (headers only — see
@@ -803,6 +806,7 @@ impl App {
             menu_status: None,
             menu_rows: Vec::new(),
             menu_rect: Rect::default(),
+            effort_hits: Vec::new(),
             form_fields: Vec::new(),
             form_focus: 0,
             sessions: Vec::new(),

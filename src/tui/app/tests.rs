@@ -1701,6 +1701,51 @@ mod tests {
     }
 
     #[test]
+    fn effort_slider_opens_on_current_level_with_hits() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.model_cfg.effort = EffortLevel::High;
+        app.open_menu(crate::tui::app::menus::Menu::Effort);
+        // slider opens on the current level, not on `off`
+        let want = EffortLevel::SELECTABLE
+            .iter()
+            .position(|l| *l == EffortLevel::High)
+            .unwrap();
+        assert_eq!(app.menu_sel, want);
+        // render the slider card: 6 click targets, one per level
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        app.draw_menu(&mut buf, area);
+        assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
+        assert!(app.menu_rect.width > 0 && app.menu_rect.height > 0);
+        // hover the max dot previews it, click commits it
+        let (_, max_idx) = app.effort_hits.last().copied().expect("max hit");
+        let (rect, _) = app.effort_hits[max_idx];
+        assert_eq!(
+            app.effort_hover_at(rect.y, rect.x + 1),
+            Some(max_idx)
+        );
+        assert_eq!(app.menu_sel, max_idx);
+    }
+
+    #[test]
+    fn effort_slider_colors_span_gray_to_magenta() {
+        use crate::tui::theme::Theme;
+        use ratatui::style::Color;
+        assert_eq!(
+            Theme::effort_color(EffortLevel::Off),
+            Color::DarkGray
+        );
+        assert_eq!(Theme::effort_color(EffortLevel::Max), Color::Magenta);
+        // every level gets a distinct color
+        let mut seen = std::collections::HashSet::new();
+        for lvl in EffortLevel::SELECTABLE {
+            assert!(seen.insert(Theme::effort_color(lvl)), "{lvl:?}");
+        }
+    }
+
+    #[test]
     fn command_popup_contains_only_command_names() {
         assert!(COMMANDS.iter().all(|command| !command.contains(' ')));
         assert!(COMMANDS.contains(&"/undo"));

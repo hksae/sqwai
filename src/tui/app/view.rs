@@ -2587,9 +2587,13 @@ impl App {
             self.menu_built_at = Some(now);
         }
 
-        // fixed extra lines under the content: hint footer and transient status
-        // Menu footers are intentionally empty: controls should be consistent
-        // and discoverable from the global interface, not repeated in every menu.
+        // Effort gets a horizontal slider card instead of the generic
+        // row list (narrow terminals fall back to the list below).
+        if matches!(menu, Some(Menu::Effort)) && area.width >= 56 {
+            self.draw_effort_slider(buf, area);
+            return;
+        }
+        self.effort_hits.clear();
         self.menu_footer_text = None;
         // Popup actions do not show transient green notices at the bottom.
         let footer_h = 0usize;
@@ -2892,6 +2896,178 @@ impl App {
         {
             ta.as_ref().render(field_rect, buf);
         }
+    }
+
+    /// Horizontal effort slider card: level names above, ○/● dots on a
+    /// track below (off/gray on the left, max/magenta on the right). The
+    /// filled part of the track takes the selected level's color; the rest
+    /// stays dim. Arrows move, click on a label/dot commits, Enter commits.
+    fn draw_effort_slider(&mut self, buf: &mut Buffer, area: Rect) {
+        use crate::config::EffortLevel;
+        const COL_W: u16 = 8;
+        let n = EffortLevel::SELECTABLE.len();
+        let sel = self.menu_sel.min(n.saturating_sub(1));
+        let active = EffortLevel::SELECTABLE[sel];
+        let active_color = Theme::effort_color(active);
+        let active_style = Theme::effort(active);
+
+        // card geometry: 1 pad + n columns, labels + track + note + hint
+        let inner_w = 1 + COL_W * n as u16;
+        let w = (inner_w + 2).clamp(30, area.width.saturating_sub(4).max(30));
+        let h: u16 = 8;
+        let rect = Rect {
+            x: area.x + (area.width.saturating_sub(w)) / 2,
+            y: area.y + (area.height.saturating_sub(h)) / 2,
+            width: w,
+            height: h.min(area.height.saturating_sub(2).max(4)),
+        };
+        self.menu_rect = rect;
+        self.effort_hits.clear();
+
+        // modal dim, same as generic menus (text and colors preserved)
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    let style = cell.style();
+                    cell.set_style(style.add_modifier(Modifier::DIM));
+                }
+            }
+        }
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Plain)
+            .border_style(Theme::border_dim())
+            .title(Span::styled(
+                format!(" {} ", self.menu_title()),
+                Style::new()
+                    .fg(ratatui::style::Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        Clear.render(rect, buf);
+        let inner = Rect {
+            x: rect.x + 1,
+            y: rect.y + 1,
+            width: rect.width.saturating_sub(2),
+            height: rect.height.saturating_sub(2),
+        };
+        block.render(rect, buf);
+        if inner.height < 4 || inner.width < inner_w {
+            return;
+        }
+
+        let labels_y = inner.y;
+        let track_y = inner.y + 1;
+        let note_y = inner.y + 2;
+        let hint_y = inner.y + 3;
+        let base_x = inner.x + 1;
+
+        // labels row + hit rects (label cell and dot cell share one target)
+        for (i, lvl) in EffortLevel::SELECTABLE.iter().enumerate() {
+            let name = lvl.as_str();
+            let col_x = base_x + COL_W * i as u16;
+            let name_w = name.len() as u16;
+            let pad = COL_W.saturating_sub(name_w) / 2;
+            let style = if i == sel {
+                active_style
+            } else {
+                Theme::dim()
+            };
+            Paragraph::new(Line::from(vec![
+                Span::styled(" ".repeat(pad as usize), Theme::base()),
+                Span::styled(name.to_string(), style),
+            ]))
+            .render(
+                Rect {
+                    x: col_x,
+                    y: labels_y,
+                    width: COL_W,
+                    height: 1,
+                },
+                buf,
+            );
+            self.effort_hits.push((
+                Rect {
+                    x: col_x,
+                    y: labels_y,
+                    width: COL_W,
+                    height: 2,
+                },
+                i,
+            ));
+        }
+
+        // track row: dots at column centers, connectors between them.
+        // Built cell by cell, then compressed into style runs, so wide
+        // glyphs or multibyte dashes can never misalign the dots.
+        let total = COL_W as usize * n;
+        let dot_off = (COL_W / 2) as usize;
+        let dim = Theme::dim();
+        let fill = Style::new().fg(active_color);
+        // each cell: (glyph, style)
+        let mut cells: Vec<(&str, Style)> = vec![(" ", Theme::base()); total];
+        for i in 0..n {
+            let dx = i * COL_W as usize + dot_off;
+            let (dot, dot_style) = if i == sel {
+                ("●", active_style)
+            } else if i < sel {
+                ("○", fill)
+            } else {
+                ("○", dim)
+            };
+            cells[dx] = (dot, dot_style);
+            // connector to the next dot: filled iff fully left of selection
+            if i + 1 < n {
+                let cstyle = if i + 1 <= sel { fill } else { dim };
+                for c in cells.iter_mut().take((i + 1) * COL_W as usize + dot_off).skip(dx + 1) {
+                    *c = ("─", cstyle);
+                }
+            }
+        }
+        let mut spans: Vec<Span> = Vec::new();
+        for (glyph, style) in cells {
+            let same = spans.last().map(|s: &Span| s.style == style).unwrap_or(false);
+            if same {
+                let last: &mut Span = spans.last_mut().expect("nonempty");
+                last.content.to_mut().push_str(glyph);
+            } else {
+                spans.push(Span::styled(glyph.to_string(), style));
+            }
+        }
+        Paragraph::new(Line::from(spans)).render(
+            Rect {
+                x: base_x,
+                y: track_y,
+                width: inner.width.saturating_sub(1),
+                height: 1,
+            },
+            buf,
+        );
+
+        // note: what the highlighted level does on this model
+        let plan = self.effort_plan_for(EffortLevel::SELECTABLE[sel]);
+        Paragraph::new(Line::from(Span::styled(plan.label(), Theme::dim()))).render(
+            Rect {
+                x: base_x,
+                y: note_y,
+                width: inner.width.saturating_sub(1),
+                height: 1,
+            },
+            buf,
+        );
+        Paragraph::new(Line::from(Span::styled(
+            "← → move · click level · enter select",
+            Theme::dim(),
+        )))
+        .render(
+            Rect {
+                x: base_x,
+                y: hint_y,
+                width: inner.width.saturating_sub(1),
+                height: 1,
+            },
+            buf,
+        );
     }
 
     pub(super) fn draw_popup(&mut self, buf: &mut Buffer, input_area: Rect) {
@@ -3216,7 +3392,7 @@ impl App {
             // were doing work
             Theme::dim()
         } else {
-            Style::new().fg(Theme::ACCENT_SOFT())
+            Theme::effort(self.model_cfg.effort)
         };
         spans.push(Span::styled(ef_label.clone(), ef_style));
         self.ef_click = Some((ef_x0, ef_x0 + cols(&ef_label) as u16));

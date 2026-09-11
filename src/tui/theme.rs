@@ -1,5 +1,7 @@
 ﻿use ratatui::style::{Color, Modifier, Style};
 
+use crate::config::EffortLevel;
+
 /// Fixed Codex-style palette for the TUI: ANSI-16 names only, no custom RGB.
 ///
 /// Rules (mirroring `codex-rs/tui/styles.md`):
@@ -70,6 +72,25 @@ impl Theme {
     #[allow(non_snake_case)]
     pub const fn GREEN() -> Color {
         Color::Green
+    }
+    /// Slider/status color per effort level: off gray → low green →
+    /// medium cyan (house accent) → high light-blue → xhigh yellow →
+    /// max magenta. First cut for live review; tune after seeing it.
+    pub const fn effort_color(level: EffortLevel) -> Color {
+        match level {
+            EffortLevel::Off => Color::DarkGray,
+            EffortLevel::Low => Color::Green,
+            EffortLevel::Medium => Color::Cyan,
+            EffortLevel::High => Color::LightBlue,
+            EffortLevel::Xhigh => Color::Yellow,
+            EffortLevel::Max => Color::Magenta,
+        }
+    }
+
+    pub fn effort(level: EffortLevel) -> Style {
+        Style::new()
+            .fg(Self::effort_color(level))
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn base() -> Style {

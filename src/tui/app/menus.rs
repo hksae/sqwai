@@ -661,6 +661,13 @@ impl App {
         if matches!(self.cur_menu(), Some(Menu::ConfirmDelete { .. })) && self.menu_sel == 0 {
             self.menu_sel = 1;
         }
+        // effort slider opens on the current level, not on `off`
+        if matches!(self.cur_menu(), Some(Menu::Effort)) {
+            self.menu_sel = EffortLevel::SELECTABLE
+                .iter()
+                .position(|l| *l == self.model_cfg.effort)
+                .unwrap_or(0);
+        }
         // unit tests inject the cache directly and never hit the disk
         #[cfg(not(test))]
         if matches!(self.cur_menu(), Some(Menu::Sessions | Menu::DeleteSessions)) {
@@ -808,6 +815,11 @@ impl App {
     }
 
     pub(super) fn menu_hover(&mut self, row: u16) -> Option<usize> {
+        // effort slider has its own column-aware hit-testing (see
+        // `effort_hover_at`); the row-only path must not fight it
+        if matches!(self.cur_menu(), Some(Menu::Effort)) {
+            return Some(self.menu_sel);
+        }
         let r = self.menu_rect;
         // forms highlight nothing; clicks/hover on the frame (borders) or on
         // rows past the last entry must not select anything — otherwise a
@@ -824,6 +836,24 @@ impl App {
             self.dirty = true;
         }
         Some(abs)
+    }
+
+    /// Effort slider hit-test: label column or dot column → SELECTABLE
+    /// index. Hover previews (no commit), click commits via `menu_activate`.
+    pub(super) fn effort_hover_at(&mut self, row: u16, col: u16) -> Option<usize> {
+        if !matches!(self.cur_menu(), Some(Menu::Effort)) {
+            return None;
+        }
+        let (_, idx) = self
+            .effort_hits
+            .iter()
+            .find(|(r, _)| col >= r.x && col < r.right() && row >= r.y && row < r.bottom())?;
+        let idx = *idx;
+        if idx != self.menu_sel {
+            self.menu_sel = idx;
+            self.dirty = true;
+        }
+        Some(idx)
     }
 
     /// id of the session row currently highlighted in the sessions menu
