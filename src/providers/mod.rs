@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{EffortLevel, ResolvedProvider, WireFormat};
 
+/// Own User-Agent for every outbound HTTP client (provider APIs, model
+/// catalog, webfetch): identifies the agent instead of leaking the generic
+/// reqwest default. Version tracks the package automatically.
+pub const USER_AGENT: &str = concat!("sqwai/", env!("CARGO_PKG_VERSION"));
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -515,6 +520,7 @@ pub async fn check_connection(p: &ResolvedProvider) -> Result<String, String> {
         .ok_or_else(|| "no API key configured for this provider".to_string())?;
     let url = format!("{}/models", p.base_url.trim_end_matches('/'));
     let http = reqwest::ClientBuilder::new()
+        .user_agent(USER_AGENT)
         .connect_timeout(std::time::Duration::from_secs(8))
         .timeout(std::time::Duration::from_secs(15))
         .build()

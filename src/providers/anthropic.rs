@@ -175,6 +175,7 @@ impl AnthropicProvider {
             .ok_or_else(|| anyhow!("anthropic: api key missing"))?;
         let http = reqwest::ClientBuilder::new()
             .http1_only()
+            .user_agent(super::USER_AGENT)
             .connect_timeout(std::time::Duration::from_secs(15))
             .read_timeout(std::time::Duration::from_secs(180))
             .build()?;

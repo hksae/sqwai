@@ -42,7 +42,7 @@ pub async fn fetch(args: &Value) -> Outcome {
         Err(error) => return Outcome::err(error),
     };
     let timeout = args.get("timeout").and_then(Value::as_u64).unwrap_or(15);
-    let client = match client(timeout, "sqwai/0.1 webfetch") {
+    let client = match client(timeout, crate::providers::USER_AGENT) {
         Ok(c) => c,
         Err(e) => return Outcome::err(format!("webfetch {e}")),
     };

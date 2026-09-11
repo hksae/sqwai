@@ -2911,10 +2911,10 @@ impl App {
         let active_color = Theme::effort_color(active);
         let active_style = Theme::effort(active);
 
-        // card geometry: 1 pad + n columns, labels + track + note + hint
+        // card geometry: 1 pad + n columns; labels + track + one air row
         let inner_w = 1 + COL_W * n as u16;
         let w = (inner_w + 2).clamp(30, area.width.saturating_sub(4).max(30));
-        let h: u16 = 8;
+        let h: u16 = 5;
         let rect = Rect {
             x: area.x + (area.width.saturating_sub(w)) / 2,
             y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -2943,7 +2943,14 @@ impl App {
                 Style::new()
                     .fg(ratatui::style::Color::White)
                     .add_modifier(Modifier::BOLD),
-            ));
+            ))
+            .title_bottom(
+                Line::from(Span::styled(
+                    " ← → move · click · enter ",
+                    Theme::dim(),
+                ))
+                .right_aligned(),
+            );
         Clear.render(rect, buf);
         let inner = Rect {
             x: rect.x + 1,
@@ -2952,14 +2959,12 @@ impl App {
             height: rect.height.saturating_sub(2),
         };
         block.render(rect, buf);
-        if inner.height < 4 || inner.width < inner_w {
+        if inner.height < 3 || inner.width < inner_w {
             return;
         }
 
         let labels_y = inner.y;
         let track_y = inner.y + 1;
-        let note_y = inner.y + 2;
-        let hint_y = inner.y + 3;
         let base_x = inner.x + 1;
 
         // labels row + hit rects (label cell and dot cell share one target)
@@ -3038,31 +3043,6 @@ impl App {
             Rect {
                 x: base_x,
                 y: track_y,
-                width: inner.width.saturating_sub(1),
-                height: 1,
-            },
-            buf,
-        );
-
-        // note: what the highlighted level does on this model
-        let plan = self.effort_plan_for(EffortLevel::SELECTABLE[sel]);
-        Paragraph::new(Line::from(Span::styled(plan.label(), Theme::dim()))).render(
-            Rect {
-                x: base_x,
-                y: note_y,
-                width: inner.width.saturating_sub(1),
-                height: 1,
-            },
-            buf,
-        );
-        Paragraph::new(Line::from(Span::styled(
-            "← → move · click level · enter select",
-            Theme::dim(),
-        )))
-        .render(
-            Rect {
-                x: base_x,
-                y: hint_y,
                 width: inner.width.saturating_sub(1),
                 height: 1,
             },

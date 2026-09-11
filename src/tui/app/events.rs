@@ -598,6 +598,11 @@ impl App {
                         {
                             self.open_menu(Menu::Settings);
                         }
+                        KeyCode::Char('e') | KeyCode::Char('E')
+                            if ctrl && self.menu_stack.is_empty() =>
+                        {
+                            self.open_menu(Menu::Effort);
+                        }
                         KeyCode::Char('g') | KeyCode::Char('G')
                             if ctrl
                                 && (self.menu_stack.is_empty()
@@ -886,8 +891,9 @@ impl App {
                             // inside: pick a row; outside: act like esc
                             if self.in_menu_rect(m.row, m.column) {
                                 if matches!(self.cur_menu(), Some(Menu::Effort)) {
-                                    // click a dot/label commits the level at once
-                                    if self.effort_hover_at(m.row, m.column).is_some() {
+                                    // click a dot/label selects and commits at once
+                                    if let Some(idx) = self.effort_index_at(m.row, m.column) {
+                                        self.menu_sel = idx;
                                         self.menu_activate();
                                     }
                                 } else if matches!(self.cur_menu(), Some(Menu::GraphView { .. }))
@@ -905,9 +911,9 @@ impl App {
                         }
                     }
                     MouseEventKind::Moved if !self.menu_stack.is_empty() => {
-                        if matches!(self.cur_menu(), Some(Menu::Effort)) {
-                            let _ = self.effort_hover_at(m.row, m.column);
-                        } else {
+                        // effort slider: hover previews nothing (only click
+                        // or arrows change the level)
+                        if !matches!(self.cur_menu(), Some(Menu::Effort)) {
                             let _ = self.menu_hover(m.row);
                         }
                     }

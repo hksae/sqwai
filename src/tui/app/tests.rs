@@ -1719,14 +1719,15 @@ mod tests {
         app.draw_menu(&mut buf, area);
         assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
         assert!(app.menu_rect.width > 0 && app.menu_rect.height > 0);
-        // hover the max dot previews it, click commits it
+        // hover the max dot previews nothing (no mutation without click)
         let (_, max_idx) = app.effort_hits.last().copied().expect("max hit");
         let (rect, _) = app.effort_hits[max_idx];
-        assert_eq!(
-            app.effort_hover_at(rect.y, rect.x + 1),
-            Some(max_idx)
-        );
-        assert_eq!(app.menu_sel, max_idx);
+        assert_eq!(app.effort_index_at(rect.y, rect.x + 1), Some(max_idx));
+        assert_eq!(app.menu_sel, want, "hover must not move the slider");
+        // click commits it
+        app.menu_sel = max_idx;
+        app.menu_activate();
+        assert_eq!(app.model_cfg.effort, EffortLevel::Max);
     }
 
     #[test]

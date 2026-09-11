@@ -839,21 +839,16 @@ impl App {
     }
 
     /// Effort slider hit-test: label column or dot column → SELECTABLE
-    /// index. Hover previews (no commit), click commits via `menu_activate`.
-    pub(super) fn effort_hover_at(&mut self, row: u16, col: u16) -> Option<usize> {
+    /// index. Pure lookup, no side effects: hovering previews nothing, only
+    /// a click (or arrows + Enter) changes the selection.
+    pub(super) fn effort_index_at(&self, row: u16, col: u16) -> Option<usize> {
         if !matches!(self.cur_menu(), Some(Menu::Effort)) {
             return None;
         }
-        let (_, idx) = self
-            .effort_hits
+        self.effort_hits
             .iter()
-            .find(|(r, _)| col >= r.x && col < r.right() && row >= r.y && row < r.bottom())?;
-        let idx = *idx;
-        if idx != self.menu_sel {
-            self.menu_sel = idx;
-            self.dirty = true;
-        }
-        Some(idx)
+            .find(|(r, _)| col >= r.x && col < r.right() && row >= r.y && row < r.bottom())
+            .map(|(_, idx)| *idx)
     }
 
     /// id of the session row currently highlighted in the sessions menu
@@ -1856,6 +1851,7 @@ impl App {
                     ("ctrl+p", "providers"),
                     ("ctrl+l", "plan"),
                     ("ctrl+o", "settings"),
+                    ("ctrl+e", "effort"),
                     ("y / n", "confirm · cancel"),
                     ("a / d", "allow always · deny"),
                     ("1-9", "pick inline option"),
