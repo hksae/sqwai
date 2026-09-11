@@ -2705,7 +2705,7 @@ mod tests {
             !title.contains('(') && !title.contains(')'),
             "title has parens: {title}"
         );
-        assert!(title.contains("edit provider: anthropic"));
+        assert!(title.contains("Edit provider: anthropic"));
 
         app.open_menu_replace(Menu::EditModel {
             provider: "anthropic".into(),
@@ -2716,7 +2716,7 @@ mod tests {
             !mtitle.contains('(') && !mtitle.contains(')'),
             "mtitle has parens: {mtitle}"
         );
-        assert!(mtitle.contains("model @ anthropic"));
+        assert!(mtitle.contains("Model · anthropic"));
 
         // Simulate form rect and mouse interaction
         app.menu_rect = Rect {

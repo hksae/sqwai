@@ -587,6 +587,15 @@ impl ListSection {
     }
 }
 
+/// Capitalize the first letter for menu titles ("budget ratio" -> "Budget ratio").
+fn cap_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 impl App {
     pub(super) fn cur_menu(&self) -> Option<&Menu> {
         self.menu_stack.last()
@@ -1701,71 +1710,67 @@ impl App {
 
     pub(super) fn menu_title(&self) -> String {
         match &self.cur_menu() {
-            Some(Menu::Settings) => " settings ".into(),
-            Some(Menu::Appearance) => " appearance ".into(),
-            Some(Menu::Mcp) => " mcp servers ".into(),
-            Some(Menu::Lsp) => " lsp servers ".into(),
-            Some(Menu::Skills) => " skills ".into(),
-            Some(Menu::Providers) => " providers (enter: models) ".into(),
-            Some(Menu::Models { provider }) => format!(" {provider} models "),
-            Some(Menu::PickModel { provider }) => format!(" switch model: {provider} "),
-            Some(Menu::DeleteModelList { provider }) => format!(" delete model @ {provider} "),
+            Some(Menu::Settings) => " Settings ".into(),
+            Some(Menu::Appearance) => " Appearance ".into(),
+            Some(Menu::Mcp) => " MCP servers ".into(),
+            Some(Menu::Lsp) => " LSP servers ".into(),
+            Some(Menu::Skills) => " Skills ".into(),
+            Some(Menu::Providers) => " Providers ".into(),
+            Some(Menu::Models { provider }) => format!(" Models · {provider} "),
+            Some(Menu::PickModel { provider }) => format!(" Switch model · {provider} "),
+            Some(Menu::DeleteModelList { provider }) => {
+                format!(" Delete model · {provider} ")
+            }
             Some(Menu::EditProvider { name }) => match name {
-                Some(n) => format!(" edit provider: {n} "),
-                None => " new provider ".into(),
+                Some(n) => format!(" Edit provider: {n} "),
+                None => " New provider ".into(),
             },
             Some(Menu::EditModel { provider, .. }) => {
-                format!(" model @ {provider} ")
+                format!(" Model · {provider} ")
             }
             Some(Menu::Sessions) => {
                 if self.sessions_filter.is_empty() {
-                    " sessions ".into()
+                    " Sessions ".into()
                 } else {
-                    format!(" sessions · filter '{}' ", self.sessions_filter)
+                    format!(" Sessions · filter '{}' ", self.sessions_filter)
                 }
             }
-            Some(Menu::DeleteSessions) => " delete session ".into(),
-            Some(Menu::Debug) => " debug ".into(),
-            Some(Menu::Agent) => " agent ".into(),
-            Some(Menu::Safety) => " safety ".into(),
-            Some(Menu::Undo) => " undo ".into(),
-            Some(Menu::PickDefaultModel) => " default model ".into(),
-            Some(Menu::Help) => " help ".into(),
-            Some(Menu::Controls) => " controls ".into(),
-            Some(Menu::EditScalar(setting)) => format!(" edit {} ", setting.label()),
-            Some(Menu::AddListItem(section)) => format!(" add {} ", section.title()),
+            Some(Menu::DeleteSessions) => " Delete session ".into(),
+            Some(Menu::Debug) => " Debug ".into(),
+            Some(Menu::Agent) => " Agent ".into(),
+            Some(Menu::Safety) => " Safety ".into(),
+            Some(Menu::Undo) => " Undo ".into(),
+            Some(Menu::PickDefaultModel) => " Default model ".into(),
+            Some(Menu::Help) => " Help ".into(),
+            Some(Menu::Controls) => " Controls ".into(),
+            Some(Menu::EditScalar(setting)) => format!(" Edit {} ", cap_first(setting.label())),
+            Some(Menu::AddListItem(section)) => format!(" Add {} ", cap_first(section.title())),
             Some(Menu::DeleteListItems(section)) => {
-                format!(" delete {} ", section.title())
+                format!(" Delete {} ", cap_first(section.title()))
             }
             Some(Menu::EditMcpServer { index }) => match index {
-                Some(_) => " edit MCP server ".into(),
-                None => " new MCP server ".into(),
+                Some(_) => " Edit MCP server ".into(),
+                None => " New MCP server ".into(),
             },
-            Some(Menu::McpServer { .. }) => " mcp server ".into(),
-            Some(Menu::DeleteMcpServer) => " delete MCP server ".into(),
+            Some(Menu::McpServer { .. }) => " MCP server ".into(),
+            Some(Menu::DeleteMcpServer) => " Delete MCP server ".into(),
             Some(Menu::EditLspServer { index }) => match index {
-                Some(_) => " edit LSP server ".into(),
-                None => " new LSP server ".into(),
+                Some(_) => " Edit LSP server ".into(),
+                None => " New LSP server ".into(),
             },
-            Some(Menu::LspServer { .. }) => " lsp server ".into(),
-            Some(Menu::DeleteLspServer) => " delete LSP server ".into(),
-            Some(Menu::EditSessionTitle { .. }) => " rename session ".into(),
-            Some(Menu::ConfirmDelete { .. }) => " confirm ".into(),
-            Some(Menu::Effort) => " effort ".into(),
-            Some(Menu::AskUser { questions, .. }) => {
-                if questions.iter().any(|q| q.multiple) {
-                    " ask · multiple (enter toggles, confirm to finish) ".into()
-                } else {
-                    " ask ".into()
-                }
-            }
-            Some(Menu::Approval { .. }) => " confirm command ".into(),
-            Some(Menu::AskFree { .. }) => " type your answer (enter: send, esc: cancel) ".into(),
-            Some(Menu::Todo) => " to-do ".into(),
-            Some(Menu::Plan) => " plan ".into(),
-            Some(Menu::PlanPreview { .. }) => " proposed plan ".into(),
-            Some(Menu::Subagents) => " subagents ".into(),
-            Some(Menu::GraphView { .. }) => " graph view (Ctrl+G) ".into(),
+            Some(Menu::LspServer { .. }) => " LSP server ".into(),
+            Some(Menu::DeleteLspServer) => " Delete LSP server ".into(),
+            Some(Menu::EditSessionTitle { .. }) => " Rename session ".into(),
+            Some(Menu::ConfirmDelete { .. }) => " Confirm ".into(),
+            Some(Menu::Effort) => " Effort ".into(),
+            Some(Menu::AskUser { .. }) => " Ask ".into(),
+            Some(Menu::Approval { .. }) => " Confirm command ".into(),
+            Some(Menu::AskFree { .. }) => " Answer ".into(),
+            Some(Menu::Todo) => " To-do ".into(),
+            Some(Menu::Plan) => " Plan ".into(),
+            Some(Menu::PlanPreview { .. }) => " Proposed plan ".into(),
+            Some(Menu::Subagents) => " Subagents ".into(),
+            Some(Menu::GraphView { .. }) => " Graph ".into(),
             None => String::new(),
         }
     }

@@ -2739,7 +2739,9 @@ impl App {
             .border_style(Theme::border_dim())
             .title(Span::styled(
                 format!(" {} ", self.menu_title()),
-                Theme::dim(),
+                Style::new()
+                    .fg(ratatui::style::Color::White)
+                    .add_modifier(Modifier::BOLD),
             ));
         if matches!(self.cur_menu(), Some(Menu::Sessions)) {
             block = block.title_bottom(
