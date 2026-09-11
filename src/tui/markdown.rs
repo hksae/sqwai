@@ -1209,7 +1209,15 @@ fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
         let inner = &text[from..inner_end];
         match marker {
             "`" | "``" => {
-                out.push(Span::styled(inner.to_string(), code_style()));
+                // cyan code keeps its color, but never drops the ambient
+                // background: inside a quote the band must continue
+                // uninterrupted behind `code` (and bold/links keep it by
+                // deriving from `style` below).
+                let mut cs = code_style();
+                if let Some(bg) = style.bg {
+                    cs = cs.bg(bg);
+                }
+                out.push(Span::styled(inner.to_string(), cs));
             }
             "$" | "$$" => {
                 let rendered = render_math(inner);
@@ -1957,6 +1965,32 @@ mod tests {
             "quote body carries the band bg: {:?}",
             lines[0]
         );
+    }
+
+    #[test]
+    fn quote_inline_markup_keeps_band_bg() {
+        use ratatui::style::Color;
+        let hl = Highlighter::new();
+        let lines = render("> use `read` and **bold** here", 60, &hl);
+        assert_eq!(lines.len(), 1);
+        let spans = &lines[0].spans;
+        // inline code keeps its cyan fg but inherits the quote band bg
+        let code = spans
+            .iter()
+            .find(|s| s.content == "read")
+            .expect("code span");
+        assert_eq!(code.style.fg, Some(Color::Cyan));
+        assert_eq!(code.style.bg, Some(Theme::QUOTE_BG()));
+        // bold keeps the green fg and the band bg
+        let bold = spans
+            .iter()
+            .find(|s| s.content == "bold")
+            .expect("bold span");
+        assert_eq!(bold.style.fg, Some(Color::Green));
+        assert_eq!(bold.style.bg, Some(Theme::QUOTE_BG()));
+        // top-level code stays transparent (no ambient bg to inherit)
+        let plain = inline("`x`", Theme::base());
+        assert_eq!(plain[0].style.bg, None);
     }
 
     #[test]
