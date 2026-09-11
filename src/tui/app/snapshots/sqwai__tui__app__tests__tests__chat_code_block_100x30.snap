@@ -9,14 +9,14 @@ expression: s
 
  Here is the explanation:
 
- ╭─ rust ──────────────────╮
- │  fn main() {            │
- │      println!("hello"); │
- │  }                      │
- ╰─────────────────────────╯
+ fn main() {
+     println!("hello");
+ }
 
  The main function is the program entry point. It calls println! which writes to stdout. This is
  very idiomatic Rust and the canonical hello-world example.
+
+
 
 
 

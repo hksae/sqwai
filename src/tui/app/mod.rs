@@ -1019,9 +1019,11 @@ impl App {
         }
         input.set_block(Self::input_block());
         input.set_style(Theme::base());
-        input.set_cursor_line_style(Style::new().bg(Theme::SURFACE()));
-        input.set_cursor_style(Style::new().bg(Theme::ACCENT_SOFT()).fg(Theme::BG()));
-        input.set_selection_style(Style::new().bg(Theme::ACCENT()).fg(Theme::BG()));
+        input.set_cursor_line_style(Style::new());
+        // Classic block cursor / selection on manually colored backgrounds
+        // (the styles.md exception for black & white).
+        input.set_cursor_style(Style::new().bg(ratatui::style::Color::White).fg(ratatui::style::Color::Black));
+        input.set_selection_style(Style::new().bg(ratatui::style::Color::Cyan).fg(ratatui::style::Color::Black));
         input
     }
 

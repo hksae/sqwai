@@ -96,7 +96,7 @@ fn base_style() -> Style {
 }
 
 fn code_style() -> Style {
-    Style::new().fg(Theme::ACCENT_SOFT()).bg(Theme::SURFACE())
+    Style::new().fg(Color::Cyan)
 }
 
 /// Render markdown text into styled lines. Width is used only by tables.
@@ -217,8 +217,9 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
             }
             let level = level.min(4);
             let rail = "▐ ".repeat(level);
-            let mut spans = vec![Span::styled(rail, Theme::accent())];
-            spans.extend(inline(rest, Theme::dim().add_modifier(Modifier::ITALIC)));
+            let quote = Style::new().fg(Theme::GREEN());
+            let mut spans = vec![Span::styled(rail, quote)];
+            spans.extend(inline(rest, quote));
             out.push(Line::from(spans));
             continue;
         }
@@ -231,9 +232,15 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
                 .map(|c| if c == '\t' { 4 } else { 1 })
                 .sum();
             let nest = (indent_cols / 2).min(3);
+            // Ordered markers get light blue, unordered stay default.
+            let marker_style = if marker.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                Style::new().fg(Theme::LIGHT_BLUE())
+            } else {
+                Style::new()
+            };
             let mut spans = vec![
                 Span::styled("  ".repeat(nest + 1), base_style()),
-                Span::styled(format!("{marker} "), Theme::accent()),
+                Span::styled(format!("{marker} "), marker_style),
             ];
             spans.extend(inline(rest, base_style()));
             out.push(Line::from(spans));
@@ -581,80 +588,15 @@ fn emit_code(
     hl: &Highlighter,
     width: u16,
 ) {
-    // highlight first to measure, then frame the block in a rounded outline
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    // Codex-style: plain syntax-highlighted rows, no frame or language badge.
+    // Long source lines still wrap to the chat width (the outer wrapper must
+    // never see an over-wide row).
+    let w = (width as usize).max(1);
     for line in hl.highlight_code(code, lang) {
-        lines.push(surface_line(line));
-    }
-    // Degenerate narrow viewport: the frame alone needs 5 columns. Skip it
-    // and emit plain (still wrapped) highlighted rows instead of overflowing.
-    if width < 6 {
-        let w = (width as usize).max(1);
-        for l in lines.into_iter().flat_map(|line| wrap_code_line(line, w)) {
+        for l in wrap_code_line(line, w) {
             out.push(l);
         }
-        return;
     }
-    // The code frame must never be wider than the chat viewport. Long source
-    // lines are wrapped into additional framed rows below, rather than being
-    // passed to the outer wrapper where the right border could be split away.
-    let max_w = width.saturating_sub(4) as usize;
-
-    // top border with the language embedded: ╭─ rust ────╮
-    // If language text is longer than the content, expand iw so that
-    // the top border, body lines, and bottom border all have identical width (iw + 4).
-    let lang_txt = match lang {
-        Some(l) if !l.is_empty() => {
-            // Truncate language label if it would overflow max_w + 2
-            let available = max_w.saturating_add(2);
-            let mut s = format!("─ {l} ");
-            if UnicodeWidthStr::width(s.as_str()) > available {
-                let mut truncated = String::new();
-                for ch in format!("─ {l}").chars() {
-                    if UnicodeWidthStr::width(format!("{truncated}{ch}… ").as_str()) > available {
-                        break;
-                    }
-                    truncated.push(ch);
-                }
-                s = format!("{truncated}… ");
-            }
-            s
-        }
-        _ => String::new(),
-    };
-    let lang_w = UnicodeWidthStr::width(lang_txt.as_str());
-    let min_iw_for_lang = lang_w.saturating_sub(2);
-
-    let iw = lines
-        .iter()
-        .map(line_width)
-        .max()
-        .unwrap_or(0)
-        .max(min_iw_for_lang)
-        .min(max_w)
-        .max(1);
-    // Code frame is intentionally a little quieter than the accent text.
-    let b = Style::new().fg(Theme::code_border()).bg(Theme::BG());
-
-    let rest = (iw + 2).saturating_sub(UnicodeWidthStr::width(lang_txt.as_str()));
-    out.push(Line::from(vec![
-        Span::styled("╭".to_string(), b),
-        // The label is part of the frame, not an accent badge: one quiet
-        // border color keeps the left cap and the rest of the outline uniform.
-        Span::styled(lang_txt, b),
-        Span::styled(format!("{}╮", "─".repeat(rest)), b),
-    ]));
-    for l in lines.into_iter().flat_map(|line| wrap_code_line(line, iw)) {
-        let pad = " ".repeat(iw.saturating_sub(line_width(&l)));
-        let mut spans = vec![Span::styled("│ ".to_string(), b)];
-        spans.extend(l.spans);
-        spans.push(Span::styled(format!("{pad} │"), b));
-        out.push(Line::from(spans));
-    }
-    out.push(Line::from(vec![
-        Span::styled("╰".to_string(), b),
-        Span::styled(format!("{}╯", "─".repeat(iw + 2)), b),
-    ]));
 }
 
 fn wrap_code_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
@@ -691,33 +633,9 @@ fn wrap_code_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     rows
 }
 
-/// Patch one highlighted code line onto the surface background.
-fn surface_line(line: Line<'static>) -> Line<'static> {
-    let mut spans = Vec::with_capacity(line.spans.len() + 1);
-    spans.push(Span::styled(" ".to_string(), surface_pad()));
-    for s in line.spans {
-        let st = s.style.patch(Style::new().bg(Theme::SURFACE()));
-        spans.push(Span::styled(s.content, st));
-    }
-    Line::from(spans)
-}
-
-/// Terminal columns of a rendered line, without joining its spans into a
-/// temporary string first (used for measuring, not for content).
-fn line_width(l: &Line<'_>) -> usize {
-    l.spans
-        .iter()
-        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-        .sum()
-}
-
 #[cfg(test)]
 fn line_text_pub(l: &Line<'_>) -> String {
     l.spans.iter().map(|s| s.content.as_ref()).collect()
-}
-
-fn surface_pad() -> Style {
-    Style::new().fg(Theme::SURFACE()).bg(Theme::SURFACE())
 }
 
 fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
@@ -732,21 +650,16 @@ fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
         return None;
     }
     let rest = after.trim_start_matches([' ', '\t']);
+    // Codex-style headings: h1 bold+underlined, h2 bold, h3 bold+italic,
+    // h4-h6 italic. The `#` markers stay visible (terminal default color).
     let style = match level {
-        1..=2 => Theme::accent_bold(),
-        3..=4 => Style::new()
-            .fg(Theme::FG())
-            .bg(Theme::BG())
-            .add_modifier(Modifier::BOLD),
-        _ => Style::new()
-            .fg(Theme::DIM())
-            .bg(Theme::BG())
-            .add_modifier(Modifier::BOLD),
+        1 => Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        2 => Style::new().add_modifier(Modifier::BOLD),
+        3 => Style::new().add_modifier(Modifier::BOLD | Modifier::ITALIC),
+        _ => Style::new().add_modifier(Modifier::ITALIC),
     };
-    let spans = inline(rest, style);
-    // The Markdown marker is syntax, not content: do not print it in the
-    // terminal. The heading style itself provides the visual distinction
-    // (no underline: it collides with link styling and looks noisy).
+    let mut spans = vec![Span::styled(format!("{} ", "#".repeat(level)), style)];
+    spans.extend(inline(rest, style));
     Some(spans)
 }
 
@@ -1584,10 +1497,18 @@ mod tests {
     }
 
     #[test]
-    fn code_block_gets_label_and_lines() {
+    fn code_block_renders_plain_lines_without_frame() {
         let hl = Highlighter::new();
         let lines = render("```rust\nfn main() {}\n```\ntext", 80, &hl);
-        assert!(lines.len() >= 3);
+        assert!(lines.len() >= 2);
+        let first = line_text_pub(&lines[0]);
+        assert_eq!(first, "fn main() {}");
+        let joined: String = lines.iter().map(|l| line_text_pub(l)).collect();
+        assert!(joined.contains("text"), "{joined:?}");
+        // No frame borders and no language badge (Codex-style plain block).
+        for ch in ['╭', '╮', '╰', '╯', '│'] {
+            assert!(!joined.contains(ch), "frame leaked: {joined:?}");
+        }
         let narrow = render(
             "```cpp\nstd::cout << \"Hello, world!\" << std::endl;\n```",
             24,
@@ -1596,35 +1517,10 @@ mod tests {
         for line in &narrow {
             assert!(UnicodeWidthStr::width(line_text_pub(line).as_str()) <= 24);
         }
-        let label: String = lines[0]
-            .spans
-            .iter()
-            .map(|s| s.content.to_string())
-            .collect();
-        assert!(label.contains("rust"), "label was {label:?}");
-        assert!(
-            lines[0]
-                .spans
-                .iter()
-                .all(|span| span.style == lines[0].spans[0].style),
-            "language label must share the quiet frame style"
-        );
-        let generic = render("```text\nplain note\n```", 80, &hl);
-        let generic_top = line_text_pub(&generic[0]);
-        assert!(
-            !generic_top.contains("text"),
-            "generic text label must be hidden: {generic_top:?}"
-        );
-        let body: String = lines[1]
-            .spans
-            .iter()
-            .map(|s| s.content.to_string())
-            .collect();
-        assert!(body.contains("fn main"), "{body:?}");
     }
 
     #[test]
-    fn headings_render_without_underline() {
+    fn headings_keep_markers_codex_style() {
         let hl = Highlighter::new();
         let lines = render("# Catalog\ndescription\n# Additional example", 80, &hl);
         assert_eq!(lines.len(), 3);
@@ -1633,21 +1529,45 @@ mod tests {
             .iter()
             .map(|s| s.content.to_string())
             .collect();
-        assert_eq!(first, "Catalog");
+        assert_eq!(first, "# Catalog");
         assert!(
             lines[0]
                 .spans
                 .iter()
                 .any(|s| s.style.add_modifier.contains(Modifier::BOLD))
         );
-        for l in &lines {
-            assert!(
-                l.spans
-                    .iter()
-                    .all(|s| !s.style.add_modifier.contains(Modifier::UNDERLINED)),
-                "headings must not be underlined: {l:?}"
-            );
-        }
+        // h1 is underlined, deeper levels are not.
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .all(|s| s.style.add_modifier.contains(Modifier::UNDERLINED)),
+            "h1 must be underlined: {:?}",
+            lines[0]
+        );
+        let h2 = render("## Sub", 80, &hl);
+        let h2text: String = h2[0]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert_eq!(h2text, "## Sub");
+        assert!(
+            h2[0]
+                .spans
+                .iter()
+                .all(|s| s.style.add_modifier.contains(Modifier::BOLD)
+                    && !s.style.add_modifier.contains(Modifier::UNDERLINED)),
+            "h2 must be bold, not underlined: {:?}",
+            h2[0]
+        );
+        let h3 = render("### Deep", 80, &hl);
+        assert!(
+            h3[0].spans.iter().all(|s| s.style.add_modifier.contains(Modifier::BOLD)
+                && s.style.add_modifier.contains(Modifier::ITALIC)),
+            "h3 must be bold+italic: {:?}",
+            h3[0]
+        );
         // `#Foo` is a paragraph, not a heading: the marker stays visible
         let nospace = render("#NoSpace", 80, &hl);
         let text: String = nospace
@@ -1780,28 +1700,28 @@ mod tests {
     }
 
     #[test]
-    fn code_box_borders_align() {
+    fn code_block_rows_fit_width() {
         let hl = Highlighter::new();
         let lines = render("```rust\nfn a() {}\nlet x = 12345;\n```\n", 60, &hl);
-        let widths: Vec<usize> = lines
-            .iter()
-            .take(5)
-            .map(|l| l.spans.iter().map(|s| s.content.chars().count()).sum())
-            .collect();
-        assert!(widths.iter().all(|&w| w == widths[0]), "{widths:?}");
+        assert!(!lines.is_empty());
+        for l in &lines {
+            assert!(
+                UnicodeWidthStr::width(line_text_pub(l).as_str()) <= 60,
+                "{l:?}"
+            );
+        }
+        let joined: String = lines.iter().map(|l| line_text_pub(l)).collect();
+        assert!(joined.contains("fn a()"), "{joined:?}");
     }
 
     #[test]
-    fn code_box_borders_align_with_long_language() {
+    fn code_block_language_badge_dropped() {
         let hl = Highlighter::new();
         let lines = render("```javascript\n1\n```\n", 60, &hl);
-        let widths: Vec<usize> = lines
-            .iter()
-            .take(3)
-            .map(|l| UnicodeWidthStr::width(line_text_pub(l).as_str()))
-            .collect();
-        assert_eq!(widths.len(), 3);
-        assert!(widths.iter().all(|&w| w == widths[0]), "{widths:?}");
+        let joined: String = lines.iter().map(|l| line_text_pub(l)).collect();
+        assert!(joined.contains('1'), "{joined:?}");
+        // No frame and no language badge: plain code row only.
+        assert_eq!(joined, "1", "{joined:?}");
     }
 
     #[test]
@@ -1978,10 +1898,10 @@ mod tests {
     #[test]
     fn code_block_survives_narrow_width_and_unknown_lang() {
         let hl = Highlighter::new();
-        // `foobarlang` is unknown -> plain-text fallback, still framed
+        // `foobarlang` is unknown -> plain-text fallback, no frame
         let lines = render("```foobarlang\nlet x = 1;\n```", 40, &hl);
         assert!(!lines.is_empty());
-        // degenerate viewport: no frame, but nothing overflows
+        // degenerate viewport: nothing overflows
         let tiny = render("```rust\nfn main() {}\n```", 4, &hl);
         assert!(!tiny.is_empty());
         for l in &tiny {
@@ -1993,13 +1913,13 @@ mod tests {
         // uppercase language tag still highlights instead of falling back:
         // the body keeps syntax spans, not one uniform style
         let up = render("```RUST\nfn main() {}\n```", 60, &hl);
-        assert!(up.len() >= 3);
-        let styles: std::collections::HashSet<String> = up[1]
+        assert_eq!(up.len(), 1);
+        let styles: std::collections::HashSet<String> = up[0]
             .spans
             .iter()
             .map(|s| format!("{:?}", s.style))
             .collect();
-        assert!(styles.len() > 1, "expected highlight spans: {:?}", up[1]);
+        assert!(styles.len() > 1, "expected highlight spans: {:?}", up[0]);
     }
 
     #[test]
