@@ -891,10 +891,13 @@ impl App {
                             // inside: pick a row; outside: act like esc
                             if self.in_menu_rect(m.row, m.column) {
                                 if matches!(self.cur_menu(), Some(Menu::Effort)) {
-                                    // click a dot/label selects and commits at once
-                                    if let Some(idx) = self.effort_index_at(m.row, m.column) {
+                                    // click moves the slider preview, the popup
+                                    // stays open; Enter commits, Esc cancels
+                                    if let Some(idx) = self.effort_index_at(m.row, m.column)
+                                        && idx != self.menu_sel
+                                    {
                                         self.menu_sel = idx;
-                                        self.menu_activate();
+                                        self.dirty = true;
                                     }
                                 } else if matches!(self.cur_menu(), Some(Menu::GraphView { .. }))
                                     && self.menu_rect.width >= 100
