@@ -230,7 +230,12 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
                 avail as u16,
             );
             for row in rows {
-                let mut spans = vec![Span::styled(rail.clone(), quote)];
+                // the rail glyph stays on the default background; the green
+                // band covers the quoted text (and its padding) only
+                let mut spans = vec![Span::styled(
+                    rail.clone(),
+                    Style::new().fg(Theme::GREEN()),
+                )];
                 spans.extend(row.spans);
                 let used: usize = spans
                     .iter()
@@ -1943,9 +1948,13 @@ mod tests {
         assert_eq!(lines.len(), 1);
         let text = line_text_pub(&lines[0]);
         assert_eq!(text, "▐ hi      ", "{text:?}");
+        // rail glyph itself is transparent; the band starts right of it
+        assert_eq!(lines[0].spans[0].style.bg, None);
         assert!(
-            lines[0].spans.iter().all(|s| s.style.bg == Some(Theme::QUOTE_BG())),
-            "every quote span carries the band bg: {:?}",
+            lines[0].spans[1..]
+                .iter()
+                .all(|s| s.style.bg == Some(Theme::QUOTE_BG())),
+            "quote body carries the band bg: {:?}",
             lines[0]
         );
     }

@@ -73,11 +73,12 @@ impl Theme {
     pub const fn GREEN() -> Color {
         Color::Green
     }
-    /// Blockquote band: translucent-green feel on dark terminals. A flat
-    /// dark green, not a bright one: text stays the bright green fg.
+    /// Blockquote band: dark translucent-green on dark terminals. The `▐`
+    /// rail itself stays on the default background; the band starts right
+    /// of it. Text stays the bright green fg.
     #[allow(non_snake_case)]
     pub const fn QUOTE_BG() -> Color {
-        Color::Rgb(30, 52, 30)
+        Color::Rgb(18, 31, 18)
     }
     /// Slider/status color per effort level: off gray → low green →
     /// medium cyan (house accent) → high light-blue → xhigh yellow →
