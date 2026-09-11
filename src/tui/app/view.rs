@@ -2743,7 +2743,7 @@ impl App {
         let mut block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Plain)
-            .border_style(Theme::border_dim())
+            .border_style(Theme::border_popup())
             .title(Span::styled(
                 format!(" {} ", self.menu_title()),
                 Style::new()
@@ -2879,7 +2879,7 @@ impl App {
             let details_block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Theme::border_dim())
+                .border_style(Theme::border_popup())
                 .title(Span::styled(" Node Details ", Theme::dim()));
 
             Paragraph::new(detail_lines)
@@ -2940,7 +2940,7 @@ impl App {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Plain)
-            .border_style(Theme::border_dim())
+            .border_style(Theme::border_popup())
             .title(Span::styled(
                 format!(" {} ", self.menu_title()),
                 Style::new()
@@ -3105,7 +3105,7 @@ impl App {
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Theme::border_dim()),
+                .border_style(Theme::border_popup()),
         ).render(rect, buf);
         // mini scrollbar inside the right border when the list overflows
         // (on the last content column, so the border stays intact)

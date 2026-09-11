@@ -132,6 +132,11 @@ impl Theme {
     pub fn border_dim() -> Style {
         Style::new().fg(Self::BORDER_DIM())
     }
+    /// Frames of every modal menu and popup: plain white, so overlays read
+    /// as a surface above the dimmed chat.
+    pub fn border_popup() -> Style {
+        Style::new().fg(Color::White)
+    }
     /// Busy/attention status: bold yellow, no chip background (Codex status).
     pub fn status_chip() -> Style {
         Style::new()
