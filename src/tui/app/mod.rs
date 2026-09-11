@@ -1607,7 +1607,7 @@ impl App {
             .collect()
     }
 
-    pub(super) fn popup_scroll_by(&mut self, delta: i32) {
+    pub(super) fn popup_scroll_by(&mut self, delta: i32) -> bool {
         let items = self.popup_items();
         let shown = items
             .len()
@@ -1620,7 +1620,16 @@ impl App {
         } else {
             self.popup_scroll.saturating_add(delta as usize)
         };
-        self.popup_scroll = next.min(max_scroll);
+        let next = next.min(max_scroll);
+        // True when the viewport actually moved: scrolling into a clamped
+        // edge must not schedule an empty present. Callers repaint separately
+        // when they clear a hover highlight.
+        if next != self.popup_scroll {
+            self.popup_scroll = next;
+            true
+        } else {
+            false
+        }
     }
 
     /// Rebuild the provider client from the current config so changes made
@@ -4170,6 +4179,7 @@ impl App {
     }
 
     fn scroll(&mut self, delta: i32) {
+        let had_sel = self.sel.is_some();
         self.sel = None;
         let h = self.last_chat.height.max(1) as usize;
         let max = self.cache_lines.len().saturating_sub(h);
@@ -4182,13 +4192,19 @@ impl App {
             self.view_top.min(max)
         };
         let next = (cur as isize - delta as isize).clamp(0, max as isize) as usize;
+        let old = (self.follow, self.view_top);
         if next >= max {
             self.follow = true;
         } else {
             self.follow = false;
             self.view_top = next;
         }
-        self.dirty = true;
+        // Scrolling into a clamped edge changes nothing on screen: skip the
+        // frame instead of presenting an empty diff (each present costs a
+        // terminal roundtrip). A cleared selection still needs its repaint.
+        if (self.follow, self.view_top) != old || had_sel {
+            self.dirty = true;
+        }
     }
 
     /// Start collecting startup screen data on a background thread. The

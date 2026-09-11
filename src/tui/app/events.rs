@@ -817,9 +817,12 @@ impl App {
                                 .scroll(tui_textarea::Scrolling::Delta { rows: -1, cols: 0 });
                             self.dirty = true;
                         } else if self.popup_visible() {
-                            self.popup_scroll_by(-3);
+                            let moved = self.popup_scroll_by(-3);
+                            let unhovered = self.hover.is_some();
                             self.hover = None;
-                            self.dirty = true;
+                            if moved || unhovered {
+                                self.dirty = true;
+                            }
                         } else {
                             // 3 lines per notch (was 4): smaller steps read as
                             // smoother motion now that each notch draws its own
@@ -839,9 +842,12 @@ impl App {
                                 .scroll(tui_textarea::Scrolling::Delta { rows: 1, cols: 0 });
                             self.dirty = true;
                         } else if self.popup_visible() {
-                            self.popup_scroll_by(3);
+                            let moved = self.popup_scroll_by(3);
+                            let unhovered = self.hover.is_some();
                             self.hover = None;
-                            self.dirty = true;
+                            if moved || unhovered {
+                                self.dirty = true;
+                            }
                         } else {
                             self.scroll(-3);
                         }
