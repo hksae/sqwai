@@ -2626,12 +2626,15 @@ impl App {
         self.menu_rect = rect;
 
         // Menus are modal surfaces: dim the already-rendered screen while
-        // preserving its text, then paint the menu at normal contrast.
+        // preserving its text AND colors, then paint the menu at normal
+        // contrast. Only the DIM modifier is added: replacing fg/bg (as
+        // before) wiped the user band, syntax colors and selections behind
+        // the menu.
         for y in area.y..area.bottom() {
             for x in area.x..area.right() {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     let style = cell.style();
-                    cell.set_style(style.fg(Theme::DIM()).bg(Theme::BG()));
+                    cell.set_style(style.add_modifier(Modifier::DIM));
                 }
             }
         }
