@@ -1378,6 +1378,7 @@ mod tests {
                 draw_us: 10,
                 rebuild_us: 5,
                 bytes: 2048,
+                pace_us: 8333,
                 merge: "splice",
                 fresh: 1,
                 segs: 2,
@@ -1395,9 +1396,18 @@ mod tests {
         app.menu_activate();
         assert!(!app.perf.enabled());
         let content = std::fs::read_to_string(&path).expect("log file written");
-        assert!(content.contains("# frame draw_us"), "header:\n{content}");
+        assert!(content.contains("# frame t_ms draw_us"), "header:\n{content}");
         assert!(
-            content.lines().any(|l| l.starts_with("1 10 5 2048 splice")),
+            content.lines().any(|l| {
+                let parts: Vec<&str> = l.split_whitespace().collect();
+                parts.len() > 6
+                    && parts[0] == "1"
+                    && parts[2] == "10"
+                    && parts[3] == "5"
+                    && parts[4] == "2048"
+                    && parts[5] == "8333"
+                    && parts[6] == "splice"
+            }),
             "frame line:\n{content}"
         );
         assert!(content.contains("EVT"), "event line:\n{content}");

@@ -1150,12 +1150,20 @@ impl App {
                 draw_res?;
                 end_res?;
                 let frame_us = t0.elapsed();
-                frame_ema = frame_ema.mul_f32(0.7) + frame_us.mul_f32(0.3);
+                // Asymmetric EMA: stretch the pace quickly when draws stall,
+                // recover quickly when they are fast again, so one slow patch
+                // cannot pin the UI at a sluggish pace for seconds.
+                frame_ema = if frame_us > frame_ema {
+                    frame_ema.mul_f32(0.7) + frame_us.mul_f32(0.3)
+                } else {
+                    frame_ema.mul_f32(0.4) + frame_us.mul_f32(0.6)
+                };
                 self.last_frame = Instant::now();
                 let stat = perf::FrameStat {
                     draw_us: frame_us.as_micros(),
                     rebuild_us: self.last_rebuild_us,
                     bytes: frame_bytes.take_bytes(),
+                    pace_us: pace.as_micros(),
                     merge: self.last_merge.as_str(),
                     fresh: self.last_fresh,
                     segs: self.segments.len(),

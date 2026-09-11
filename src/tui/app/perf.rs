@@ -5,8 +5,8 @@
 //! frame log → on, then read offline:
 //!
 //! ```text
-//! # frame draw_us rebuild_us bytes merge fresh renders wraps segs rows tick streaming running view
-//! 12 1843 1502 4096 splice 1 1 3 9 42 45 1 1 0
+//! # frame t_ms draw_us rebuild_us bytes pace_us merge fresh renders wraps segs rows tick streaming running view
+//! 12 345 1843 1502 4096 8333 splice 1 1 3 9 42 45 1 1 0
 //! EVT 1234 tool_start read
 //! ```
 //!
@@ -22,6 +22,9 @@ pub struct FrameStat {
     pub rebuild_us: u128,
     /// terminal bytes produced by the frame (pre-kernel write volume)
     pub bytes: u64,
+    /// adaptive pace in force for this frame (µs): separates "paced" lag
+    /// (high pace_us) from genuine stalls (low pace_us, high draw_us)
+    pub pace_us: u128,
     pub merge: &'static str,
     pub fresh: usize,
     pub segs: usize,
@@ -83,7 +86,7 @@ impl PerfLog {
                 let mut out = std::io::BufWriter::new(f);
                 let _ = writeln!(
                     out,
-                    "# frame draw_us rebuild_us bytes merge fresh renders wraps segs rows tick streaming running view"
+                    "# frame t_ms draw_us rebuild_us bytes pace_us merge fresh renders wraps segs rows tick streaming running view"
                 );
                 self.path = path.display().to_string();
                 self.out = Some(out);
@@ -108,11 +111,13 @@ impl PerfLog {
         self.frames += 1;
         let _ = writeln!(
             out,
-            "{} {} {} {} {} {} {renders} {wraps} {} {} {} {} {} {}",
+            "{} {} {} {} {} {} {} {renders} {wraps} {} {} {} {} {} {} {}",
             self.frames,
+            self.t0.elapsed().as_millis(),
             s.draw_us,
             s.rebuild_us,
             s.bytes,
+            s.pace_us,
             s.merge,
             s.fresh,
             s.segs,
