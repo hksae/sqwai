@@ -1611,7 +1611,7 @@ impl App {
                 };
                 let mut head_spans = vec![
                     Span::styled(marker.0, marker.1),
-                    Span::styled(shown_name, Style::new().fg(Theme::MAGENTA())),
+                    Span::styled(shown_name, Theme::accent()),
                     Span::styled(summary, Theme::dim()),
                 ];
                 if let Some((added, removed)) = edit_counts {

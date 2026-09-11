@@ -4,9 +4,9 @@
 ///
 /// Rules (mirroring `codex-rs/tui/styles.md`):
 /// - primary text is the terminal default (`Reset`), secondary is dim gray;
-/// - `Cyan` = tips, selection, status, accents; `Green` = success;
+/// - `Cyan` = tips, selection, status, accents, tool names; `Green` = success;
 /// - `Red` = errors; `Yellow` = busy/attention (dark terminals);
-/// - `Magenta` = special headers; `LightBlue` = ordered list markers;
+/// - `LightBlue` = ordered list markers; `Green` = blockquotes;
 /// - no painted backgrounds: everything is transparent over the terminal.
 /// Dark terminal is assumed (no light-theme probing like Codex `color.rs`).
 pub struct Theme;
@@ -62,10 +62,6 @@ impl Theme {
     #[allow(non_snake_case)]
     pub const fn WARN() -> Color {
         Color::Yellow
-    }
-    #[allow(non_snake_case)]
-    pub const fn MAGENTA() -> Color {
-        Color::Magenta
     }
     #[allow(non_snake_case)]
     pub const fn LIGHT_BLUE() -> Color {
