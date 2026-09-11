@@ -3497,14 +3497,14 @@ fn session_row(
     let Some(frame_w) = framed else {
         return (Line::from(spans), action);
     };
-    // rails + exact fit: every framed row matches the borders column-wise
+    // rails + exact fit: every framed row matches the borders column-wise.
+    // The pad lives INSIDE the rails (fit first, wrap after): padding
+    // outside would park the closing rail left of the border.
+    let inner = fit_line_width(Line::from(spans), frame_w);
     let mut full = vec![Span::styled("│".to_string(), Theme::rule_color())];
-    full.extend(spans);
+    full.extend(inner.spans);
     full.push(Span::styled("│".to_string(), Theme::rule_color()));
-    (
-        fit_line_width(Line::from(full), frame_w + 2),
-        action,
-    )
+    (Line::from(full), action)
 }
 
 /// truncate + pad to exactly `w` display columns (never chars: a CJK title

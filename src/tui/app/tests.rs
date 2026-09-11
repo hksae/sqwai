@@ -1484,6 +1484,12 @@ mod tests {
         assert_eq!(w_top, w_bot, "top and bottom borders must match");
         assert_eq!(w_top, w_row, "row and borders must match in display width");
         assert!(w_top <= 40, "must fit within menu rect width: {w_top} > 40");
+        // the closing rail seals the row: padding lives inside the frame,
+        // never parked after the rail (right rail must not drift left)
+        assert!(
+            content_row.ends_with('│'),
+            "trailing pad leaked past the rail: {content_row:?}"
+        );
     }
 
     #[test]
