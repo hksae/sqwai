@@ -218,9 +218,20 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
             let level = level.min(4);
             let rail = "▐ ".repeat(level);
             let quote = Style::new().fg(Theme::GREEN());
-            let mut spans = vec![Span::styled(rail, quote)];
-            spans.extend(inline(rest, quote));
-            out.push(Line::from(spans));
+            // Wrap the quoted text to what fits beside the rail, then put
+            // the rail on EVERY visual row: the outer wrapper would
+            // otherwise split long quotes and leave continuation rows bare.
+            let rail_cols = level * 2;
+            let avail = (width as usize).saturating_sub(rail_cols).max(1);
+            let (rows, _) = wrap_tagged(
+                vec![(Line::from(inline(rest, quote)), None)],
+                avail as u16,
+            );
+            for row in rows {
+                let mut spans = vec![Span::styled(rail.clone(), quote)];
+                spans.extend(row.spans);
+                out.push(Line::from(spans));
+            }
             continue;
         }
 
@@ -1889,6 +1900,30 @@ mod tests {
         assert!(all.contains("▐ ▐ deep"), "{all:?}");
         assert!(all.contains("▐ shallow"), "{all:?}");
         assert!(all.contains('─'), "spaced `* * *` is a rule: {all:?}");
+    }
+
+    #[test]
+    fn quote_rail_repeats_on_every_wrapped_row() {
+        let hl = Highlighter::new();
+        let lines = render(
+            "> alpha beta gamma delta epsilon zeta eta theta iota kappa",
+            20,
+            &hl,
+        );
+        assert!(lines.len() > 1, "must wrap at width 20: {lines:?}");
+        for l in &lines {
+            let text = line_text_pub(l);
+            assert!(
+                text.starts_with("▐ "),
+                "continuation row lost its rail: {text:?}"
+            );
+            assert!(
+                UnicodeWidthStr::width(text.as_str()) <= 20,
+                "row overflows: {text:?}"
+            );
+        }
+        let all: String = lines.iter().map(|l| line_text_pub(l)).collect();
+        assert!(all.contains("kappa"), "tail lost: {all:?}");
     }
 
     #[test]
