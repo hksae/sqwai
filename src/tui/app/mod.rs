@@ -1031,6 +1031,17 @@ impl App {
         Block::default()
     }
 
+    /// Width of the `› ` input marker gutter (0 on degenerate widths).
+    /// The marker occupies the gutter on the top input row only; the
+    /// textarea itself is shifted right by this on every row.
+    pub(super) fn input_marker_w(&self) -> u16 {
+        if self.last_input.width >= 6 {
+            2
+        } else {
+            0
+        }
+    }
+
     pub async fn run(mut self, mut terminal: Terminal) -> Result<()> {
         let (ev_tx, ev_rx) = std::sync::mpsc::channel::<crossterm::event::Event>();
         let input_notify = std::sync::Arc::new(tokio::sync::Notify::new());

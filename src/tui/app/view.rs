@@ -2322,8 +2322,31 @@ impl App {
         .style(Theme::base());
         f.render_widget(rule.clone(), layout[1]);
         self.input.set_block(Self::input_block());
-        // the cursor is rendered by tui-textarea; the input has no frame
-        f.render_widget(&self.input, layout[2]);
+        // the cursor is rendered by tui-textarea; the input has no frame.
+        // `› ` marks the top input row (like the user strip); the textarea
+        // is shifted right so text aligns under it on every row.
+        let marker_w = self.input_marker_w();
+        let input_rect = Rect {
+            x: layout[2].x + marker_w,
+            y: layout[2].y,
+            width: layout[2].width.saturating_sub(marker_w),
+            height: layout[2].height,
+        };
+        if marker_w > 0 {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "› ",
+                    Style::new().add_modifier(Modifier::BOLD | Modifier::DIM),
+                ))),
+                Rect {
+                    x: layout[2].x,
+                    y: layout[2].y,
+                    width: marker_w,
+                    height: 1,
+                },
+            );
+        }
+        f.render_widget(&self.input, input_rect);
         f.render_widget(rule, layout[3]);
 
         self.status_y = layout[4].y;
