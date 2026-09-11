@@ -650,13 +650,18 @@ fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
         return None;
     }
     let rest = after.trim_start_matches([' ', '\t']);
-    // Codex-style headings: h1 bold+underlined, h2 bold, h3 bold+italic,
-    // h4-h6 italic. The `#` markers stay visible (terminal default color).
+    // Headings: h1 bold+underlined, h2 bold, h3 bold+cyan, h4-h6 dim
+    // italic. h3/h4+ deliberately do not rely on italic alone: terminals
+    // without italic support (conhost) would render them as plain text.
     let style = match level {
         1 => Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         2 => Style::new().add_modifier(Modifier::BOLD),
-        3 => Style::new().add_modifier(Modifier::BOLD | Modifier::ITALIC),
-        _ => Style::new().add_modifier(Modifier::ITALIC),
+        3 => Style::new()
+            .fg(Theme::ACCENT())
+            .add_modifier(Modifier::BOLD | Modifier::ITALIC),
+        _ => Style::new()
+            .fg(Theme::DIM())
+            .add_modifier(Modifier::ITALIC),
     };
     let mut spans = vec![Span::styled(format!("{} ", "#".repeat(level)), style)];
     spans.extend(inline(rest, style));
@@ -1564,9 +1569,17 @@ mod tests {
         let h3 = render("### Deep", 80, &hl);
         assert!(
             h3[0].spans.iter().all(|s| s.style.add_modifier.contains(Modifier::BOLD)
-                && s.style.add_modifier.contains(Modifier::ITALIC)),
-            "h3 must be bold+italic: {:?}",
+                && s.style.add_modifier.contains(Modifier::ITALIC)
+                && s.style.fg == Some(ratatui::style::Color::Cyan)),
+            "h3 must be bold+italic cyan: {:?}",
             h3[0]
+        );
+        let h4 = render("#### Fine", 80, &hl);
+        assert!(
+            h4[0].spans.iter().all(|s| s.style.add_modifier.contains(Modifier::ITALIC)
+                && s.style.fg == Some(Theme::DIM())),
+            "h4 must be dim italic: {:?}",
+            h4[0]
         );
         // `#Foo` is a paragraph, not a heading: the marker stays visible
         let nospace = render("#NoSpace", 80, &hl);
