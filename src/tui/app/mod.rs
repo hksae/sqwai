@@ -1023,19 +1023,28 @@ impl App {
 
     pub async fn run(mut self, mut terminal: Terminal) -> Result<()> {
         let (ev_tx, ev_rx) = std::sync::mpsc::channel::<crossterm::event::Event>();
+        let input_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let input_notify_tx = std::sync::Arc::clone(&input_notify);
         std::thread::spawn(move || {
             while let Ok(ev) = crossterm::event::read() {
                 crate::tui::event_log::log("READ", crate::tui::event_log::describe(&ev));
                 if ev_tx.send(ev).is_err() {
                     break;
                 }
+                input_notify_tx.notify_one();
             }
         });
 
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         while !self.quit {
-            tick.tick().await;
+            // Event-driven wakeup: a mouse/key event wakes the loop instantly
+            // instead of waiting up to 50ms for the next tick. The tick stays
+            // for spinner/typewriter/background polls while idle.
+            tokio::select! {
+                _ = input_notify.notified() => {},
+                _ = tick.tick() => {},
+            }
             if self.enter_gate.flush(Instant::now()) {
                 self.submit();
             }
