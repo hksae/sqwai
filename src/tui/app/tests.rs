@@ -1288,27 +1288,25 @@ mod tests {
     }
 
     #[test]
-    fn menu_wheel_steps_selection_without_wrap_or_trap() {
+    fn menu_wheel_scrolls_view_without_wrap_or_trap() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.open_menu(Menu::Controls);
         let n = app.menu_rows.len();
-        assert!(n > 6, "need room to step");
+        assert!(n > 6, "need room to scroll");
+        app.menu_visible_rows = 5;
         // from the top, wheeling up stays (no wrap to the bottom)
-        app.menu_sel = 0;
         app.menu_wheel(-3);
-        assert_eq!(app.menu_sel, 0);
-        // steps move the selection; the draw clamp pulls the view after it,
-        // so hover can never pin the viewport against the wheel
+        assert_eq!((app.menu_sel, app.menu_scroll), (0, 0));
+        // wheel moves the view, never the selection
         app.menu_wheel(3);
-        assert_eq!(app.menu_sel, 3);
+        assert_eq!((app.menu_sel, app.menu_scroll), (0, 3));
         app.menu_wheel(3);
-        assert_eq!(app.menu_sel, 6);
+        assert_eq!((app.menu_sel, app.menu_scroll), (0, 6));
         // bottom edge clamps without wrapping to the top
-        app.menu_sel = n - 1;
-        app.menu_wheel(3);
-        assert_eq!(app.menu_sel, n - 1);
+        app.menu_wheel(10000);
+        assert_eq!((app.menu_sel, app.menu_scroll), (0, n - 5));
         app.menu_wheel(-3);
-        assert_eq!(app.menu_sel, n - 4);
+        assert_eq!((app.menu_sel, app.menu_scroll), (0, n - 8));
     }
 
     #[test]
@@ -2015,12 +2013,15 @@ mod tests {
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
         assert!(text.contains("braille-classic"), "{text:?}");
         assert!(text.contains(" Test "), "{text:?}");
-        // scroll to the shimmer row: selection pulls the window after it
+        // scroll to the shimmer row: keyboard nav pulls the window after it
         let shim = crate::tui::spinners::ALL
             .iter()
             .position(|e| e.name == "shimmer-live")
             .expect("shimmer row");
-        app.menu_sel = shim;
+        while app.menu_sel < shim {
+            app.menu_nav(1);
+        }
+        assert_eq!(app.menu_sel, shim);
         let mut buf = Buffer::empty(area);
         app.draw_menu(&mut buf, area);
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
@@ -2029,6 +2030,83 @@ mod tests {
         // Enter closes the gallery again
         app.menu_activate();
         assert!(app.menu_stack.is_empty(), "gallery must close on commit");
+    }
+
+    fn wheel_test_app() -> (crate::tui::app::App, usize) {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.command("test");
+        assert!(
+            crate::tui::spinners::ALL.len() > 20,
+            "gallery must be longer than one window"
+        );
+        // one draw so the wheel knows the window height
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        app.draw_menu(&mut buf, area);
+        let vis = app.menu_visible_rows;
+        assert!(vis > 0 && vis < app.menu_rows.len(), "vis={vis}");
+        (app, vis)
+    }
+
+    #[test]
+    fn menu_wheel_scrolls_view_selection_stays() {
+        let (mut app, vis) = wheel_test_app();
+        let n = app.menu_rows.len();
+        app.menu_wheel(3);
+        assert_eq!(app.menu_sel, 0, "wheel must not move the selection");
+        assert_eq!(app.menu_scroll, 3, "wheel must scroll the view");
+        app.menu_wheel(-2);
+        assert_eq!((app.menu_sel, app.menu_scroll), (0, 1));
+        // top clamp
+        app.menu_wheel(-100);
+        assert_eq!((app.menu_sel, app.menu_scroll), (0, 0));
+        // bottom clamp: no trailing empty space
+        app.menu_wheel(10000);
+        assert_eq!(app.menu_sel, 0);
+        assert_eq!(app.menu_scroll, n - vis, "scroll={} n={n} vis={vis}", app.menu_scroll);
+    }
+
+    #[test]
+    fn menu_wheel_may_scroll_selection_out_of_view_and_draw_keeps_it() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let (mut app, vis) = wheel_test_app();
+        app.menu_wheel(10000);
+        assert!(
+            app.menu_sel < app.menu_scroll
+                || app.menu_sel >= app.menu_scroll + vis,
+            "selection must be allowed out of the window"
+        );
+        // redraw must not snap the view back to the selection
+        let scroll = app.menu_scroll;
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        app.draw_menu(&mut buf, area);
+        assert_eq!(app.menu_scroll, scroll, "draw must keep free scroll");
+        assert_eq!(app.menu_sel, 0);
+    }
+
+    #[test]
+    fn menu_nav_and_jump_pull_view_after_selection() {
+        let (mut app, vis) = wheel_test_app();
+        let n = app.menu_rows.len();
+        // scroll the selection out of view, then step: view follows sel
+        app.menu_wheel(10000);
+        app.menu_nav(1);
+        assert_eq!(app.menu_sel, 1);
+        assert_eq!(app.menu_scroll, 1, "view must follow the selection");
+        // jump to end / start pulls the window along
+        app.menu_jump(true);
+        assert_eq!(app.menu_sel, n - 1);
+        assert_eq!(app.menu_scroll, n - vis);
+        app.menu_jump(false);
+        assert_eq!((app.menu_sel, app.menu_scroll), (0, 0));
+        // page jump also follows
+        app.menu_nav(10);
+        assert!(app.menu_sel < app.menu_scroll + vis, "page sel must be visible");
+        assert!(app.menu_sel >= app.menu_scroll, "page sel must be visible");
     }
 
     #[test]

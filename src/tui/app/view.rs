@@ -2664,15 +2664,13 @@ impl App {
             }
         }
 
-        // keep the selection inside the visible window for list menus
+        // Free-scroll view: the wheel moves menu_scroll on its own and the
+        // selection may sit outside the window — never snap back to it
+        // here (keyboard nav pulls the view via menu_follow_sel). Only
+        // cap the trailing empty space.
         let list_rows = if is_form { 0 } else { content_rows };
+        self.menu_visible_rows = list_rows;
         if !is_form && list_rows > 0 {
-            if self.menu_sel < self.menu_scroll {
-                self.menu_scroll = self.menu_sel;
-            }
-            if self.menu_sel >= self.menu_scroll + list_rows {
-                self.menu_scroll = self.menu_sel + 1 - list_rows;
-            }
             if self.menu_scroll + list_rows > self.menu_rows.len() {
                 self.menu_scroll = self.menu_rows.len().saturating_sub(list_rows);
             }

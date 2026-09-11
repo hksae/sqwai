@@ -419,6 +419,8 @@ pub struct App {
     menu_sel: usize,
     /// scroll offset for long list menus
     menu_scroll: usize,
+    /// list-window height from the last draw: wheel/nav clamp against it
+    menu_visible_rows: usize,
     /// fixed hint line under a list menu (not part of the scrolled rows)
     menu_footer_text: Option<String>,
     /// transient status shown inside the open menu instead of the chat
@@ -812,6 +814,7 @@ impl App {
             menu_stack: Vec::new(),
             menu_sel: 0,
             menu_scroll: 0,
+            menu_visible_rows: 0,
             menu_footer_text: None,
             menu_status: None,
             menu_rows: Vec::new(),

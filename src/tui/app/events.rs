@@ -368,6 +368,8 @@ impl App {
                                 {
                                     self.sessions_filter.clear();
                                     self.menu_sel = 0;
+                            self.menu_scroll = 0;
+                                    self.menu_scroll = 0;
                                     self.build_menu_rows();
                                     self.dirty = true;
                                 } else if let Some(Menu::GraphView { search_filter, .. }) = self.cur_menu_mut()
@@ -375,6 +377,8 @@ impl App {
                                 {
                                     *search_filter = None;
                                     self.menu_sel = 0;
+                            self.menu_scroll = 0;
+                                    self.menu_scroll = 0;
                                     self.build_menu_rows();
                                     self.dirty = true;
                                 } else {
@@ -642,12 +646,14 @@ impl App {
                         KeyCode::Char(c) if matches!(self.cur_menu(), Some(Menu::Sessions)) => {
                             self.sessions_filter.push(c);
                             self.menu_sel = 0;
+                            self.menu_scroll = 0;
                             self.build_menu_rows();
                             self.dirty = true;
                         }
                         KeyCode::Backspace if matches!(self.cur_menu(), Some(Menu::Sessions)) => {
                             self.sessions_filter.pop();
                             self.menu_sel = 0;
+                            self.menu_scroll = 0;
                             self.build_menu_rows();
                             self.dirty = true;
                         }
@@ -669,6 +675,7 @@ impl App {
                                 *search_filter = Some(String::new());
                             }
                             self.menu_sel = 0;
+                            self.menu_scroll = 0;
                             self.build_menu_rows();
                             self.dirty = true;
                         }
@@ -684,6 +691,7 @@ impl App {
                                 filter.pop();
                             }
                             self.menu_sel = 0;
+                            self.menu_scroll = 0;
                             self.build_menu_rows();
                             self.dirty = true;
                         }
@@ -696,6 +704,7 @@ impl App {
                                 filter.push(c);
                             }
                             self.menu_sel = 0;
+                            self.menu_scroll = 0;
                             self.build_menu_rows();
                             self.dirty = true;
                         }

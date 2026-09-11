@@ -725,8 +725,9 @@ impl App {
         self.dirty = true;
     }
 
-    /// Wheel over a list menu: step the selection itself (no wrap), the
-    /// draw clamp then pulls the view after it. Forms keep the wheel inert.
+    /// Wheel over a list menu: scrolls the view only, the selection
+    /// stays put — it may freely leave the visible window. Forms keep
+    /// the wheel inert.
     pub(super) fn menu_wheel(&mut self, delta: i32) {
         if self.is_form_menu() {
             return;
@@ -735,15 +736,32 @@ impl App {
         if n == 0 {
             return;
         }
-        let sel = self.menu_sel.min(n - 1);
+        let max = n.saturating_sub(self.menu_visible_rows.max(1));
         let next = if delta < 0 {
-            sel.saturating_sub(delta.unsigned_abs() as usize)
+            self.menu_scroll
+                .saturating_sub(delta.unsigned_abs() as usize)
         } else {
-            (sel + delta as usize).min(n - 1)
+            (self.menu_scroll + delta as usize).min(max)
         };
-        if next != self.menu_sel {
-            self.menu_sel = next;
+        if next != self.menu_scroll {
+            self.menu_scroll = next;
             self.dirty = true;
+        }
+    }
+
+    /// Pull the view after the selection (keyboard nav): the selection
+    /// must stay visible. The wheel never calls this — it scrolls free.
+    fn menu_follow_sel(&mut self) {
+        let n = self.menu_rows.len();
+        if n == 0 {
+            return;
+        }
+        self.menu_sel = self.menu_sel.min(n - 1);
+        let vis = self.menu_visible_rows.max(1);
+        if self.menu_sel < self.menu_scroll {
+            self.menu_scroll = self.menu_sel;
+        } else if self.menu_sel >= self.menu_scroll + vis {
+            self.menu_scroll = self.menu_sel + 1 - vis;
         }
     }
 
@@ -778,6 +796,7 @@ impl App {
                 } else {
                     (self.menu_sel + step).min(n - 1)
                 };
+                self.menu_follow_sel();
             }
         } else {
             let n = self.menu_rows.len();
@@ -787,6 +806,7 @@ impl App {
                 } else {
                     (self.menu_sel + 1) % n
                 };
+                self.menu_follow_sel();
             }
         }
         self.dirty = true;
@@ -799,6 +819,7 @@ impl App {
         }
         if !self.menu_rows.is_empty() {
             self.menu_sel = if to_end { self.menu_rows.len() - 1 } else { 0 };
+            self.menu_follow_sel();
         }
         self.dirty = true;
     }
