@@ -390,45 +390,58 @@ fn emit_table(out: &mut Vec<Line<'static>>, rows: Vec<Vec<String>>, align: Vec<A
     // with non-Latin text draw its right border inside the cell text.
     let mut widths: Vec<usize> = (0..ncols)
         .map(|i| {
-            rows.iter()
+            let content = rows
+                .iter()
                 .map(|r| {
                     r.get(i)
                         .map(|c| UnicodeWidthStr::width(c.as_str()))
                         .unwrap_or(0)
                 })
                 .max()
-                .unwrap_or(0)
-                .max(MIN_COL)
+                .unwrap_or(0);
+            // +2 frame-adjacent padding spaces live inside the column: a
+            // token that fits the content must never wrap. Without this the
+            // longest token always overflowed its own `wi - 2` budget by
+            // exactly two columns and shredded character-by-character.
+            content.saturating_add(2).max(MIN_COL)
         })
         .collect();
     // Shrink to fit the frame: content budget is `avail`, because the frame
-    // itself costs `ncols + 1` border columns. Distribute the cut
-    // proportionally in bounded passes — never one column per iteration.
+    // itself costs `ncols + 1` border columns. Longest-first water-filling:
+    // the widest columns absorb the cut while narrow ones (tool names,
+    // flags, short cells) keep their natural width and never shred.
     let content_total: usize = widths.iter().sum();
     if content_total > avail {
         let mut over = content_total - avail;
-        // pass 1: proportional floor shares toward MIN_COL
-        let reducible: usize = widths.iter().map(|w| w.saturating_sub(MIN_COL)).sum();
-        if reducible > 0 {
-            for w in widths.iter_mut() {
-                let room = w.saturating_sub(MIN_COL);
-                let cut = over
-                    .saturating_mul(room)
-                    .checked_div(reducible)
-                    .unwrap_or(0)
-                    .min(room);
-                *w -= cut;
-                over -= cut;
+        while over > 0 {
+            let max_w = widths.iter().copied().max().unwrap_or(0);
+            if max_w <= MIN_COL {
+                break;
             }
-            // pass 2: leftover from flooring, one column per column max
+            let next = widths
+                .iter()
+                .copied()
+                .filter(|w| *w < max_w)
+                .max()
+                .unwrap_or(MIN_COL);
+            let target = next.max(MIN_COL);
+            let holders = widths.iter().filter(|w| **w == max_w).count().max(1);
+            // even share per max column, at least one column each pass
+            let share = over.div_ceil(holders).max(1);
+            let mut cut_any = false;
             for w in widths.iter_mut() {
                 if over == 0 {
                     break;
                 }
-                let room = w.saturating_sub(MIN_COL);
-                let cut = over.min(room);
-                *w -= cut;
-                over -= cut;
+                if *w == max_w && *w > target {
+                    let cut = (*w - target).min(share).min(over);
+                    *w -= cut;
+                    over -= cut;
+                    cut_any = true;
+                }
+            }
+            if !cut_any {
+                break;
             }
         }
         // Still over (everything at MIN_COL): the frame overflows the
@@ -1751,6 +1764,33 @@ mod tests {
                 "width {width}: grid overflows the terminal {cols:?}"
             );
         }
+    }
+
+    #[test]
+    fn table_narrow_columns_keep_whole_tokens() {
+        // regression: proportional shrink squeezed short columns to MIN_COL
+        // and shredded `file_remove` into one letter per row, while the
+        // longest token always overflowed its own `wi - 2` budget by the two
+        // unpaid padding columns
+        let hl = Highlighter::new();
+        let md = "| Инструмент | Категория | Мутирует | Чекпоинт / Undo | Соответствие DESIGN.md |\n|---|---|---|---|---|\n| `file_remove` | files | Да | Да (blob_before) | Устраняет обходные пути через `bash rm`, сохраняет инвариант хостовых диффов |\n| `git_st` | git | Да | Да | Закрывает разрыв: позволяет коммитить untracked файлы |\n";
+        let lines = render(md, 100, &hl);
+        let text: Vec<String> = lines.iter().map(|l| line_text_pub(l)).collect();
+        for token in ["Инструмент", "file_remove", "Категория", "git_st"] {
+            assert!(
+                text.iter().any(|l| l.contains(token)),
+                "{token} shredded across rows: {text:?}"
+            );
+        }
+        let cols: Vec<usize> = lines
+            .iter()
+            .map(|l| UnicodeWidthStr::width(line_text_pub(l).as_str()))
+            .collect();
+        assert!(
+            cols.iter().all(|&c| c == cols[0]),
+            "ragged grid {cols:?}"
+        );
+        assert!(cols[0] <= 100, "grid overflows: {cols:?}");
     }
 
     #[test]
