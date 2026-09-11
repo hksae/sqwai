@@ -1,5 +1,4 @@
 use anyhow::Result;
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Line;
@@ -90,7 +89,7 @@ fn reopen_undone_steps(
     reopened
 }
 
-pub type Terminal = ratatui::Terminal<CrosstermBackend<std::io::Stdout>>;
+pub type Terminal = ratatui::Terminal<crate::tui::clear_tail::ClearTailBackend<std::io::Stdout>>;
 
 mod events;
 mod forms;
