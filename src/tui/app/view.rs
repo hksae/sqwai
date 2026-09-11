@@ -2631,14 +2631,17 @@ impl App {
 
         // Menus are modal surfaces: dim the already-rendered screen while
         // preserving its text AND colors, then paint the menu at normal
-        // contrast. Only the DIM modifier is added: replacing fg/bg (as
-        // before) wiped the user band, syntax colors and selections behind
-        // the menu.
+        // contrast. DIM alone only dulls foreground intensity, so painted
+        // backgrounds (user band, block cursor, selections) would keep
+        // glowing behind the menu: their bg is stepped down too.
         for y in area.y..area.bottom() {
             for x in area.x..area.right() {
                 if let Some(cell) = buf.cell_mut((x, y)) {
-                    let style = cell.style();
-                    cell.set_style(style.add_modifier(Modifier::DIM));
+                    let mut style = cell.style().add_modifier(Modifier::DIM);
+                    if let Some(bg) = style.bg {
+                        style.bg = Some(dim_bg(bg));
+                    }
+                    cell.set_style(style);
                 }
             }
         }
@@ -3733,6 +3736,27 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     #[test]
+    fn modal_dim_steps_painted_backgrounds_down() {
+        use super::dim_bg;
+        use ratatui::style::Color;
+        // transparent and already-dark stay put
+        assert_eq!(dim_bg(Color::Reset), Color::Reset);
+        assert_eq!(dim_bg(Color::Black), Color::Black);
+        assert_eq!(dim_bg(Color::DarkGray), Color::DarkGray);
+        // user band (grayscale ramp) scales down the ramp, stays distinct
+        assert_eq!(dim_bg(Color::Indexed(235)), Color::Indexed(233));
+        assert_eq!(dim_bg(Color::Indexed(232)), Color::Indexed(232));
+        // block cursor / selections collapse to dark gray
+        assert_eq!(dim_bg(Color::White), Color::DarkGray);
+        assert_eq!(dim_bg(Color::Cyan), Color::DarkGray);
+        // truecolor scales toward black
+        assert_eq!(
+            dim_bg(Color::Rgb(100, 150, 200)),
+            Color::Rgb(60, 90, 120)
+        );
+    }
+
+    #[test]
     fn shorten_path_shortens_user_home() {
         use crate::tui::app::shorten_path;
         use std::path::Path;
@@ -3781,6 +3805,45 @@ fn pad_display(s: &str, width: usize) -> String {
 /// Widest the project directory may get in the status bar before it is
 /// truncated. It shrinks further when the rest of the row needs the space.
 const DIR_MAX_COLS: usize = 20;
+
+/// Background step-down for the modal-menu dim pass. DIM alone only dulls
+/// foreground intensity, so this maps every painted background one step
+/// toward black while foreground hues (kept, +DIM) still carry the meaning:
+/// - transparent / already-dark stays put;
+/// - grayscale-ramp grays (our user band) scale down the ramp;
+/// - bright/white/plenty-chromatic backgrounds collapse to dark gray.
+///
+/// Other 256-palette entries are left alone: we never emit them as
+/// backgrounds, and guessing their hue without a terminal query is worse
+/// than leaving one bright cell behind.
+fn dim_bg(bg: ratatui::style::Color) -> ratatui::style::Color {
+    use ratatui::style::Color;
+    match bg {
+        Color::Reset | Color::Black | Color::DarkGray => bg,
+        Color::Indexed(i) if (232..=255).contains(&i) => {
+            Color::Indexed(232 + (i - 232) * 3 / 5)
+        }
+        Color::White
+        | Color::Gray
+        | Color::Red
+        | Color::Green
+        | Color::Yellow
+        | Color::Blue
+        | Color::Magenta
+        | Color::Cyan
+        | Color::LightRed
+        | Color::LightGreen
+        | Color::LightYellow
+        | Color::LightBlue
+        | Color::LightMagenta
+        | Color::LightCyan => Color::DarkGray,
+        Color::Indexed(_) => bg,
+        Color::Rgb(r, g, b) => {
+            let down = |c: u8| (c as u16 * 3 / 5) as u8;
+            Color::Rgb(down(r), down(g), down(b))
+        }
+    }
+}
 
 /// Terminal columns a status-bar label occupies.
 pub(super) fn cols(s: &str) -> usize {
