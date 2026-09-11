@@ -2935,7 +2935,7 @@ impl App {
                     .bg(Theme::ACCENT_SOFT())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::new().fg(Theme::ACCENT_SOFT()).bg(Theme::BG())
+                Theme::base()
             };
             let pad = 1usize;
             rows.push(Line::from(vec![Span::styled(
@@ -2952,12 +2952,13 @@ impl App {
                 .border_type(BorderType::Plain)
                 .border_style(Theme::border_dim()),
         ).render(rect, buf);
-        // mini scrollbar on the right border when the list overflows
+        // mini scrollbar inside the right border when the list overflows
+        // (on the last content column, so the border stays intact)
         if max_scroll > 0 {
             let track = shown;
             let thumb = 1.max(track * shown / items.len());
             let pos = skip * (track - thumb) / max_scroll.max(1);
-            let bx = rect.right() - 1;
+            let bx = rect.right().saturating_sub(2);
             for i in 0..track {
                 if let Some(cell) = buf
                     .cell_mut(ratatui::layout::Position::new(bx, rect.y + 1 + i as u16))
