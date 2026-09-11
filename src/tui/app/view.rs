@@ -2732,8 +2732,9 @@ impl App {
                 }
             }
         } else if matches!(self.cur_menu(), Some(Menu::TestAnims)) {
-            // gallery: live frame + name per row, list-style selection
-            let tick = self.spinner_tick;
+            // gallery: live frame + name per row, list-style selection.
+            // slowed 4x (one frame per 200ms) so each animation is examinable.
+            let tick = self.spinner_tick / 4;
             for (n, _) in self
                 .menu_rows
                 .iter()
