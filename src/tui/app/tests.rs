@@ -1288,6 +1288,64 @@ mod tests {
     }
 
     #[test]
+    fn menu_wheel_steps_selection_without_wrap_or_trap() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.open_menu(Menu::Controls);
+        let n = app.menu_rows.len();
+        assert!(n > 6, "need room to step");
+        // from the top, wheeling up stays (no wrap to the bottom)
+        app.menu_sel = 0;
+        app.menu_wheel(-3);
+        assert_eq!(app.menu_sel, 0);
+        // steps move the selection; the draw clamp pulls the view after it,
+        // so hover can never pin the viewport against the wheel
+        app.menu_wheel(3);
+        assert_eq!(app.menu_sel, 3);
+        app.menu_wheel(3);
+        assert_eq!(app.menu_sel, 6);
+        // bottom edge clamps without wrapping to the top
+        app.menu_sel = n - 1;
+        app.menu_wheel(3);
+        assert_eq!(app.menu_sel, n - 1);
+        app.menu_wheel(-3);
+        assert_eq!(app.menu_sel, n - 4);
+    }
+
+    #[test]
+    fn menu_scrollbar_yields_to_drawn_frames() {
+        use crate::providers::Role;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        // pinned frame + enough rows to overflow a short card
+        let mut pinned = Session::new("m".into(), 1000);
+        pinned.push(Role::User, "pinned one");
+        pinned.pinned = true;
+        app.sessions = vec![crate::session::SessionHeader::from_session(&pinned)];
+        for i in 0..12 {
+            let mut s = Session::new("m".into(), 1000);
+            s.push(Role::User, format!("filler session number {i}"));
+            app.sessions.push(crate::session::SessionHeader::from_session(&s));
+        }
+        app.open_menu(Menu::Sessions);
+        let area = Rect::new(0, 0, 100, 14);
+        let mut buf = Buffer::empty(area);
+        app.draw_menu(&mut buf, area);
+        let row_text = |y: u16| -> String {
+            (0..area.width).map(|x| buf[(x, y)].symbol()).collect()
+        };
+        // pinned frame survived the scrollbar: corners still corners
+        let hy = (0..area.height)
+            .find(|y| row_text(*y).contains("pinned"))
+            .expect("pinned header row");
+        let row = row_text(hy);
+        assert!(
+            row.contains("┌") && row.contains("┐"),
+            "scrollbar must not eat the frame: {row:?}"
+        );
+    }
+
+    #[test]
     fn menu_list_shows_popup_style_scrollbar_on_overflow() {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;

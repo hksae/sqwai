@@ -807,12 +807,15 @@ impl App {
                     self.dirty = true;
                 }
                 Event::Mouse(m) => match m.kind {
-                    // wheel navigates list menus (forms keep wheel inert)
+                    // wheel moves the menu selection (the view follows it);
+                    // scrolling the bare offset instead would fight hover:
+                    // the draw clamp snaps the view back to the hovered row
+                    // and the wheel looks dead at both ends (forms inert)
                     MouseEventKind::ScrollUp if !self.menu_stack.is_empty() => {
-                        self.menu_scroll_by(-3);
+                        self.menu_wheel(-3);
                     }
                     MouseEventKind::ScrollDown if !self.menu_stack.is_empty() => {
-                        self.menu_scroll_by(3);
+                        self.menu_wheel(3);
                     }
                     MouseEventKind::ScrollUp => {
                         if self.menu_stack.is_empty()

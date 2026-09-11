@@ -2909,6 +2909,12 @@ impl App {
                         .cell_mut(ratatui::layout::Position::new(bx, rect.y + 1 + i as u16))
                         && i >= pos
                         && i < pos + thumb
+                        // never punch through drawn frames (pinned rails,
+                        // table borders): the thumb yields, the frame wins
+                        && !matches!(
+                            cell.symbol(),
+                            "│" | "─" | "┌" | "┐" | "└" | "┘" | "├" | "┤" | "┬" | "┴" | "┼"
+                        )
                     {
                         cell.set_symbol("▐")
                             .set_style(Style::new().fg(Theme::rule_color()));

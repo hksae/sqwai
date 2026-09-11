@@ -722,22 +722,24 @@ impl App {
         self.dirty = true;
     }
 
-    pub(super) fn menu_scroll_by(&mut self, delta: i32) {
+    /// Wheel over a list menu: step the selection itself (no wrap), the
+    /// draw clamp then pulls the view after it. Forms keep the wheel inert.
+    pub(super) fn menu_wheel(&mut self, delta: i32) {
         if self.is_form_menu() {
             return;
         }
-        let visible = self.menu_rect.height.saturating_sub(2) as usize;
-        let max_scroll = self.menu_rows.len().saturating_sub(visible.max(1));
-        let next = if delta < 0 {
-            self.menu_scroll
-                .saturating_sub(delta.unsigned_abs() as usize)
-        } else {
-            self.menu_scroll.saturating_add(delta as usize)
+        let n = self.menu_rows.len();
+        if n == 0 {
+            return;
         }
-        .min(max_scroll);
-        // Scrolling into a clamped edge changes nothing: skip the frame.
-        if next != self.menu_scroll {
-            self.menu_scroll = next;
+        let sel = self.menu_sel.min(n - 1);
+        let next = if delta < 0 {
+            sel.saturating_sub(delta.unsigned_abs() as usize)
+        } else {
+            (sel + delta as usize).min(n - 1)
+        };
+        if next != self.menu_sel {
+            self.menu_sel = next;
             self.dirty = true;
         }
     }
@@ -2510,12 +2512,9 @@ impl App {
                         MenuAction::None,
                     ));
                 }
-                if self.sessions_filter.is_empty() {
-                    self.menu_rows.push(row(
-                        Line::from(Span::styled(" p: pin · d: delete", Theme::dim())),
-                        MenuAction::None,
-                    ));
-                }
+                // no in-list key hint row: it would duplicate the
+                // title_bottom hint, and a dead selectable row eats wheel
+                // steps and hover targets
                 self.menu_footer_text = Some(if self.sessions_filter.is_empty() {
                     "enter: open · r: rename · p: pin · d: delete · type to filter".into()
                 } else {
