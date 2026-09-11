@@ -1982,7 +1982,6 @@ mod tests {
         assert!(COMMANDS.contains(&"/skill"));
         assert!(COMMANDS.contains(&"/graph-rebuild"));
     }
-
     #[test]
     fn help_menu_is_empty() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
@@ -1990,6 +1989,46 @@ mod tests {
         app.command("help");
         assert!(matches!(app.cur_menu(), Some(Menu::Help)));
         assert!(app.menu_rows.is_empty());
+    }
+
+    #[test]
+    fn test_command_opens_animation_gallery_with_live_rows() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        assert!(COMMANDS.contains(&"/test"));
+        app.command("test");
+        assert!(
+            matches!(app.cur_menu(), Some(Menu::TestAnims)),
+            "/test must open the gallery"
+        );
+        assert_eq!(
+            app.menu_rows.len(),
+            crate::tui::spinners::ALL.len(),
+            "one row per catalog entry"
+        );
+        // smoke-render: live frames paint without panic, names visible
+        app.spinner_tick = 7;
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        app.draw_menu(&mut buf, area);
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("braille-classic"), "{text:?}");
+        assert!(text.contains(" Test "), "{text:?}");
+        // scroll to the shimmer row: selection pulls the window after it
+        let shim = crate::tui::spinners::ALL
+            .iter()
+            .position(|e| e.name == "shimmer-live")
+            .expect("shimmer row");
+        app.menu_sel = shim;
+        let mut buf = Buffer::empty(area);
+        app.draw_menu(&mut buf, area);
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("shimmer-live"), "{text:?}");
+        assert!(text.contains("Working"), "{text:?}");
+        // Enter closes the gallery again
+        app.menu_activate();
+        assert!(app.menu_stack.is_empty(), "gallery must close on commit");
     }
 
     #[test]

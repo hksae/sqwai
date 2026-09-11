@@ -2731,6 +2731,42 @@ impl App {
                     }
                 }
             }
+        } else if matches!(self.cur_menu(), Some(Menu::TestAnims)) {
+            // gallery: live frame + name per row, list-style selection
+            let tick = self.spinner_tick;
+            for (n, _) in self
+                .menu_rows
+                .iter()
+                .skip(self.menu_scroll)
+                .take(content_rows)
+                .enumerate()
+            {
+                let abs = self.menu_scroll + n;
+                let entry =
+                    crate::tui::spinners::ALL.get(abs % crate::tui::spinners::ALL.len());
+                let mut spans = match entry {
+                    Some(e) if e.name == "shimmer-live" => {
+                        let mut v = crate::tui::shimmer::shimmer_spans("Working", tick);
+                        v.push(Span::styled("  shimmer-live".to_string(), Theme::dim()));
+                        v
+                    }
+                    Some(e) => vec![
+                        Span::styled(
+                            format!("{}  ", crate::tui::spinners::frame(e, tick)),
+                            Theme::accent(),
+                        ),
+                        Span::styled(e.name.to_string(), Theme::base()),
+                    ],
+                    None => vec![Span::styled(String::new(), Theme::base())],
+                };
+                if abs == self.menu_sel {
+                    spans = spans
+                        .into_iter()
+                        .map(|s| Span::styled(s.content.to_string(), Theme::accent_bold()))
+                        .collect();
+                }
+                rows.push(Line::from(spans));
+            }
         } else {
             // render only the visible window of the list
             for (n, (line, _)) in self
@@ -2771,6 +2807,10 @@ impl App {
         if matches!(self.cur_menu(), Some(Menu::Sessions)) {
             block = block.title_bottom(
                 Line::from(Span::styled(" p: pin · d: delete ", Theme::dim())).right_aligned(),
+            );
+        } else if matches!(self.cur_menu(), Some(Menu::TestAnims)) {
+            block = block.title_bottom(
+                Line::from(Span::styled(" enter/esc: close ", Theme::dim())).right_aligned(),
             );
         } else if matches!(
             self.cur_menu(),

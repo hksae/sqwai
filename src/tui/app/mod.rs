@@ -1147,7 +1147,9 @@ impl App {
                 self.busy_until = None;
                 self.dirty = true;
             }
-            let animating = self.streaming || self.tool_running();
+            let animating = self.streaming
+                || self.tool_running()
+                || matches!(self.cur_menu(), Some(Menu::TestAnims));
             if animating {
                 // fixed 20 FPS animation rate from the wall clock, not per
                 // loop iteration: bursts would otherwise fast-forward it
@@ -2305,6 +2307,7 @@ impl App {
             .to_string();
         match name.as_str() {
             "/settings" => self.open_menu(Menu::Settings),
+            "/test" => self.open_menu(Menu::TestAnims),
             "/debug" => self.open_menu(Menu::Debug),
             "/mcp" => self.status(
                 "MCP settings are available from /settings (runtime coming in phase 4)",

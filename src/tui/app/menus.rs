@@ -37,6 +37,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "/settings",
     "/skill",
     "/skills",
+    "/test",
     "/undo",
 ];
 
@@ -181,6 +182,8 @@ pub(super) enum Menu {
         provider: String,
     },
     Effort,
+    /// /test: spinner/animation showcase gallery (eye candy, picks welcome)
+    TestAnims,
     /// the model asked the user structured questions (ask_user)
     /// legacy modal path; live asks render inline in the chat instead
     #[allow(dead_code)]
@@ -898,6 +901,11 @@ impl App {
     pub(super) fn menu_activate(&mut self) {
         if self.is_form_menu() {
             self.form_save();
+            return;
+        }
+        // gallery is a showcase: any commit just closes it
+        if matches!(self.cur_menu(), Some(Menu::TestAnims)) {
+            self.menu_back();
             return;
         }
         // confirmation prompts: enter always confirms (esc cancels)
@@ -1792,6 +1800,7 @@ impl App {
             Some(Menu::EditSessionTitle { .. }) => " Rename session ".into(),
             Some(Menu::ConfirmDelete { .. }) => " Confirm ".into(),
             Some(Menu::Effort) => " Effort ".into(),
+            Some(Menu::TestAnims) => " Test ".into(),
             Some(Menu::AskUser { .. }) => " Ask ".into(),
             Some(Menu::Approval { .. }) => " Confirm command ".into(),
             Some(Menu::AskFree { .. }) => " Answer ".into(),
@@ -2773,6 +2782,19 @@ impl App {
                             Span::styled(note, Theme::dim()),
                         ]),
                         MenuAction::SetEffort(lvl),
+                    ));
+                }
+            }
+            Menu::TestAnims => {
+                // rows carry names only; live frames are painted at draw time
+                // (see draw_menu gallery branch), so rows never go stale
+                for entry in crate::tui::spinners::ALL {
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled(
+                            format!(" {}", entry.name),
+                            Theme::base(),
+                        )]),
+                        MenuAction::None,
                     ));
                 }
             }
