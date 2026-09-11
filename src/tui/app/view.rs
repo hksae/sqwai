@@ -2629,6 +2629,18 @@ impl App {
         };
         self.menu_rect = rect;
 
+        // Sessions rows bake the pinned frame width in at build time, when
+        // the rect may still be stale (0 or another menu's card). Re-resolve
+        // against the real card and rebuild once — header and content can
+        // never disagree on screen.
+        if matches!(menu, Some(Menu::Sessions)) {
+            let want = super::menus::sessions_frame_w(rect.width) as u16;
+            if want != self.sessions_frame_built_w {
+                self.build_menu_rows();
+                self.sessions_frame_built_w = want;
+            }
+        }
+
         // Menus are modal surfaces: dim the already-rendered screen while
         // preserving its text AND colors, then paint the menu at normal
         // contrast. DIM alone only dulls foreground intensity, so painted

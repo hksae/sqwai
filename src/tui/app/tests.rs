@@ -1364,6 +1364,46 @@ mod tests {
     }
 
     #[test]
+    fn pinned_frame_resolves_against_real_card_not_stale_rect() {
+        use crate::providers::Role;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let mut s = Session::new("m".into(), 1000);
+        s.push(Role::User, "hi");
+        s.pinned = true;
+        app.sessions = vec![SessionHeader::from_session(&s)];
+        // stale narrow rect, e.g. left over from the effort slider card
+        app.menu_rect = Rect::new(0, 0, 52, 5);
+        app.open_menu(Menu::Sessions);
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        app.draw_menu(&mut buf, area);
+        // the draw-time check rebuilt rows for the real card
+        let row_text = |y: u16| -> String {
+            (0..area.width).map(|x| buf[(x, y)].symbol()).collect()
+        };
+        let hy = (0..area.height)
+            .find(|y| row_text(*y).contains("pinned"))
+            .expect("pinned header row");
+        let row = row_text(hy);
+        assert!(
+            row.contains("┌") && row.contains("┐"),
+            "header must carry the full frame: {row:?}"
+        );
+        // real card is 78 wide → 72-col frame + corners; a stale 52-wide
+        // estimate would leave a 50-col header behind
+        let start = row.find('┌').expect("frame start");
+        let end = row.find('┐').expect("frame end") + '┐'.len_utf8();
+        let frame = &row[start..end];
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(frame),
+            74,
+            "header must span the real card: {row:?}"
+        );
+    }
+
+    #[test]
     fn pinned_sessions_frame_stays_dim() {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;

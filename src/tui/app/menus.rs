@@ -2457,13 +2457,17 @@ impl App {
                 let cur_id = self.session.id.to_string();
                 let pinned: Vec<&SessionHeader> =
                     visible.iter().filter(|s| s.pinned).copied().collect();
+                // Resolved width travels with the rows: draw_menu compares it
+                // against the real card and rebuilds once on mismatch (also
+                // covers an empty pinned section — it must track, not stick).
+                let menu_w = if self.menu_rect.width > 0 {
+                    self.menu_rect.width
+                } else {
+                    78.min(self.cache_w.saturating_sub(2)).max(30)
+                };
+                let frame_w = sessions_frame_w(menu_w);
+                self.sessions_frame_built_w = frame_w as u16;
                 if !pinned.is_empty() {
-                    let menu_w = if self.menu_rect.width > 0 {
-                        self.menu_rect.width
-                    } else {
-                        78.min(self.cache_w.saturating_sub(4)).max(30)
-                    };
-                    let frame_w = (menu_w as usize).saturating_sub(4).clamp(24, 72);
                     let head = " pinned ";
                     let mid = {
                         let label = format!(" {head} ");
@@ -3440,6 +3444,12 @@ fn plan_rows(
         }
     }
     rows
+}
+
+/// Pinned-section inner width for a menu card of `menu_w` columns.
+/// Shared by the row builder and the draw-time mismatch check below.
+pub(super) fn sessions_frame_w(menu_w: u16) -> usize {
+    (menu_w as usize).saturating_sub(4).clamp(24, 72)
 }
 
 fn session_row(

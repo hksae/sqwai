@@ -420,6 +420,10 @@ pub struct App {
     menu_status: Option<(String, StatusKind)>,
     menu_rows: Vec<(Line<'static>, MenuAction)>,
     menu_rect: Rect,
+    /// pinned-section width the Sessions rows were built for (see
+    /// `sessions_frame_w`): draw_menu rebuilds once when the real card
+    /// disagrees, so a stale rect never desyncs header from content
+    sessions_frame_built_w: u16,
     /// click/hover targets of the effort slider (rect → SELECTABLE index),
     /// rebuilt on every slider draw; empty when another menu is open
     effort_hits: Vec<(Rect, usize)>,
@@ -806,6 +810,7 @@ impl App {
             menu_status: None,
             menu_rows: Vec::new(),
             menu_rect: Rect::default(),
+            sessions_frame_built_w: 0,
             effort_hits: Vec::new(),
             form_fields: Vec::new(),
             form_focus: 0,
