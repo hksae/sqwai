@@ -2474,7 +2474,7 @@ impl App {
                         )
                     };
                     self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(format!("┌{mid}┐"), Theme::border_popup())]),
+                        Line::from(vec![Span::styled(format!("┌{mid}┐"), Theme::rule_color())]),
                         MenuAction::None,
                     ));
                     for s in &pinned {
@@ -2487,7 +2487,7 @@ impl App {
                     self.menu_rows.push(row(
                         Line::from(vec![Span::styled(
                             format!("└{}┘", "─".repeat(frame_w)),
-                            Theme::border_popup(),
+                            Theme::rule_color(),
                         )]),
                         MenuAction::None,
                     ));
@@ -3477,11 +3477,11 @@ fn session_row(
     let pad = frame_w.saturating_sub(left_w + 2 + dim_w);
     (
         Line::from(vec![
-            Span::styled("│".to_string(), Theme::border_popup()),
+            Span::styled("│".to_string(), Theme::rule_color()),
             Span::styled(left, Theme::FG()),
             Span::styled(format!("  {dim_truncated}"), Theme::dim()),
             Span::styled(" ".repeat(pad), Theme::base()),
-            Span::styled("│".to_string(), Theme::border_popup()),
+            Span::styled("│".to_string(), Theme::rule_color()),
         ]),
         action,
     )

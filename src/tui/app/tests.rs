@@ -1306,7 +1306,7 @@ mod tests {
     }
 
     #[test]
-    fn pinned_sessions_frame_renders_white() {
+    fn pinned_sessions_frame_stays_dim() {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         use ratatui::style::Color;
@@ -1318,18 +1318,29 @@ mod tests {
         let area = Rect::new(0, 0, 100, 30);
         let mut buf = Buffer::empty(area);
         app.draw_menu(&mut buf, area);
-        let frame_cell = buf
+        let row_text = |y: u16| -> String {
+            (0..area.width).map(|x| buf[(x, y)].symbol()).collect()
+        };
+        // the pinned header row (not the outer menu frame corner)
+        let hy = (0..area.height)
+            .find(|y| row_text(*y).contains("pinned"))
+            .expect("pinned header row");
+        let corner_x = (0..area.width)
+            .find(|x| buf[(*x, hy)].symbol() == "┌")
+            .expect("pinned frame corner");
+        assert_eq!(buf[(corner_x, hy)].style().fg, Some(Color::DarkGray));
+        // pinned row rails live strictly inside the outer menu frame
+        let r = app.menu_rect;
+        let rail = buf
             .content()
             .iter()
-            .find(|c| c.symbol() == "┌")
-            .expect("pinned frame top border");
-        assert_eq!(frame_cell.style().fg, Some(Color::White));
-        let rail_cell = buf
-            .content()
-            .iter()
-            .find(|c| c.symbol() == "│")
+            .enumerate()
+            .map(|(i, c)| (i as u16 % area.width, c))
+            .find(|(x, c)| {
+                c.symbol() == "│" && *x != r.x && *x != r.right().saturating_sub(1)
+            })
             .expect("pinned row rail");
-        assert_eq!(rail_cell.style().fg, Some(Color::White));
+        assert_eq!(rail.1.style().fg, Some(Color::DarkGray));
     }
 
     #[test]

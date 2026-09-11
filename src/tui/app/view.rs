@@ -3130,7 +3130,7 @@ impl App {
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Theme::border_popup()),
+                .border_style(Theme::border_dim()),
         ).render(rect, buf);
         // mini scrollbar inside the right border when the list overflows
         // (on the last content column, so the border stays intact)
