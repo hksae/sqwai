@@ -217,10 +217,12 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
             }
             let level = level.min(4);
             let rail = "▐ ".repeat(level);
-            let quote = Style::new().fg(Theme::GREEN());
+            let quote = Style::new().fg(Theme::GREEN()).bg(Theme::QUOTE_BG());
             // Wrap the quoted text to what fits beside the rail, then put
             // the rail on EVERY visual row: the outer wrapper would
             // otherwise split long quotes and leave continuation rows bare.
+            // Rows are padded to the full width in the quote bg so the band
+            // reads as one translucent stripe, like the user strip.
             let rail_cols = level * 2;
             let avail = (width as usize).saturating_sub(rail_cols).max(1);
             let (rows, _) = wrap_tagged(
@@ -230,6 +232,14 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
             for row in rows {
                 let mut spans = vec![Span::styled(rail.clone(), quote)];
                 spans.extend(row.spans);
+                let used: usize = spans
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum();
+                let pad = (width as usize).saturating_sub(used);
+                if pad > 0 {
+                    spans.push(Span::styled(" ".repeat(pad), quote));
+                }
                 out.push(Line::from(spans));
             }
             continue;
@@ -1924,6 +1934,20 @@ mod tests {
         }
         let all: String = lines.iter().map(|l| line_text_pub(l)).collect();
         assert!(all.contains("kappa"), "tail lost: {all:?}");
+    }
+
+    #[test]
+    fn quote_band_covers_full_width_in_green_bg() {
+        let hl = Highlighter::new();
+        let lines = render("> hi", 10, &hl);
+        assert_eq!(lines.len(), 1);
+        let text = line_text_pub(&lines[0]);
+        assert_eq!(text, "▐ hi      ", "{text:?}");
+        assert!(
+            lines[0].spans.iter().all(|s| s.style.bg == Some(Theme::QUOTE_BG())),
+            "every quote span carries the band bg: {:?}",
+            lines[0]
+        );
     }
 
     #[test]
