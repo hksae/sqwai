@@ -35,6 +35,7 @@ pub enum EffortLevel {
     Low,
     Medium,
     High,
+    Xhigh,
     Max,
 }
 
@@ -74,18 +75,20 @@ impl<'de> Deserialize<'de> for EffortLevel {
 
 impl EffortLevel {
     /// all levels selectable from the status-bar `th:` menu
-    pub const SELECTABLE: [EffortLevel; 5] = [
+    pub const SELECTABLE: [EffortLevel; 6] = [
         EffortLevel::Off,
         EffortLevel::Low,
         EffortLevel::Medium,
         EffortLevel::High,
+        EffortLevel::Xhigh,
         EffortLevel::Max,
     ];
-    pub const ALL: [EffortLevel; 5] = [
+    pub const ALL: [EffortLevel; 6] = [
         EffortLevel::Off,
         EffortLevel::Low,
         EffortLevel::Medium,
         EffortLevel::High,
+        EffortLevel::Xhigh,
         EffortLevel::Max,
     ];
     pub fn as_str(&self) -> &'static str {
@@ -94,6 +97,7 @@ impl EffortLevel {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::Xhigh => "xhigh",
             Self::Max => "max",
         }
     }
@@ -120,20 +124,21 @@ pub enum EffortControl {
     None,
     /// reasoning can be switched on and off, but not levelled (DeepSeek-like)
     Toggle,
-    /// `low` / `medium` / `high`
-    Levels,
-    /// `low` / `medium` / `high` / `xhigh`, for models that document `xhigh`
-    Xhigh,
+    /// the level name goes on the wire literally (`low`/`medium`/`high`/
+    /// `xhigh`/`max`): transparent pass-through. If the endpoint does not
+    /// know a name it answers 400 and the user picks another level.
+    /// `levels`/`xhigh` are accepted as legacy spellings of the same thing.
+    #[serde(alias = "levels", alias = "xhigh")]
+    Named,
     /// a numeric thinking budget, so every level is a real distinct request
     Budget,
 }
 
 impl EffortControl {
-    pub const ALL: [EffortControl; 5] = [
+    pub const ALL: [EffortControl; 4] = [
         EffortControl::None,
         EffortControl::Toggle,
-        EffortControl::Levels,
-        EffortControl::Xhigh,
+        EffortControl::Named,
         EffortControl::Budget,
     ];
 
@@ -141,8 +146,7 @@ impl EffortControl {
         match self {
             Self::None => "none",
             Self::Toggle => "toggle",
-            Self::Levels => "levels",
-            Self::Xhigh => "xhigh",
+            Self::Named => "named",
             Self::Budget => "budget",
         }
     }
@@ -153,10 +157,9 @@ impl EffortControl {
             // budget_tokens is part of the Messages API, not of a model's
             // optional feature set
             WireFormat::Anthropic => EffortControl::Budget,
-            // `reasoning_effort` / `reasoning.effort` are widely accepted and
-            // widely ignored; assume the three documented levels and nothing
-            // above them
-            WireFormat::Openai | WireFormat::Responses => EffortControl::Levels,
+            // `reasoning_effort` / `reasoning.effort` take a level name;
+            // it goes on the wire literally (see `Named`)
+            WireFormat::Openai | WireFormat::Responses => EffortControl::Named,
         }
     }
 }
@@ -248,7 +251,7 @@ pub struct ModelConfig {
 
 /// A model's declared effort behaviour, resolved against its wire format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EffortSupport {
+    pub struct EffortSupport {
     pub control: EffortControl,
     /// the model always reasons; `off` cannot be honoured
     pub always_on: bool,
@@ -257,7 +260,7 @@ pub struct EffortSupport {
 impl Default for EffortSupport {
     fn default() -> Self {
         Self {
-            control: EffortControl::Levels,
+            control: EffortControl::Named,
             always_on: false,
         }
     }
@@ -274,11 +277,9 @@ impl ModelConfig {
             .effort_control
             .unwrap_or_else(|| EffortControl::default_for(format));
         let control = match (format, declared) {
-            (WireFormat::Anthropic, EffortControl::Levels | EffortControl::Xhigh) => {
-                EffortControl::Budget
-            }
+            (WireFormat::Anthropic, EffortControl::Named) => EffortControl::Budget,
             (WireFormat::Openai | WireFormat::Responses, EffortControl::Budget) => {
-                EffortControl::Levels
+                EffortControl::Named
             }
             _ => declared,
         };
@@ -1148,16 +1149,16 @@ mod tests {
         );
         assert_eq!(
             m.effort_support(WireFormat::Openai).control,
-            EffortControl::Levels,
-            "an unknown OpenAI-compatible endpoint must not be assumed to do more"
+            EffortControl::Named,
+            "an unknown OpenAI-compatible endpoint gets literal level names"
         );
         assert!(!m.effort_support(WireFormat::Openai).always_on);
 
-        m.effort_control = Some(EffortControl::Xhigh);
+        m.effort_control = Some(EffortControl::Named);
         assert_eq!(
             m.effort_support(WireFormat::Openai).control,
-            EffortControl::Xhigh,
-            "a documented xhigh model must be able to say so"
+            EffortControl::Named,
+            "a documented named-level model must be able to say so"
         );
     }
 
@@ -1176,7 +1177,7 @@ mod tests {
         m.effort_control = Some(EffortControl::Budget);
         assert_eq!(
             m.effort_support(WireFormat::Openai).control,
-            EffortControl::Levels
+            EffortControl::Named
         );
         // shapes the format *can* express are left alone
         m.effort_control = Some(EffortControl::Toggle);
@@ -1190,14 +1191,23 @@ mod tests {
     fn effort_declaration_parses_and_round_trips() {
         let m: ModelConfig = toml::from_str(
             "provider = \"p\"\nid = \"m\"\ncontext = 1000\neffort = \"max\"\n\
-             effort_control = \"xhigh\"\neffort_always_on = true\n",
+             effort_control = \"named\"\neffort_always_on = true\n",
         )
         .unwrap();
-        assert_eq!(m.effort_control, Some(EffortControl::Xhigh));
+        assert_eq!(m.effort_control, Some(EffortControl::Named));
         assert!(m.effort_always_on);
         let back: ModelConfig = toml::from_str(&toml::to_string_pretty(&m).unwrap()).unwrap();
         assert_eq!(back.effort_control, m.effort_control);
         assert!(back.effort_always_on);
+
+        // legacy spellings still parse to the same control
+        for legacy in ["levels", "xhigh"] {
+            let old: ModelConfig = toml::from_str(&format!(
+                "provider = \"p\"\nid = \"m\"\ncontext = 1000\neffort = \"high\"\neffort_control = \"{legacy}\"\n"
+            ))
+            .unwrap();
+            assert_eq!(old.effort_control, Some(EffortControl::Named), "{legacy}");
+        }
 
         // a model that declares nothing writes nothing
         let plain: ModelConfig =

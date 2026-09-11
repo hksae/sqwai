@@ -42,14 +42,14 @@ pub struct Plan {
     pub status: Status,
 }
 
-/// Anthropic thinking budgets per level. `max` is a real step here, which is
-/// why `budget` support honours all five levels.
+/// Anthropic thinking budgets per level.
 fn budget(level: EffortLevel) -> u32 {
     match level {
         EffortLevel::Off => 0,
         EffortLevel::Low => 2048,
         EffortLevel::Medium => 8192,
         EffortLevel::High => 16384,
+        EffortLevel::Xhigh => 24576,
         EffortLevel::Max => 32768,
     }
 }
@@ -81,7 +81,10 @@ pub fn plan(level: EffortLevel, support: EffortSupport) -> Plan {
         (EffortControl::Toggle, _) => (Wire::Level("medium"), Status::Clamped { to: "medium" }),
 
         // ── named levels ────────────────────────────────────────────────────
-        (EffortControl::Levels | EffortControl::Xhigh, EffortLevel::Off) => {
+        // Transparent pass-through: the level name goes on the wire
+        // literally. Whether the endpoint knows it is the endpoint's
+        // business to report (HTTP 400); the UI never silently substitutes.
+        (EffortControl::Named, EffortLevel::Off) => {
             if support.always_on {
                 (
                     Wire::Nothing,
@@ -93,21 +96,17 @@ pub fn plan(level: EffortLevel, support: EffortSupport) -> Plan {
                 (Wire::Nothing, Status::Applied)
             }
         }
-        (EffortControl::Levels | EffortControl::Xhigh, EffortLevel::Low) => {
-            (Wire::Level("low"), Status::Applied)
-        }
-        (EffortControl::Levels | EffortControl::Xhigh, EffortLevel::Medium) => {
+        (EffortControl::Named, EffortLevel::Low) => (Wire::Level("low"), Status::Applied),
+        (EffortControl::Named, EffortLevel::Medium) => {
             (Wire::Level("medium"), Status::Applied)
         }
-        (EffortControl::Levels | EffortControl::Xhigh, EffortLevel::High) => {
+        (EffortControl::Named, EffortLevel::High) => {
             (Wire::Level("high"), Status::Applied)
         }
-        (EffortControl::Xhigh, EffortLevel::Max) => (Wire::Level("xhigh"), Status::Applied),
-        // `max` above a three-level API is the case #20 was filed about: it
-        // used to be sent as `high` with the UI still showing `max`.
-        (EffortControl::Levels, EffortLevel::Max) => {
-            (Wire::Level("high"), Status::Clamped { to: "high" })
+        (EffortControl::Named, EffortLevel::Xhigh) => {
+            (Wire::Level("xhigh"), Status::Applied)
         }
+        (EffortControl::Named, EffortLevel::Max) => (Wire::Level("max"), Status::Applied),
 
         // ── numeric budget ──────────────────────────────────────────────────
         (EffortControl::Budget, EffortLevel::Off) if support.always_on => (
@@ -166,25 +165,29 @@ mod tests {
         EffortSupport { control, always_on }
     }
 
-    /// The bug from #20: `max` was silently sent as `high` on every
-    /// three-level API while the UI kept showing `max`.
+    /// Named levels go on the wire literally — including `max` and `xhigh`.
+    /// Whether the endpoint knows a name is its 400 to report, never our
+    /// silent substitution (transparent slider, per user decision).
     #[test]
-    fn max_is_clamped_where_xhigh_is_not_documented_and_says_so() {
-        let p = plan(EffortLevel::Max, support(EffortControl::Levels, false));
-        assert_eq!(p.wire, Wire::Level("high"));
-        assert_eq!(p.status, Status::Clamped { to: "high" });
-        assert_eq!(p.short_label(), "ef:max→high");
-
-        let p = plan(EffortLevel::Max, support(EffortControl::Xhigh, false));
-        assert_eq!(p.wire, Wire::Level("xhigh"));
-        assert!(p.is_honoured());
+    fn named_levels_pass_through_verbatim() {
+        for (level, name) in [
+            (EffortLevel::Low, "low"),
+            (EffortLevel::Medium, "medium"),
+            (EffortLevel::High, "high"),
+            (EffortLevel::Xhigh, "xhigh"),
+            (EffortLevel::Max, "max"),
+        ] {
+            let p = plan(level, support(EffortControl::Named, false));
+            assert_eq!(p.wire, Wire::Level(name), "{level:?}");
+            assert!(p.is_honoured(), "{level:?}");
+        }
     }
 
     /// A model that cannot stop reasoning makes `off` a request the provider
     /// will not honour, and that has to be visible rather than implied.
     #[test]
     fn off_on_an_always_reasoning_model_is_reported_as_ignored() {
-        let p = plan(EffortLevel::Off, support(EffortControl::Levels, true));
+        let p = plan(EffortLevel::Off, support(EffortControl::Named, true));
         assert_eq!(p.wire, Wire::Nothing);
         assert!(matches!(p.status, Status::Ignored { .. }));
         assert_eq!(p.short_label(), "ef:off (ignored)");
@@ -213,7 +216,7 @@ mod tests {
         assert!(p.is_honoured());
     }
 
-    /// With a numeric budget every level is a distinct request, so all five
+    /// With a numeric budget every level is a distinct request, so all six
     /// are honoured and the label can name the actual budget.
     #[test]
     fn a_budget_api_honours_every_level() {

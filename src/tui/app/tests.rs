@@ -1639,21 +1639,13 @@ mod tests {
     /// a model whose API stops at `high` used to read `th:max`, which claimed
     /// work that was never requested.
     #[test]
-    fn the_status_bar_reports_a_clamped_level_rather_than_the_selection() {
+    fn the_status_bar_reports_the_sent_level_verbatim() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
         app.model_cfg.effort = EffortLevel::Max;
 
-        app.model_cfg.effort_control = Some(crate::config::EffortControl::Levels);
-        let text: String = app
-            .status_bar_spans(120)
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(text.contains("ef:max→high"), "status bar: {text:?}");
-
-        // a model that documents xhigh gets max, and the bar says so plainly
-        app.model_cfg.effort_control = Some(crate::config::EffortControl::Xhigh);
+        // transparent slider: max goes on the wire as max, no clamp note
+        app.model_cfg.effort_control = Some(crate::config::EffortControl::Named);
         let text: String = app
             .status_bar_spans(120)
             .iter()
@@ -1679,7 +1671,7 @@ mod tests {
     #[test]
     fn the_effort_menu_annotates_every_level_it_offers() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.model_cfg.effort_control = Some(crate::config::EffortControl::Levels);
+        app.model_cfg.effort_control = Some(crate::config::EffortControl::Named);
         app.open_menu(crate::tui::app::menus::Menu::Effort);
         let rows: Vec<String> = app
             .menu_rows
@@ -1693,9 +1685,14 @@ mod tests {
             .collect();
         let all = rows.join("\n");
         assert_eq!(rows.len(), EffortLevel::SELECTABLE.len(), "{all}");
+        // transparent slider: every named level lands, so no clamp notes
         assert!(
-            all.contains("max") && all.contains("sent as high"),
-            "max must be marked as clamped: {all}"
+            all.contains("max") && !all.contains("sent as"),
+            "no level must be marked as clamped: {all}"
+        );
+        assert!(
+            all.contains("xhigh"),
+            "xhigh must be offered: {all}"
         );
         assert!(
             !all.contains("low  →"),

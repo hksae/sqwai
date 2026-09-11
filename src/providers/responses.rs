@@ -481,22 +481,20 @@ mod tests {
         }
     }
 
-    /// `max` reaches `xhigh` only where the model declares it; on a
-    /// three-level model it is sent as `high` (and the UI says so — see
-    /// `providers::effort`).
+    /// Named levels go on the wire literally (transparent slider).
     #[test]
     fn effort_reaches_the_body_at_the_declared_level() {
         use crate::config::EffortControl;
-        let b = build_body(&request_at(EffortLevel::Max, EffortControl::Levels));
-        assert_eq!(b["reasoning"]["effort"], "high");
-        let b = build_body(&request_at(EffortLevel::Max, EffortControl::Xhigh));
+        let b = build_body(&request_at(EffortLevel::Max, EffortControl::Named));
+        assert_eq!(b["reasoning"]["effort"], "max");
+        let b = build_body(&request_at(EffortLevel::Xhigh, EffortControl::Named));
         assert_eq!(b["reasoning"]["effort"], "xhigh");
-        let b = build_body(&request_at(EffortLevel::Low, EffortControl::Levels));
+        let b = build_body(&request_at(EffortLevel::Low, EffortControl::Named));
         assert_eq!(b["reasoning"]["effort"], "low");
         // a model with no reasoning control gets no parameter at all
         let b = build_body(&request_at(EffortLevel::High, EffortControl::None));
         assert!(b.get("reasoning").is_none(), "unexpected reasoning: {b}");
-        let b = build_body(&request_at(EffortLevel::Off, EffortControl::Levels));
+        let b = build_body(&request_at(EffortLevel::Off, EffortControl::Named));
         assert!(b.get("reasoning").is_none());
     }
 

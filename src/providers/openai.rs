@@ -501,12 +501,12 @@ mod tests {
     async fn the_body_carries_the_declared_level() {
         use crate::config::{EffortControl, EffortLevel, EffortSupport};
         for (level, control, expected) in [
-            (EffortLevel::Max, EffortControl::Levels, Some("high")),
-            (EffortLevel::Max, EffortControl::Xhigh, Some("xhigh")),
-            (EffortLevel::High, EffortControl::Levels, Some("high")),
-            (EffortLevel::Low, EffortControl::Levels, Some("low")),
+            (EffortLevel::Max, EffortControl::Named, Some("max")),
+            (EffortLevel::Xhigh, EffortControl::Named, Some("xhigh")),
+            (EffortLevel::High, EffortControl::Named, Some("high")),
+            (EffortLevel::Low, EffortControl::Named, Some("low")),
             (EffortLevel::High, EffortControl::None, None),
-            (EffortLevel::Off, EffortControl::Levels, None),
+            (EffortLevel::Off, EffortControl::Named, None),
         ] {
             let (url, bodies, h) = capturing_sse_server();
             let mut req = plain_request();
@@ -824,7 +824,7 @@ mod tests {
         req.model_id = "custom-reasoning-model".into();
         req.effort = Some(crate::providers::EffortLevel::Medium);
         req.effort_support = crate::config::EffortSupport {
-            control: crate::config::EffortControl::Levels,
+            control: crate::config::EffortControl::Named,
             always_on: false,
         };
         let body = OpenAiProvider::build_body(&req);

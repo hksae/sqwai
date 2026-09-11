@@ -2731,7 +2731,7 @@ impl App {
                         }
                     };
                     let name_style = if plan.is_honoured() {
-                        Theme::accent()
+                        Theme::base()
                     } else {
                         Theme::dim()
                     };
