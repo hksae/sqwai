@@ -87,13 +87,13 @@ async fn run(cfg: config::Config, resume_id: Option<String>, read_only: bool) ->
         }
     };
 
-    let terminal = init_terminal()?;
+    let (terminal, frame_bytes) = init_terminal()?;
     let _guard = TerminalGuard;
     let app = tui::app::App::new(cfg, session, startup, read_only)?;
-    app.run(terminal).await
+    app.run(terminal, frame_bytes).await
 }
 
-fn init_terminal() -> Result<tui::app::Terminal> {
+fn init_terminal() -> Result<(tui::app::Terminal, crate::tui::clear_tail::TerminalWriter)> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
     crossterm::execute!(
@@ -105,11 +105,13 @@ fn init_terminal() -> Result<tui::app::Terminal> {
     // BufWriter coalesces the hundreds of small per-cell writes of a frame
     // into one or two syscalls; every frame still ends with an explicit
     // flush, so no output ever sits in the buffer across frames.
-    let backend = crate::tui::clear_tail::ClearTailBackend::new(io::BufWriter::with_capacity(
-        64 * 1024,
+    // SharedWriter counts frame bytes for the /debug perf log.
+    let shared = crate::tui::clear_tail::TerminalWriter::new(io::BufWriter::with_capacity(
+        256 * 1024,
         stdout,
     ));
-    Ok(tui::app::Terminal::new(backend)?)
+    let backend = crate::tui::clear_tail::ClearTailBackend::new(shared.clone());
+    Ok((tui::app::Terminal::new(backend)?, shared))
 }
 
 fn restore_terminal() -> Result<()> {

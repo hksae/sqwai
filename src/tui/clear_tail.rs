@@ -46,6 +46,77 @@ use ratatui::style::{Color as RColor, Modifier};
 /// Minimum trailing blank run (cells) worth replacing with a single EL.
 const MIN_EL_RUN: usize = 8;
 
+/// Shared, byte-counting terminal writer.
+///
+/// `CrosstermBackend` owns its writer, so per-frame byte totals cannot be
+/// read back through it. This handle owns the real writer behind a mutex and
+/// can be cloned: one clone feeds the backend, another lets the run loop
+/// drain the counter after each frame for the `/debug` perf log.
+/// Counts bytes *produced* per frame (pre-kernel); with the 256K `BufWriter`
+/// below it a frame rarely fills the buffer mid-frame, so the count matches
+/// wire bytes closely enough for throughput diagnosis.
+#[derive(Debug)]
+pub struct SharedWriter<W: Write> {
+    state: std::sync::Arc<std::sync::Mutex<SharedState<W>>>,
+}
+
+impl<W: Write> Clone for SharedWriter<W> {
+    fn clone(&self) -> Self {
+        Self {
+            state: std::sync::Arc::clone(&self.state),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SharedState<W: Write> {
+    writer: W,
+    bytes: u64,
+}
+
+/// Concrete writer stack used by the production terminal.
+pub type TerminalWriter =
+    SharedWriter<std::io::BufWriter<std::io::Stdout>>;
+
+impl<W: Write> SharedWriter<W> {
+    pub fn new(writer: W) -> Self {
+        Self {
+            state: std::sync::Arc::new(std::sync::Mutex::new(SharedState {
+                writer,
+                bytes: 0,
+            })),
+        }
+    }
+
+    /// Bytes produced since the last call (resets the counter).
+    pub fn take_bytes(&self) -> u64 {
+        std::mem::take(
+            &mut self
+                .state
+                .lock()
+                .expect("terminal writer mutex")
+                .bytes,
+        )
+    }
+}
+
+impl<W: Write> Write for SharedWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut state = self.state.lock().expect("terminal writer mutex");
+        let n = state.writer.write(buf)?;
+        state.bytes += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.state
+            .lock()
+            .expect("terminal writer mutex")
+            .writer
+            .flush()
+    }
+}
+
 /// `CrosstermBackend` wrapper; see the module docs for the optimization.
 #[derive(Debug)]
 pub struct ClearTailBackend<W: Write> {
@@ -230,9 +301,9 @@ mod tests {
     use super::*;
 
     #[derive(Clone, Default)]
-    struct SharedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    struct VecWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
-    impl Write for SharedWriter {
+    impl Write for VecWriter {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             self.0.lock().expect("writer mutex").extend_from_slice(buf);
             Ok(buf.len())
@@ -250,7 +321,7 @@ mod tests {
     }
 
     fn draw_to_string(width: u16, updates: &[(u16, u16, Cell)]) -> String {
-        let shared = SharedWriter::default();
+        let shared = VecWriter::default();
         let mut backend = ClearTailBackend::new(shared.clone());
         backend.test_width = Some(width);
         let refs = updates.iter().map(|(x, y, c)| (*x, *y, c));
@@ -339,6 +410,18 @@ mod tests {
             .collect();
         let out = draw_to_string(width, &updates);
         assert!(out.contains("\x1b[K"), "expected EL, got: {out:?}");
+    }
+
+    #[test]
+    fn shared_writer_counts_and_drains_bytes() {
+        let shared = SharedWriter::new(Vec::<u8>::new());
+        {
+            let mut probe = shared.clone();
+            probe.write_all(b"hello").expect("write");
+            probe.flush().expect("flush");
+        }
+        assert_eq!(shared.take_bytes(), 5);
+        assert_eq!(shared.take_bytes(), 0);
     }
 
     #[test]

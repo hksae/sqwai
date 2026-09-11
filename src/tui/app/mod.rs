@@ -96,7 +96,7 @@ fn reopen_undone_steps(
 }
 
 pub type Terminal = ratatui::Terminal<
-    crate::tui::clear_tail::ClearTailBackend<std::io::BufWriter<std::io::Stdout>>,
+    crate::tui::clear_tail::ClearTailBackend<crate::tui::clear_tail::TerminalWriter>,
 >;
 
 mod events;
@@ -1044,7 +1044,11 @@ impl App {
         }
     }
 
-    pub async fn run(mut self, mut terminal: Terminal) -> Result<()> {
+    pub async fn run(
+        mut self,
+        mut terminal: Terminal,
+        frame_bytes: crate::tui::clear_tail::TerminalWriter,
+    ) -> Result<()> {
         let (ev_tx, ev_rx) = std::sync::mpsc::channel::<crossterm::event::Event>();
         let input_notify = std::sync::Arc::new(tokio::sync::Notify::new());
         let input_notify_tx = std::sync::Arc::clone(&input_notify);
@@ -1149,8 +1153,9 @@ impl App {
                 frame_ema = frame_ema.mul_f32(0.7) + frame_us.mul_f32(0.3);
                 self.last_frame = Instant::now();
                 let stat = perf::FrameStat {
-                    draw_us: t0.elapsed().as_micros(),
+                    draw_us: frame_us.as_micros(),
                     rebuild_us: self.last_rebuild_us,
+                    bytes: frame_bytes.take_bytes(),
                     merge: self.last_merge.as_str(),
                     fresh: self.last_fresh,
                     segs: self.segments.len(),
