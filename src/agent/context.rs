@@ -13,8 +13,9 @@
 //! degraded memory instead of dying on a failed request.
 //!
 //! The durable plan is not touched by any stage: it lives in
-//! `.sqwai/plan.md` and is re-injected into the system block every request
-//! (design §5), so compaction can never cost the agent its goal or next step.
+//! `.sqwai/plans/<id>.json` (design §2.1) and is re-injected into the system
+//! block every request (design §5), so compaction can never cost the agent
+//! its goal or next step.
 
 use crate::providers::{Message, Role};
 
