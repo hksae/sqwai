@@ -1791,6 +1791,30 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_hides_completed_subagents() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.subagents
+            .push((1, "one".into(), "completed".into(), "done".into(), false));
+        app.subagents
+            .push((2, "two".into(), "completed".into(), "done".into(), false));
+        let text: String = app
+            .status_bar_spans(160)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(!text.contains("agents:"), "stale label must go: {text}");
+        // failures still show — a collapsed block must not hide breakage
+        app.subagents
+            .push((3, "three".into(), "failed".into(), "err".into(), false));
+        let text: String = app
+            .status_bar_spans(160)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("1 failed"), "bar: {text}");
+    }
+
+    #[test]
     fn typewriter_reveals_gradually_and_drains() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.pending_reveal = "Hello".into();

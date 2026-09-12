@@ -3669,7 +3669,9 @@ impl App {
         } else if failed > 0 {
             format!(" agents:{} · {failed} failed ", self.subagents.len())
         } else {
-            format!(" agents:{} ", self.subagents.len())
+            // all completed: nothing to show (the Subagents menu keeps the
+            // transcripts, reachable via the shortcut)
+            String::new()
         };
         self.ef_click = None;
         self.agents_click = None;
