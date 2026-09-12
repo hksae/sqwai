@@ -470,6 +470,41 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static HTTP_LOG: AtomicBool = AtomicBool::new(false);
 
+/// stable per-conversation id, set by the TUI on submit / session switch.
+/// Gateways that route on it (OpenCode Go: `x-opencode-session`) read it
+/// when building requests; it is never sent anywhere else.
+static CONVERSATION_ID: std::sync::RwLock<Option<String>> =
+    std::sync::RwLock::new(None);
+
+/// remember the active conversation for session-aware gateways
+pub fn set_conversation_id(id: &str) {
+    *CONVERSATION_ID.write().unwrap_or_else(|e| e.into_inner()) = Some(id.to_string());
+}
+
+/// value for `x-opencode-session`, if this base URL belongs to the OpenCode
+/// gateway and a conversation id is known. Deliberately scoped by host:
+/// other providers must never see this header.
+pub fn opencode_session_value(base_url: &str) -> Option<String> {
+    if !base_url.contains("opencode.ai") {
+        return None;
+    }
+    CONVERSATION_ID
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+}
+
+/// attach `x-opencode-session` to a request builder when applicable
+pub fn with_opencode_session(
+    builder: reqwest::RequestBuilder,
+    base_url: &str,
+) -> reqwest::RequestBuilder {
+    match opencode_session_value(base_url) {
+        Some(id) => builder.header("x-opencode-session", id),
+        None => builder,
+    }
+}
+
 /// enable/disable the request debug log (`/debug` menu, persisted in `[ui]`)
 pub fn set_http_log(on: bool) {
     HTTP_LOG.store(on, Ordering::Relaxed);
@@ -532,6 +567,7 @@ pub async fn check_connection(p: &ResolvedProvider) -> Result<String, String> {
             .header("anthropic-version", "2023-06-01"),
         WireFormat::Openai | WireFormat::Responses => request.bearer_auth(&key),
     };
+    request = with_opencode_session(request, &p.base_url);
     let response = request.send().await.map_err(|e| {
         // transport failure: DNS, refused, TLS, timeout — one line, no URL dump
         let first: String = e
@@ -681,6 +717,36 @@ mod connection_tests {
             outcome.expect_err("no key must fail").contains("API key"),
             "must say what to fix"
         );
+    }
+
+    #[test]
+    fn opencode_session_header_is_scoped_to_opencode_hosts() {
+        set_conversation_id("sess-42");
+        assert_eq!(
+            opencode_session_value("https://opencode.ai/zen/go/v1"),
+            Some("sess-42".to_string())
+        );
+        assert_eq!(
+            opencode_session_value("https://opencode.ai/zen/v1"),
+            Some("sess-42".to_string())
+        );
+        assert_eq!(opencode_session_value("https://api.openai.com/v1"), None);
+        assert_eq!(opencode_session_value("http://127.0.0.1:11434/v1"), None);
+    }
+
+    #[tokio::test]
+    async fn probe_never_leaks_session_header_to_other_hosts() {
+        set_conversation_id("sess-42");
+        let (url, head, handle) =
+            mock_models_server(200, "OK", r#"{"data":[{"id":"a"}]}"#);
+        let outcome = check_connection(&resolved(url, WireFormat::Openai, Some("k".into()))).await;
+        assert_eq!(outcome, Ok("1 models".to_string()));
+        let seen = head.lock().unwrap();
+        assert!(
+            !seen.to_lowercase().contains("x-opencode-session"),
+            "foreign hosts must not see the header: {seen:?}"
+        );
+        handle.join().unwrap();
     }
 }
 

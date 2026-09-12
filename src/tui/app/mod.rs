@@ -878,6 +878,7 @@ impl App {
         app.stable_prefix = app.stable_prefix();
         app.rebuild_session_environment();
         app.context_bootstrap_pending = true;
+        crate::providers::set_conversation_id(&app.session.id.to_string());
         app.start_builtin_update(false);
         Ok(app)
     }
@@ -1886,6 +1887,8 @@ impl App {
         self.startup = false;
         // pick up any provider/key change made since the last turn
         self.rebuild_provider();
+        // session-aware gateways (OpenCode Go) route on this per conversation
+        crate::providers::set_conversation_id(&self.session.id.to_string());
         self.push_segment(Segment::User(text.clone()));
         self.session.push(Role::User, &text);
         self.turn_user_index = Some(self.session.messages.len().saturating_sub(1));
@@ -2062,6 +2065,7 @@ impl App {
         }
         self.context_bootstrap_pending = true;
         self.session = s;
+        crate::providers::set_conversation_id(&self.session.id.to_string());
         if let Some(ref plan_id) = self.session.plan_id
             && crate::plan::open(&self.project_root, plan_id).is_err()
         {
@@ -2151,6 +2155,7 @@ impl App {
         self.run_undo_maintenance();
         let ctx = self.session.context_limit;
         self.session = Session::new(self.cfg.default_model.clone(), ctx);
+        crate::providers::set_conversation_id(&self.session.id.to_string());
         self.session.plan_id = crate::plan::open_active_for_session(
             &self.project_root,
             Some(&self.session.id.to_string()),

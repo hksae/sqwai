@@ -224,6 +224,7 @@ impl Provider for OpenAiProvider {
 
             let mut r = this.http.post(&url);
             if let Some(k) = &this.api_key { r = r.bearer_auth(k); }
+            r = super::with_opencode_session(r, &this.base_url);
             let resp = match r.json(&body).send().await {
                 Ok(r) => r,
                 Err(e) => {

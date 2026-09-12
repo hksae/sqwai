@@ -213,14 +213,16 @@ impl Provider for AnthropicProvider {
             let mut req = req;
             this.sanitize(&mut req);
             let body = build_body(&req, 8192, cache_breakpoints);
-            let resp = match this
-                .http
-                .post(&this.url)
-                .header("x-api-key", &this.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .json(&body)
-                .send()
-                .await
+            let resp = match super::with_opencode_session(
+                this.http
+                    .post(&this.url)
+                    .header("x-api-key", &this.api_key)
+                    .header("anthropic-version", "2023-06-01"),
+                &this.url,
+            )
+            .json(&body)
+            .send()
+            .await
             {
                 Ok(r) => r,
                 Err(e) => {

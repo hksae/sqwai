@@ -183,6 +183,7 @@ impl Provider for ResponsesProvider {
             let body = build_body(&req);
             let mut r = this.http.post(&this.url);
             if let Some(k) = &this.api_key { r = r.bearer_auth(k); }
+            r = super::with_opencode_session(r, &this.url);
             let resp = match r.json(&body).send().await {
                 Ok(r) => r,
                 Err(e) => {
