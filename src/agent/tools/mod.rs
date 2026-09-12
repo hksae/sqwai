@@ -545,7 +545,7 @@ tight loop; await its result before dependent changes or reporting success.",
         ToolDef {
             name: "bash_output",
             kind: Kind::ReadOnly,
-            description: "Wait for a background command and read its output. ALWAYS prefer wait_secs (0-60): it blocks until the job exits or fresh output arrives — one call instead of a poll loop. Polling without wait_secs wastes context and is flagged in the response. Output is incremental: the first read returns the tail, later reads return only bytes appended since the previous read (from_start=true re-reads the tail). Only this session's jobs are visible here. A finished job is reported once with its exit code, then cleaned up. Without id: a list of this session's background jobs with their commands and log paths.",
+            description: "Wait for a background command and read its output. ALWAYS prefer wait_secs (0-60): it blocks until the job exits or fresh output arrives — one call instead of a poll loop. Reads without it on a running job are free twice, then force-waited (15s, then 30s). Output is incremental: the first read returns the tail, later reads return only bytes appended since the previous read (from_start=true re-reads the tail). Only this session's jobs are visible here. A finished job is reported once with its exit code, then cleaned up. Without id: a list of this session's background jobs with their commands and log paths.",
             parameters: json!({
                 "type": "object",
                 "properties": {

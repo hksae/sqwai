@@ -41,6 +41,9 @@ pub(super) struct BgJob {
     /// bytes appended since the previous read, so chatty logs cross the
     /// context exactly once
     pub read: u64,
+    /// consecutive reads without `wait_secs` while still running: drives
+    /// the forced-wait escalation (models poll out of habit otherwise)
+    pub nowait_polls: u32,
 }
 
 impl BgJob {
@@ -375,6 +378,7 @@ fn run_background(ctx: &ToolCtx, command: &str) -> Outcome {
                 session: ctx.session_id.clone(),
                 exit: None,
                 read: 0,
+                nowait_polls: 0,
             });
             Outcome::ok(format!(
                 "launched in background as job {id} (pid {pid}) — logs appended to {}. \
@@ -405,14 +409,28 @@ fn own_job<'a>(
         })
 }
 
+/// Escalation schedule for no-wait reads of a running job: two free
+/// reads, then forced waits — 15s the first time, 30s capped after.
+/// Pure so tests pin the schedule without sleeping.
+fn forced_wait_secs(consecutive_nowait: u32) -> u64 {
+    match consecutive_nowait {
+        0..=2 => 0,
+        3 => 15,
+        _ => 30,
+    }
+}
+
 /// `bash_output`: incremental output of a background job, or a status list
 /// of all jobs when no id is given. The first read of a job returns the
 /// tail of its log; every later read returns only the bytes appended since
 /// the previous read, so a chatty log crosses the context exactly once.
 /// `from_start=true` re-reads the tail from scratch. `wait_secs` (0-60,
 /// clamped) blocks until the job exits, fresh bytes arrive, the timeout
-/// lapses, or the user cancels — one call instead of a poll loop. A finished
-/// job is reported once with its exit code, then removed from the registry.
+/// lapses, or the user cancels — one call instead of a poll loop. Reads
+/// without it on a running job are free twice, then force-waited (15s,
+/// then 30s capped): polling out of habit still returns, just after a
+/// wait. A finished job is reported once with its exit code, then removed
+/// from the registry.
 pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
     if ctx.cancel_requested() {
         return Outcome::cancelled();
@@ -451,10 +469,31 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
     let tail = args["tail"].as_u64().unwrap_or(BG_TAIL_DEFAULT as u64) as usize;
     let tail = tail.clamp(200, BG_TAIL_MAX);
 
+    // no-wait escalation: two free reads, then the host waits on the
+    // model's behalf (15s, then 30s capped) — polling out of habit still
+    // returns, just after a wait. An explicit wait_secs resets the count.
+    let mut forced = 0u64;
+    {
+        let job = match own_job(&mut jobs, &ctx.session_id, id) {
+            Ok(job) => job,
+            Err(e) => return Outcome::err(e),
+        };
+        job.poll();
+        if job.running() {
+            if wait_secs > 0 {
+                job.nowait_polls = 0;
+            } else {
+                job.nowait_polls += 1;
+                forced = forced_wait_secs(job.nowait_polls);
+            }
+        }
+    }
+    let effective_wait = wait_secs.max(forced);
+
     // blocking wait BEFORE the read: until the job exits, fresh bytes land,
     // the timeout lapses, or Esc. The registry lock is never held across a
     // sleep — the job is re-resolved after the wait.
-    if wait_secs > 0 {
+    if effective_wait > 0 {
         // bytes the model has already seen: waiting ends early on anything
         // beyond this, so a second waiter does not sleep through output
         let seen = match own_job(&mut jobs, &ctx.session_id, id) {
@@ -464,7 +503,8 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
         // the outer guard must go BEFORE the loop: it re-locks below, and
         // std Mutex is not reentrant — holding both would self-deadlock
         drop(jobs);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(effective_wait);
         loop {
             if ctx.cancel_requested() {
                 return Outcome::cancelled();
@@ -535,6 +575,7 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
     };
     let log = job.log.display().to_string();
     let still_running = job.running();
+    let polls = job.nowait_polls;
     if !still_running {
         jobs.retain(|j| j.id != id);
     }
@@ -543,16 +584,23 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
     } else {
         "--- new output since the last read ---"
     };
-    // models keep polling out of habit even though the schema documents
-    // wait_secs — so a running job polled without it says so itself,
-    // every time, until the habit breaks. One line against kilobytes.
-    let nudge = if still_running && wait_secs == 0 {
-        "\n(do not poll in a loop: pass wait_secs (up to 60) to block until fresh output or exit)"
+    // The hint rides right under the status line, never at the end: long
+    // outputs get truncated from the tail, which is exactly where an
+    // end-positioned hint dies unseen. Models poll out of habit even
+    // though the schema documents wait_secs — a running job polled
+    // without it says so itself, every time, until the habit breaks.
+    // After two free reads the wait is forced (15s, then 30s capped).
+    let notice = if still_running && wait_secs == 0 {
+        if forced > 0 {
+            format!("(no-wait poll #{polls} in a row: waited {forced}s on your behalf — pass wait_secs yourself next time)\n")
+        } else {
+            "(do not poll in a loop: pass wait_secs (up to 60) to block until fresh output or exit)\n".to_string()
+        }
     } else {
-        ""
+        String::new()
     };
     Outcome::ok(format!(
-        "job {id}: {status} (log: {log})\n{section}\n{body}{nudge}",
+        "job {id}: {status} (log: {log})\n{notice}{section}\n{body}",
     ))
 }
 
@@ -999,6 +1047,47 @@ mod tests {
             t0.elapsed() < std::time::Duration::from_secs(5),
             "wait must respect its timeout"
         );
+        let killed = bash_kill(&c, &serde_json::json!({"id": id}));
+        assert!(killed.ok, "{}", killed.output);
+    }
+
+    #[test]
+    fn forced_wait_schedule_is_two_free_then_15_then_30() {
+        assert_eq!(forced_wait_secs(0), 0);
+        assert_eq!(forced_wait_secs(1), 0);
+        assert_eq!(forced_wait_secs(2), 0);
+        assert_eq!(forced_wait_secs(3), 15);
+        assert_eq!(forced_wait_secs(4), 30);
+        assert_eq!(forced_wait_secs(99), 30);
+    }
+
+    /// Reads without wait_secs on a running job escalate: the 3rd forces
+    /// a 15s wait (waking early on fresh output), the 4th forces 30s.
+    #[test]
+    fn repeated_nowait_reads_force_a_wait() {
+        let mut c = ctx();
+        let id = spawn_bg(&mut c, &long_sleep_command());
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let j = |v: serde_json::Value| bash_output(&c, &v);
+        let first = j(serde_json::json!({"id": id}));
+        assert!(first.ok, "{}", first.output);
+        assert!(!first.output.contains("waited "), "{}", first.output);
+        let second = j(serde_json::json!({"id": id}));
+        assert!(second.ok, "{}", second.output);
+        assert!(!second.output.contains("waited "), "{}", second.output);
+        // third: forced 15s, but ping lines land ~1/s so it wakes fast
+        let t0 = std::time::Instant::now();
+        let third = j(serde_json::json!({"id": id}));
+        assert!(third.ok, "{}", third.output);
+        assert!(third.output.contains("waited 15s"), "{}", third.output);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(12),
+            "forced wait must wake on fresh output, not sleep it out"
+        );
+        // fourth: capped at 30s, same early wake
+        let fourth = j(serde_json::json!({"id": id}));
+        assert!(fourth.ok, "{}", fourth.output);
+        assert!(fourth.output.contains("waited 30s"), "{}", fourth.output);
         let killed = bash_kill(&c, &serde_json::json!({"id": id}));
         assert!(killed.ok, "{}", killed.output);
     }
