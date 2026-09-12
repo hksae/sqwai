@@ -82,26 +82,6 @@ pub fn snapshot_boundary(
     shadow.snapshot_forced(session_id, label).map(Some)
 }
 
-/// Snapshot with the default store and no session key.
-///
-/// Kept for the call sites that have no session id to hand; they land on a
-/// shared chain, which is worse for retention but never wrong.
-pub fn snapshot(root: &Path, label: &str) -> Result<String> {
-    match snapshot_session(root, ShadowStore::Local, "shared", label)? {
-        Some(sha) => Ok(sha),
-        // Nothing changed since the previous snapshot, so the previous one
-        // already describes this state and is the honest thing to return.
-        None => {
-            let Some(shadow) = shadow(root, ShadowStore::Local) else {
-                anyhow::bail!("no shadow repository");
-            };
-            shadow
-                .head_of("shared")
-                .context("the tree is unchanged and no previous snapshot exists")
-        }
-    }
-}
-
 pub fn changed_files(root: &Path, sha: &str) -> Result<Vec<String>> {
     let Some(shadow) = shadow(root, ShadowStore::Local) else {
         anyhow::bail!("no shadow repository");
@@ -675,7 +655,9 @@ mod tests {
 
         let repo = tmp_repo();
         let dir = repo.path();
-        let sha = snapshot(dir, "pre_mutation").expect("snapshot");
+        let sha = snapshot_session(dir, ShadowStore::Local, "test", "pre_mutation")
+            .expect("no shadow repo")
+            .expect("snapshot");
         std::fs::write(dir.join("a.txt"), "agent edit\n").unwrap();
 
         let mut journal = Journal::open(dir, "session").unwrap();
@@ -718,7 +700,9 @@ mod tests {
         git_in(dir, &["add", "."]);
         git_in(dir, &["commit", "-qm", "add human.txt"]);
 
-        let sha = snapshot(dir, "pre_mutation a.txt").expect("snapshot");
+        let sha = snapshot_session(dir, ShadowStore::Local, "test", "pre_mutation a.txt")
+            .expect("no shadow repo")
+            .expect("snapshot");
         // the agent rewrites a.txt ...
         std::fs::write(dir.join("a.txt"), "agent edit\n").unwrap();
         let agent_hash = hash_of(&dir.join("a.txt"));
@@ -755,7 +739,9 @@ mod tests {
     fn restore_removes_files_created_after_the_snapshot() {
         let repo = tmp_repo();
         let dir = repo.path();
-        let sha = snapshot(dir, "pre_mutation").expect("snapshot");
+        let sha = snapshot_session(dir, ShadowStore::Local, "test", "pre_mutation")
+            .expect("no shadow repo")
+            .expect("snapshot");
         std::fs::write(dir.join("generated.rs"), "// agent\n").unwrap();
         let agent_hash = hash_of(&dir.join("generated.rs"));
 
@@ -780,7 +766,9 @@ mod tests {
     fn restore_skips_a_file_edited_after_the_agent_wrote_it() {
         let repo = tmp_repo();
         let dir = repo.path();
-        let sha = snapshot(dir, "pre_mutation a.txt").expect("snapshot");
+        let sha = snapshot_session(dir, ShadowStore::Local, "test", "pre_mutation a.txt")
+            .expect("no shadow repo")
+            .expect("snapshot");
         std::fs::write(dir.join("a.txt"), "agent edit\n").unwrap();
         let agent_hash = hash_of(&dir.join("a.txt"));
         std::fs::write(dir.join("a.txt"), "agent edit, then mine\n").unwrap();
@@ -810,7 +798,9 @@ mod tests {
     fn restore_without_a_recorded_hash_puts_the_file_back() {
         let repo = tmp_repo();
         let dir = repo.path();
-        let sha = snapshot(dir, "pre_bash").expect("snapshot");
+        let sha = snapshot_session(dir, ShadowStore::Local, "test", "pre_bash")
+            .expect("no shadow repo")
+            .expect("snapshot");
         std::fs::write(dir.join("a.txt"), "touched by a shell command\n").unwrap();
 
         let report = restore_paths(
@@ -838,7 +828,9 @@ mod tests {
         fs::write(dir.join("a.txt"), "changed\n").unwrap();
         fs::write(dir.join("new.txt"), "created\n").unwrap();
 
-        let sha = snapshot(dir, "test").expect("snapshot");
+        let sha = snapshot_session(dir, ShadowStore::Local, "test", "test")
+            .expect("no shadow repo")
+            .expect("snapshot");
 
         // what the agent then did: rewrote two files and created a third
         fs::write(dir.join("a.txt"), "worse\n").unwrap();
@@ -924,7 +916,9 @@ mod tests {
         let dir = repo.path();
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src").join("foo.rs"), "original\n").unwrap();
-        let sha = snapshot(dir, "pre_mutation").expect("snapshot");
+        let sha = snapshot_session(dir, ShadowStore::Local, "test", "pre_mutation")
+            .expect("no shadow repo")
+            .expect("snapshot");
         std::fs::write(dir.join("src").join("foo.rs"), "agent modified\n").unwrap();
 
         let targets = vec![Target {
@@ -938,5 +932,35 @@ mod tests {
             std::fs::read_to_string(dir.join("src").join("foo.rs")).unwrap(),
             "original\n"
         );
+    }
+
+    /// #196: two sessions snapshotting interleaved work must not interleave
+    /// their checkpoint history — each chain holds only its own commits, so
+    /// walking one session's chain for undo never sees another's.
+    #[test]
+    fn session_chains_do_not_interleave() {
+        let repo = tmp_repo();
+        let dir = repo.path();
+        let snap = |session: &str, label: &str, content: &str| {
+            std::fs::write(dir.join("a.txt"), content).unwrap();
+            snapshot_session(dir, ShadowStore::Local, session, label)
+                .expect("no shadow repo")
+                .expect("snapshot")
+        };
+        snap("aaa", "aaa-1", "a1\n");
+        snap("bbb", "bbb-1", "b1\n");
+        snap("aaa", "aaa-2", "a2\n");
+
+        let shadow = shadow_repo(dir, ShadowStore::Local).expect("shadow repo");
+        let labels = |session: &str| {
+            shadow
+                .commit_log(session)
+                .expect("log")
+                .iter()
+                .map(|(_, label)| label.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(labels("aaa"), vec!["aaa-2".to_string(), "aaa-1".to_string()]);
+        assert_eq!(labels("bbb"), vec!["bbb-1".to_string()]);
     }
 }
