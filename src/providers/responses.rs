@@ -170,7 +170,13 @@ impl ResponsesProvider {
 impl Provider for ResponsesProvider {
     fn capabilities(&self) -> super::ProviderCapabilities {
         super::ProviderCapabilities {
-            previous_response: true,
+            // Console Go answers Responses calls statelessly: it retains
+            // nothing server-side, so a previous_response_id always 400s
+            // ("referenced response not found or expired"). Never offer
+            // continuation there — the loop then resends the full
+            // transcript in `input`, which loses nothing. Other hosts
+            // keep the documented behavior.
+            previous_response: !self.url.contains("opencode.ai"),
             ..Default::default()
         }
     }
@@ -696,6 +702,37 @@ mod tests {
         stripped.previous_response_id = None;
         stripped.context_transport = crate::providers::ContextTransport::Stateless;
         assert!(build_body(&stripped).get("previous_response_id").is_none());
+    }
+
+    #[test]
+    fn opencode_gateway_is_stateless_no_continuation_offered() {
+        use super::Provider;
+        let p = ResponsesProvider::new(&ResolvedProvider {
+            name: "go".into(),
+            format: crate::config::WireFormat::Responses,
+            base_url: "https://opencode.ai/zen/go/v1".into(),
+            api_key: None,
+        })
+        .unwrap();
+        assert!(
+            !p.capabilities().previous_response,
+            "Console Go retains nothing server-side"
+        );
+        // ...so sanitize drops the id and the loop resends everything
+        let mut req = ChatRequest {
+            model_id: "m".into(),
+            system: vec![],
+            messages: vec![Message::new(Role::User, "hi")],
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: Some("resp_old".into()),
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        p.sanitize(&mut req);
+        assert!(req.previous_response_id.is_none());
+        assert!(build_body(&req).get("previous_response_id").is_none());
     }
 
     #[test]
