@@ -117,9 +117,9 @@ sandbox. There is no isolated/container mode, no tamper detection, and no
 **Single instance.** `.sqwai/lock/<uuid>.lock` records the owning process pid
 and a random uuid (not the session id), plus a `read_only=` line. A second
 sqwai started in the same project finds a live lock and enters read-only
-mode for plan/journal/memory/graph with a warning. `--force` does not take
-over the lock — it leaves the other lock file in place and only clears the
-`read_only` check for the new instance. SQLite serializes graph writes; the
+mode for plan/journal/memory/graph with a warning. `--force` skips that
+check: both instances stay writable, so `--force` is an explicit unsafe
+concurrent mode — two writers, no arbitration. SQLite serializes graph writes; the
 lock protects the plaintext plan, diary and journal.
 
 ---
@@ -139,6 +139,10 @@ completed|abandoned → (read-only in the TUI; the model has no mutating op)
 A session resolves strictly: `open_active_for_session` returns the
 session's own active plan or `None` — never another session's plan (#171).
 Joining a foreign plan is explicit (`plan start` records membership).
+Cursor limit: several sessions may commit to one plan, but `applied_event`
+holds a single `session:seq` — the last writer's suffix. A crash between
+another session's journal append and its plan store leaves that op in the
+other session's journal where the startup replay never looks. See §13.
 
 Fork is deleted: there is no `/fork`, no plan copy, no journal fork record.
 Resume (`--resume`, session picker, `/new` continue) is the only
@@ -199,11 +203,16 @@ Field notes:
 
 applied_event — scoped reference `session:seq` of the last journal event
 applied to this plan file (absent when nothing applied yet). The plan is a
-recoverable projection; on load the host replays journal events after
-applied_event (§2.1.4, §2.2.1).
+recoverable projection; the startup replay pass (§2.1.4) re-applies journal
+events after the cursor. Covers one session's suffix only (see §13).
 acceptance[] — `{text, status, evidence[], validation, by?, reason?}`. No
 stable id and no content hash: identity is the vector index. `status` ∈
 pending | passed | waived (`verified` still reads as `passed` in old files).
+Source of truth: `validation`, not `status`. Every new `verify` sets both
+(`status: passed` as the display mirror, `validation: {passed, receipts}` as
+the authority); `complete` reads `validation.status` (with `legacy_passed`
+— status passed but validation empty — accepted only for plan files that
+predate receipts). `status` alone never satisfies `complete` for new files.
 steps[].kind ∈ research | change | verify (default change). Determines
 what counts as evidence (§2.1.4).
 steps[].refs — optional list of `{path, symbol?, intent}` objects where
@@ -233,8 +242,14 @@ budget — token estimate of the plan as injected; limit derived from model
 context × plan.budget_ratio (default 0.10).
 acceptance[].text may be prefixed `cmd:` (host runs it on `plan verify` and on
 `complete`; the result becomes evidence automatically) or `manual:` (user
-waives it). Anything else is free text, settled by host-recorded evidence
-from a verify step — never by defaulting to `manual:`.
+waives it). Anything else is free text, settled only by unspent
+host-recorded evidence from a verify step — never by defaulting to `manual:`.
+Unspent means: evidence refs of a verify step that no other passed acceptance
+item has already spent (`evidence_spent` rejects reuse); each ref must satisfy
+the verify gate (successful `bash`/`git_*` exec, or any `diagnostics` record).
+The host pins an attachment receipt (`runner: "evidence"`, state digest over
+traversed paths) so later moves stale the item like a command check, and
+`complete` re-validates the refs instead of trusting the earlier verify.
 Writes are atomic: temp file + rename. On open, a plan that fails schema
 validation is quarantined to `plans/corrupt/<id>.json` and loading fails;
 there is no automatic rebuild (replay only heals cursors and orphans).
@@ -248,9 +263,9 @@ applied_event, folded, or step_epoch. There is no `fold` op, no
 `goal_revision` op (`set_goal` is host-only), and no `restore`/`abandon` op
 (`cancel` with no id, or with the plan's own id, abandons the whole plan).
 
-Host-only operations (never exposed as tool ops): reopen (after undo),
-waive and confirm (user settles acceptance items), set_goal, accept_proposal,
-replay/repair. There is no `fold` op and no `restore` op.
+Host-only operations (never exposed as tool ops, recorded in the journal as
+plan events with by: host|user): reopen (after undo), waive and confirm
+(user settles acceptance items), set_goal, accept_proposal, replay/repair.
 
 JSON
 
@@ -271,10 +286,6 @@ create is the only op allowed to create steps with kinds in bulk; the model
 should keep initial plans small (guideline in prompt: 3–12 steps) and split
 later.
 
-Host-only operations (never exposed as tool ops, recorded in the journal as
-plan events with by: host|user): reopen (after undo), waive and confirm
-(user settles acceptance items), set_goal, accept_proposal, replay/repair.
-
 2.1.4 Validator (host code only)
 Op	Rejected when
 create	own session already has an active plan (rejected with its id) · goal empty · zero steps · more than plan.max_steps (24) steps
@@ -286,7 +297,7 @@ cancel	step done · empty reason defaults to `"cancelled"`; no id (or the plan's
 add / split	resulting step count > plan.max_steps (no runtime override exists) · after/id unknown · split only `pending|reopened` steps without evidence, at most 8 parts
 verify	acceptance index unknown · host evidence rule fails (below)
 complete	any step `pending|in_progress|blocked|reopened` · any acceptance `validation.status` not `passed|waived` · any `passed` receipt is `stale`; pre-receipt `Passed` items (written before validation existed) still complete
-any	`plan::apply` itself has no completed|abandoned guard — the TUI refuses such plans (`workable_plan`)
+any	known defect (A): `plan::apply` itself has no completed|abandoned guard — only the TUI refuses such plans (`workable_plan`); the model path must gain the same guard
 Evidence is owned by the host. The model never supplies journal sequence
 numbers to `finish` or `verify` (the fields exist for wire compatibility and
 are ignored with a note). Whenever the host writes a `tool_result`,
@@ -353,9 +364,20 @@ produced by a reducer over all relevant events, including plan ops,
 evidence attachment, receipts, invalidations, undo, goal revisions, and deletion.
 Every accepted `plan` op is first appended to the journal as a `plan` event and only
 then applied to `plans/<plan-id>.json`; `applied_event` advances in the same
-atomic step. There is no total-order counter. On load the host does not replay;
-a crash between journal append and plan write heals deterministically by replay
-at startup (§2.2.1, §3.7). The plan file alone is never trusted without its journal prefix.
+atomic step. There is no total-order counter. Replay contract (single,
+implemented in `plan::replay`, run at startup and session start): for each
+plan file carrying an `applied_event` cursor `session:seq`, re-apply that
+session's journaled `plan` ops after the cursor (pure re-application — no
+commands run, no approvals, no evidence gates; every replayed op was already
+accepted when first journaled), re-attach `tool_result`/`file_diff`/
+`diagnostics` evidence refs the file update lost, and rebuild plans whose
+create intent was journaled but whose file is missing (unless a later
+`plan_deleted` marks the absence deliberate). Replay is idempotent: a clean
+tree changes nothing and stores nothing; on divergence the cursor holds and
+the plan is reported stalled for a human. Ordinary plan loads do not replay —
+they trust the file; healing happens only through this startup pass. The
+plan file alone is never trusted without its journal prefix. Known limit:
+the cursor covers one session's suffix only (see §13).
 
 **Attribute misattribution warning (non-blocking).** If the step being finished has
 file_diff evidence whose paths overlap with `refs` of another pending or in_progress step,
@@ -453,6 +475,11 @@ benchmark/…), at most one referenced file, or one of the trivial terms
 (typo/rename/format/whitespace/spelling/comment/lint). Otherwise the model
 must `plan create` first. Without this the model routes around the plan for
 "quick" tasks that grow.
+Deliberate scope: the gate checks project-global `open_active`, not the
+session's own plan. It asks "is there planning discipline", not "is it
+yours" — one active plan per project is enough to let a session act under
+it (joining stays explicit via `plan start`). Strict session resolution
+(§2.1.1) still governs which plan a session reads and mutates.
 2.2 Journal
 The journal is the factual record of a session. Written only by the host,
 in the tool dispatch layer and in a few lifecycle points. The model has one
@@ -670,9 +697,8 @@ Ordered by importance:
 Verifier — resolve_ref answers "does this file/symbol exist, where,
 with what signature" deterministically. Consumers: plan validator
 (start with refs), pre-edit warning.
-Context selector — the neighborhood of files/symbols tied to the
-current step (via evidence and refs) is offered to the model as compact
-facts.
+Context selector — planned (§12.5), not a current role: no graph facts are
+injected into prompts today.
 Navigation — recall, graph_query, graph-view for the user.
 Anything the graph returns from an exact lookup is an index observation
 over parsed AST files; anything from ranked search is advisory. An exact lookup
@@ -875,8 +901,10 @@ git --git-dir=… --work-tree=… update-ref refs/sessions/<id> <commit>
 
 What this achieves: the user's `.git` is untouched (no `index.lock`, no clutter in
 refs, user's gc/hooks/worktree are bypassed); it works in projects without git;
-git handles delta compression, deduplication, `.gitignore`, and renames automatically;
-the CLI is asynchronous by nature, avoiding TUI freezes.
+git handles delta compression, deduplication, `.gitignore`, and renames automatically.
+Git is invoked synchronously on the blocking tool thread, so it does not
+block the async runtime; the TUI reports checkpoint progress via tool events.
+Blocking the runtime and blocking the UI are not the same thing.
 
 Note on raw bytes: `core.autocrlf = false` avoids CRLF normalization in the shadow
 index, but does not completely bypass repository `.gitattributes` or external smudge/clean
@@ -946,10 +974,11 @@ user message
   → prompt assembly (§3.2)
   → model streams; each tool call:
       safety classification → approval dialog if needed → journal approval
-      checkpoint if mutating (§2.5)
-      journal tool_call
-      dispatch; for plan ops: validator; for graph-touching tools: freshness
-      journal tool_result (+ file_diff, + diagnostics if LSP)
+      dispatch; for file mutations, inside the call: read-guard check →
+      pre-mutation shadow snapshot → write → blob store → file_diff metadata;
+      for plan ops: validator; for graph-touching tools: freshness
+      journal tool_call, then after dispatch journal tool_result (+ file_diff,
+      + checkpoint records, + diagnostics if LSP)
       graph incremental reindex
   → model text delta streamed to TUI
   → end of turn: nudge computation, diary trigger check, session save
@@ -1062,9 +1091,9 @@ L1 blinded reflector, L2 /verify) for "you broke it" moments. Specified in
 §12.7. No criticism detector, neutralizer, executor, or verdict machinery
 exists today.
 3.6 Undo
-/undo [n] restores the working tree to the n-th previous checkpoint
-(default 1); `/undo step N` reverts one plan step from Layer-1 pre-images
-only. Effects, in order:
+/undo [n] attempts to restore sqwai-recorded changes from the n-th previous
+checkpoint (default 1) — not a guaranteed full-tree rollback. `/undo step N`
+reverts one plan step from Layer-1 pre-images only. Effects, in order:
 
 1. The restore is scoped to what the host recorded as its own writes across
    the undone checkpoints (`recorded_writes`): the user's own editor changes
@@ -1086,6 +1115,10 @@ only. Effects, in order:
 4. The provider's copy of the conversation still contains the reverted work,
    so the next request sends the transcript the host owns instead.
    Anchor rebuilt for the next turn with undo: restored to a1b2 (3 files); steps reopened: 2.
+The status line always reports the four outcomes separately: restored,
+removed (created after the snapshot), reopened steps, and — when they occur —
+left alone as externally changed (skipped), scope not narrowed, and
+checkpoints whose effects may remain (unrecorded bash windows).
 Redo is not offered in v1; the post-undo tree is itself checkpointed, so
 /undo again is safe.
 3.7 Failures
@@ -1094,7 +1127,7 @@ Provider error mid-turn after retries	partial text kept in history; provider_err
 User cancels a running tool (Esc)	tool_result ok:false code:cancelled; the cancel is journaled; step stays in_progress; no prior work is reverted
 Provider down with fallback configured	automatic switch to the next model in the fallback chain after retry exhaustion on network/5xx; provider_error journaled with recovered:true, switched_to; step stays in_progress
 Tool panics	caught per call (the blocking tool thread failing surfaces as ok:false); agent continues
-Crash	resume path (§3.4) with journal repair; a crash between journal append and plan write heals by replay from `applied_event` (§2.1.4); plan file writes stay atomic (temp + rename)
+Crash	resume path (§3.4) with journal repair; a crash between journal append and plan write heals by the startup replay pass (§2.1.4); plan file writes stay atomic (temp + rename)
 Diary call fails	host-only entry; never blocks compaction
 Graph corrupt	status shown; graph features off until rebuild; nothing else affected
 Not a git repo	layer-1 file checkpoints and `/undo step N` remain available; Bash side effects that cannot be enumerated are not fully restorable; status shows reduced guarantees
@@ -1125,8 +1158,8 @@ The tool reference: what each tool touches and what the host records for it.
 | `bash` | exec | yes | + checkpoint (pre/step-boundary), file_diff on tree change, approval |
 | `bash_output` `bash_kill` | exec | no | tool_call/result; background jobs are registered, reaped on completion |
 | `think` | reasoning | no | tool_call/result |
-| `git_status` `git_diff` `git_log` `git_show` `git_branch` `git_stage` | git | no, except `git_stage` and `git_commit` | tool_call/result |
-| `git_commit` | git | yes | + checkpoint |
+| `git_status` `git_diff` `git_log` `git_show` `git_branch` | git | no for status/diff/log/show; `git_branch` create/switch are mutating and refused in PLAN mode | tool_call/result |
+| `git_stage` `git_commit` | git | yes — plain `git` in the project root (the user's repo, not the shadow); `git_commit` takes a pre-mutation shadow snapshot | + checkpoint |
 | `propose_plan` | planning | plan file via approval | tool_call/result |
 | `webfetch` (optional CSS `selector`) `websearch` | web | no | tool_call/result (URL digest only) |
 | `ask_user` | interaction | no | tool_call/result |
@@ -1252,7 +1285,9 @@ Foundation: JSON-RPC framing, initialize, didOpen/didChange/didSave, queued
 publishDiagnostics (configured servers in `[lsp]`). Wiring on top of it: after each file mutation the host
 drains queued diagnostics plus a short bounded wait, writes a diagnostics
 journal record, and appends an error summary to the tool result. A verify
-step may close on "diagnostics with zero errors" (§2.1.4). Navigation tools (definition, references) feed
+step closes on any `diagnostics` record — severity is currently unchecked
+(§2.1.4); error diagnostics count the same as clean ones. See §13.
+Navigation tools (definition, references) feed
 the graph as semantic capabilities later.
 
 5.7 Skills
@@ -1403,10 +1438,10 @@ number; a `partial` one is missing something the design calls for.
 | D | git tools, patch, web tools, subagents | done | B |
 | E | Graph prototype (Cozo, generic + markdown) | done — engine replaced by I1 | — |
 | F1 | plan tool + validator (all rules except evidence/refs) + /plan /goal /constraints /mode; prompt update | done | B |
-| F1b | Event-sourced projection reducer + deterministic replay (`applied_event`, `plan_event_no`, orphan recovery) | done | F1, F2 |
+| F1b | Event-sourced projection reducer + deterministic replay (`applied_event`, orphan recovery) | partial — journal-first projection and startup replay (cursor + evidence re-attach + orphan rebuild) exist; no total-order counter and no corrupt-plan rebuild (quarantine only); multi-session cursor gap (§13) | F1, F2 |
 | F2 | Journal writer at dispatch; all kinds except `reflect`, `graph` | done (incl. `diagnostics`) | B |
 | F3 | Evidence rule in `finish`, `verify`, `complete`; nudges; note | done — `verify` accepts evidence from an unrelated step (#6) | F1 |
-| F4 | Diary: host block, triggers, writer call, fallback; memory_read; secrets screening | done — the journal itself is not screened (#11); the diary number post-check of §2.3.2 is a prompt instruction, not host code (#12) | F2 |
+| F4 | Diary: host block, triggers, writer call, fallback; memory_read; secrets screening | done — journal summary/text screened at append, diary prose post-checked in host code | F2 |
 | F5 | MEMORY.md + memory_propose approval; session-start loading | done | F4 |
 | F6 | Compaction anchor; summary=off default; resume per §3.4 (fork deleted); undo→reopen | done | F1–F5 |
 | F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, zstd) + layer-2 shadow repo driven by git CLI synchronously; path-scoped restore; `/undo step N` | done | F1 |
@@ -1467,8 +1502,9 @@ real tasks to learn which accessibility-tree format models read well.
 8.1 Core DoD
 A plan's goal cannot be changed by any model action (test: fuzz plan ops).
 finish without host evidence is impossible (test per step kind).
-After 3 forced compactions in a 150+ tool-call task, the anchor is byte-equal
-in goal/constraints to the original and the model's restated goal matches
+After 3 forced compactions in a 150+ tool-call task, the anchor matches
+the original goal/constraints under semantic (normalized) equality and the
+model's restated goal matches
 (§8.2).
 Diary entries never contain a test count or exit code absent from the host
 block (post-check test).
@@ -1760,6 +1796,23 @@ never changed automatically. Journal `plan_draft`; config `[issue]`.
 - **Model refusal under pressure.** Models with strong safety filters (e.g., Anthropic Fable)
   may refuse legitimate commands. Mitigations: fallback to Mythos model, configurable safety
   levels (AG), journaled refusals, and user‑controlled override.
+
+- **Multi-session replay cursor.** `applied_event` is a single `session:seq`
+  (the last writer's suffix). When several sessions commit to one plan, a
+  crash between session B's journal append and its plan store leaves B's op
+  where the startup replay never looks. Concurrent commits also interleave
+  without a shared order. Candidate fixes: a per-session cursor map
+  (`applied_events: {session: seq}`) with replay scanning each suffix, or a
+  dedicated plan journal. Until then, concurrent multi-session writes to one
+  plan are best-effort.
+
+- **Loose text acceptance and diagnostics severity.** A free-text acceptance
+  item settles on any unspent verify-step evidence, and any `diagnostics`
+  record — errors included — satisfies the verify gate. Formally valid but
+  meaningless receipts are possible (e.g. an unrelated error dump verifying
+  an unrelated text item). For benchmark scoring, `cmd:` items with re-run
+  receipts are the trustworthy subset. Tightening (zero-error diagnostics,
+  rejecting untyped items on create) is a code change, not a doc change.
 
 ### Findings vs notes
 
