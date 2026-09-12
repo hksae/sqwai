@@ -30,6 +30,9 @@ pub(super) struct BgJob {
     pub log: PathBuf,
     pub started: std::time::Instant,
     pub child: std::process::Child,
+    /// owning session (#197): one process can host several sessions
+    /// (switches, subagents) — each sees and kills only its own jobs
+    pub session: String,
     /// cached once the process exits: the child is reaped (no zombie on
     /// Unix) but the job stays listed until `bash_output` reports it once
     pub exit: Option<std::process::ExitStatus>,
@@ -356,6 +359,7 @@ fn run_background(ctx: &ToolCtx, command: &str) -> Outcome {
                 log: log.clone(),
                 started: std::time::Instant::now(),
                 child,
+                session: ctx.session_id.clone(),
                 exit: None,
                 read: 0,
             });
@@ -367,6 +371,25 @@ fn run_background(ctx: &ToolCtx, command: &str) -> Outcome {
         }
         Err(e) => Outcome::err(format!("background spawn failed: {e}")),
     }
+}
+
+/// Resolve one of THIS session's jobs (#197). A foreign id is reported
+/// as foreign rather than missing, so the model learns the boundary
+/// instead of retrying a kill/read loop against someone else's job.
+fn own_job<'a>(
+    jobs: &'a mut Vec<BgJob>,
+    session: &str,
+    id: u64,
+) -> Result<&'a mut BgJob, String> {
+    if jobs.iter().any(|j| j.id == id && j.session != session) {
+        return Err(format!("job {id} belongs to another session"));
+    }
+    jobs
+        .iter_mut()
+        .find(|j| j.id == id)
+        .ok_or_else(|| {
+            format!("no background job {id} — use bash_output without an id to list jobs")
+        })
 }
 
 /// `bash_output`: incremental output of a background job, or a status list
@@ -388,11 +411,10 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
         Err(_) => return Outcome::err("background job registry is unavailable"),
     };
     let Some(id) = id else {
-        if jobs.is_empty() {
-            return Outcome::ok("no background jobs");
-        }
+        // #197: only this session's jobs are listed — other sessions'
+        // jobs keep running, but they are invisible (and untouchable) here
         let mut lines = Vec::new();
-        for job in jobs.iter() {
+        for job in jobs.iter().filter(|j| j.session == ctx.session_id) {
             lines.push(format!(
                 "job {} — {} — `{}` (log: {})",
                 job.id,
@@ -400,6 +422,9 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
                 job.command,
                 job.log.display()
             ));
+        }
+        if lines.is_empty() {
+            return Outcome::ok("no background jobs");
         }
         return Outcome::ok(format!(
             "{} background job(s) (no id given — pass one for the output):\n{}",
@@ -419,11 +444,10 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
     if wait_secs > 0 {
         // bytes the model has already seen: waiting ends early on anything
         // beyond this, so a second waiter does not sleep through output
-        let seen = jobs
-            .iter()
-            .find(|j| j.id == id)
-            .map(|j| j.read)
-            .unwrap_or(0);
+        let seen = match own_job(&mut jobs, &ctx.session_id, id) {
+            Ok(job) => job.read,
+            Err(e) => return Outcome::err(e),
+        };
         // the outer guard must go BEFORE the loop: it re-locks below, and
         // std Mutex is not reentrant — holding both would self-deadlock
         drop(jobs);
@@ -435,8 +459,9 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
             let done = match bg_jobs().lock() {
                 Err(_) => return Outcome::err("background job registry is unavailable"),
                 Ok(mut guard) => {
-                    let Some(job) = guard.iter_mut().find(|j| j.id == id) else {
-                        return Outcome::err(format!("no background job {id} — it was killed or reaped while waiting"));
+                    let job = match own_job(&mut guard, &ctx.session_id, id) {
+                        Ok(job) => job,
+                        Err(e) => return Outcome::err(format!("{e} — it was killed or reaped while waiting")),
                     };
                     job.poll();
                     let len = std::fs::metadata(&job.log).map(|m| m.len()).unwrap_or(0);
@@ -455,10 +480,9 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
         };
     }
 
-    let Some(job) = jobs.iter_mut().find(|j| j.id == id) else {
-        return Outcome::err(format!(
-            "no background job {id} — use bash_output without an id to list jobs"
-        ));
+    let job = match own_job(&mut jobs, &ctx.session_id, id) {
+        Ok(job) => job,
+        Err(e) => return Outcome::err(e),
     };
     let status = job.status_line();
     let len = std::fs::metadata(&job.log).map(|m| m.len()).unwrap_or(0);
@@ -511,8 +535,9 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
 }
 
 /// `bash_kill`: end a background job's whole process tree and report the
-/// outcome. The job is removed from the registry either way.
-pub(super) fn bash_kill(args: &serde_json::Value) -> Outcome {
+/// outcome. Only the owning session's jobs (#197). The job is removed from
+/// the registry either way.
+pub(super) fn bash_kill(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
     poll_jobs();
     let Some(id) = args["id"].as_u64() else {
         return Outcome::err("bash_kill requires the job id (from bash background=true)");
@@ -521,9 +546,11 @@ pub(super) fn bash_kill(args: &serde_json::Value) -> Outcome {
         Ok(j) => j,
         Err(_) => return Outcome::err("background job registry is unavailable"),
     };
-    let Some(mut job) = jobs.iter().position(|j| j.id == id).map(|i| jobs.remove(i)) else {
-        return Outcome::err(format!("no background job {id} to kill"));
+    let pos = match own_job(&mut jobs, &ctx.session_id, id) {
+        Ok(_) => jobs.iter().position(|j| j.id == id).expect("resolved above"),
+        Err(e) => return Outcome::err(e),
     };
+    let mut job = jobs.remove(pos);
     job.poll();
     match job.exit {
         Some(status) => Outcome::ok(format!(
@@ -827,7 +854,7 @@ mod tests {
         );
 
         // kill; killed jobs are gone from the registry
-        let killed = bash_kill(&serde_json::json!({"id": id}));
+        let killed = bash_kill(&c, &serde_json::json!({"id": id}));
         assert!(killed.ok, "{}", killed.output);
         let gone = bash_output(&c, &serde_json::json!({"id": id}));
         assert!(!gone.ok, "{}", gone.output);
@@ -854,7 +881,7 @@ mod tests {
         assert!(polled.output.contains("finished"), "{}", polled.output);
         assert!(polled.output.contains("hi"), "{}", polled.output);
 
-        let kill_late = bash_kill(&serde_json::json!({"id": id}));
+        let kill_late = bash_kill(&c, &serde_json::json!({"id": id}));
         assert!(!kill_late.ok, "{}", kill_late.output);
         assert!(
             kill_late.output.contains("no background job"),
@@ -905,7 +932,7 @@ mod tests {
         assert!(again.ok, "{}", again.output);
         assert!(again.output.contains("--- output tail ---"), "{}", again.output);
 
-        let killed = bash_kill(&serde_json::json!({"id": id}));
+        let killed = bash_kill(&c, &serde_json::json!({"id": id}));
         assert!(killed.ok, "{}", killed.output);
     }
 
@@ -940,7 +967,7 @@ mod tests {
             t0.elapsed() < std::time::Duration::from_secs(5),
             "wait must respect its timeout"
         );
-        let killed = bash_kill(&serde_json::json!({"id": id}));
+        let killed = bash_kill(&c, &serde_json::json!({"id": id}));
         assert!(killed.ok, "{}", killed.output);
     }
 
@@ -957,6 +984,54 @@ mod tests {
         );
         let zero = sleep(&c, &serde_json::json!({"seconds": 0}));
         assert!(zero.ok, "{}", zero.output);
+    }
+
+    /// #197: one process can host several sessions — each sees, reads
+    /// and kills only its own background jobs.
+    #[test]
+    fn background_jobs_are_isolated_by_session() {
+        let mut a = ctx();
+        a.session_id = "session-a".into();
+        let mut b = ctx();
+        b.session_id = "session-b".into();
+        let started = bash(&mut a, "echo hello-a", None, true);
+        assert!(started.ok, "{}", started.output);
+        let id: u64 = started
+            .output
+            .split("job ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|num| num.parse().ok())
+            .expect("spawn result must carry a job id");
+
+        // B sees nothing of A's job
+        let list = bash_output(&b, &serde_json::json!({}));
+        assert!(list.ok, "{}", list.output);
+        assert!(
+            list.output.contains("no background jobs"),
+            "foreign jobs must stay invisible: {}",
+            list.output
+        );
+        let read = bash_output(&b, &serde_json::json!({"id": id}));
+        assert!(!read.ok, "{}", read.output);
+        assert!(
+            read.output.contains("another session"),
+            "read must name the boundary: {}",
+            read.output
+        );
+        let kill = bash_kill(&b, &serde_json::json!({"id": id}));
+        assert!(!kill.ok, "{}", kill.output);
+        assert!(
+            kill.output.contains("another session"),
+            "kill must name the boundary: {}",
+            kill.output
+        );
+
+        // ...while A works with it normally
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let polled = bash_output(&a, &serde_json::json!({"id": id}));
+        assert!(polled.ok, "{}", polled.output);
+        assert!(polled.output.contains("hello-a"), "{}", polled.output);
     }
 
     #[test]

@@ -545,7 +545,7 @@ tight loop; await its result before dependent changes or reporting success.",
         ToolDef {
             name: "bash_output",
             kind: Kind::ReadOnly,
-            description: "Read a background command's output — incremental: the first read returns the tail, later reads return only the bytes appended since the previous read (from_start=true re-reads the tail). wait_secs (0-60) blocks until the job exits, fresh output arrives, or the timeout lapses: one call instead of a poll loop. A finished job is reported once with its exit code, then cleaned up. Without id: a list of all background jobs with their commands and log paths.",
+            description: "Read a background command's output — incremental: the first read returns the tail, later reads return only the bytes appended since the previous read (from_start=true re-reads the tail). Only this session's jobs are visible here. wait_secs (0-60) blocks until the job exits, fresh output arrives, or the timeout lapses: one call instead of a poll loop. A finished job is reported once with its exit code, then cleaned up. Without id: a list of this session's background jobs with their commands and log paths.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -559,7 +559,7 @@ tight loop; await its result before dependent changes or reporting success.",
         ToolDef {
             name: "bash_kill",
             kind: Kind::ReadOnly,
-            description: "Stop a background command started with bash background=true, including everything it spawned. Reports the job's command and final state.",
+            description: "Stop one of this session's background commands started with bash background=true, including everything it spawned. Jobs from other sessions are invisible here. Reports the job's command and final state.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -1346,7 +1346,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             args["background"].as_bool().unwrap_or(false),
         ),
         "bash_output" => exec::bash_output(ctx, args),
-        "bash_kill" => exec::bash_kill(args),
+        "bash_kill" => exec::bash_kill(ctx, args),
         "sleep" => exec::sleep(ctx, args),
         "think" => Outcome::ok("ok — continue with the next step of your plan."),
         "plan" => plan_op(ctx, args),
