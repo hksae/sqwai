@@ -365,7 +365,7 @@ fn run_background(ctx: &ToolCtx, command: &str) -> Outcome {
             });
             Outcome::ok(format!(
                 "launched in background as job {id} (pid {pid}) — logs appended to {}. \
-                 Poll with bash_output(id), stop with bash_kill(id).",
+                 Wait with bash_output(id, wait_secs), stop with bash_kill(id).",
                 log.display()
             ))
         }
@@ -521,7 +521,8 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
         ("<no new output since the last read>".to_string(), false)
     };
     let log = job.log.display().to_string();
-    if !job.running() {
+    let still_running = job.running();
+    if !still_running {
         jobs.retain(|j| j.id != id);
     }
     let section = if first_read {
@@ -529,8 +530,16 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
     } else {
         "--- new output since the last read ---"
     };
+    // models keep polling out of habit even though the schema documents
+    // wait_secs — so a running job polled without it says so itself,
+    // every time, until the habit breaks. One line against kilobytes.
+    let nudge = if still_running && wait_secs == 0 {
+        "\n(do not poll in a loop: pass wait_secs (up to 60) to block until fresh output or exit)"
+    } else {
+        ""
+    };
     Outcome::ok(format!(
-        "job {id}: {status} (log: {log})\n{section}\n{body}",
+        "job {id}: {status} (log: {log})\n{section}\n{body}{nudge}",
     ))
 }
 
@@ -926,6 +935,11 @@ mod tests {
             "ping must have written in 2s: {}",
             second.output
         );
+        assert!(
+            second.output.contains("do not poll in a loop"),
+            "a running job polled without wait_secs must nudge: {}",
+            second.output
+        );
 
         // from_start re-reads the tail instead of the delta
         let again = bash_output(&c, &serde_json::json!({"id": id, "from_start": true}));
@@ -945,6 +959,11 @@ mod tests {
         let out = bash_output(&c, &serde_json::json!({"id": id, "wait_secs": 10}));
         assert!(out.ok, "{}", out.output);
         assert!(out.output.contains("hello-wait"), "{}", out.output);
+        assert!(
+            !out.output.contains("do not poll in a loop"),
+            "no nudge when wait_secs was used: {}",
+            out.output
+        );
         assert!(
             t0.elapsed() < std::time::Duration::from_secs(8),
             "wait must wake early, not sleep the full timeout"

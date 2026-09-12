@@ -545,13 +545,13 @@ tight loop; await its result before dependent changes or reporting success.",
         ToolDef {
             name: "bash_output",
             kind: Kind::ReadOnly,
-            description: "Read a background command's output — incremental: the first read returns the tail, later reads return only the bytes appended since the previous read (from_start=true re-reads the tail). Only this session's jobs are visible here. wait_secs (0-60) blocks until the job exits, fresh output arrives, or the timeout lapses: one call instead of a poll loop. A finished job is reported once with its exit code, then cleaned up. Without id: a list of this session's background jobs with their commands and log paths.",
+            description: "Wait for a background command and read its output. ALWAYS prefer wait_secs (0-60): it blocks until the job exits or fresh output arrives — one call instead of a poll loop. Polling without wait_secs wastes context and is flagged in the response. Output is incremental: the first read returns the tail, later reads return only bytes appended since the previous read (from_start=true re-reads the tail). Only this session's jobs are visible here. A finished job is reported once with its exit code, then cleaned up. Without id: a list of this session's background jobs with their commands and log paths.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "id": {"type": "integer", "description": "job id from bash background=true"},
                     "tail": {"type": "integer", "description": "bytes of output to return (default 10000, max 50000)"},
-                    "wait_secs": {"type": "integer", "description": "block up to N seconds (max 60) for exit or fresh output"},
+                    "wait_secs": {"type": "integer", "description": "PREFERRED: block up to N seconds (max 60) for exit or fresh output instead of polling"},
                     "from_start": {"type": "boolean", "description": "re-read the tail from scratch instead of the delta"}
                 }
             }),
