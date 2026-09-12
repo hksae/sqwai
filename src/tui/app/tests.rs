@@ -2381,6 +2381,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn edit_model_form_options_match_control_cycle() {
+        // the form must offer auto-then-every-control, like CycleEffortControl
+        use super::forms::{ALWAYS_OPTS, EFFORT_CONTROL_OPTS};
+        use crate::config::EffortControl;
+        assert_eq!(EFFORT_CONTROL_OPTS[0], "auto");
+        assert_eq!(&EFFORT_CONTROL_OPTS[1..], &EffortControl::STRS[..]);
+        assert_eq!(ALWAYS_OPTS, &["off", "on"]);
+    }
+
+    #[test]
+    fn edit_model_form_round_trips_effort_declarations() {
+        use crate::config::EffortControl;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let m = app.cfg.models.get_mut("m").unwrap();
+        m.effort_control = Some(EffortControl::Budget);
+        m.effort_always_on = true;
+        app.open_menu_replace(Menu::EditModel {
+            provider: "p".into(),
+            key: Some("m".into()),
+        });
+        assert_eq!(app.form_fields[4].trimmed(), "budget");
+        assert_eq!(app.form_fields[5].trimmed(), "on");
+        app.form_save();
+        let m = app.cfg.models.get("m").unwrap();
+        assert_eq!(m.effort_control, Some(EffortControl::Budget));
+        assert!(m.effort_always_on);
+    }
+
     fn wheel_test_app() -> (crate::tui::app::App, usize) {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
@@ -3460,7 +3489,7 @@ mod tests {
         assert_eq!(app.form_focus, 1);
 
         // Click inside the text area of field 1
-        let text_x = app.menu_rect.x + 1 + 16;
+        let text_x = app.menu_rect.x + 1 + app.form_label_w();
         app.form_mouse_down(12, text_x + 2);
         assert!(app.form_is_selecting());
 

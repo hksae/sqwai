@@ -154,6 +154,13 @@ impl EffortControl {
         }
     }
 
+    /// Option strings for pick-one UI, same order as `ALL`.
+    pub const STRS: [&'static str; 4] = ["none", "toggle", "named", "budget"];
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|c| c.as_str() == s)
+    }
+
     /// what a wire format supports when the model says nothing more specific
     pub fn default_for(format: WireFormat) -> Self {
         match format {
@@ -1145,6 +1152,14 @@ mod tests {
         // pick-one UI builds on this: a hardcoded copy once dropped xhigh
         let from_all: Vec<&str> = EffortLevel::ALL.iter().map(|l| l.as_str()).collect();
         assert_eq!(&EffortLevel::STRS[..], &from_all[..]);
+    }
+
+    #[test]
+    fn effort_control_strs_cover_every_variant_in_order() {
+        let from_all: Vec<&str> = EffortControl::ALL.iter().map(|c| c.as_str()).collect();
+        assert_eq!(&EffortControl::STRS[..], &from_all[..]);
+        assert_eq!(EffortControl::from_str("named"), Some(EffortControl::Named));
+        assert_eq!(EffortControl::from_str("auto"), None);
     }
 
     /// The declaration is an override, not a requirement: a model that says

@@ -11,7 +11,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tui_textarea::TextArea;
 
 use crate::agent::loop_task::AgentEvent;
-use crate::config::{Config, EffortLevel, ModelConfig, WireFormat};
+use crate::config::{Config, EffortControl, EffortLevel, ModelConfig, WireFormat};
 use crate::providers::{self, ChatRequest, Message as PMessage, Role, SharedProvider};
 use crate::session::Session;
 use crate::tui::markdown::{Highlighter, render, wrap_tagged};
@@ -22,6 +22,15 @@ const FORMAT_OPTS: &[&str] = &["openai", "anthropic", "responses"];
 /// here once dropped `xhigh`, showing `off` for xhigh models and clobbering
 /// the level on save.
 const EFFORT_OPTS: &[&str] = &EffortLevel::STRS;
+/// Per-model effort-control options: `auto` (derive from the wire format)
+///
+/// leads, then every declared control in cycle order (see
+/// `CycleEffortControl`). `ALWAYS_OPTS` is the on/off switch beside it.
+/// The `[1..]` tail must stay equal to `EffortControl::STRS` — pinned by
+/// `edit_model_form_options_match_control_cycle` — so the form can never
+/// lag behind a new control variant again.
+pub(super) const EFFORT_CONTROL_OPTS: &[&str] = &["auto", "none", "toggle", "named", "budget"];
+pub(super) const ALWAYS_OPTS: &[&str] = &["off", "on"];
 const MCP_TRANSPORT_OPTS: &[&str] = &["stdio", "http"];
 
 /// "K=V,K=V" <-> env map rendering for server forms.
@@ -149,11 +158,25 @@ impl App {
                             .iter()
                             .position(|s| *s == mc.effort.as_str())
                             .unwrap_or(0);
+                        let ctl_sel = match mc.effort_control {
+                            None => 0,
+                            Some(c) => EffortControl::ALL
+                                .iter()
+                                .position(|x| *x == c)
+                                .map(|i| i + 1)
+                                .unwrap_or(0),
+                        };
                         self.form_fields = vec![
                             FormField::text("key", key.clone().unwrap_or_default()),
                             FormField::text("request id", mc.id.clone()),
                             FormField::text("context", mc.context.to_string()),
                             FormField::choice("effort", EFFORT_OPTS, ef_sel),
+                            FormField::choice("effort control", EFFORT_CONTROL_OPTS, ctl_sel),
+                            FormField::choice(
+                                "effort always on",
+                                ALWAYS_OPTS,
+                                usize::from(mc.effort_always_on),
+                            ),
                         ];
                     }
                     _ => {
@@ -166,6 +189,8 @@ impl App {
                             FormField::text("request id", String::new()),
                             FormField::text("context", "128000".into()),
                             FormField::choice("effort", EFFORT_OPTS, ef_sel),
+                            FormField::choice("effort control", EFFORT_CONTROL_OPTS, 0),
+                            FormField::choice("effort always on", ALWAYS_OPTS, 0),
                         ];
                     }
                 }
@@ -524,11 +549,13 @@ impl App {
             }
             Some(Menu::EditModel { provider, key }) => {
                 let vals: Vec<String> = self.form_fields.iter().map(|f| f.trimmed()).collect();
-                let (new_key, id, ctx, th) = (
+                let (new_key, id, ctx, th, ctl, always) = (
                     vals.first().cloned().unwrap_or_default(),
                     vals.get(1).cloned().unwrap_or_default(),
                     vals.get(2).cloned().unwrap_or_default(),
                     vals.get(3).cloned().unwrap_or_default(),
+                    vals.get(4).cloned().unwrap_or_default(),
+                    vals.get(5).cloned().unwrap_or_default(),
                 );
                 if new_key.is_empty() || id.is_empty() {
                     self.status("key and request id are required", StatusKind::Err);
@@ -539,6 +566,8 @@ impl App {
                     return;
                 };
                 let effort = EffortLevel::from_str(&th).unwrap_or(EffortLevel::Off);
+                let effort_control = EffortControl::from_str(&ctl);
+                let effort_always_on = always == "on";
                 if key.as_deref() != Some(new_key.as_str())
                     && self.cfg.models.contains_key(&new_key)
                 {
@@ -557,8 +586,8 @@ impl App {
                     }
                 }
                 // Fields the form does not show must survive an edit: before
-                // this, editing a model silently reset its prices, and it
-                // would now also reset its declared effort support.
+                // this, editing a model silently reset its prices. Effort
+                // control and always-on come from the form now.
                 let previous = key
                     .as_ref()
                     .and_then(|k| self.cfg.models.get(k))
@@ -569,8 +598,8 @@ impl App {
                     id,
                     context,
                     effort,
-                    effort_control: previous.as_ref().and_then(|p| p.effort_control),
-                    effort_always_on: previous.as_ref().is_some_and(|p| p.effort_always_on),
+                    effort_control,
+                    effort_always_on,
                     price_in: previous.as_ref().and_then(|p| p.price_in),
                     price_out: previous.as_ref().and_then(|p| p.price_out),
                     fallback: previous.as_ref().and_then(|p| p.fallback.clone()),
