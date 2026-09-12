@@ -298,7 +298,9 @@ fn looks_like_rm_rf(lower: &str) -> bool {
 }
 
 fn powershell_recursive_delete(lower: &str) -> bool {
-    let aliases = ["remove-item", "ri", "rm", "del", "erase", "rd"];
+    // #173: `rmdir` is a standard Remove-Item alias — without it
+    // `rmdir -Recurse` slipped through as Safe
+    let aliases = ["remove-item", "ri", "rm", "rmdir", "del", "erase", "rd"];
     let tokens: Vec<&str> = lower
         .split(|c: char| c.is_whitespace() || c == ';' || c == '|')
         .map(|token| token.trim())
@@ -653,16 +655,25 @@ mod tests {
 
     #[test]
     fn powershell_aliases_require_recursive_flag() {
-        assert!(matches!(
-            classify_for(ShellKind::PowerShell, "rm -Recurse -Force C:\\tmp"),
-            Verdict::NeedsApproval(_)
-        ));
-        assert!(matches!(
-            classify_for(ShellKind::PowerShell, "rm -Recurse C:\\tmp"),
-            Verdict::NeedsApproval(_)
-        ));
+        for cmd in [
+            "rm -Recurse -Force C:\\tmp",
+            "rm -Recurse C:\\tmp",
+            "rmdir -Recurse -Force C:\\tmp",
+        ] {
+            assert!(
+                matches!(
+                    classify_for(ShellKind::PowerShell, cmd),
+                    Verdict::NeedsApproval(_)
+                ),
+                "missed dangerous: {cmd}"
+            );
+        }
         assert_eq!(
             classify_for(ShellKind::PowerShell, "rm notes.txt"),
+            Verdict::Safe
+        );
+        assert_eq!(
+            classify_for(ShellKind::PowerShell, "rmdir notes.txt"),
             Verdict::Safe
         );
     }
