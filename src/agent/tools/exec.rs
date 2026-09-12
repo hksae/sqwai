@@ -88,19 +88,32 @@ fn shell() -> (ShellKind, &'static str, &'static str) {
     (kind, program, flag)
 }
 
+/// BELOW_NORMAL_PRIORITY_CLASS (0x4000), named here because winapi is not
+/// a dependency and std exposes only the raw flag setter.
+#[cfg(windows)]
+const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+/// DETACHED_PROCESS (0x08000000), same story.
+#[cfg(windows)]
+const DETACHED_PROCESS: u32 = 0x0800_0000;
+
 /// build a Command runnable in `cwd`
 fn spawn_command(ctx: &ToolCtx, command: &str, cwd: Option<&str>) -> Command {
     let (kind, program, flag) = shell();
     let mut c = Command::new(program);
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
+        // Agent-spawned compiles/tests must never starve the TUI: below
+        // normal priority, set here so every spawn site inherits it.
+        // (Combined with DETACHED_PROCESS for background jobs below —
+        // one call per Command, since flags replace rather than OR.)
+        c.creation_flags(BELOW_NORMAL_PRIORITY_CLASS);
         if kind == ShellKind::Cmd {
             // cmd.exe /C does not follow CommandLineToArgvW quoting rules:
             // passing the command through .arg() re-quotes it, so embedded
             // quotes (paths with spaces, quoted arguments) arrive mangled
             // and cmd reports "not recognized as an internal or external
             // command". raw_arg hands the string to cmd.exe verbatim.
-            use std::os::windows::process::CommandExt;
             c.arg(flag).raw_arg(command);
         } else {
             c.arg(flag).arg(command);
@@ -332,7 +345,7 @@ fn run_background(ctx: &ToolCtx, command: &str) -> Outcome {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // DETACHED_PROCESS
+        cmd.creation_flags(DETACHED_PROCESS | BELOW_NORMAL_PRIORITY_CLASS);
     }
     cmd.stdin(Stdio::null());
     if let Ok(f) = std::fs::File::create(&log) {
