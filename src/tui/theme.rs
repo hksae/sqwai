@@ -149,6 +149,17 @@ impl Theme {
             .fg(Self::LIGHT_BLUE())
             .add_modifier(Modifier::BOLD)
     }
+    /// Tool call head rows: calm white, so calls scan as one list. State
+    /// lives in the marker shape (✓/✗/spinner) and the finish wave —
+    /// not in the row color.
+    pub fn tool_head() -> Style {
+        Style::new().fg(Color::White)
+    }
+    pub fn tool_head_bold() -> Style {
+        Style::new()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    }
     pub fn ok() -> Style {
         Style::new()
             .fg(Self::OK())

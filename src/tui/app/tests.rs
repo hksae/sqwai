@@ -2538,7 +2538,10 @@ mod tests {
         }
         let rows = app.render_segment(&app.segments, 0, 80, true);
         assert_eq!(rows[0].0.spans[0].content.as_ref(), "  ✓ ");
-        assert_eq!(rows[0].0.spans[0].style, crate::tui::theme::Theme::ok());
+        assert_eq!(
+            rows[0].0.spans[0].style,
+            crate::tui::theme::Theme::tool_head_bold()
+        );
         assert_eq!(rows[0].0.spans[1].content.as_ref(), "read");
     }
 

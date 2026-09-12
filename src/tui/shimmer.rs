@@ -241,18 +241,19 @@ fn shimmer_ansi(text: &str, tick: usize) -> Vec<Span<'static>> {
         .collect()
 }
 
-/// One-shot finish wave for a tool head row: a green (ok) or red (failed)
-/// band sweeps from the marker across the name over `progress` 0.0..1.0.
-/// The base is exactly the static row's styles (marker ok/err, name accent),
-/// so tool rows stay blue and only the wave carries green/red — no gray
-/// phase, and the frozen end frame equals the normal render (no pop).
+/// One-shot finish wave for a tool head row: a soft green (ok) or soft red
+/// (failed) band sweeps from the marker across the name over `progress`
+/// 0.0..1.0. Pastel by design — the row itself is calm white, so the wave
+/// whispers instead of shouting.
+/// The base is exactly the static row's styles (white marker + name),
+/// so the frozen end frame equals the normal render (no pop).
 /// Caller gates on [`has_truecolor`]; without RGB there is no wave, just
 /// the static row.
 pub fn flash_spans(marker: &str, name: &str, done_ok: bool, progress: f64) -> Vec<Span<'static>> {
     const BAND: f64 = 3.0;
-    // GitHub-dark status hues, readable on the user strip
-    const GREEN: (u8, u8, u8) = (63, 185, 80);
-    const RED: (u8, u8, u8) = (248, 81, 73);
+    // softened status hues: readable on dark ground, quiet next to white
+    const GREEN: (u8, u8, u8) = (140, 205, 155);
+    const RED: (u8, u8, u8) = (230, 160, 155);
     let target = if done_ok { GREEN } else { RED };
     let marker_w: f64 = marker
         .chars()
@@ -276,13 +277,9 @@ pub fn flash_spans(marker: &str, name: &str, done_ok: bool, progress: f64) -> Ve
         column += w;
         // settled: exactly the static row's styles, no pop at either end
         let settled = if part {
-            if done_ok {
-                Theme::ok()
-            } else {
-                Theme::err()
-            }
+            Theme::tool_head_bold()
         } else {
-            Theme::accent()
+            Theme::tool_head()
         };
         let style = if center <= frontier && center > frontier - BAND {
             Style::default()
@@ -436,29 +433,29 @@ mod tests {
     #[test]
     fn flash_rides_static_without_gray() {
         const GRAY: Option<Color> = Some(Color::Rgb(128, 128, 128));
-        // start: exactly the static row (marker ok-style, blue name)
+        // start: exactly the static row (white marker, white name)
         let at0 = flash_spans("  ✓ ", "read", true, 0.0);
         let text: String = at0.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "  ✓ read");
-        assert_eq!(at0[0].style, Theme::ok());
-        assert_eq!(at0[4].style, Theme::accent());
+        assert_eq!(at0[0].style, Theme::tool_head_bold());
+        assert_eq!(at0[4].style, Theme::tool_head());
         assert!(
             at0.iter().all(|s| s.style.fg != GRAY),
             "no gray phase at the start"
         );
-        // mid-sweep: the green band travels over the blue name
+        // mid-sweep: the soft green band travels over the white name
         let mid = flash_spans("  ✓ ", "read", true, 0.5);
         assert!(
             mid.iter()
-                .any(|s| s.style.fg == Some(Color::Rgb(63, 185, 80))),
-            "green band must ride mid-sweep"
+                .any(|s| s.style.fg == Some(Color::Rgb(140, 205, 155))),
+            "soft green band must ride mid-sweep"
         );
         let mid_err = flash_spans("  ✗ ", "bash", false, 0.5);
         assert!(
             mid_err
                 .iter()
-                .any(|s| s.style.fg == Some(Color::Rgb(248, 81, 73))),
-            "red band must ride mid-sweep"
+                .any(|s| s.style.fg == Some(Color::Rgb(230, 160, 155))),
+            "soft red band must ride mid-sweep"
         );
         assert!(
             mid.iter().all(|s| s.style.fg != GRAY)
@@ -467,9 +464,9 @@ mod tests {
         );
         // end: settled back to the static row, no pop
         let end = flash_spans("  ✓ ", "read", true, 1.0);
-        assert_eq!(end[0].style, Theme::ok());
-        assert_eq!(end[4].style, Theme::accent());
+        assert_eq!(end[0].style, Theme::tool_head_bold());
+        assert_eq!(end[4].style, Theme::tool_head());
         let end_err = flash_spans("  ✗ ", "bash", false, 1.0);
-        assert_eq!(end_err[0].style, Theme::err());
+        assert_eq!(end_err[0].style, Theme::tool_head_bold());
     }
 }

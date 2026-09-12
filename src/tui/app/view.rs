@@ -1624,19 +1624,21 @@ impl App {
                 flash,
             } => {
                 // Every tool uses the same three-part row: state marker, tool
-                // name, and a quiet one-line argument summary. Keeping the
-                // geometry identical makes running, successful, and failed
-                // calls scan as one list.
+                // name, and a quiet one-line argument summary. Calm white
+                // throughout — state reads from the marker shape and the
+                // finish wave, not from row colors. Keeping the geometry
+                // identical makes running, successful, and failed calls
+                // scan as one list.
                 let marker = match ok {
                     None => (
                         format!(
                             "  {} ",
                             WORKING_SPINNER[self.spinner_tick % WORKING_SPINNER.len()]
                         ),
-                        Theme::accent(),
+                        Theme::tool_head(),
                     ),
-                    Some(true) => ("  ✓ ".to_string(), Theme::ok()),
-                    Some(false) => ("  ✗ ".to_string(), Theme::err()),
+                    Some(true) => ("  ✓ ".to_string(), Theme::tool_head_bold()),
+                    Some(false) => ("  ✗ ".to_string(), Theme::tool_head_bold()),
                 };
                 let marker_width = 4usize;
                 let name_width = name
@@ -1689,7 +1691,7 @@ impl App {
                     }
                     None => vec![
                         Span::styled(marker.0, marker.1),
-                        Span::styled(shown_name, Theme::accent()),
+                        Span::styled(shown_name, Theme::tool_head()),
                         Span::styled(summary, Theme::dim()),
                     ],
                 };
