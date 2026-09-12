@@ -1199,6 +1199,7 @@ impl App {
                 output,
                 diff,
                 expanded,
+                flash,
                 ..
             } => {
                 let mut k = name.len()
@@ -1212,6 +1213,19 @@ impl App {
                     Some(true) => k.wrapping_add(1),
                     Some(false) => k.wrapping_add(2),
                 };
+                // a live finish wave repaints every animation frame: without
+                // its own bucket the first wave frame would pin the cache —
+                // freezing the sweep, then sticking past expiry. Keyed off
+                // spinner_tick so it moves exactly with the animation ticks;
+                // expiry drops the term (and the sweep retires flash), so the
+                // key settles back to the static one.
+                if let Some(t0) = flash {
+                    if t0.elapsed().as_millis() < crate::tui::shimmer::FLASH_MS as u128
+                        && crate::tui::shimmer::has_truecolor()
+                    {
+                        k = k.wrapping_add(1_000_000 + self.spinner_tick.wrapping_mul(13));
+                    }
+                }
                 k
             }
             Segment::Status {

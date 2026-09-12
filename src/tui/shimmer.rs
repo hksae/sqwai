@@ -169,14 +169,15 @@ fn shimmer_ansi(text: &str, tick: usize) -> Vec<Span<'static>> {
         .collect()
 }
 
-/// One-shot finish wave for a tool head row: `progress` 0.0..1.0 sweeps
-/// from the marker across the name, gray → green (ok) or red (failed),
-/// settling into the static ✓/✗ styles the row keeps afterwards (so the
-/// frozen end frame equals the normal render — no pop). Caller gates on
-/// [`has_truecolor`]; without RGB there is no wave, just the static row.
+/// One-shot finish wave for a tool head row: a green (ok) or red (failed)
+/// band sweeps from the marker across the name over `progress` 0.0..1.0.
+/// The base is exactly the static row's styles (marker ok/err, name accent),
+/// so tool rows stay blue and only the wave carries green/red — no gray
+/// phase, and the frozen end frame equals the normal render (no pop).
+/// Caller gates on [`has_truecolor`]; without RGB there is no wave, just
+/// the static row.
 pub fn flash_spans(marker: &str, name: &str, done_ok: bool, progress: f64) -> Vec<Span<'static>> {
     const BAND: f64 = 3.0;
-    const GRAY: (u8, u8, u8) = (128, 128, 128);
     // GitHub-dark status hues, readable on the user strip
     const GREEN: (u8, u8, u8) = (63, 185, 80);
     const RED: (u8, u8, u8) = (248, 81, 73);
@@ -201,25 +202,22 @@ pub fn flash_spans(marker: &str, name: &str, done_ok: bool, progress: f64) -> Ve
         let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as f64;
         let center = column + w / 2.0;
         column += w;
-        let style = if center < frontier - BAND {
-            // settled: exactly the static row's styles, no pop at the end
-            if part {
-                if done_ok {
-                    Theme::ok()
-                } else {
-                    Theme::err()
-                }
+        // settled: exactly the static row's styles, no pop at either end
+        let settled = if part {
+            if done_ok {
+                Theme::ok()
             } else {
-                Theme::accent()
+                Theme::err()
             }
-        } else if center <= frontier {
-            let k = 1.0 - (frontier - center) / BAND;
-            let (r, g, b) = blend(GRAY, target, k.clamp(0.0, 1.0));
+        } else {
+            Theme::accent()
+        };
+        let style = if center <= frontier && center > frontier - BAND {
             Style::default()
-                .fg(Color::Rgb(r, g, b))
+                .fg(Color::Rgb(target.0, target.1, target.2))
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Rgb(GRAY.0, GRAY.1, GRAY.2))
+            settled
         };
         out.push(Span::styled(ch.to_string(), style));
     }
@@ -298,30 +296,42 @@ mod tests {
     }
 
     #[test]
-    fn flash_starts_gray_settles_to_static() {
-        let at0: String = flash_spans("  ✓ ", "read", true, 0.0)
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert_eq!(at0, "  ✓ read");
+    fn flash_rides_static_without_gray() {
+        const GRAY: Option<Color> = Some(Color::Rgb(128, 128, 128));
+        // start: exactly the static row (marker ok-style, blue name)
+        let at0 = flash_spans("  ✓ ", "read", true, 0.0);
+        let text: String = at0.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "  ✓ read");
+        assert_eq!(at0[0].style, Theme::ok());
+        assert_eq!(at0[4].style, Theme::accent());
         assert!(
-            flash_spans("  ✓ ", "read", true, 0.0)
-                .iter()
-                .all(|s| s.style.fg == Some(Color::Rgb(128, 128, 128))),
-            "nothing settled before the frontier"
+            at0.iter().all(|s| s.style.fg != GRAY),
+            "no gray phase at the start"
         );
-        // settled end equals the static row: marker ok-style, name accent
+        // mid-sweep: the green band travels over the blue name
+        let mid = flash_spans("  ✓ ", "read", true, 0.5);
+        assert!(
+            mid.iter()
+                .any(|s| s.style.fg == Some(Color::Rgb(63, 185, 80))),
+            "green band must ride mid-sweep"
+        );
+        let mid_err = flash_spans("  ✗ ", "bash", false, 0.5);
+        assert!(
+            mid_err
+                .iter()
+                .any(|s| s.style.fg == Some(Color::Rgb(248, 81, 73))),
+            "red band must ride mid-sweep"
+        );
+        assert!(
+            mid.iter().all(|s| s.style.fg != GRAY)
+                && mid_err.iter().all(|s| s.style.fg != GRAY),
+            "no gray phase mid-sweep either"
+        );
+        // end: settled back to the static row, no pop
         let end = flash_spans("  ✓ ", "read", true, 1.0);
         assert_eq!(end[0].style, Theme::ok());
         assert_eq!(end[4].style, Theme::accent());
         let end_err = flash_spans("  ✗ ", "bash", false, 1.0);
         assert_eq!(end_err[0].style, Theme::err());
-        // mid-sweep carries blended color between gray and green
-        let mid = flash_spans("  ✓ ", "read", true, 0.5);
-        assert!(
-            mid.iter().any(|s| matches!(s.style.fg, Some(Color::Rgb(_, _, _)))
-                && s.style.fg != Some(Color::Rgb(128, 128, 128))),
-            "band must tint mid-sweep"
-        );
     }
 }

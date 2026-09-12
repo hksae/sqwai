@@ -1167,6 +1167,45 @@ impl App {
                 || self.segments.iter().any(|s| {
                     matches!(s, Segment::Tool { flash: Some(t0), .. } if t0.elapsed().as_millis() < crate::tui::shimmer::FLASH_MS as u128)
                 });
+            // Retire expired finish waves: the row renders its static style
+            // again, and the rev bump forces the one final repaint even when
+            // the wave was the only thing animating (turn ended exactly on
+            // the tool finish) — otherwise the last wave frame would stick.
+            for i in 0..self.segments.len() {
+                let expired = matches!(self.segments.get(i), Some(Segment::Tool { flash: Some(t0), .. }) if t0.elapsed().as_millis() >= crate::tui::shimmer::FLASH_MS as u128);
+                if expired {
+                    if let Some(Segment::Tool { flash, .. }) = self.segments.get_mut(i) {
+                        *flash = None;
+                    }
+                    self.touch_segment(i);
+                    self.dirty = true;
+                }
+            }
+            let sub_ids: Vec<u64> = self.subagent_chats.keys().copied().collect();
+            for id in sub_ids {
+                let mut done = Vec::new();
+                if let Some(chat) = self.subagent_chats.get(&id) {
+                    for (pos, seg) in chat.iter().enumerate() {
+                        if matches!(seg, Segment::Tool { flash: Some(t0), .. } if t0.elapsed().as_millis() >= crate::tui::shimmer::FLASH_MS as u128)
+                        {
+                            done.push(pos);
+                        }
+                    }
+                }
+                if !done.is_empty() {
+                    if let Some(chat) = self.subagent_chats.get_mut(&id) {
+                        for pos in &done {
+                            if let Some(Segment::Tool { flash, .. }) = chat.get_mut(*pos) {
+                                *flash = None;
+                            }
+                        }
+                    }
+                    for pos in done {
+                        self.sub_touch(id, pos);
+                    }
+                    self.dirty = true;
+                }
+            }
             if animating {
                 // fixed 20 FPS animation rate from the wall clock, not per
                 // loop iteration: bursts would otherwise fast-forward it

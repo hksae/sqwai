@@ -2323,6 +2323,28 @@ mod tests {
         assert_eq!(rows[0].0.spans[1].content.as_ref(), "read");
     }
 
+    #[test]
+    fn expired_flash_key_matches_static_key() {
+        // the live wave must not pin the cache: expiry returns the key to
+        // the static one, so the row repaints settled (no stuck wave frame)
+        let app = test_app("http://127.0.0.1:9/v1".into());
+        let mk = |flash| Segment::Tool {
+            name: "read".into(),
+            args: "a.rs".into(),
+            ok: Some(true),
+            output: String::new(),
+            diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
+            expanded: false,
+            flash,
+        };
+        let expired = mk(Some(
+            std::time::Instant::now() - std::time::Duration::from_secs(5),
+        ));
+        assert_eq!(app.seg_key(&mk(None)), app.seg_key(&expired));
+    }
+
     fn wheel_test_app() -> (crate::tui::app::App, usize) {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
