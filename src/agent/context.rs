@@ -653,6 +653,9 @@ mod tests {
             &crate::plan::Limits::default(),
         )
         .unwrap();
+        // prod plans always carry their session (plan_op sets it on
+        // create); without membership #171 strictness resolves nothing
+        plan.sessions = vec!["anchor-session".to_string()];
         crate::plan::store(&root, &plan).unwrap();
         crate::plan::apply(
             &mut plan,

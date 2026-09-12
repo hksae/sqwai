@@ -1559,10 +1559,9 @@ impl App {
                                             serde_json::json!({ "plan_id": id }),
                                         );
                                     }
-                                    // Defect B: the fallback below can surface
-                                    // another session's stale active plan — say
-                                    // so explicitly instead of silently
-                                    // switching the session onto it.
+                                    // #171: resolution is session-strict — another
+                                    // session's active plan never surfaces here,
+                                    // so the session is simply plan-less now.
                                     let sid = self.session.id.to_string();
                                     let note = match crate::plan::open_active_for_session(
                                         &root,
@@ -1574,15 +1573,9 @@ impl App {
                                         Some(next) => {
                                             let goal: String =
                                                 next.goal.text.chars().take(60).collect();
-                                            if next.sessions.iter().any(|s| s == &sid) {
-                                                format!(
-                                                    "plan deleted; now following active plan '{goal}' (see /plan)"
-                                                )
-                                            } else {
-                                                format!(
-                                                    "plan deleted; now following active plan '{goal}' — it belongs to another session (see /plan)"
-                                                )
-                                            }
+                                            format!(
+                                                "plan deleted; now following active plan '{goal}' (see /plan)"
+                                            )
                                         }
                                         None => "plan deleted; no active plan".to_string(),
                                     };

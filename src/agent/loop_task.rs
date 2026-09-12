@@ -500,6 +500,7 @@ async fn run_subagent(
     }
     let task = tasks.into_iter().next().unwrap();
     let id = next_subagent_id();
+    let child_session = next_subagent_session();
     // NOTE (§2.2.4): children always complete inside this tool call — the
     // event loop below is awaited before the outcome returns. There is no
     // fire-and-forget spawn, so `plan finish` can never race still-running
@@ -525,6 +526,17 @@ async fn run_subagent(
             task: task.clone(),
         })
         .await;
+    // #171: the child works its parent's step, so it joins the parent plan
+    // explicitly. Without membership its evidence cannot attach under
+    // session-strict resolution — and silent fallback is gone on purpose.
+    if let Some(step) = parent_step.as_ref()
+        && let Ok(mut plan) = plan::open(root, &step.plan_id)
+        && !plan.sessions.iter().any(|s| s == &child_session)
+    {
+        plan.sessions.push(child_session.clone());
+        plan.revision += 1;
+        let _ = plan::store(root, &plan);
+    }
     let child = spawn_agent(AgentInput {
         provider: provider.clone(),
         model_id: model_id.to_string(),
@@ -537,7 +549,7 @@ async fn run_subagent(
         root: root.to_path_buf(),
         // #190: NOT `sub-{id}` — the numeric counter resets on restart
         // and would append to a previous run's journal file
-        session_id: next_subagent_session(),
+        session_id: child_session.clone(),
         blocked_patterns: blocked_patterns.to_vec(),
         plan_mode,
         context_limit,
@@ -3833,6 +3845,87 @@ mod effort_tests {
             "the scripted follow-up turn must stay unconsumed"
         );
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    /// #171: a child spawned for its parent's step joins the parent plan
+    /// explicitly, so its evidence attaches under session-strict
+    /// resolution instead of relying on the removed silent fallback.
+    #[tokio::test]
+    async fn subagent_joins_its_parent_plan() {
+        let root = std::env::temp_dir().join(format!("sqwai-subjoin-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&root);
+        let mut plan = plan::create(
+            "parent goal".into(),
+            Vec::new(),
+            Vec::new(),
+            vec![plan::NewStep {
+                title: "step".into(),
+                kind: None,
+                refs: Vec::new(),
+            }],
+            20_000,
+            &plan::Limits::default(),
+        )
+        .unwrap();
+        plan.sessions = vec!["parent-sess".into()];
+        plan::store(&root, &plan).unwrap();
+        plan::apply(
+            &mut plan,
+            plan::Op::Start {
+                id: "1".into(),
+                confirm: None,
+            },
+            &plan::Limits::default(),
+            None,
+        )
+        .unwrap();
+        plan::store(&root, &plan).unwrap();
+        let plan_id = plan.id.clone();
+
+        let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(vec![vec![Ok(
+                crate::providers::StreamEvent::Text("child done".into()),
+            )]]),
+        });
+        let (parent_tx, _parent_rx) = mpsc::channel(64);
+        let call = crate::providers::ToolCallReq::new(
+            "c1",
+            "subagent",
+            serde_json::json!({"task": "do it"}),
+        );
+        let outcome = run_subagent(
+            &call,
+            &parent_tx,
+            &provider,
+            "m",
+            &root,
+            &[],
+            false,
+            10_000,
+            None,
+            crate::config::EffortSupport::default(),
+            None,
+            Vec::new(),
+            crate::config::McpConfig::default(),
+            crate::config::LspConfig::default(),
+            false,
+            crate::config::ShadowStore::Off,
+        )
+        .await;
+        assert!(outcome.ok, "{}", outcome.output);
+
+        let reloaded = plan::open(&root, &plan_id).unwrap();
+        let members: Vec<&str> = reloaded
+            .sessions
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert!(members.contains(&"parent-sess"), "{members:?}");
+        assert!(
+            members.iter().any(|s| s.starts_with("sub-") && *s != "parent-sess"),
+            "child joined explicitly: {members:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

@@ -3608,7 +3608,7 @@ mod tests {
         let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
         assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
 
-        let mut journal = crate::agent::journal::Journal::open(&dir, "diagnostics").unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
         journal.set_attribution(Some("1".into()), Some(plan_id), "main");
         journal
             .append("plan", json!({"op": "start", "id": "1"}))
@@ -3762,8 +3762,10 @@ mod tests {
         );
 
         let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        // the writer session must be the agent's own (#171): a foreign
+        // journal file no longer attaches evidence to this plan
         let mut evidence_journal =
-            crate::agent::journal::Journal::open(&dir, "test-evidence").unwrap();
+            crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
         evidence_journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
         assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
         evidence_journal
@@ -3888,7 +3890,7 @@ mod tests {
         assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
 
         let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-        let mut journal = crate::agent::journal::Journal::open(&dir, "assumption").unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
         journal.set_attribution(Some("1".into()), Some(plan_id), "main");
         let seq = journal
             .append(
@@ -3978,7 +3980,7 @@ mod tests {
         );
         assert!(created.ok, "{}", created.output);
         let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-        let mut journal = crate::agent::journal::Journal::open(&dir, "evidence-rules").unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
 
         assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
         journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
@@ -4026,7 +4028,7 @@ mod tests {
         );
         assert!(created.ok, "{}", created.output);
         let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-        let mut journal = crate::agent::journal::Journal::open(&dir, "evidence-rules").unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
 
         assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
         journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
@@ -4138,7 +4140,7 @@ mod tests {
         );
         assert!(created.ok, "{}", created.output);
         let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-        let mut journal = crate::agent::journal::Journal::open(&dir, "verify-rules").unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
         journal.set_attribution(Some("1".into()), Some(plan_id), "main");
         journal
             .append_evidence("tool_result", json!({"tool": "bash", "ok": true}))
@@ -4180,7 +4182,7 @@ mod tests {
         );
         assert!(created.ok, "{}", created.output);
         let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-        let mut journal = crate::agent::journal::Journal::open(&dir, "verify-rules").unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
         journal.set_attribution(Some("1".into()), Some(plan_id), "main");
         journal
             .append_evidence("tool_result", json!({"tool": "bash", "ok": true}))
@@ -4235,7 +4237,7 @@ mod tests {
         );
         assert!(created.ok, "{}", created.output);
         let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-        let mut journal = crate::agent::journal::Journal::open(&dir, "verify-rules").unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
         journal.set_attribution(Some("1".into()), Some(plan_id), "main");
         journal
             .append_evidence("tool_result", json!({"tool": "bash", "ok": false}))
@@ -4436,7 +4438,7 @@ mod tests {
         );
         assert!(created.ok, "{}", created.output);
         let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-        let mut journal = crate::agent::journal::Journal::open(&dir, "complete-rules").unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
         assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
         journal.set_attribution(Some("1".into()), Some(plan_id), "main");
         journal.append("plan", json!({"op": "start"})).unwrap();

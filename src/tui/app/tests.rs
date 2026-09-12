@@ -5630,10 +5630,9 @@ mod tests {
     }
 
     #[test]
-    fn plan_delete_names_foreign_fallback_plan() {
-        // Defect B: after delete, the fallback can surface another session's
-        // stale active plan. The status must name it explicitly instead of
-        // silently switching the session onto it.
+    fn plan_delete_then_session_has_no_plan() {
+        // #171: after delete, another session's active plan must NOT
+        // surface as this session's — the session simply has no plan.
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         let temp_dir = std::env::temp_dir().join(format!(
             "sqwai-test-plan-delete-foreign-{}",
@@ -5663,10 +5662,13 @@ mod tests {
         own.created = "2026-01-01T00:00:00+00:00".to_string();
         own.sessions = vec![sid.clone()];
         plan::store(&temp_dir, &own).unwrap();
-        let mut foreign = mk_plan("foreign stale work");
+        let mut foreign = mk_plan("foreign active work");
         foreign.created = "2026-09-09T00:00:00+00:00".to_string();
         foreign.sessions = vec!["someone-else".into()];
         plan::store(&temp_dir, &foreign).unwrap();
+        // `foreign` stays stored but unreferenced below: its presence is
+        // the point — it must not surface as this session's plan.
+        let _ = &foreign;
         app.session.plan_id = Some(own.id.clone());
 
         app.plan_command("/plan delete");
@@ -5675,12 +5677,13 @@ mod tests {
         assert_eq!(app.session.plan_id, None);
         let text = toast_text(&app);
         assert!(
-            text.contains("foreign stale work") && text.contains("another session"),
-            "delete must name the foreign fallback plan: {text}"
+            text.contains("no active plan"),
+            "delete leaves the session plan-less: {text}"
         );
-        // The fallback itself still resolves (global-plan semantics), just
-        // no longer silently.
-        assert_eq!(app.session_plan().map(|p| p.id), Some(foreign.id.clone()));
+        assert!(
+            app.session_plan().is_none(),
+            "no silent fallback onto the foreign plan"
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

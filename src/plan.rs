@@ -1074,7 +1074,13 @@ pub fn open_active(root: &Path) -> Result<Option<Plan>> {
     open_active_for_session(root, None)
 }
 
-/// Open the active plan for a specific session, or the most recent active plan.
+/// Open the active plan for a specific session: the session's own active
+/// plan, or — when the session has none — the most recent active plan.
+///
+/// The fallback preserves single-plan behavior for views (a fresh session
+/// sees the one active plan). Anything that mutates shared state or
+/// permanently links identity must use [`open_own_active_plan`] instead —
+/// silently adopting a foreign plan pollutes other sessions (#171).
 pub fn open_active_for_session(root: &Path, session_id: Option<&str>) -> Result<Option<Plan>> {
     let dir = plans_dir(root);
     let entries = match std::fs::read_dir(&dir) {
@@ -1105,6 +1111,11 @@ pub fn open_active_for_session(root: &Path, session_id: Option<&str>) -> Result<
             .find(|p| p.sessions.iter().any(|s| s == sid))
     {
         return Ok(Some(plan.clone()));
+    } else if session_id.is_some() {
+        // #171: a session without its own active plan gets None — falling
+        // through to another session's plan here silently adopts foreign
+        // work into this session's identity and attribution.
+        return Ok(None);
     }
     // Deterministic fallback: pick the most recent active plan by created timestamp
     active_plans.sort_by(|a, b| b.created.cmp(&a.created));
@@ -3207,6 +3218,9 @@ mod tests {
     fn invalidate_on_diff_commits_only_on_change() {
         let dir = std::env::temp_dir().join(format!("sqwai-plan-inv-{}", new_id()));
         let mut plan = new_plan();
+        // #171: resolution is session-strict — the plan must carry the
+        // session under test, as plan_op sets on create in prod
+        plan.sessions = vec!["sess".to_string()];
         close_steps(&mut plan);
         plan.steps[0].refs = vec![StepRef::from("x.rs")];
         verify_acceptance(&mut plan, 0, vec![], false, Some(receipt(&["x.rs"]))).unwrap();
@@ -3449,6 +3463,32 @@ mod tests {
         // Querying without session deterministically picks the newest (child)
         let resolved_default = open_active(&dir).unwrap().unwrap();
         assert_eq!(resolved_default.id, child_id);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #171: a session with no own active plan resolves to None — never to
+    /// another session's plan. Silent cross-session adoption is gone.
+    #[test]
+    fn open_active_for_session_never_returns_a_foreign_plan() {
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-strict-{}", new_id()));
+        let mut plan = new_plan();
+        plan.sessions = vec!["owner".into()];
+        store(&dir, &plan).unwrap();
+
+        assert!(
+            open_active_for_session(&dir, Some("stranger"))
+                .unwrap()
+                .is_none(),
+            "a plan-less session must not adopt the foreign plan"
+        );
+        // ...while the owner still resolves, and the global view is intact
+        assert!(
+            open_active_for_session(&dir, Some("owner"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(open_active(&dir).unwrap().is_some());
 
         std::fs::remove_dir_all(&dir).ok();
     }

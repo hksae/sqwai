@@ -2503,9 +2503,8 @@ impl App {
     }
 
     /// The plan this session works on: its linked plan while the file is
-    /// still readable on disk, otherwise the session-scoped active plan
-    /// (which falls back to the most recent one, preserving single-plan
-    /// behavior when nothing is linked). Every TUI read or mutation of
+    /// still readable on disk, otherwise the session's own active plan —
+    /// never another session's (#171). Every TUI read or mutation of
     /// "the plan" goes through here so two sessions never operate on each
     /// other's plans.
     fn session_plan(&self) -> Option<plan::Plan> {
