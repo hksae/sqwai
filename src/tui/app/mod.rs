@@ -192,7 +192,7 @@ impl Mode {
     }
 }
 
-const WORKING_SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    const WORKING_SPINNER: [char; 6] = ['◜', '◠', '◝', '◞', '◡', '◟'];
 
 /// Connection-check state for one provider, rendered on its menu rows.
 #[derive(Clone)]
