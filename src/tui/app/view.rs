@@ -2829,10 +2829,24 @@ impl App {
                 let entry =
                     crate::tui::spinners::ALL.get(abs % crate::tui::spinners::ALL.len());
                 let mut spans = match entry {
-                    Some(e) if e.name == "shimmer-live" => {
-                        let mut v = crate::tui::shimmer::shimmer_spans("Working", tick);
-                        v.push(Span::styled("  shimmer-live".to_string(), Theme::dim()));
+                    Some(e) if e.name.starts_with("shimmer-") => {
+                        let mut v =
+                            crate::tui::shimmer::shimmer_named("Working", tick, e.name);
+                        v.push(Span::styled(format!("  {}", e.name), Theme::dim()));
                         v
+                    }
+                    Some(e) if e.name == "flux-wave-wide" => {
+                        // 8-cell braille wave, one frame of phase per cell —
+                        // the FluxSpinner look without the widget dependency
+                        const WAVE: [char; 8] =
+                            ['⣾', '⣷', '⣯', '⣟', '⡿', '⢿', '⣽', '⣻'];
+                        let wave: String = (0..WAVE.len())
+                            .map(|c| WAVE[(tick + c) % WAVE.len()])
+                            .collect();
+                        vec![
+                            Span::styled(format!("{wave}  "), Theme::accent()),
+                            Span::styled(e.name.to_string(), Theme::base()),
+                        ]
                     }
                     Some(e) => vec![
                         Span::styled(

@@ -7,8 +7,14 @@
 //!
 //! Single-cell entries (no `-wide` suffix) fit one terminal column and could
 //! replace the tool spinner anywhere. The `cli-*` entries port frame data
-//! from sindresorhus/cli-spinners (MIT); emoji entries from that collection
-//! are deliberately left out.
+//! from sindresorhus/cli-spinners (MIT); the `flux-*` entries port the
+//! FluxFrames presets from ratatui/ratatui-spinner (MIT), skipping the ones
+//! that duplicate entries above (classic/orbit/moon/square/bar). Emoji
+//! entries from those collections are deliberately left out.
+//!
+//! Rows named `shimmer-*` and `flux-wave-wide` ignore `frames` (a placeholder
+//! is still required): the gallery paints them live — tinted shimmer waves
+//! via [`crate::tui::shimmer::shimmer_named`], the phase wave procedurally.
 
 /// One showcase animation: a name and its looping frames.
 pub struct Spin {
@@ -59,6 +65,10 @@ pub const ALL: &[Spin] = &[
     spin!("star-shoot", ["*     ", " *    ", "  *   ", "   *  ", "    * ", "     *"]),
     spin!("matrix", ["ﾊﾐﾋｰｳｼ", "ﾐﾋｰｳｼﾅ", "ﾋｰｳｼﾅﾓ", "ｰｳｼﾅﾓﾆ", "ｳｼﾅﾓﾆｻ", "ｼﾅﾓﾆｻﾜ"]),
     spin!("shimmer-live", ["◌"]),
+    spin!("shimmer-ocean", ["◌"]),
+    spin!("shimmer-ember", ["◌"]),
+    spin!("shimmer-mint", ["◌"]),
+    spin!("shimmer-pulse", ["◌"]),
     spin!("clock-wide", ["🕐", "🕑", "🕒", "🕓", "🕔", "🕕", "🕖", "🕗", "🕘", "🕙", "🕚", "🕛"]),
     spin!("moon-wide", ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"]),
     spin!("earth-wide", ["🌍", "🌎", "🌏"]),
@@ -107,6 +117,26 @@ pub const ALL: &[Spin] = &[
     spin!("cli-pong-wide", ["▐⠂       ▌", "▐⠈       ▌", "▐ ⠂      ▌", "▐ ⠠      ▌", "▐  ⡀     ▌", "▐  ⠠     ▌", "▐   ⠂    ▌", "▐   ⠈    ▌", "▐    ⠂   ▌", "▐    ⠠   ▌", "▐     ⡀  ▌", "▐     ⠠  ▌", "▐      ⠂ ▌", "▐      ⠈ ▌", "▐       ⠂▌", "▐       ⠠▌", "▐       ⡀▌", "▐      ⠠ ▌", "▐      ⠂ ▌", "▐     ⠈  ▌", "▐     ⠂  ▌", "▐    ⠠   ▌", "▐    ⡀   ▌", "▐   ⠠    ▌", "▐   ⠂    ▌", "▐  ⠈     ▌", "▐  ⠂     ▌", "▐ ⠠      ▌", "▐ ⡀      ▌", "▐⠠       ▌"]),
     spin!("cli-shark-wide", ["▐|\\____________▌", "▐_|\\___________▌", "▐__|\\__________▌", "▐___|\\_________▌", "▐____|\\________▌", "▐_____|\\_______▌", "▐______|\\______▌", "▐_______|\\_____▌", "▐________|\\____▌", "▐_________|\\___▌", "▐__________|\\__▌", "▐___________|\\_▌", "▐____________|\\▌", "▐____________/|▌", "▐___________/|_▌", "▐__________/|__▌", "▐_________/|___▌", "▐________/|____▌", "▐_______/|-----▌", "▐______/|------▌", "▐_____/|-------▌", "▐____/|--------▌", "▐___/|---------▌", "▐__/|----------▌", "▐_/|-----------▌", "▐/|------------▌"]),
     spin!("cli-fish-wide", ["~~~~~~~~~~~~~~~~~~~~", "> ~~~~~~~~~~~~~~~~~~", "º> ~~~~~~~~~~~~~~~~~", "(º> ~~~~~~~~~~~~~~~~", "((º> ~~~~~~~~~~~~~~~", "<((º> ~~~~~~~~~~~~~~", "><((º> ~~~~~~~~~~~~~", " ><((º> ~~~~~~~~~~~~", "~ ><((º> ~~~~~~~~~~~", "~~ <>((º> ~~~~~~~~~~", "~~~ ><((º> ~~~~~~~~~", "~~~~ <>((º> ~~~~~~~~", "~~~~~ ><((º> ~~~~~~~", "~~~~~~ <>((º> ~~~~~~", "~~~~~~~ ><((º> ~~~~~", "~~~~~~~~ <>((º> ~~~~", "~~~~~~~~~ ><((º> ~~~", "~~~~~~~~~~ <>((º> ~~", "~~~~~~~~~~~ ><((º> ~", "~~~~~~~~~~~~ <>((º> ", "~~~~~~~~~~~~~ ><((º>", "~~~~~~~~~~~~~~ <>((", "~~~~~~~~~~~~~~~ ><((", "~~~~~~~~~~~~~~~~ <>(", "~~~~~~~~~~~~~~~~~ ><", "~~~~~~~~~~~~~~~~~~ <", "~~~~~~~~~~~~~~~~~~~~"]),
+    // --- ratatui-spinner FluxFrames ports (single-cell presets) ---
+    spin!("flux-braille", ["⣾", "⣷", "⣯", "⣟", "⡿", "⢿", "⣽", "⣻"]),
+    spin!("flux-line", ["│", "╱", "─", "╲"]),
+    spin!("flux-block", ["▖", "▘", "▝", "▗"]),
+    spin!("flux-clock", ["◷", "◶", "◵", "◴"]),
+    spin!("flux-triangles", ["▲", "▶", "▼", "◀"]),
+    spin!("flux-pulse", ["⣀", "⣤", "⣶", "⣾", "⣿", "⣾", "⣶", "⣤"]),
+    spin!("flux-bounce", ["⠉", "⠒", "⣀", "⠒"]),
+    spin!("flux-half", ["▀", "▐", "▄", "▌"]),
+    spin!("flux-dice", ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"]),
+    spin!("flux-corners", ["┌", "┐", "┘", "└"]),
+    spin!("flux-circle-fill", ["○", "◔", "◑", "◕", "●"]),
+    spin!("flux-piston", ["▁", "▃", "▅", "▇", "█", "▇", "▅", "▃"]),
+    spin!("flux-star", ["✶", "✷", "✸", "✹"]),
+    spin!("flux-pair", ["⠉", "⠘", "⠰", "⢠", "⣀", "⡄", "⠆", "⠃"]),
+    spin!("flux-diamond", ["◇", "◈", "◆", "◈"]),
+    spin!("flux-arc", ["◜", "◝", "◞", "◟"]),
+    // multi-cell phase wave (FluxSpinner width=8, phase_step=1): painted
+    // procedurally by the gallery, frames are a placeholder
+    spin!("flux-wave-wide", ["⣾⣷⣯⣟⡿⢿⣽⣻"]),
 ];
 
 #[cfg(test)]
@@ -145,9 +175,13 @@ mod tests {
             if entry.name.ends_with("-wide") || entry.name.ends_with("-bar") {
                 continue;
             }
+            // live-painted rows carry a placeholder frame, not real content
+            if entry.name.starts_with("shimmer-") {
+                continue;
+            }
             if matches!(
                 entry.name,
-                "meter" | "heartbeat" | "star-shoot" | "matrix" | "ellipsis" | "shimmer-live"
+                "meter" | "heartbeat" | "star-shoot" | "matrix" | "ellipsis"
             ) {
                 continue;
             }

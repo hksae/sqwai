@@ -2076,6 +2076,24 @@ mod tests {
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
         assert!(text.contains("shimmer-live"), "{text:?}");
         assert!(text.contains("Working"), "{text:?}");
+        // new rows paint too: a tint shimmer, a flux preset, the wave
+        for probe in ["shimmer-ocean", "flux-dice", "flux-wave-wide"] {
+            let pos = crate::tui::spinners::ALL
+                .iter()
+                .position(|e| e.name == probe)
+                .expect("gallery row");
+            while app.menu_sel < pos {
+                app.menu_nav(1);
+            }
+            assert_eq!(app.menu_sel, pos);
+            let mut buf = Buffer::empty(area);
+            app.draw_menu(&mut buf, area);
+            let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+            assert!(text.contains(probe), "{probe} not visible: {text:?}");
+            if probe.starts_with("shimmer-") {
+                assert!(text.contains("Working"), "{probe} lost its demo text");
+            }
+        }
         // Enter closes the gallery again
         app.menu_activate();
         assert!(app.menu_stack.is_empty(), "gallery must close on commit");
