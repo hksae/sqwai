@@ -222,6 +222,9 @@ pub(super) enum Segment {
         /// total source lines of the shown body, for the "… N more" row
         preview_total: usize,
         expanded: bool,
+        /// finish-wave start for the one-shot green/red sweep; None settles
+        /// to the static ✓/✗ row. Set when the ToolNotice lands.
+        flash: Option<std::time::Instant>,
     },
     Status {
         text: String,
@@ -1604,6 +1607,7 @@ impl App {
                 preview,
                 preview_total,
                 expanded,
+                flash,
             } => {
                 // Every tool uses the same three-part row: state marker, tool
                 // name, and a quiet one-line argument summary. Keeping the
@@ -1642,11 +1646,39 @@ impl App {
                 } else {
                     format!("  {}", truncate_display_width(args, summary_width))
                 };
-                let mut head_spans = vec![
-                    Span::styled(marker.0, marker.1),
-                    Span::styled(shown_name, Theme::accent()),
-                    Span::styled(summary, Theme::dim()),
-                ];
+                // one-shot finish wave: green/red sweep over marker+name,
+                // then the static row. Truecolor only; elsewhere the row
+                // is simply already static.
+                let wave = match (ok, flash) {
+                    (Some(done), Some(t0)) => {
+                        let el = t0.elapsed().as_millis();
+                        if el < crate::tui::shimmer::FLASH_MS as u128
+                            && crate::tui::shimmer::has_truecolor()
+                        {
+                            Some(crate::tui::shimmer::flash_spans(
+                                &marker.0,
+                                &shown_name,
+                                *done,
+                                el as f64 / crate::tui::shimmer::FLASH_MS as f64,
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                let mut head_spans = match wave {
+                    Some(wave) => {
+                        let mut spans = wave;
+                        spans.push(Span::styled(summary, Theme::dim()));
+                        spans
+                    }
+                    None => vec![
+                        Span::styled(marker.0, marker.1),
+                        Span::styled(shown_name, Theme::accent()),
+                        Span::styled(summary, Theme::dim()),
+                    ],
+                };
                 if let Some((added, removed)) = edit_counts {
                     head_spans.push(Span::styled(format!("  +{added}"), Theme::ok()));
                     head_spans.push(Span::styled(format!(" -{removed}"), Theme::err()));

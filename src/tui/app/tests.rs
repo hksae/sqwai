@@ -404,6 +404,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
+            flash: None,
         });
         app.push_segment(Segment::Assistant {
             text: "done".into(),
@@ -502,6 +503,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
+            flash: None,
         });
         app.push_segment(Segment::Thinking {
             text: "hmm".into(),
@@ -519,6 +521,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
+            flash: None,
         });
         app.push_segment(Segment::Assistant {
             text: "done".into(),
@@ -620,6 +623,7 @@ mod tests {
                 preview: Vec::new(),
                 preview_total: 0,
                 expanded: false,
+                flash: None,
             });
         }
         app.finalize_activity_group(true);
@@ -664,6 +668,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
+            flash: None,
         });
         app.finalize_activity_group(true);
 
@@ -1694,6 +1699,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
+            flash: None,
         });
         app.clear_subagent_ui_on_stop();
         assert!(app.subagents.is_empty());
@@ -1840,6 +1846,7 @@ mod tests {
                 preview: Vec::new(),
                 preview_total: 0,
                 expanded: false,
+                flash: None,
             }],
         );
         app.subagent_meta
@@ -2262,6 +2269,60 @@ mod tests {
         assert!(!app.cfg.ui.experimental_test);
     }
 
+    #[test]
+    fn tool_notice_arms_the_finish_wave() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.handle_tool_start("read".into(), "a.rs".into());
+        app.handle_tool_notice("read".into(), "done".into(), true, None);
+        let seg = app
+            .segments
+            .iter()
+            .find(|s| matches!(s, Segment::Tool { .. }))
+            .expect("tool row");
+        assert!(
+            matches!(seg, Segment::Tool { ok: Some(true), flash: Some(_), .. }),
+            "notice resolves the row and arms the wave"
+        );
+    }
+
+    #[test]
+    fn finish_wave_keeps_geometry_and_settles_static() {
+        // env-independent: geometry holds on both paths, and an expired
+        // wave renders exactly the static row
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.push_segment(Segment::Tool {
+            name: "read".into(),
+            args: "a.rs".into(),
+            ok: Some(true),
+            output: String::new(),
+            diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
+            expanded: false,
+            flash: Some(std::time::Instant::now()),
+        });
+        let rows = app.render_segment(&app.segments, 0, 80, true);
+        assert_eq!(rows.len(), 1, "head row only, like static");
+        let text: String = rows[0]
+            .0
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.starts_with("  "), "{text:?}");
+        assert!(text.contains("read"), "{text:?}");
+
+        // expired flash: byte-identical static row
+        if let Some(Segment::Tool { flash, .. }) = app.segments.get_mut(0) {
+            *flash =
+                Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
+        }
+        let rows = app.render_segment(&app.segments, 0, 80, true);
+        assert_eq!(rows[0].0.spans[0].content.as_ref(), "  ✓ ");
+        assert_eq!(rows[0].0.spans[0].style, crate::tui::theme::Theme::ok());
+        assert_eq!(rows[0].0.spans[1].content.as_ref(), "read");
+    }
+
     fn wheel_test_app() -> (crate::tui::app::App, usize) {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
@@ -2468,6 +2529,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
+            flash: None,
         });
         let rows = app.render_segment(&app.segments, 0, 80, true);
         let text: String = rows[0]
@@ -2492,6 +2554,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: true,
+            flash: None,
         });
         let rows = app.render_segment(&app.segments, 0, 18, true);
         use unicode_width::UnicodeWidthStr;
@@ -2590,6 +2653,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: true,
+            flash: None,
         });
         app.startup = false;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -3879,6 +3943,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
+            flash: None,
         });
         app.push_segment(Segment::Tool {
             name: "bash".into(),
@@ -3889,6 +3954,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
+            flash: None,
         });
         app.push_segment(Segment::Tool {
             name: "write_file".into(),
@@ -3899,6 +3965,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
+            flash: None,
         });
         app.push_segment(Segment::Assistant {
             text: "Done, though one step failed.".into(),
@@ -3929,6 +3996,7 @@ mod tests {
                 preview: Vec::new(),
                 preview_total: 0,
                 expanded: false,
+                flash: None,
             });
         }
         let seg_end = app.segments.len();
@@ -3970,6 +4038,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
+            flash: None,
         });
         // production always holds the live answer slot while streaming; the
         // group logic keys off the work rows, not the slot, but the frame
@@ -4017,6 +4086,7 @@ mod tests {
                 preview: Vec::new(),
                 preview_total: 0,
                 expanded: false,
+                flash: None,
             });
         }
         app.push_segment(Segment::Tool {
@@ -4028,6 +4098,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
+            flash: None,
         });
         app.push_segment(Segment::Tool {
             name: "cleanup".into(),
@@ -4038,6 +4109,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
+            flash: None,
         });
         let seg_end = app.segments.len();
         app.activity_groups.push(ActivityGroup {
@@ -4493,6 +4565,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
+            flash: None,
         });
         assert!(app.tool_running());
 
@@ -5114,6 +5187,7 @@ mod tests {
                 preview: Vec::new(),
                 preview_total: 0,
                 expanded: false,
+                flash: None,
             },
         );
 
@@ -5312,6 +5386,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
+            flash: None,
         });
 
         let commentary_rows = app.render_segment(&app.segments, 0, 80, true);
@@ -6128,6 +6203,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
+            flash: None,
         });
         for i in 0..25 {
             app.push_segment(Segment::Assistant {
@@ -6194,6 +6270,7 @@ mod tests {
                 preview: Vec::new(),
                 preview_total: 0,
                 expanded: false,
+                flash: None,
             }],
         );
         app.subagent_meta
@@ -6238,6 +6315,7 @@ mod tests {
                 preview: Vec::new(),
                 preview_total: 0,
                 expanded: false,
+                flash: None,
             });
         }
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -6258,6 +6336,7 @@ mod tests {
                 app.segments.first(),
                 Some(Segment::Tool {
                     expanded: false,
+                    flash: None,
                     ..
                 })
             ),
@@ -6426,6 +6505,7 @@ mod tests {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
+            flash: None,
         });
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();

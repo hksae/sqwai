@@ -963,6 +963,7 @@ impl App {
                             preview: Vec::new(),
                             preview_total: 0,
                             expanded: false,
+                            flash: None,
                         });
                         pending_tools.insert(call.id.clone(), idx);
                     }
@@ -1160,7 +1161,12 @@ impl App {
             let animating = self.streaming
                 || self.tool_running()
                 || self.toast.is_some()
-                || matches!(self.cur_menu(), Some(Menu::TestAnims));
+                || matches!(self.cur_menu(), Some(Menu::TestAnims))
+                // finish waves get their 700ms even past streaming end,
+                // or the sweep would freeze mid-row on the last tool
+                || self.segments.iter().any(|s| {
+                    matches!(s, Segment::Tool { flash: Some(t0), .. } if t0.elapsed().as_millis() < crate::tui::shimmer::FLASH_MS as u128)
+                });
             if animating {
                 // fixed 20 FPS animation rate from the wall clock, not per
                 // loop iteration: bursts would otherwise fast-forward it
@@ -3157,6 +3163,7 @@ impl App {
                             preview: Vec::new(),
                             preview_total: 0,
                             expanded: false,
+                            flash: None,
                         },
                     );
                     self.dirty = true;
@@ -3175,6 +3182,7 @@ impl App {
                             diff: current_diff,
                             preview,
                             preview_total,
+                            flash,
                             ..
                         }) = chat.iter_mut().rev().find(|segment| matches!(segment, Segment::Tool { name: current, ok: None, .. } if current == &name))
                     {
@@ -3183,6 +3191,7 @@ impl App {
                         *current_diff = diff;
                         (*preview, *preview_total) =
                             view::tool_preview(current_diff.as_deref(), output.as_str());
+                        *flash = Some(std::time::Instant::now());
                     }
                     self.sub_touch_all(id);
                     self.dirty = true;
@@ -3486,6 +3495,7 @@ impl App {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
+            flash: None,
         };
         // The model may stream a short preamble before emitting its tool call.
         // Keep tool activity above the live answer so the chat reads in
@@ -3577,6 +3587,7 @@ impl App {
                     diff: dslot,
                     preview,
                     preview_total,
+                    flash,
                     ..
                 }) = self.segments.get_mut(i)
                 {
@@ -3585,6 +3596,8 @@ impl App {
                     *dslot = diff;
                     (*preview, *preview_total) =
                         view::tool_preview(dslot.as_deref(), output.as_str());
+                    // one-shot finish wave (green/red sweep, then static)
+                    *flash = Some(std::time::Instant::now());
                 }
                 self.touch_segment(i);
             }
@@ -3601,6 +3614,8 @@ impl App {
                     preview,
                     preview_total,
                     expanded: false,
+                    // arrived already finished: play the wave from now
+                    flash: Some(std::time::Instant::now()),
                 };
                 let pos = self
                     .segments
