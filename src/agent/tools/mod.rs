@@ -530,7 +530,8 @@ Use instead of grep when whitespace, line breaks or comments vary.",
 (rm -rf, sudo, disk ops, force-push, etc.) require user approval and the model should avoid them. \
 Long output is truncated to a tail and the full log path is returned. Use background=true when the \
 command is expected to outlast the normal tool timeout or when useful independent work can \
-continue; await its result before dependent changes or reporting success.",
+continue; wait on it with bash_output(id, wait_secs) or sleep(seconds) instead of polling in a \
+tight loop; await its result before dependent changes or reporting success.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -544,12 +545,14 @@ continue; await its result before dependent changes or reporting success.",
         ToolDef {
             name: "bash_output",
             kind: Kind::ReadOnly,
-            description: "Read a background command's output. With id: the job's status plus the last bytes of its log (a finished job is reported once with its exit code, then cleaned up). Without id: a list of all background jobs with their commands and log paths.",
+            description: "Read a background command's output — incremental: the first read returns the tail, later reads return only the bytes appended since the previous read (from_start=true re-reads the tail). wait_secs (0-60) blocks until the job exits, fresh output arrives, or the timeout lapses: one call instead of a poll loop. A finished job is reported once with its exit code, then cleaned up. Without id: a list of all background jobs with their commands and log paths.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "id": {"type": "integer", "description": "job id from bash background=true"},
-                    "tail": {"type": "integer", "description": "bytes of output to return (default 10000, max 50000)"}
+                    "tail": {"type": "integer", "description": "bytes of output to return (default 10000, max 50000)"},
+                    "wait_secs": {"type": "integer", "description": "block up to N seconds (max 60) for exit or fresh output"},
+                    "from_start": {"type": "boolean", "description": "re-read the tail from scratch instead of the delta"}
                 }
             }),
         },
@@ -563,6 +566,18 @@ continue; await its result before dependent changes or reporting success.",
                     "id": {"type": "integer", "description": "job id"}
                 },
                 "required": ["id"]
+            }),
+        },
+        ToolDef {
+            name: "sleep",
+            kind: Kind::ReadOnly,
+            description: "Wait N seconds (0-60, clamped) without doing anything: for pauses a file, a server, or a human needs. Esc cancels the wait. For background jobs prefer bash_output(id, wait_secs): it wakes on fresh output instead of sleeping blind.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "seconds": {"type": "integer", "description": "how long to wait (0-60)"}
+                },
+                "required": ["seconds"]
             }),
         },
         ToolDef {
@@ -1018,6 +1033,7 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             .map(|id| format!("job {id}"))
             .unwrap_or_else(|| "list".to_string()),
         "bash_kill" => format!("job {}", args["id"].as_u64().unwrap_or(0)),
+        "sleep" => format!("{}s", args["seconds"].as_u64().unwrap_or(0)),
         "think" => {
             let thought: String = s("thought").chars().take(80).collect();
             thought
@@ -1329,8 +1345,9 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             args["timeout"].as_u64(),
             args["background"].as_bool().unwrap_or(false),
         ),
-        "bash_output" => exec::bash_output(args),
+        "bash_output" => exec::bash_output(ctx, args),
         "bash_kill" => exec::bash_kill(args),
+        "sleep" => exec::sleep(ctx, args),
         "think" => Outcome::ok("ok — continue with the next step of your plan."),
         "plan" => plan_op(ctx, args),
         "memory_read" => match crate::agent::diary::read_day(

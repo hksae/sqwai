@@ -29,10 +29,15 @@ pub(super) struct BgJob {
     pub command: String,
     pub log: PathBuf,
     pub started: std::time::Instant,
-    child: std::process::Child,
+    pub child: std::process::Child,
     /// cached once the process exits: the child is reaped (no zombie on
     /// Unix) but the job stays listed until `bash_output` reports it once
-    exit: Option<std::process::ExitStatus>,
+    pub exit: Option<std::process::ExitStatus>,
+    /// log bytes already delivered to the model: `bash_output` is
+    /// incremental — first read returns the tail, later reads only the
+    /// bytes appended since the previous read, so chatty logs cross the
+    /// context exactly once
+    pub read: u64,
 }
 
 impl BgJob {
@@ -352,6 +357,7 @@ fn run_background(ctx: &ToolCtx, command: &str) -> Outcome {
                 started: std::time::Instant::now(),
                 child,
                 exit: None,
+                read: 0,
             });
             Outcome::ok(format!(
                 "launched in background as job {id} (pid {pid}) — logs appended to {}. \
@@ -363,10 +369,18 @@ fn run_background(ctx: &ToolCtx, command: &str) -> Outcome {
     }
 }
 
-/// `bash_output`: the tail of a background job's log, or a status list of all
-/// jobs when no id is given. A finished job is reported once with its exit
-/// code, then removed from the registry.
-pub(super) fn bash_output(args: &serde_json::Value) -> Outcome {
+/// `bash_output`: incremental output of a background job, or a status list
+/// of all jobs when no id is given. The first read of a job returns the
+/// tail of its log; every later read returns only the bytes appended since
+/// the previous read, so a chatty log crosses the context exactly once.
+/// `from_start=true` re-reads the tail from scratch. `wait_secs` (0-60,
+/// clamped) blocks until the job exits, fresh bytes arrive, the timeout
+/// lapses, or the user cancels — one call instead of a poll loop. A finished
+/// job is reported once with its exit code, then removed from the registry.
+pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
+    if ctx.cancel_requested() {
+        return Outcome::cancelled();
+    }
     poll_jobs();
     let id = args["id"].as_u64();
     let mut jobs = match bg_jobs().lock() {
@@ -388,11 +402,58 @@ pub(super) fn bash_output(args: &serde_json::Value) -> Outcome {
             ));
         }
         return Outcome::ok(format!(
-            "{} background job(s) (no id given — pass one for the output tail):\n{}",
+            "{} background job(s) (no id given — pass one for the output):\n{}",
             lines.len(),
             lines.join("\n")
         ));
     };
+
+    let wait_secs = args["wait_secs"].as_u64().unwrap_or(0).clamp(0, 60);
+    let from_start = args["from_start"].as_bool().unwrap_or(false);
+    let tail = args["tail"].as_u64().unwrap_or(BG_TAIL_DEFAULT as u64) as usize;
+    let tail = tail.clamp(200, BG_TAIL_MAX);
+
+    // blocking wait BEFORE the read: until the job exits, fresh bytes land,
+    // the timeout lapses, or Esc. The registry lock is never held across a
+    // sleep — the job is re-resolved after the wait.
+    if wait_secs > 0 {
+        // bytes the model has already seen: waiting ends early on anything
+        // beyond this, so a second waiter does not sleep through output
+        let seen = jobs
+            .iter()
+            .find(|j| j.id == id)
+            .map(|j| j.read)
+            .unwrap_or(0);
+        // the outer guard must go BEFORE the loop: it re-locks below, and
+        // std Mutex is not reentrant — holding both would self-deadlock
+        drop(jobs);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+        loop {
+            if ctx.cancel_requested() {
+                return Outcome::cancelled();
+            }
+            let done = match bg_jobs().lock() {
+                Err(_) => return Outcome::err("background job registry is unavailable"),
+                Ok(mut guard) => {
+                    let Some(job) = guard.iter_mut().find(|j| j.id == id) else {
+                        return Outcome::err(format!("no background job {id} — it was killed or reaped while waiting"));
+                    };
+                    job.poll();
+                    let len = std::fs::metadata(&job.log).map(|m| m.len()).unwrap_or(0);
+                    !job.running() || len > seen
+                }
+            };
+            if done || std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        // re-lock for the read below
+        jobs = match bg_jobs().lock() {
+            Ok(j) => j,
+            Err(_) => return Outcome::err("background job registry is unavailable"),
+        };
+    }
 
     let Some(job) = jobs.iter_mut().find(|j| j.id == id) else {
         return Outcome::err(format!(
@@ -400,16 +461,52 @@ pub(super) fn bash_output(args: &serde_json::Value) -> Outcome {
         ));
     };
     let status = job.status_line();
-    let tail = args["tail"].as_u64().unwrap_or(BG_TAIL_DEFAULT as u64) as usize;
-    let tail = tail.clamp(200, BG_TAIL_MAX);
-    let body = tail_of_file(&job.log, tail).unwrap_or_else(|| "<no output yet>".to_string());
+    let len = std::fs::metadata(&job.log).map(|m| m.len()).unwrap_or(0);
+    let (body, first_read) = if from_start || job.read == 0 {
+        // tail of the whole log, as before; the cursor parks at the end so
+        // the next read is a delta from here
+        let body = tail_of_file(&job.log, tail).unwrap_or_else(|| "<no output yet>".to_string());
+        job.read = len;
+        (body, true)
+    } else if len > job.read {
+        // only what landed since the previous read, bounded by `tail`
+        let mut f = match std::fs::File::open(&job.log) {
+            Ok(f) => f,
+            Err(_) => return Outcome::err(format!("cannot read job {id} log")),
+        };
+        use std::io::{Read, Seek, SeekFrom};
+        let start = job.read.max(len.saturating_sub(tail as u64));
+        let mut buf = Vec::new();
+        let body = match f
+            .seek(SeekFrom::Start(start))
+            .and_then(|_| f.read_to_end(&mut buf))
+        {
+            Ok(_) => {
+                let skipped = start.saturating_sub(job.read);
+                let mut text = String::from_utf8_lossy(&buf).into_owned();
+                if skipped > 0 {
+                    text = format!("…(showing the last {tail} of {skipped} new bytes)\n{text}");
+                }
+                text
+            }
+            Err(_) => return Outcome::err(format!("cannot read job {id} log")),
+        };
+        job.read = len;
+        (body, false)
+    } else {
+        ("<no new output since the last read>".to_string(), false)
+    };
     let log = job.log.display().to_string();
     if !job.running() {
         jobs.retain(|j| j.id != id);
     }
+    let section = if first_read {
+        "--- output tail ---"
+    } else {
+        "--- new output since the last read ---"
+    };
     Outcome::ok(format!(
-        "job {id}: {status} (log: {})\n--- output tail ---\n{body}",
-        log
+        "job {id}: {status} (log: {log})\n{section}\n{body}",
     ))
 }
 
@@ -443,6 +540,26 @@ pub(super) fn bash_kill(args: &serde_json::Value) -> Outcome {
             Outcome::ok(format!("job {id} killed: `{}`", job.command))
         }
     }
+}
+
+/// `sleep`: block up to 60s so the agent can wait for something outside
+/// its control (a file, a server, a human) without burning turns on empty
+/// polls. For background jobs prefer `bash_output(id, wait_secs)`: it wakes
+/// on fresh output instead of sleeping blind. Sleeps in slices so Esc
+/// cancels the wait like any other tool call.
+pub(super) fn sleep(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
+    let secs = args["seconds"].as_u64().unwrap_or(0).clamp(0, 60);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if ctx.cancel_requested() {
+            return Outcome::cancelled();
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Outcome::ok(format!("slept {secs}s"))
 }
 
 fn elapsed_of(job: &BgJob) -> String {
@@ -686,7 +803,7 @@ mod tests {
             .expect("spawn result must carry a job id");
 
         // list without an id shows the job
-        let list = bash_output(&serde_json::json!({}));
+        let list = bash_output(&c, &serde_json::json!({}));
         assert!(list.ok, "{}", list.output);
         assert!(
             list.output.contains(&format!("job {id}")),
@@ -696,7 +813,7 @@ mod tests {
 
         // give the pings a moment, then read the tail: output grows
         std::thread::sleep(std::time::Duration::from_millis(1200));
-        let polled = bash_output(&serde_json::json!({"id": id}));
+        let polled = bash_output(&c, &serde_json::json!({"id": id}));
         assert!(polled.ok, "{}", polled.output);
         assert!(
             polled.output.contains(&format!("job {id}")),
@@ -712,7 +829,7 @@ mod tests {
         // kill; killed jobs are gone from the registry
         let killed = bash_kill(&serde_json::json!({"id": id}));
         assert!(killed.ok, "{}", killed.output);
-        let gone = bash_output(&serde_json::json!({"id": id}));
+        let gone = bash_output(&c, &serde_json::json!({"id": id}));
         assert!(!gone.ok, "{}", gone.output);
     }
 
@@ -732,7 +849,7 @@ mod tests {
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(600));
 
-        let polled = bash_output(&serde_json::json!({"id": id}));
+        let polled = bash_output(&c, &serde_json::json!({"id": id}));
         assert!(polled.ok, "{}", polled.output);
         assert!(polled.output.contains("finished"), "{}", polled.output);
         assert!(polled.output.contains("hi"), "{}", polled.output);
@@ -743,6 +860,116 @@ mod tests {
             kill_late.output.contains("no background job"),
             "{}",
             kill_late.output
+        );
+    }
+
+    fn spawn_bg(c: &mut ToolCtx, command: &str) -> u64 {
+        let started = bash(c, command, None, true);
+        assert!(started.ok, "{}", started.output);
+        started
+            .output
+            .split("job ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|num| num.parse().ok())
+            .expect("spawn result must carry a job id")
+    }
+
+    /// Reads are incremental: the first returns the tail, the next only
+    /// what landed since — a chatty log crosses the context exactly once.
+    #[test]
+    fn bash_output_returns_deltas_after_the_first_read() {
+        let mut c = ctx();
+        let id = spawn_bg(&mut c, &long_sleep_command());
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let first = bash_output(&c, &serde_json::json!({"id": id}));
+        assert!(first.ok, "{}", first.output);
+        assert!(first.output.contains("--- output tail ---"), "{}", first.output);
+
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        let second = bash_output(&c, &serde_json::json!({"id": id}));
+        assert!(second.ok, "{}", second.output);
+        assert!(
+            second.output.contains("--- new output since the last read ---"),
+            "{}",
+            second.output
+        );
+        assert!(
+            !second.output.contains("<no new output since the last read>"),
+            "ping must have written in 2s: {}",
+            second.output
+        );
+
+        // from_start re-reads the tail instead of the delta
+        let again = bash_output(&c, &serde_json::json!({"id": id, "from_start": true}));
+        assert!(again.ok, "{}", again.output);
+        assert!(again.output.contains("--- output tail ---"), "{}", again.output);
+
+        let killed = bash_kill(&serde_json::json!({"id": id}));
+        assert!(killed.ok, "{}", killed.output);
+    }
+
+    /// wait_secs wakes on fresh output: one call instead of a poll loop.
+    #[test]
+    fn bash_output_wait_returns_when_bytes_land() {
+        let mut c = ctx();
+        let id = spawn_bg(&mut c, "echo hello-wait");
+        let t0 = std::time::Instant::now();
+        let out = bash_output(&c, &serde_json::json!({"id": id, "wait_secs": 10}));
+        assert!(out.ok, "{}", out.output);
+        assert!(out.output.contains("hello-wait"), "{}", out.output);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(8),
+            "wait must wake early, not sleep the full timeout"
+        );
+    }
+
+    /// wait_secs gives up at the timeout while the job keeps running.
+    #[test]
+    fn bash_output_wait_times_out_on_a_quiet_job() {
+        let mut c = ctx();
+        let id = spawn_bg(&mut c, &long_sleep_command());
+        // drain the startup burst so the wait has nothing fresh to wake on
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let _ = bash_output(&c, &serde_json::json!({"id": id}));
+        let t0 = std::time::Instant::now();
+        let out = bash_output(&c, &serde_json::json!({"id": id, "wait_secs": 1}));
+        assert!(out.ok, "{}", out.output);
+        assert!(out.output.contains("still running"), "{}", out.output);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "wait must respect its timeout"
+        );
+        let killed = bash_kill(&serde_json::json!({"id": id}));
+        assert!(killed.ok, "{}", killed.output);
+    }
+
+    #[test]
+    fn sleep_waits_and_reports() {
+        let c = ctx();
+        let t0 = std::time::Instant::now();
+        let out = sleep(&c, &serde_json::json!({"seconds": 1}));
+        assert!(out.ok, "{}", out.output);
+        assert_eq!(out.output, "slept 1s");
+        assert!(
+            t0.elapsed() >= std::time::Duration::from_millis(900),
+            "must actually wait"
+        );
+        let zero = sleep(&c, &serde_json::json!({"seconds": 0}));
+        assert!(zero.ok, "{}", zero.output);
+    }
+
+    #[test]
+    fn sleep_is_cancelled_promptly() {
+        let c = ctx();
+        let cancel = c.cancel.clone();
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let t0 = std::time::Instant::now();
+        let out = sleep(&c, &serde_json::json!({"seconds": 60}));
+        assert!(out.cancelled, "{}", out.output);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(2),
+            "a cancelled sleep must not run the clock"
         );
     }
 }
