@@ -209,10 +209,13 @@ impl Journal {
     /// short-lived handle, so a long-lived writer must call this after any
     /// plan tool call before appending again — otherwise it would reuse a
     /// sequence number (§2.1.4).
-    pub fn resync(&mut self) {
-        if let Ok(last) = last_seq(&self.path) {
-            self.next_seq = last.saturating_add(1);
-        }
+    ///
+    /// #189: failures are returned, never swallowed — a silent stale
+    /// counter reuses sequence numbers and corrupts evidence refs.
+    pub fn resync(&mut self) -> Result<()> {
+        let last = last_seq(&self.path)?;
+        self.next_seq = last.saturating_add(1);
+        Ok(())
     }
 
     /// Read records from every journal belonging to this project.
@@ -936,6 +939,37 @@ mod tests {
     use super::*;
     fn root() -> PathBuf {
         tempfile::tempdir().unwrap().keep()
+    }
+
+    #[test]
+    fn resync_advances_past_externally_appended_records() {
+        let root = root();
+        let mut journal = Journal::open(&root, "session").unwrap();
+        assert_eq!(journal.append("a", json!({})).unwrap(), 1);
+        // a short-lived handle (plan::commit) wrote behind our back
+        let mut other = Journal::open(&root, "session").unwrap();
+        assert_eq!(other.append("b", json!({})).unwrap(), 2);
+        journal.resync().expect("resync");
+        assert_eq!(journal.append("c", json!({})).unwrap(), 3);
+    }
+
+    /// #189: a resync failure is loud and keeps the counter — never a
+    /// silent stale reuse of sequence numbers.
+    #[test]
+    fn resync_failure_returns_an_error() {
+        use std::io::Write;
+        let root = root();
+        let mut journal = Journal::open(&root, "session").unwrap();
+        assert_eq!(journal.append("a", json!({})).unwrap(), 1);
+        // corrupt the tail with a non-record line
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(journal.path())
+            .unwrap();
+        writeln!(f, "{{not json}}").unwrap();
+        drop(f);
+        assert!(journal.resync().is_err(), "corrupt tail must fail loudly");
+        assert_eq!(journal.next_seq(), 2, "counter untouched on failure");
     }
 
     #[test]

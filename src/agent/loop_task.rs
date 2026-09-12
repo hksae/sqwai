@@ -1848,7 +1848,13 @@ async fn run_agent(
                     // `plan_op` journals its own intent records ahead of every
                     // store (§2.1.4); resync this long-lived handle past them
                     // so the next append cannot reuse a sequence number.
-                    writer.resync();
+                    // A failed resync is loud (#189): proceeding on a stale
+                    // counter would corrupt evidence refs.
+                    if let Err(e) = writer.resync() {
+                        crate::providers::log_http(&format!(
+                            "journal resync failed — sequence numbers may collide: {e:#}"
+                        ));
+                    }
                     let op = call
                         .args
                         .get("op")
