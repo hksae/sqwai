@@ -115,10 +115,13 @@ pub enum AgentEvent {
         ok: bool,
         output: String,
     },
-    /// a tool just started: name + short arguments, spinner in the TUI
+    /// a tool just started: name + short arguments, spinner in the TUI.
+    /// `call_id` pins the matching notice to this exact row: same-name
+    /// calls in one batch (parallel subagents) must not close each other.
     ToolStart {
         name: String,
         summary: String,
+        call_id: String,
     },
     /// a tool finished (ok=True/False); carries the unified diff for mutations
     ToolNotice {
@@ -126,6 +129,7 @@ pub enum AgentEvent {
         summary: String,
         ok: bool,
         diff: Option<String>,
+        call_id: String,
     },
     /// the model asked the user structured questions; answer via ControlMsg
     AskUser {
@@ -422,6 +426,197 @@ fn subagent_tasks_from_args(args: &serde_json::Value) -> Result<Vec<String>, Str
     Ok(tasks)
 }
 
+/// Run a pure-subagent batch concurrently: every call gets its pre-phase
+/// (cancel check, journal row, ToolStart row) in call order, the children
+/// run overlapped, and results are processed back in call order, so rows,
+/// journal and transcript look exactly like a fast sequential batch — only
+/// the waits overlap. Mixed batches keep the sequential loop: interleaving
+/// arbitrary tools would tangle journal attribution and mutation order.
+///
+/// Esc semantics match one running subagent: children ignore the parent
+/// flag (each has its own), so a stop request lands as "let the running
+/// finish, then end the turn" — the next pre-check stops everything after.
+#[allow(clippy::too_many_arguments)]
+async fn run_subagent_batch(
+    calls: &[ToolCallReq],
+    session_id: &str,
+    root: &Path,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    journal: &mut Option<crate::agent::journal::Journal>,
+    tx: &mpsc::Sender<AgentEvent>,
+    current_step: Option<String>,
+    provider: &SharedProvider,
+    model_id: &str,
+    blocked_patterns: &[String],
+    plan_mode: bool,
+    context_limit: u64,
+    effort: Option<EffortLevel>,
+    effort_support: crate::config::EffortSupport,
+    max_tokens: Option<u32>,
+    system: &[SystemPart],
+    mcp: &crate::config::McpConfig,
+    lsp: &crate::config::LspConfig,
+    read_only: bool,
+    shadow_store: crate::config::ShadowStore,
+    messages: &mut Vec<Message>,
+) -> bool {
+    use futures::{StreamExt, stream};
+    // pre-phase in order; stops at the first pre-cancelled call exactly
+    // like the sequential loop (that call still gets its cancelled row,
+    // later ones only their protocol tool_result)
+    let mut dispatch: Vec<(usize, ToolCallReq, std::time::Instant)> = Vec::new();
+    let mut cutoff = calls.len();
+    let mut interrupted = false;
+    for (index, call) in calls.iter().enumerate() {
+        let pre_cancelled = cancel.swap(false, std::sync::atomic::Ordering::Relaxed);
+        if let Some(writer) = journal.as_mut() {
+            let active =
+                plan::open_active_for_session(root, Some(session_id)).ok().flatten();
+            let plan_id = active.as_ref().map(|p| p.id.clone());
+            let step = current_step.clone().or_else(|| {
+                active.as_ref().and_then(|p| {
+                    p.steps
+                        .iter()
+                        .find(|s| s.status == plan::StepStatus::InProgress)
+                        .map(|s| s.id.clone())
+                })
+            });
+            writer.set_attribution(step, plan_id, "main");
+            let _ = writer.append(
+                "tool_call",
+                serde_json::json!({
+                    "tool": call.name,
+                    "call_id": call.id,
+                    "args_digest": tools::call_summary(&call.name, &call.args),
+                }),
+            );
+        }
+        let _ = tx
+            .send(AgentEvent::ToolStart {
+                name: call.name.clone(),
+                summary: tools::call_summary(&call.name, &call.args),
+                call_id: call.id.clone(),
+            })
+            .await;
+        if pre_cancelled {
+            cutoff = index;
+            break;
+        }
+        dispatch.push((index, call.clone(), std::time::Instant::now()));
+    }
+    // fan out; results collected out of order, processed back in order
+    let mut done: Vec<(usize, ToolCallReq, std::time::Instant, tools::Outcome)> = stream::iter(dispatch.into_iter())
+        .map(|(index, call, started)| {
+            let session_id = session_id.to_string();
+            let provider = provider.clone();
+            let model_id = model_id.to_string();
+            let root = root.to_path_buf();
+            let blocked_patterns = blocked_patterns.to_vec();
+            let system = system.to_vec();
+            let mcp = mcp.clone();
+            let lsp = lsp.clone();
+            async move {
+                let outcome = run_subagent(
+                    &call,
+                    &session_id,
+                    &tx,
+                    &provider,
+                    &model_id,
+                    &root,
+                    &blocked_patterns,
+                    plan_mode,
+                    context_limit,
+                    effort,
+                    effort_support,
+                    max_tokens,
+                    system,
+                    mcp,
+                    lsp,
+                    read_only,
+                    shadow_store,
+                )
+                .await;
+                (index, call, started, outcome)
+            }
+        })
+        .buffer_unordered(MAX_PARALLEL_SUBAGENTS)
+        .collect()
+        .await;
+    done.sort_by_key(|(index, _, _, _)| *index);
+    for (_index, call, tool_started, outcome) in done {
+        let _ = tx
+            .send(AgentEvent::ToolNotice {
+                name: call.name.clone(),
+                summary: outcome.output.clone(),
+                ok: outcome.ok,
+                diff: outcome.diff.clone(),
+                call_id: call.id.clone(),
+            })
+            .await;
+        if let Some(writer) = journal.as_mut() {
+            let _ = writer
+                .append_evidence(
+                    "tool_result",
+                    serde_json::json!({
+                        "tool": call.name,
+                        "call_id": call.id,
+                        "ok": outcome.ok,
+                        "duration_ms": tool_started.elapsed().as_millis(),
+                        "summary": outcome.output.chars().take(200).collect::<String>(),
+                        "trust": "high",
+                        "code": if outcome.cancelled { Some("cancelled") } else { None },
+                    }),
+                )
+                .ok();
+        }
+        if outcome.cancelled {
+            interrupted = true;
+        }
+        messages.push(Message::tool_result(&call.id, outcome.output, !outcome.ok));
+    }
+    if cutoff < calls.len() {
+        // the call that saw the flag: a cancelled result row, exactly like
+        // the sequential loop — then plain protocol results for the rest
+        let call = &calls[cutoff];
+        let outcome = tools::Outcome::cancelled();
+        let _ = tx
+            .send(AgentEvent::ToolNotice {
+                name: call.name.clone(),
+                summary: outcome.output.clone(),
+                ok: outcome.ok,
+                diff: outcome.diff.clone(),
+                call_id: call.id.clone(),
+            })
+            .await;
+        if let Some(writer) = journal.as_mut() {
+            let _ = writer
+                .append_evidence(
+                    "tool_result",
+                    serde_json::json!({
+                        "tool": call.name,
+                        "call_id": call.id,
+                        "ok": outcome.ok,
+                        "duration_ms": 0,
+                        "summary": outcome.output.chars().take(200).collect::<String>(),
+                        "trust": "high",
+                        "code": Some("cancelled"),
+                    }),
+                )
+                .ok();
+        }
+        interrupted = true;
+        messages.push(Message::tool_result(&call.id, outcome.output, !outcome.ok));
+        for rest in &calls[cutoff + 1..] {
+            messages.push(Message::tool_result(
+                &rest.id,
+                "cancelled by user — this tool call was not run".to_string(),
+                true,
+            ));
+        }
+    }
+    interrupted
+}
+
 #[allow(clippy::too_many_arguments)] // all parameters are required for subagent configuration
 async fn run_subagent(
     call: &ToolCallReq,
@@ -534,13 +729,11 @@ async fn run_subagent(
     // #171: the child works its parent's step, so it joins the parent plan
     // explicitly. Without membership its evidence cannot attach under
     // session-strict resolution — and silent fallback is gone on purpose.
-    if let Some(step) = parent_step.as_ref()
-        && let Ok(mut plan) = plan::open(root, &step.plan_id)
-        && !plan.sessions.iter().any(|s| s == &child_session)
+    // Serialized: concurrent siblings must not read-modify-write the plan
+    // file over each other and drop a join.
     {
-        plan.sessions.push(child_session.clone());
-        plan.revision += 1;
-        let _ = plan::store(root, &plan);
+        let _guard = PLAN_JOIN_LOCK.lock().await;
+        join_plan_session(root, parent_step.as_ref(), &child_session);
     }
     let child = spawn_agent(AgentInput {
         provider: provider.clone(),
@@ -587,7 +780,7 @@ async fn run_subagent(
                     .send(AgentEvent::SubagentThinking { id, text })
                     .await;
             }
-            AgentEvent::ToolStart { name, summary } => {
+            AgentEvent::ToolStart { name, summary, .. } => {
                 let _ = parent_tx
                     .send(AgentEvent::SubagentToolStart { id, name, summary })
                     .await;
@@ -597,6 +790,7 @@ async fn run_subagent(
                 summary,
                 ok,
                 diff,
+                ..
             } => {
                 let _ = parent_tx
                     .send(AgentEvent::SubagentToolDone {
@@ -671,6 +865,27 @@ async fn run_subagent(
 fn next_subagent_id() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Serializes plan-membership joins: concurrent sibling subagents share one
+/// plan file, and an unlocked read-modify-write would drop all but one join.
+static PLAN_JOIN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Join one child session into its parent plan (#171: without membership
+/// its evidence cannot attach under session-strict resolution).
+fn join_plan_session(
+    root: &Path,
+    parent_step: Option<&plan::StepContext>,
+    child_session: &str,
+) {
+    if let Some(step) = parent_step
+        && let Ok(mut plan) = plan::open(root, &step.plan_id)
+        && !plan.sessions.iter().any(|s| s == child_session)
+    {
+        plan.sessions.push(child_session.to_string());
+        plan.revision += 1;
+        let _ = plan::store(root, &plan);
+    }
 }
 
 /// Journal/shadow identity for a child agent. Unique across process
@@ -1400,8 +1615,41 @@ async fn run_agent(
         // stop, not "let the model decide what to do about it".
         let mut interrupted = false;
 
-        // execute each call, feeding results back into the conversation
-        for (call_index, call) in turn.calls.iter().enumerate() {
+        // A turn that only delegates to subagents fans the calls out
+        // concurrently (each awaits its children inside run_subagent);
+        // every other batch keeps the sequential loop below. Pre/post
+        // bookkeeping is identical in both shapes: rows, journal and
+        // messages stay in call order, only the waits overlap.
+        let pure_subagents = subagent_depth == 0
+            && !turn.calls.is_empty()
+            && turn.calls.iter().all(|call| call.name == "subagent");
+        if pure_subagents {
+            interrupted = run_subagent_batch(
+                &turn.calls,
+                &session_id,
+                &root,
+                &ctx.cancel,
+                &mut journal,
+                &tx,
+                ctx.current_step.clone(),
+                &provider,
+                &model_id,
+                &blocked_patterns,
+                plan_mode,
+                context_limit,
+                effort,
+                effort_support,
+                max_tokens,
+                &system,
+                &mcp,
+                &lsp,
+                read_only,
+                shadow_store,
+                &mut messages,
+            )
+            .await;
+        } else {
+            for (call_index, call) in turn.calls.iter().enumerate() {
             // A cancellation from the previous call must not leak into this
             // one: the flag is per-request, reset right before dispatch —
             // but the reset must not swallow an Esc that landed between
@@ -1449,6 +1697,7 @@ async fn run_agent(
                 .send(AgentEvent::ToolStart {
                     name: call.name.clone(),
                     summary: tools::call_summary(&call.name, &call.args),
+                    call_id: call.id.clone(),
                 })
                 .await;
 
@@ -1762,6 +2011,7 @@ async fn run_agent(
                     summary: outcome.output.clone(),
                     ok: outcome.ok,
                     diff: outcome.diff.clone(),
+                    call_id: call.id.clone(),
                 })
                 .await;
             // report a checkpoint taken by the mutation, if any
@@ -2032,6 +2282,7 @@ async fn run_agent(
                 }
                 break;
             }
+        }
         }
         if interrupted {
             // and no further model turn is requested this round; the turn
@@ -4016,6 +4267,106 @@ mod effort_tests {
             reloaded.sessions
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Same-turn subagent calls overlap: both ToolStarts land before the
+    /// first ToolNotice (a sequential loop would interleave start/notice
+    /// pairs). Rows, journal and messages still come out in call order.
+    #[tokio::test]
+    async fn same_turn_subagent_calls_overlap() {
+        let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(vec![
+                vec![
+                    Ok(crate::providers::StreamEvent::ToolCall(
+                        crate::providers::ToolCallReq::new(
+                            "c1",
+                            "subagent",
+                            serde_json::json!({"task": "first"}),
+                        ),
+                    )),
+                    Ok(crate::providers::StreamEvent::ToolCall(
+                        crate::providers::ToolCallReq::new(
+                            "c2",
+                            "subagent",
+                            serde_json::json!({"task": "second"}),
+                        ),
+                    )),
+                ],
+                // one single-text turn per child; interchangeable
+                vec![Ok(crate::providers::StreamEvent::Text("child one done".into()))],
+                vec![Ok(crate::providers::StreamEvent::Text("child two done".into()))],
+                vec![Ok(crate::providers::StreamEvent::Text("all done".into()))],
+            ]),
+        });
+
+        let temp_dir = std::env::temp_dir().join(format!("sqwai-subbatch-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let input = AgentInput {
+            provider,
+            model_id: "m".into(),
+            model_key: "primary".into(),
+            effort: None,
+            effort_support: crate::config::EffortSupport::default(),
+            max_tokens: None,
+            system: vec![],
+            messages: vec![Message::new(Role::User, "go")],
+            root: temp_dir.clone(),
+            session_id: "test-subbatch-sess".into(),
+            blocked_patterns: vec![],
+            plan_mode: false,
+            context_limit: 10000,
+            enable_tools: true,
+            read_only: false,
+            previous_response_id: None,
+            summary: None,
+            mcp: Default::default(),
+            lsp: Default::default(),
+            compact_only: false,
+            diary: Default::default(),
+            memory: Default::default(),
+            compaction: Default::default(),
+            plan_limits: Default::default(),
+            shadow_store: crate::config::ShadowStore::Off,
+            subagent_depth: 0,
+            parent_step: None,
+            fallback_chain: vec![],
+        };
+
+        let mut handle = spawn_agent(input);
+        let mut seq: Vec<String> = Vec::new();
+        let mut dones = 0;
+        let mut results = Vec::new();
+        while let Some(ev) = handle.rx.recv().await {
+            match ev {
+                AgentEvent::ToolStart { call_id, .. } => seq.push(format!("start:{call_id}")),
+                AgentEvent::ToolNotice { call_id, .. } => {
+                    seq.push(format!("notice:{call_id}"))
+                }
+                AgentEvent::SubagentDone { .. } => dones += 1,
+                AgentEvent::Completed(Ok(outcome)) => {
+                    results = outcome
+                        .messages
+                        .iter()
+                        .filter(|m| m.role == Role::Tool)
+                        .filter_map(|m| m.tool_call_id.clone())
+                        .collect();
+                    break;
+                }
+                AgentEvent::Completed(Err(e)) => panic!("unexpected agent error: {e}"),
+                _ => {}
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        assert_eq!(dones, 2, "both children finished: {seq:?}");
+        assert!(
+            seq.len() >= 4 && seq[0] == "start:c1" && seq[1] == "start:c2",
+            "both starts precede any notice: {seq:?}"
+        );
+        assert_eq!(results.len(), 2, "both calls got results");
+        assert!(
+            results.contains(&"c1".to_string()) && results.contains(&"c2".to_string()),
+            "results address both calls: {results:?}"
+        );
     }
 
     #[tokio::test]

@@ -216,6 +216,9 @@ pub(super) enum Segment {
     Tool {
         name: String,
         args: String,
+        /// model-side call id pinning notices to this exact row (parallel
+        /// same-name calls); `None` for rows predating it (subagent chats)
+        call_id: Option<String>,
         /// `None` while the tool is still running
         ok: Option<bool>,
         output: String,
@@ -525,6 +528,16 @@ impl App {
             let gi = tag - GROUP_BASE;
             // resolve the positional index to a stable group identity now:
             // the live turn's start, or the frozen group's seg_start
+            if let Some(id) = self.active_subagent {
+                // subagent view folds the child's own groups: stored ones
+                // resolve, the live one is untoggleable and resolves nowhere
+                let start = self
+                    .sub_groups
+                    .get(&id)
+                    .and_then(|groups| groups.get(gi))
+                    .map(|g| g.seg_start)?;
+                return Some(ClickTarget::Group { start, screen });
+            }
             let start = if gi < self.activity_groups.len() {
                 self.activity_groups[gi].seg_start
             } else {
@@ -933,6 +946,18 @@ impl App {
             ClickTarget::Group { start, screen } => {
                 // re-resolve by seg_start against the CURRENT groups: a stale
                 // index is ignored instead of folding the wrong turn
+                if let Some(id) = self.active_subagent {
+                    // subagent view folds the child's own groups, never the
+                    // main transcript's; the live group stays expanded
+                    if let Some(groups) = self.sub_groups.get_mut(&id)
+                        && let Some(gi) = groups.iter().position(|g| g.seg_start == start)
+                    {
+                        groups[gi].expanded = !groups[gi].expanded;
+                        self.capture_anchor_for_view(Some(id), GROUP_BASE + gi, screen);
+                        self.dirty = true;
+                    }
+                    return;
+                }
                 let gi = self
                     .activity_groups
                     .iter()
@@ -1712,6 +1737,7 @@ impl App {
                 preview_total,
                 expanded,
                 flash,
+                ..
             } => {
                 // Every tool uses the same three-part row: state marker, tool
                 // name, and a quiet one-line argument summary. Calm white
@@ -2281,6 +2307,15 @@ impl App {
         for g in &self.activity_groups {
             g.expanded.hash(&mut h);
         }
+        // subagent folds share the gate: a toggle must rebuild even though
+        // no segment revision moves (cached rows are reused as-is)
+        for (id, groups) in &self.sub_groups {
+            id.hash(&mut h);
+            groups.len().hash(&mut h);
+            for g in groups {
+                g.expanded.hash(&mut h);
+            }
+        }
         self.live_group_collapsed.hash(&mut h);
         self.spinner_tick.hash(&mut h);
         self.ask_hover.hash(&mut h);
@@ -2692,9 +2727,10 @@ impl App {
 
     /// Assemble one subagent transcript into the live buffers.
     /// Same pipeline as the main view (render → wrap → id-keyed cache),
-    /// minus activity groups (a subagent chat has no turn folding).
-    /// Borrows are scoped per index so the cache insert never aliases the
-    /// transcript slice it was rendered from.
+    /// with the same activity folding: finished groups come from the store,
+    /// the running turn recomputes live. Borrows are scoped per index so
+    /// the cache insert never aliases the transcript slice it was rendered
+    /// from.
     fn rebuild_sub_cache(&mut self, width: u16, id: u64) {
         // timed for the `/debug` perf log, like the main rebuild
         let t0 = std::time::Instant::now();
@@ -2707,7 +2743,72 @@ impl App {
             .unwrap_or(0);
         let mut chunks: Vec<RowChunk> = Vec::new();
         let mut fresh: Vec<bool> = Vec::new();
+        let mut struct_ord = 0u64;
+        macro_rules! struct_row {
+            ($line:expr, $tag:expr) => {{
+                chunks.push(struct_chunk(struct_ord, $line, $tag, w));
+                fresh.push(true);
+                struct_ord += 1;
+            }};
+        }
+        // finished turns are frozen in `sub_groups`; the running turn is
+        // recomputed here, so its header counts grow while events stream in
+        let mut groups: Vec<ActivityGroup> =
+            self.sub_groups.get(&id).cloned().unwrap_or_default();
+        let running = self
+            .subagents
+            .iter()
+            .any(|(sid, _, status, _, _)| *sid == id && status == "running");
+        if running
+            && let Some(chat) = self.subagent_chats.get(&id)
+        {
+            let floor = groups
+                .iter()
+                .map(|g| g.seg_end)
+                .max()
+                .unwrap_or(0)
+                .min(chat.len());
+            if let Some(run) = Self::trailing_work_run_in(chat, floor) {
+                let duration_ms = self
+                    .sub_started
+                    .get(&id)
+                    .map(|t| t.elapsed().as_millis() as u64)
+                    .unwrap_or(0);
+                let mut live = Self::build_activity_group_in(chat, run, duration_ms, None);
+                live.expanded = true;
+                groups.push(live);
+            }
+        }
+        let stored = self.sub_groups.get(&id).map(|g| g.len()).unwrap_or(0);
+        let mut gi = 0usize; // next group waiting to be opened
+        let mut hide_until = 0usize; // collapsed group: skip [seg_start, seg_end)
+        let mut inside_until = 0usize; // expanded group: indent [seg_start, seg_end)
         for idx in 0..count {
+            if gi < groups.len() && idx == groups[gi].seg_start {
+                let g = &groups[gi];
+                struct_row!(blank(), None);
+                // only a running turn's group shimmers; finished headers
+                // stay static dim — same as the main transcript
+                let live = running && gi >= stored;
+                struct_row!(
+                    activity_header_line(g, live.then_some(self.spinner_tick)),
+                    Some(GROUP_BASE + gi)
+                );
+                if g.expanded {
+                    inside_until = g.seg_end;
+                } else {
+                    hide_until = g.seg_end;
+                }
+                gi += 1;
+            }
+            if idx < hide_until {
+                continue;
+            }
+            let indent = if idx < inside_until {
+                usize::from(GROUP_INDENT)
+            } else {
+                0
+            };
             let (mid, mrev, key) = match (self.subagent_chats.get(&id), self.subagent_meta.get(&id))
             {
                 (Some(chat), Some(meta)) => match (chat.get(idx), meta.get(idx)) {
@@ -2716,8 +2817,12 @@ impl App {
                 },
                 _ => continue,
             };
+            // nested rows render narrower so the indent cannot push them
+            // past the chat width; the width is part of the cache check so
+            // a segment that moves in or out of a group repaints correctly
+            let render_w = w.saturating_sub(indent as u16);
             let hit = matches!(self.seg_cache.get(&mid), Some(entry)
-                if entry.rev == mrev && entry.width == w && entry.key == key);
+                if entry.rev == mrev && entry.width == render_w && entry.key == key);
             if hit {
                 // live rows are reused by the merge step: no clone here
                 chunks.push((AsmTag::Seg(mid), Vec::new()));
@@ -2728,15 +2833,19 @@ impl App {
             let lines = {
                 // immutable borrow ends before the cache insert below
                 let chat = self.subagent_chats.get(&id).unwrap();
-                self.render_segment(chat, idx, w, false)
+                self.render_segment(chat, idx, render_w, false)
             };
-            let (rows, tags) = wrap_tagged(lines, w);
+            let chunk: Vec<(Line<'static>, Option<usize>)> = lines
+                .into_iter()
+                .map(|(line, tag)| (indent_line(line, indent), tag))
+                .collect();
+            let (rows, tags) = wrap_tagged(chunk, w);
             let rows: Vec<(Line<'static>, Option<usize>)> = rows.into_iter().zip(tags).collect();
             self.seg_cache.insert(
                 mid,
                 SegCacheEntry {
                     rev: mrev,
-                    width: w,
+                    width: render_w,
                     key,
                     rows: rows.clone(),
                 },

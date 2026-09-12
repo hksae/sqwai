@@ -266,6 +266,12 @@ pub struct App {
     subagents: Vec<(u64, String, String, String, bool)>,
     /// full read-only transcripts for each child agent
     subagent_chats: std::collections::BTreeMap<u64, Vec<Segment>>,
+    /// finished activity groups per child chat: same folding as the main
+    /// transcript, so child chats read identically. Ephemeral like the
+    /// chats; cleared with them.
+    sub_groups: std::collections::BTreeMap<u64, Vec<ActivityGroup>>,
+    /// start time per running child, for its live group header
+    sub_started: std::collections::BTreeMap<u64, std::time::Instant>,
     /// child transcript currently replacing the main chat on screen
     active_subagent: Option<u64>,
     /// checked options in the current multi-select ask_user, per question
@@ -779,6 +785,8 @@ impl App {
             todos: Vec::new(),
             subagents: Vec::new(),
             subagent_chats: std::collections::BTreeMap::new(),
+            sub_groups: std::collections::BTreeMap::new(),
+            sub_started: std::collections::BTreeMap::new(),
             active_subagent: None,
             ask_picked: Vec::new(),
             ask_custom: Vec::new(),
@@ -984,6 +992,7 @@ impl App {
                         let idx = self.push_segment(Segment::Tool {
                             name: call.name.clone(),
                             args: crate::agent::tools::call_summary(&call.name, &call.args),
+                            call_id: Some(call.id.clone()),
                             ok: None,
                             output: String::new(),
                             diff: None,
@@ -2221,6 +2230,8 @@ impl App {
         self.subagents.clear();
         self.subagent_chats.clear();
         self.subagent_meta.clear();
+        self.sub_groups.clear();
+        self.sub_started.clear();
         self.sub_views.clear();
         // live + parked rows belong to the old transcript: drop them whole
         // so the next draw assembles from scratch instead of splicing
@@ -2330,6 +2341,8 @@ impl App {
         self.subagents.clear();
         self.subagent_chats.clear();
         self.subagent_meta.clear();
+        self.sub_groups.clear();
+        self.sub_started.clear();
         self.sub_views.clear();
         self.stashed_main_scroll = None;
         self.todos.clear();
@@ -3300,6 +3313,9 @@ impl App {
                         Segment::Tool {
                             name,
                             args: summary,
+                            // child rows are matched by name within one
+                            // child's chat (sequential there); no call id
+                            call_id: None,
                             ok: None,
                             output: String::new(),
                             diff: None,
@@ -3379,22 +3395,30 @@ impl App {
                             }
                         }
                     }
+                    // fold the finished chat like a main turn; no more rows
+                    // land after Done, so the stored indices stay valid
+                    self.finalize_sub_group(id, !ok);
                     self.sub_touch_all(id);
                     if matches!(self.cur_menu(), Some(Menu::Subagents)) {
                         self.build_menu_rows();
                     }
                     self.dirty = true;
                 }
-                AgentEvent::ToolStart { name, summary } => {
-                    self.handle_tool_start(name, summary);
+                AgentEvent::ToolStart {
+                    name,
+                    summary,
+                    call_id,
+                } => {
+                    self.handle_tool_start(name, summary, Some(call_id));
                 }
                 AgentEvent::ToolNotice {
                     name,
                     summary,
                     ok,
                     diff,
+                    call_id,
                 } => {
-                    self.handle_tool_notice(name, summary, ok, diff);
+                    self.handle_tool_notice(name, summary, ok, diff, Some(call_id));
                 }
                 AgentEvent::Checkpoint { label } => {
                     self.last_checkpoint = Some(label);
@@ -3606,7 +3630,7 @@ impl App {
     /// live answer (tool -> result -> answer). A tool call ends the current
     /// reasoning block, so the next ThinkingDelta opens its own row instead of
     /// piling onto the previous one.
-    fn handle_tool_start(&mut self, name: String, summary: String) {
+    fn handle_tool_start(&mut self, name: String, summary: String, call_id: Option<String>) {
         if self.thinking_open {
             if let Some(i) = self.thinking_idx.take() {
                 self.freeze_thinking(i);
@@ -3632,6 +3656,7 @@ impl App {
         let tool = Segment::Tool {
             name,
             args: summary,
+            call_id,
             ok: None,
             output: String::new(),
             diff: None,
@@ -3686,6 +3711,7 @@ impl App {
             });
         }
         self.subagent_meta.insert(id, meta);
+        self.sub_started.insert(id, std::time::Instant::now());
         let pos = self
             .segments
             .iter()
@@ -3711,17 +3737,28 @@ impl App {
         summary: String,
         ok: bool,
         diff: Option<String>,
+        call_id: Option<String>,
     ) {
         // answered inline above; no Tool row exists for it by design
         if name == "ask_user" || name == "propose_plan" {
             return;
         }
         self.perf.event(&format!("tool_done {name} ok={ok}"));
-        // close the row opened by ToolStart; fall back to a new one
-        let hit = self
-            .segments
-            .iter()
-            .rposition(|s| matches!(s, Segment::Tool { name: n, ok: None, .. } if *n == name));
+        // close the row opened by ToolStart: exact call id first (parallel
+        // same-name calls), then the legacy name match for rows predating
+        // ids; fall back to a new row when the start event was missed
+        let hit = call_id
+            .as_ref()
+            .and_then(|wanted| {
+                self.segments.iter().position(|s| {
+                    matches!(s, Segment::Tool { call_id: row_id, ok: None, .. } if row_id.as_ref() == Some(wanted))
+                })
+            })
+            .or_else(|| {
+                self.segments.iter().rposition(|s| {
+                    matches!(s, Segment::Tool { name: n, ok: None, .. } if *n == name)
+                })
+            });
         match hit {
             Some(i) => {
                 if let Some(Segment::Tool {
@@ -3751,6 +3788,7 @@ impl App {
                 let tool = Segment::Tool {
                     name,
                     args: String::new(),
+                    call_id,
                     ok: Some(ok),
                     output: summary,
                     diff,
@@ -3839,11 +3877,11 @@ impl App {
     }
 
     /// True while a tool call is executing right now — the row `ToolStart`
-    /// opened and `ToolNotice` has not yet closed. Only one tool runs at a
-    /// time (mutating calls run alone; §3.1), so the most recent segment is
-    /// enough to check. This is what Esc uses to decide between a cooperative
-    /// per-tool cancel (§3.7) and the hard whole-turn abort: there is nothing
-    /// "mid-tool" to cancel while the model is only streaming text.
+    /// opened and `ToolNotice` has not yet closed. Mutating calls run alone
+    /// (§3.1), but same-turn subagent calls overlap, so any open row counts.
+    /// This is what Esc uses to decide between a cooperative per-tool cancel
+    /// (§3.7) and the hard whole-turn abort: there is nothing "mid-tool" to
+    /// cancel while the model is only streaming text.
     fn tool_running(&self) -> bool {
         self.segments
             .iter()
@@ -3934,14 +3972,20 @@ impl App {
     /// belong to no group and must neither break the run nor join it.
     /// `start` never reaches back past the last finalized group.
     fn trailing_work_run(&self) -> Option<(usize, usize)> {
-        let segs = &self.segments;
         let floor = self
             .activity_groups
             .iter()
             .map(|g| g.seg_end)
             .max()
             .unwrap_or(0)
-            .min(segs.len());
+            .min(self.segments.len());
+        Self::trailing_work_run_in(&self.segments, floor)
+    }
+
+    /// Same scan over any transcript: subagent chats fold with the same
+    /// rules as the main one. `floor` is where the previous group ended.
+    fn trailing_work_run_in(segs: &[Segment], floor: usize) -> Option<(usize, usize)> {
+        let floor = floor.min(segs.len());
         let mut end = segs.len();
         while end > floor && matches!(segs[end - 1], Segment::Status { .. }) {
             end -= 1;
@@ -3987,10 +4031,31 @@ impl App {
 
     /// Summarize one run of working segments into an `ActivityGroup`.
     fn build_activity_group(&self, (seg_start, seg_end): (usize, usize)) -> ActivityGroup {
+        // The activity header measures the full turn (including provider and
+        // tool latency); individual thinking rows use their own frozen timer.
+        let duration_ms = self
+            .turn_started
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        Self::build_activity_group_in(
+            &self.segments,
+            (seg_start, seg_end),
+            duration_ms,
+            self.turn_user_index,
+        )
+    }
+
+    /// Same summary over any transcript (subagent chats carry no turn user).
+    fn build_activity_group_in(
+        segs: &[Segment],
+        (seg_start, seg_end): (usize, usize),
+        duration_ms: u64,
+        turn_user: Option<usize>,
+    ) -> ActivityGroup {
         let mut calls = 0usize;
         let mut thinking = 0usize;
         let mut errors = 0usize;
-        for seg in &self.segments[seg_start..seg_end] {
+        for seg in &segs[seg_start..seg_end] {
             match seg {
                 Segment::Tool {
                     ok: Some(false), ..
@@ -4011,12 +4076,6 @@ impl App {
                 _ => {}
             }
         }
-        // The activity header measures the full turn (including provider and
-        // tool latency); individual thinking rows use their own frozen timer.
-        let duration_ms = self
-            .turn_started
-            .map(|t| t.elapsed().as_millis() as u64)
-            .unwrap_or(0);
         ActivityGroup {
             seg_start,
             seg_end,
@@ -4026,8 +4085,36 @@ impl App {
             errors,
             rejected: 0,
             expanded: true,
-            turn_user: self.turn_user_index,
+            turn_user,
         }
+    }
+
+    /// Fold one finished child chat into an activity group, like the main
+    /// transcript does per turn. Runs once, on SubagentDone, when the chat
+    /// stops changing so the stored indices stay valid.
+    fn finalize_sub_group(&mut self, id: u64, failed: bool) {
+        let Some(chat) = self.subagent_chats.get(&id) else {
+            return;
+        };
+        let floor = self
+            .sub_groups
+            .get(&id)
+            .map(|groups| groups.iter().map(|g| g.seg_end).max().unwrap_or(0))
+            .unwrap_or(0)
+            .min(chat.len());
+        let Some(run) = Self::trailing_work_run_in(chat, floor) else {
+            self.sub_started.remove(&id);
+            return;
+        };
+        let duration_ms = self
+            .sub_started
+            .remove(&id)
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        let mut group = Self::build_activity_group_in(chat, run, duration_ms, None);
+        // like the main transcript: a failed child stays open
+        group.expanded = failed || group.errors > 0;
+        self.sub_groups.entry(id).or_default().push(group);
     }
 
     /// Freeze the turn that just finished into a group. Called once the

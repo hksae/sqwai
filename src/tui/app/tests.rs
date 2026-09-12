@@ -296,13 +296,18 @@ mod tests {
             let _ = app.agent.as_mut();
             match e {
                 AgentEvent::ThinkingDelta(t) => app.handle_thinking_delta(t),
-                AgentEvent::ToolStart { name, summary } => app.handle_tool_start(name, summary),
+                AgentEvent::ToolStart {
+                    name,
+                    summary,
+                    call_id,
+                } => app.handle_tool_start(name, summary, Some(call_id)),
                 AgentEvent::ToolNotice {
                     name,
                     summary,
                     ok,
                     diff,
-                } => app.handle_tool_notice(name, summary, ok, diff),
+                    call_id,
+                } => app.handle_tool_notice(name, summary, ok, diff, Some(call_id)),
                 AgentEvent::TextDelta(t) => app.handle_text_delta(t),
                 _ => {}
             }
@@ -312,6 +317,7 @@ mod tests {
             AgentEvent::ToolStart {
                 name: "read".into(),
                 summary: "a.rs".into(),
+                call_id: "c-read".into(),
             },
             &mut app,
         );
@@ -321,6 +327,7 @@ mod tests {
                 summary: "lines".into(),
                 ok: true,
                 diff: None,
+                call_id: "c-read".into(),
             },
             &mut app,
         );
@@ -329,6 +336,7 @@ mod tests {
             AgentEvent::ToolStart {
                 name: "edit".into(),
                 summary: "a.rs".into(),
+                call_id: "c-edit".into(),
             },
             &mut app,
         );
@@ -338,6 +346,7 @@ mod tests {
                 summary: "ok".into(),
                 ok: true,
                 diff: None,
+                call_id: "c-edit".into(),
             },
             &mut app,
         );
@@ -396,6 +405,7 @@ mod tests {
             live: false,
         });
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "read".into(),
             args: "a.rs".into(),
             ok: Some(ok),
@@ -424,7 +434,7 @@ mod tests {
         });
         app.thinking_idx = Some(0);
         app.thinking_open = true;
-        app.handle_tool_start("read".into(), "a.rs".into());
+        app.handle_tool_start("read".into(), "a.rs".into(), None);
         match &app.segments[0] {
             Segment::Thinking {
                 duration_ms, live, ..
@@ -495,6 +505,7 @@ mod tests {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.push_segment(Segment::User("go".into()));
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "subagent".into(),
             args: "task".into(),
             ok: Some(true),
@@ -513,6 +524,7 @@ mod tests {
             live: false,
         });
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "read".into(),
             args: "a.rs".into(),
             ok: Some(true),
@@ -615,6 +627,7 @@ mod tests {
         app.push_segment(Segment::User("go".into()));
         for name in ["read", "write"] {
             app.push_segment(Segment::Tool {
+                call_id: None,
                 name: name.into(),
                 args: "a.rs".into(),
                 ok: Some(true),
@@ -660,6 +673,7 @@ mod tests {
         // second turn: tools ran, then a provider error with no streamed text
         app.push_segment(Segment::User("again".into()));
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "read".into(),
             args: "b.rs".into(),
             ok: Some(true),
@@ -694,7 +708,7 @@ mod tests {
             live: true,
         });
         app.handle_thinking_delta("thinking".into());
-        app.handle_tool_start("read".into(), "a.rs".into());
+        app.handle_tool_start("read".into(), "a.rs".into(), None);
 
         // the running turn is not frozen yet: no group stored, but rendered
         assert!(app.activity_groups.is_empty());
@@ -1757,6 +1771,7 @@ mod tests {
             expanded: false,
         });
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "subagent".into(),
             args: "2 tasks".into(),
             ok: None,
@@ -2009,6 +2024,104 @@ mod tests {
         assert_eq!(app.active_subagent, Some(7));
     }
 
+    fn open_sub_chat(app: &mut App, id: u64, status: &str) {
+        use crate::tui::app::view::SegMeta;
+        app.subagent_chats.insert(
+            id,
+            vec![
+                Segment::User("do research".into()),
+                Segment::Thinking {
+                    text: "hmm".into(),
+                    expanded: false,
+                    started: None,
+                    duration_ms: 0,
+                    live: false,
+                },
+                Segment::Tool {
+                    name: "read".into(),
+                    args: "a.rs".into(),
+                    call_id: None,
+                    ok: Some(true),
+                    output: "contents".into(),
+                    diff: None,
+                    preview: vec!["contents".into()],
+                    preview_total: 1,
+                    expanded: false,
+                    flash: None,
+                },
+                Segment::Assistant {
+                    text: "found it".into(),
+                    live: false,
+                },
+            ],
+        );
+        app.subagent_meta.insert(
+            id,
+            (771..775).map(|n| SegMeta { id: n, rev: 0 }).collect(),
+        );
+        app.subagents
+            .push((id, "do research".into(), status.into(), String::new(), false));
+        app.active_subagent = Some(id);
+    }
+
+    #[test]
+    fn sub_group_folds_finished_chat_like_main() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        open_sub_chat(&mut app, 7, "completed");
+        app.finalize_sub_group(7, false);
+        let groups = app.sub_groups.get(&7).expect("folded group");
+        assert_eq!(groups.len(), 1);
+        assert_eq!((groups[0].seg_start, groups[0].seg_end), (1, 3));
+        assert!(!groups[0].expanded, "ok child folds shut");
+        let s = render_to_string(&mut app, 100, 30);
+        assert!(s.contains("activity"), "header shows:\n{s}");
+        assert!(s.contains("found it"), "answer stays visible:\n{s}");
+        assert!(!s.contains("a.rs"), "tool row folds away:\n{s}");
+    }
+
+    #[test]
+    fn sub_group_header_click_toggles() {
+        use crate::tui::app::view::GROUP_BASE;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        open_sub_chat(&mut app, 7, "completed");
+        app.finalize_sub_group(7, false);
+        render_to_string(&mut app, 100, 30);
+        let abs = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(GROUP_BASE))
+            .expect("header row");
+        app.click(abs);
+        assert!(
+            app.sub_groups[&7][0].expanded,
+            "header click unfolds the child turn"
+        );
+        let s = render_to_string(&mut app, 100, 30);
+        assert!(s.contains("a.rs"), "tool row is back:\n{s}");
+    }
+
+    #[test]
+    fn sub_group_live_while_running() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        open_sub_chat(&mut app, 7, "running");
+        app.sub_started
+            .insert(7, std::time::Instant::now());
+        // reopen the tool row: the running turn is still open
+        if let Some(Segment::Tool { ok, .. }) = app
+            .subagent_chats
+            .get_mut(&7)
+            .and_then(|chat| chat.get_mut(2))
+        {
+            *ok = None;
+        }
+        let s = render_to_string(&mut app, 100, 30);
+        assert!(s.contains("activity"), "live header shows:\n{s}");
+        assert!(s.contains("a.rs"), "running rows stay visible:\n{s}");
+    }
+
     #[test]
     fn subagent_chat_click_expands_its_tool_without_switching_chat() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
@@ -2016,6 +2129,7 @@ mod tests {
         app.subagent_chats.insert(
             7,
             vec![Segment::Tool {
+                call_id: None,
                 name: "read".into(),
                 args: "src/main.rs".into(),
                 ok: Some(true),
@@ -2505,8 +2619,8 @@ mod tests {
     #[test]
     fn tool_notice_arms_the_finish_wave() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.handle_tool_start("read".into(), "a.rs".into());
-        app.handle_tool_notice("read".into(), "done".into(), true, None);
+        app.handle_tool_start("read".into(), "a.rs".into(), None);
+        app.handle_tool_notice("read".into(), "done".into(), true, None, None);
         let seg = app
             .segments
             .iter()
@@ -2519,11 +2633,64 @@ mod tests {
     }
 
     #[test]
+    fn tool_notice_matches_call_id_not_position() {
+        // two same-name rows open (parallel subagents): the notice must
+        // close its own row, not the last open one (rposition would)
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.handle_tool_start("subagent".into(), "first".into(), Some("c1".into()));
+        app.handle_tool_start("subagent".into(), "second".into(), Some("c2".into()));
+        app.handle_tool_notice(
+            "subagent".into(),
+            "one done".into(),
+            true,
+            None,
+            Some("c1".into()),
+        );
+        assert!(
+            matches!(
+                &app.segments[0],
+                Segment::Tool {
+                    ok: Some(true),
+                    output,
+                    ..
+                } if output.as_str() == "one done"
+            ),
+            "first notice closes the first row: {:?}",
+            app.segments[0]
+        );
+        assert!(
+            matches!(&app.segments[1], Segment::Tool { ok: None, .. }),
+            "second row stays open: {:?}",
+            app.segments[1]
+        );
+        app.handle_tool_notice(
+            "subagent".into(),
+            "two done".into(),
+            true,
+            None,
+            Some("c2".into()),
+        );
+        assert!(
+            matches!(
+                &app.segments[1],
+                Segment::Tool {
+                    ok: Some(true),
+                    output,
+                    ..
+                } if output.as_str() == "two done"
+            ),
+            "second notice closes the second row: {:?}",
+            app.segments[1]
+        );
+    }
+
+    #[test]
     fn finish_wave_keeps_geometry_and_settles_static() {
         // env-independent: geometry holds on both paths, and an expired
         // wave renders exactly the static row
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "read".into(),
             args: "a.rs".into(),
             ok: Some(true),
@@ -2565,6 +2732,7 @@ mod tests {
         // the static one, so the row repaints settled (no stuck wave frame)
         let app = test_app("http://127.0.0.1:9/v1".into());
         let mk = |flash| Segment::Tool {
+            call_id: None,
             name: "read".into(),
             args: "a.rs".into(),
             ok: Some(true),
@@ -2826,6 +2994,7 @@ mod tests {
     fn edit_row_shows_colored_change_counts() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "edit".into(),
             args: "src/a-very-long-file-name.rs".into(),
             ok: Some(true),
@@ -2851,6 +3020,7 @@ mod tests {
     fn expanded_tool_output_uses_left_rail_and_truncates() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "patch".into(),
             args: String::new(),
             ok: Some(true),
@@ -2950,6 +3120,7 @@ mod tests {
     fn resized_terminal_rebuilds_tool_frames_at_chat_width() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "patch".into(),
             args: String::new(),
             ok: Some(true),
@@ -4242,6 +4413,7 @@ mod tests {
         app.startup = false;
         app.push_segment(Segment::User("Do the thing.".into()));
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "read_file".into(),
             args: r#"{"path":"src/main.rs"}"#.into(),
             ok: Some(true),
@@ -4253,6 +4425,7 @@ mod tests {
             flash: None,
         });
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "bash".into(),
             args: r#"{"cmd":"cargo build"}"#.into(),
             ok: Some(false),
@@ -4264,6 +4437,7 @@ mod tests {
             flash: None,
         });
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "write_file".into(),
             args: r#"{"path":"out.txt"}"#.into(),
             ok: Some(true),
@@ -4295,6 +4469,7 @@ mod tests {
         let seg_start = app.segments.len();
         for i in 0..12 {
             app.push_segment(Segment::Tool {
+                call_id: None,
                 name: format!("tool_{i}"),
                 args: r#"{}"#.into(),
                 ok: Some(true),
@@ -4337,6 +4512,7 @@ mod tests {
         app.startup = false;
         app.push_segment(Segment::User("Run the tests.".into()));
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "bash".into(),
             args: r#"{"cmd":"cargo test"}"#.into(),
             ok: None, // still running
@@ -4385,6 +4561,7 @@ mod tests {
         });
         for i in 0..4 {
             app.push_segment(Segment::Tool {
+                call_id: None,
                 name: format!("tool_{i}"),
                 args: r#"{}"#.into(),
                 ok: Some(true),
@@ -4397,6 +4574,7 @@ mod tests {
             });
         }
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "risky_tool".into(),
             args: r#"{"x":1}"#.into(),
             ok: Some(false),
@@ -4408,6 +4586,7 @@ mod tests {
             flash: None,
         });
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "cleanup".into(),
             args: r#"{}"#.into(),
             ok: Some(true),
@@ -4864,6 +5043,7 @@ mod tests {
         assert!(!app.tool_running(), "no tool segment at all");
 
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "bash".into(),
             args: "sleep 30".into(),
             ok: None,
@@ -5268,12 +5448,12 @@ mod tests {
     fn ask_user_tool_rows_are_suppressed_live() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         let before = app.segments.len();
-        app.handle_tool_start("ask_user".to_string(), "anything".to_string());
+        app.handle_tool_start("ask_user".to_string(), "anything".to_string(), None);
         assert_eq!(app.segments.len(), before, "no Tool row for ask_user");
-        app.handle_tool_notice("ask_user".to_string(), "answer".to_string(), true, None);
+        app.handle_tool_notice("ask_user".to_string(), "answer".to_string(), true, None, None);
         assert_eq!(app.segments.len(), before, "no Tool row on notice either");
         // ordinary tools are unaffected
-        app.handle_tool_start("read".to_string(), "a.rs".to_string());
+        app.handle_tool_start("read".to_string(), "a.rs".to_string(), None);
         assert_eq!(app.segments.len(), before + 1);
     }
 
@@ -5389,7 +5569,7 @@ mod tests {
             duration_ms: 0,
             live: false,
         });
-        app.handle_tool_start("read".to_string(), "a.rs".to_string());
+        app.handle_tool_start("read".to_string(), "a.rs".to_string(), None);
         app.push_segment(Segment::Assistant {
             text: String::new(),
             live: true,
@@ -5597,6 +5777,7 @@ mod tests {
         app.insert_segment(
             1,
             Segment::Tool {
+                call_id: None,
                 name: "bash".into(),
                 args: "echo hi".into(),
                 ok: Some(true),
@@ -5647,13 +5828,13 @@ mod tests {
 
         // Turn 1: model outputs preamble text, then calls tool 'read'
         app.handle_text_delta("Let me inspect the file.\nHere is my plan.".into());
-        app.handle_tool_start("read".into(), "a.rs".into());
-        app.handle_tool_notice("read".into(), "file contents".into(), true, None);
+        app.handle_tool_start("read".into(), "a.rs".into(), None);
+        app.handle_tool_notice("read".into(), "file contents".into(), true, None, None);
 
         // Turn 2: model outputs preamble text, then calls tool 'edit'
         app.handle_text_delta("Now I see the issue, editing line 10.".into());
-        app.handle_tool_start("edit".into(), "a.rs".into());
-        app.handle_tool_notice("edit".into(), "done".into(), true, None);
+        app.handle_tool_start("edit".into(), "a.rs".into(), None);
+        app.handle_tool_notice("edit".into(), "done".into(), true, None, None);
 
         // Turn 3: model outputs final answer (no tools)
         app.handle_text_delta("I have finished the fix.".into());
@@ -5761,8 +5942,8 @@ mod tests {
         });
 
         app.handle_text_delta("First line of commentary.\nSecond line of commentary.".into());
-        app.handle_tool_start("read".into(), "main.rs".into());
-        app.handle_tool_notice("read".into(), "ok".into(), true, None);
+        app.handle_tool_start("read".into(), "main.rs".into(), None);
+        app.handle_tool_notice("read".into(), "ok".into(), true, None, None);
         app.finish_turn(Ok(()));
 
         // Commentary segment exists (not a tool row)
@@ -5796,6 +5977,7 @@ mod tests {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.push_segment(Segment::Commentary("Checking files...".into()));
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "read_file".into(),
             args: "src/main.rs".into(),
             ok: Some(true),
@@ -5901,7 +6083,7 @@ mod tests {
         });
 
         app.handle_text_delta("Starting build...".into());
-        app.handle_tool_start("bash".into(), "cargo build".into());
+        app.handle_tool_start("bash".into(), "cargo build".into(), None);
 
         // Abort mid-tool
         app.finish_turn(Err("aborted".into()));
@@ -6613,6 +6795,7 @@ mod tests {
         }
         let tool_idx = app.segments.len();
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "read".into(),
             args: "f".into(),
             ok: Some(true),
@@ -6680,6 +6863,7 @@ mod tests {
         app.subagent_chats.insert(
             7,
             vec![Segment::Tool {
+                call_id: None,
                 name: "read".into(),
                 args: "src/main.rs".into(),
                 ok: Some(true),
@@ -6725,6 +6909,7 @@ mod tests {
         app.startup = false;
         for name in ["first", "second"] {
             app.push_segment(Segment::Tool {
+                call_id: None,
                 name: name.into(),
                 args: String::new(),
                 ok: Some(true),
@@ -6914,6 +7099,7 @@ mod tests {
         });
         let tool_idx = app.segments.len();
         app.push_segment(Segment::Tool {
+            call_id: None,
             name: "read".into(),
             args: "Cargo.toml".into(),
             ok: Some(true),
