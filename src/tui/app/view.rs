@@ -2751,7 +2751,10 @@ impl App {
                     }
                     Some(e) => vec![
                         Span::styled(
-                            format!("{}  ", crate::tui::spinners::frame(e, tick)),
+                            format!(
+                                "{}  ",
+                                truncate_display_width(crate::tui::spinners::frame(e, tick), 24)
+                            ),
                             Theme::accent(),
                         ),
                         Span::styled(e.name.to_string(), Theme::base()),
