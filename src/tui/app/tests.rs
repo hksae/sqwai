@@ -551,7 +551,13 @@ mod tests {
     #[test]
     fn error_status_arrives_collapsed_and_unfolds_on_click() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.status("first\nsecond\nthird", StatusKind::Err);
+        // durable error segments (turn notes) still live in the chat;
+        // transient notices toast and never become segments
+        app.push_segment(Segment::Status {
+            text: "first\nsecond\nthird".into(),
+            kind: StatusKind::Err,
+            expanded: false,
+        });
         let idx = app.segments.len() - 1;
 
         let rows = app.render_segment(&app.segments, idx, 100, true);
@@ -572,7 +578,11 @@ mod tests {
         );
 
         // a single line wider than the row collapses too
-        app.status(&"x".repeat(200), StatusKind::Err);
+        app.push_segment(Segment::Status {
+            text: "x".repeat(200),
+            kind: StatusKind::Err,
+            expanded: false,
+        });
         let wide = app.render_segment(&app.segments, app.segments.len() - 1, 100, true);
         assert_eq!(wide.len(), 1, "wide single line capped: {wide:?}");
 
@@ -901,14 +911,8 @@ mod tests {
             "user message must not be added"
         );
         assert!(
-            app.segments.iter().any(|s| matches!(
-                s,
-                Segment::Status {
-                    kind: StatusKind::Err,
-                    ..
-                }
-            )),
-            "no error status shown"
+            matches!(&app.toast, Some(t) if t.kind == StatusKind::Err),
+            "rejection toasts an error"
         );
         assert_eq!(
             app.input.lines().join("\n"),
@@ -1279,10 +1283,10 @@ mod tests {
             "menu actions must not write into the chat"
         );
         assert!(
-            app.menu_status
+            app.toast
                 .as_ref()
-                .is_some_and(|(t, _)| t.contains("pinned")),
-            "no in-menu notice"
+                .is_some_and(|t| t.text.contains("pinned")),
+            "pin notice goes to the toast"
         );
         assert!(app.sessions[0].pinned);
     }
@@ -1621,7 +1625,27 @@ mod tests {
         app.status("provider boom", StatusKind::Err);
         let spans = app.status_bar_spans(120);
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("err: provider boom"), "bar: {text}");
+        assert!(text.contains("provider boom"), "bar: {text}");
+        assert!(
+            !app.segments.iter().any(|s| matches!(s, Segment::Status { .. })),
+            "toast never lands in the chat"
+        );
+    }
+
+    #[test]
+    fn toast_replaces_previous_notice() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.status("first", StatusKind::Info);
+        app.status("second", StatusKind::Warn);
+        assert_eq!(toast_text(&app), "second", "new notice wins outright");
+        assert!(app.toast.as_ref().is_some_and(|t| t.kind == StatusKind::Warn));
+        // expired toasts vanish from the bar
+        app.toast.as_mut().expect("toast").until =
+            std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let spans = app.status_bar_spans(120);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.contains("second"), "expired toast hidden: {text}");
+        assert!(app.toast.is_none(), "expired toast dropped");
     }
 
     #[test]
@@ -2190,10 +2214,10 @@ mod tests {
     fn plan_show_alias_is_gone() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.plan_command("/plan show");
-        assert!(matches!(
-            app.segments.last(),
-            Some(Segment::Status { text, .. }) if text.contains("unknown /plan action")
-        ));
+        assert!(
+            matches!(&app.toast, Some(t) if t.text.contains("unknown /plan action")),
+            "unknown action toasts"
+        );
         // bare `/plan` still opens the overview
         app.plan_command("/plan");
         assert!(matches!(app.cur_menu(), Some(Menu::Plan)));
@@ -2256,28 +2280,20 @@ mod tests {
     }
 
     #[test]
-    fn busy_status_is_unique_and_expires() {
+    fn busy_status_is_a_replacing_toast_and_expires() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.show_busy_status();
         app.show_busy_status();
-        assert_eq!(
-            app.segments
-                .iter()
-                .filter(|segment| matches!(segment, Segment::Status { text, .. } if text == App::BUSY_STATUS))
-                .count(),
-            1
-        );
-        app.busy_until = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
-        if app
-            .busy_until
-            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
-        {
-            app.clear_busy_statuses();
-            app.busy_until = None;
-        }
+        // one toast, never a chat segment
+        assert!(app.toast.as_ref().is_some_and(|t| t.text == App::BUSY_STATUS));
         assert!(!app.segments.iter().any(|segment| {
             matches!(segment, Segment::Status { text, .. } if text == App::BUSY_STATUS)
         }));
+        // expiry drops it
+        app.toast.as_mut().expect("toast").until =
+            std::time::Instant::now() - std::time::Duration::from_secs(1);
+        assert!(app.live_toast().is_none());
+        assert!(app.toast.is_none());
     }
 
     #[test]
@@ -2285,13 +2301,7 @@ mod tests {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.show_busy_status();
         app.show_busy_status();
-        assert_eq!(
-            app.segments
-                .iter()
-                .filter(|segment| matches!(segment, Segment::Status { text, .. } if text == App::BUSY_STATUS))
-                .count(),
-            1
-        );
+        assert!(app.toast.as_ref().is_some_and(|t| t.text == App::BUSY_STATUS));
         app.streaming = true;
         app.finish_turn(Err("aborted".into()));
         assert!(!app.segments.iter().any(|segment| {
@@ -2590,10 +2600,10 @@ mod tests {
         app.form_fields[0] = super::forms::FormField::text("max steps", "abc".into());
         app.form_save();
         assert_eq!(app.cfg.plan.max_steps, 24);
-        // a form is open, so the status lands in the menu, not in chat
+        // notices never land in chat segments anymore — this one toasts
         assert!(matches!(
-            &app.menu_status,
-            Some((text, _)) if text.contains("reset to default")
+            &app.toast,
+            Some(t) if t.text.contains("reset to default")
         ));
     }
 
@@ -2947,7 +2957,7 @@ mod tests {
                 .any(|s| matches!(s, Segment::Status { .. })),
             "debug toggles must not write to the chat"
         );
-        assert!(app.menu_status.is_some(), "notice stays inside the menu");
+        assert!(app.toast.is_some(), "toggle notice toasts");
     }
 
     #[test]
@@ -4141,7 +4151,7 @@ mod tests {
     fn status_bar_with_activity_respects_width_and_click_targets() {
         for activity_setup in [
             |app: &mut App| app.last_checkpoint = Some("edit src/main.rs".into()),
-            |app: &mut App| app.bar_error = Some("network timeout 408".into()),
+            |app: &mut App| app.status("network timeout 408", StatusKind::Err),
             |app: &mut App| app.retry_line = Some("retrying in 2s (1/3)".into()),
         ] {
             for w in [60u16, 80, 100, 120] {
@@ -4367,13 +4377,9 @@ mod tests {
             .push(("deadbeef".into(), "write src/a.rs".into()));
 
         let last_status = |app: &App| {
-            app.segments
-                .iter()
-                .rev()
-                .find_map(|segment| match segment {
-                    Segment::Status { text, .. } => Some(text.clone()),
-                    _ => None,
-                })
+            app.toast
+                .as_ref()
+                .map(|t| t.text.clone())
                 .unwrap_or_default()
         };
 
@@ -4415,13 +4421,9 @@ mod tests {
 
         app.command("undo step 3");
         let status = app
-            .segments
-            .iter()
-            .rev()
-            .find_map(|segment| match segment {
-                Segment::Status { text, .. } => Some(text.clone()),
-                _ => None,
-            })
+            .toast
+            .as_ref()
+            .map(|t| t.text.clone())
             .unwrap_or_default();
         assert!(
             status.contains("step 3") && status.contains("no file writes"),
@@ -4513,7 +4515,7 @@ mod tests {
             !app.streaming,
             "an auth failure must end the turn, not retry it"
         );
-        let reported = app.bar_error.clone().unwrap_or_default();
+        let reported = app.toast.map(|t| t.text).unwrap_or_default();
         assert!(
             reported.contains("API key") || reported.contains("401"),
             "the user should be told what to fix: {reported:?}"
@@ -5325,6 +5327,12 @@ mod tests {
         );
     }
 
+    /// Transient notices never become chat segments anymore — they toast
+    /// for 3s at the bottom bar. Tests assert on the toast text.
+    fn toast_text(app: &App) -> String {
+        app.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()
+    }
+
     #[test]
     fn plan_delete_user_command_flow() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
@@ -5340,10 +5348,11 @@ mod tests {
             app.menu_stack.is_empty(),
             "menu should not open when no active plan"
         );
-        assert!(matches!(
-            app.segments.last(),
-            Some(Segment::Status { text, .. }) if text == "no active plan"
-        ));
+        assert!(
+            toast_text(&app) == "no active plan",
+            "refusal toasts: {:?}",
+            toast_text(&app)
+        );
 
         // 2. Create an active plan in temp_dir
         let limits = plan::Limits { max_steps: 10 };
@@ -5377,11 +5386,9 @@ mod tests {
         assert!(!plan_file.exists(), "plan file must be deleted");
         assert_eq!(app.session.plan_id, None, "session plan_id must be cleared");
         assert!(
-            matches!(
-                app.segments.last(),
-                Some(Segment::Status { text, .. }) if text == "plan deleted; no active plan"
-            ),
-            "success status must reach chat segments, not vanish with the menu"
+            toast_text(&app) == "plan deleted; no active plan",
+            "success toasts, it must not vanish with the menu: {:?}",
+            toast_text(&app)
         );
 
         // Verify journal has plan_deleted event
@@ -5408,10 +5415,11 @@ mod tests {
 
         // usage without a reason
         app.plan_command("/plan confirm 0");
-        assert!(matches!(
-            app.segments.last(),
-            Some(Segment::Status { text, .. }) if text.starts_with("usage: /plan confirm")
-        ));
+        assert!(
+            toast_text(&app).starts_with("usage: /plan confirm"),
+            "usage toasts: {:?}",
+            toast_text(&app)
+        );
 
         let limits = plan::Limits { max_steps: 10 };
         let created = plan::create(
@@ -5431,10 +5439,7 @@ mod tests {
         app.session.plan_id = Some(created.id.clone());
 
         app.plan_command("/plan confirm 0 looks good");
-        assert!(matches!(
-            app.segments.last(),
-            Some(Segment::Status { text, .. }) if text == "acceptance 0 confirmed"
-        ));
+        assert_eq!(toast_text(&app), "acceptance 0 confirmed");
         let reloaded = plan::read_plan_file(&temp_dir, &created.id).unwrap();
         assert_eq!(
             reloaded.acceptance[0].validation.status,
@@ -5533,10 +5538,7 @@ mod tests {
         app.session.plan_id = Some(finished.id.clone());
         let revision = finished.revision;
 
-        let last_status = |app: &App| match app.segments.last() {
-            Some(Segment::Status { text, .. }) => text.clone(),
-            other => panic!("expected status segment, got {other:?}"),
-        };
+        let last_status = |app: &App| toast_text(app);
 
         app.plan_command("/plan complete");
         assert!(
@@ -5626,10 +5628,7 @@ mod tests {
         app.run_confirm_action();
 
         assert_eq!(app.session.plan_id, None);
-        let text = match app.segments.last() {
-            Some(Segment::Status { text, .. }) => text.clone(),
-            other => panic!("expected status segment, got {other:?}"),
-        };
+        let text = toast_text(&app);
         assert!(
             text.contains("foreign stale work") && text.contains("another session"),
             "delete must name the foreign fallback plan: {text}"
@@ -5669,11 +5668,9 @@ mod tests {
             "plan_id must be kept while the plan still exists"
         );
         assert!(
-            matches!(
-                app.segments.last(),
-                Some(Segment::Status { text, .. }) if text.contains("plan delete failed")
-            ),
-            "status must report the failure, not a fake success"
+            toast_text(&app).contains("plan delete failed"),
+            "toast must report the failure, not a fake success: {:?}",
+            toast_text(&app)
         );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -5781,38 +5778,26 @@ mod tests {
 
         // 1. Trying to delete built-in provider is refused
         app.run_action(MenuAction::DeleteProvider("gemini".into()));
-        assert!(matches!(
-            app.segments.last(),
-            Some(Segment::Status { text, .. }) if text.contains("cannot be deleted")
-        ));
+        assert!(toast_text(&app).contains("cannot be deleted"));
 
         // 2. Trying to delete built-in model is refused
         app.run_action(MenuAction::DeleteModel(
             "gemini".into(),
             "gemini-3.8-flash".into(),
         ));
-        assert!(matches!(
-            app.segments.last(),
-            Some(Segment::Status { text, .. }) if text.contains("cannot be deleted")
-        ));
+        assert!(toast_text(&app).contains("cannot be deleted"));
 
         // 3. Trying to edit built-in model is refused
         app.run_action(MenuAction::EditModel(
             "gemini".into(),
             "gemini-3.8-flash".into(),
         ));
-        assert!(matches!(
-            app.segments.last(),
-            Some(Segment::Status { text, .. }) if text.contains("cannot be modified")
-        ));
+        assert!(toast_text(&app).contains("cannot be modified"));
 
         // 4. /providers update triggers update status
         app.builtin_update_rx = None; // clear in-flight check from test_app startup
         app.command("providers update");
-        assert!(matches!(
-            app.segments.last(),
-            Some(Segment::Status { text, .. }) if text.contains("checking for built-in provider updates")
-        ));
+        assert!(toast_text(&app).contains("checking for built-in provider updates"));
     }
 
     #[test]

@@ -866,6 +866,21 @@ impl App {
                     // anchor the header row BEFORE flipping so the block
                     // keeps its screen line instead of jumping with follow
                     self.capture_anchor_for_view(None, idx, screen);
+                    // unfolding an error also copies its full text: the
+                    // collapsed row is truncated, the clipboard gets all
+                    if v && let Some(Segment::Status {
+                        kind: StatusKind::Err,
+                        text,
+                        ..
+                    }) = self.segments.get(idx)
+                    {
+                        let text = text.clone();
+                        if let Ok(mut cb) = arboard::Clipboard::new()
+                            && cb.set_text(text).is_ok()
+                        {
+                            self.status("error copied to clipboard", StatusKind::Info);
+                        }
+                    }
                     match self.segments.get_mut(idx) {
                         Some(Segment::Thinking { expanded, .. }) => *expanded = v,
                         Some(Segment::Subagent { expanded, .. }) => *expanded = v,
@@ -3283,21 +3298,27 @@ impl App {
     }
 
     pub(super) fn status_bar_spans(&mut self, w: u16) -> Vec<Span<'static>> {
-        // a live retry overrides everything else on the left side
+        // a live retry overrides everything else on the left side, then the
+        // 3s toast (any notice, errors included), then the checkpoint hint
         let plan_label = self.plan_step_label.clone();
         let (activity, activity_style) = if let Some(line) = &self.retry_line {
             (format!(" {line}"), Theme::warn())
+        } else if let Some((text, kind)) = self.live_toast() {
+            let st = match kind {
+                StatusKind::Info => Theme::dim(),
+                StatusKind::Ok => Theme::ok(),
+                StatusKind::Warn => Theme::warn(),
+                StatusKind::Err => Theme::err(),
+            };
+            (format!(" {}", truncate_chars(&text, 60)), st)
         } else {
-            match &self.bar_error {
-                Some(e) => (format!(" err: {}", truncate_chars(e, 60)), Theme::err()),
-                None => match &self.last_checkpoint {
-                    // reassurance that the undo insurance exists
-                    Some(cp) => (
-                        format!(" checkpoint: {}", truncate_chars(cp, 44)),
-                        Theme::dim(),
-                    ),
-                    None => (String::new(), Theme::dim()),
-                },
+            match &self.last_checkpoint {
+                // reassurance that the undo insurance exists
+                Some(cp) => (
+                    format!(" checkpoint: {}", truncate_chars(cp, 44)),
+                    Theme::dim(),
+                ),
+                None => (String::new(), Theme::dim()),
             }
         };
         let dir = self.cwd_label.clone();

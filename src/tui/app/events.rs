@@ -252,10 +252,6 @@ impl App {
                     // Ctrl+V is handled below through the clipboard API.
                     // Without bracketed paste, PowerShell cannot inject an
                     // embedded newline as a separate submit event.
-                    // a fresh keypress dismisses the previous in-menu notice
-                    if !self.menu_stack.is_empty() {
-                        self.menu_status = None;
-                    }
                     let now = Instant::now();
                     let is_enter = matches!(k.code, KeyCode::Enter | KeyCode::Char('\r'));
                     if !is_enter && self.enter_gate.before_key(now) {
@@ -758,7 +754,6 @@ impl App {
                                     self.dirty = true;
                                 } else {
                                     self.jump_to_bottom_on_typing();
-                                    self.bar_error = None;
                                     self.input.input(k);
                                 }
                             } else {
@@ -791,13 +786,11 @@ impl App {
                         }
                         _ if self.is_inline_ask_free() => {
                             self.jump_to_bottom_on_typing();
-                            self.bar_error = None;
                             self.input.input(k);
                         }
                         _ if !self.menu_stack.is_empty() => {}
                         _ => {
                             self.jump_to_bottom_on_typing();
-                            self.bar_error = None;
                             self.input.input(k);
                         }
                     }

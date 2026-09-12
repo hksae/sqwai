@@ -159,6 +159,18 @@ enum StatusKind {
     Err,
 }
 
+/// How long a bottom-bar notice stays up before vanishing.
+const TOAST_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Transient bottom-bar notice: every status/error lands here for 3s, the
+/// chat stays clean. A new notice replaces the current one outright.
+#[derive(Debug, Clone)]
+struct Toast {
+    text: String,
+    kind: StatusKind,
+    until: Instant,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Mode {
     Plan,
@@ -276,8 +288,9 @@ pub struct App {
     /// still running, so /new and session switches never block the UI
     startup_data_rx: Option<std::sync::mpsc::Receiver<StartupData>>,
     pub(super) last_ctrl_c: Option<Instant>,
-    /// last request error, shown in the status bar until the next action
-    bar_error: Option<String>,
+    /// transient bottom-bar notice (3s): every status/error lands here, the
+    /// chat stays clean. A new notice replaces the current one.
+    toast: Option<Toast>,
     /// previous turn ended successfully — gates retry notifications
     prev_turn_ok: bool,
     /// already toasted for the current retry cycle
@@ -395,9 +408,6 @@ pub struct App {
     /// Pending events queued during burst detection.
     pending_events: std::collections::VecDeque<crossterm::event::Event>,
 
-    /// Deadline for the single transient busy notice.
-    busy_until: Option<Instant>,
-
     /// Finalized activity groups (one per completed agent turn). The currently
     /// streaming turn is rendered live and only lands here at `finish_turn`.
     activity_groups: Vec<ActivityGroup>,
@@ -423,8 +433,6 @@ pub struct App {
     menu_visible_rows: usize,
     /// fixed hint line under a list menu (not part of the scrolled rows)
     menu_footer_text: Option<String>,
-    /// transient status shown inside the open menu instead of the chat
-    menu_status: Option<(String, StatusKind)>,
     menu_rows: Vec<(Line<'static>, MenuAction)>,
     menu_rect: Rect,
     /// pinned-section width the Sessions rows were built for (see
@@ -761,7 +769,7 @@ impl App {
             startup_data_rx: None,
             last_ctrl_c: None,
             read_only,
-            bar_error: None,
+            toast: None,
             prev_turn_ok: false,
             retry_notified: true, // no toast for the very first turn
             retry_line: None,
@@ -816,7 +824,6 @@ impl App {
             menu_scroll: 0,
             menu_visible_rows: 0,
             menu_footer_text: None,
-            menu_status: None,
             menu_rows: Vec::new(),
             menu_rect: Rect::default(),
             sessions_frame_built_w: 0,
@@ -842,7 +849,6 @@ impl App {
             paste_enter_until: None,
             enter_gate: events::EnterGate::default(),
             pending_events: std::collections::VecDeque::new(),
-            busy_until: None,
             activity_groups: Vec::new(),
             turn_started: None,
             live_group_collapsed: false,
@@ -1142,16 +1148,13 @@ impl App {
                 };
                 self.dirty |= self.reveal_chars(step);
             }
-            if self
-                .busy_until
-                .is_some_and(|deadline| Instant::now() >= deadline)
-            {
-                self.clear_busy_statuses();
-                self.busy_until = None;
+            if self.toast.as_ref().is_some_and(|t| Instant::now() >= t.until) {
+                self.toast = None;
                 self.dirty = true;
             }
             let animating = self.streaming
                 || self.tool_running()
+                || self.toast.is_some()
                 || matches!(self.cur_menu(), Some(Menu::TestAnims));
             if animating {
                 // fixed 20 FPS animation rate from the wall clock, not per
@@ -1818,7 +1821,7 @@ impl App {
                 self.input_text()
             ),
         );
-        self.bar_error = None;
+        self.toast = None;
         self.retry_notified = false;
         self.retry_line = None;
         self.last_checkpoint = None;
@@ -2398,7 +2401,6 @@ impl App {
                             StatusKind::Ok,
                         ),
                         Err(e) => {
-                            self.bar_error = Some(format!("init: {e}"));
                             self.status(&format!("init: {e}"), StatusKind::Err)
                         }
                     }
@@ -2789,34 +2791,35 @@ impl App {
     const BUSY_STATUS: &'static str = "busy · esc to stop";
 
     fn show_busy_status(&mut self) {
-        self.retain_segments(
-            |segment| !matches!(segment, Segment::Status { text, .. } if text == Self::BUSY_STATUS),
-        );
         self.status(Self::BUSY_STATUS, StatusKind::Warn);
-        self.busy_until = Some(Instant::now() + Duration::from_secs(2));
     }
 
+    /// Every status/error lands here: a 3s bottom-bar notice replacing the
+    /// current one. The chat carries no transient notices anymore — only
+    /// durable turn notes (stopped / error:) stay as segments.
     fn status(&mut self, text: &str, kind: StatusKind) {
-        if text == Self::BUSY_STATUS {
-            self.retain_segments(|segment| {
-                !matches!(segment, Segment::Status { text: existing, .. } if text == existing)
-            });
-        }
-        if kind == StatusKind::Err {
-            self.bar_error = Some(text.to_string());
-        }
-        if self.menu_stack.is_empty() {
-            // with no menu open the chat carries the message
-            self.push_segment(Segment::Status {
-                text: text.to_string(),
-                kind,
-                expanded: false,
-            });
-        } else {
-            // never pollute the chat from inside a menu: show it in the menu
-            self.menu_status = Some((text.to_string(), kind));
-        }
+        self.toast = Some(Toast {
+            text: text.to_string(),
+            kind,
+            until: Instant::now() + TOAST_TTL,
+        });
         self.dirty = true;
+    }
+
+    /// Live toast, if any: expired ones are dropped on read so the bar
+    /// never shows a stale notice.
+    fn live_toast(&mut self) -> Option<(String, StatusKind)> {
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|t| Instant::now() >= t.until)
+        {
+            self.toast = None;
+            self.dirty = true;
+        }
+        self.toast
+            .as_ref()
+            .map(|t| (t.text.clone(), t.kind))
     }
 
     /// move up to `k` chars from the reveal queue to the visible answer
@@ -3634,10 +3637,15 @@ impl App {
     }
 
     fn clear_busy_statuses(&mut self) {
-        self.retain_segments(
-            |segment| !matches!(segment, Segment::Status { text, .. } if text == Self::BUSY_STATUS),
-        );
-        self.busy_until = None;
+        // the busy notice is a toast now: drop it if it is still up
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|t| t.text == Self::BUSY_STATUS)
+        {
+            self.toast = None;
+            self.dirty = true;
+        }
     }
 
     fn clear_subagent_ui_on_stop(&mut self) {
@@ -3939,9 +3947,6 @@ impl App {
             Err(e) => Some((format!("error: {e}"), true)),
         };
         if let Some((note, is_error)) = &turn_note {
-            if *is_error {
-                self.bar_error = Some(note.clone());
-            }
             self.status(
                 note,
                 if *is_error {

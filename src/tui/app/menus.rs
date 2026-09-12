@@ -1534,9 +1534,8 @@ impl App {
                     }
                 }
                 if matches!(&inner, MenuAction::DeletePlan) {
-                    // close the prompt first: with a menu open status()
-                    // writes to menu_status, which nothing renders once the
-                    // menu is gone — the outcome must land in chat segments
+                    // close the prompt first so the outcome toast is
+                    // visible on the bare chat, not hidden behind a menu
                     self.menu_home();
                     let root = self.project_root.clone();
                     match self.deletable_plan_id() {
