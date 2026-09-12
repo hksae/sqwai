@@ -1187,6 +1187,23 @@ mod tests {
             [crate::session::TurnNote { text, is_error: true, .. }]
                 if text == "error: provider offline"
         ));
+        // durable notes render live in the chat AND toast — neither alone
+        for (app, text, kind) in [
+            (&stopped, "stopped", StatusKind::Info),
+            (&failed, "error: provider offline", StatusKind::Err),
+        ] {
+            assert!(
+                app.segments.iter().any(|s| matches!(
+                    s,
+                    Segment::Status { text: t, kind: k, .. } if t == text && *k == kind
+                )),
+                "live {text:?} segment missing"
+            );
+            assert!(
+                app.toast.as_ref().is_some_and(|t| t.text == text),
+                "live {text:?} toast missing"
+            );
+        }
     }
 
     #[tokio::test]

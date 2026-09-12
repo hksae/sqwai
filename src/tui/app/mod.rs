@@ -3947,14 +3947,19 @@ impl App {
             Err(e) => Some((format!("error: {e}"), true)),
         };
         if let Some((note, is_error)) = &turn_note {
-            self.status(
-                note,
-                if *is_error {
-                    StatusKind::Err
-                } else {
-                    StatusKind::Info
-                },
-            );
+            let kind = if *is_error {
+                StatusKind::Err
+            } else {
+                StatusKind::Info
+            };
+            self.status(note, kind);
+            // durable turn notes stay in the chat as segments (they are
+            // history, restored on reload) — the toast alone is not enough
+            self.push_segment(Segment::Status {
+                text: note.clone(),
+                kind,
+                expanded: false,
+            });
         }
         // Segment indices are stable from here on: the empty-thinking cleanup
         // and the answer backfill above have all run.
