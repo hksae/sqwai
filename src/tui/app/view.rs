@@ -3162,59 +3162,14 @@ impl App {
         let track_y = inner.y + 1;
         let base_x = inner.x + 1;
 
-        // Fill + comet sweep state (see effort_sweep): re-anchor a move from
-        // the displayed position so rapid moves redirect instead of jumping.
-        // Returns the fill position (dot units) and the comet crest position
-        // (cell units), if the sweep is still travelling.
-        let target = sel;
-        let now = std::time::Instant::now();
-        if self.effort_sweep.map(|(_, to, _)| to) != Some(target) {
-            let from = match self.effort_sweep {
-                Some((f, old_to, t0)) => {
-                    let el = now.duration_since(t0).as_millis();
-                    if el >= EFFORT_SWEEP_MS as u128 {
-                        old_to as f64
-                    } else {
-                        f + (old_to as f64 - f) * el as f64 / EFFORT_SWEEP_MS as f64
-                    }
-                }
-                None => target as f64,
-            };
-            self.effort_sweep = Some((from, target, now));
-        }
-        let (fill_pos, comet_x) = match self.effort_sweep {
-            Some((from, to, t0)) if to == target => {
-                let el = now.duration_since(t0).as_millis();
-                if el >= EFFORT_SWEEP_MS as u128 {
-                    (target as f64, None)
-                } else {
-                    let k = el as f64 / EFFORT_SWEEP_MS as f64;
-                    let pos = from + (target as f64 - from) * k;
-                    // dot centers sit at idx * COL_W + COL_W / 2
-                    let fx = (from + (target as f64 - from) * k) * COL_W as f64
-                        + COL_W as f64 / 2.0;
-                    (pos, Some(fx))
-                }
-            }
-            _ => (target as f64, None),
-        };
-
         // labels row + hit rects (label cell and dot cell share one target)
         for (i, lvl) in EffortLevel::SELECTABLE.iter().enumerate() {
             let name = lvl.as_str();
             let col_x = base_x + COL_W * i as u16;
             let name_w = name.len() as u16;
             let pad = COL_W.saturating_sub(name_w) / 2;
-            // the new selection flashes white while the sweep travels, then
-            // settles into its level color
             let style = if i == sel {
-                if comet_x.is_some() {
-                    Style::new()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    active_style
-                }
+                active_style
             } else {
                 Theme::dim()
             };
@@ -3253,37 +3208,21 @@ impl App {
         let mut cells: Vec<(&str, Style)> = vec![(" ", Theme::base()); total];
         for i in 0..n {
             let dx = i * COL_W as usize + dot_off;
-            // progress dots: the selection itself is always bold; the fill
-            // behind it rides the sweep position, the rest are hollow.
-            // Settled (fill_pos == sel) this is exactly the old static rule.
+            // progress dots: every level up to the selection is filled,
+            // the selection itself additionally bold; the rest are hollow
             let (dot, dot_style) = if i == sel {
                 ("●", active_style)
-            } else if (i as f64) < fill_pos {
+            } else if i < sel {
                 ("●", fill)
             } else {
                 ("○", dim)
             };
             cells[dx] = (dot, dot_style);
-            // connector to the next dot: filled iff fully left of the fill
+            // connector to the next dot: filled iff fully left of selection
             if i + 1 < n {
-                let cstyle = if ((i + 1) as f64) <= fill_pos {
-                    fill
-                } else {
-                    dim
-                };
+                let cstyle = if i + 1 <= sel { fill } else { dim };
                 for c in cells.iter_mut().take((i + 1) * COL_W as usize + dot_off).skip(dx + 1) {
                     *c = ("─", cstyle);
-                }
-            }
-        }
-        // comet crest: a bright band riding the sweep across the changed
-        // span — the visible animation over the fill motion
-        if let Some(fx) = comet_x {
-            for (x, cell) in cells.iter_mut().enumerate() {
-                if (x as f64 - fx).abs() < 2.0 {
-                    cell.1 = Style::new()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD);
                 }
             }
         }
