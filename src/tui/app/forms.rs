@@ -18,7 +18,10 @@ use crate::tui::markdown::{Highlighter, render, wrap_tagged};
 use crate::tui::theme::Theme;
 
 const FORMAT_OPTS: &[&str] = &["openai", "anthropic", "responses"];
-const EFFORT_OPTS: &[&str] = &["off", "low", "medium", "high", "max"];
+/// Per-model effort options: always the full level list — a hardcoded copy
+/// here once dropped `xhigh`, showing `off` for xhigh models and clobbering
+/// the level on save.
+const EFFORT_OPTS: &[&str] = &EffortLevel::STRS;
 const MCP_TRANSPORT_OPTS: &[&str] = &["stdio", "http"];
 
 /// "K=V,K=V" <-> env map rendering for server forms.

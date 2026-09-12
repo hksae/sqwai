@@ -2345,6 +2345,24 @@ mod tests {
         assert_eq!(app.seg_key(&mk(None)), app.seg_key(&expired));
     }
 
+    #[test]
+    fn edit_model_form_keeps_xhigh_effort() {
+        // the providers-menu form once offered only five levels: an xhigh
+        // model showed `off`, and saving the untouched form clobbered it
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.cfg.models.get_mut("m").unwrap().effort = EffortLevel::Xhigh;
+        app.open_menu_replace(Menu::EditModel {
+            provider: "p".into(),
+            key: Some("m".into()),
+        });
+        assert_eq!(app.form_fields[3].trimmed(), "xhigh");
+        app.form_save();
+        assert_eq!(
+            app.cfg.models.get("m").unwrap().effort,
+            EffortLevel::Xhigh
+        );
+    }
+
     fn wheel_test_app() -> (crate::tui::app::App, usize) {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;

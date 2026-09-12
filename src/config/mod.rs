@@ -91,6 +91,9 @@ impl EffortLevel {
         EffortLevel::Xhigh,
         EffortLevel::Max,
     ];
+    /// Option strings for pick-one UI (model edit form, etc.): derived from
+    /// the same levels, so the UI can never lag behind a new level again.
+    pub const STRS: [&'static str; 6] = ["off", "low", "medium", "high", "xhigh", "max"];
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Off => "off",
@@ -1135,6 +1138,13 @@ mod tests {
         assert_eq!(t.effort, EffortLevel::High);
         let t: T = toml::from_str("effort = \"max\"").unwrap();
         assert_eq!(t.effort, EffortLevel::Max);
+    }
+
+    #[test]
+    fn effort_strs_cover_every_level_in_order() {
+        // pick-one UI builds on this: a hardcoded copy once dropped xhigh
+        let from_all: Vec<&str> = EffortLevel::ALL.iter().map(|l| l.as_str()).collect();
+        assert_eq!(&EffortLevel::STRS[..], &from_all[..]);
     }
 
     /// The declaration is an override, not a requirement: a model that says
