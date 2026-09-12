@@ -2137,12 +2137,24 @@ mod tests {
     fn effort_slider_fill_sweeps_to_selection() {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
+        use ratatui::style::Color;
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.model_cfg.effort = EffortLevel::Low;
         app.open_menu(crate::tui::app::menus::Menu::Effort);
         let area = Rect::new(0, 0, 100, 30);
         let mut buf = Buffer::empty(area);
         app.draw_menu(&mut buf, area);
+        // white cells on a card row: the popup border is white too, so only
+        // track dots/dashes count (the labels row carries the flash instead)
+        let white_on_row = |buf: &Buffer, y: u16| {
+            (0..area.width)
+                .filter(|&x| {
+                    buf.cell((x, y)).is_some_and(|c| {
+                        c.fg == Color::White && matches!(c.symbol(), "●" | "○" | "─")
+                    })
+                })
+                .count()
+        };
         // move the selection without committing: the fill lags behind it
         app.menu_sel = 4;
         let mut buf = Buffer::empty(area);
@@ -2151,7 +2163,13 @@ mod tests {
         // dot 0 filled, dot 4 bold-selected, the middle still hollow mid-sweep
         assert_eq!(dots.matches('●').count(), 2, "{dots:?}");
         assert_eq!(dots.matches('○').count(), 4, "{dots:?}");
-        // settled: the fill catches up exactly
+        // ...while a bright crest rides the changed span
+        let track_y = app.menu_rect.y + 2;
+        assert!(
+            white_on_row(&buf, track_y) >= 2,
+            "comet must light the track mid-sweep"
+        );
+        // settled: the fill catches up exactly, no white left behind
         if let Some((from, to, _)) = app.effort_sweep {
             app.effort_sweep = Some((
                 from,
@@ -2164,6 +2182,7 @@ mod tests {
         let dots: String = buf.content().iter().map(|c| c.symbol()).collect();
         assert_eq!(dots.matches('●').count(), 5, "{dots:?}");
         assert_eq!(dots.matches('○').count(), 1, "{dots:?}");
+        assert_eq!(white_on_row(&buf, track_y), 0, "crest must settle away");
     }
 
     #[test]

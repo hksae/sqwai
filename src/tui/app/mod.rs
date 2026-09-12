@@ -201,9 +201,9 @@ impl Mode {
 
 /// Mode-chip color sweep length: a quick flash, not a lingering animation.
 const MODE_BLEND_MS: u64 = 250;
-/// Effort-slider fill sweep length: the fill catches up with the selection
-/// instead of snapping to it.
-const EFFORT_SWEEP_MS: u64 = 200;
+/// Effort-slider sweep length: the fill catches up with the selection
+/// while a bright crest rides across the changed span.
+const EFFORT_SWEEP_MS: u64 = 300;
 /// Sweep endpoints, close to the indexed chip colors (bold Yellow / bold
 /// LightBlue) so the settle frame does not pop.
 const MODE_ACT_RGB: (u8, u8, u8) = (250, 200, 70);

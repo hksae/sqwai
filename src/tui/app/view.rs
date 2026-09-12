@@ -3160,9 +3160,10 @@ impl App {
         let track_y = inner.y + 1;
         let base_x = inner.x + 1;
 
-        // Fill sweep: the track fill travels from the displayed position to
-        // the selection instead of snapping. A move mid-sweep re-anchors
-        // from where the fill visibly is, so rapid moves redirect it.
+        // Fill + comet sweep state (see effort_sweep): re-anchor a move from
+        // the displayed position so rapid moves redirect instead of jumping.
+        // Returns the fill position (dot units) and the comet crest position
+        // (cell units), if the sweep is still travelling.
         let target = sel;
         let now = std::time::Instant::now();
         if self.effort_sweep.map(|(_, to, _)| to) != Some(target) {
@@ -3179,16 +3180,21 @@ impl App {
             };
             self.effort_sweep = Some((from, target, now));
         }
-        let fill_pos = match self.effort_sweep {
+        let (fill_pos, comet_x) = match self.effort_sweep {
             Some((from, to, t0)) if to == target => {
                 let el = now.duration_since(t0).as_millis();
                 if el >= EFFORT_SWEEP_MS as u128 {
-                    target as f64
+                    (target as f64, None)
                 } else {
-                    from + (target as f64 - from) * el as f64 / EFFORT_SWEEP_MS as f64
+                    let k = el as f64 / EFFORT_SWEEP_MS as f64;
+                    let pos = from + (target as f64 - from) * k;
+                    // dot centers sit at idx * COL_W + COL_W / 2
+                    let fx = (from + (target as f64 - from) * k) * COL_W as f64
+                        + COL_W as f64 / 2.0;
+                    (pos, Some(fx))
                 }
             }
-            _ => target as f64,
+            _ => (target as f64, None),
         };
 
         // labels row + hit rects (label cell and dot cell share one target)
@@ -3197,8 +3203,16 @@ impl App {
             let col_x = base_x + COL_W * i as u16;
             let name_w = name.len() as u16;
             let pad = COL_W.saturating_sub(name_w) / 2;
+            // the new selection flashes white while the sweep travels, then
+            // settles into its level color
             let style = if i == sel {
-                active_style
+                if comet_x.is_some() {
+                    Style::new()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    active_style
+                }
             } else {
                 Theme::dim()
             };
@@ -3257,6 +3271,17 @@ impl App {
                 };
                 for c in cells.iter_mut().take((i + 1) * COL_W as usize + dot_off).skip(dx + 1) {
                     *c = ("─", cstyle);
+                }
+            }
+        }
+        // comet crest: a bright band riding the sweep across the changed
+        // span — the visible animation over the fill motion
+        if let Some(fx) = comet_x {
+            for (x, cell) in cells.iter_mut().enumerate() {
+                if (x as f64 - fx).abs() < 2.0 {
+                    cell.1 = Style::new()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD);
                 }
             }
         }
