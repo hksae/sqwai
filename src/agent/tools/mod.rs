@@ -2863,7 +2863,12 @@ fn validate_attached_records(
             continue;
         }
         let allowed = match required_kind {
-            plan::StepKind::Research => record.kind == "tool_result",
+            // #198: research that only failed proves nothing — at least one
+            // successful call is the minimum bar for "done"
+            plan::StepKind::Research => {
+                record.kind == "tool_result"
+                    && record.fields.get("ok").and_then(Value::as_bool) == Some(true)
+            }
             plan::StepKind::Change => record.kind == "file_diff",
             plan::StepKind::Verify => {
                 record.kind == "diagnostics"
@@ -4003,6 +4008,52 @@ mod tests {
             "{}",
             rejected.output
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #198: a research step whose every call failed has no evidence of
+    /// done work — finish must refuse, not accept the failures.
+    #[test]
+    fn research_finish_rejects_only_failed_calls() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "validate research",
+                "steps": [{"title": "research", "kind": "research"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        let mut journal = crate::agent::journal::Journal::open(&dir, "evidence-rules").unwrap();
+
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
+        journal.append("plan", json!({"op": "start"})).unwrap();
+        journal
+            .append_evidence("tool_result", json!({"tool": "read", "ok": false}))
+            .unwrap();
+        let rejected = plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "1", "summary": "looked", "evidence": [2]}),
+        );
+        assert!(!rejected.ok, "failed calls are not evidence: {}", rejected.output);
+        assert!(
+            rejected.output.contains("wrong_evidence"),
+            "{}",
+            rejected.output
+        );
+
+        // one successful call flips it to acceptable
+        journal
+            .append_evidence("tool_result", json!({"tool": "read", "ok": true}))
+            .unwrap();
+        let done = plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "1", "summary": "found", "evidence": [3]}),
+        );
+        assert!(done.ok, "{}", done.output);
         fs::remove_dir_all(&dir).ok();
     }
 
