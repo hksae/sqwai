@@ -10,6 +10,8 @@
 //! 50ms while work runs, so one tick is one frame (40 ticks per sweep) and
 //! the output is fully deterministic under test.
 
+use std::sync::OnceLock;
+
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use unicode_width::UnicodeWidthChar;
@@ -29,10 +31,18 @@ fn blend(base: (u8, u8, u8), crest: (u8, u8, u8), t: f64) -> (u8, u8, u8) {
     (mix(base.0, crest.0), mix(base.1, crest.1), mix(base.2, crest.2))
 }
 
+/// Terminal env does not change mid-process: detect once, reuse every
+/// frame instead of re-reading env vars per row.
+static TRUECOLOR: OnceLock<bool> = OnceLock::new();
+
 /// Truecolor advertised via env (same signals `supports-color` reads):
 /// explicit COLORTERM, Windows Terminal, known-good TERM_PROGRAM/TERM.
 /// Unknown terminals get the ANSI fallback — never garbage.
 fn has_truecolor() -> bool {
+    *TRUECOLOR.get_or_init(detect_truecolor)
+}
+
+fn detect_truecolor() -> bool {
     if std::env::var_os("NO_COLOR").is_some() {
         return false;
     }
