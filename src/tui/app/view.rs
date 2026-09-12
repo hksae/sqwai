@@ -1256,9 +1256,26 @@ impl App {
                 }
             }
             Segment::Commentary(text) => {
+                // Pre-wrap to the indented budget and put the indent on EVERY
+                // visual row: the outer wrapper would otherwise split long
+                // lines and leave continuation rows at column 0 (same class
+                // of bug the quote rail already fixes). Whole block reads
+                // one notch dimmer than tool rows, hues preserved.
                 let inner_w = w.saturating_sub(2).max(1);
-                for l in render(text, inner_w, &self.hl) {
-                    out.push((indent_line(l, 2), Some(idx)));
+                let (rows, _) = crate::tui::markdown::wrap_tagged(
+                    render(text, inner_w, &self.hl)
+                        .into_iter()
+                        .map(|l| (l, None))
+                        .collect(),
+                    inner_w,
+                );
+                for row in rows {
+                    let mut spans =
+                        vec![Span::styled("  ".to_string(), Theme::base())];
+                    spans.extend(row.spans.into_iter().map(|s| {
+                        Span::styled(s.content, s.style.add_modifier(Modifier::DIM))
+                    }));
+                    out.push((Line::from(spans), Some(idx)));
                 }
             }
             Segment::AskUser {

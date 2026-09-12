@@ -5196,6 +5196,34 @@ mod tests {
     }
 
     #[test]
+    fn commentary_wrapped_rows_keep_indent_and_dim() {
+        use ratatui::style::Modifier;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.push_segment(Segment::Commentary(
+            "word ".repeat(30).trim_end().to_string(),
+        ));
+        let rows = app.render_segment(&app.segments, 0, 40, true);
+        assert!(rows.len() > 1, "must wrap at width 40");
+        for (l, _) in &rows {
+            let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            if text.trim().is_empty() {
+                continue;
+            }
+            assert!(
+                text.starts_with("  ") && !text.starts_with("   "),
+                "every row indented by 2: {text:?}"
+            );
+            assert!(
+                l.spans
+                    .iter()
+                    .skip(1)
+                    .all(|s| s.style.add_modifier.contains(Modifier::DIM)),
+                "body spans dimmed, hues kept: {text:?}"
+            );
+        }
+    }
+
+    #[test]
     fn load_history_restores_commentary_when_assistant_message_has_content() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.session.messages = vec![
