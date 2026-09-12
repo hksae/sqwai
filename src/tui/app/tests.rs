@@ -2110,6 +2110,137 @@ mod tests {
         assert!(app2.menu_stack.is_empty(), "bare /test opens nothing");
     }
 
+    fn queue_test_app() -> crate::tui::app::App {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app
+    }
+
+    #[test]
+    fn submit_mid_turn_queues_instead_of_sending() {
+        let mut app = queue_test_app();
+        app.streaming = true;
+        app.input = App::fresh_input("do it after".into());
+        app.submit();
+        assert_eq!(app.pending_queue, vec!["do it after".to_string()]);
+        assert!(
+            !app.segments.iter().any(|s| matches!(s, Segment::User(_))),
+            "nothing sent while streaming"
+        );
+        assert_eq!(app.input_text(), "", "input cleared like a submit");
+        assert!(toast_text(&app).contains("queued"), "queued toast shown");
+        // a second message keeps FIFO order
+        app.input = App::fresh_input("and this too".into());
+        app.submit();
+        assert_eq!(app.pending_queue.len(), 2);
+    }
+
+    #[test]
+    fn submit_mid_turn_commands_are_not_queued() {
+        let mut app = queue_test_app();
+        app.streaming = true;
+        // non-whitelisted command: busy notice, nothing queued
+        app.input = App::fresh_input("/undo".into());
+        app.submit();
+        assert!(app.pending_queue.is_empty());
+        assert_eq!(toast_text(&app), App::BUSY_STATUS);
+        // whitelisted command: runs immediately, nothing queued
+        app.input = App::fresh_input("/help".into());
+        app.submit();
+        assert!(app.pending_queue.is_empty());
+        assert!(matches!(app.cur_menu(), Some(Menu::Help)));
+    }
+
+    #[tokio::test]
+    async fn natural_finish_sends_first_queued_message() {
+        use crate::providers::Role;
+        let mut app = queue_test_app();
+        app.session.push(Role::User, "first");
+        app.turn_user_index = Some(0);
+        app.push_segment(Segment::Assistant {
+            text: String::new(),
+            live: true,
+        });
+        app.streaming = true;
+        app.pending_queue = vec!["queued one".into(), "queued two".into()];
+        app.finish_turn(Ok(()));
+        assert_eq!(app.pending_queue, vec!["queued two".to_string()]);
+        assert!(
+            app.segments.iter().any(|s| matches!(
+                s,
+                Segment::User(t) if t == "queued one"
+            )),
+            "front message sent as a new turn"
+        );
+        assert!(app.streaming, "new turn started");
+    }
+
+    #[tokio::test]
+    async fn failed_turn_keeps_queue_for_manual_resend() {
+        use crate::providers::Role;
+        let mut app = queue_test_app();
+        app.session.push(Role::User, "first");
+        app.turn_user_index = Some(0);
+        app.push_segment(Segment::Assistant {
+            text: String::new(),
+            live: true,
+        });
+        app.streaming = true;
+        app.pending_queue = vec!["stays".into()];
+        app.finish_turn(Err("provider offline".into()));
+        assert_eq!(app.pending_queue, vec!["stays".to_string()]);
+        assert!(!app.streaming);
+        // empty Enter resends it once idle
+        app.input = App::fresh_input(String::new());
+        app.submit();
+        assert!(app.pending_queue.is_empty(), "resent");
+        assert!(
+            app.segments.iter().any(|s| matches!(
+                s,
+                Segment::User(t) if t == "stays"
+            )),
+            "manual resend works"
+        );
+    }
+
+    #[test]
+    fn session_switch_drops_the_queue() {
+        use crate::session::Session;
+        let mut app = queue_test_app();
+        app.pending_queue = vec!["stale".into()];
+        app.apply_session(Session::new("m".into(), 1000));
+        assert!(app.pending_queue.is_empty());
+        app.pending_queue = vec!["stale".into()];
+        app.startup = false; // apply_session raised the startup screen
+        app.start_new_session();
+        assert!(app.pending_queue.is_empty());
+    }
+
+    #[test]
+    fn queue_preview_renders_above_input() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut app = queue_test_app();
+        app.pending_queue = vec!["fix the typo".into(), "and docs".into()];
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        app.render_into(&mut buf, area);
+        let lines: Vec<String> = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        let input_y = app.last_input.y as usize;
+        assert!(
+            lines[input_y - 1].contains("queued (2): fix the typo"),
+            "preview sits right above input: {:?}",
+            lines[input_y - 1]
+        );
+        assert!(lines[input_y - 1].contains("[+1 more]"));
+    }
+
     #[test]
     fn experimental_section_sits_above_debug_and_toggles() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());

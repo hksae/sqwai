@@ -2368,7 +2368,14 @@ impl App {
             Theme::border_dim(),
         )))
         .style(Theme::base());
-        rule.clone().render(layout[1], buf);
+        // queued follow-ups live in the rule row above the composer: no
+        // layout shift, no reserved space — the separator simply turns
+        // informative while something is queued
+        if !self.pending_queue.is_empty() {
+            Paragraph::new(self.queue_line(area.width)).render(layout[1], buf);
+        } else {
+            rule.clone().render(layout[1], buf);
+        }
         self.input.set_block(Self::input_block());
         // the cursor is rendered by tui-textarea; the input has no frame.
         // `› ` marks the top input row (like the user strip); the textarea
@@ -3307,6 +3314,24 @@ impl App {
             spans.push(Span::styled(format!(" · ${cost:.2}"), Theme::accent()));
         }
         Paragraph::new(Line::from(spans)).style(Theme::base())
+    }
+
+    /// queued follow-ups preview for the rule row above the composer:
+    /// `queued (2): first words… [+1 more]`, dim and width-capped
+    fn queue_line(&self, w: u16) -> Line<'static> {
+        let n = self.pending_queue.len();
+        let first = self.pending_queue.first().map(String::as_str).unwrap_or("");
+        let mut head = format!("  queued ({n}): {first}");
+        if n > 1 {
+            head.push_str(&format!(" [+{} more]", n - 1));
+        }
+        if !self.streaming {
+            head.push_str(" · enter to send");
+        }
+        Line::from(Span::styled(
+            truncate_display_width(&head, w as usize),
+            Theme::dim(),
+        ))
     }
 
     pub(super) fn status_bar(&mut self, w: u16) -> Paragraph<'static> {

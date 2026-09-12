@@ -291,6 +291,9 @@ pub struct App {
     /// transient bottom-bar notice (3s): every status/error lands here, the
     /// chat stays clean. A new notice replaces the current one.
     toast: Option<Toast>,
+    /// user messages typed mid-turn: sent as new turns FIFO after the
+    /// running one ends (or on abort); cleared on session switch
+    pending_queue: Vec<String>,
     /// previous turn ended successfully — gates retry notifications
     prev_turn_ok: bool,
     /// already toasted for the current retry cycle
@@ -770,6 +773,7 @@ impl App {
             last_ctrl_c: None,
             read_only,
             toast: None,
+            pending_queue: Vec::new(),
             prev_turn_ok: false,
             retry_notified: true, // no toast for the very first turn
             retry_line: None,
@@ -1832,7 +1836,7 @@ impl App {
                 if let Some(active) = self.session_plan() {
                     text = if let Some(step) = active.steps.iter().find(|s| {
                         s.status == crate::plan::StepStatus::InProgress
-                            || s.status == crate::plan::StepStatus::Pending
+                        || s.status == crate::plan::StepStatus::Pending
                     }) {
                         format!("Continue next plan step: {}", step.title)
                     } else {
@@ -1841,16 +1845,30 @@ impl App {
                 } else {
                     return;
                 }
+            } else if !self.streaming
+                && !self.pending_queue.is_empty()
+                && self.menu_stack.is_empty()
+            {
+                // idle with queued follow-ups (a turn failed earlier):
+                // empty Enter sends the first one
+                text = self.pending_queue.remove(0);
             } else {
                 return;
             }
         }
         if self.streaming {
+            if !text.starts_with('/') {
+                // plain message mid-turn: queue it, it goes as a new turn
+                // once the running one ends (or on abort)
+                self.pending_queue.push(text);
+                self.input = Self::fresh_input(String::new());
+                self.status("queued — will send when the turn ends", StatusKind::Info);
+                return;
+            }
             // Whitelist of commands that are safe to run while the agent is
             // streaming: read-only UI, menus, and viewing the plan. Mutating
             // commands (graph rebuild, plan edits, undo, etc.) stay blocked and
-            // show the busy notice. User messages (non-commands) are always
-            // blocked while streaming.
+            // show the busy notice.
             let allowed = if let Some(rest) = text.strip_prefix('/') {
                 let mut parts = rest.split_whitespace();
                 match parts.next().unwrap_or("") {
@@ -2066,6 +2084,8 @@ impl App {
         self.context_bootstrap_pending = true;
         self.session = s;
         crate::providers::set_conversation_id(&self.session.id.to_string());
+        // queued follow-ups belong to the old conversation
+        self.pending_queue.clear();
         if let Some(ref plan_id) = self.session.plan_id
             && crate::plan::open(&self.project_root, plan_id).is_err()
         {
@@ -2156,6 +2176,7 @@ impl App {
         let ctx = self.session.context_limit;
         self.session = Session::new(self.cfg.default_model.clone(), ctx);
         crate::providers::set_conversation_id(&self.session.id.to_string());
+        self.pending_queue.clear();
         self.session.plan_id = crate::plan::open_active_for_session(
             &self.project_root,
             Some(&self.session.id.to_string()),
@@ -3993,6 +4014,17 @@ impl App {
             .collect();
         self.session.save().ok();
         self.dirty = true;
+        // queued follow-ups (typed mid-turn): a natural finish or an abort
+        // sends the first one as a new turn right away; a failed turn
+        // leaves the queue for a manual resend (Enter on empty input)
+        let send_queued = !self.pending_queue.is_empty()
+            && self.menu_stack.is_empty()
+            && (matches!(&res, Ok(())) || matches!(&res, Err(e) if e == "aborted"));
+        if send_queued {
+            let next = self.pending_queue.remove(0);
+            self.input = Self::fresh_input(next);
+            self.submit();
+        }
     }
 
     /// revert the last `n` mutating actions and reopen steps whose evidence was reverted.
