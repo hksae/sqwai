@@ -3121,13 +3121,16 @@ impl App {
                         // Agent died without a final Completed event. If Esc
                         // already requested an abort, this is not a successful
                         // turn and must not read the previous session answer.
+                        // Otherwise the session was not replaced, so there is
+                        // no new answer to authorize either: only what was
+                        // actually streamed may fill the slot.
                         let result = if self.aborted {
                             Err("aborted".to_string())
                         } else {
                             Ok(())
                         };
                         self.agent = None;
-                        self.finish_turn(result);
+                        self.finish_turn_inner(result, false);
                         return;
                     }
                 },
@@ -3755,6 +3758,29 @@ impl App {
         // The agent owns the authoritative conversation. It never contains a
         // system turn: the system block is rebuilt per request and never
         // persisted (the session also refuses one defensively).
+        //
+        // The outcome only authorizes a visible answer if it advanced past
+        // the plain answer already on screen: a tool-cancelled turn ends Ok
+        // with no new assistant message (only tool traffic), and backfilling
+        // the session's last — previous turn's — answer would stamp it into
+        // this turn's slot, duplicating it. Ordinals, not content: a model
+        // legitimately repeating the previous answer word-for-word still
+        // advanced the conversation.
+        let prev_plain = self
+            .session
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::Assistant && m.tool_calls.is_empty())
+            .count();
+        let mut ord = 0;
+        let mut last_ord = 0;
+        for m in &outcome.messages {
+            if m.role == Role::Assistant && m.tool_calls.is_empty() {
+                ord += 1;
+                last_ord = ord;
+            }
+        }
+        let advanced = last_ord > prev_plain;
         self.session.messages = outcome.messages;
         self.session.summary = outcome.summary;
         // the transcript was replaced wholesale; the token estimate is stale
@@ -3765,7 +3791,7 @@ impl App {
         }
         self.refresh_plan_label();
         self.session.checkpoints.extend(outcome.journal);
-        self.finish_turn(Ok(()));
+        self.finish_turn_inner(Ok(()), advanced);
     }
 
     fn is_subagent_row(segment: &Segment) -> bool {
@@ -3983,6 +4009,15 @@ impl App {
     }
 
     fn finish_turn(&mut self, res: Result<(), String>) {
+        self.finish_turn_inner(res, true);
+    }
+
+    /// `advanced` tells the Ok path whether the outcome added a new plain
+    /// assistant message past the one already on screen (`finish_turn_ok`
+    /// computes it against the pre-replacement session). Callers that did
+    /// not replace the session pass false, so a turn that died silently can
+    /// never backfill the previous answer into the live slot.
+    fn finish_turn_inner(&mut self, res: Result<(), String>, advanced: bool) {
         self.clear_busy_statuses();
         // an aborted/errored turn can leave a question with nobody waiting
         // for its answer — freeze it instead of leaving a live ghost.
@@ -4028,12 +4063,14 @@ impl App {
         }
         // On a successful completion the agent already replaced the session
         // wholesale (finish_turn_ok), so the last assistant message there is
-        // authoritative and becomes the visible answer. On an abort/error the
-        // session was NOT updated and still holds the *previous* turn's answer —
-        // backfilling from it would stamp that old answer into the slot for the
-        // turn we just stopped, duplicating it. In that case trust only what was
-        // actually streamed this turn (assistant_buf).
-        let final_text = if res.is_ok() {
+        // authoritative and becomes the visible answer — but only if the
+        // outcome actually advanced past the answer on screen (see
+        // finish_turn_ok). On an abort/error the session was NOT updated and
+        // still holds the *previous* turn's answer — backfilling from it
+        // would stamp that old answer into the slot for the turn we just
+        // stopped, duplicating it. In that case trust only what was actually
+        // streamed this turn (assistant_buf).
+        let final_text = if res.is_ok() && advanced {
             self.session
                 .messages
                 .iter()

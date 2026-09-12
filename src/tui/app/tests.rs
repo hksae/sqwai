@@ -1811,6 +1811,118 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_tool_turn_does_not_backfill_prior_answer() {
+        use crate::agent::loop_task::AgentOutcome;
+        use crate::providers::{Message, Role, ToolCallReq};
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        // prior completed turn, on screen and in history
+        app.session.push(Role::User, "hello");
+        app.session.push(Role::Assistant, "hello!");
+        app.push_segment(Segment::User("hello".into()));
+        app.push_segment(Segment::Assistant {
+            text: "hello!".into(),
+            live: false,
+        });
+        // new turn: tool started, Esc cancelled it before any answer text
+        // streamed — the loop ends cooperatively with Ok and no new
+        // assistant message, only tool traffic
+        app.streaming = true;
+        app.session.push(Role::User, "run it");
+        app.push_segment(Segment::User("run it".into()));
+        app.push_segment(Segment::Assistant {
+            text: String::new(),
+            live: true,
+        });
+        app.finish_turn_ok(AgentOutcome {
+            messages: vec![
+                Message::new(Role::User, "hello"),
+                Message::new(Role::Assistant, "hello!"),
+                Message::new(Role::User, "run it"),
+                Message::new(Role::Assistant, "").with_tool_calls(vec![
+                    ToolCallReq::new("c1", "read", serde_json::json!({})),
+                ]),
+                Message::tool_result("c1", "cancelled", true),
+            ],
+            summary: None,
+            todos: Vec::new(),
+            plan_todos: Vec::new(),
+            journal: Vec::new(),
+        });
+
+        assert!(!app.streaming);
+        let answers: Vec<&str> = app
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Assistant { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            answers.iter().filter(|a| *a == &"hello!").count(),
+            1,
+            "cancel must not stamp the prior answer into the new turn: {answers:?}"
+        );
+        assert!(
+            !app.segments
+                .iter()
+                .any(|s| matches!(s, Segment::Assistant { live: true, .. })),
+            "empty live slot should be removed on cancel"
+        );
+    }
+
+    #[test]
+    fn cancelled_tool_turn_keeps_streamed_partial() {
+        use crate::agent::loop_task::AgentOutcome;
+        use crate::providers::{Message, Role, ToolCallReq};
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.session.push(Role::User, "hello");
+        app.session.push(Role::Assistant, "hello!");
+        app.push_segment(Segment::User("hello".into()));
+        app.push_segment(Segment::Assistant {
+            text: "hello!".into(),
+            live: false,
+        });
+        // cancel landed after some post-tool text streamed: the revealed
+        // partial is kept and preserved, the prior answer stays single
+        app.streaming = true;
+        app.session.push(Role::User, "run it");
+        app.push_segment(Segment::User("run it".into()));
+        app.push_segment(Segment::Assistant {
+            text: "partial…".into(),
+            live: true,
+        });
+        app.assistant_buf = "partial…".into();
+        app.finish_turn_ok(AgentOutcome {
+            messages: vec![
+                Message::new(Role::User, "hello"),
+                Message::new(Role::Assistant, "hello!"),
+                Message::new(Role::User, "run it"),
+                Message::new(Role::Assistant, "").with_tool_calls(vec![
+                    ToolCallReq::new("c1", "read", serde_json::json!({})),
+                ]),
+                Message::tool_result("c1", "cancelled", true),
+            ],
+            summary: None,
+            todos: Vec::new(),
+            plan_todos: Vec::new(),
+            journal: Vec::new(),
+        });
+
+        let answers: Vec<&str> = app
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Assistant { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answers, vec!["hello!", "partial…"], "{answers:?}");
+        let last = app.session.messages.last().expect("partial kept");
+        assert_eq!(last.content, "partial…");
+    }
+
+    #[test]
     fn subagents_menu_opens_read_only_chat() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.subagents.push((
