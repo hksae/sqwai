@@ -68,6 +68,7 @@ pub const ALL: &[Spin] = &[
     spin!("shimmer-ocean", ["◌"]),
     spin!("shimmer-ember", ["◌"]),
     spin!("shimmer-mint", ["◌"]),
+    spin!("shimmer-dusk", ["◌"]),
     spin!("shimmer-pulse", ["◌"]),
     spin!("clock-wide", ["🕐", "🕑", "🕒", "🕓", "🕔", "🕕", "🕖", "🕗", "🕘", "🕙", "🕚", "🕛"]),
     spin!("moon-wide", ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"]),

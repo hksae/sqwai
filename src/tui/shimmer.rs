@@ -154,6 +154,7 @@ fn shimmer_rgb_tint(
 pub const TINT_OCEAN: [(u8, u8, u8); 2] = [(24, 80, 130), (130, 225, 255)];
 pub const TINT_EMBER: [(u8, u8, u8); 2] = [(135, 65, 25), (255, 185, 95)];
 pub const TINT_MINT: [(u8, u8, u8); 2] = [(30, 115, 70), (150, 255, 195)];
+pub const TINT_DUSK: [(u8, u8, u8); 2] = [(235, 200, 60), (90, 140, 255)];
 
 /// Tinted wave: the same travelling band as [`shimmer_spans`], but sweeping
 /// from `base` to `crest` — a color-to-color transition. Truecolor only;
@@ -201,6 +202,7 @@ pub fn shimmer_named(text: &str, tick: usize, name: &str) -> Vec<Span<'static>> 
         "shimmer-ocean" => shimmer_tint_spans(text, tick, TINT_OCEAN[0], TINT_OCEAN[1]),
         "shimmer-ember" => shimmer_tint_spans(text, tick, TINT_EMBER[0], TINT_EMBER[1]),
         "shimmer-mint" => shimmer_tint_spans(text, tick, TINT_MINT[0], TINT_MINT[1]),
+        "shimmer-dusk" => shimmer_tint_spans(text, tick, TINT_DUSK[0], TINT_DUSK[1]),
         "shimmer-pulse" => shimmer_pulse_spans(text, tick),
         _ => shimmer_spans(text, tick),
     }
@@ -419,6 +421,7 @@ mod tests {
             "shimmer-ocean",
             "shimmer-ember",
             "shimmer-mint",
+            "shimmer-dusk",
             "shimmer-pulse",
         ] {
             let text: String = shimmer_named("Working", 9, name)
