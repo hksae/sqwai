@@ -190,7 +190,21 @@ impl Mode {
             Self::Act => "ACT",
         }
     }
+    /// Sweep endpoint for the chip color transition.
+    fn chip_rgb(self) -> (u8, u8, u8) {
+        match self {
+            Self::Act => MODE_ACT_RGB,
+            Self::Plan => MODE_PLAN_RGB,
+        }
+    }
 }
+
+/// Mode-chip color sweep length: a quick flash, not a lingering animation.
+const MODE_BLEND_MS: u64 = 250;
+/// Sweep endpoints, close to the indexed chip colors (bold Yellow / bold
+/// LightBlue) so the settle frame does not pop.
+const MODE_ACT_RGB: (u8, u8, u8) = (250, 200, 70);
+const MODE_PLAN_RGB: (u8, u8, u8) = (110, 165, 255);
 
     const WORKING_SPINNER: [char; 6] = ['◜', '◠', '◝', '◞', '◡', '◟'];
 
@@ -469,6 +483,11 @@ pub struct App {
     /// the config claims: (model id, level, reason). Cleared when either the
     /// model or the level changes, since the observation was about that pair.
     effort_observed_ignored: Option<(String, EffortLevel, String)>,
+    /// Mode-chip color sweep: RGB the sweep started from + start time. The
+    /// target is always the current mode's color, so a toggle mid-sweep
+    /// re-anchors from the displayed color — rapid toggles redirect the
+    /// blend instead of breaking it. Retired (→ None) past the sweep.
+    mode_blend: Option<((u8, u8, u8), Instant)>,
     agents_click: Option<(u16, u16)>,
     status_y: u16,
 
@@ -842,6 +861,7 @@ impl App {
             builtin_update_rx: None,
             maintain_rx: None,
             effort_observed_ignored: None,
+            mode_blend: None,
             agents_click: None,
             status_y: 0,
             press: None,
@@ -1162,6 +1182,11 @@ impl App {
                 || self.tool_running()
                 || self.toast.is_some()
                 || matches!(self.cur_menu(), Some(Menu::TestAnims))
+                // live mode-chip sweep gets its 250ms even past streaming
+                // end, or the chip would freeze mid-blend on the toggle
+                || self.mode_blend.is_some_and(|(_, t0)| {
+                    t0.elapsed().as_millis() < MODE_BLEND_MS as u128
+                })
                 // finish waves get their 700ms even past streaming end,
                 // or the sweep would freeze mid-row on the last tool
                 || self.segments.iter().any(|s| {
@@ -1205,6 +1230,16 @@ impl App {
                     }
                     self.dirty = true;
                 }
+            }
+            // Retire the finished chip sweep: without this the last RGB
+            // frame would stick, since nothing else repaints a settled
+            // status bar.
+            if self
+                .mode_blend
+                .is_some_and(|(_, t0)| t0.elapsed().as_millis() >= MODE_BLEND_MS as u128)
+            {
+                self.mode_blend = None;
+                self.dirty = true;
             }
             if animating {
                 // fixed 20 FPS animation rate from the wall clock, not per
@@ -2856,14 +2891,41 @@ impl App {
     fn mode_command(&mut self, rest: &str) {
         match rest.split_whitespace().nth(1) {
             Some("plan") => {
-                self.mode = Mode::Plan;
+                self.set_mode(Mode::Plan);
                 self.status("mode: PLAN", StatusKind::Info);
             }
             Some("act") => {
-                self.mode = Mode::Act;
+                self.set_mode(Mode::Act);
                 self.status("mode: ACT", StatusKind::Info);
             }
             _ => self.status("usage: /mode plan|act", StatusKind::Warn),
+        }
+    }
+
+    /// Switch ACT/PLAN through one funnel: arms the chip color sweep from
+    /// the currently displayed color (see `mode_blend`), so a toggle
+    /// mid-sweep redirects the blend instead of breaking it.
+    fn set_mode(&mut self, mode: Mode) {
+        let from = self.mode_chip_rgb(Instant::now());
+        self.mode = mode;
+        self.mode_blend = Some((from, Instant::now()));
+        self.dirty = true;
+    }
+
+    /// Chip color right now: in-sweep lerp toward the mode endpoint,
+    /// otherwise the endpoint itself.
+    fn mode_chip_rgb(&self, now: Instant) -> (u8, u8, u8) {
+        let to = self.mode.chip_rgb();
+        match &self.mode_blend {
+            Some((from, t0)) => {
+                let el = now.duration_since(*t0).as_millis();
+                if el >= MODE_BLEND_MS as u128 {
+                    to
+                } else {
+                    crate::tui::shimmer::blend(*from, to, el as f64 / MODE_BLEND_MS as f64)
+                }
+            }
+            None => to,
         }
     }
 

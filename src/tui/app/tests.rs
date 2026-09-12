@@ -1878,6 +1878,43 @@ mod tests {
         assert_eq!(EffortLevel::SELECTABLE, EffortLevel::ALL);
     }
 
+    #[test]
+    fn mode_chip_matches_mode_when_settled() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        // settled ACT: the classic yellow chip
+        let spans = app.status_bar_spans(120);
+        assert_eq!(spans[0].content.as_ref(), " ACT ");
+        assert_eq!(spans[0].style, crate::tui::theme::Theme::status_chip());
+        // settled PLAN: blue chip (blend force-expired, no timing involved)
+        app.set_mode(Mode::Plan);
+        app.mode_blend = Some((
+            super::MODE_PLAN_RGB,
+            std::time::Instant::now() - std::time::Duration::from_secs(5),
+        ));
+        let spans = app.status_bar_spans(120);
+        assert_eq!(spans[0].content.as_ref(), " PLAN ");
+        assert_eq!(
+            spans[0].style,
+            crate::tui::theme::Theme::mode_chip_plan()
+        );
+    }
+
+    #[test]
+    fn mode_toggle_rearms_blend_instead_of_breaking() {
+        // rapid toggles redirect the sweep from the displayed color: the
+        // blend stays armed and the mode always wins
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.set_mode(Mode::Plan);
+        assert_eq!(app.mode, Mode::Plan);
+        assert!(app.mode_blend.is_some(), "toggle arms the sweep");
+        app.set_mode(Mode::Act);
+        assert_eq!(app.mode, Mode::Act);
+        assert!(
+            app.mode_blend.is_some(),
+            "second toggle re-arms, never drops"
+        );
+    }
+
     /// §5.1: the status bar shows the *effective* mapping. Selecting `max` on
     /// a model whose API stops at `high` used to read `th:max`, which claimed
     /// work that was never requested.

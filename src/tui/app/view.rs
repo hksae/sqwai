@@ -6,7 +6,7 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, 
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget};
 use std::hash::{Hash, Hasher};
@@ -3530,9 +3530,28 @@ impl App {
             format!("{} ", truncate_display_width(&dir, dir_budget - 1))
         };
         let right_len = fixed_len + cols(&dir_label);
+        // mode chip: yellow ACT, blue PLAN, with a quick RGB sweep between
+        // them on toggle (truecolor only). Same text and width either way,
+        // so the padding and click targets below are unaffected.
+        let chip_settled = match self.mode {
+            Mode::Act => Theme::status_chip(),
+            Mode::Plan => Theme::mode_chip_plan(),
+        };
+        let chip_style = match self.mode_blend {
+            Some((_, t0))
+                if t0.elapsed().as_millis() < MODE_BLEND_MS as u128
+                    && crate::tui::shimmer::has_truecolor() =>
+            {
+                let (r, g, b) = self.mode_chip_rgb(std::time::Instant::now());
+                Style::new()
+                    .fg(Color::Rgb(r, g, b))
+                    .add_modifier(Modifier::BOLD)
+            }
+            _ => chip_settled,
+        };
         let mut spans = vec![Span::styled(
             format!(" {} ", self.mode.label()),
-            Theme::status_chip(),
+            chip_style,
         )];
         if !plan_label.is_empty() {
             spans.push(Span::styled(format!("  {plan_label}"), Theme::dim()));

@@ -28,8 +28,9 @@ pub const FLASH_MS: u64 = 700;
 const BASE_RGB: (u8, u8, u8) = (128, 128, 128);
 const CREST_RGB: (u8, u8, u8) = (255, 255, 255);
 
-/// Linear blend between two grays, like Codex `color::blend`.
-fn blend(base: (u8, u8, u8), crest: (u8, u8, u8), t: f64) -> (u8, u8, u8) {
+/// Linear blend between two RGB colors, like Codex `color::blend`.
+/// Shared with the mode-chip sweep (yellow ACT ↔ blue PLAN).
+pub(crate) fn blend(base: (u8, u8, u8), crest: (u8, u8, u8), t: f64) -> (u8, u8, u8) {
     let mix = |b: u8, c: u8| (b as f64 + (c as f64 - b as f64) * t).round() as u8;
     (mix(base.0, crest.0), mix(base.1, crest.1), mix(base.2, crest.2))
 }

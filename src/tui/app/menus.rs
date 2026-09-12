@@ -1429,7 +1429,8 @@ impl App {
                 self.build_menu_rows();
             }
             MenuAction::ToggleMode => {
-                self.mode = self.mode.toggle();
+                let next = self.mode.toggle();
+                self.set_mode(next);
                 self.status(&format!("mode: {}", self.mode.label()), StatusKind::Info);
             }
             MenuAction::OpenSessions => {

@@ -523,7 +523,8 @@ impl App {
                         KeyCode::Tab
                             if self.menu_stack.is_empty() && self.active_ask_seg().is_none() =>
                         {
-                            self.mode = self.mode.toggle()
+                            let next = self.mode.toggle();
+                            self.set_mode(next);
                         }
                         KeyCode::Tab if matches!(self.cur_menu(), Some(Menu::AskUser { .. })) => {
                             if let Some(Menu::AskUser { questions, .. }) = self.cur_menu() {

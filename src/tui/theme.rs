@@ -143,6 +143,12 @@ impl Theme {
             .fg(Self::WARN())
             .add_modifier(Modifier::BOLD)
     }
+    /// PLAN mode chip: bold light-blue, mirrors the yellow ACT chip.
+    pub fn mode_chip_plan() -> Style {
+        Style::new()
+            .fg(Self::LIGHT_BLUE())
+            .add_modifier(Modifier::BOLD)
+    }
     pub fn ok() -> Style {
         Style::new()
             .fg(Self::OK())

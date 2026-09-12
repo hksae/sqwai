@@ -29,7 +29,13 @@ const EFFORT_OPTS: &[&str] = &EffortLevel::STRS;
 /// The `[1..]` tail must stay equal to `EffortControl::STRS` — pinned by
 /// `edit_model_form_options_match_control_cycle` — so the form can never
 /// lag behind a new control variant again.
-pub(super) const EFFORT_CONTROL_OPTS: &[&str] = &["auto", "none", "toggle", "named", "budget"];
+pub(super) const EFFORT_CONTROL_OPTS: &[&str] = &[
+    "auto",
+    EffortControl::STRS[0],
+    EffortControl::STRS[1],
+    EffortControl::STRS[2],
+    EffortControl::STRS[3],
+];
 pub(super) const ALWAYS_OPTS: &[&str] = &["off", "on"];
 const MCP_TRANSPORT_OPTS: &[&str] = &["stdio", "http"];
 
