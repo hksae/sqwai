@@ -2134,6 +2134,39 @@ mod tests {
     }
 
     #[test]
+    fn effort_slider_fill_sweeps_to_selection() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.model_cfg.effort = EffortLevel::Low;
+        app.open_menu(crate::tui::app::menus::Menu::Effort);
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        app.draw_menu(&mut buf, area);
+        // move the selection without committing: the fill lags behind it
+        app.menu_sel = 4;
+        let mut buf = Buffer::empty(area);
+        app.draw_menu(&mut buf, area);
+        let dots: String = buf.content().iter().map(|c| c.symbol()).collect();
+        // dot 0 filled, dot 4 bold-selected, the middle still hollow mid-sweep
+        assert_eq!(dots.matches('●').count(), 2, "{dots:?}");
+        assert_eq!(dots.matches('○').count(), 4, "{dots:?}");
+        // settled: the fill catches up exactly
+        if let Some((from, to, _)) = app.effort_sweep {
+            app.effort_sweep = Some((
+                from,
+                to,
+                std::time::Instant::now() - std::time::Duration::from_secs(5),
+            ));
+        }
+        let mut buf = Buffer::empty(area);
+        app.draw_menu(&mut buf, area);
+        let dots: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert_eq!(dots.matches('●').count(), 5, "{dots:?}");
+        assert_eq!(dots.matches('○').count(), 1, "{dots:?}");
+    }
+
+    #[test]
     fn effort_narrow_fallback_list_hovers_and_clicks_by_row() {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;

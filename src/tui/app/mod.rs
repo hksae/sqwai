@@ -201,6 +201,9 @@ impl Mode {
 
 /// Mode-chip color sweep length: a quick flash, not a lingering animation.
 const MODE_BLEND_MS: u64 = 250;
+/// Effort-slider fill sweep length: the fill catches up with the selection
+/// instead of snapping to it.
+const EFFORT_SWEEP_MS: u64 = 200;
 /// Sweep endpoints, close to the indexed chip colors (bold Yellow / bold
 /// LightBlue) so the settle frame does not pop.
 const MODE_ACT_RGB: (u8, u8, u8) = (250, 200, 70);
@@ -459,6 +462,10 @@ pub struct App {
     /// click/hover targets of the effort slider (rect → SELECTABLE index),
     /// rebuilt on every slider draw; empty when another menu is open
     effort_hits: Vec<(Rect, usize)>,
+    /// Effort-slider fill sweep: (displayed fill position, target index,
+    /// start time). A move mid-sweep re-anchors from the displayed position,
+    /// so rapid arrow/hover moves redirect the fill instead of jumping it.
+    effort_sweep: Option<(f64, usize, Instant)>,
     form_fields: Vec<FormField>,
     form_focus: usize,
     /// cached session list for the sessions menus (headers only — see
@@ -851,6 +858,7 @@ impl App {
             menu_rect: Rect::default(),
             sessions_frame_built_w: 0,
             effort_hits: Vec::new(),
+            effort_sweep: None,
             form_fields: Vec::new(),
             form_focus: 0,
             sessions: Vec::new(),
@@ -1187,6 +1195,8 @@ impl App {
                 || self.mode_blend.is_some_and(|(_, t0)| {
                     t0.elapsed().as_millis() < MODE_BLEND_MS as u128
                 })
+                // live slider-fill sweep while the Effort menu is open
+                || matches!(self.cur_menu(), Some(Menu::Effort)) && self.effort_sweep_alive()
                 // finish waves get their 700ms even past streaming end,
                 // or the sweep would freeze mid-row on the last tool
                 || self.segments.iter().any(|s| {
@@ -1239,6 +1249,16 @@ impl App {
                 .is_some_and(|(_, t0)| t0.elapsed().as_millis() >= MODE_BLEND_MS as u128)
             {
                 self.mode_blend = None;
+                self.dirty = true;
+            }
+            // Retire a finished fill sweep with one final snap frame — but
+            // only a sweep that actually travelled; a sweep armed from its
+            // own target is already settled and needs nothing.
+            if matches!(self.effort_sweep, Some((from, to, t0))
+                if (to as f64 - from).abs() > f64::EPSILON
+                    && t0.elapsed().as_millis() >= EFFORT_SWEEP_MS as u128)
+            {
+                self.effort_sweep = None;
                 self.dirty = true;
             }
             if animating {
@@ -2927,6 +2947,15 @@ impl App {
             }
             None => to,
         }
+    }
+
+    /// True while the slider fill is still travelling toward the selection.
+    /// A sweep armed from its own target (menu just opened, no move yet) is
+    /// already settled and must not keep frames flowing.
+    fn effort_sweep_alive(&self) -> bool {
+        matches!(self.effort_sweep, Some((from, to, t0))
+            if (to as f64 - from).abs() > f64::EPSILON
+                && t0.elapsed().as_millis() < EFFORT_SWEEP_MS as u128)
     }
 
     const BUSY_STATUS: &'static str = "busy · esc to stop";

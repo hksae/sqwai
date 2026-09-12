@@ -3160,6 +3160,37 @@ impl App {
         let track_y = inner.y + 1;
         let base_x = inner.x + 1;
 
+        // Fill sweep: the track fill travels from the displayed position to
+        // the selection instead of snapping. A move mid-sweep re-anchors
+        // from where the fill visibly is, so rapid moves redirect it.
+        let target = sel;
+        let now = std::time::Instant::now();
+        if self.effort_sweep.map(|(_, to, _)| to) != Some(target) {
+            let from = match self.effort_sweep {
+                Some((f, old_to, t0)) => {
+                    let el = now.duration_since(t0).as_millis();
+                    if el >= EFFORT_SWEEP_MS as u128 {
+                        old_to as f64
+                    } else {
+                        f + (old_to as f64 - f) * el as f64 / EFFORT_SWEEP_MS as f64
+                    }
+                }
+                None => target as f64,
+            };
+            self.effort_sweep = Some((from, target, now));
+        }
+        let fill_pos = match self.effort_sweep {
+            Some((from, to, t0)) if to == target => {
+                let el = now.duration_since(t0).as_millis();
+                if el >= EFFORT_SWEEP_MS as u128 {
+                    target as f64
+                } else {
+                    from + (target as f64 - from) * el as f64 / EFFORT_SWEEP_MS as f64
+                }
+            }
+            _ => target as f64,
+        };
+
         // labels row + hit rects (label cell and dot cell share one target)
         for (i, lvl) in EffortLevel::SELECTABLE.iter().enumerate() {
             let name = lvl.as_str();
@@ -3206,19 +3237,24 @@ impl App {
         let mut cells: Vec<(&str, Style)> = vec![(" ", Theme::base()); total];
         for i in 0..n {
             let dx = i * COL_W as usize + dot_off;
-            // progress dots: every level up to the selection is filled,
-            // the selection itself additionally bold; the rest are hollow
+            // progress dots: the selection itself is always bold; the fill
+            // behind it rides the sweep position, the rest are hollow.
+            // Settled (fill_pos == sel) this is exactly the old static rule.
             let (dot, dot_style) = if i == sel {
                 ("●", active_style)
-            } else if i < sel {
+            } else if (i as f64) < fill_pos {
                 ("●", fill)
             } else {
                 ("○", dim)
             };
             cells[dx] = (dot, dot_style);
-            // connector to the next dot: filled iff fully left of selection
+            // connector to the next dot: filled iff fully left of the fill
             if i + 1 < n {
-                let cstyle = if i + 1 <= sel { fill } else { dim };
+                let cstyle = if ((i + 1) as f64) <= fill_pos {
+                    fill
+                } else {
+                    dim
+                };
                 for c in cells.iter_mut().take((i + 1) * COL_W as usize + dot_off).skip(dx + 1) {
                     *c = ("─", cstyle);
                 }
