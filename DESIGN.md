@@ -1778,6 +1778,34 @@ final; issue constraints shown separately and droppable; non-author comments
 used for refs only; upstream changes surface as `issue updated` + diff, goal
 never changed automatically. Journal `plan_draft`; config `[issue]`.
 
+### 12.11 @-mentions (planned)
+Carried over from the pre-rewrite design ("при `@упоминании` файла или
+заметки в чате в контекст автоматически подтягиваются близкие узлы
+графа"); never implemented. Manual counterpart to the automatic context
+block (§12.5): the user pins exact context instead of quoting paths in
+prose, so the model guesses less and burns fewer `read` calls. Pinned
+context is a host observation, which fits the integrity model.
+
+- **Picker (TUI).** `@` in the input opens the existing completion popup.
+  Files first (glob by prefix — cheap, synchronous); symbols second (via
+  `recall`, debounced — it has latency).
+- **Resolution at send time, not in the UI.** The host resolves each `@`
+  to a canonical key (`resolve_ref` for symbols, path resolution for
+  files). Unresolved refs warn and stay literal (degrade-don't-refuse),
+  never silently pass.
+- **Injection as a separate volatile block** (`<pinned>`), budgeted and
+  truncated: file content up to the `read` limit plus graph neighbors.
+  One `@` on a huge file must not eat the context.
+- **Read-guard boundary (decision required).** If the host inserted the
+  bytes itself, the consistent choice is to treat the file as read
+  (hash-pinned, normal Stale rules after) — otherwise the model sees code
+  it may not edit. This changes the guard invariant and must be specified
+  explicitly when built.
+- **No auto-linking to the plan.** `@`-files are not step `refs`; at most
+  the host may suggest them.
+- **Not** the automatic neighbor pull from the original sketch — that stays
+  with the context block (§12.5). The value of `@` is precision.
+
 ---
 
 ## 13. Known gaps (acknowledged boundaries)
