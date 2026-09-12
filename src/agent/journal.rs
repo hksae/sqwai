@@ -389,12 +389,35 @@ impl Journal {
     /// Returns the revertible pre-images and, separately, the paths a later
     /// step has since written, so the caller can refuse and say which.
     pub fn step_pre_images(root: &Path, step: &str) -> Result<StepRevert> {
+        Self::step_pre_images_in(root, None, step)
+    }
+
+    /// Pre-images for one plan step, scoped to one plan. Step numbers restart
+    /// per plan ("1" exists in every plan), so the unscoped scan merges
+    /// same-numbered steps of every plan in the project — undoing one step
+    /// could put back another plan's bytes. Records stamped before plan
+    /// attribution existed (`plan: None`) still count: they cannot be
+    /// attributed anywhere else. `plan: None` keeps the old unscoped scan
+    /// for callers that resolved no plan.
+    pub fn step_pre_images_in(
+        root: &Path,
+        plan: Option<&str>,
+        step: &str,
+    ) -> Result<StepRevert> {
         let records = Self::records(root)?;
+        let in_scope = |record: &Record| {
+            plan.is_none_or(|wanted| {
+                record.plan.as_deref() == Some(wanted) || record.plan.is_none()
+            })
+        };
         let mut revert = StepRevert::default();
         let mut last_seq_of_step = 0u64;
 
         for record in &records {
-            if record.kind != "file_diff" || record.step.as_deref() != Some(step) {
+            if record.kind != "file_diff"
+                || !in_scope(record)
+                || record.step.as_deref() != Some(step)
+            {
                 continue;
             }
             last_seq_of_step = last_seq_of_step.max(record.seq);
@@ -421,10 +444,13 @@ impl Journal {
             }
         }
 
-        // Anything written after this step's last record, by a different step,
-        // makes that path un-revertible on its own.
+        // Anything written after this step's last record, by a different step
+        // of the same plan, makes that path un-revertible on its own. Writes
+        // from other plans do not count: their step numbers live in a
+        // different namespace.
         for record in &records {
             if record.kind != "file_diff"
+                || !in_scope(record)
                 || record.seq <= last_seq_of_step
                 || record.step.as_deref() == Some(step)
             {
@@ -512,14 +538,29 @@ impl Journal {
     /// `step` narrows the result to one plan step, which is what `finish`
     /// needs; `None` returns the session's open assumptions, which is what the
     /// anchor and the diary need.
-    pub fn open_assumptions(root: &Path, step: Option<&str>) -> Result<Vec<Assumption>> {
-        let records = Self::records(root)?;
+    ///
+    /// Scoped to one session journal: sequence numbers restart per file, and
+    /// step numbers restart per plan, so an unscoped scan would validate a
+    /// `resolves` against another session's note and warn about foreign
+    /// plans' assumptions.
+    pub fn open_assumptions_in(
+        root: &Path,
+        session_id: &str,
+        step: Option<&str>,
+    ) -> Result<Vec<Assumption>> {
+        Ok(Self::assumptions_in(
+            &Self::records_for(root, session_id)?,
+            step,
+        ))
+    }
+
+    fn assumptions_in(records: &[Record], step: Option<&str>) -> Vec<Assumption> {
         let resolved: std::collections::HashSet<u64> = records
             .iter()
             .filter(|record| record.kind == "note")
             .filter_map(|record| record.fields.get("resolves").and_then(Value::as_u64))
             .collect();
-        Ok(records
+        records
             .iter()
             .filter(|record| {
                 record.kind == "note"
@@ -540,7 +581,7 @@ impl Journal {
                     .unwrap_or_default()
                     .to_string(),
             })
-            .collect())
+            .collect()
     }
 
     /// Which of `checkpoints` have at least one recorded write.
@@ -1287,7 +1328,7 @@ mod tests {
             )
             .unwrap();
 
-        let open = Journal::open_assumptions(&root, None).unwrap();
+        let open = Journal::open_assumptions_in(&root, "session", None).unwrap();
         assert_eq!(
             open.iter().map(|item| item.seq).collect::<Vec<_>>(),
             vec![first, second]
@@ -1305,7 +1346,7 @@ mod tests {
                 }),
             )
             .unwrap();
-        let open = Journal::open_assumptions(&root, None).unwrap();
+        let open = Journal::open_assumptions_in(&root, "session", None).unwrap();
         assert_eq!(open.len(), 1, "{open:?}");
         assert_eq!(open[0].seq, second);
         assert!(
@@ -1337,14 +1378,108 @@ mod tests {
             )
             .unwrap();
 
-        let one = Journal::open_assumptions(&root, Some("1")).unwrap();
+        let one = Journal::open_assumptions_in(&root, "session", Some("1")).unwrap();
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].text, "step one's");
         assert_eq!(
-            Journal::open_assumptions(&root, Some("3")).unwrap().len(),
+            Journal::open_assumptions_in(&root, "session", Some("3"))
+                .unwrap()
+                .len(),
             0
         );
-        assert_eq!(Journal::open_assumptions(&root, None).unwrap().len(), 2);
+        assert_eq!(
+            Journal::open_assumptions_in(&root, "session", None)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    /// Step numbers restart per plan ("1" exists in every plan), so a
+    /// project-wide scan merges same-numbered steps of different plans.
+    /// The scoped revert sees only its own plan's writes — including the
+    /// "later step rewrote it" guard, which must not fire on another
+    /// plan's same-named file.
+    #[test]
+    fn step_pre_images_are_scoped_to_one_plan() {
+        let root = root();
+        let mut a = Journal::open(&root, "sess-a").unwrap();
+        a.set_attribution(Some("1".into()), Some("plan-a".into()), "main");
+        a.append(
+            "file_diff",
+            json!({
+                "path": "a.rs",
+                "blob_before": "blake3:a",
+                "hash_before": "h0",
+                "hash_after": "h1",
+            }),
+        )
+        .unwrap();
+        let mut b = Journal::open(&root, "sess-b").unwrap();
+        b.set_attribution(Some("1".into()), Some("plan-b".into()), "main");
+        b.append(
+            "file_diff",
+            json!({
+                "path": "b.rs",
+                "blob_before": "blake3:b",
+                "hash_before": "h0",
+                "hash_after": "h1",
+            }),
+        )
+        .unwrap();
+        // another plan's step 2 rewrites the same path: unscoped, that
+        // would refuse plan-a's revert of a.rs
+        b.set_attribution(Some("2".into()), Some("plan-b".into()), "main");
+        b.append(
+            "file_diff",
+            json!({
+                "path": "a.rs",
+                "blob_before": "blake3:a2",
+                "hash_before": "h1",
+                "hash_after": "h2",
+            }),
+        )
+        .unwrap();
+
+        let revert = Journal::step_pre_images_in(&root, Some("plan-a"), "1").unwrap();
+        assert_eq!(revert.files.len(), 1, "{revert:?}");
+        assert_eq!(revert.files[0].path, "a.rs");
+        assert!(
+            revert.written_since.is_empty(),
+            "foreign plan writes must not block: {revert:?}"
+        );
+        let other = Journal::step_pre_images_in(&root, Some("plan-b"), "1").unwrap();
+        assert_eq!(other.files.len(), 1);
+        assert_eq!(other.files[0].path, "b.rs");
+    }
+
+    /// Sequence numbers restart per journal file, so a `resolves` seq is
+    /// only meaningful inside its own session — and neither are open
+    /// assumption lists.
+    #[test]
+    fn assumptions_stay_in_their_session() {
+        let root = root();
+        let mut a = Journal::open(&root, "sess-a").unwrap();
+        a.set_attribution(Some("1".into()), Some("plan-a".into()), "main");
+        a.append(
+            "note",
+            serde_json::json!({"by": "model", "note": "assumption", "text": "a holds"}),
+        )
+        .unwrap();
+        let mut b = Journal::open(&root, "sess-b").unwrap();
+        b.set_attribution(Some("1".into()), Some("plan-b".into()), "main");
+        b.append(
+            "note",
+            serde_json::json!({"by": "model", "note": "assumption", "text": "b holds"}),
+        )
+        .unwrap();
+
+        let open_a = Journal::open_assumptions_in(&root, "sess-a", None).unwrap();
+        assert_eq!(open_a.len(), 1);
+        assert_eq!(open_a[0].text, "a holds");
+        let open_b = Journal::open_assumptions_in(&root, "sess-b", Some("1")).unwrap();
+        assert_eq!(open_b.len(), 1);
+        assert_eq!(open_b[0].text, "b holds");
     }
 
     /// What scopes `/undo`: only the paths this checkpoint's own `file_diff`

@@ -144,8 +144,11 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     ));
     // §2.1.4 asks the anchor to surface open assumptions: compaction is
     // exactly when an unresolved assumption would otherwise vanish from the
-    // conversation while still holding up the work.
-    let open = crate::agent::journal::Journal::open_assumptions(root, None).unwrap_or_default();
+    // conversation while still holding up the work. Scoped to this session:
+    // sequence numbers restart per journal file.
+    let open =
+        crate::agent::journal::Journal::open_assumptions_in(root, session_id, None)
+            .unwrap_or_default();
     if open.is_empty() {
         out.push_str("open assumptions: none\n");
     } else {

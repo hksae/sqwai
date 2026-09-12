@@ -425,6 +425,7 @@ fn subagent_tasks_from_args(args: &serde_json::Value) -> Result<Vec<String>, Str
 #[allow(clippy::too_many_arguments)] // all parameters are required for subagent configuration
 async fn run_subagent(
     call: &ToolCallReq,
+    parent_session: &str,
     parent_tx: &mpsc::Sender<AgentEvent>,
     provider: &SharedProvider,
     model_id: &str,
@@ -457,6 +458,7 @@ async fn run_subagent(
                 async move {
                     let outcome = run_subagent(
                         &one,
+                        parent_session,
                         parent_tx,
                         provider,
                         model_id,
@@ -507,7 +509,10 @@ async fn run_subagent(
     // children of the same step; no extra gate is needed for that.
     // Inherit the spawning step, if any (§2.2.4): the child stamps this
     // context on its records and stops mutating once the epoch moves on.
-    let parent_step = plan::open_active_for_session(root, None)
+    // Resolved against the PARENT session, never the global fallback: the
+    // most recent active plan may belong to another session, and the child
+    // must work its parent's step or none at all.
+    let parent_step = plan::open_active_for_session(root, Some(parent_session))
         .ok()
         .flatten()
         .and_then(|plan| {
@@ -1526,6 +1531,7 @@ async fn run_agent(
                     "subagent" if subagent_depth == 0 => {
                         run_subagent(
                             call,
+                            &ctx.session_id,
                             &tx,
                             &provider,
                             &model_id,
@@ -3900,6 +3906,7 @@ mod effort_tests {
         );
         let outcome = run_subagent(
             &call,
+            "parent-sess",
             &parent_tx,
             &provider,
             "m",
@@ -3929,6 +3936,84 @@ mod effort_tests {
         assert!(
             members.iter().any(|s| s.starts_with("sub-") && *s != "parent-sess"),
             "child joined explicitly: {members:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The parent session resolves strictly: when it joined no plan, the
+    /// child must not inherit the most recent *other* session's plan via
+    /// the old global fallback.
+    #[tokio::test]
+    async fn subagent_ignores_a_foreign_active_plan() {
+        let root = std::env::temp_dir().join(format!("sqwai-subforeign-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&root);
+        let mut plan = plan::create(
+            "foreign goal".into(),
+            Vec::new(),
+            Vec::new(),
+            vec![plan::NewStep {
+                title: "step".into(),
+                kind: None,
+                refs: Vec::new(),
+            }],
+            20_000,
+            &plan::Limits::default(),
+        )
+        .unwrap();
+        plan.sessions = vec!["other-sess".into()];
+        plan::store(&root, &plan).unwrap();
+        plan::apply(
+            &mut plan,
+            plan::Op::Start {
+                id: "1".into(),
+                confirm: None,
+            },
+            &plan::Limits::default(),
+            None,
+        )
+        .unwrap();
+        plan::store(&root, &plan).unwrap();
+        let plan_id = plan.id.clone();
+
+        let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(vec![vec![Ok(
+                crate::providers::StreamEvent::Text("child done".into()),
+            )]]),
+        });
+        let (parent_tx, _parent_rx) = mpsc::channel(64);
+        let call = crate::providers::ToolCallReq::new(
+            "c1",
+            "subagent",
+            serde_json::json!({"task": "do it"}),
+        );
+        let outcome = run_subagent(
+            &call,
+            "lonely-sess",
+            &parent_tx,
+            &provider,
+            "m",
+            &root,
+            &[],
+            false,
+            10_000,
+            None,
+            crate::config::EffortSupport::default(),
+            None,
+            Vec::new(),
+            crate::config::McpConfig::default(),
+            crate::config::LspConfig::default(),
+            false,
+            crate::config::ShadowStore::Off,
+        )
+        .await;
+        assert!(outcome.ok, "{}", outcome.output);
+
+        let reloaded = plan::open(&root, &plan_id).unwrap();
+        assert_eq!(
+            reloaded.sessions,
+            vec!["other-sess".to_string()],
+            "no foreign join: {:?}",
+            reloaded.sessions
         );
         let _ = std::fs::remove_dir_all(&root);
     }

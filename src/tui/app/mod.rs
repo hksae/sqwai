@@ -4365,7 +4365,26 @@ impl App {
     /// because putting the old bytes back would undo that later step too.
     fn undo_step(&mut self, step: &str) {
         let root = std::env::current_dir().unwrap_or_default();
-        let revert = match crate::agent::journal::Journal::step_pre_images(&root, step) {
+        // resolve the session's own plan first: step numbers restart per
+        // plan, so the revert must be scoped to this plan, not scanned
+        // project-wide (no plan → the old unscoped scan, nothing better)
+        let plan_id = crate::plan::open_active_for_session(
+            &root,
+            Some(&self.session.id.to_string()),
+        )
+        .ok()
+        .flatten()
+        .map(|plan| plan.id);
+        // no plan to scope to → the old unscoped scan (nothing better exists)
+        let revert = match &plan_id {
+            Some(pid) => crate::agent::journal::Journal::step_pre_images_in(
+                &root,
+                Some(pid),
+                step,
+            ),
+            None => crate::agent::journal::Journal::step_pre_images(&root, step),
+        };
+        let revert = match revert {
             Ok(revert) => revert,
             Err(e) => {
                 self.status(&format!("undo step {step}: {e:#}"), StatusKind::Err);
@@ -4389,8 +4408,10 @@ impl App {
             Ok(report) => {
                 let touched = report.touched();
                 let mut reopened: Vec<String> = Vec::new();
-                if let Ok(Some(mut active)) =
-                    crate::plan::open_active_for_session(&root, Some(&self.session.id.to_string()))
+                // the same plan the revert was scoped to: reopening anything
+                // else would attach this session's undo to foreign work
+                if let Some(pid) = &plan_id
+                    && let Ok(mut active) = crate::plan::open(&root, pid)
                     && crate::plan::reopen_for_undo(
                         &mut active,
                         step,

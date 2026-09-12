@@ -1594,8 +1594,13 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
                 // Closing an assumption is only meaningful against one that is
                 // actually open: a `resolves` pointing anywhere else would look
                 // like closure while leaving the assumption standing.
-                let open = crate::agent::journal::Journal::open_assumptions(&ctx.root, None)
-                    .unwrap_or_default();
+                // Scoped to this session: sequence numbers restart per file.
+                let open = crate::agent::journal::Journal::open_assumptions_in(
+                    &ctx.root,
+                    &ctx.session_id,
+                    None,
+                )
+                .unwrap_or_default();
                 if open.iter().any(|item| item.seq == resolves) {
                     Outcome::ok(format!("note recorded: {kind}, resolves j#{resolves}"))
                 } else {
@@ -1627,7 +1632,11 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
 fn journal_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let op = args["op"].as_str().unwrap_or("read");
     if op == "assumptions" {
-        let open = match crate::agent::journal::Journal::open_assumptions(&ctx.root, None) {
+        let open = match crate::agent::journal::Journal::open_assumptions_in(
+            &ctx.root,
+            &ctx.session_id,
+            None,
+        ) {
             Ok(open) => open,
             Err(e) => return Outcome::err(format!("journal read failed: {e:#}")),
         };
@@ -2604,8 +2613,12 @@ fn with_assumption_warning(ctx: &ToolCtx, finished_step: Option<&str>, message: 
     let Some(step) = finished_step else {
         return message;
     };
-    let open =
-        crate::agent::journal::Journal::open_assumptions(&ctx.root, Some(step)).unwrap_or_default();
+    let open = crate::agent::journal::Journal::open_assumptions_in(
+        &ctx.root,
+        &ctx.session_id,
+        Some(step),
+    )
+    .unwrap_or_default();
     if open.is_empty() {
         return message;
     }
