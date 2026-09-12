@@ -1441,6 +1441,8 @@ impl App {
             custom,
             focus: 0,
             answered: None,
+            // live questions open unfolded so they can be answered at once
+            expanded: true,
         };
         let pos = self
             .segments
@@ -1609,8 +1611,13 @@ impl App {
             Some(Segment::AskUser { id, .. }) => *id,
             _ => return,
         };
-        if let Some(Segment::AskUser { answered, .. }) = self.segments.get_mut(seg) {
+        if let Some(Segment::AskUser {
+            answered, expanded, ..
+        }) = self.segments.get_mut(seg)
+        {
             *answered = Some(text.clone());
+            // settle to the one-line head row, like a finished tool row
+            *expanded = false;
         }
         self.touch_segment(seg);
         if let Some(agent) = &self.agent {
@@ -1630,8 +1637,12 @@ impl App {
             self.active_ask_id = None;
             return;
         };
-        if let Some(Segment::AskUser { answered, .. }) = self.segments.get_mut(seg) {
+        if let Some(Segment::AskUser {
+            answered, expanded, ..
+        }) = self.segments.get_mut(seg)
+        {
             *answered = Some(note.to_string());
+            *expanded = false;
         }
         self.touch_segment(seg);
         self.active_ask_id = None;

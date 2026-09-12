@@ -3588,6 +3588,7 @@ mod tests {
             custom: vec![String::new()],
             focus: 0,
             answered: None,
+            expanded: true,
         };
         let seg2 = Segment::AskUser {
             id: 1,
@@ -3596,6 +3597,7 @@ mod tests {
             custom: vec![String::new()],
             focus: 0,
             answered: None,
+            expanded: true,
         };
         assert_ne!(app.seg_key(&seg1), app.seg_key(&seg2));
     }
@@ -5083,6 +5085,117 @@ mod tests {
         assert!(app.ask_custom_focus.is_none());
         app.inline_ask_skip();
         assert!(app.active_ask_seg().is_none(), "second Esc skips");
+    }
+
+    #[test]
+    fn ask_user_answer_collapses_to_head_row() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        push_inline_ask(&mut app, ask_fixture());
+        let seg = app.active_ask_seg().expect("live ask");
+        assert!(
+            matches!(app.segments[seg], Segment::AskUser { expanded: true, .. }),
+            "live questions open unfolded"
+        );
+        app.inline_ask_select(0, 1);
+        app.inline_ask_confirm();
+        assert!(
+            matches!(
+                app.segments[seg],
+                Segment::AskUser {
+                    answered: Some(_),
+                    expanded: false,
+                    ..
+                }
+            ),
+            "the answer settles to the one-line head"
+        );
+        let s = render_to_string(&mut app, 100, 30);
+        assert!(s.contains("ask_user"), "head names the tool:\n{s}");
+        assert!(s.contains("beta"), "head carries the answer:\n{s}");
+        assert!(
+            !s.contains("Pick many"),
+            "the questionnaire folds away:\n{s}"
+        );
+    }
+
+    #[test]
+    fn ask_user_head_click_folds_and_unfolds() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        push_inline_ask(&mut app, ask_fixture());
+        app.inline_ask_confirm();
+        let seg = app
+            .segments
+            .iter()
+            .position(|s| matches!(s, Segment::AskUser { .. }))
+            .expect("ask segment");
+        // collapsed to a single head row
+        render_to_string(&mut app, 100, 30);
+        let rows = app
+            .cache_rowseg
+            .iter()
+            .filter(|t| **t == Some(seg))
+            .count();
+        assert_eq!(rows, 1, "answered ask is one head row");
+        let abs = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(seg))
+            .unwrap();
+        // head click unfolds the questionnaire back
+        app.click(abs);
+        assert!(
+            matches!(app.segments[seg], Segment::AskUser { expanded: true, .. }),
+            "head click unfolds"
+        );
+        render_to_string(&mut app, 100, 30);
+        let rows = app
+            .cache_rowseg
+            .iter()
+            .filter(|t| **t == Some(seg))
+            .count();
+        assert!(rows > 5, "questionnaire is back: {rows} rows");
+        // and folds again on the first row
+        let abs = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(seg))
+            .unwrap();
+        app.click(abs);
+        assert!(
+            matches!(
+                app.segments[seg],
+                Segment::AskUser { expanded: false, .. }
+            ),
+            "head click folds again"
+        );
+    }
+
+    #[test]
+    fn ask_user_option_click_still_selects_when_expanded() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        push_inline_ask(&mut app, ask_fixture());
+        render_to_string(&mut app, 100, 30);
+        let seg = app.active_ask_seg().expect("live ask");
+        let start = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(seg))
+            .expect("ask block");
+        // expanded layout: header, question, alpha, beta at offset 3
+        app.click(start + 3);
+        match &app.segments[seg] {
+            Segment::AskUser { picked, .. } => {
+                assert_eq!(picked[0], vec![false, true], "option click selects")
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(
+            matches!(app.segments[seg], Segment::AskUser { expanded: true, .. }),
+            "option click must not fold the questionnaire"
+        );
     }
 
     #[test]

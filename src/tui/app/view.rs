@@ -178,6 +178,8 @@ pub(super) enum Segment {
     /// This is the primary (and only) interactive surface: no overlay, no
     /// modal menu. While `answered` is `None` the agent is blocked waiting
     /// for the user; after the answer it freezes into a plain Q&A record.
+    /// Collapses to one tool-style head row like tool calls; the expanded
+    /// questionnaire is unchanged.
     AskUser {
         #[allow(dead_code)]
         id: u64,
@@ -188,6 +190,8 @@ pub(super) enum Segment {
         focus: usize,
         /// frozen answer text once the user confirmed/skipped; None = active
         answered: Option<String>,
+        /// false shows only the head row (marker + name + summary)
+        expanded: bool,
     },
     /// propose_plan draft awaiting accept/decline, inline in chat and folded
     /// into the turn's activity like a tool call. `decided` freezes it.
@@ -510,6 +514,11 @@ impl App {
                 let id = self.seg_meta.get(seg_idx).map(|m| m.id)?;
                 return Some(ClickTarget::Ask { seg: id, row });
             }
+            // an ask head row folds/unfolds the questionnaire like a tool row
+            if let Some(seg_idx) = self.ask_head_at(abs) {
+                let id = self.seg_meta.get(seg_idx).map(|m| m.id)?;
+                return Some(ClickTarget::Toggle { seg: id, screen });
+            }
         }
         let tag = self.cache_rowseg.get(abs).copied()??;
         if tag >= GROUP_BASE {
@@ -695,8 +704,15 @@ impl App {
     /// offset inside the segment's rendered block -> interactive row.
     /// Must stay in lockstep with `render_segment`'s AskUser branch: every
     /// logical line there is exactly one visual row (truncated to width).
+    /// A collapsed block is just the head row, which toggles (see
+    /// `ask_head_at`) instead of answering.
     fn ask_decode(&self, seg_idx: usize, offset: usize) -> Option<AskRow> {
-        let Segment::AskUser { questions, .. } = self.segments.get(seg_idx)? else {
+        let Segment::AskUser {
+            expanded: true,
+            questions,
+            ..
+        } = self.segments.get(seg_idx)?
+        else {
             return None;
         };
         let mut line = 0usize;
@@ -739,6 +755,22 @@ impl App {
             return Some(AskRow::Confirm);
         }
         None
+    }
+
+    /// absolute row of an AskUser head row (offset 0 of its block), if the
+    /// click landed exactly there. Collapsed blocks are just the head;
+    /// expanded ones toggle on their first row too, tool-style. Option and
+    /// confirm rows resolve as Ask above and never reach here.
+    fn ask_head_at(&self, abs_row: usize) -> Option<usize> {
+        let seg_idx = self.cache_rowseg.get(abs_row).copied()??;
+        if !matches!(
+            self.segments.get(seg_idx),
+            Some(Segment::AskUser { .. })
+        ) {
+            return None;
+        }
+        let (start, _) = self.ask_block_range(seg_idx)?;
+        (abs_row == start).then_some(seg_idx)
     }
 
     /// map an absolute cache row onto an interactive proposal target, if any
@@ -850,7 +882,8 @@ impl App {
                 };
                 // clicking an error line folds/unfolds its full text (it
                 // arrives collapsed); full text stays selectable by drag
-                // like any row. A finished tool row reveals its output.
+                // like any row. A finished tool row reveals its output, an
+                // ask head row its questionnaire.
                 let toggle = match self.segments.get(idx) {
                     Some(Segment::Status {
                         kind: StatusKind::Err,
@@ -863,6 +896,7 @@ impl App {
                         expanded,
                         ..
                     }) => Some(!*expanded),
+                    Some(Segment::AskUser { expanded, .. }) => Some(!*expanded),
                     _ => None,
                 };
                 if let Some(v) = toggle {
@@ -888,6 +922,7 @@ impl App {
                         Some(Segment::Thinking { expanded, .. }) => *expanded = v,
                         Some(Segment::Subagent { expanded, .. }) => *expanded = v,
                         Some(Segment::Tool { expanded, .. }) => *expanded = v,
+                        Some(Segment::AskUser { expanded, .. }) => *expanded = v,
                         Some(Segment::Status { expanded, .. }) => *expanded = v,
                         _ => {}
                     }
@@ -1112,6 +1147,7 @@ impl App {
                 custom,
                 focus,
                 answered,
+                expanded,
                 ..
             } => {
                 let mut k = questions.len() * 1000;
@@ -1130,6 +1166,10 @@ impl App {
                 k += focus * 101;
                 if let Some(a) = answered {
                     k += a.len() * 3 + 1_000_000;
+                }
+                // folded/unfolded paints a different block
+                if *expanded {
+                    k = k.wrapping_add(8_000_007);
                 }
                 // hover highlight is part of the painted row
                 if let Some(hover) = self.ask_hover {
@@ -1250,6 +1290,53 @@ impl App {
         }
     }
 
+    /// Collapsed ask_user head row, tool-style: marker + name + dim
+    /// summary. Live shows the first question, answered shows the frozen
+    /// answer; click the row to unfold the questionnaire.
+    fn ask_head_row(
+        &self,
+        segs: &[Segment],
+        idx: usize,
+        w: u16,
+    ) -> (Line<'static>, Option<usize>) {
+        let (marker, summary) = match &segs[idx] {
+            Segment::AskUser {
+                answered: Some(a), ..
+            } => ("  ✓ ", a.clone()),
+            Segment::AskUser { questions, .. } => {
+                let first = questions
+                    .first()
+                    .map(|q| q.question.as_str())
+                    .unwrap_or("");
+                let extra = if questions.len() > 1 {
+                    format!(" (+{} more)", questions.len() - 1)
+                } else {
+                    String::new()
+                };
+                ("  ? ", format!("{first}{extra}"))
+            }
+            _ => ("  ? ", String::new()),
+        };
+        let name = "ask_user";
+        let marker_width = 4usize;
+        let name_width = name
+            .width()
+            .min(usize::from(w).saturating_sub(marker_width));
+        let shown_name = truncate_display_width(name, name_width);
+        let summary_width = usize::from(w)
+            .saturating_sub(marker_width + name_width)
+            .saturating_sub(2);
+        let summary = format!("  {}", truncate_display_width(&summary, summary_width));
+        (
+            Line::from(vec![
+                Span::styled(marker.to_string(), Theme::tool_head_bold()),
+                Span::styled(shown_name, Theme::tool_head()),
+                Span::styled(summary, Theme::dim()),
+            ]),
+            Some(idx),
+        )
+    }
+
     /// Render one segment. `segs` is the owning transcript (main chat or one
     /// subagent's), `interactive` enables live ask/proposal highlight — only
     /// the main view is interactive; subagent rows always render inactive.
@@ -1294,6 +1381,9 @@ impl App {
                     }));
                     out.push((Line::from(spans), Some(idx)));
                 }
+            }
+            Segment::AskUser { expanded: false, .. } => {
+                out.push(self.ask_head_row(segs, idx, w));
             }
             Segment::AskUser {
                 questions,
