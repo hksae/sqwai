@@ -203,6 +203,24 @@ impl Provider for OpenAiProvider {
                 );
             }
             let body = Self::build_body(&req);
+            // one-line request summary for gateway debugging (body itself
+            // can be 50KB+ of system prompt, so only its shape is logged)
+            if let Some(obj) = body.as_object() {
+                let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+                keys.sort_unstable();
+                super::log_http(&format!(
+                    "POST {url} model={} keys=[{}] reasoning_effort={} tools={}",
+                    body.get("model").and_then(|m| m.as_str()).unwrap_or("?"),
+                    keys.join(","),
+                    body.get("reasoning_effort")
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                    body.get("tools")
+                        .and_then(|t| t.as_array())
+                        .map(|a| a.len().to_string())
+                        .unwrap_or_else(|| "-".into()),
+                ));
+            }
 
             let mut r = this.http.post(&url);
             if let Some(k) = &this.api_key { r = r.bearer_auth(k); }
