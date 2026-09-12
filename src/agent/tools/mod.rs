@@ -1028,10 +1028,22 @@ pub fn call_summary(name: &str, args: &Value) -> String {
         "ls" => s("path"),
         "read" | "write" | "edit" | "multi_edit" => s("file_path"),
         "bash" => s("command"),
-        "bash_output" => args["id"]
-            .as_u64()
-            .map(|id| format!("job {id}"))
-            .unwrap_or_else(|| "list".to_string()),
+        "bash_output" => {
+            // wait_secs/from_start visible right in the row: no need to
+            // expand the call to see whether the model waited or polled
+            let base = args["id"]
+                .as_u64()
+                .map(|id| format!("job {id}"))
+                .unwrap_or_else(|| "list".to_string());
+            let mut extra = String::new();
+            if args["wait_secs"].as_u64().unwrap_or(0) > 0 {
+                extra.push_str(&format!(" wait {}s", args["wait_secs"].as_u64().unwrap_or(0)));
+            }
+            if args["from_start"].as_bool().unwrap_or(false) {
+                extra.push_str(" from start");
+            }
+            format!("{base}{extra}")
+        }
         "bash_kill" => format!("job {}", args["id"].as_u64().unwrap_or(0)),
         "sleep" => format!("{}s", args["seconds"].as_u64().unwrap_or(0)),
         "think" => {
@@ -2182,9 +2194,28 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             let mut active = match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
                 Ok(Some(p)) => p,
                 Ok(None) => {
-                    return Outcome::err(
-                        "no active plan: create one with op=create first".to_string(),
-                    );
+                    // #171: no own plan — but `start` names an explicit step
+                    // to work, so resolve the project's active plan and JOIN
+                    // it (membership recorded) instead of failing or
+                    // silently borrowing foreign work.
+                    let is_start = matches!(&other, plan::Op::Start { .. });
+                    match (is_start, plan::open_active(&ctx.root)) {
+                        (true, Ok(Some(mut foreign))) => {
+                            if !foreign.sessions.iter().any(|s| s == &ctx.session_id) {
+                                foreign.sessions.push(ctx.session_id.clone());
+                                foreign.revision += 1;
+                                if let Err(e) = plan::store(&ctx.root, &foreign) {
+                                    return Outcome::err(format!("plan join failed: {e:#}"));
+                                }
+                            }
+                            foreign
+                        }
+                        _ => {
+                            return Outcome::err(
+                                "no active plan: create one with op=create first".to_string(),
+                            )
+                        }
+                    }
                 }
                 Err(e) => return Outcome::err(format!("plan store unreadable: {e:#}")),
             };
@@ -4057,6 +4088,71 @@ mod tests {
         );
         assert!(done.ok, "{}", done.output);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #171: `plan start` on the project's active plan is an explicit
+    /// adoption — the session joins (membership recorded) instead of
+    /// failing or silently borrowing foreign work. Other ops stay strict.
+    #[test]
+    fn plan_start_joins_a_foreign_active_plan() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "shared work",
+                "steps": [{"title": "step one"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+
+        // another session, no plan of its own
+        let mut other = ToolCtx::new(&dir).in_session("other-sess");
+        let started = plan_op(&mut other, &json!({"op": "start", "id": "1"}));
+        assert!(started.ok, "start must join, not refuse: {}", started.output);
+
+        let plan = plan::open_active(&dir).unwrap().unwrap();
+        assert!(
+            plan.sessions.contains(&ctx.session_id)
+                && plan.sessions.contains(&"other-sess".to_string()),
+            "both sessions are members: {:?}",
+            plan.sessions
+        );
+
+        // ...while a non-start op from the outsider still resolves nothing
+        let mut third = ToolCtx::new(&dir).in_session("third-sess");
+        let shown = plan_op(&mut third, &json!({"op": "show"}));
+        assert!(
+            !shown.ok,
+            "reads stay session-strict too: {}",
+            shown.output
+        );
+        let finished = plan_op(
+            &mut third,
+            &json!({"op": "finish", "id": "1", "summary": "mine"}),
+        );
+        assert!(
+            !finished.ok,
+            "finish without membership must not touch the step"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Call rows show whether the model waited: `job 1` vs `job 1 wait 60s`.
+    #[test]
+    fn bash_output_summary_shows_wait_params() {
+        assert_eq!(
+            call_summary("bash_output", &json!({"id": 1})),
+            "job 1"
+        );
+        assert_eq!(
+            call_summary("bash_output", &json!({"id": 1, "wait_secs": 60})),
+            "job 1 wait 60s"
+        );
+        assert_eq!(
+            call_summary("bash_output", &json!({"id": 2, "from_start": true})),
+            "job 2 from start"
+        );
     }
 
     /// A `cmd:` acceptance item is settled by the host running the command,

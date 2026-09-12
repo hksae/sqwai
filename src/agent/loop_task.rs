@@ -1467,7 +1467,12 @@ async fn run_agent(
                 && plan_limits.plan_first == crate::config::PlanFirstMode::Soft
                 && tools::is_mutating_call(&call.name, &call.args)
                 && call.name != "plan"
-                && crate::plan::open_active_for_session(&root, Some(&session_id)).ok().flatten().is_none()
+                // #171: the gate asks "is there planning discipline", not
+                // "is it yours" — one active plan per project (§2.1.1), so a
+                // global check. Session-scoped resolution stays strict
+                // everywhere else; joining a foreign plan is explicit
+                // (`plan start` records membership).
+                && crate::plan::open_active(&root).ok().flatten().is_none()
                 && !is_heuristic_trivial(&messages)
             {
                 tools::Outcome::err(
