@@ -428,9 +428,9 @@ fn forced_wait_secs(consecutive_nowait: u32) -> u64 {
 /// clamped) blocks until the job exits, fresh bytes arrive, the timeout
 /// lapses, or the user cancels — one call instead of a poll loop. Reads
 /// without it on a running job are free twice, then force-waited (15s,
-/// then 30s capped): polling out of habit still returns, just after a
-/// wait. A finished job is reported once with its exit code, then removed
-/// from the registry.
+/// then 30s capped, for exit — intermediate output does not wake a forced
+/// wait, or chatty jobs would poll forever unchanged). A finished job is
+/// reported once with its exit code, then removed from the registry.
 pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
     if ctx.cancel_requested() {
         return Outcome::cancelled();
@@ -493,6 +493,11 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
     // blocking wait BEFORE the read: until the job exits, fresh bytes land,
     // the timeout lapses, or Esc. The registry lock is never held across a
     // sleep — the job is re-resolved after the wait.
+    //
+    // Asymmetry is deliberate: an explicit wait_secs wakes on fresh output
+    // (the model asked to watch), but a FORCED wait ignores intermediate
+    // output and sits until exit or cap — otherwise a chatty job wakes it
+    // instantly every time and polling continues unchanged.
     if effective_wait > 0 {
         // bytes the model has already seen: waiting ends early on anything
         // beyond this, so a second waiter does not sleep through output
@@ -505,6 +510,7 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
         drop(jobs);
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_secs(effective_wait);
+        let wake_on_output = forced == 0;
         loop {
             if ctx.cancel_requested() {
                 return Outcome::cancelled();
@@ -518,7 +524,7 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
                     };
                     job.poll();
                     let len = std::fs::metadata(&job.log).map(|m| m.len()).unwrap_or(0);
-                    !job.running() || len > seen
+                    !job.running() || (wake_on_output && len > seen)
                 }
             };
             if done || std::time::Instant::now() >= deadline {
@@ -590,9 +596,11 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
     // though the schema documents wait_secs — a running job polled
     // without it says so itself, every time, until the habit breaks.
     // After two free reads the wait is forced (15s, then 30s capped).
-    let notice = if still_running && wait_secs == 0 {
+    // A forced wait that ends at the exit still says so: otherwise the
+    // model never learns it was parked.
+    let notice = if wait_secs == 0 && (still_running || forced > 0) {
         if forced > 0 {
-            format!("(no-wait poll #{polls} in a row: waited {forced}s on your behalf — pass wait_secs yourself next time)\n")
+            format!("(no-wait poll #{polls} in a row: waited {forced}s for exit on your behalf — pass wait_secs yourself next time)\n")
         } else {
             "(do not poll in a loop: pass wait_secs (up to 60) to block until fresh output or exit)\n".to_string()
         }
@@ -1062,12 +1070,21 @@ mod tests {
     }
 
     /// Reads without wait_secs on a running job escalate: the 3rd forces
-    /// a 15s wait (waking early on fresh output), the 4th forces 30s.
+    /// a wait that sits until exit or cap (intermediate output does not
+    /// wake it), the 4th would force 30s (pinned by the schedule unit
+    /// test — not slept out here).
     #[test]
     fn repeated_nowait_reads_force_a_wait() {
         let mut c = ctx();
-        let id = spawn_bg(&mut c, &long_sleep_command());
-        std::thread::sleep(std::time::Duration::from_millis(1200));
+        // ~5s of output, then exit: the forced wait wakes on the exit,
+        // not on the full 15s cap
+        #[cfg(unix)]
+        let cmd = "ping -c 6 127.0.0.1";
+        #[cfg(windows)]
+        let cmd = "ping -n 6 127.0.0.1";
+        let id = spawn_bg(&mut c, cmd);
+        // three back-to-back reads: the job cannot finish that fast, so
+        // all three observe it running and the 3rd forces a wait
         let j = |v: serde_json::Value| bash_output(&c, &v);
         let first = j(serde_json::json!({"id": id}));
         assert!(first.ok, "{}", first.output);
@@ -1075,21 +1092,19 @@ mod tests {
         let second = j(serde_json::json!({"id": id}));
         assert!(second.ok, "{}", second.output);
         assert!(!second.output.contains("waited "), "{}", second.output);
-        // third: forced 15s, but ping lines land ~1/s so it wakes fast
+        // third: forced 15s, waking on the ~5s exit instead
         let t0 = std::time::Instant::now();
         let third = j(serde_json::json!({"id": id}));
         assert!(third.ok, "{}", third.output);
         assert!(third.output.contains("waited 15s"), "{}", third.output);
         assert!(
-            t0.elapsed() < std::time::Duration::from_secs(12),
-            "forced wait must wake on fresh output, not sleep it out"
+            t0.elapsed() > std::time::Duration::from_secs(3),
+            "a forced wait must actually park, not return instantly"
         );
-        // fourth: capped at 30s, same early wake
-        let fourth = j(serde_json::json!({"id": id}));
-        assert!(fourth.ok, "{}", fourth.output);
-        assert!(fourth.output.contains("waited 30s"), "{}", fourth.output);
-        let killed = bash_kill(&c, &serde_json::json!({"id": id}));
-        assert!(killed.ok, "{}", killed.output);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(14),
+            "forced wait must wake on exit, not sleep the cap"
+        );
     }
 
     #[test]
