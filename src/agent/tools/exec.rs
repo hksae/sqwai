@@ -425,12 +425,12 @@ fn forced_wait_secs(consecutive_nowait: u32) -> u64 {
 /// tail of its log; every later read returns only the bytes appended since
 /// the previous read, so a chatty log crosses the context exactly once.
 /// `from_start=true` re-reads the tail from scratch. `wait_secs` (0-60,
-/// clamped) blocks until the job exits, fresh bytes arrive, the timeout
-/// lapses, or the user cancels — one call instead of a poll loop. Reads
+/// clamped) parks until the job exits or the timeout lapses — intermediate
+/// output never wakes it early (that degenerates into polling on chatty
+/// jobs); the read after the wait returns everything accumulated. Reads
 /// without it on a running job are free twice, then force-waited (15s,
-/// then 30s capped, for exit — intermediate output does not wake a forced
-/// wait, or chatty jobs would poll forever unchanged). A finished job is
-/// reported once with its exit code, then removed from the registry.
+/// then 30s capped). A finished job is reported once with its exit code,
+/// then removed from the registry.
 pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
     if ctx.cancel_requested() {
         return Outcome::cancelled();
@@ -490,27 +490,18 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
     }
     let effective_wait = wait_secs.max(forced);
 
-    // blocking wait BEFORE the read: until the job exits, fresh bytes land,
-    // the timeout lapses, or Esc. The registry lock is never held across a
-    // sleep — the job is re-resolved after the wait.
-    //
-    // Asymmetry is deliberate: an explicit wait_secs wakes on fresh output
-    // (the model asked to watch), but a FORCED wait ignores intermediate
-    // output and sits until exit or cap — otherwise a chatty job wakes it
-    // instantly every time and polling continues unchanged.
+    // blocking wait BEFORE the read: until the job exits, the timeout
+    // lapses, or Esc. Intermediate output NEVER wakes a wait: on a chatty
+    // job "wake on output" degenerates into polling every couple of
+    // seconds, which is exactly what wait exists to prevent. The read
+    // after the wait returns everything accumulated. The registry lock
+    // is never held across a sleep — the job is re-resolved after.
     if effective_wait > 0 {
-        // bytes the model has already seen: waiting ends early on anything
-        // beyond this, so a second waiter does not sleep through output
-        let seen = match own_job(&mut jobs, &ctx.session_id, id) {
-            Ok(job) => job.read,
-            Err(e) => return Outcome::err(e),
-        };
         // the outer guard must go BEFORE the loop: it re-locks below, and
         // std Mutex is not reentrant — holding both would self-deadlock
         drop(jobs);
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_secs(effective_wait);
-        let wake_on_output = forced == 0;
         loop {
             if ctx.cancel_requested() {
                 return Outcome::cancelled();
@@ -523,8 +514,7 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
                         Err(e) => return Outcome::err(format!("{e} — it was killed or reaped while waiting")),
                     };
                     job.poll();
-                    let len = std::fs::metadata(&job.log).map(|m| m.len()).unwrap_or(0);
-                    !job.running() || (wake_on_output && len > seen)
+                    !job.running()
                 }
             };
             if done || std::time::Instant::now() >= deadline {
