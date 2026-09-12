@@ -1626,6 +1626,23 @@ mod tests {
     }
 
     #[test]
+    fn session_switch_drops_stale_notices() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.effort_observed_ignored =
+            Some(("m".into(), EffortLevel::High, "nope".into()));
+        app.retry_line = Some("retry #1 in 5s — boom".into());
+        app.last_checkpoint = Some("cp".into());
+        app.prev_turn_ok = true;
+        app.retry_notified = false;
+        app.apply_session(Session::new("m".into(), 1000));
+        assert!(app.effort_observed_ignored.is_none());
+        assert!(app.retry_line.is_none());
+        assert!(app.last_checkpoint.is_none());
+        assert!(!app.prev_turn_ok);
+        assert!(app.retry_notified);
+    }
+
+    #[test]
     fn start_new_session_stamps_project() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         assert!(app.start_new_session());
@@ -2025,6 +2042,44 @@ mod tests {
         assert_eq!(answers, vec!["hello!", "partial…"], "{answers:?}");
         let last = app.session.messages.last().expect("partial kept");
         assert_eq!(last.content, "partial…");
+    }
+
+    #[test]
+    fn finish_turn_ok_rebases_notes_after_compaction() {
+        use crate::agent::loop_task::AgentOutcome;
+        use crate::providers::{Message, Role};
+        use crate::session::TurnNote;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        for (user, answer) in [("u1", "a1"), ("u2", "a2"), ("u3", "a3")] {
+            app.session.push(Role::User, user);
+            app.session.push(Role::Assistant, answer);
+        }
+        for (idx, text) in [(0, "n0"), (2, "n2"), (4, "n4")] {
+            app.session.turn_notes.push(TurnNote {
+                user_index: idx,
+                text: text.into(),
+                is_error: false,
+            });
+        }
+        // compaction dropped the first two turns, kept the third
+        app.finish_turn_ok(AgentOutcome {
+            messages: vec![
+                Message::new(Role::User, "summary"),
+                Message::new(Role::User, "u3"),
+                Message::new(Role::Assistant, "a3"),
+            ],
+            summary: Some("summary".into()),
+            todos: Vec::new(),
+            plan_todos: Vec::new(),
+            journal: Vec::new(),
+        });
+        let notes: Vec<usize> = app
+            .session
+            .turn_notes
+            .iter()
+            .map(|n| n.user_index)
+            .collect();
+        assert_eq!(notes, vec![0, 0, 1], "{notes:?}");
     }
 
     #[test]

@@ -202,6 +202,31 @@ impl Session {
         Ok(dir)
     }
 
+    /// Rebase positional turn attachments after history surgery (compaction
+    /// and hard-trim drop a message prefix, optionally prepending a summary):
+    /// `dropped` messages vanish from the front, survivors shift down.
+    /// Notes pointing into the dropped prefix clamp to the earliest
+    /// surviving turn — a failure record must stay visible, even misplaced
+    /// beats silently lost. Activity summaries keep their totals but lose
+    /// the attachment they can no longer name (`None` restores fine).
+    pub fn rebase_turn_attachments(&mut self, dropped: usize) {
+        if dropped == 0 {
+            return;
+        }
+        for note in &mut self.turn_notes {
+            note.user_index = note.user_index.saturating_sub(dropped);
+        }
+        for summary in &mut self.activity {
+            if let Some(idx) = summary.user_index.as_mut() {
+                if *idx < dropped {
+                    summary.user_index = None;
+                } else {
+                    *idx -= dropped;
+                }
+            }
+        }
+    }
+
     /// true when `project` belongs to `root`: legacy saves (`None`) belong
     /// everywhere; same-machine paths compare case-insensitively on Windows.
     pub fn project_is_here(
@@ -553,6 +578,47 @@ mod tests {
         stamped.project = Some(std::path::PathBuf::from("/proj/a"));
         let header = SessionHeader::from_session(&stamped);
         assert_eq!(header.project, stamped.project);
+    }
+
+    #[test]
+    fn rebase_turn_attachments_survives_prefix_drop() {
+        let mut s = Session::new("m".into(), 1000);
+        s.turn_notes.push(TurnNote {
+            user_index: 2,
+            text: "old fail".into(),
+            is_error: true,
+        });
+        s.turn_notes.push(TurnNote {
+            user_index: 5,
+            text: "kept".into(),
+            is_error: false,
+        });
+        for (idx, calls) in [(Some(1), 3), (Some(5), 7), (None, 9)] {
+            s.activity.push(ActivitySummary {
+                calls,
+                thinking: 0,
+                duration_ms: 0,
+                errors: 0,
+                rejected: 0,
+                user_index: idx,
+            });
+        }
+        // compaction dropped the first four messages
+        s.rebase_turn_attachments(4);
+        let notes: Vec<usize> = s.turn_notes.iter().map(|n| n.user_index).collect();
+        // the dropped turn's note clamps to the earliest survivor instead
+        // of vanishing; the kept one shifts down
+        assert_eq!(notes, vec![0, 1]);
+        let attached: Vec<Option<usize>> =
+            s.activity.iter().map(|a| a.user_index).collect();
+        // totals survive, the dangling attachment is released
+        assert_eq!(attached, vec![None, Some(1), None]);
+        assert_eq!(s.activity.iter().map(|a| a.calls).sum::<usize>(), 19);
+
+        // a no-op drop changes nothing
+        s.rebase_turn_attachments(0);
+        let notes: Vec<usize> = s.turn_notes.iter().map(|n| n.user_index).collect();
+        assert_eq!(notes, vec![0, 1]);
     }
 
     #[test]

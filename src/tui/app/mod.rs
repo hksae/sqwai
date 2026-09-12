@@ -2245,6 +2245,14 @@ impl App {
         self.stashed_main_scroll = None;
         self.todos.clear();
         self.turn_user_index = None;
+        // per-turn/per-session notices belong to the old conversation: a
+        // stale retry countdown, checkpoint hint or "ignored by model"
+        // verdict must not leak into the new session's chrome
+        self.effort_observed_ignored = None;
+        self.retry_line = None;
+        self.last_checkpoint = None;
+        self.prev_turn_ok = false;
+        self.retry_notified = true;
         self.active_ask_id = None;
         self.ask_hover = None;
         self.active_proposal_id = None;
@@ -2347,6 +2355,14 @@ impl App {
         self.stashed_main_scroll = None;
         self.todos.clear();
         self.turn_user_index = None;
+        // per-turn/per-session notices belong to the old conversation: a
+        // stale retry countdown, checkpoint hint or "ignored by model"
+        // verdict must not leak into the new session's chrome
+        self.effort_observed_ignored = None;
+        self.retry_line = None;
+        self.last_checkpoint = None;
+        self.prev_turn_ok = false;
+        self.retry_notified = true;
         self.active_ask_id = None;
         self.ask_hover = None;
         self.active_proposal_id = None;
@@ -3836,6 +3852,16 @@ impl App {
         // system turn: the system block is rebuilt per request and never
         // persisted (the session also refuses one defensively).
         //
+        // Compaction and hard-trim drop a message prefix (optionally
+        // prepending a summary), so positional attachments from before the
+        // replacement no longer address the same turns — rebase them first.
+        // Plain appends (the common case) leave every index valid.
+        if outcome.messages.len() < self.session.messages.len() {
+            self.session.rebase_turn_attachments(
+                self.session.messages.len() - outcome.messages.len(),
+            );
+        }
+        //
         // The outcome only authorizes a visible answer if it advanced past
         // the plain answer already on screen: a tool-cancelled turn ends Ok
         // with no new assistant message (only tool traffic), and backfilling
@@ -4325,7 +4351,8 @@ impl App {
         let idx = self.session.checkpoints.len().saturating_sub(n);
         let (sha, label) = self.session.checkpoints[idx].clone();
         let root = std::env::current_dir().unwrap_or_default();
-        let git_snapshots = crate::agent::checkpoints::available(&root);
+        let git_snapshots =
+            crate::agent::checkpoints::available_in(&root, self.cfg.undo.shadow);
         // Scope the restore to what the host recorded as its own writes across
         // the checkpoints being undone. Without this, undo reverts the whole
         // tree to the snapshot and silently discards anything the user edited
@@ -4384,7 +4411,7 @@ impl App {
             // Nothing recorded — a `bash` mutation, whose effects the host
             // cannot enumerate. Fall back to the snapshot-vs-worktree diff and
             // say so, rather than pretending the scope is known.
-            crate::agent::checkpoints::changed_files(&root, &sha)
+            crate::agent::checkpoints::changed_files(&root, self.cfg.undo.shadow, &sha)
                 .unwrap_or_default()
                 .into_iter()
                 .map(|path| crate::agent::checkpoints::Target {

@@ -46,8 +46,15 @@ pub fn shadow_repo(root: &Path, store: ShadowStore) -> Option<Shadow> {
 /// initialised a repository as a side effect would litter every directory the
 /// TUI asks about.
 pub fn available(root: &Path) -> bool {
+    available_in(root, ShadowStore::Local)
+}
+
+/// Availability in the configured store: with `[undo].shadow="user"` the
+/// snapshots live outside the project, and the Local check would report
+/// undo unavailable while it works fine.
+pub fn available_in(root: &Path, store: ShadowStore) -> bool {
     crate::agent::shadow::git_available()
-        && crate::agent::shadow::dir_for(root, ShadowStore::Local).is_some()
+        && crate::agent::shadow::dir_for(root, store).is_some()
 }
 
 /// Snapshot the worktree onto this session's chain in the shadow repository
@@ -82,8 +89,8 @@ pub fn snapshot_boundary(
     shadow.snapshot_forced(session_id, label).map(Some)
 }
 
-pub fn changed_files(root: &Path, sha: &str) -> Result<Vec<String>> {
-    let Some(shadow) = shadow(root, ShadowStore::Local) else {
+pub fn changed_files(root: &Path, store: ShadowStore, sha: &str) -> Result<Vec<String>> {
+    let Some(shadow) = shadow(root, store) else {
         anyhow::bail!("no shadow repository");
     };
     shadow.changed_files(sha)
@@ -340,6 +347,18 @@ pub fn restore_paths_in(
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn available_in_respects_the_configured_store() {
+        let missing = std::env::temp_dir().join("sqwai-no-such-project-undo");
+        // off means layer 2 is off, wherever the project is
+        assert!(!available_in(&missing, ShadowStore::Off));
+        // the legacy entry point is the local store
+        assert_eq!(
+            available_in(&missing, ShadowStore::Local),
+            available(&missing)
+        );
+    }
 
     /// §2.5: blobs are *"purged together with the session journal"*. A chain
     /// whose journal is gone has nothing left that could reference its
