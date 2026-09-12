@@ -751,6 +751,13 @@ impl App {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
 
+        // stamp an unstamped empty session (fresh stub): resumed sessions
+        // keep the project they were born in, legacy ones stay universal
+        let mut session = session;
+        if session.project.is_none() && session.messages.is_empty() {
+            session.project = Some(project_root.clone());
+        }
+
         let mut app = Self {
             project_root,
             cwd_label,
@@ -2255,6 +2262,26 @@ impl App {
             ),
             StatusKind::Ok,
         );
+        // a session born in another project still opens, but its plan and
+        // undo links point at that project's .sqwai — say so instead of
+        // leaving only the routine "session opened" notice
+        if self.session.project.is_some()
+            && !Session::project_is_here(&self.session.project, &self.project_root)
+        {
+            let where_born = self
+                .session
+                .project
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.status(
+                &format!(
+                    "session from another project ({where_born}): plan and undo links may dangle"
+                ),
+                StatusKind::Warn,
+            );
+        }
     }
 
     fn start_new_session(&mut self) -> bool {
@@ -2275,6 +2302,7 @@ impl App {
         self.run_undo_maintenance();
         let ctx = self.session.context_limit;
         self.session = Session::new(self.cfg.default_model.clone(), ctx);
+        self.session.project = Some(self.project_root.clone());
         crate::providers::set_conversation_id(&self.session.id.to_string());
         self.pending_queue.clear();
         self.session.plan_id = crate::plan::open_active_for_session(
@@ -4603,8 +4631,13 @@ impl App {
             graph_ready,
         };
 
-        // Saved sessions
-        let sessions = Session::list_visible_headers(10).unwrap_or_default();
+        // Saved sessions: this project's own (legacy saves belong
+        // everywhere); foreign ones live in the sessions menu instead
+        let sessions: Vec<SessionHeader> = Session::list_visible_headers(10)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| Session::project_is_here(&s.project, &root))
+            .collect();
 
         let (active_plan, last_session, recent) = if let Some(plan) = active_plan_raw {
             let in_prog = plan

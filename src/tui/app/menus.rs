@@ -2553,12 +2553,39 @@ impl App {
                         MenuAction::None,
                     ));
                 }
-                for s in &visible {
+                // sessions born in another project live below their own
+                // divider: same rows, no column surgery, and opening one
+                // warns (see apply_session) instead of failing oddly
+                let (mine, foreign): (Vec<&&SessionHeader>, Vec<&&SessionHeader>) =
+                    visible.iter().partition(|s| {
+                        s.pinned
+                            || crate::session::Session::project_is_here(
+                                &s.project,
+                                &self.project_root,
+                            )
+                    });
+                for s in mine {
                     if s.pinned {
                         continue;
                     }
                     self.menu_rows
                         .push(session_row(s, s.id.to_string() == cur_id, None));
+                }
+                if !foreign.is_empty() {
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled(
+                            " ── other projects ──".to_string(),
+                            Theme::dim(),
+                        )]),
+                        MenuAction::None,
+                    ));
+                    for s in foreign {
+                        self.menu_rows.push(session_row(
+                            s,
+                            s.id.to_string() == cur_id,
+                            None,
+                        ));
+                    }
                 }
                 if visible.is_empty() {
                     let note = if q.is_empty() {

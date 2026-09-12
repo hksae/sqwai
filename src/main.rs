@@ -95,7 +95,9 @@ async fn run(cfg: config::Config, resume_id: Option<String>, read_only: bool) ->
         Some(id) => session::Session::load(&id)?,
         None => {
             let m = cfg.default_model_config()?.clone();
-            session::Session::new(cfg.default_model.clone(), m.context)
+            let mut s = session::Session::new(cfg.default_model.clone(), m.context);
+            s.project = Some(std::env::current_dir().unwrap_or_default());
+            s
         }
     };
 

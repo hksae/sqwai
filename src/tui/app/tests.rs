@@ -1552,6 +1552,72 @@ mod tests {
         assert!(rows[1].contains("a medium length title!"));
     }
 
+    fn project_session(title: &str, project: Option<std::path::PathBuf>) -> Session {
+        use crate::providers::Role;
+        let mut s = Session::new("m".into(), 1000);
+        s.push(Role::User, title);
+        s.project = project;
+        s
+    }
+
+    #[test]
+    fn sessions_menu_splits_foreign_projects() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let root = app.project_root.clone();
+        let foreign_root = root.join("definitely-not-this-project");
+        let mine = project_session("mine task", Some(root));
+        let legacy = project_session("legacy task", None);
+        let away = project_session("away task", Some(foreign_root));
+        app.sessions = vec![
+            SessionHeader::from_session(&mine),
+            SessionHeader::from_session(&away),
+            SessionHeader::from_session(&legacy),
+        ];
+        app.open_menu(Menu::Sessions);
+        let all: Vec<String> = app
+            .menu_rows
+            .iter()
+            .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        let joined = all.join("\n");
+        assert!(joined.contains("other projects"), "{joined:?}");
+        let div = all.iter().position(|r| r.contains("other projects")).unwrap();
+        let pos = |needle: &str| all.iter().position(|r| r.contains(needle)).unwrap();
+        // current + legacy above the divider, foreign below it
+        assert!(pos("mine task") < div, "{joined:?}");
+        assert!(pos("legacy task") < div, "{joined:?}");
+        assert!(pos("away task") > div, "{joined:?}");
+    }
+
+    #[test]
+    fn apply_session_warns_on_foreign_project() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let foreign_root = app.project_root.join("definitely-not-this-project");
+        let mut away = project_session("away", Some(foreign_root));
+        away.push(crate::providers::Role::User, "more");
+        app.apply_session(away);
+        let toast = app.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+        assert!(toast.contains("another project"), "{toast:?}");
+
+        // same project (and legacy) open quietly
+        let root = app.project_root.clone();
+        let home = project_session("home", Some(root));
+        app.apply_session(home);
+        let toast = app.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+        assert!(!toast.contains("another project"), "{toast:?}");
+        let legacy = project_session("old", None);
+        app.apply_session(legacy);
+        let toast = app.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+        assert!(!toast.contains("another project"), "{toast:?}");
+    }
+
+    #[test]
+    fn start_new_session_stamps_project() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        assert!(app.start_new_session());
+        assert_eq!(app.session.project, Some(app.project_root.clone()));
+    }
+
     #[test]
 
     fn debug_enter_updates_visible_value() {
@@ -4977,7 +5043,7 @@ mod tests {
             !app.streaming,
             "an auth failure must end the turn, not retry it"
         );
-        let reported = app.toast.map(|t| t.text).unwrap_or_default();
+        let reported = app.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
         assert!(
             reported.contains("API key") || reported.contains("401"),
             "the user should be told what to fix: {reported:?}"

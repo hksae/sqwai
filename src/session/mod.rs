@@ -37,6 +37,10 @@ pub struct SessionHeader {
     pub context_tokens: u64,
     pub calls: usize,
     pub errors: usize,
+    /// project root this session belongs to; `None` marks a legacy save
+    /// (shown everywhere, never filtered out)
+    #[serde(default)]
+    pub project: Option<std::path::PathBuf>,
 }
 
 impl SessionHeader {
@@ -66,6 +70,7 @@ impl SessionHeader {
             context_tokens: s.context_tokens_used(),
             calls: s.activity.iter().map(|a| a.calls).sum(),
             errors: s.activity.iter().map(|a| a.errors).sum(),
+            project: s.project.clone(),
         }
     }
 }
@@ -142,6 +147,12 @@ pub struct Session {
     /// Terminal outcomes for agent turns that have no normal final answer.
     #[serde(default)]
     pub turn_notes: Vec<TurnNote>,
+    /// project root this session was born in; stamped by the host on
+    /// creation. Plans, journals and undo chains live under this root, so
+    /// opening the session elsewhere dangles those links (the UI warns).
+    /// `None` marks a legacy save: shown everywhere, never filtered out.
+    #[serde(default)]
+    pub project: Option<std::path::PathBuf>,
 }
 
 impl Session {
@@ -167,6 +178,7 @@ impl Session {
             checkpoints: Vec::new(),
             activity: Vec::new(),
             turn_notes: Vec::new(),
+            project: None,
         }
     }
 
@@ -188,6 +200,24 @@ impl Session {
         let dir = crate::config::data_dir()?.join("sessions");
         std::fs::create_dir_all(&dir)?;
         Ok(dir)
+    }
+
+    /// true when `project` belongs to `root`: legacy saves (`None`) belong
+    /// everywhere; same-machine paths compare case-insensitively on Windows.
+    pub fn project_is_here(
+        project: &Option<std::path::PathBuf>,
+        root: &std::path::Path,
+    ) -> bool {
+        match project {
+            None => true,
+            Some(p) => {
+                p == root
+                    || (cfg!(windows)
+                        && p
+                            .to_string_lossy()
+                            .eq_ignore_ascii_case(&root.to_string_lossy()))
+            }
+        }
     }
 
     /// Append a conversation turn.
@@ -494,6 +524,35 @@ mod tests {
         assert_eq!(title_from("fix the bug\nmore"), "fix the bug");
         let long = "x".repeat(60);
         assert_eq!(title_from(&long).chars().count(), 41); // 40 + ellipsis
+    }
+
+    #[test]
+    fn project_belongs_here_legacy_and_foreign() {
+        use std::path::{Path, PathBuf};
+        let root = Path::new("/proj/a");
+        assert!(Session::project_is_here(&None, root), "legacy is universal");
+        assert!(Session::project_is_here(
+            &Some(PathBuf::from("/proj/a")),
+            root
+        ));
+        assert!(!Session::project_is_here(
+            &Some(PathBuf::from("/proj/b")),
+            root
+        ));
+    }
+
+    #[test]
+    fn legacy_save_without_project_loads_as_universal() {
+        let s = Session::new("m".into(), 1000);
+        let mut v: serde_json::Value = serde_json::to_value(&s).unwrap();
+        v.as_object_mut().unwrap().remove("project");
+        let back: Session = serde_json::from_value(v).unwrap();
+        assert!(back.project.is_none());
+
+        let mut stamped = Session::new("m".into(), 1000);
+        stamped.project = Some(std::path::PathBuf::from("/proj/a"));
+        let header = SessionHeader::from_session(&stamped);
+        assert_eq!(header.project, stamped.project);
     }
 
     #[test]
