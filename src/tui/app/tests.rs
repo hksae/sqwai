@@ -4222,40 +4222,26 @@ mod tests {
         );
     }
 
-    /// The working spinner reads as part of the model group, right of the
-    /// model name, in the chip's accent colour but without its inverted
-    /// background.
+    /// Bottom spinner is removed for now (a replacement from the
+    /// `/test animations` gallery is coming): while streaming the status
+    /// bar must show no spinner glyph anywhere.
     #[test]
-    fn working_spinner_sits_right_of_the_model_without_chip_background() {
+    fn no_bottom_spinner_while_streaming() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
         app.streaming = true;
 
         let spans = app.status_bar_spans(100);
-        let model_at = spans
-            .iter()
-            .position(|s| s.content.contains("test-model"))
-            .expect("model span rendered");
-        let spinner_at = spans
-            .iter()
-            .position(|s| {
+        assert!(
+            !spans.iter().any(|s| {
                 let text = s.content.trim();
                 text.chars().count() == 1
                     && text
                         .chars()
                         .next()
                         .is_some_and(|c| WORKING_SPINNER.contains(&c))
-            })
-            .expect("spinner span rendered while streaming");
-        assert_eq!(
-            spinner_at,
-            model_at + 1,
-            "spinner must sit immediately right of the model"
-        );
-        assert_eq!(
-            spans[spinner_at].style,
-            ratatui::style::Style::new().fg(crate::tui::theme::Theme::ACCENT_SOFT()),
-            "spinner uses the chip accent without its background block"
+            }),
+            "status bar must not carry a spinner until the replacement lands"
         );
     }
     /// The provider menu carries a connection probe: dispatching it marks the
