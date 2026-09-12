@@ -1369,9 +1369,15 @@ async fn run_agent(
         // execute each call, feeding results back into the conversation
         for (call_index, call) in turn.calls.iter().enumerate() {
             // A cancellation from the previous call must not leak into this
-            // one: the flag is per-request, reset right before dispatch.
-            ctx.cancel
-                .store(false, std::sync::atomic::Ordering::Relaxed);
+            // one: the flag is per-request, reset right before dispatch —
+            // but the reset must not swallow an Esc that landed between
+            // calls (#192): swap reports whether it was set, and if so this
+            // call is recorded as cancelled without running. Downstream
+            // (ToolNotice, journal, the interrupted path) treats it exactly
+            // like a mid-tool cancel.
+            let pre_cancelled = ctx
+                .cancel
+                .swap(false, std::sync::atomic::Ordering::Relaxed);
             let journal_mark = ctx.journal.len();
             let tool_started = Instant::now();
             if let Some(writer) = journal.as_mut() {
@@ -1412,7 +1418,9 @@ async fn run_agent(
                 })
                 .await;
 
-            let mut outcome = if read_only && tools::is_mutating_call(&call.name, &call.args) {
+            let mut outcome = if pre_cancelled {
+                tools::Outcome::cancelled()
+            } else if read_only && tools::is_mutating_call(&call.name, &call.args) {
                 tools::Outcome::err(
                     "project is read-only because another sqwai instance owns the lock; use --force to enable writes",
                 )
@@ -3688,6 +3696,106 @@ mod effort_tests {
         }
         let _ = std::fs::remove_dir_all(&temp_dir);
         assert!(saw_tool_notice, "should have seen tool notice");
+    }
+
+    /// #192: an Esc that lands between two tool calls must stop the batch.
+    /// The per-request cancel flag is reset before each dispatch; the reset
+    /// used to swallow a flag set between calls, so the next call ran
+    /// anyway. Whatever the schedule, the second call must never start,
+    /// while both calls still get a tool_result (protocol shape).
+    #[tokio::test]
+    async fn esc_between_tool_calls_stops_the_batch() {
+        let provider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(vec![
+                vec![
+                    Ok(crate::providers::StreamEvent::ToolCall(crate::providers::ToolCallReq::new(
+                        "c1",
+                        "think",
+                        serde_json::json!({"thought": "one"}),
+                    ))),
+                    Ok(crate::providers::StreamEvent::ToolCall(crate::providers::ToolCallReq::new(
+                        "c2",
+                        "think",
+                        serde_json::json!({"thought": "two"}),
+                    ))),
+                ],
+                vec![Ok(crate::providers::StreamEvent::Text(
+                    "should not get here".into(),
+                ))],
+            ]),
+        });
+
+        let temp_dir = std::env::temp_dir().join(format!("sqwai-test-esccancel-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let input = AgentInput {
+            provider: provider.clone(),
+            model_id: "m".into(),
+            model_key: "primary".into(),
+            effort: None,
+            effort_support: crate::config::EffortSupport::default(),
+            max_tokens: None,
+            system: vec![],
+            messages: vec![Message::new(Role::User, "go")],
+            root: temp_dir.clone(),
+            session_id: "test-esc-sess".into(),
+            blocked_patterns: vec![],
+            plan_mode: false,
+            context_limit: 10000,
+            enable_tools: true,
+            read_only: false,
+            previous_response_id: None,
+            summary: None,
+            mcp: Default::default(),
+            lsp: Default::default(),
+            compact_only: false,
+            diary: Default::default(),
+            memory: Default::default(),
+            compaction: Default::default(),
+            plan_limits: Default::default(),
+            shadow_store: crate::config::ShadowStore::Off,
+            subagent_depth: 0,
+            parent_step: None,
+            fallback_chain: vec![],
+        };
+
+        let mut handle = spawn_agent(input);
+        // Esc lands while the batch is dispatching (or just before it).
+        handle.request_tool_cancel();
+        let mut think_starts = 0;
+        let mut outcome_msgs = Vec::new();
+        while let Some(ev) = handle.rx.recv().await {
+            match ev {
+                AgentEvent::ToolStart { name, .. } if name == "think" => {
+                    think_starts += 1;
+                }
+                AgentEvent::Completed(Ok(outcome)) => {
+                    outcome_msgs = outcome.messages;
+                    break;
+                }
+                AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
+                _ => {}
+            }
+        }
+        assert!(
+            think_starts <= 1,
+            "the second call must never run after Esc, started {think_starts}"
+        );
+        let results: Vec<&str> = outcome_msgs
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(
+            results.len(),
+            2,
+            "both calls need a tool_result (protocol shape): {results:?}"
+        );
+        assert_eq!(
+            provider.events.lock().unwrap().len(),
+            1,
+            "the scripted follow-up turn must stay unconsumed"
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[tokio::test]
