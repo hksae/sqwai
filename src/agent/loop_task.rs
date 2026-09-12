@@ -535,7 +535,9 @@ async fn run_subagent(
         system,
         messages: vec![Message::new(Role::User, task)],
         root: root.to_path_buf(),
-        session_id: format!("sub-{id}"),
+        // #190: NOT `sub-{id}` — the numeric counter resets on restart
+        // and would append to a previous run's journal file
+        session_id: next_subagent_session(),
         blocked_patterns: blocked_patterns.to_vec(),
         plan_mode,
         context_limit,
@@ -652,6 +654,21 @@ async fn run_subagent(
 fn next_subagent_id() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Journal/shadow identity for a child agent. Unique across process
+/// restarts (#190): a bare per-process counter resets to 1, so a resumed
+/// session's new subagent would append to the previous run's `sub-1.jsonl`.
+/// Wall ms + pid + counter cannot repeat (same pid means same process,
+/// where the counter differs).
+fn next_subagent_session() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("sub-{ms}-{}-{n}", std::process::id())
 }
 
 pub fn spawn_agent(input: AgentInput) -> AgentHandle {
@@ -2942,6 +2959,20 @@ pub(crate) fn is_accepted_memory_answer(answer_ok: bool, raw_answer: &str) -> bo
 #[cfg(test)]
 mod subagent_tests {
     use super::*;
+
+    /// #190: every child session id is distinct, even back-to-back —
+    /// journal files must never be shared between runs.
+    #[test]
+    fn subagent_session_ids_are_unique() {
+        let a = next_subagent_session();
+        let b = next_subagent_session();
+        assert_ne!(a, b, "counter must disambiguate same-ms spawns");
+        assert!(a.starts_with("sub-"), "{a}");
+        assert!(
+            !a.contains('/') && !a.contains('\\') && !a.contains(".."),
+            "journal-file safe: {a}"
+        );
+    }
 
     #[test]
     fn accepts_one_or_many_subagent_tasks() {
