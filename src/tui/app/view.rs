@@ -3566,14 +3566,6 @@ impl App {
                 .unwrap_or(0);
             spans.push(Span::styled(format!(" · cache {cp}%"), Theme::dim()));
         }
-        // cost meter: enabled later from the settings menu ([ui] show_cost)
-        if self.cfg.ui.show_cost
-            && let (Some(pi), Some(po)) = (self.model_cfg.price_in, self.model_cfg.price_out)
-        {
-            let cost = self.session.usage.prompt_tokens as f64 * pi / 1e6
-                + self.session.usage.completion_tokens as f64 * po / 1e6;
-            spans.push(Span::styled(format!(" · ${cost:.2}"), Theme::accent()));
-        }
         Paragraph::new(Line::from(spans)).style(Theme::base())
     }
 

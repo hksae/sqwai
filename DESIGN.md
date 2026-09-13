@@ -1255,7 +1255,7 @@ mode at spawn. The mode indicator is always visible.
 
 5.4 TUI
 ratatui + crossterm; ASCII/box-drawing only, no emoji; English UI strings
-centralized. Header: model, mode, tokens and context %, cache reads, cost.
+centralized. Header: model, mode, tokens and context %, cache reads.
 Streaming markdown with syntect highlighting; tool calls collapse on
 completion (Enter expands); diffs shown post hoc; thinking collapsed.
 Indicators: compacting…, checkpoint hint, background jobs, retries. Panic hook restores the terminal.
@@ -1561,7 +1561,7 @@ How to run (dogfooding checklist):
 3. Mechanism run: harness runs each task with the active anchor and plan loop;
    compaction threshold set low to trigger ≥ 3 compactions.
 4. Analysis: comparative scorecards, stale-receipt counts,
-   and cost/token trade-off curves (no `bench` command exists yet — see AC).
+   and token trade-off curves (no `bench` command exists yet — see AC).
 
 8.3 Ongoing metrics (shown in /debug)
 /debug holds runtime toggles: typewriter, http debug log (request
@@ -1756,7 +1756,7 @@ unattended mode adds policy on top, not new trust. Key points:
   exhausted · 5 consecutive tool failures · lock lost · provider
   unrecoverable. Every stop writes a diary entry and a session `session_end`.
 - **Morning:** `sqwai brief` (outcome, acceptance+evidence, steps, files per
-  step, irreversible actions, denials, pending memory, tokens/cost) and
+  step, irreversible actions, denials, pending memory, tokens) and
   `/review` (step-by-step diff with accept/reopen) from the same data.
   Nothing merged/committed/pushed unless `unattended.allow_commit`; push
   never allowed.

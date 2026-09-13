@@ -248,12 +248,6 @@ pub struct ModelConfig {
     /// `off` is reported as unsupported instead of pretending to disable it
     #[serde(default, skip_serializing_if = "is_false")]
     pub effort_always_on: bool,
-    /// $ per 1M input tokens (for the cost meter)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub price_in: Option<f64>,
-    /// $ per 1M output tokens
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub price_out: Option<f64>,
     /// Optional fallback model key (same or other provider)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<String>,
@@ -489,9 +483,6 @@ pub struct UiConfig {
     /// append failed request details to debug.log
     #[serde(default)]
     pub http_log: bool,
-    /// show $ spent in the header (needs price_in/price_out on the model)
-    #[serde(default)]
-    pub show_cost: bool,
     /// unlock /test ... commands (off by default, /settings -> Experimental)
     #[serde(default)]
     pub experimental_test: bool,
@@ -502,7 +493,6 @@ impl Default for UiConfig {
         Self {
             typewriter: true,
             http_log: false,
-            show_cost: false,
             experimental_test: false,
         }
     }
@@ -1360,8 +1350,6 @@ mod tests {
                 effort: EffortLevel::Off,
                 effort_control: None,
                 effort_always_on: false,
-                price_in: None,
-                price_out: None,
                 fallback: None,
             },
         );
@@ -1433,8 +1421,6 @@ mod tests {
                 effort: EffortLevel::Off,
                 effort_control: None,
                 effort_always_on: false,
-                price_in: None,
-                price_out: None,
                 fallback: Some("m_b".into()),
             },
         );
@@ -1447,8 +1433,6 @@ mod tests {
                 effort: EffortLevel::Off,
                 effort_control: None,
                 effort_always_on: false,
-                price_in: None,
-                price_out: None,
                 fallback: Some("m_c".into()),
             },
         );
@@ -1461,8 +1445,6 @@ mod tests {
                 effort: EffortLevel::Off,
                 effort_control: None,
                 effort_always_on: false,
-                price_in: None,
-                price_out: None,
                 fallback: Some("m_a".into()), // cycle back to A
             },
         );

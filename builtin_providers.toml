@@ -12,56 +12,42 @@ provider = "gemini"
 id = "gemini-3.1-pro-preview"
 context = 1048576
 effort = "high"
-price_in = 2.0
-price_out = 12.0
 
 [models."gemini-3.8-flash"]
 provider = "gemini"
 id = "gemini-3.8-flash"
 context = 1048576
 effort = "medium"
-price_in = 0.75
-price_out = 3.75
 
 [models."gemini-3.7-flash"]
 provider = "gemini"
 id = "gemini-3.7-flash"
 context = 1048576
 effort = "medium"
-price_in = 0.75
-price_out = 3.75
 
 [models."gemini-3.6-flash"]
 provider = "gemini"
 id = "gemini-3.6-flash"
 context = 1048576
 effort = "medium"
-price_in = 0.75
-price_out = 3.75
 
 [models."gemini-3.5-flash"]
 provider = "gemini"
 id = "gemini-3.5-flash"
 context = 1048576
 effort = "medium"
-price_in = 1.5
-price_out = 9.0
 
 [models."gemini-3.5-flash-lite"]
 provider = "gemini"
 id = "gemini-3.5-flash-lite"
 context = 1048576
 effort = "off"
-price_in = 0.3
-price_out = 2.5
 
 [models."gemini-3.1-flash-lite"]
 provider = "gemini"
 id = "gemini-3.1-flash-lite"
 context = 1048576
 effort = "off"
-price_in = 0.25
-price_out = 1.5
 
 # Anthropic
 [providers.anthropic]
@@ -75,56 +61,42 @@ provider = "anthropic"
 id = "claude-opus-5"
 context = 1000000
 effort = "high"
-price_in = 5.0
-price_out = 25.0
 
 [models."claude-opus-4-8"]
 provider = "anthropic"
 id = "claude-opus-4-8"
 context = 1000000
 effort = "high"
-price_in = 5.0
-price_out = 25.0
 
 [models."claude-sonnet-5"]
 provider = "anthropic"
 id = "claude-sonnet-5"
 context = 1000000
 effort = "medium"
-price_in = 2.0
-price_out = 10.0
 
 [models."claude-sonnet-4-6"]
 provider = "anthropic"
 id = "claude-sonnet-4-6"
 context = 1000000
 effort = "medium"
-price_in = 3.0
-price_out = 15.0
 
 [models."claude-haiku-4-5"]
 provider = "anthropic"
 id = "claude-haiku-4-5"
 context = 200000
 effort = "medium"
-price_in = 1.0
-price_out = 5.0
 
 [models."claude-fable-5-1"]
 provider = "anthropic"
 id = "claude-fable-5-1"
 context = 1000000
 effort = "medium"
-price_in = 10.0
-price_out = 50.0
 
 [models."claude-mythos-5-1"]
 provider = "anthropic"
 id = "claude-mythos-5-1"
 context = 1000000
 effort = "medium"
-price_in = 10.0
-price_out = 50.0
 
 # OpenAI
 [providers.openai]
@@ -138,80 +110,60 @@ provider = "openai"
 id = "gpt-5.4-mini"
 context = 272000
 effort = "off"
-price_in = 0.75
-price_out = 4.5
 
 [models."gpt-5.4-nano"]
 provider = "openai"
 id = "gpt-5.4-nano"
 context = 272000
 effort = "off"
-price_in = 0.2
-price_out = 1.25
 
 [models."gpt-5.3-codex"]
 provider = "openai"
 id = "gpt-5.3-codex"
 context = 272000
 effort = "high"
-price_in = 1.75
-price_out = 14.0
 
 [models."gpt-5.6-sol"]
 provider = "openai"
 id = "gpt-5.6-sol"
 context = 922000
 effort = "medium"
-price_in = 4.0
-price_out = 20.0
 
 [models."gpt-5.6-luna"]
 provider = "openai"
 id = "gpt-5.6-luna"
 context = 922000
 effort = "low"
-price_in = 0.2
-price_out = 1.2
 
 [models."gpt-5.6-cyber"]
 provider = "openai"
 id = "gpt-5.6-cyber"
 context = 400000
 effort = "medium"
-price_in = 12.5
-price_out = 75.0
 
 [models."gpt-5.6-terra"]
 provider = "openai"
 id = "gpt-5.6-terra"
 context = 922000
 effort = "medium"
-price_in = 2.0
-price_out = 12.0
 
 [models."gpt-5.5"]
 provider = "openai"
 id = "gpt-5.5"
 context = 1050000
 effort = "high"
-price_in = 5.0
-price_out = 30.0
 
 [models."gpt-6-astra"]
 provider = "openai"
 id = "gpt-6-astra"
 context = 922000
 effort = "medium"
-price_in = 10.0
-price_out = 50.0
 
 [models."o4-mini"]
 provider = "openai"
 id = "o4-mini"
 context = 200000
 effort = "medium"
-price_in = 1.1
-price_out = 4.4
 
 # DeepSeek
 [providers.deepseek]
@@ -225,40 +177,30 @@ provider = "deepseek"
 id = "deepseek-chat"
 context = 131072
 effort = "off"
-price_in = 0.28
-price_out = 0.42
 
 [models."deepseek-reasoner"]
 provider = "deepseek"
 id = "deepseek-reasoner"
 context = 131072
 effort = "high"
-price_in = 0.28
-price_out = 0.42
 
 [models."deepseek-v4-pro"]
 provider = "deepseek"
 id = "deepseek-v4-pro"
 context = 1000000
 effort = "medium"
-price_in = 1.32
-price_out = 3.96
 
 [models."deepseek-v4-flash"]
 provider = "deepseek"
 id = "deepseek-v4-flash"
 context = 1000000
 effort = "medium"
-price_in = 0.44
-price_out = 1.32
 
 [models."deepseek-v3.2"]
 provider = "deepseek"
 id = "deepseek-v3.2"
 context = 163840
 effort = "medium"
-price_in = 0.28
-price_out = 0.4
 
 # Grok
 [providers.grok]
@@ -272,32 +214,24 @@ provider = "grok"
 id = "grok-build-0.1"
 context = 256000
 effort = "high"
-price_in = 1.0
-price_out = 2.0
 
 [models."grok-4.6"]
 provider = "grok"
 id = "grok-4.6"
 context = 500000
 effort = "high"
-price_in = 2.0
-price_out = 6.0
 
 [models."grok-4.5"]
 provider = "grok"
 id = "grok-4.5"
 context = 500000
 effort = "high"
-price_in = 2.0
-price_out = 6.0
 
 [models."grok-4.3"]
 provider = "grok"
 id = "grok-4.3"
 context = 1000000
 effort = "medium"
-price_in = 1.25
-price_out = 2.5
 
 # Kimi
 [providers.kimi]
@@ -311,22 +245,16 @@ provider = "kimi"
 id = "kimi-k3"
 context = 1048576
 effort = "high"
-price_in = 3.0
-price_out = 15.0
 
 [models."kimi-k2.7-code"]
 provider = "kimi"
 id = "kimi-k2.7-code"
 context = 262144
 effort = "high"
-price_in = 0.95
-price_out = 4.0
 
 [models."kimi-k2.6"]
 provider = "kimi"
 id = "kimi-k2.6"
 context = 262144
 effort = "medium"
-price_in = 0.95
-price_out = 4.0
 

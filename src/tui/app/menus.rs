@@ -93,11 +93,6 @@ pub(super) fn fmt_ctx(n: u64) -> String {
     n.to_string()
 }
 
-/// Compact $/1M price for menu rows: 2.0 -> "2", 0.15 -> "0.15".
-pub(super) fn fmt_price(v: f64) -> String {
-    trim_num(v, 4)
-}
-
 fn trim_num(v: f64, prec: usize) -> String {
     let s = format!("{v:.prec$}");
     s.trim_end_matches('0').trim_end_matches('.').to_string()
@@ -262,7 +257,6 @@ pub(super) enum MenuAction {
     ToggleHttpLog,
     ToggleExperimentalTest,
     TogglePerfLog,
-    ToggleShowCost,
     CycleModelEffort,
     CycleDefaultEffort,
     /// cycle what the current model is declared to do with the slider
@@ -1366,13 +1360,6 @@ impl App {
                 }
                 self.build_menu_rows();
             }
-            MenuAction::ToggleShowCost => {
-                self.cfg.ui.show_cost = !self.cfg.ui.show_cost;
-                self.cfg.save().ok();
-                let on = self.cfg.ui.show_cost;
-                self.status(&format!("show cost: {}", on_off(on)), StatusKind::Ok);
-                self.build_menu_rows();
-            }
             MenuAction::CycleModelEffort => {
                 let all = EffortLevel::ALL;
                 let cur = all
@@ -2157,11 +2144,6 @@ impl App {
                     on_off(self.cfg.ui.typewriter).as_str(),
                     MenuAction::ToggleTypewriter,
                 ));
-                self.menu_rows.push(setting(
-                    "Show cost",
-                    on_off(self.cfg.ui.show_cost).as_str(),
-                    MenuAction::ToggleShowCost,
-                ));
                 self.menu_footer_text = Some("enter: open/toggle · esc: back".into());
             }
             Menu::Agent => {
@@ -2697,21 +2679,14 @@ impl App {
                         } else {
                             MenuAction::EditModel(provider.clone(), k.clone())
                         };
-                        let price_part = match (m.price_in, m.price_out) {
-                            (Some(pi), Some(po)) => {
-                                format!(" · ${}/${}", fmt_price(pi), fmt_price(po))
-                            }
-                            _ => String::new(),
-                        };
                         self.menu_rows.push(row(
                             Line::from(vec![
                                 Span::styled(format!(" {k}{mark}"), Theme::FG()),
                                 Span::styled(
                                     format!(
-                                        "  {} · {}{} · {}",
+                                        "  {} · {} · {}",
                                         m.id,
                                         fmt_ctx(m.context),
-                                        price_part,
                                         // each row reports what that model
                                         // would actually do with its level
                                         crate::providers::effort::plan(

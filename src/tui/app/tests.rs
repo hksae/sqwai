@@ -72,8 +72,6 @@ mod tests {
                 effort: EffortLevel::Off,
                 effort_control: None,
                 effort_always_on: false,
-                price_in: None,
-                price_out: None,
                 fallback: None,
             },
         );
@@ -172,8 +170,6 @@ mod tests {
                 effort: EffortLevel::Off,
                 effort_control: None,
                 effort_always_on: false,
-                price_in: None,
-                price_out: None,
                 fallback: None,
             },
         );
@@ -1016,8 +1012,6 @@ mod tests {
                 effort: EffortLevel::Off,
                 effort_control: None,
                 effort_always_on: false,
-                price_in: None,
-                price_out: None,
                 fallback: None,
             },
         );
@@ -3528,9 +3522,9 @@ mod tests {
     fn appearance_toggles_ui_settings() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.open_menu(Menu::Appearance);
-        let before = app.cfg.ui.show_cost;
-        app.run_action(MenuAction::ToggleShowCost);
-        assert_eq!(app.cfg.ui.show_cost, !before);
+        let before = app.cfg.ui.typewriter;
+        app.run_action(MenuAction::ToggleTypewriter);
+        assert_eq!(app.cfg.ui.typewriter, !before);
         assert!(matches!(app.cur_menu(), Some(Menu::Appearance)));
     }
 
@@ -6217,8 +6211,6 @@ mod tests {
                 effort: EffortLevel::Off,
                 effort_control: None,
                 effort_always_on: false,
-                price_in: None,
-                price_out: None,
                 fallback: None,
             },
         );
@@ -6734,8 +6726,8 @@ mod tests {
     }
 
     #[test]
-    fn model_menu_row_formats_ctx_and_prices() {
-        use super::menus::{fmt_ctx, fmt_price};
+    fn model_menu_row_formats_ctx() {
+        use super::menus::fmt_ctx;
 
         assert_eq!(fmt_ctx(1048576), "1m");
         assert_eq!(fmt_ctx(1000000), "1m");
@@ -6748,12 +6740,7 @@ mod tests {
         assert_eq!(fmt_ctx(8192), "8k");
         assert_eq!(fmt_ctx(512), "512");
 
-        assert_eq!(fmt_price(2.0), "2");
-        assert_eq!(fmt_price(0.15), "0.15");
-        assert_eq!(fmt_price(1.1), "1.1");
-        assert_eq!(fmt_price(0.28), "0.28");
-
-        // row shows compact ctx and $in/$out prices
+        // row shows compact ctx
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.cfg.models.insert(
             "gpt-5.5".into(),
@@ -6764,8 +6751,6 @@ mod tests {
                 effort: EffortLevel::High,
                 effort_control: None,
                 effort_always_on: false,
-                price_in: Some(5.0),
-                price_out: Some(30.0),
                 fallback: None,
             },
         );
@@ -6784,9 +6769,7 @@ mod tests {
             })
             .collect();
         assert!(
-            texts
-                .iter()
-                .any(|t| t.contains("1.05m") && t.contains("$5/$30")),
+            texts.iter().any(|t| t.contains("1.05m")),
             "rows: {texts:?}"
         );
     }

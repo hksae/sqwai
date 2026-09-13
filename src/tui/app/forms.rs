@@ -591,9 +591,8 @@ impl App {
                         self.session.model_key = new_key.clone();
                     }
                 }
-                // Fields the form does not show must survive an edit: before
-                // this, editing a model silently reset its prices. Effort
-                // control and always-on come from the form now.
+                // Fields the form does not show must survive an edit.
+                // Effort control and always-on come from the form now.
                 let previous = key
                     .as_ref()
                     .and_then(|k| self.cfg.models.get(k))
@@ -606,8 +605,6 @@ impl App {
                     effort,
                     effort_control,
                     effort_always_on,
-                    price_in: previous.as_ref().and_then(|p| p.price_in),
-                    price_out: previous.as_ref().and_then(|p| p.price_out),
                     fallback: previous.as_ref().and_then(|p| p.fallback.clone()),
                 };
                 self.cfg.models.insert(new_key.clone(), updated.clone());

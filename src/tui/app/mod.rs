@@ -733,8 +733,6 @@ impl App {
                 effort: EffortLevel::Off,
                 effort_control: None,
                 effort_always_on: false,
-                price_in: None,
-                price_out: None,
                 fallback: None,
             });
         let resolved = cfg.resolve_provider(&model_cfg)?;
