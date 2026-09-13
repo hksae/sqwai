@@ -4066,6 +4066,116 @@ mod effort_tests {
         assert!(got_fallback_text, "should have received text from fallback provider");
     }
 
+    fn big(text: &str) -> String {
+        text.repeat(600)
+    }
+
+    fn three_turns() -> Vec<Message> {
+        vec![
+            Message::new(Role::User, big("first task ")),
+            Message::new(Role::Assistant, big("did first ")),
+            Message::new(Role::User, big("second task ")),
+            Message::new(
+                Role::Assistant,
+                "reading",
+            )
+            .with_tool_calls(vec![crate::providers::ToolCallReq::new(
+                "c1",
+                "read",
+                serde_json::json!({"file_path": "a.rs"}),
+            )]),
+            Message::tool_result("c1", big("file bytes "), false),
+            Message::new(Role::User, big("third task ")),
+            Message::new(Role::Assistant, big("doing third ")),
+        ]
+    }
+
+    fn summary_policy() -> context::Policy {
+        // limit 16k: threshold binds (0.8 × 16k = 12800 < 16k − 8k
+        // reserve), the ~9900-token fixture is over, the ~6600-token kept
+        // tail plus summary still fits — so stage 4 must not run
+        context::Policy::with_compaction(16_000, 0.08, 2, 0.80, true)
+    }
+
+    fn count_summaries(messages: &[Message]) -> usize {
+        messages
+            .iter()
+            .map(|m| m.content.matches("<conversation-summary>").count())
+            .sum()
+    }
+
+    /// Stage 2 end-to-end (mock model): old turns collapse into one summary
+    /// message, the recent tail stays verbatim, tool pairs stay joined.
+    #[tokio::test]
+    async fn compact_history_summarizes_through_the_model() {
+        let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(vec![vec![Ok(
+                crate::providers::StreamEvent::Text("MOCK-SUMMARY".into()),
+            )]]),
+        });
+        let policy = summary_policy();
+        let mut messages = three_turns();
+        let mut summary = None;
+        let out = compact_history(&provider, "m", &mut messages, &mut summary, &policy, 0, false)
+            .await
+            .expect("pressure is over: must compact");
+        assert!(out.0 > out.1, "must shrink: {:?}", out);
+        assert!(out.2, "model summary must be reported");
+        assert_eq!(summary.as_deref(), Some("MOCK-SUMMARY"));
+        assert_eq!(count_summaries(&messages), 1);
+        assert!(messages[0].content.contains("MOCK-SUMMARY"));
+        assert!(
+            messages.iter().any(|m| m.content.contains("third task")),
+            "recent turns stay verbatim"
+        );
+    }
+
+    /// A second compaction must not stack a second summary block: the old
+    /// one is re-summarized through `<previous-summary>`, not duplicated.
+    #[tokio::test]
+    async fn compact_history_never_stacks_two_summaries() {
+        let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(vec![
+                vec![Ok(crate::providers::StreamEvent::Text("SECOND".into()))],
+                vec![Ok(crate::providers::StreamEvent::Text("THIRD".into()))],
+            ]),
+        });
+        let policy = summary_policy();
+        let mut messages = three_turns();
+        let mut summary = None;
+        compact_history(&provider, "m", &mut messages, &mut summary, &policy, 0, false).await;
+        // force again: history is small now, but the old summary message
+        // plus kept tail still exceed keep_turns
+        compact_history(&provider, "m", &mut messages, &mut summary, &policy, 0, true).await;
+        assert_eq!(
+            count_summaries(&messages),
+            1,
+            "exactly one summary block may exist"
+        );
+    }
+
+    /// A failed summary call falls back to the extractive local summary.
+    /// (`summarized` stays true: a summary block was prepended, just not by
+    /// the model — the event reports the transcript shape, not the author.)
+    #[tokio::test]
+    async fn compact_history_falls_back_to_local_summary() {
+        let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(Vec::new()),
+        });
+        let policy = summary_policy();
+        let mut messages = three_turns();
+        let mut summary = None;
+        let out = compact_history(&provider, "m", &mut messages, &mut summary, &policy, 0, false)
+            .await
+            .expect("pressure is over: must compact");
+        assert!(out.2);
+        assert_eq!(count_summaries(&messages), 1);
+        assert!(
+            summary.as_deref().unwrap_or_default().contains("## Earlier conversation summary"),
+            "unexpected summary: {summary:?}"
+        );
+    }
+
     #[tokio::test]
     async fn test_plan_first_gate_blocks_and_allows_mutations() {
         // 1. Blocked when non-trivial prompt and no plan in Act mode

@@ -494,10 +494,21 @@ fn is_safe_cut(messages: &[Message], cut: usize) -> bool {
     )
 }
 
+/// A previously written summary block. Such a message never goes back
+/// through summarization inline: its text rides via `<previous-summary>`
+/// (see `summary_input`), so rendering it into the transcript would nest
+/// tags and duplicate tokens on every further compaction.
+fn is_summary_message(message: &Message) -> bool {
+    message.content.contains("<conversation-summary>")
+}
+
 /// Render the part of the conversation that is about to be replaced.
 pub fn transcript(messages: &[Message]) -> String {
     let mut out = String::new();
     for message in messages {
+        if is_summary_message(message) {
+            continue;
+        }
         let label = match message.role {
             Role::User => "User",
             Role::Assistant => "Agent",
@@ -567,7 +578,28 @@ fn summary_message(summary: &str) -> String {
 
 /// Stage 3, last resort: drop the oldest turns until the history fits.
 /// Never fails and never orphans a tool call.
+///
+/// A leading summary block is the only record of already-dropped turns: it
+/// is exempt from trimming (the tail behind it is trimmed instead), or the
+/// next compaction has nothing to chain onto. This bites exactly when the
+/// kept tail alone exceeds the budget — e.g. a forced-low threshold with
+/// heavy tool traffic — where an unprotected trim would eat the summary it
+/// has just written.
 pub fn hard_trim(messages: &[Message], budget: u64) -> Vec<Message> {
+    let (head, rest) = match messages.first() {
+        Some(first) if first.content.contains("<conversation-summary>") => {
+            (Some(first.clone()), &messages[1..])
+        }
+        _ => (None, messages),
+    };
+    let trimmed = hard_trim_inner(rest, budget);
+    match head {
+        Some(h) => std::iter::once(h).chain(trimmed).collect(),
+        None => trimmed,
+    }
+}
+
+fn hard_trim_inner(messages: &[Message], budget: u64) -> Vec<Message> {
     if estimated_tokens(messages) <= budget {
         return messages.to_vec();
     }
@@ -616,10 +648,16 @@ fn prune_message(message: &Message) -> Message {
 /// worse to read but cannot invent anything.
 pub fn local_summary(messages: &[Message], existing: Option<&str>) -> String {
     let mut lines = Vec::new();
-    if let Some(previous) = existing.filter(|s| !s.trim().is_empty()) {
-        lines.push(previous.trim().to_string());
+    let previous = existing.filter(|s| !s.trim().is_empty());
+    if let Some(text) = previous {
+        lines.push(text.trim().to_string());
     }
     for message in messages {
+        // a previous summary block rides via `existing`, never inline —
+        // otherwise every fallback nests the old tags one level deeper
+        if previous.is_some() && is_summary_message(message) {
+            continue;
+        }
         let label = match message.role {
             Role::User => "User",
             Role::Assistant => "Agent",
@@ -1067,5 +1105,26 @@ mod tests {
         let trimmed = hard_trim(&messages, 0);
         assert!(!trimmed.is_empty());
         assert_eq!(trimmed[0].role, Role::User);
+    }
+
+    #[test]
+    fn hard_trim_never_eats_a_leading_summary() {
+        // tail alone exceeds the budget: without protection the trim would
+        // drop the summary it has just written, breaking the chain
+        let mut messages = vec![Message::new(
+            Role::User,
+            "<conversation-summary>\nold facts\n</conversation-summary>",
+        )];
+        for i in 0..10 {
+            messages.push(user(&format!("turn {i} {}", "x".repeat(400))));
+        }
+        let trimmed = hard_trim(&messages, 500);
+        assert!(
+            trimmed[0].content.contains("<conversation-summary>"),
+            "summary must survive: {:?}",
+            trimmed[0].content.chars().take(60).collect::<String>()
+        );
+        // the tail behind it still got trimmed to roughly the budget
+        assert!(trimmed.len() < messages.len());
     }
 }
