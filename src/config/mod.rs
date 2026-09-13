@@ -230,7 +230,7 @@ impl ProviderConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub provider: String,
     /// model id sent in requests
@@ -384,6 +384,23 @@ pub async fn check_and_update_builtins(force: bool) -> Result<Option<BuiltinCata
     let text = res.text().await?;
     let catalog: BuiltinCatalog =
         toml::from_str(&text).context("parsing builtin providers TOML")?;
+
+    // No-op when the content is identical: the meta stamp still advances
+    // (so tomorrow's launch skips the fetch), but the caller gets Ok(None)
+    // — no rewrite, no apply_builtins pass, no "updated" noise.
+    if let Ok(cache_path) = builtin_cache_path()
+        && let Ok(cached) = std::fs::read_to_string(&cache_path)
+        && cached == text
+    {
+        if let Ok(meta_path) = builtin_meta_path()
+            && let Ok(meta_json) = serde_json::to_string(&BuiltinMeta {
+                last_checked: today,
+            })
+        {
+            let _ = atomic_write(&meta_path, &meta_json);
+        }
+        return Ok(None);
+    }
 
     if let Ok(cache_path) = builtin_cache_path() {
         let _ = atomic_write(&cache_path, &text);
@@ -903,8 +920,11 @@ impl Config {
         BuiltinCatalog::current().models.contains_key(key)
     }
 
-    /// Merge built-in providers/models into config. User key overrides are preserved;
-    /// built-in models and formats are kept up-to-date with the catalog.
+    /// Merge built-in providers/models into config. Provider endpoints stay
+    /// fresh (base_url/format sync); user key overrides are preserved.
+    /// Models are user-owned by key: catalog entries fill in absent keys
+    /// only, never overwrite. A customized built-in model survives because
+    /// `save` persists it (see below).
     pub fn apply_builtins(&mut self) {
         let catalog = BuiltinCatalog::current();
         for (name, p) in catalog.providers {
@@ -919,7 +939,7 @@ impl Config {
             }
         }
         for (k, m) in catalog.models {
-            self.models.insert(k, m);
+            self.models.entry(k).or_insert(m);
         }
     }
 
@@ -948,20 +968,7 @@ impl Config {
         #[allow(unreachable_code)]
         {
             let path = config_path()?;
-            let builtin = BuiltinCatalog::current();
-
-            // Strip built-in models and unmodified built-in providers from user's config.toml
-            let mut save_cfg = self.clone();
-            save_cfg
-                .models
-                .retain(|k, _| !builtin.models.contains_key(k));
-            save_cfg.providers.retain(|name, p| {
-                if let Some(bp) = builtin.providers.get(name) {
-                    p.api_key.is_some() || p.api_key_env != bp.api_key_env
-                } else {
-                    true
-                }
-            });
+            let save_cfg = self.without_pristine_builtins();
 
             atomic_write(
                 &path,
@@ -969,6 +976,29 @@ impl Config {
             )?;
             Ok(())
         }
+    }
+
+    /// Copy of this config with pristine built-in entries removed, for
+    /// persisting: untouched catalog models/providers stay out of the user
+    /// file, customized ones stay in. Pure so tests can cover it (`save`
+    /// itself never touches disk under `cfg(test)`).
+    pub fn without_pristine_builtins(&self) -> Self {
+        let builtin = BuiltinCatalog::current();
+        let mut save_cfg = self.clone();
+        save_cfg.models.retain(|k, m| {
+            builtin
+                .models
+                .get(k)
+                .is_none_or(|catalog_m| catalog_m != m)
+        });
+        save_cfg.providers.retain(|name, p| {
+            if let Some(bp) = builtin.providers.get(name) {
+                p.api_key.is_some() || p.api_key_env != bp.api_key_env
+            } else {
+                true
+            }
+        });
+        save_cfg
     }
 
     pub fn default_model_config(&self) -> Result<&ModelConfig> {
@@ -1356,6 +1386,43 @@ mod tests {
         cfg.apply_builtins();
         assert!(cfg.models.contains_key("my-custom-model"));
         assert!(!cfg.is_builtin_model("my-custom-model"));
+    }
+
+    #[test]
+    fn customized_builtin_model_survives_save_strip_and_reapply() {
+        // the hand-edit path: user overrides one field of a built-in model
+        let mut cfg = Config::default();
+        cfg.apply_builtins();
+        let key = "gemini-3.8-flash";
+        assert!(cfg.is_builtin_model(key));
+        let mut customized = cfg.models[key].clone();
+        customized.effort = EffortLevel::High;
+        cfg.models.insert(key.into(), customized.clone());
+
+        // save-strip keeps the customized entry, drops pristine ones
+        let stripped = cfg.without_pristine_builtins();
+        assert_eq!(
+            stripped.models.get(key),
+            Some(&customized),
+            "customized built-in must persist"
+        );
+        for k in stripped.models.keys() {
+            if k != key {
+                assert!(
+                    !BuiltinCatalog::current().models.contains_key(k),
+                    "pristine built-in {k} leaked into the user file"
+                );
+            }
+        }
+
+        // reload: user entry wins over the catalog, untouched keys refresh
+        let mut reloaded = stripped;
+        reloaded.apply_builtins();
+        assert_eq!(
+            reloaded.models.get(key),
+            Some(&customized),
+            "re-apply must not clobber the user override"
+        );
     }
 
     #[test]
