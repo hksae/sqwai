@@ -301,6 +301,9 @@ impl Session {
     }
 
     /// Cumulative tokens over the whole session: billing and statistics only.
+    /// Currently no UI surface reads it (the removed header did); kept with
+    /// its tests for future metrics instead of being deleted with the view.
+    #[allow(dead_code)]
     pub fn cumulative_tokens(&self) -> u64 {
         let reported = self.usage.total();
         if reported > 0 {

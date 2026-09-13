@@ -3518,57 +3518,6 @@ impl App {
         }
     }
 
-    #[allow(dead_code)]
-    pub(super) fn header_line(&self) -> Paragraph<'static> {
-        if self.segments.is_empty() {
-            return Paragraph::new(Line::from(vec![
-                Span::styled(" sqwai", Theme::accent_bold()),
-                Span::styled(format!(" · v{}", env!("CARGO_PKG_VERSION")), Theme::dim()),
-            ]))
-            .style(Theme::base());
-        }
-        let context_used = self.session.context_tokens_used();
-        let pct = self.session.context_percent() as u64;
-        let tok = fmt_k(context_used);
-        let mut spans = vec![
-            Span::styled(" sqwai", Theme::accent_bold()),
-            Span::styled(
-                format!(" · {}", truncate_chars(&self.session.title, 30)),
-                Theme::dim(),
-            ),
-            // last activity, same format as the sessions menu
-            Span::styled(
-                format!(" {}", fmt_date(self.session.last_activity())),
-                Theme::dim(),
-            ),
-            Span::styled(
-                format!(" · {}@{}", self.model_cfg.id, self.model_cfg.provider),
-                Style::new().fg(Theme::ACCENT_SOFT()),
-            ),
-            Span::styled(format!(" · {tok} tok / {pct}% ctx"), Theme::accent()),
-            // cumulative session total — billing/statistics only, kept separate
-            // from the live context meter above (don't mix the two sizes)
-            Span::styled(
-                format!(" · Σ{} tok", fmt_k(self.session.cumulative_tokens())),
-                Theme::dim(),
-            ),
-        ];
-        // Only claim prompt-cache savings once the provider has actually
-        // reported cached tokens. A documented cache key we never see a hit
-        // for stays unverified, so it is not advertised.
-        if self.session.cache_confirmed
-            && let Some(c) = self.session.usage.cached_tokens
-        {
-            let cp = c
-                .saturating_mul(100)
-                .min(context_used)
-                .checked_div(context_used)
-                .unwrap_or(0);
-            spans.push(Span::styled(format!(" · cache {cp}%"), Theme::dim()));
-        }
-        Paragraph::new(Line::from(spans)).style(Theme::base())
-    }
-
     /// queued follow-ups preview for the rule row above the composer:
     /// `queued (2): first words… [+1 more]`, dim and width-capped
     fn queue_line(&self, w: u16) -> Line<'static> {
