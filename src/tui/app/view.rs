@@ -3584,7 +3584,7 @@ impl App {
             .min(100);
         let mut ctx_metrics_label = format!(" cache {cp}% · {ctx_pct}% · {tok_str} ·");
 
-        let model_label = format!(" {} ", self.model_cfg.id);
+        let model_label = format!(" {} ", self.session.model_key);
         // reports the effective mapping, not the raw selection (§5.1)
         let effort_plan = self.effort_plan();
         let ef_label = format!(" {} ", effort_plan.short_label());
@@ -3720,7 +3720,7 @@ impl App {
         spans.push(Span::styled(model_label, Theme::dim()));
         // click targets are measured from the same numbers, so `ef_x0`
         // accounts for the model group width.
-        let ef_x0 = model_x0 + cols(&self.model_cfg.id) as u16 + 2;
+        let ef_x0 = model_x0 + cols(&self.session.model_key) as u16 + 2;
         let ef_style = if self.model_cfg.effort == EffortLevel::Off || !effort_plan.is_honoured() {
             // a level the model will not act on must not be lit up as if it
             // were doing work
@@ -3754,7 +3754,7 @@ impl App {
                 project_path: shorten_path(&self.project_root),
                 git_branch: None,
                 git_modified: None,
-                model: self.model_cfg.id.clone(),
+                model: self.session.model_key.clone(),
                 active_plan: None,
                 last_session: None,
                 memory: MemoryInfo::default(),

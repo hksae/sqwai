@@ -747,7 +747,13 @@ impl App {
         let provider = providers::create(&resolved)?;
 
         let startup_data = if startup {
-            Some(Self::collect_startup_data(&cfg, &model_cfg, read_only, None))
+            Some(Self::collect_startup_data(
+                &cfg,
+                &model_cfg,
+                read_only,
+                None,
+                &model_key,
+            ))
         } else {
             None
         };
@@ -4713,9 +4719,10 @@ impl App {
         let model_cfg = self.model_cfg.clone();
         let read_only = self.read_only;
         let preferred_plan_id = self.startup_preferred_plan.clone();
+        let session_model_key = self.session.model_key.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let data = Self::collect_startup_data(&cfg, &model_cfg, read_only, preferred_plan_id);
+            let data = Self::collect_startup_data(&cfg, &model_cfg, read_only, preferred_plan_id, &session_model_key);
             let _ = tx.send(data);
         });
         self.startup_data_rx = Some(rx);
@@ -4743,12 +4750,13 @@ impl App {
         model_cfg: &ModelConfig,
         read_only: bool,
         preferred_plan_id: Option<String>,
+        session_model_key: &str,
     ) -> StartupData {
         let root = std::env::current_dir().unwrap_or_default();
         let version = env!("CARGO_PKG_VERSION");
         let project_path = shorten_path(&root);
         let (git_branch, git_modified) = collect_git_info(&root);
-        let model = model_cfg.id.clone();
+        let model = session_model_key.to_string();
 
         let active_plan_raw = preferred_plan_id
             .as_deref()

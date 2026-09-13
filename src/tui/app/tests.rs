@@ -4167,6 +4167,7 @@ mod tests {
             &app.model_cfg,
             app.read_only,
             None,
+            &app.session.model_key.clone(),
         ));
 
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
@@ -4201,6 +4202,7 @@ mod tests {
             &app.model_cfg,
             app.read_only,
             None,
+            &app.session.model_key.clone(),
         ));
 
         let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
@@ -4356,7 +4358,7 @@ mod tests {
     fn startup_screen_wraps_text_on_narrow_window() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = true;
-        let mut data = App::collect_startup_data(&app.cfg, &app.model_cfg, app.read_only, None);
+        let mut data = App::collect_startup_data(&app.cfg, &app.model_cfg, app.read_only, None, &app.session.model_key.clone());
         data.project_path = "~/dev/a/very/long/nested/path/to/project".into();
         app.startup_data = Some(data);
 
@@ -4388,9 +4390,15 @@ mod tests {
             &app.model_cfg,
             app.read_only,
             Some("01JDOESNOTEXIST000000000000".into()),
+            &app.session.model_key.clone(),
         );
-        let without_pref =
-            App::collect_startup_data(&app.cfg, &app.model_cfg, app.read_only, None);
+        let without_pref = App::collect_startup_data(
+            &app.cfg,
+            &app.model_cfg,
+            app.read_only,
+            None,
+            &app.session.model_key.clone(),
+        );
         assert_eq!(
             with_pref.active_plan.map(|p| p.title),
             without_pref.active_plan.map(|p| p.title)
