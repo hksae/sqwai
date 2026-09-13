@@ -1862,6 +1862,15 @@ impl App {
     pub(super) fn note_compaction(&mut self, summarized: bool, before: u64, after: u64) {
         self.context_bootstrap_pending = true;
         self.rebuild_session_environment();
+        // a forced /compact that changed nothing must not report X → X tok
+        // as if work happened; say it fits instead
+        if !summarized && before == after {
+            self.status(
+                &format!("context already fits: {} tok, nothing dropped", fmt_k(before)),
+                StatusKind::Info,
+            );
+            return;
+        }
         let verb = if summarized { "summarized" } else { "trimmed" };
         self.status(
             &format!(

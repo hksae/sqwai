@@ -332,7 +332,6 @@ pub(super) enum ScalarSetting {
     DiaryBatchSteps,
     DiaryBatchMinutes,
     CompactionThreshold,
-    CompactionStageRatio,
     CompactionKeepTurns,
     CompactionAnchorRatio,
     UndoKeepPerSession,
@@ -373,7 +372,6 @@ impl ScalarSetting {
             Self::DiaryBatchSteps => "batch steps",
             Self::DiaryBatchMinutes => "batch minutes",
             Self::CompactionThreshold => "threshold",
-            Self::CompactionStageRatio => "stage ratio",
             Self::CompactionKeepTurns => "keep turns",
             Self::CompactionAnchorRatio => "anchor ratio",
             Self::UndoKeepPerSession => "keep per session",
@@ -397,7 +395,6 @@ impl ScalarSetting {
             Self::DiaryBatchSteps => cfg.diary.batch_steps.to_string(),
             Self::DiaryBatchMinutes => cfg.diary.batch_minutes.to_string(),
             Self::CompactionThreshold => cfg.compaction.threshold.to_string(),
-            Self::CompactionStageRatio => cfg.compaction.stage_ratio.to_string(),
             Self::CompactionKeepTurns => cfg.compaction.keep_turns.to_string(),
             Self::CompactionAnchorRatio => cfg.compaction.anchor_ratio.to_string(),
             Self::UndoKeepPerSession => cfg.undo.keep_per_session.to_string(),
@@ -476,12 +473,6 @@ impl ScalarSetting {
                 raw,
                 &mut cfg.compaction.threshold,
                 def.compaction.threshold,
-            ),
-            Self::CompactionStageRatio => apply_num(
-                label,
-                raw,
-                &mut cfg.compaction.stage_ratio,
-                def.compaction.stage_ratio,
             ),
             Self::CompactionKeepTurns => apply_num(
                 label,
@@ -2213,11 +2204,6 @@ impl App {
                     "threshold",
                     ScalarSetting::CompactionThreshold.current(&self.cfg),
                     ScalarSetting::CompactionThreshold,
-                ));
-                self.menu_rows.push(scalar(
-                    "stage ratio",
-                    ScalarSetting::CompactionStageRatio.current(&self.cfg),
-                    ScalarSetting::CompactionStageRatio,
                 ));
                 self.menu_rows.push(scalar(
                     "keep turns",

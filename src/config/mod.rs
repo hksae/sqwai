@@ -715,10 +715,10 @@ fn default_secrets_exclude_globs() -> Vec<String> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionConfig {
+    /// fraction of the context at which compaction triggers (whichever
+    /// bites first with the answer reserve, see Policy::budget)
     #[serde(default = "default_compaction_threshold")]
     pub threshold: f64,
-    #[serde(default = "default_compaction_stage_ratio")]
-    pub stage_ratio: f64,
     #[serde(default = "default_compaction_keep_turns")]
     pub keep_turns: usize,
     #[serde(default = "default_compaction_anchor_ratio")]
@@ -739,7 +739,6 @@ impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             threshold: default_compaction_threshold(),
-            stage_ratio: default_compaction_stage_ratio(),
             keep_turns: default_compaction_keep_turns(),
             anchor_ratio: default_compaction_anchor_ratio(),
             summary: CompactionSummary::default(),
@@ -802,7 +801,6 @@ struct UiOverride {
 #[derive(Debug, Clone, Default, Deserialize)]
 struct CompactionOverride {
     threshold: Option<f64>,
-    stage_ratio: Option<f64>,
     keep_turns: Option<usize>,
     anchor_ratio: Option<f64>,
     summary: Option<CompactionSummary>,
@@ -848,7 +846,6 @@ const PROJECT_ALLOWLIST: &[(&str, &[&str])] = &[
         "compaction",
         &[
             "threshold",
-            "stage_ratio",
             "keep_turns",
             "anchor_ratio",
             "summary",
@@ -917,9 +914,6 @@ fn default_diary_batch_minutes() -> u16 {
 }
 fn default_compaction_threshold() -> f64 {
     0.80
-}
-fn default_compaction_stage_ratio() -> f64 {
-    0.60
 }
 fn default_compaction_keep_turns() -> usize {
     4
@@ -1239,9 +1233,6 @@ impl Config {
         let o = &overrides.compaction;
         if let Some(v) = o.threshold {
             compaction.threshold = v;
-        }
-        if let Some(v) = o.stage_ratio {
-            compaction.stage_ratio = v;
         }
         if let Some(v) = o.keep_turns {
             compaction.keep_turns = v;

@@ -283,8 +283,12 @@ pub struct Policy {
     /// the host-generated anchor policy.
     pub anchor_ratio: Option<f64>,
     pub keep_turns: Option<usize>,
-    pub stage_ratio: Option<f64>,
     pub summary_enabled: bool,
+    /// Fraction of the context at which compaction triggers
+    /// (`[compaction].threshold`, 0.80). Combined with the reserve below:
+    /// the trigger is whichever bites first, so a large reserve on a small
+    /// model still leaves room for the answer.
+    pub threshold: Option<f64>,
 }
 
 impl Policy {
@@ -294,8 +298,8 @@ impl Policy {
             context_limit,
             anchor_ratio: None,
             keep_turns: None,
-            stage_ratio: None,
             summary_enabled: false,
+            threshold: None,
         }
     }
 
@@ -303,15 +307,15 @@ impl Policy {
         context_limit: u64,
         anchor_ratio: f64,
         keep_turns: usize,
-        stage_ratio: f64,
+        threshold: f64,
         summary_enabled: bool,
     ) -> Self {
         Self {
             context_limit,
             anchor_ratio: Some(anchor_ratio),
             keep_turns: Some(keep_turns),
-            stage_ratio: Some(stage_ratio),
             summary_enabled,
+            threshold: Some(threshold),
         }
     }
 
@@ -326,21 +330,27 @@ impl Policy {
         raw.clamp(RESERVE_MIN, RESERVE_MAX).min(self.context_limit)
     }
 
-    /// how much history may accumulate before compaction is triggered
+    /// how much history may accumulate before compaction is triggered:
+    /// the configured threshold fraction, but never more than the limit
+    /// minus the answer reserve — whichever bites first. No threshold
+    /// configured (legacy `Policy::new`) means reserve-only, as before.
     pub fn budget(&self) -> u64 {
         if self.context_limit == 0 {
             return u64::MAX;
         }
-        self.context_limit.saturating_sub(self.reserve())
+        let by_reserve = self.context_limit.saturating_sub(self.reserve());
+        match self.threshold {
+            None => by_reserve,
+            Some(t) => {
+                ((self.context_limit as f64 * t.clamp(0.0, 1.0)).round() as u64)
+                    .min(self.context_limit)
+                    .min(by_reserve)
+            }
+        }
     }
 
     pub fn keep_turns(&self) -> usize {
         self.keep_turns.unwrap_or(SUMMARY_KEEP_RECENT)
-    }
-
-    #[allow(dead_code)]
-    pub fn stage_ratio(&self) -> f64 {
-        self.stage_ratio.unwrap_or(0.60).clamp(0.0, 1.0)
     }
 
     pub fn pressure(&self, tokens: u64) -> Pressure {
@@ -436,21 +446,34 @@ pub fn prune(messages: &[Message]) -> (Vec<Message>, bool) {
 
 /// Stage 2: split the history into (to_summarize, keep_verbatim).
 ///
+/// `keep_turns` counts user turns, not messages: the last `keep_turns` user
+/// messages and everything after the earliest of them stays verbatim.
 /// The cut lands on a user turn and never separates an assistant tool call
 /// from its results — providers reject orphaned tool results.
-#[allow(dead_code)]
 pub fn split_for_summary(messages: &[Message]) -> (&[Message], &[Message]) {
     split_for_summary_with_keep(messages, SUMMARY_KEEP_RECENT)
 }
 
 pub fn split_for_summary_with_keep(
     messages: &[Message],
-    keep_recent: usize,
+    keep_turns: usize,
 ) -> (&[Message], &[Message]) {
-    if messages.len() <= keep_recent {
+    // user-turn indices from the end; keep the last `keep_turns` of them
+    // and drop everything before the earliest kept one
+    let keep = keep_turns.max(1);
+    let mut from_end: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, message)| message.role == Role::User)
+        .map(|(index, _)| index)
+        .take(keep + 1)
+        .collect();
+    if from_end.len() <= keep {
         return (&[], messages);
     }
-    let mut cut = messages.len() - keep_recent;
+    from_end.truncate(keep);
+    let mut cut = *from_end.last().expect("keep >= 1");
     while cut > 0 && !is_safe_cut(messages, cut) {
         cut -= 1;
     }
@@ -856,16 +879,42 @@ mod tests {
 
     #[test]
     fn configured_policy_controls_reserve_tail_and_summary() {
-        let policy = Policy::with_compaction(100_000, 0.08, 4, 0.60, false);
+        let policy = Policy::with_compaction(100_000, 0.08, 4, 0.80, false);
         assert_eq!(policy.reserve(), 8_000);
         assert_eq!(policy.keep_turns(), 4);
         assert!(!policy.summary_enabled);
-        assert!((policy.stage_ratio() - 0.60).abs() < f64::EPSILON);
+        // threshold bites first here: 80% of 100k beats 100k − 8k reserve
+        assert_eq!(policy.budget(), 80_000);
 
         let messages: Vec<_> = (0..8).map(|i| user(&format!("message {i}"))).collect();
         let (older, keep) = split_for_summary_with_keep(&messages, policy.keep_turns());
         assert_eq!(older.len(), 4);
         assert_eq!(keep.len(), 4);
+    }
+
+    #[test]
+    fn keep_turns_counts_user_turns_not_messages() {
+        // one user turn with tool traffic is still one turn: all of it stays
+        let messages = vec![
+            user("old task"),
+            Message::new(Role::Assistant, "working"),
+            Message::tool_result("c1", "output", false),
+            user("new task"),
+            Message::new(Role::Assistant, "on it"),
+        ];
+        let (older, keep) = split_for_summary_with_keep(&messages, 1);
+        assert_eq!(older.len(), 3);
+        assert_eq!(keep.len(), 2);
+        assert_eq!(keep[0].content, "new task");
+    }
+
+    #[test]
+    fn reserve_caps_the_threshold_on_small_contexts() {
+        // 20k limit: 80% would be 16k, but the 8k minimum reserve wins
+        let policy = Policy::with_compaction(20_000, 0.08, 4, 0.80, false);
+        assert_eq!(policy.budget(), 12_000);
+        assert_eq!(policy.pressure(12_000), Pressure::Ok);
+        assert_eq!(policy.pressure(12_001), Pressure::Summarize);
     }
 
     #[test]
@@ -926,9 +975,11 @@ mod tests {
             Message::new(Role::Assistant, "did fourth"),
             user("fifth task"),
         ];
-        let (older, keep) = split_for_summary(&messages);
+        let (older, keep) = split_for_summary_with_keep(&messages, 2);
         assert!(!older.is_empty());
         assert!(keep.first().is_some_and(|m| m.role == Role::User));
+        // kept tail is exactly the last two user turns and what follows them
+        assert_eq!(keep.first().unwrap().content, "fourth task");
         // the split is a clean partition
         assert_eq!(older.len() + keep.len(), messages.len());
         // a tool call that was summarized keeps its result on the same side;

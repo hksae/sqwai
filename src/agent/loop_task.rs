@@ -1095,7 +1095,7 @@ async fn run_agent(
         context_limit,
         compaction.anchor_ratio,
         compaction.keep_turns,
-        compaction.stage_ratio,
+        compaction.threshold,
         matches!(compaction.summary, crate::config::CompactionSummary::Short),
     );
     // Tools are part of the request prefix: sorted for stability, narrowed in
@@ -1582,7 +1582,7 @@ async fn run_agent(
                         context_limit,
                         compaction.anchor_ratio,
                         compaction.keep_turns,
-                        compaction.stage_ratio,
+                        compaction.threshold,
                         matches!(compaction.summary, crate::config::CompactionSummary::Short),
                     );
                     previous_response_id = None;

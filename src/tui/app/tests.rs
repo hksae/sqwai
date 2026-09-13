@@ -3611,6 +3611,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compaction_noop_reports_fits_instead_of_lying() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.note_compaction(false, 12_000, 12_000);
+        assert!(
+            toast_text(&app).contains("already fits"),
+            "no-op compact must not report X → X: {}",
+            toast_text(&app)
+        );
+    }
+
     /// Same reasoning for undo: the provider still remembers the work that was
     /// just reverted on disk.
     #[test]

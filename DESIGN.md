@@ -1017,18 +1017,23 @@ Skills triggered by keywords do not enter A.
 
 3.3 Compaction
 3.3.1 Trigger
-used_tokens ≥ context × compaction.threshold (0.80), checked after each
-turn, or /compact. The threshold leaves room for the diary call and the
-anchor.
+Compaction runs when history exceeds `min(context × compaction.threshold
+(0.80), context − answer reserve)` — whichever bites first, so a large
+reserve on a small model still leaves room for the answer. Checked before
+each turn (against the provider's reported prompt size, falling back to
+the host estimate), on context-overflow errors (one forced compaction +
+one retry), or /compact. The trigger leaves room for the diary call and
+the anchor.
 
-Staged pre-compaction. When used_tokens ≥ context × compaction.stage_ratio
-(0.60) but below the threshold, the host prunes old tool-result history:
+Tool-output pruning. Every compaction pass first prunes old tool-result
+history (no separate stage, no ratio knob):
 tool outputs older than the last 6 messages are cut to 2000 chars (outputs
 over 20000 chars to an 800-char head) plus the note "…(old tool output
 compacted; rerun the tool to see the full result again)". User
 messages and assistant prose are kept verbatim. This is cheap, preserves the
-anchor, and delays a full compaction by several turns. Full compaction
-(below) still triggers at the threshold.
+anchor, and delays a full compaction by several turns. Summarization and
+hard-trim (below) still trigger at the threshold. A forced /compact that
+changes nothing reports "context already fits", never X → X.
 
 3.3.2 Procedure
 Journal compaction (pre-record with phase: begin).
@@ -1036,7 +1041,8 @@ Diary entry (§2.3.3 trigger 1), bounded by diary.timeout_secs; fallback
 host-only.
 Build the anchor (below).
 Choose the history to keep verbatim: the last compaction.keep_turns (4)
-user/assistant exchanges, plus any ask_user awaiting an answer.
+user turns (counted by user messages, not raw messages) and everything
+after the earliest of them, plus any ask_user awaiting an answer.
 Optional short summary (compaction.summary: off|short, default off):
 one model call, ≤ 300 tokens, restricted to "what the user asked in the
 dropped messages that is not in the plan". Placed after the anchor.
@@ -1339,8 +1345,7 @@ batch_minutes = 20
 
 [compaction]
 threshold = 0.80
-stage_ratio = 0.60         # staged pre-compaction of tool-output history
-keep_turns = 4
+keep_turns = 4             # user turns kept verbatim, not messages
 anchor_ratio = 0.08
 summary = "off"            # off | short
 
@@ -1365,7 +1370,7 @@ display- and budget-class keys only:
 
 - `[diary]`: token_budget, effort, timeout_secs, batch_steps, batch_minutes
 - `[ui]`: typewriter, http_log, experimental_test
-- `[compaction]`: threshold, stage_ratio, keep_turns, anchor_ratio, summary
+- `[compaction]`: threshold, keep_turns, anchor_ratio, summary
 - `[undo]`: keep_per_session, blob_grace_secs, shadow, shadow_max_bytes
 - `[plan]`: budget_ratio, max_steps, nudge_after
 - `[memory]`: load_budget_ratio, max_tokens, max_proposals_per_turn
@@ -1488,7 +1493,7 @@ number; a `partial` one is missing something the design calls for.
 | V | Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md) | partial — cmd:/manual: settling done (#7); remaining: /init seeding of verify commands and their substitution on create | F3 |
 | V1 | Verification receipts (§2.1.4): execution interval digest, check hash, stale invalidation, manual `confirm` vs `waive` | done — interval digest, check hash, stale invalidation on diff, manual /plan confirm, replay restoration | V, F1b |
 | W | Plan-first gate (Act first-mutate w/o plan → plan_required) | done — `plan_first: soft|off` in PlanConfig; heuristic trivial bypass; gate blocks unprompted mutations in Act mode without an active plan | F3 |
-| X | Staged compaction + recent-reads anchor + USER.md split/load | partial — USER.md split/loading and staged pre-compaction (§3.3.1) done; the read guard is a host path→hash map, not context-backed authorization | F1, F5 |
+| X | Tool-output pruning + USER.md split/load | partial — USER.md split/loading and prune (§3.3.1) done; the read guard is a host path→hash map, not context-backed authorization | F1, F5 |
 | Y | Claim lint (post-generation verify against journal/resolve_ref) | planned (§12.9) | I4 |
 | Z | Scope guard (step.refs vs file_diff) | partial — finish-time misattribution warnings via refs done; no warn/block gate on the write path | I4 |
 | AA | Lessons tied to files (note kind + context-block rule) | partial — `lesson` note kind done; automatic file-tied injection planned with the context block (§12.5) | I5 |
