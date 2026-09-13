@@ -573,7 +573,12 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
     let still_running = job.running();
     let polls = job.nowait_polls;
     if !still_running {
+        // reaped read: the registry entry goes away, and so does the log
+        // file — finished logs are never listed, so keeping them only
+        // grows %TEMP%/sqwai-bg/ without bound.
+        let log_path = job.log.clone();
         jobs.retain(|j| j.id != id);
+        let _ = std::fs::remove_file(&log_path);
     }
     let section = if first_read {
         "--- output tail ---"
@@ -620,6 +625,8 @@ pub(super) fn bash_kill(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
     };
     let mut job = jobs.remove(pos);
     job.poll();
+    // the log goes with the registry entry, finished or killed
+    let _ = std::fs::remove_file(&job.log);
     match job.exit {
         Some(status) => Outcome::ok(format!(
             "job {id} had already finished: `{}` (exit code {})",
@@ -957,7 +964,6 @@ mod tests {
             kill_late.output
         );
     }
-
     fn spawn_bg(c: &mut ToolCtx, command: &str) -> u64 {
         let started = bash(c, command, None, true);
         assert!(started.ok, "{}", started.output);
@@ -968,6 +974,47 @@ mod tests {
             .and_then(|rest| rest.split(' ').next())
             .and_then(|num| num.parse().ok())
             .expect("spawn result must carry a job id")
+    }
+
+    fn spawn_bg_with_log(c: &mut ToolCtx, command: &str) -> (u64, std::path::PathBuf) {
+        let started = bash(c, command, None, true);
+        assert!(started.ok, "{}", started.output);
+        let id: u64 = started
+            .output
+            .split("job ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|num| num.parse().ok())
+            .expect("spawn result must carry a job id");
+        let log = started
+            .output
+            .split("logs appended to ")
+            .nth(1)
+            .and_then(|rest| rest.split(". Wait").next())
+            .map(std::path::PathBuf::from)
+            .expect("spawn result must carry the log path");
+        (id, log)
+    }
+
+    /// Reaped and killed jobs leave no log files: the registry entry and
+    /// its `%TEMP%/sqwai-bg/bg-*.out` go away together.
+    #[test]
+    fn reaped_and_killed_jobs_leave_no_log_files() {
+        let mut c = ctx();
+        // kill path: running job removed by bash_kill
+        let (id, log) = spawn_bg_with_log(&mut c, &long_sleep_command());
+        assert!(log.exists(), "log must exist while the job runs");
+        let killed = bash_kill(&c, &serde_json::json!({"id": id}));
+        assert!(killed.ok, "{}", killed.output);
+        assert!(!log.exists(), "killed job must not leave its log behind");
+
+        // reap path: finished job removed by the final read
+        let (id, log) = spawn_bg_with_log(&mut c, "echo hi");
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let polled = bash_output(&c, &serde_json::json!({"id": id}));
+        assert!(polled.ok, "{}", polled.output);
+        assert!(polled.output.contains("finished"), "{}", polled.output);
+        assert!(!log.exists(), "reaped job must not leave its log behind");
     }
 
     /// Reads are incremental: the first returns the tail, the next only
