@@ -40,7 +40,7 @@ fn main() -> Result<()> {
         eprintln!("warning: {message}");
     }
 
-    let cfg = match config::Config::load() {
+    let mut cfg = match config::Config::load() {
         Ok(cfg) => cfg,
         Err(config::LoadError::Missing(path)) => {
             config::write_template(&path)?;
@@ -52,6 +52,9 @@ fn main() -> Result<()> {
         }
         Err(e) => return Err(e.into()),
     };
+    for note in cfg.apply_project_overrides(&project_root) {
+        eprintln!("warning: {note}");
+    }
 
     std::panic::set_hook(Box::new(|info| {
         // TUI is not active yet here (presenter starts inside run()); a plain

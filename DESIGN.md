@@ -87,7 +87,7 @@ memory/YYYY-MM-DD.md daily diary user decides (default ignored)
 graph/graph.db SQLite index ignored
 graph/meta.json schema + generation ignored
 skills/ project skills user decides (default committed)
-config.toml allowed through the file-tool jail; project overrides are not implemented
+config.toml allowed through the file-tool jail; project overrides merged per §5.9 allowlist
 
 ~/.config/sqwai/config.toml user config, providers, keys env names
 ~/.config/sqwai/USER.md user-wide profile: language, style, OS, defaults (one per user)
@@ -1358,6 +1358,23 @@ There is no `[graph]`, `[reflect]`, `[unattended]`, `[issue]`, or `[journal]`
 section: graph, LSP, and secrets behavior are currently fixed, and the
 reflector, unattended mode, issues, and the claim lint do not exist (see
 §12).
+
+Project overrides (`.sqwai/config.toml`, optional, committed or not at the
+user's discretion) merge over the user config, per key. Allowlist —
+display- and budget-class keys only:
+
+- `[diary]`: token_budget, effort, timeout_secs, batch_steps, batch_minutes
+- `[ui]`: typewriter, http_log, experimental_test
+- `[compaction]`: threshold, stage_ratio, keep_turns, anchor_ratio, summary
+- `[undo]`: keep_per_session, blob_grace_secs, shadow, shadow_max_bytes
+- `[plan]`: budget_ratio, max_steps, nudge_after
+- `[memory]`: load_budget_ratio, max_tokens, max_proposals_per_turn
+
+Never overridable from a project file: providers, models, keys, safety,
+`plan_first`, MCP/LSP servers, skills dirs. Anything else present is
+ignored and reported at startup (stderr warning); a parse error rejects
+the whole file (fail-closed). Rationale: a cloned repo must not be able
+to reconfigure trust.
 
 5.10 Stack
 Rust 2024, tokio (full), ratatui + crossterm (TUI), reqwest +

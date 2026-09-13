@@ -759,6 +759,117 @@ impl Default for DiaryConfig {
     }
 }
 
+/// Project-level overrides (`.sqwai/config.toml`, §5.9).
+///
+/// A cloned repo must never be able to reconfigure trust: providers, models,
+/// keys, safety, plan gates, MCP/LSP servers, and skills-dirs are NOT
+/// allowlisted and are ignored with a warning. Only display- and
+/// budget-class keys are accepted; everything else in the file is reported
+/// back so a silently-ignored setting cannot confuse. The whole file is
+/// rejected on parse error (fail-closed).
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ProjectOverrides {
+    #[serde(default)]
+    diary: DiaryOverride,
+    #[serde(default)]
+    ui: UiOverride,
+    #[serde(default)]
+    compaction: CompactionOverride,
+    #[serde(default)]
+    undo: UndoOverride,
+    #[serde(default)]
+    plan: PlanOverride,
+    #[serde(default)]
+    memory: MemoryOverride,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct DiaryOverride {
+    token_budget: Option<u32>,
+    effort: Option<EffortLevel>,
+    timeout_secs: Option<u64>,
+    batch_steps: Option<u8>,
+    batch_minutes: Option<u16>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct UiOverride {
+    typewriter: Option<bool>,
+    http_log: Option<bool>,
+    experimental_test: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct CompactionOverride {
+    threshold: Option<f64>,
+    stage_ratio: Option<f64>,
+    keep_turns: Option<usize>,
+    anchor_ratio: Option<f64>,
+    summary: Option<CompactionSummary>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct UndoOverride {
+    keep_per_session: Option<u32>,
+    blob_grace_secs: Option<u64>,
+    shadow: Option<ShadowStore>,
+    shadow_max_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PlanOverride {
+    budget_ratio: Option<f64>,
+    max_steps: Option<usize>,
+    nudge_after: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct MemoryOverride {
+    load_budget_ratio: Option<f64>,
+    max_tokens: Option<u32>,
+    max_proposals_per_turn: Option<u8>,
+}
+
+/// (table, keys) accepted from a project file. Anything else present is
+/// ignored and reported. Keep in sync with the `*Override` structs above.
+const PROJECT_ALLOWLIST: &[(&str, &[&str])] = &[
+    (
+        "diary",
+        &[
+            "token_budget",
+            "effort",
+            "timeout_secs",
+            "batch_steps",
+            "batch_minutes",
+        ],
+    ),
+    ("ui", &["typewriter", "http_log", "experimental_test"]),
+    (
+        "compaction",
+        &[
+            "threshold",
+            "stage_ratio",
+            "keep_turns",
+            "anchor_ratio",
+            "summary",
+        ],
+    ),
+    (
+        "undo",
+        &[
+            "keep_per_session",
+            "blob_grace_secs",
+            "shadow",
+            "shadow_max_bytes",
+        ],
+    ),
+    ("plan", &["budget_ratio", "max_steps", "nudge_after"]),
+    (
+        "memory",
+        &["load_budget_ratio", "max_tokens", "max_proposals_per_turn"],
+    ),
+];
+
 impl CompactionSummary {
     pub const ALL: [CompactionSummary; 2] = [CompactionSummary::Off, CompactionSummary::Short];
     pub fn as_str(&self) -> &'static str {
@@ -999,6 +1110,154 @@ impl Config {
             }
         });
         save_cfg
+    }
+
+    /// Overlay `.sqwai/config.toml` project overrides. Returns human-readable
+    /// notes for everything ignored (unknown tables/keys, whole-file parse
+    /// failure). A missing file is not an error and yields no notes.
+    pub fn apply_project_overrides(&mut self, root: &Path) -> Vec<String> {
+        let mut notes = Vec::new();
+        let path = root.join(".sqwai").join("config.toml");
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return notes,
+            Err(e) => {
+                notes.push(format!(
+                    "project config {} unreadable ({e}); ignoring",
+                    path.display()
+                ));
+                return notes;
+            }
+        };
+        let value: toml::Value = match toml::from_str(&raw) {
+            Ok(value) => value,
+            Err(e) => {
+                notes.push(format!(
+                    "project config {} does not parse ({e}); ignoring",
+                    path.display()
+                ));
+                return notes;
+            }
+        };
+        // report-then-ignore everything outside the allowlist, so a cloned
+        // repo can neither reconfigure trust nor confuse by silently
+        // dropping a setting the user thinks is active
+        if let Some(table) = value.as_table() {
+            for (section, keys) in table {
+                match PROJECT_ALLOWLIST
+                    .iter()
+                    .find(|(allowed, _)| allowed == section)
+                {
+                    None => notes.push(format!(
+                        "project config [{}] is not overridable; ignoring",
+                        section
+                    )),
+                    Some((_, allowed_keys)) => {
+                        if let Some(entries) = keys.as_table() {
+                            for key in entries.keys() {
+                                if !allowed_keys.contains(&key.as_str()) {
+                                    notes.push(format!(
+                                        "project config {section}.{key} is not overridable; ignoring"
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let overrides: ProjectOverrides = match toml::from_str(&raw) {
+            Ok(overrides) => overrides,
+            Err(e) => {
+                notes.push(format!(
+                    "project config {} has invalid values ({e}); ignoring",
+                    path.display()
+                ));
+                return notes;
+            }
+        };
+        let diary = &mut self.diary;
+        let o = &overrides.diary;
+        if let Some(v) = o.token_budget {
+            diary.token_budget = v;
+        }
+        if let Some(v) = o.effort {
+            diary.effort = v;
+        }
+        if let Some(v) = o.timeout_secs {
+            diary.timeout_secs = v;
+        }
+        if let Some(v) = o.batch_steps {
+            diary.batch_steps = v;
+        }
+        if let Some(v) = o.batch_minutes {
+            diary.batch_minutes = v;
+        }
+        let ui = &mut self.ui;
+        let o = &overrides.ui;
+        if let Some(v) = o.typewriter {
+            ui.typewriter = v;
+        }
+        if let Some(v) = o.http_log {
+            ui.http_log = v;
+        }
+        if let Some(v) = o.experimental_test {
+            ui.experimental_test = v;
+        }
+        let compaction = &mut self.compaction;
+        let o = &overrides.compaction;
+        if let Some(v) = o.threshold {
+            compaction.threshold = v;
+        }
+        if let Some(v) = o.stage_ratio {
+            compaction.stage_ratio = v;
+        }
+        if let Some(v) = o.keep_turns {
+            compaction.keep_turns = v;
+        }
+        if let Some(v) = o.anchor_ratio {
+            compaction.anchor_ratio = v;
+        }
+        if let Some(v) = o.summary {
+            compaction.summary = v;
+        }
+        let undo = &mut self.undo;
+        let o = &overrides.undo;
+        if let Some(v) = o.keep_per_session {
+            undo.keep_per_session = v;
+        }
+        if let Some(v) = o.blob_grace_secs {
+            undo.blob_grace_secs = v;
+        }
+        if let Some(v) = o.shadow {
+            undo.shadow = v;
+        }
+        if let Some(v) = o.shadow_max_bytes {
+            undo.shadow_max_bytes = v;
+        }
+        let plan = &mut self.plan;
+        let o = &overrides.plan;
+        if let Some(v) = o.budget_ratio {
+            plan.budget_ratio = v;
+        }
+        if let Some(v) = o.max_steps {
+            plan.max_steps = v;
+        }
+        if let Some(v) = o.nudge_after {
+            plan.nudge_after = v;
+        }
+        let memory = &mut self.memory;
+        let o = &overrides.memory;
+        if let Some(v) = o.load_budget_ratio {
+            memory.load_budget_ratio = v;
+        }
+        if let Some(v) = o.max_tokens {
+            memory.max_tokens = v;
+        }
+        if let Some(v) = o.max_proposals_per_turn {
+            memory.max_proposals_per_turn = v;
+        }
+        notes
     }
 
     pub fn default_model_config(&self) -> Result<&ModelConfig> {
@@ -1389,8 +1648,7 @@ mod tests {
     }
 
     #[test]
-    fn customized_builtin_model_survives_save_strip_and_reapply() {
-        // the hand-edit path: user overrides one field of a built-in model
+    fn customized_builtin_model_survives_save_strip_and_reapply() {        // the hand-edit path: user overrides one field of a built-in model
         let mut cfg = Config::default();
         cfg.apply_builtins();
         let key = "gemini-3.8-flash";
@@ -1423,6 +1681,57 @@ mod tests {
             Some(&customized),
             "re-apply must not clobber the user override"
         );
+    }
+
+    #[test]
+    fn project_overrides_apply_allowlisted_keys_and_report_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let sqwai = dir.path().join(".sqwai");
+        std::fs::create_dir_all(&sqwai).unwrap();
+        std::fs::write(
+            sqwai.join("config.toml"),
+            r#"
+[diary]
+token_budget = 500
+
+[plan]
+max_steps = 5
+plan_first = "off"
+
+[safety]
+blocked_patterns = ["rm -rf /"]
+
+[models."x"]
+provider = "p"
+"#,
+        )
+        .unwrap();
+
+        let mut cfg = Config::default();
+        let notes = cfg.apply_project_overrides(dir.path());
+        assert_eq!(cfg.diary.token_budget, 500);
+        assert_eq!(cfg.plan.max_steps, 5);
+        // not allowlisted: values untouched, but reported
+        assert_eq!(cfg.plan.plan_first, PlanFirstMode::Soft);
+        assert!(notes.iter().any(|n| n.contains("plan.plan_first")), "{notes:?}");
+        assert!(notes.iter().any(|n| n.contains("[safety]")), "{notes:?}");
+        assert!(notes.iter().any(|n| n.contains("[models]")), "{notes:?}");
+        assert!(!cfg.models.contains_key("x"), "project file must not inject models");
+    }
+
+    #[test]
+    fn project_overrides_missing_file_is_silent_and_broken_file_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        assert!(cfg.apply_project_overrides(dir.path()).is_empty());
+
+        let sqwai = dir.path().join(".sqwai");
+        std::fs::create_dir_all(&sqwai).unwrap();
+        std::fs::write(sqwai.join("config.toml"), "[diary\ntoken_budget = ").unwrap();
+        let before = cfg.diary.token_budget;
+        let notes = cfg.apply_project_overrides(dir.path());
+        assert_eq!(cfg.diary.token_budget, before, "broken file must change nothing");
+        assert!(!notes.is_empty(), "broken file must be reported");
     }
 
     #[test]
