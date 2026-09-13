@@ -1594,6 +1594,22 @@ Evaluation protocol:
   4. *Fabricated references*: AST-checked references to non-existent symbols/files.
   5. *Verified completion*: acceptance items with `validation: passed` backed by
      uninterrupted execution receipts. `waived` items count as unverified (0) in benchmark scoring.
+  6. *Cost*: tokens in/out (and $ at the run's tariff) per task per arm —
+     a retention win at +50% cost is a different product conclusion.
+- **Finish (pre-registered, symmetric):** mechanism arm finishes when all
+  steps are done AND all acceptance items are verified/waived — the
+  `complete` call itself is not required (the model forgetting the ritual
+  must not fail the run). Baseline arm (no plan, no complete) finishes when
+  the model claims completion in text AND the harness independently verifies
+  the task (acceptance commands + trap checks). No apples-to-oranges.
+- **Design freedom:** both arms get the same goal/constraints/acceptance and
+  are scored on invariants (tests, traps, receipts), never on matching a
+  reference solution. Different naming or structure (e.g. `expires_at` vs
+  `expiry_ms`) is fine.
+- **Shakedown before the 12:** one task, one arm at a time, threshold 0.04,
+  with per-turn latency logging. Go/no-go: both arms compacted ≥ 3,
+  post-compaction turns not an order slower, finish detector fires, diary
+  trigger shows no timeout tail. Only then the full runs.
 
 Success criteria:
 Evaluation starts at 2 repeated runs per task per arm. Success requires
