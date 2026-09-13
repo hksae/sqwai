@@ -44,6 +44,12 @@ pub struct ToolCtx {
     /// interleave their checkpoint history — and retention can truncate one
     /// session's chain without touching another's.
     pub session_id: String,
+    /// Override for the checkpoint chain only (§2.2.4): a child session's
+    /// snapshots land on its parent's chain, so the parent's `/undo` sees
+    /// the child's step boundaries and bash mutations. `None` means the own
+    /// chain. Job isolation, read-guard and journal identity all stay on
+    /// `session_id` — only the shadow chain is shared.
+    pub checkpoint_session: Option<String>,
     /// Files read this session and the content hash they had at the time,
     /// keyed by canonical path. §4 calls for the guard to be hash-tracked: a
     /// file changed by `bash` since the last read has to be read again, and
@@ -92,6 +98,7 @@ impl ToolCtx {
             root_canon,
             read_only,
             session_id: "shared".into(),
+            checkpoint_session: None,
             files_read: HashMap::new(),
             journal: Vec::new(),
             plan_limits: crate::config::PlanConfig::default(),
@@ -112,6 +119,12 @@ impl ToolCtx {
     pub fn in_session(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = session_id.into();
         self
+    }
+
+    /// Whose shadow chain snapshots go to (child → parent). Everything else
+    /// keeps using `session_id`.
+    pub fn checkpoint_chain(&self) -> &str {
+        self.checkpoint_session.as_deref().unwrap_or(&self.session_id)
     }
 
     /// Share a cancellation flag across this context and its clones. The
@@ -698,7 +711,7 @@ tight loop; await its result before dependent changes or reporting success.",
         ToolDef {
             name: "subagent",
             kind: Kind::ReadOnly,
-            description: "Delegate one or more focused tasks to child agents. Children inherit the current Plan/Act mode; up to 8 tasks are accepted, at most 4 run concurrently, and child agents cannot create further subagents. Separate subagent calls in one turn also run concurrently.",
+            description: "Delegate one or more focused tasks to child agents. Children inherit the current Plan/Act mode; up to 8 tasks are accepted, at most 4 run concurrently, and child agents cannot create further subagents. A child that produces nothing for 600s is cancelled and reported as timed out. Separate subagent calls in one turn also run concurrently.",
             parameters: json!({"type":"object","properties":{"task":{"type":"string","description":"one focused child task"},"tasks":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8,"description":"focused child tasks to run concurrently"}},"anyOf":[{"required":["task"]},{"required":["tasks"]}]}),
         },
         ToolDef {
@@ -2029,6 +2042,13 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             ));
         }
     };
+    // host-only ops never reach the validator: session membership is joined
+    // by the host when it spawns a child, not proposed by the model
+    if matches!(op, plan::Op::Join { .. }) {
+        return Outcome::err(
+            "plan op rejected: join is host-only — sessions join a plan via plan start, not this op",
+        );
+    }
     let limits = plan::Limits {
         max_steps: ctx.plan_limits.max_steps,
     };
@@ -2283,7 +2303,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         && let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_boundary(
                             &ctx.root,
                             ctx.shadow_store,
-                            &ctx.session_id,
+                            ctx.checkpoint_chain(),
                             &format!("step_{id}_start"),
                         )
                     {
@@ -2293,7 +2313,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         && let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_boundary(
                             &ctx.root,
                             ctx.shadow_store,
-                            &ctx.session_id,
+                            ctx.checkpoint_chain(),
                             &format!("step_{id}_finish"),
                         )
                     {
@@ -3672,12 +3692,24 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// `join` is host-only: the model cannot add sessions to a plan, not
+    /// even its own — membership comes from `plan start` and child spawns.
+    #[test]
+    fn plan_join_op_is_refused_for_the_model() {
+        let (mut ctx, _dir) = proj();
+        let refused = plan_op(&mut ctx, &json!({"op": "join", "session": "sub-1"}));
+        assert!(!refused.ok, "join must never run from the model");
+        assert!(
+            refused.output.contains("host-only"),
+            "{}",
+            refused.output
+        );
+    }
     /// A subagent mutating after its step was reopened would attach stale
     /// work to a fresh epoch (§2.2.4). The dispatcher refuses the mutation
     /// instead; read-only tools keep working, and a fresh spawn proceeds.
     #[test]
-    fn subagent_mutation_refused_after_step_reopen() {
-        let (mut ctx, dir) = proj();
+    fn subagent_mutation_refused_after_step_reopen() {        let (mut ctx, dir) = proj();
         let created = plan_op(
             &mut ctx,
             &json!({"op": "create", "goal": "guarded work", "acceptance": [],

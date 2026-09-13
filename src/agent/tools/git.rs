@@ -148,7 +148,7 @@ pub fn commit(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
         &ctx.root,
         ctx.shadow_store,
-        &ctx.session_id,
+        ctx.checkpoint_chain(),
         "git_commit",
     ) {
         ctx.journal.push((sha, "git_commit".to_string()));
@@ -249,7 +249,7 @@ pub fn branch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
                     &ctx.root,
                     ctx.shadow_store,
-                    &ctx.session_id,
+                    ctx.checkpoint_chain(),
                     "git_branch create",
                 ) {
                     ctx.journal.push((sha, "git_branch create".to_string()));
@@ -264,7 +264,7 @@ pub fn branch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
                     &ctx.root,
                     ctx.shadow_store,
-                    &ctx.session_id,
+                    ctx.checkpoint_chain(),
                     "git_branch switch",
                 ) {
                     ctx.journal.push((sha, "git_branch switch".to_string()));
@@ -329,7 +329,7 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let checkpoint = if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
         &ctx.root,
         ctx.shadow_store,
-        &ctx.session_id,
+        ctx.checkpoint_chain(),
         "patch",
     ) {
         ctx.journal.push((sha.clone(), "patch".to_string()));
@@ -463,12 +463,12 @@ pub fn step_diff(ctx: &ToolCtx, args: &Value) -> Outcome {
     let _ = crate::agent::checkpoints::snapshot_boundary(
         &ctx.root,
         ctx.shadow_store,
-        &ctx.session_id,
+        ctx.checkpoint_chain(),
         &format!("step_{step_id}_probe"),
     );
 
     // Find commits in the session chain
-    let commits = match shadow.commit_log(&ctx.session_id) {
+    let commits = match shadow.commit_log(ctx.checkpoint_chain()) {
         Ok(c) if !c.is_empty() => c,
         _ => match shadow.commit_log("shared") {
             Ok(c) => c,
@@ -510,7 +510,7 @@ pub fn step_diff(ctx: &ToolCtx, args: &Value) -> Outcome {
     // If finish is still not found, use latest commit on the session chain
     if finish_sha.is_none() {
         finish_sha = shadow
-            .head_of(&ctx.session_id)
+            .head_of(ctx.checkpoint_chain())
             .or_else(|| shadow.head_of("shared"));
     }
 

@@ -1019,7 +1019,8 @@ fn apply_record(
             Ok(true)
         }
         Some(
-            "start" | "finish" | "block" | "unblock" | "cancel" | "add" | "split" | "complete",
+            "start" | "finish" | "block" | "unblock" | "cancel" | "add" | "split" | "complete"
+            | "join",
         ) => {
             let op: Op = serde_json::from_value(serde_json::Value::Object(fields.clone()))
                 .map_err(|_| Rejection::new("replay_shape", "unparsable op intent", ""))?;
@@ -1214,6 +1215,12 @@ pub enum Op {
     },
     Complete,
     Show,
+    /// Host-only: a child session joins its parent's plan so its evidence
+    /// attaches under session-strict resolution. Never exposed to the model
+    /// (the `plan` tool refuses it); recorded journal-first like every op.
+    Join {
+        session: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1509,7 +1516,17 @@ pub fn apply(
             evidence,
         } => verify_acceptance(plan, acceptance, Vec::new(), !evidence.is_empty(), None),
         Op::Complete => complete(plan),
+        Op::Join { session } => join(plan, &session),
     }
+}
+
+/// Record a session's membership in the plan. Idempotent: replaying a join
+/// (or racing joins under the lock) changes nothing the second time.
+fn join(plan: &mut Plan, session: &str) -> Result<Applied, Rejection> {
+    if !plan.sessions.iter().any(|s| s == session) {
+        plan.sessions.push(session.to_string());
+    }
+    accept(plan, format!("session {session} joined plan {}", plan.id))
 }
 
 fn reject(
@@ -2799,6 +2816,52 @@ mod tests {
         let again = replay(&dir).unwrap();
         assert_eq!(again.ops_applied, 0);
         assert!(again.plans_healed.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn join_is_journal_first_idempotent_and_replayable() {
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-join-{}", new_id()));
+        let mut plan = new_plan();
+        plan.sessions = vec!["parent".to_string()];
+        plan.applied_event = Some("parent:0".to_string());
+        store(&dir, &plan).unwrap();
+        // The crash: join intent journaled in the parent's file (where the
+        // cursor points), plan file never caught up.
+        let mut journal = crate::agent::journal::Journal::open(&dir, "parent").unwrap();
+        journal
+            .append(
+                "plan",
+                serde_json::json!({
+                    "op": "join", "session": "sub-9",
+                    "plan_id": plan.id, "by": "host", "ok": true,
+                }),
+            )
+            .unwrap();
+
+        let report = replay(&dir).unwrap();
+        assert_eq!(report.ops_applied, 1);
+        let healed = open(&dir, &plan.id).unwrap();
+        assert!(healed.sessions.contains(&"sub-9".to_string()));
+        assert_eq!(healed.applied_event.as_deref(), Some("parent:1"));
+
+        // Idempotent: replay and direct apply change nothing further.
+        let again = replay(&dir).unwrap();
+        assert_eq!(again.ops_applied, 0);
+        let mut healed = healed;
+        apply(
+            &mut healed,
+            Op::Join {
+                session: "sub-9".to_string(),
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            healed.sessions.iter().filter(|s| *s == "sub-9").count(),
+            1
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -265,7 +265,8 @@ applied_event, folded, or step_epoch. There is no `fold` op, no
 
 Host-only operations (never exposed as tool ops, recorded in the journal as
 plan events with by: host|user): reopen (after undo), waive and confirm
-(user settles acceptance items), set_goal, accept_proposal, replay/repair.
+(user settles acceptance items), set_goal, accept_proposal, join (child
+session membership), replay/repair.
 
 JSON
 
@@ -547,23 +548,38 @@ evidence. The prompt tells the model to start a step before acting; the
 nudge (§2.1.4) reminds it.
 
 2.2.4 Subagents
-Child agents write to the parent session's journal with agent: "sub-N" and
-an immutable spawn context `{plan_id, step_id, step_epoch}` captured at spawn
-time. `step_epoch` increments on every host-only `reopen` (§3.6); records
-whose epoch does not match the step's current epoch do not count as evidence
-for the reopened step.
+Each child runs in its own session (`sub-<ms>-<pid>-<n>`, unique across
+restarts) with its own journal file; records carry that session id with
+agent `main`, plus an immutable spawn context `{plan_id, step_id,
+step_epoch}` captured at spawn time. `step_epoch` increments on every
+host-only `reopen` (§3.6); records whose epoch does not match the step's
+current epoch do not count as evidence for the reopened step.
+Plan membership is explicit: the host records a journal-first `join` op
+in the parent's journal (replayable, idempotent), so the child's evidence
+attaches under session-strict resolution.
+
+A child inherits its parent's model, effort, mode, limits and configs
+(diary, memory, compaction, plan limits, fallback chain) and the full
+context window. It may not nest further, ask the user, propose plans or
+memories (all refused or auto-declined); dangerous approvals auto-deny.
+A child that produces nothing for 600s is cancelled cooperatively, given
+a 5s grace, aborted, and reported as a timed-out error — a hung child
+never stalls the parent turn forever.
 
 Concurrency and writers discipline:
 - Mutating tools (`write`, `edit`, `patch`, `bash`) invoked by a subagent verify
   that the subagent's `step_epoch` matches the plan's current `step_epoch`; if
   the step was reopened or cancelled while the subagent was running, the
   mutation is refused (`code: stale_epoch`).
+- Up to 8 tasks per call, at most 4 concurrently; same-turn pure-subagent
+  batches overlap waits but keep call-order rows, journal and transcript.
 - No `finish` gate on running children and no undo→subagent cancellation
   signal exist yet (see S1).
 
-Their file_diff and tool_result records count as evidence for that step. The
-subagent record with event: done carries the child's summary digest so the diary
-can reference it.
+A child's shadow snapshots land on the parent's checkpoint chain, so the
+parent's `/undo` sees step boundaries and bash mutations; its diary
+`step_lifecycle` entries stay tagged with the child session. Their
+file_diff and tool_result records count as evidence for that step.
 
 2.2.5 Consumers
 Plan validator: evidence for finish and verify.

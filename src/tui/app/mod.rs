@@ -2110,6 +2110,7 @@ impl App {
             shadow_store: self.cfg.undo.shadow,
             subagent_depth: 0,
             parent_step: None,
+            parent_session: None,
             fallback_chain,
         };
         self.context_bootstrap_pending = false;
@@ -2186,6 +2187,7 @@ impl App {
             shadow_store: self.cfg.undo.shadow,
             subagent_depth: 0,
             parent_step: None,
+            parent_session: None,
             fallback_chain: Vec::new(),
         };
         self.agent = Some(spawn_agent(input));

@@ -597,7 +597,7 @@ fn checkpoint(ctx: &mut ToolCtx, p: &Path, what: &str) {
     if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
         &ctx.root,
         ctx.shadow_store,
-        &ctx.session_id,
+        ctx.checkpoint_chain(),
         &label,
     ) {
         ctx.journal.push((sha, label));

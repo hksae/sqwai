@@ -301,6 +301,11 @@ pub struct AgentInput {
     /// `None` for main agents. The child stamps it on its journal records
     /// and refuses mutations once the step moves to a newer epoch.
     pub parent_step: Option<plan::StepContext>,
+    /// Session id of the spawning agent, if any. The child's shadow
+    /// snapshots land on this chain so the parent's `/undo` sees them
+    /// (§2.2.4); everything else (journal, jobs, read-guard) stays on the
+    /// child's own session.
+    pub parent_session: Option<String>,
     /// Optional fallback models to switch to if primary model fails with retry-exhausted network/5xx (§5.1, §7 T).
     pub fallback_chain: Vec<FallbackCandidate>,
 }
@@ -393,6 +398,12 @@ struct TurnOutcome {
 
 const MAX_SUBAGENTS_PER_CALL: usize = 8;
 const MAX_PARALLEL_SUBAGENTS: usize = 4;
+/// A child that produces nothing in this long is stuck (provider retry
+/// loops run far longer): cancel cooperatively, wait out a short grace,
+/// then tear the turn down. Without this a hung child stalls the parent
+/// turn forever — Esc only stops what comes *after* running children.
+const SUBAGENT_TIMEOUT_SECS: u64 = 600;
+const SUBAGENT_CANCEL_GRACE_SECS: u64 = 5;
 
 fn subagent_tasks_from_args(args: &serde_json::Value) -> Result<Vec<String>, String> {
     let mut tasks: Vec<String> = args["tasks"]
@@ -459,6 +470,12 @@ async fn run_subagent_batch(
     read_only: bool,
     shadow_store: crate::config::ShadowStore,
     messages: &mut Vec<Message>,
+    diary: crate::config::DiaryConfig,
+    memory: crate::config::MemoryConfig,
+    compaction: crate::config::CompactionConfig,
+    plan_limits: crate::config::PlanConfig,
+    fallback_chain: Vec<FallbackCandidate>,
+    timeout: std::time::Duration,
 ) -> bool {
     use futures::{StreamExt, stream};
     // pre-phase in order; stops at the first pre-cancelled call exactly
@@ -515,6 +532,10 @@ async fn run_subagent_batch(
             let system = system.to_vec();
             let mcp = mcp.clone();
             let lsp = lsp.clone();
+            let diary = diary.clone();
+            let memory = memory.clone();
+            let compaction = compaction.clone();
+            let fallback_chain = fallback_chain.clone();
             async move {
                 let outcome = run_subagent(
                     &call,
@@ -534,6 +555,12 @@ async fn run_subagent_batch(
                     lsp,
                     read_only,
                     shadow_store,
+                    diary,
+                    memory,
+                    compaction,
+                    plan_limits,
+                    fallback_chain,
+                    std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
                 )
                 .await;
                 (index, call, started, outcome)
@@ -636,6 +663,12 @@ async fn run_subagent(
     lsp: crate::config::LspConfig,
     read_only: bool,
     shadow_store: crate::config::ShadowStore,
+    diary: crate::config::DiaryConfig,
+    memory: crate::config::MemoryConfig,
+    compaction: crate::config::CompactionConfig,
+    plan_limits: crate::config::PlanConfig,
+    fallback_chain: Vec<FallbackCandidate>,
+    timeout: std::time::Duration,
 ) -> tools::Outcome {
     let tasks = match subagent_tasks_from_args(&call.args) {
         Ok(tasks) => tasks,
@@ -650,6 +683,10 @@ async fn run_subagent(
                 let system = system.clone();
                 let mcp = mcp.clone();
                 let lsp = lsp.clone();
+                let diary = diary.clone();
+                let memory = memory.clone();
+                let compaction = compaction.clone();
+                let fallback_chain = fallback_chain.clone();
                 async move {
                     let outcome = run_subagent(
                         &one,
@@ -664,11 +701,17 @@ async fn run_subagent(
                         effort,
                         effort_support,
                         max_tokens,
-                        system.clone(),
-                        mcp.clone(),
-                        lsp.clone(),
+                        system,
+                        mcp,
+                        lsp,
                         read_only,
                         shadow_store,
+                        diary,
+                        memory,
+                        compaction,
+                        plan_limits,
+                        fallback_chain,
+                        timeout,
                     )
                     .await;
                     (
@@ -733,7 +776,7 @@ async fn run_subagent(
     // file over each other and drop a join.
     {
         let _guard = PLAN_JOIN_LOCK.lock().await;
-        join_plan_session(root, parent_step.as_ref(), &child_session);
+        join_plan_session(root, parent_step.as_ref(), parent_session, &child_session);
     }
     let child = spawn_agent(AgentInput {
         provider: provider.clone(),
@@ -758,18 +801,61 @@ async fn run_subagent(
         mcp,
         lsp,
         compact_only: false,
-        diary: crate::config::DiaryConfig::default(),
-        memory: crate::config::MemoryConfig::default(),
-        compaction: crate::config::CompactionConfig::default(),
-        plan_limits: crate::config::PlanConfig::default(),
+        diary,
+        memory,
+        compaction,
+        plan_limits,
         shadow_store,
         subagent_depth: 1,
         parent_step,
-        fallback_chain: Vec::new(),
+        parent_session: Some(parent_session.to_string()),
+        fallback_chain,
     });
     let mut child = child;
     let mut output = String::new();
-    while let Some(event) = child.rx.recv().await {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let event = match tokio::time::timeout_at(deadline, child.rx.recv()).await {
+            Ok(Some(event)) => event,
+            Ok(None) => {
+                let result = tools::Outcome::err("subagent disconnected");
+                let _ = parent_tx
+                    .send(AgentEvent::SubagentDone {
+                        id,
+                        ok: false,
+                        output: result.output.clone(),
+                    })
+                    .await;
+                return result;
+            }
+            Err(_) => {
+                // timed out: ask cooperatively first (a `bash` child kills
+                // its own process tree on this), then tear down hard
+                child.request_tool_cancel();
+                let grace = std::time::Duration::from_secs(SUBAGENT_CANCEL_GRACE_SECS);
+                let finished = tokio::time::timeout(grace, child.rx.recv()).await;
+                child.abort();
+                let result = if matches!(finished, Ok(Some(AgentEvent::Completed(_)))) {
+                    tools::Outcome::err(format!(
+                        "subagent timed out after {}s (finished during cancel, result discarded)",
+                        timeout.as_secs()
+                    ))
+                } else {
+                    tools::Outcome::err(format!(
+                        "subagent timed out after {}s",
+                        timeout.as_secs()
+                    ))
+                };
+                let _ = parent_tx
+                    .send(AgentEvent::SubagentDone {
+                        id,
+                        ok: false,
+                        output: result.output.clone(),
+                    })
+                    .await;
+                return result;
+            }
+        };
         match event {
             AgentEvent::TextDelta(text) => {
                 output.push_str(&text);
@@ -851,15 +937,6 @@ async fn run_subagent(
             _ => {}
         }
     }
-    let result = tools::Outcome::err("subagent disconnected");
-    let _ = parent_tx
-        .send(AgentEvent::SubagentDone {
-            id,
-            ok: false,
-            output: result.output.clone(),
-        })
-        .await;
-    result
 }
 
 fn next_subagent_id() -> u64 {
@@ -873,18 +950,43 @@ static PLAN_JOIN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(()
 
 /// Join one child session into its parent plan (#171: without membership
 /// its evidence cannot attach under session-strict resolution).
+/// Journal-first like every plan mutation, in the PARENT's journal: the
+/// startup replay only scans the cursor session's suffix, so an intent in
+/// the child's file would never replay. The cursor advances, so a crash
+/// heals by replay instead of leaving a store write the journal never saw.
 fn join_plan_session(
     root: &Path,
     parent_step: Option<&plan::StepContext>,
+    parent_session: &str,
     child_session: &str,
 ) {
     if let Some(step) = parent_step
-        && let Ok(mut plan) = plan::open(root, &step.plan_id)
+        && let Ok(plan) = plan::open(root, &step.plan_id)
         && !plan.sessions.iter().any(|s| s == child_session)
     {
-        plan.sessions.push(child_session.to_string());
-        plan.revision += 1;
-        let _ = plan::store(root, &plan);
+        let mut plan = plan;
+        // apply first: commit only persists the already-mutated plan behind
+        // the journal intent (same order as the plan tool path)
+        if plan::apply(
+            &mut plan,
+            plan::Op::Join {
+                session: child_session.to_string(),
+            },
+            &plan::Limits::default(),
+            None,
+        )
+        .is_ok()
+        {
+            let _ = plan::commit(
+                root,
+                parent_session,
+                &mut plan,
+                "join",
+                "host",
+                true,
+                serde_json::json!({"session": child_session}),
+            );
+        }
     }
 }
 
@@ -1043,6 +1145,7 @@ async fn run_agent(
         shadow_store,
         subagent_depth,
         parent_step,
+        parent_session,
         mut fallback_chain,
     } = input;
     let mut current_model_key = model_key;
@@ -1216,9 +1319,16 @@ async fn run_agent(
         .with_shadow_store(shadow_store)
         .with_plan_limits(plan_limits, context_limit)
         .with_cancel(cancel_tool);
+    // A child's shadow snapshots belong on the parent chain (§2.2.4), so the
+    // parent's `/undo` sees step boundaries and bash mutations; the journal,
+    // job isolation and read-guard stay on the child's own session.
+    ctx.checkpoint_session = parent_session.clone();
     // Subagents inherit their spawn context (§2.2.4): it stamps their
     // journal records and gates their mutations against reopen races.
     ctx.subagent_step = parent_step.clone();
+    // ...and their shadow snapshots land on the parent chain, so the
+    // parent's `/undo` sees them (ToolCtx::checkpoint_session).
+    ctx.checkpoint_session = parent_session.clone();
     // The session's current step (§2.2.3). Adopt whatever the plan holds in
     // progress — after a crash that is the interrupted step (§3.4) — and
     // keep it in lockstep with plan outcomes below. `ctx.current_step` is
@@ -1646,6 +1756,12 @@ async fn run_agent(
                 read_only,
                 shadow_store,
                 &mut messages,
+                diary.clone(),
+                memory.clone(),
+                compaction.clone(),
+                plan_limits,
+                fallback_chain.clone(),
+                std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
             )
             .await;
         } else {
@@ -1796,6 +1912,12 @@ async fn run_agent(
                             lsp.clone(),
                             read_only,
                             shadow_store,
+                            diary.clone(),
+                            memory.clone(),
+                            compaction.clone(),
+                            plan_limits,
+                            fallback_chain.clone(),
+                            std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
                         )
                         .await
                     }
@@ -1925,7 +2047,7 @@ async fn run_agent(
                 && let Ok(Some(sha)) = checkpoints::snapshot_session(
                     &ctx.root,
                     ctx.shadow_store,
-                    &ctx.session_id,
+                    ctx.checkpoint_chain(),
                     "post_bash cancelled",
                 )
             {
@@ -2175,12 +2297,17 @@ async fn run_agent(
                         {
                             Some(s.clone())
                         } else {
-                            checkpoints::snapshot_boundary(&root, shadow_store, &session_id, &tag)
-                                .ok()
-                                .flatten()
-                                .inspect(|s| {
-                                    ctx.journal.push((s.clone(), tag.clone()));
-                                })
+                            checkpoints::snapshot_boundary(
+                                &root,
+                                shadow_store,
+                                parent_session.as_deref().unwrap_or(&session_id),
+                                &tag,
+                            )
+                            .ok()
+                            .flatten()
+                            .inspect(|s| {
+                                ctx.journal.push((s.clone(), tag.clone()));
+                            })
                         };
                         if let Some(sha) = sha {
                             let _ = writer.append(
@@ -2206,7 +2333,7 @@ async fn run_agent(
                                 checkpoints::snapshot_boundary(
                                     &root,
                                     shadow_store,
-                                    &session_id,
+                                    parent_session.as_deref().unwrap_or(&session_id),
                                     &tag,
                                 )
                                 .ok()
@@ -3173,7 +3300,7 @@ async fn bash_call(
         if let Ok(Some(sha)) = checkpoints::snapshot_session(
             &ctx.root,
             ctx.shadow_store,
-            &ctx.session_id,
+            ctx.checkpoint_chain(),
             &format!("pre_bash {command}"),
         ) {
             ctx.journal.push((sha, format!("bash {command}")));
@@ -3900,6 +4027,7 @@ mod effort_tests {
             shadow_store: crate::config::ShadowStore::Off,
             subagent_depth: 0,
             parent_step: None,
+            parent_session: None,
             fallback_chain: vec![fallback],
         };
 
@@ -3982,6 +4110,7 @@ mod effort_tests {
             shadow_store: crate::config::ShadowStore::Off,
             subagent_depth: 0,
             parent_step: None,
+            parent_session: None,
             fallback_chain: vec![],
         };
 
@@ -4066,6 +4195,7 @@ mod effort_tests {
             shadow_store: crate::config::ShadowStore::Off,
             subagent_depth: 0,
             parent_step: None,
+            parent_session: None,
             fallback_chain: vec![],
         };
 
@@ -4173,6 +4303,12 @@ mod effort_tests {
             crate::config::LspConfig::default(),
             false,
             crate::config::ShadowStore::Off,
+            crate::config::DiaryConfig::default(),
+            crate::config::MemoryConfig::default(),
+            crate::config::CompactionConfig::default(),
+            crate::config::PlanConfig::default(),
+            Vec::new(),
+            std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
         )
         .await;
         assert!(outcome.ok, "{}", outcome.output);
@@ -4255,6 +4391,12 @@ mod effort_tests {
             crate::config::LspConfig::default(),
             false,
             crate::config::ShadowStore::Off,
+            crate::config::DiaryConfig::default(),
+            crate::config::MemoryConfig::default(),
+            crate::config::CompactionConfig::default(),
+            crate::config::PlanConfig::default(),
+            Vec::new(),
+            std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
         )
         .await;
         assert!(outcome.ok, "{}", outcome.output);
@@ -4270,6 +4412,69 @@ mod effort_tests {
     }
 
     /// Same-turn subagent calls overlap: both ToolStarts land before the
+    /// A hung child must not stall the parent turn forever: the timeout
+    /// cancels cooperatively, waits out the grace, aborts, and reports.
+    #[tokio::test]
+    async fn hung_subagent_times_out_and_aborts() {
+        struct HangingProvider;
+        impl crate::providers::Provider for HangingProvider {
+            fn stream_chat(
+                &self,
+                _req: crate::providers::ChatRequest,
+            ) -> futures::stream::BoxStream<'static, crate::providers::StreamResult>
+            {
+                use futures::StreamExt;
+                futures::stream::pending().boxed()
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "sqwai-subtimeout-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&root);
+        let provider: SharedProvider = std::sync::Arc::new(HangingProvider);
+        let (parent_tx, _parent_rx) = mpsc::channel(64);
+        let call = crate::providers::ToolCallReq::new(
+            "c1",
+            "subagent",
+            serde_json::json!({"task": "hang forever"}),
+        );
+        let outcome = run_subagent(
+            &call,
+            "parent-sess",
+            &parent_tx,
+            &provider,
+            "m",
+            &root,
+            &[],
+            false,
+            10_000,
+            None,
+            crate::config::EffortSupport::default(),
+            None,
+            Vec::new(),
+            crate::config::McpConfig::default(),
+            crate::config::LspConfig::default(),
+            false,
+            crate::config::ShadowStore::Off,
+            crate::config::DiaryConfig::default(),
+            crate::config::MemoryConfig::default(),
+            crate::config::CompactionConfig::default(),
+            crate::config::PlanConfig::default(),
+            Vec::new(),
+            std::time::Duration::from_millis(150),
+        )
+        .await;
+        assert!(!outcome.ok, "a hung child must fail, not hang");
+        assert!(
+            outcome.output.contains("timed out"),
+            "unexpected outcome: {}",
+            outcome.output
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// first ToolNotice (a sequential loop would interleave start/notice
     /// pairs). Rows, journal and messages still come out in call order.
     #[tokio::test]
@@ -4329,6 +4534,7 @@ mod effort_tests {
             shadow_store: crate::config::ShadowStore::Off,
             subagent_depth: 0,
             parent_step: None,
+            parent_session: None,
             fallback_chain: vec![],
         };
 
@@ -4420,6 +4626,7 @@ mod effort_tests {
             shadow_store: crate::config::ShadowStore::Off,
             subagent_depth: 0,
             parent_step: None,
+            parent_session: None,
             fallback_chain: vec![],
         };
 
