@@ -1863,6 +1863,13 @@ context is a host observation, which fits the integrity model.
   Mitigations: nudge (§2.1.4), specific hint in rejection, and finish-time
   warning via refs (§2.1.4). This follows the degrade‑don’t‑refuse principle.
 
+- **Approval confirms by mouse click and accepts keys on appearance.**
+  Clicking an option approves immediately, and an Enter pressed while
+  switching windows can land in the dialog (focus steal) — one accidental
+  approval of a destructive command already happened. Planned fix: options
+  chosen by number keys, confirmed by a separate Enter press; ignore Enter
+  for ~500ms after the dialog appears and unless the window has focus.
+
 - **Hardcoding detection.** The host does not automatically detect test-shaped hardcodes
   (e.g., string literals matching test inputs). Mitigations: manual acceptance items,
   property‑based tests, and planned hardcode linter (AF). Until then, users are encouraged
