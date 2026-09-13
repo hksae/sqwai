@@ -192,9 +192,7 @@ multi-session path.
      "reason": "waiting for user: keybinding conflicts with existing Ctrl+T",
      "validation": {"status": "pending", "receipts": []}, "step_epoch": 0}
   ],
-  "folded": [
-    {"ids": ["0a", "0b"], "text": "✓ 0a–0b: explored TUI menus", "evidence": [{"session": "a8f2", "seq": 1}]}
-  ],
+  "folded": [],
   "budget": {"tokens": 1840, "limit": 20000},
   "revision": 7,
   "rejections_in_a_row": 0
@@ -237,7 +235,7 @@ requires every acceptance item to have `validation.status` of `passed` or
 `waived`; non-stale receipts required (§2.1.4). Pre-receipt `Passed` items
 (written before validation existed) still complete without re-verification.
 stale_goal: true appears on pending steps after a goal revision (§2.1.6).
-folded — host-compressed done steps (§2.1.5).
+folded — legacy, always empty (see §2.1.5).
 budget — token estimate of the plan as injected; limit derived from model
 context × plan.budget_ratio (default 0.10).
 acceptance[].text may be prefixed `cmd:` (host runs it on `plan verify` and on
@@ -408,11 +406,13 @@ N = plan.nudge_after (8) journal events of kind file_diff|tool_result have
 been attributed to a step without any plan op, the next turn's volatile
 system block contains one line: plan: step 2 has 8 actions and no update — finish, split or block it. Non-blocking.
 
-2.1.5 Size budget and folding
-Before every injection the host estimates the plan's tokens. Closed steps
-(`done|cancelled`, see `is_closed`) fold away for display; the prompt
-context renders at most 8 folded entries. There is no token-budget
-folding writer that rewrites the plan file.
+2.1.5 Size budget
+The injected plan is bounded structurally, not by a folding writer: at most
+`plan.max_steps` (24) steps at ~2 rendered lines each, acceptance one line
+per item. Closed steps (`done|cancelled`, see `is_closed`) render inline
+with the rest — no folding pass exists. The `folded[]` vector in the format
+is legacy (always empty; read for backward compatibility). If `max_steps`
+ever grows, budget enforcement will be needed here.
 
 The model never rewrites the plan to make it shorter.
 
@@ -1082,7 +1082,6 @@ constraints: …
 acceptance: [0] pending · [1] passed j#a8f2:41
 plan 01J… rev 7: 1 done · 1 in_progress · 0 blocked · 2 pending · 0 cancelled
   step 2 in_progress "Add todos field"
-  folded: ✓ 0a–0b explored TUI menus
 files changed this session: src/session/mod.rs · src/tui/app/mod.rs
 last verification: successful exec j#15
 open assumptions: step 2 assumes `timeout` not already used (j#19)
