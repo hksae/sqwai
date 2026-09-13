@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Sync builtin_providers.toml with latest model specifications and pricing.
+Sync builtin_providers.toml with latest model specifications.
 
-Source of truth for specs/prices: LiteLLM model_prices_and_context_window.json.
+Source of truth for specs: LiteLLM model_prices_and_context_window.json.
 
 Policy (agreed):
 - AUTO-DISCOVERY: tracked model IDs are NOT hardcoded (except Gemini, which is
@@ -91,15 +91,15 @@ PROVIDERS_CONFIG = [
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "api_key_env": "GEMINI_API_KEY",
         "continuation": True,
-        # owner-pinned list; only specs/prices refresh from the DB
+        # owner-pinned list; only specs refresh from the DB
         "pinned": [
-            ("gemini-3.1-pro-preview", "high", 1048576, 2.0, 12.0),
-            ("gemini-3.8-flash", "medium", 1048576, 0.75, 3.75),
-            ("gemini-3.7-flash", "medium", 1048576, 0.75, 3.75),
-            ("gemini-3.6-flash", "medium", 1048576, 0.5, 3.0),
-            ("gemini-3.5-flash", "medium", 1048576, 0.5, 3.0),
-            ("gemini-3.5-flash-lite", "off", 1048576, 0.3, 2.5),
-            ("gemini-3.1-flash-lite", "off", 1048576, 0.25, 2.0),
+            ("gemini-3.1-pro-preview", "high", 1048576),
+            ("gemini-3.8-flash", "medium", 1048576),
+            ("gemini-3.7-flash", "medium", 1048576),
+            ("gemini-3.6-flash", "medium", 1048576),
+            ("gemini-3.5-flash", "medium", 1048576),
+            ("gemini-3.5-flash-lite", "off", 1048576),
+            ("gemini-3.1-flash-lite", "off", 1048576),
         ],
         "litellm_prefixes": ("gemini",),
     },
@@ -316,18 +316,9 @@ def guess_effort(cid):
     return "medium"
 
 
-def clean_price(value):
-    """Round $/1M to 4 decimals and drop float noise like 0.19999999999999998."""
-    return round(float(value), 4)
-
-
-def specs_from_db(info, d_ctx=1000000, d_in=1.0, d_out=5.0):
+def specs_from_db(info, d_ctx=1000000):
     ctx = info.get("max_input_tokens") or info.get("max_tokens") or d_ctx
-    in_cost = info.get("input_cost_per_token")
-    out_cost = info.get("output_cost_per_token")
-    price_in = clean_price(in_cost * 1_000_000) if in_cost is not None else d_in
-    price_out = clean_price(out_cost * 1_000_000) if out_cost is not None else d_out
-    return int(ctx), price_in, price_out
+    return int(ctx)
 
 
 def lookup(data, prefixes, model_id):
@@ -355,34 +346,32 @@ def build_catalog(data, today):
         print(f"[{p['name']}]")
         if "pinned" in p:
             models = []
-            for model_id, effort, d_ctx, d_in, d_out in p["pinned"]:
+            for model_id, effort, d_ctx in p["pinned"]:
                 info, key = lookup(data, p["litellm_prefixes"], model_id)
                 if info is None or not usable_entry(info, today):
                     print(f"  - {model_id}: not in DB, using pinned defaults")
-                    ctx, price_in, price_out = d_ctx, d_in, d_out
+                    ctx = d_ctx
                 else:
-                    ctx, price_in, price_out = specs_from_db(info, d_ctx, d_in, d_out)
-                    print(f"  - {model_id}: ctx={ctx} in=${price_in}/M out=${price_out}/M (db: {key})")
-                models.append((model_id, effort, ctx, price_in, price_out))
+                    ctx = specs_from_db(info, d_ctx)
+                    print(f"  - {model_id}: ctx={ctx} (db: {key})")
+                models.append((model_id, effort, ctx))
         else:
             found = discover(data, p["slugs"], p["prefixes"], today)
             picked = pick_families(found, p["families"], p["max_models"])
             models = []
             for cid, info in picked:
-                ctx, price_in, price_out = specs_from_db(info)
+                ctx = specs_from_db(info)
                 effort = guess_effort(cid)
-                print(f"  - {cid}: ctx={ctx} in=${price_in}/M out=${price_out}/M effort={effort}")
-                models.append((cid, effort, ctx, price_in, price_out))
+                print(f"  - {cid}: ctx={ctx} effort={effort}")
+                models.append((cid, effort, ctx))
         total += len(models)
-        for model_id, effort, ctx, price_in, price_out in models:
+        for model_id, effort, ctx in models:
             lines += [
                 f'[models."{model_id}"]',
                 f"provider = \"{p['name']}\"",
                 f'id = "{model_id}"',
                 f"context = {ctx}",
                 f'effort = "{effort}"',
-                f"price_in = {price_in}",
-                f"price_out = {price_out}",
                 "",
             ]
     return "\n".join(lines) + "\n", total
