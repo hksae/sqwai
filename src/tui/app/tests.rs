@@ -76,7 +76,8 @@ mod tests {
             },
         );
         let cfg = Config {
-            default_model: "m".into(),
+            last_model: "m".into(),
+            legacy_default_model: String::new(),
             default_effort: crate::config::EffortLevel::Off,
             providers,
             models,
@@ -174,7 +175,8 @@ mod tests {
             },
         );
         let cfg = Config {
-            default_model: "m".into(),
+            last_model: "m".into(),
+            legacy_default_model: String::new(),
             default_effort: crate::config::EffortLevel::Off,
             providers,
             models,
@@ -3285,7 +3287,6 @@ mod tests {
             texts.iter().any(|t| t.contains("default effort  ")),
             "value must not stick to the label: {texts:?}"
         );
-        assert!(texts.iter().any(|t| t.contains("default model  ")));
     }
 
     #[test]
@@ -3414,19 +3415,14 @@ mod tests {
     }
 
     #[test]
-    fn settings_default_model_pick() {
+    fn switching_model_records_last_model() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.open_menu(Menu::PickDefaultModel);
-        let key = app
-            .menu_rows
-            .iter()
-            .find_map(|(_, action)| match action {
-                MenuAction::SetDefaultModel(key) => Some(key.clone()),
-                _ => None,
-            })
-            .expect("picker lists models");
-        app.run_action(MenuAction::SetDefaultModel(key.clone()));
-        assert_eq!(app.cfg.default_model, key);
+        let mut other = app.cfg.models["m"].clone();
+        other.id = "other-model".into();
+        app.cfg.models.insert("m2".into(), other);
+        app.run_action(MenuAction::UseModel("m2".into()));
+        assert_eq!(app.session.model_key, "m2");
+        assert_eq!(app.cfg.last_model, "m2");
     }
 
     #[test]
@@ -6245,7 +6241,8 @@ mod tests {
             },
         );
         let cfg = Config {
-            default_model: "m".into(),
+            last_model: "m".into(),
+            legacy_default_model: String::new(),
             default_effort: crate::config::EffortLevel::Off,
             providers,
             models,

@@ -140,7 +140,7 @@ Windows: `%APPDATA%\sqwai\config\config.toml`). Add an endpoint the template
 does not cover by hand:
 
 ```toml
-default_model = "sonnet"
+last_model = "sonnet"                       # new sessions continue with the last used model
 
 [providers.anthropic]
 format = "anthropic"                        # anthropic | openai | responses
@@ -155,14 +155,11 @@ continuation = true                         # let the provider continue from its
 provider = "anthropic"
 id = "claude-sonnet-5"
 context = 1000000
-effort = "high"                             # off | low | medium | high | max
-effort_control = "levels"                   # none | toggle | levels | xhigh | budget
+effort = "high"                             # off | low | medium | high | xhigh | max
+effort_control = "named"                    # none | toggle | named | budget
                                             # omit it and the wire format decides:
-                                            # a token budget on Anthropic, the three
-                                            # documented levels elsewhere. Declare
-                                            # "xhigh" for a model that documents it,
-                                            # otherwise `max` is sent as `high` and
-                                            # the status bar says `ef:max→high`.
+                                            # a token budget on Anthropic, the
+                                            # documented levels elsewhere.
 effort_always_on = false                    # the model cannot stop reasoning, so
                                             # `off` is reported as ignored
 ```

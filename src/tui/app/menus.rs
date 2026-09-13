@@ -128,8 +128,6 @@ pub(super) enum Menu {
     Safety,
     /// /settings -> Undo: checkpoint retention and shadow store
     Undo,
-    /// pick the default model for new sessions
-    PickDefaultModel,
     /// /help: help sections
     Help,
     /// /help -> controls: key combo reference
@@ -294,10 +292,8 @@ pub(super) enum MenuAction {
     OpenAgent,
     OpenSafety,
     OpenUndo,
-    OpenPickDefaultModel,
     #[allow(dead_code)]
     OpenControls,
-    SetDefaultModel(String),
     CycleDiaryEffort,
     CycleCompactionSummary,
     CycleUndoShadow,
@@ -1051,21 +1047,7 @@ impl App {
             MenuAction::OpenAgent => self.open_menu(Menu::Agent),
             MenuAction::OpenSafety => self.open_menu(Menu::Safety),
             MenuAction::OpenUndo => self.open_menu(Menu::Undo),
-            MenuAction::OpenPickDefaultModel => self.open_menu(Menu::PickDefaultModel),
             MenuAction::OpenControls => self.open_menu(Menu::Controls),
-            MenuAction::SetDefaultModel(key) => {
-                if !self.cfg.models.contains_key(&key) {
-                    self.status(&format!("unknown model '{key}'"), StatusKind::Err);
-                    return;
-                }
-                self.cfg.default_model = key.clone();
-                self.cfg.save().ok();
-                self.status(
-                    &format!("default model = {key} (applies to new sessions)"),
-                    StatusKind::Ok,
-                );
-                self.build_menu_rows();
-            }
             MenuAction::CycleDiaryEffort => {
                 let cur = EffortLevel::ALL
                     .iter()
@@ -1795,7 +1777,6 @@ impl App {
             Some(Menu::Agent) => " Agent ".into(),
             Some(Menu::Safety) => " Safety ".into(),
             Some(Menu::Undo) => " Undo ".into(),
-            Some(Menu::PickDefaultModel) => " Default model ".into(),
             Some(Menu::Help) => " Help ".into(),
             Some(Menu::Controls) => " Controls ".into(),
             Some(Menu::EditScalar(setting)) => format!(" Edit {} ", cap_first(setting.label())),
@@ -2331,23 +2312,6 @@ impl App {
                 ));
                 self.menu_footer_text = Some("enter: edit/cycle · esc: back".into());
             }
-            Menu::PickDefaultModel => {
-                for (k, m) in &self.cfg.models {
-                    let mark = if *k == self.cfg.default_model {
-                        " *default"
-                    } else {
-                        ""
-                    };
-                    self.menu_rows.push(row(
-                        Line::from(vec![
-                            Span::styled(format!(" {k}{mark}"), Theme::FG()),
-                            Span::styled(format!("  {}", m.provider), Theme::dim()),
-                        ]),
-                        MenuAction::SetDefaultModel(k.clone()),
-                    ));
-                }
-                self.menu_footer_text = Some("enter: set default · esc: back".into());
-            }
             Menu::DeleteListItems(section) => {
                 for (i, item) in section.items(&self.cfg).iter().enumerate() {
                     self.menu_rows.push(row(
@@ -2612,13 +2576,6 @@ impl App {
                 ));
             }
             Menu::Providers => {
-                self.menu_rows.push(row(
-                    Line::from(vec![
-                        Span::styled(format!("  {:<16}", "default model"), Theme::FG()),
-                        Span::styled(self.cfg.default_model.clone(), Theme::dim()),
-                    ]),
-                    MenuAction::OpenPickDefaultModel,
-                ));
                 self.menu_rows.push(row(
                     Line::from(vec![
                         Span::styled(format!("  {:<16}", "default effort"), Theme::FG()),

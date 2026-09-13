@@ -2196,7 +2196,7 @@ impl App {
         }
         // resolve the session's model against the current config
         if !self.cfg.models.contains_key(&s.model_key) {
-            s.model_key = self.cfg.default_model.clone();
+            s.model_key = self.cfg.last_model.clone();
         }
         if let Some(mc) = self.cfg.models.get(&s.model_key).cloned() {
             s.context_limit = mc.context;
@@ -2339,7 +2339,7 @@ impl App {
         // name so its undo history survives its own maintenance.
         self.run_undo_maintenance();
         let ctx = self.session.context_limit;
-        self.session = Session::new(self.cfg.default_model.clone(), ctx);
+        self.session = Session::new(self.cfg.last_model.clone(), ctx);
         self.session.project = Some(self.project_root.clone());
         crate::providers::set_conversation_id(&self.session.id.to_string());
         self.pending_queue.clear();
@@ -2481,7 +2481,7 @@ impl App {
                 self.session.last_response_model = None;
                 self.session.model_key = key.to_string();
                 self.session.context_limit = self.model_cfg.context;
-                self.cfg.default_model = key.to_string();
+                self.cfg.last_model = key.to_string();
                 self.cfg.save().ok();
                 self.status(&format!("model: {key}"), StatusKind::Ok);
             }
@@ -3141,7 +3141,7 @@ impl App {
             Ok(outcome) => match outcome {
                 Ok(Some(new_catalog)) => {
                     self.cfg.apply_builtins();
-                    if let Ok(mc) = self.cfg.default_model_config().cloned()
+                    if let Ok(mc) = self.cfg.last_model_config().cloned()
                         && self.model_cfg.id == mc.id
                     {
                         self.model_cfg = mc;

@@ -930,8 +930,15 @@ fn default_compaction_anchor_ratio() -> f64 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default = "default_model_name")]
-    pub default_model: String,
+    /// model new sessions open with: always the last one used, never a
+    /// separate "default". Updated on every model switch; migrated from
+    /// legacy `default_model` on load; first catalog model on first run.
+    /// Empty when absent from the file — that is what triggers migration.
+    #[serde(default)]
+    pub last_model: String,
+    /// legacy name for `last_model`; read on load, never written back
+    #[serde(default, skip_serializing, rename = "default_model")]
+    pub(crate) legacy_default_model: String,
     #[serde(default = "default_effort", alias = "default_thinking")]
     pub default_effort: EffortLevel,
     #[serde(default)]
@@ -962,8 +969,13 @@ pub struct Config {
     pub undo: UndoConfig,
 }
 
-fn default_model_name() -> String {
-    "gemini-3.8-flash".into()
+fn first_builtin_model() -> String {
+    BuiltinCatalog::current()
+        .models
+        .keys()
+        .next()
+        .cloned()
+        .unwrap_or_default()
 }
 fn default_effort() -> EffortLevel {
     EffortLevel::Medium
@@ -1003,7 +1015,8 @@ impl Default for Config {
     fn default() -> Self {
         let catalog = BuiltinCatalog::current();
         Self {
-            default_model: default_model_name(),
+            last_model: first_builtin_model(),
+            legacy_default_model: String::new(),
             default_effort: EffortLevel::Medium,
             providers: catalog.providers,
             models: catalog.models,
@@ -1069,7 +1082,25 @@ impl Config {
         let raw = std::fs::read_to_string(&path).context("reading config")?;
         let mut cfg: Config = toml::from_str(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
         cfg.apply_builtins();
+        cfg.migrate_last_model();
         Ok(cfg)
+    }
+
+    /// Resolve which model new sessions open with: explicit `last_model`
+    /// wins; legacy `default_model` migrates once; otherwise the first
+    /// catalog model (first run). A dangling reference (model deleted
+    /// since) falls back the same way instead of failing the load.
+    fn migrate_last_model(&mut self) {
+        if self.last_model.is_empty() || !self.models.contains_key(&self.last_model) {
+            if !self.legacy_default_model.is_empty()
+                && self.models.contains_key(&self.legacy_default_model)
+            {
+                self.last_model = std::mem::take(&mut self.legacy_default_model);
+            } else {
+                self.last_model = first_builtin_model();
+            }
+        }
+        self.legacy_default_model.clear();
     }
 
     pub fn save(&self) -> Result<()> {
@@ -1260,11 +1291,11 @@ impl Config {
         notes
     }
 
-    pub fn default_model_config(&self) -> Result<&ModelConfig> {
-        self.models.get(&self.default_model).ok_or_else(|| {
+    pub fn last_model_config(&self) -> Result<&ModelConfig> {
+        self.models.get(&self.last_model).ok_or_else(|| {
             anyhow::anyhow!(
-                "default_model {:?} not found in [models]",
-                self.default_model
+                "last_model {:?} not found in [models]",
+                self.last_model
             )
         })
     }
@@ -1368,18 +1399,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_template_has_resolvable_default_model() {
+    fn default_config_template_has_resolvable_last_model() {
         let cfg = Config::default();
-        assert!(!cfg.default_model.is_empty());
-        assert!(cfg.default_model_config().is_ok());
+        assert!(!cfg.last_model.is_empty());
+        assert!(cfg.last_model_config().is_ok());
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         write_template(&path).unwrap();
         let mut loaded: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         loaded.apply_builtins();
-        assert_eq!(loaded.default_model, "gemini-3.8-flash");
-        assert!(loaded.default_model_config().is_ok());
+        loaded.migrate_last_model();
+        assert!(loaded.last_model_config().is_ok());
+    }
+
+    #[test]
+    fn legacy_default_model_migrates_to_last_model_once() {
+        let mut cfg: Config = toml::from_str(
+            r#"
+default_model = "my-old"
+[models."my-old"]
+provider = "p"
+id = "my-old"
+context = 1000
+effort = "off"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.last_model, "");
+        assert_eq!(cfg.legacy_default_model, "my-old");
+        cfg.apply_builtins();
+        cfg.migrate_last_model();
+        assert_eq!(cfg.last_model, "my-old");
+        assert!(cfg.legacy_default_model.is_empty());
+
+        // dangling reference (model deleted since) falls back, not errors
+        cfg.last_model = "gone".into();
+        cfg.migrate_last_model();
+        assert_eq!(cfg.last_model, first_builtin_model());
+        assert!(cfg.last_model_config().is_ok());
     }
 
     /// The config example in the README must actually load.
@@ -1406,9 +1464,9 @@ mod tests {
             "every provider in the example needs a base_url"
         );
         assert!(
-            cfg.models.contains_key(&cfg.default_model),
-            "default_model {:?} must be one of the example's models",
-            cfg.default_model
+            cfg.models.contains_key(&cfg.last_model),
+            "last_model {:?} must be one of the example's models",
+            cfg.last_model
         );
     }
 
