@@ -1567,18 +1567,26 @@ Divided into two stages:
 - **G1 (Full integrity benchmark)**: evaluates complete execution integrity,
   including verification receipts, crash recovery, and claim linting.
 
-Fixture repository (small Rust crate with tests) and 3 scripted tasks of 25–40
-steps each, run with `compaction.threshold` forced low so that ≥ 3 compactions
-occur per run.
+Fixture: `minidb`, a small file-backed KV store in Rust (~15 files,
+builds in seconds, tests in milliseconds), designed to punish forgetting:
+a deprecated `btree.rs` twin of the real `lsm.rs` engine, near-identical
+`compact`/`compact_range`/`compact_all` names, config Innocents
+(`flush_interval`, `fsync`), and one undocumented invariant (`tmp:` keys
+are not persisted). Three scripted tasks of 25–40 steps each (TTL feature,
+constrained rename, ambiguous bugfix — specs frozen after one manual
+calibration run), run with `compaction.threshold` forced low so that ≥ 3
+compactions occur per run. Repeats: 2 per task per arm to start (12 runs);
+5 only if variance demands it. Wall-time cap 1h per run.
 
 Evaluation protocol:
 - **External observer**: an external evaluation harness (independent of the agent's
   internal journal) observes both runs and writes `bench/<task>/<arm>.eval.jsonl`.
-  The baseline agent runs with plan/journal/anchor disabled and summary=short.
-- **Branching goal probe**: after each compaction, the harness executes a detached
-  fork of the context with the probe: "State the current goal and constraints verbatim."
-  The probe response is scored by the harness and discarded; it is **never**
-  inserted into the active working conversation.
+  The baseline arm is `SQWAI_BENCH_BASELINE=1`: plan/note/journal tools
+  hidden, anchor and diary not injected, `compaction.summary=short` forced.
+  The host journal still records everything — it is the observer's data
+  source, not a mechanism under test. No mid-run context forks: scoring is
+  end-state plus journal-derived facts (final anchor/answers, file_diff
+  chains, resolve_ref over mentioned symbols, validation receipts).
 - **Scoring**:
   1. *Goal fidelity*: semantic match of active goal (0 / 0.5 / 1.0).
   2. *Constraint retention*: fraction of initial constraints preserved verbatim.
@@ -1588,19 +1596,17 @@ Evaluation protocol:
      uninterrupted execution receipts. `waived` items count as unverified (0) in benchmark scoring.
 
 Success criteria:
-Evaluation is performed across 5 repeated runs per task. Success requires
-statistically significant superiority on goal fidelity (≥ 0.90 vs baseline < 0.60),
+Evaluation starts at 2 repeated runs per task per arm. Success requires
+superiority on goal fidelity (≥ 0.90 vs baseline < 0.60),
 constraint retention (≥ 0.95 vs baseline < 0.50), and redundant work reduction,
 with non-inferiority on reference validity.
 
 How to run (dogfooding checklist):
 
-1. Tasks: three fixtures — (a) add a session field + TUI surface, (b) rename
-   a widely used symbol across modules, (c) fix a failing test with ambiguous issue text.
-   Each ships with an explicit goal sentence, 2–3 constraints, and `cmd:` acceptance.
-2. Baseline run: harness runs each task with `compaction.summary=short`, no plan/journal tools.
-3. Mechanism run: harness runs each task with the active anchor and plan loop;
-   compaction threshold set low to trigger ≥ 3 compactions.
+1. Tasks: `minidb` T1 (TTL feature), T2 (constrained rename), T3 (ambiguous
+   bugfix). Each ships with an explicit goal sentence, 2–3 constraints, and `cmd:` acceptance.
+2. Baseline run: `SQWAI_BENCH_BASELINE=1` (no plan/journal tools, no anchor/diary, `summary=short`).
+3. Mechanism run: active anchor and plan loop; compaction threshold set low to trigger ≥ 3 compactions.
 4. Analysis: comparative scorecards, stale-receipt counts,
    and token trade-off curves (no `bench` command exists yet — see AC).
 
