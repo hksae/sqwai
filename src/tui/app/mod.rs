@@ -135,6 +135,10 @@ pub(super) struct ActivePlanInfo {
     pub current_step: usize,
     pub total_steps: usize,
     pub status_text: String,
+    /// where this plan comes from: linked session, previous session, or the
+    /// project-global newest active plan — so the startup screen never shows
+    /// a plan without saying whose it is
+    pub source: String,
 }
 
 #[derive(Debug, Clone)]
@@ -307,6 +311,10 @@ pub struct App {
     /// background collector for startup_data; Some while a collection is
     /// still running, so /new and session switches never block the UI
     startup_data_rx: Option<std::sync::mpsc::Receiver<StartupData>>,
+    /// plan id the startup screen prefers over the global newest active
+    /// plan: the previous session's plan on /new, the session's own plan
+    /// when switching to an empty session
+    startup_preferred_plan: Option<String>,
     pub(super) last_ctrl_c: Option<Instant>,
     /// transient bottom-bar notice (3s): every status/error lands here, the
     /// chat stays clean. A new notice replaces the current one.
@@ -739,7 +747,7 @@ impl App {
         let provider = providers::create(&resolved)?;
 
         let startup_data = if startup {
-            Some(Self::collect_startup_data(&cfg, &model_cfg, read_only))
+            Some(Self::collect_startup_data(&cfg, &model_cfg, read_only, None))
         } else {
             None
         };
@@ -802,6 +810,7 @@ impl App {
             startup,
             startup_data,
             startup_data_rx: None,
+            startup_preferred_plan: None,
             last_ctrl_c: None,
             read_only,
             toast: None,
@@ -2262,6 +2271,9 @@ impl App {
         // data is collected in the background — switching must not block
         self.startup = self.session.messages.is_empty();
         if self.startup {
+            // an empty session shows its own plan when it has one, not the
+            // global newest — same rule as /new
+            self.startup_preferred_plan = self.session.plan_id.clone();
             self.refresh_startup_data();
         }
         self.menu_home();
@@ -2312,6 +2324,9 @@ impl App {
         if self.session_has_messages() {
             self.session.save().ok();
         }
+        // the startup screen after /new prefers the plan we just left over
+        // the global newest: it is the plan the user was working on
+        self.startup_preferred_plan = self.session.plan_id.clone();
         // §2.5 runs retention when a session ends. Doing it here rather than
         // on the way out means it also happens for a session the user simply
         // walks away from, and the new session's own chain is protected by
@@ -4697,9 +4712,10 @@ impl App {
         let cfg = self.cfg.clone();
         let model_cfg = self.model_cfg.clone();
         let read_only = self.read_only;
+        let preferred_plan_id = self.startup_preferred_plan.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let data = Self::collect_startup_data(&cfg, &model_cfg, read_only);
+            let data = Self::collect_startup_data(&cfg, &model_cfg, read_only, preferred_plan_id);
             let _ = tx.send(data);
         });
         self.startup_data_rx = Some(rx);
@@ -4726,6 +4742,7 @@ impl App {
         cfg: &Config,
         model_cfg: &ModelConfig,
         read_only: bool,
+        preferred_plan_id: Option<String>,
     ) -> StartupData {
         let root = std::env::current_dir().unwrap_or_default();
         let version = env!("CARGO_PKG_VERSION");
@@ -4733,7 +4750,16 @@ impl App {
         let (git_branch, git_modified) = collect_git_info(&root);
         let model = model_cfg.id.clone();
 
-        let active_plan_raw = crate::plan::open_active(&root).ok().flatten();
+        let active_plan_raw = preferred_plan_id
+            .as_deref()
+            .and_then(|id| crate::plan::open(&root, id).ok())
+            .map(|plan| (plan, true))
+            .or_else(|| {
+                crate::plan::open_active(&root)
+                    .ok()
+                    .flatten()
+                    .map(|plan| (plan, false))
+            });
         let has_sqwai_dir = root.join(".sqwai").exists();
 
         // Memory info
@@ -4772,7 +4798,7 @@ impl App {
             .filter(|s| Session::project_is_here(&s.project, &root))
             .collect();
 
-        let (active_plan, last_session, recent) = if let Some(plan) = active_plan_raw {
+        let (active_plan, last_session, recent) = if let Some((plan, preferred)) = active_plan_raw {
             let in_prog = plan
                 .steps
                 .iter()
@@ -4796,11 +4822,12 @@ impl App {
                 (1, "in progress".to_string())
             };
 
-            let plan_info = ActivePlanInfo {
+            let mut plan_info = ActivePlanInfo {
                 title: plan.goal.text.clone(),
                 current_step: curr,
                 total_steps: plan.steps.len(),
                 status_text: st,
+                source: String::new(),
             };
 
             let done = plan
@@ -4833,6 +4860,16 @@ impl App {
                         || s.plan_id.as_deref() == Some(&plan.id)
                 })
                 .or_else(|| sessions.first());
+
+            plan_info.source = if preferred {
+                "previous session's plan".to_string()
+            } else if let Some(s) = last_sess_obj {
+                let short = s.id.to_string();
+                let short = short.chars().take(8).collect::<String>();
+                format!("session {short} · {}", fmt_relative_time(s.last_activity()))
+            } else {
+                "newest active plan".to_string()
+            };
 
             let last_session_info = last_sess_obj.map(|s| RecentSessionInfo {
                 date: fmt_relative_time(s.last_activity()),

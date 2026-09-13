@@ -3867,8 +3867,8 @@ impl App {
             ]));
             raw_lines.push(Line::from(vec![Span::styled(
                 format!(
-                    "  step {}/{} {}",
-                    plan.current_step, plan.total_steps, plan.status_text
+                    "  step {}/{} {} · {}",
+                    plan.current_step, plan.total_steps, plan.status_text, plan.source
                 ),
                 Theme::dim(),
             )]));

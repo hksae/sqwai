@@ -4166,6 +4166,7 @@ mod tests {
             &app.cfg,
             &app.model_cfg,
             app.read_only,
+            None,
         ));
 
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
@@ -4199,6 +4200,7 @@ mod tests {
             &app.cfg,
             &app.model_cfg,
             app.read_only,
+            None,
         ));
 
         let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
@@ -4354,7 +4356,7 @@ mod tests {
     fn startup_screen_wraps_text_on_narrow_window() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = true;
-        let mut data = App::collect_startup_data(&app.cfg, &app.model_cfg, app.read_only);
+        let mut data = App::collect_startup_data(&app.cfg, &app.model_cfg, app.read_only, None);
         data.project_path = "~/dev/a/very/long/nested/path/to/project".into();
         app.startup_data = Some(data);
 
@@ -4374,6 +4376,25 @@ mod tests {
             .filter(|line| line.contains("nested") || line.contains("project"))
             .count();
         assert!(path_rows >= 1, "path should wrap on narrow screen");
+    }
+
+    #[test]
+    fn startup_preferred_plan_falls_back_to_global_when_missing() {
+        let app = test_app("http://127.0.0.1:9/v1".into());
+        // a dangling preferred id (deleted plan) must not break collection:
+        // same result as no preference
+        let with_pref = App::collect_startup_data(
+            &app.cfg,
+            &app.model_cfg,
+            app.read_only,
+            Some("01JDOESNOTEXIST000000000000".into()),
+        );
+        let without_pref =
+            App::collect_startup_data(&app.cfg, &app.model_cfg, app.read_only, None);
+        assert_eq!(
+            with_pref.active_plan.map(|p| p.title),
+            without_pref.active_plan.map(|p| p.title)
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -4746,6 +4767,7 @@ mod tests {
             current_step: 2,
             total_steps: 5,
             status_text: "In progress".into(),
+            source: "session a8f2c1d4 · 14:02".into(),
         });
         app.startup_data = Some(data);
         for w_h in [(100u16, 30u16), (70, 24)] {

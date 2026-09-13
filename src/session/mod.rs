@@ -390,8 +390,8 @@ impl Session {
     /// Ctrl+S used to deserialize up to 40 full conversations on the UI
     /// thread — a visible stall once sessions grew. A small sidecar index
     /// (`index.json` next to the sessions) remembers every file's header
-    /// keyed by mtime, so a normal menu open parses nothing; only new or
-    /// externally modified files are read. The index is self-healing: a
+    /// keyed by mtime millis + size, so a normal menu open parses nothing;
+    /// only new or externally modified files are read. The index is self-healing: a
     /// missing, stale, or corrupt entry is simply rebuilt.
     ///
     /// Pinned sessions are exempt from the window: with more sessions on
@@ -401,7 +401,8 @@ impl Session {
         let dir = Self::sessions_dir()?;
         #[derive(Serialize, Deserialize)]
         struct IdxEntry {
-            mtime: u64,
+            mtime: u128,
+            size: u64,
             #[serde(flatten)]
             header: SessionHeader,
         }
@@ -412,14 +413,17 @@ impl Session {
                 .and_then(|raw| serde_json::from_str(&raw).ok())
                 .unwrap_or_default();
 
-        let mut entries: Vec<(Option<std::time::SystemTime>, std::path::PathBuf)> = Vec::new();
+        let mut entries: Vec<(Option<std::time::SystemTime>, u64, std::path::PathBuf)> = Vec::new();
         for entry in std::fs::read_dir(&dir)?.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("json")
                 && path.file_name().and_then(|n| n.to_str()) != Some("index.json")
             {
-                let modified = entry.metadata().ok().and_then(|m| m.modified().ok());
-                entries.push((modified, path));
+                let meta = entry.metadata().ok();
+                let modified = meta.as_ref().and_then(|m| m.modified().ok());
+                // size disambiguates same-millisecond rewrites
+                let size = meta.map(|m| m.len()).unwrap_or(0);
+                entries.push((modified, size, path));
             }
         }
         entries.sort_by_key(|e| std::cmp::Reverse(e.0));
@@ -427,22 +431,25 @@ impl Session {
         let mut headers: Vec<SessionHeader> = Vec::new();
         let mut changed = false;
         let mut seen = std::collections::HashSet::new();
-        for (modified, path) in &entries {
+        for (modified, size, path) in &entries {
             let id = path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or_default()
                 .to_string();
             seen.insert(id.clone());
+            // millisecond precision: a save followed by a menu open in the
+            // same second must not serve the pre-save header
             let mtime = modified
                 .map(|t| {
                     t.duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
+                        .map(|d| d.as_millis())
                         .unwrap_or(0)
                 })
                 .unwrap_or(0);
             if let Some(hit) = index.get(&id)
                 && hit.mtime == mtime
+                && hit.size == *size
             {
                 headers.push(hit.header.clone());
                 continue;
@@ -466,6 +473,7 @@ impl Session {
                 id,
                 IdxEntry {
                     mtime,
+                    size: *size,
                     header: header.clone(),
                 },
             );
