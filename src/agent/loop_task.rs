@@ -560,7 +560,7 @@ async fn run_subagent_batch(
                     compaction,
                     plan_limits,
                     fallback_chain,
-                    std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
+                    timeout,
                 )
                 .await;
                 (index, call, started, outcome)
@@ -3294,15 +3294,23 @@ async fn bash_call(
                 ApprovalDecision::RunOnce => {}
             }
         }
-        // checkpoint before a dangerous (approved) command
+        // checkpoint before running: dangerous-approved commands always;
+        // otherwise only if the tree moved since this chain's last snapshot
+        // (hash-gate, §2.5). The classifier cannot see mutations, only risk:
+        // formatters and checkout-class commands look safe and mutate
+        // silently, and must not run uninsured.
         // §2.5: bash is the one case whose targets cannot be known in
         // advance, so this is where layer 2 earns its existence.
-        if let Ok(Some(sha)) = checkpoints::snapshot_session(
-            &ctx.root,
-            ctx.shadow_store,
-            ctx.checkpoint_chain(),
-            &format!("pre_bash {command}"),
-        ) {
+        let snapshot_wanted = needs_approval.is_some()
+            || checkpoints::tree_changed(&ctx.root, ctx.shadow_store, ctx.checkpoint_chain());
+        if snapshot_wanted
+            && let Ok(Some(sha)) = checkpoints::snapshot_session(
+                &ctx.root,
+                ctx.shadow_store,
+                ctx.checkpoint_chain(),
+                &format!("pre_bash {command}"),
+            )
+        {
             ctx.journal.push((sha, format!("bash {command}")));
         }
     }

@@ -75,10 +75,20 @@ pub fn snapshot_session(
     shadow.snapshot(session_id, label)
 }
 
+/// Hash-gate for pre-bash snapshots (§2.5): true when the worktree moved
+/// since this chain's last snapshot, or when that cannot be determined.
+/// Lets safe-classified commands skip the staging cost of `snapshot_session`
+/// while keeping silently-mutating ones (formatters, checkouts) insured.
+pub fn tree_changed(root: &Path, store: ShadowStore, session_id: &str) -> bool {
+    let Some(shadow) = shadow(root, store) else {
+        return true;
+    };
+    shadow.tree_changed(session_id)
+}
+
 /// Snapshot the worktree for this session, returning the commit hash representing
 /// this boundary (creating a boundary commit even if tree is unchanged).
-pub fn snapshot_boundary(
-    root: &Path,
+pub fn snapshot_boundary(    root: &Path,
     store: ShadowStore,
     session_id: &str,
     label: &str,

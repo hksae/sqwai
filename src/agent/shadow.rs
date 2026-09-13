@@ -199,6 +199,25 @@ impl Shadow {
             .filter(|sha| !sha.is_empty())
     }
 
+    /// Hash-gate for pre-bash snapshots (§2.5): has the worktree moved since
+    /// this chain's last snapshot? Compares the chain head tree against the
+    /// worktree directly (`diff` plus an untracked listing) — no staging,
+    /// and no `status`, whose index-vs-HEAD view never settles because our
+    /// commits land on `refs/sessions/*` via commit-tree without touching
+    /// the index. Errors fail open (snapshot): a redundant snapshot is
+    /// cheap, a missed mutation leaves bash uninsured.
+    pub fn tree_changed(&self, session_id: &str) -> bool {
+        let Some(head) = self.head_of(session_id) else {
+            return true; // nothing snapshotted yet on this chain
+        };
+        let diff = self.git(&["diff", "--name-only", &head, "--", "."]);
+        let others = self.git(&["ls-files", "--others", "--exclude-standard", "--", "."]);
+        match (diff, others) {
+            (Ok(d), Ok(o)) => !d.trim().is_empty() || !o.trim().is_empty(),
+            _ => true,
+        }
+    }
+
     /// Snapshot the worktree onto this session's chain, returning the commit.
     ///
     /// `Ok(None)` means the tree is identical to the previous snapshot, so no
@@ -419,6 +438,38 @@ mod tests {
         Shadow::open(root, ShadowStore::Local)
             .unwrap()
             .expect("git is available in the test environment")
+    }
+
+    /// Hash-gate (§2.5): no chain yet → changed; clean after a snapshot →
+    /// unchanged; any later write → changed again. A clean tree must cost
+    /// status, never staging.
+    #[test]
+    fn tree_changed_tracks_the_chain_without_staging() {
+        let dir = project();
+        let root = dir.path();
+        let shadow = open(root);
+        assert!(
+            shadow.tree_changed("s"),
+            "no snapshot yet on this chain: must snapshot"
+        );
+        shadow
+            .snapshot("s", "first")
+            .unwrap()
+            .expect("changed tree commits");
+        assert!(
+            !shadow.tree_changed("s"),
+            "clean tree must not trigger a snapshot"
+        );
+        std::fs::write(root.join("a.rs"), b"fn main() { changed(); }").unwrap();
+        assert!(
+            shadow.tree_changed("s"),
+            "edited file must trigger a snapshot"
+        );
+        std::fs::write(root.join("new.txt"), b"untracked").unwrap();
+        assert!(
+            shadow.tree_changed("s"),
+            "untracked files must trigger a snapshot"
+        );
     }
 
     /// §2.5's hard rule, and failure mode 1 of #17: the user's repository must

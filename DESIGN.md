@@ -930,8 +930,12 @@ guarantee for exact file bytes; Layer 2 shadow git is a tree delta index for unt
 A snapshot stages the whole worktree (`add -A`, shadow index only) and
 commits only if the tree differs from the previous snapshot (`write-tree`
 compared against the parent's tree; identical → `Ok(None)`). Step boundaries
-(`step_start`, `step_finish`) use forced snapshots; pre-bash uses the same
-check. `changed_files(sha)` (`git diff --cached --name-only` after staging)
+(`step_start`, `step_finish`) use forced snapshots. Pre-bash snapshots are
+hash-gated: dangerous-approved commands always snapshot; otherwise the host
+compares the chain head tree against the worktree (`diff` + untracked
+listing, no staging) and snapshots only on movement — so silently-mutating
+commands (formatters, checkouts) run insured without staging on every call.
+`changed_files(sha)` (`git diff --cached --name-only` after staging)
 enumerates what a bash command touched for `file_diff` records when the host
 cannot enumerate it otherwise.
 
