@@ -466,6 +466,10 @@ pub struct App {
     menu_footer_text: Option<String>,
     menu_rows: Vec<(Line<'static>, MenuAction)>,
     menu_rect: Rect,
+    /// when the current approval dialog opened: Enter inside the grace
+    /// window does not commit (focus-steal protection), it only keeps
+    /// the preselected deny
+    approval_opened_at: Option<Instant>,
     /// pinned-section width the Sessions rows were built for (see
     /// `sessions_frame_w`): draw_menu rebuilds once when the real card
     /// disagrees, so a stale rect never desyncs header from content
@@ -876,6 +880,7 @@ impl App {
             menu_visible_rows: 0,
             menu_footer_text: None,
             menu_rows: Vec::new(),
+            approval_opened_at: None,
             menu_rect: Rect::default(),
             sessions_frame_built_w: 0,
             effort_hits: Vec::new(),

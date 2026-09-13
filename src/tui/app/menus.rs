@@ -292,6 +292,8 @@ pub(super) enum MenuAction {
     OpenAgent,
     OpenSafety,
     OpenUndo,
+    /// approval: commit the selected option (select with 1/2/3, click or arrows)
+    DecideApproval(crate::agent::loop_task::ApprovalDecision),
     #[allow(dead_code)]
     OpenControls,
     CycleDiaryEffort,
@@ -670,6 +672,15 @@ impl App {
         self.prefill_form();
         // rows are ready immediately, not on the next frame
         self.build_menu_rows();
+        if matches!(self.cur_menu(), Some(Menu::Approval { .. })) {
+            // deny is preselected, and the clock starts for the Enter guard
+            self.menu_sel = self
+                .menu_rows
+                .iter()
+                .position(|(_, a)| matches!(a, MenuAction::DecideApproval(ApprovalDecision::Deny)))
+                .unwrap_or(0);
+            self.approval_opened_at = Some(Instant::now());
+        }
         self.dirty = true;
     }
 
@@ -890,6 +901,15 @@ impl App {
             self.run_action(action.clone());
             return;
         }
+        // approval: a click selects the option, it never commits — commit
+        // is Enter only, so a stray click cannot approve a command
+        if matches!(self.cur_menu(), Some(Menu::Approval { .. })) {
+            if let Some((_, MenuAction::DecideApproval(_))) = self.menu_rows.get(sel) {
+                self.menu_sel = sel;
+                self.dirty = true;
+            }
+            return;
+        }
         self.menu_activate();
     }
 
@@ -927,9 +947,21 @@ impl App {
             }
             return;
         }
-        // approval: enter = run once
+        // approval: enter commits the SELECTED option (deny is preselected).
+        // Enter inside the grace window after the dialog opened is ignored:
+        // it is the focus-steal path that once approved a destructive
+        // command while the user was switching windows.
         if let Some(Menu::Approval { .. }) = self.cur_menu() {
-            self.approval_decide(ApprovalDecision::RunOnce);
+            if let Some(opened) = self.approval_opened_at
+                && opened.elapsed() < std::time::Duration::from_millis(500)
+            {
+                return;
+            }
+            if let Some((_, MenuAction::DecideApproval(decision))) =
+                self.menu_rows.get(self.menu_sel)
+            {
+                self.run_action(MenuAction::DecideApproval(*decision));
+            }
             return;
         }
         let Some((_, action)) = self.menu_rows.get(self.menu_sel) else {
@@ -949,6 +981,23 @@ impl App {
         }
         self.ask_picked.clear();
         self.close_interaction();
+    }
+
+    /// approval: move the selection to the given option without committing.
+    /// Committing is Enter only (plus the open grace window), so neither a
+    /// stray keypress nor a click can approve a command by itself.
+    pub(super) fn approval_select(&mut self, decision: ApprovalDecision) {
+        if !matches!(self.cur_menu(), Some(Menu::Approval { .. })) {
+            return;
+        }
+        if let Some(idx) = self
+            .menu_rows
+            .iter()
+            .position(|(_, a)| matches!(a, MenuAction::DecideApproval(d) if *d == decision))
+        {
+            self.menu_sel = idx;
+            self.dirty = true;
+        }
     }
 
     /// approval: send the user's decision to the agent and close
@@ -980,6 +1029,7 @@ impl App {
         match action {
             MenuAction::None => {}
             MenuAction::Back => self.menu_back(),
+            MenuAction::DecideApproval(decision) => self.approval_decide(decision),
             MenuAction::GraphFocus(new_key) => {
                 if let Some(Menu::GraphView {
                     focus_key,
@@ -2941,24 +2991,31 @@ impl App {
                     )]),
                     MenuAction::None,
                 ));
+                // select-then-confirm: click/arrows/1-3 choose, Enter commits.
+                // Deny is preselected so a stray Enter refuses, not approves.
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled(
-                        " enter: run once".to_string(),
+                        " 1: run once".to_string(),
                         Theme::ACCENT_SOFT(),
                     )]),
-                    MenuAction::None,
+                    MenuAction::DecideApproval(ApprovalDecision::RunOnce),
                 ));
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled(
-                        " a: always allow this session".to_string(),
+                        " 2: always allow this session".to_string(),
                         Theme::ACCENT_SOFT(),
                     )]),
-                    MenuAction::None,
+                    MenuAction::DecideApproval(ApprovalDecision::AlwaysSession),
                 ));
                 self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(" d: deny".to_string(), Theme::ERR())]),
-                    MenuAction::None,
+                    Line::from(vec![Span::styled(
+                        " 3: deny".to_string(),
+                        Theme::ERR(),
+                    )]),
+                    MenuAction::DecideApproval(ApprovalDecision::Deny),
                 ));
+                self.menu_footer_text =
+                    Some("1/2/3: select · enter: confirm · esc: deny".into());
             }
             Menu::EditProvider { .. }
             | Menu::EditModel { .. }

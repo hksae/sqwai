@@ -4336,6 +4336,81 @@ mod tests {
         assert!(app.startup, "empty session must show the startup screen");
     }
 
+    fn open_test_approval(app: &mut App) {
+        app.open_menu(Menu::Approval {
+            id: 7,
+            command: "rm -rf x".into(),
+            reason: "test".into(),
+        });
+    }
+
+    fn approval_option_index(app: &App, decision: ApprovalDecision) -> usize {
+        app.menu_rows
+            .iter()
+            .position(|(_, a)| {
+                matches!(a, MenuAction::DecideApproval(d) if *d == decision)
+            })
+            .expect("approval option row must exist")
+    }
+
+    #[test]
+    fn approval_opens_with_deny_preselected() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        open_test_approval(&mut app);
+        assert_eq!(
+            app.menu_sel,
+            approval_option_index(&app, ApprovalDecision::Deny)
+        );
+    }
+
+    #[test]
+    fn approval_enter_inside_grace_does_not_commit() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        open_test_approval(&mut app);
+        // a stray Enter from window switching lands here: nothing happens,
+        // the dialog stays open on the preselected deny
+        app.menu_activate();
+        assert!(matches!(app.cur_menu(), Some(Menu::Approval { .. })));
+
+        // past the grace window the same Enter commits the selection
+        app.approval_opened_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(600));
+        app.menu_activate();
+        assert!(
+            app.menu_stack.is_empty(),
+            "committed approval must close the dialog"
+        );
+    }
+
+    #[test]
+    fn approval_click_selects_without_committing() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        open_test_approval(&mut app);
+        app.menu_rect = ratatui::layout::Rect { x: 0, y: 0, width: 80, height: 20 };
+        // screen row 4 → row index 3 → the "run once" option
+        app.menu_click(4);
+        assert_eq!(
+            app.menu_sel,
+            approval_option_index(&app, ApprovalDecision::RunOnce)
+        );
+        assert!(
+            matches!(app.cur_menu(), Some(Menu::Approval { .. })),
+            "a click must never approve"
+        );
+    }
+
+    #[test]
+    fn approval_number_keys_select_without_committing() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        open_test_approval(&mut app);
+        app.approval_select(ApprovalDecision::AlwaysSession);
+        assert_eq!(
+            app.menu_sel,
+            approval_option_index(&app, ApprovalDecision::AlwaysSession)
+        );
+        assert!(matches!(app.cur_menu(), Some(Menu::Approval { .. })));
+    }
+
     #[test]
     fn debug_command_opens_the_debug_menu() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());

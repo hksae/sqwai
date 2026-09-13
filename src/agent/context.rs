@@ -450,8 +450,9 @@ pub fn prune(messages: &[Message]) -> (Vec<Message>, bool) {
 /// messages and everything after the earliest of them stays verbatim.
 /// The cut lands on a user turn and never separates an assistant tool call
 /// from its results — providers reject orphaned tool results.
-pub fn split_for_summary(messages: &[Message]) -> (&[Message], &[Message]) {
-    split_for_summary_with_keep(messages, SUMMARY_KEEP_RECENT)
+/// Test-only shorthand: production always passes an explicit keep_turns.
+#[allow(dead_code)]
+pub fn split_for_summary(messages: &[Message]) -> (&[Message], &[Message]) {    split_for_summary_with_keep(messages, SUMMARY_KEEP_RECENT)
 }
 
 pub fn split_for_summary_with_keep(
