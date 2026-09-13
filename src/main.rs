@@ -1,4 +1,5 @@
 mod agent;
+mod bench;
 mod config;
 mod lock;
 mod lsp;

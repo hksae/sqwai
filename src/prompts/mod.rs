@@ -75,7 +75,10 @@ pub fn stable_prefix() -> String {
     let mut prompt = compose(&builtin_prompt(), project_agents().as_deref());
     prompt.push_str("\n\n");
     prompt.push_str(&env::process_block());
-    if let Some(memory) = memory_block(&std::env::current_dir().unwrap_or_default()) {
+    // G0 baseline (§8.2): no durable memory in the prefix.
+    if !crate::bench::baseline()
+        && let Some(memory) = memory_block(&std::env::current_dir().unwrap_or_default())
+    {
         prompt.push_str("\n\n");
         prompt.push_str(&memory);
     }

@@ -1581,12 +1581,15 @@ compactions occur per run. Repeats: 2 per task per arm to start (12 runs);
 Evaluation protocol:
 - **External observer**: an external evaluation harness (independent of the agent's
   internal journal) observes both runs and writes `bench/<task>/<arm>.eval.jsonl`.
-  The baseline arm is `SQWAI_BENCH_BASELINE=1`: plan/note/journal tools
-  hidden, anchor and diary not injected, `compaction.summary=short` forced.
-  The host journal still records everything — it is the observer's data
-  source, not a mechanism under test. No mid-run context forks: scoring is
-  end-state plus journal-derived facts (final anchor/answers, file_diff
-  chains, resolve_ref over mentioned symbols, validation receipts).
+  The baseline arm is `SQWAI_BENCH_BASELINE=1`: hidden tools (`plan`,
+  `note`, `journal`, `memory_propose`, `memory_read`); no `USER.md`/
+  `MEMORY.md`/diary block, no durable-plan block, no host anchor, no
+  resume notice; no diary writes; `compaction.summary` forced to `short`;
+  the plan-first gate lifted. The host journal still records everything —
+  it is the observer's data source, not a mechanism under test. No mid-run
+  context forks: scoring is end-state plus journal-derived facts (final
+  anchor/answers, file_diff chains, resolve_ref over mentioned symbols,
+  validation receipts).
 - **Scoring**:
   1. *Goal fidelity*: semantic match of active goal (0 / 0.5 / 1.0).
   2. *Constraint retention*: fraction of initial constraints preserved verbatim.

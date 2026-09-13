@@ -1228,9 +1228,19 @@ pub fn tool_names() -> Vec<String> {
 }
 
 pub fn tool_specs(plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
+    // G0 baseline (§8.2): the durable machinery is invisible — no plan,
+    // notes, journal projection, or durable memory tools.
+    let baseline = crate::bench::baseline();
     let mut specs: Vec<crate::providers::ToolSpec> = defs()
         .into_iter()
         .filter(|d| !plan_mode || d.kind == Kind::ReadOnly || d.name == "plan")
+        .filter(|d| {
+            !baseline
+                || !matches!(
+                    d.name,
+                    "plan" | "note" | "journal" | "memory_propose" | "memory_read"
+                )
+        })
         .map(|d| {
             let mut spec = crate::providers::ToolSpec {
                 name: d.name.to_string(),
@@ -3437,8 +3447,7 @@ mod tests {
         assert!(bad_path.output.contains("bad path"));
     }
     #[test]
-    fn tool_specs_are_stably_sorted() {
-        let names: Vec<String> = tool_specs(false).iter().map(|t| t.name.clone()).collect();
+    fn tool_specs_are_stably_sorted() {        let names: Vec<String> = tool_specs(false).iter().map(|t| t.name.clone()).collect();
         assert_eq!(names, tool_names());
 
         let mut sorted = names.clone();
@@ -3446,6 +3455,33 @@ mod tests {
         assert_eq!(names, sorted, "tool order must not depend on registration");
         let again: Vec<String> = tool_specs(false).iter().map(|t| t.name.clone()).collect();
         assert_eq!(names, again, "the schema block must be byte-stable");
+    }
+
+    /// G0 baseline (§8.2): the durable machinery is invisible to the model.
+    #[test]
+    fn baseline_hides_durable_machinery_tools() {
+        struct BaselineGuard;
+        impl Drop for BaselineGuard {
+            fn drop(&mut self) {
+                crate::bench::set_baseline_override(None);
+            }
+        }
+        let _guard = BaselineGuard;
+        crate::bench::set_baseline_override(Some(true));
+        let names: Vec<String> =
+            tool_specs(false).iter().map(|t| t.name.clone()).collect();
+        for hidden in ["plan", "note", "journal", "memory_propose", "memory_read"] {
+            assert!(
+                !names.contains(&hidden.to_string()),
+                "{hidden} must be hidden on baseline: {names:?}"
+            );
+        }
+        for kept in ["read", "bash", "resolve_ref", "recall"] {
+            assert!(
+                names.contains(&kept.to_string()),
+                "{kept} must stay on baseline: {names:?}"
+            );
+        }
     }
 
     #[test]
