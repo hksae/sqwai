@@ -478,10 +478,13 @@ impl Session {
             changed = true;
         }
         if changed {
-            let _ = std::fs::write(
-                &index_path,
-                serde_json::to_string(&index).unwrap_or_default(),
-            );
+            // atomic publish: two instances (writer + read-only/--force) can
+            // list at once, and a torn index.json would drop every cached
+            // header. A corrupt file still heals by rebuild on next read.
+            let tmp = index_path.with_extension(format!("tmp.{}", Uuid::new_v4()));
+            if std::fs::write(&tmp, serde_json::to_string(&index).unwrap_or_default()).is_ok() {
+                let _ = std::fs::rename(&tmp, &index_path);
+            }
         }
         SessionHeader::sort_sessions(&mut headers);
         headers.truncate(limit.max(1));
