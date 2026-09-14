@@ -38,12 +38,13 @@ pub const T1: TaskSpec = TaskSpec {
         "keep the on-disk log format backward compatible (old lines must load)",
         "`tmp:` scratch keys must never persist (existing invariant, keep it)",
     ],
-    acceptance_cmds: &["cargo test --test engine"],
+    acceptance_cmds: &["cargo test --test engine", "cargo test --test cli_ttl"],
 };
 
 /// Used by the matrix runs (T1 shakedown first).
 #[allow(dead_code)]
-pub const T2: TaskSpec = TaskSpec {    id: "T2",
+pub const T2: TaskSpec = TaskSpec {
+    id: "T2",
     goal: "rename `get_unchecked` to `get_raw` in `engine`, `cli` and every caller, with no behavior change",
     constraints: &[
         "do not touch `storage/btree.rs` (deprecated)",
@@ -197,6 +198,9 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
 
     let session_id = format!("bench-{}-{session_tag}", task.id);
     report.session_id = session_id.clone();
+    // routing header for opencode-gateway providers, same as the TUI does
+    // per session — without it the gateway 400s on MissingSessionID
+    crate::providers::set_conversation_id(&session_id);
     let root = fresh_copy(task, &report.arm)?;
     let mut compaction = crate::config::CompactionConfig::default();
     compaction.threshold = COMPACTION_THRESHOLD;
