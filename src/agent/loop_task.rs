@@ -4155,6 +4155,46 @@ mod effort_tests {
         assert!(messages.len() < 95, "messages must drop");
     }
 
+    /// Incremental replication of the live loop: grow the transcript turn
+    /// by turn, calling compact_history before each (like run_agent does).
+    /// Trims must show up as drops in length — never 40 silent passes.
+    #[tokio::test]
+    async fn compact_history_fires_repeatedly_as_history_grows() {
+        let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(Vec::new()),
+        });
+        let policy = context::Policy::with_compaction(1_000_000, 0.08, 4, 0.01, false);
+        let mut messages = Vec::new();
+        let mut summary = None;
+        let mut trims = 0;
+        let mut peak_len = 0;
+        for i in 0..40 {
+            messages.push(Message::new(Role::User, format!("task {i} {}", "q".repeat(500))));
+            messages.push(Message::new(Role::Assistant, format!("work {i}")));
+            messages.push(Message::tool_result(
+                format!("c{i}"),
+                "r".repeat(3000),
+                false,
+            ));
+            let before_len = messages.len();
+            if compact_history(&provider, "m", &mut messages, &mut summary, &policy, false).await
+                .is_some()
+            {
+                trims += 1;
+                assert!(
+                    messages.len() < before_len,
+                    "a reported trim must drop messages"
+                );
+            }
+            peak_len = peak_len.max(messages.len());
+        }
+        assert!(trims >= 3, "40 over-budget turns must trim repeatedly, got {trims}");
+        assert!(
+            peak_len < 120,
+            "history must stay bounded near the budget, peak len {peak_len}"
+        );
+    }
+
     fn count_summaries(messages: &[Message]) -> usize {
         messages
             .iter()
