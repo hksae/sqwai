@@ -35,6 +35,21 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// True when a mechanism-arm run should take short model summaries instead
+/// of hard trims: `SQWAI_BENCH_SUMMARY=short`. The baseline arm already
+/// implies this via [`baseline`]; this switch covers the mechanism arm for
+/// the G0 shakedown follow-up (unformalized lore dies at hard trims):
+/// one run, fixed in the method before pre-registration.
+pub fn summary_short() -> bool {
+    matches!(
+        std::env::var("SQWAI_BENCH_SUMMARY")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "short"
+    )
+}
+
 fn baseline_override() -> Option<bool> {
     BASELINE_OVERRIDE.with(|slot| slot.get())
 }

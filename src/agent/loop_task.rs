@@ -1201,6 +1201,7 @@ async fn run_agent(
         compaction.threshold,
         // G0 baseline (§8.2) always summarizes instead of anchoring
         crate::bench::baseline()
+            || crate::bench::summary_short()
             || matches!(compaction.summary, crate::config::CompactionSummary::Short),
     );
     // Tools are part of the request prefix: sorted for stability, narrowed in
@@ -1705,6 +1706,7 @@ async fn run_agent(
                         compaction.keep_turns,
                         compaction.threshold,
                         crate::bench::baseline()
+                            || crate::bench::summary_short()
                             || matches!(
                                 compaction.summary,
                                 crate::config::CompactionSummary::Short
@@ -2467,6 +2469,70 @@ async fn run_agent(
 /// compaction can remove, and gating on them fires futile compactions
 /// every turn (history already fits, trim no-ops, `after == before`).
 /// Real overflows still force-compact via the overflow path.
+/// L0 capture-nudge (deterministic): a fresh user message stating a
+/// restriction ("don't touch X") while a plan is active, where no plan
+/// constraint covers it, earns a host-owned tail line telling the model to
+/// record the restriction or justify why it needs none. Unformalized lore
+/// dies at the first hard trim; this is the cheapest place to catch it.
+pub fn capture_nudge(user_text: &str, constraints: &[String]) -> Option<String> {
+    let lower = user_text.to_lowercase();
+    if !has_restriction_marker(&lower) {
+        return None;
+    }
+    if constraint_covers(constraints, &lower) {
+        return None;
+    }
+    Some(
+        "\n[host note: this message states a restriction that is not among the \
+         active plan's constraints — record it with plan constraints add, or \
+         note why it needs no protection.]"
+            .to_string(),
+    )
+}
+
+/// Substring scan for negative directives (EN + RU). Checked before any
+/// disk access so ordinary turns never pay for the plan lookup.
+pub fn has_restriction_marker(lower_text: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "don't touch",
+        "do not touch",
+        "не трогай",
+        "don't change",
+        "do not change",
+        "не меняй",
+        "don't modify",
+        "do not modify",
+        "don't break",
+        "do not break",
+        "не ломай",
+        "don't delete",
+        "do not delete",
+        "не удаляй",
+        "оставь как есть",
+        "нельзя",
+        "запрещ",
+    ];
+    MARKERS.iter().any(|m| lower_text.contains(m))
+}
+
+/// Crude deterministic coverage: a constraint covers the directive when they
+/// share a significant token (4+ chars). Deliberately dumb — L0.
+fn constraint_covers(constraints: &[String], lower_directive: &str) -> bool {
+    let words: std::collections::HashSet<&str> = lower_directive
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 4)
+        .collect();
+    if words.is_empty() {
+        return false;
+    }
+    constraints.iter().any(|c| {
+        c.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.chars().count() >= 4)
+            .any(|w| words.contains(w))
+    })
+}
+
 async fn compact_history(
     provider: &SharedProvider,
     model_id: &str,
@@ -4273,6 +4339,28 @@ mod effort_tests {
             peak_len < 81,
             "history must stay bounded near the budget, peak len {peak_len}"
         );
+    }
+
+    #[test]
+    fn capture_nudge_fires_only_on_uncovered_restrictions() {
+        let c = |s: &str| vec![s.to_string()];
+        // no marker → silent, whatever the plan holds
+        assert!(capture_nudge("please refactor the engine", &[]).is_none());
+        assert!(capture_nudge("please refactor the engine", &c("keep API stable")).is_none());
+        // marker + empty constraints → nudge
+        let tail = capture_nudge("don't touch storage/btree.rs", &[]).expect("must nudge");
+        assert!(tail.contains("host note"), "nudge must be marked host-owned");
+        // marker + covering constraint (shared token "touch"/"btree") → silent
+        assert!(capture_nudge(
+            "don't touch storage/btree.rs",
+            &c("do not touch `storage/btree.rs` (deprecated)")
+        )
+        .is_none());
+        // marker + unrelated constraints → nudge
+        assert!(capture_nudge("don't touch storage/btree.rs", &c("keep API stable")).is_some());
+        // RU markers behave the same
+        assert!(capture_nudge("не трогай btree", &[]).is_some());
+        assert!(capture_nudge("не трогай btree", &c("btree не трогать")).is_none());
     }
 
     fn count_summaries(messages: &[Message]) -> usize {
