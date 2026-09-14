@@ -4230,6 +4230,51 @@ mod effort_tests {
         );
     }
 
+    /// Bench shape: ONE user prompt followed by assistant/tool cycles, summary
+    /// off. Regression test: the user-boundary-only cut never fired here, so
+    /// compactions stayed 0 while measured grew past the budget every turn.
+    #[tokio::test]
+    async fn compact_history_trims_a_single_prompt_tool_loop() {
+        let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(Vec::new()),
+        });
+        let policy = context::Policy::with_compaction(1_000_000, 0.08, 4, 0.01, false);
+        let mut messages = vec![Message::new(Role::User, "do the thing")];
+        let mut summary = None;
+        let mut trims = 0;
+        let mut peak_len = 0;
+        for i in 0..40 {
+            messages.push(Message::new(Role::Assistant, "").with_tool_calls(vec![
+                crate::providers::ToolCallReq::new(
+                    format!("c{i}"),
+                    "bash",
+                    serde_json::json!({"command": "ls"}),
+                ),
+            ]));
+            messages.push(Message::tool_result(
+                format!("c{i}"),
+                "r".repeat(3000),
+                false,
+            ));
+            let before_len = messages.len();
+            if compact_history(&provider, "m", &mut messages, &mut summary, &policy, false).await
+                .is_some()
+            {
+                trims += 1;
+                assert!(
+                    messages.len() < before_len,
+                    "a reported trim must drop messages"
+                );
+            }
+            peak_len = peak_len.max(messages.len());
+        }
+        assert!(trims >= 3, "40 over-budget cycles must trim repeatedly, got {trims}");
+        assert!(
+            peak_len < 81,
+            "history must stay bounded near the budget, peak len {peak_len}"
+        );
+    }
+
     fn count_summaries(messages: &[Message]) -> usize {
         messages
             .iter()

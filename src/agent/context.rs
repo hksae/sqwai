@@ -471,7 +471,29 @@ pub fn split_for_summary_with_keep(
         .take(keep + 1)
         .collect();
     if from_end.len() <= keep {
-        return (&[], messages);
+        // Few user turns but possibly a long autonomous tool loop: count
+        // agent steps the same way, or a single-prompt run never summarizes
+        // and grows until the provider rejects it.
+        let mut steps: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, message)| message.role == Role::Assistant)
+            .map(|(index, _)| index)
+            .take(keep + 1)
+            .collect();
+        if steps.len() <= keep {
+            return (&[], messages);
+        }
+        steps.truncate(keep);
+        let mut cut = *steps.last().expect("keep >= 1");
+        while cut > 0 && !is_safe_cut(messages, cut) {
+            cut -= 1;
+        }
+        if cut == 0 {
+            return (&[], messages);
+        }
+        return (&messages[..cut], &messages[cut..]);
     }
     from_end.truncate(keep);
     let mut cut = *from_end.last().expect("keep >= 1");
@@ -485,14 +507,34 @@ pub fn split_for_summary_with_keep(
 }
 
 fn is_safe_cut(messages: &[Message], cut: usize) -> bool {
-    if cut >= messages.len() || messages[cut].role != Role::User {
+    if cut >= messages.len() {
         return false;
     }
-    // a pending assistant tool call must keep its results
-    !matches!(
-        messages.get(cut.saturating_sub(1)),
-        Some(prev) if prev.role == Role::Assistant && !prev.tool_calls.is_empty()
-    )
+    if messages[cut].role == Role::User {
+        // a pending assistant tool call must keep its results
+        return !matches!(
+            messages.get(cut.saturating_sub(1)),
+            Some(prev) if prev.role == Role::Assistant && !prev.tool_calls.is_empty()
+        );
+    }
+    // An autonomous tool loop has no further user turns: cutting before an
+    // assistant step is the only way to bound it. Safe as long as no kept
+    // tool result is orphaned, i.e. every kept result's call is kept too.
+    // Never cut before a tool result or a system note.
+    if messages[cut].role != Role::Assistant {
+        return false;
+    }
+    let kept: std::collections::HashSet<&str> = messages[cut..]
+        .iter()
+        .flat_map(|m| m.tool_calls.iter().map(|c| c.id.as_str()))
+        .collect();
+    messages[cut..]
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .all(|m| match &m.tool_call_id {
+            None => true,
+            Some(id) => kept.contains(id.as_str()),
+        })
 }
 
 /// A previously written summary block. Such a message never goes back
@@ -1127,5 +1169,81 @@ mod tests {
         );
         // the tail behind it still got trimmed to roughly the budget
         assert!(trimmed.len() < messages.len());
+    }
+
+    #[test]
+    fn hard_trim_cuts_a_single_prompt_tool_loop() {
+        // Autonomous run: one user prompt, then a long assistant/tool chain
+        // with no further user turns. The old user-boundary-only cut never
+        // fired here: compactions stayed 0 while the transcript grew forever.
+        let mut messages = vec![user("do the thing")];
+        for i in 0..10 {
+            messages.push(
+                Message::new(Role::Assistant, "").with_tool_calls(vec![
+                    crate::providers::ToolCallReq::new(
+                        format!("c{i}"),
+                        "bash",
+                        serde_json::json!({"command": "ls"}),
+                    ),
+                ]),
+            );
+            messages.push(Message::tool_result(
+                format!("c{i}"),
+                "x".repeat(400),
+                false,
+            ));
+        }
+        let budget = estimated_tokens(&messages) / 2;
+        let trimmed = hard_trim(&messages, budget);
+        assert!(
+            trimmed.len() < messages.len(),
+            "must drop old cycles, kept {} of {}",
+            trimmed.len(),
+            messages.len()
+        );
+        assert!(estimated_tokens(&trimmed) <= budget);
+        assert_eq!(trimmed[0].role, Role::Assistant);
+        // no orphan: every kept tool result's call is kept as well
+        let kept: std::collections::HashSet<&str> = trimmed
+            .iter()
+            .flat_map(|m| m.tool_calls.iter().map(|c| c.id.as_str()))
+            .collect();
+        for m in &trimmed {
+            if m.role == Role::Tool {
+                if let Some(id) = &m.tool_call_id {
+                    assert!(kept.contains(id.as_str()), "orphaned tool result {id}");
+                }
+            }
+        }
+        // the newest cycle survives
+        assert_eq!(
+            trimmed.last().unwrap().content,
+            messages.last().unwrap().content
+        );
+    }
+
+    #[test]
+    fn split_summarizes_a_tool_loop_with_one_user_turn() {
+        let mut messages = vec![user("do the thing")];
+        for i in 0..10 {
+            messages.push(
+                Message::new(Role::Assistant, format!("step {i}")).with_tool_calls(vec![
+                    crate::providers::ToolCallReq::new(
+                        format!("c{i}"),
+                        "bash",
+                        serde_json::json!({"command": "ls"}),
+                    ),
+                ]),
+            );
+            messages.push(Message::tool_result(format!("c{i}"), "output", false));
+        }
+        let (older, keep) = split_for_summary_with_keep(&messages, 4);
+        assert!(!older.is_empty(), "old cycles must be summarizable");
+        assert_eq!(older.len() + keep.len(), messages.len());
+        assert!(
+            matches!(keep[0].role, Role::Assistant | Role::User),
+            "keep must open on a step boundary, got {:?}",
+            keep[0].role
+        );
     }
 }

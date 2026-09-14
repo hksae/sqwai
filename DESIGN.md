@@ -1062,7 +1062,12 @@ host-only.
 Build the anchor (below).
 Choose the history to keep verbatim: the last compaction.keep_turns (4)
 user turns (counted by user messages, not raw messages) and everything
-after the earliest of them, plus any ask_user awaiting an answer.
+after the earliest of them, plus any ask_user awaiting an answer. When the
+history holds fewer user turns than keep_turns (a single-prompt autonomous
+tool loop), agent steps (assistant messages) are counted the same way, or
+old cycles would never become summarizable. Cuts land on user turns, or —
+in such loops — before an assistant step whose kept tool results all belong
+to kept calls, so a trim never orphans a tool result.
 Optional short summary (compaction.summary: off|short, default off):
 one model call, ≤ 300 tokens, restricted to "what the user asked in the
 dropped messages that is not in the plan". Placed after the anchor.
