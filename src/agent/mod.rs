@@ -1,5 +1,6 @@
-pub mod blobs;
-pub mod checkpoints;
+pub mod blobs;pub mod checkpoints;
+#[cfg(test)]
+pub mod bench_harness;
 pub mod context;
 pub mod diary;
 pub mod graph;

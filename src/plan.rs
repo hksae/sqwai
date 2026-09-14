@@ -2050,7 +2050,7 @@ pub fn verify_acceptance(
 /// no validation block at all. New verifies always set validation, and
 /// replay heals it for journaled commits — this clause is only for plan
 /// files that predate receipts.
-fn legacy_passed(item: &Acceptance) -> bool {
+pub(crate) fn legacy_passed(item: &Acceptance) -> bool {
     item.status == AcceptanceStatus::Passed
         && item.validation.status == ValidationStatus::Pending
         && item.validation.receipts.is_empty()
