@@ -1271,7 +1271,6 @@ async fn run_agent(
             &mut messages,
             &mut summary,
             &policy,
-            0,
             true,
         )
         .await;
@@ -1450,16 +1449,16 @@ async fn run_agent(
             )
             .await;
         }
-        // Compaction gate. The provider's own prompt size is the honest
-        // measurement — it includes the system block and the tool schemas the
-        // estimate cannot see.
+        // Compaction gate. History only: the provider's full request size
+        // is observed for the diary trigger below, but the gate must use
+        // what compaction can actually remove — otherwise a big fixed
+        // prefix fires futile compactions every turn.
         if let Some((before, after, summarized)) = compact_history(
             &provider,
             &model_id,
             &mut messages,
             &mut summary,
             &policy,
-            prompt_size,
             false,
         )
         .await
@@ -1635,7 +1634,6 @@ async fn run_agent(
                         &mut messages,
                         &mut summary,
                         &policy,
-                        prompt_size,
                         true,
                     )
                     .await
@@ -2457,16 +2455,21 @@ async fn run_agent(
 ///
 /// Returns `(before, after, summarized_by_the_model)` when something changed.
 /// A failure never propagates: stage 4 always leaves a usable transcript.
+///
+/// All stages measure the HISTORY estimate, never the provider's full
+/// request size: the system prefix and tool schemas are fixed costs no
+/// compaction can remove, and gating on them fires futile compactions
+/// every turn (history already fits, trim no-ops, `after == before`).
+/// Real overflows still force-compact via the overflow path.
 async fn compact_history(
     provider: &SharedProvider,
     model_id: &str,
     messages: &mut Vec<Message>,
     summary: &mut Option<String>,
     policy: &context::Policy,
-    observed_prompt: u64,
     force: bool,
 ) -> Option<(u64, u64, bool)> {
-    let measured = |m: &[Message]| observed_prompt.max(context::estimated_tokens(m));
+    let measured = |m: &[Message]| context::estimated_tokens(m);
     let before = measured(messages);
 
     // stage 1: prune. Cheap, lossless in structure, runs every turn.
@@ -2484,13 +2487,9 @@ async fn compact_history(
         );
     }
     if !force && policy.pressure(measured(messages)) == context::Pressure::Ok {
-        // Pressure is fine, so no summarization or hard trim will run. Stage-1
-        // `prune` may have shrunk the chat history, but that never moves
-        // `measured`: it is pinned to `observed_prompt` (the provider's full
-        // prompt size of the *previous* request), which prune cannot change.
-        // Emitting "trimmed: 12k → 12k tok" here would be a no-op that reads as
-        // if context compressed when it did not. Prune is lossy, but its effect
-        // is already visible inline via PRUNE_NOTE on the trimmed tool result,
+        // Pressure is fine, so no summarization or hard trim will run.
+        // Stage-1 `prune` may have shrunk the chat history; its effect is
+        // already visible inline via PRUNE_NOTE on the trimmed tool result,
         // so stay silent instead of lying about the token count.
         return None;
     }
@@ -4121,6 +4120,41 @@ mod effort_tests {
         context::Policy::with_compaction(16_000, 0.08, 2, 0.80, true)
     }
 
+    /// Prod-shape replication: 95 mixed messages (~46k tokens, like the
+    /// T1 shakedown transcript), 1M limit, 0.01 threshold, summary off.
+    /// compact_history must shrink and report — not silently pass through.
+    #[tokio::test]
+    async fn compact_history_trims_a_long_plain_transcript() {
+        let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(Vec::new()),
+        });
+        let policy = context::Policy::with_compaction(1_000_000, 0.08, 4, 0.01, false);
+        assert_eq!(policy.budget(), 10_000);
+        let mut messages = Vec::new();
+        for i in 0..30 {
+            messages.push(Message::new(Role::User, format!("task {i} {}", "q".repeat(500))));
+            messages.push(Message::new(Role::Assistant, format!("work {i}")));
+            messages.push(Message::tool_result(
+                format!("c{i}"),
+                "r".repeat(3000),
+                false,
+            ));
+        }
+        // +5 stray user messages to reach 95 like the field transcript
+        for i in 0..5 {
+            messages.push(Message::new(Role::User, format!("extra {i}")));
+        }
+        assert_eq!(messages.len(), 95);
+        let before = context::estimated_tokens(&messages);
+        assert!(before > 10_000, "fixture must be over budget, got {before}");
+        let mut summary = None;
+        let out = compact_history(&provider, "m", &mut messages, &mut summary, &policy, false)
+            .await
+            .expect("must compact a 4x-over-budget transcript");
+        assert!(out.1 < out.0, "must shrink: {out:?}");
+        assert!(messages.len() < 95, "messages must drop");
+    }
+
     fn count_summaries(messages: &[Message]) -> usize {
         messages
             .iter()
@@ -4140,7 +4174,7 @@ mod effort_tests {
         let policy = summary_policy();
         let mut messages = three_turns();
         let mut summary = None;
-        let out = compact_history(&provider, "m", &mut messages, &mut summary, &policy, 0, false)
+        let out = compact_history(&provider, "m", &mut messages, &mut summary, &policy, false)
             .await
             .expect("pressure is over: must compact");
         assert!(out.0 > out.1, "must shrink: {:?}", out);
@@ -4167,10 +4201,10 @@ mod effort_tests {
         let policy = summary_policy();
         let mut messages = three_turns();
         let mut summary = None;
-        compact_history(&provider, "m", &mut messages, &mut summary, &policy, 0, false).await;
+        compact_history(&provider, "m", &mut messages, &mut summary, &policy, false).await;
         // force again: history is small now, but the old summary message
         // plus kept tail still exceed keep_turns
-        compact_history(&provider, "m", &mut messages, &mut summary, &policy, 0, true).await;
+        compact_history(&provider, "m", &mut messages, &mut summary, &policy, true).await;
         assert_eq!(
             count_summaries(&messages),
             1,
@@ -4189,7 +4223,7 @@ mod effort_tests {
         let policy = summary_policy();
         let mut messages = three_turns();
         let mut summary = None;
-        let out = compact_history(&provider, "m", &mut messages, &mut summary, &policy, 0, false)
+        let out = compact_history(&provider, "m", &mut messages, &mut summary, &policy, false)
             .await
             .expect("pressure is over: must compact");
         assert!(out.2);
