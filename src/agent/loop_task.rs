@@ -1453,6 +1453,12 @@ async fn run_agent(
         // is observed for the diary trigger below, but the gate must use
         // what compaction can actually remove — otherwise a big fixed
         // prefix fires futile compactions every turn.
+        if std::env::var("SQWAI_BENCH_DEBUG").is_ok() {
+            eprintln!(
+                "[compact] calling compact_history, msgs={}",
+                messages.len()
+            );
+        }
         if let Some((before, after, summarized)) = compact_history(
             &provider,
             &model_id,
@@ -2478,12 +2484,19 @@ async fn compact_history(
         *messages = pruned;
     }
     if std::env::var("SQWAI_BENCH_DEBUG").is_ok() {
+        let measured_now = measured(messages);
         eprintln!(
             "bench-debug: pressure check: measured={} budget={} limit={} msgs={}",
-            measured(messages),
+            measured_now,
             policy.budget(),
             policy.context_limit,
             messages.len(),
+        );
+        eprintln!(
+            "[compact] check: measured={} budget={} triggered={}",
+            measured_now,
+            policy.budget(),
+            measured_now >= policy.budget()
         );
     }
     if !force && policy.pressure(measured(messages)) == context::Pressure::Ok {
@@ -2554,6 +2567,9 @@ async fn compact_history(
         eprintln!("bench-debug: stage4 skipped (fits)");
     }
     let after = measured(messages);
+    if std::env::var("SQWAI_BENCH_DEBUG").is_ok() {
+        eprintln!("[compact] done, new msgs={}", messages.len());
+    }
     if after == before && !summarized {
         return None;
     }
