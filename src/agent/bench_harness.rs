@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use crate::agent::loop_task::{
     AgentEvent, AgentInput, FallbackCandidate,
 };
-use crate::providers::{Message, Role, SharedProvider, Usage};
+use crate::providers::{Message, Role, SharedProvider};
 
 const WALL_CAP: Duration = Duration::from_secs(3600);
 const COMPACTION_THRESHOLD: f64 = 0.04;
@@ -41,8 +41,9 @@ pub const T1: TaskSpec = TaskSpec {
     acceptance_cmds: &["cargo test --test engine"],
 };
 
-pub const T2: TaskSpec = TaskSpec {
-    id: "T2",
+/// Used by the matrix runs (T1 shakedown first).
+#[allow(dead_code)]
+pub const T2: TaskSpec = TaskSpec {    id: "T2",
     goal: "rename `get_unchecked` to `get_raw` in `engine`, `cli` and every caller, with no behavior change",
     constraints: &[
         "do not touch `storage/btree.rs` (deprecated)",
@@ -51,6 +52,8 @@ pub const T2: TaskSpec = TaskSpec {
     acceptance_cmds: &["cargo test --test engine"],
 };
 
+/// Used by the matrix runs (T1 shakedown first).
+#[allow(dead_code)]
 pub const T3: TaskSpec = TaskSpec {
     id: "T3",
     goal: "make `cli_batch_persists_every_write` pass without breaking anything else",
@@ -88,13 +91,25 @@ pub struct BenchModel {
 
 /// Real provider from the user's own config. `SQWAI_BENCH_MODEL` picks the
 /// model key, defaulting to the configured last model. `None` → skip the
-/// test (no keys on this machine, e.g. CI).
+/// test (no keys on this machine, e.g. CI). Failures explain themselves on
+/// stderr so a SKIP is never mysterious.
 pub fn bench_model() -> Option<BenchModel> {
-    let cfg = crate::config::Config::load().ok()?;
+    let cfg = crate::config::Config::load()
+        .map_err(|e| eprintln!("bench: cannot load user config: {e}"))
+        .ok()?;
     let key = std::env::var("SQWAI_BENCH_MODEL").unwrap_or_else(|_| cfg.last_model.clone());
-    let mc = cfg.models.get(&key)?.clone();
-    let resolved = cfg.resolve_provider(&mc).ok()?;
-    let provider = crate::providers::create(&resolved).ok()?;
+    eprintln!("bench: using model key `{key}`");
+    let Some(mc) = cfg.models.get(&key).cloned() else {
+        eprintln!("bench: model `{key}` not in config; set SQWAI_BENCH_MODEL to a key from /models");
+        return None;
+    };
+    let resolved = cfg
+        .resolve_provider(&mc)
+        .map_err(|e| eprintln!("bench: cannot resolve provider: {e:#}"))
+        .ok()?;
+    let provider = crate::providers::create(&resolved)
+        .map_err(|e| eprintln!("bench: cannot create provider: {e:#}"))
+        .ok()?;
     Some(BenchModel {
         provider,
         model_id: mc.id.clone(),
@@ -320,7 +335,6 @@ pub struct Score {
     /// goal fidelity + constraint retention stay HUMAN-scored (0/0.5/1):
     /// the report carries the final anchor and answer for the judge
     pub anchor: String,
-    pub final_answer_tail: String,
 }
 
 /// Score a finished run. Acceptance + traps are automatic; goal fidelity
