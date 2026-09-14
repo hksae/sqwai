@@ -2474,6 +2474,15 @@ async fn compact_history(
     if pruned_changed {
         *messages = pruned;
     }
+    if std::env::var("SQWAI_BENCH_DEBUG").is_ok() {
+        eprintln!(
+            "bench-debug: pressure check: measured={} budget={} limit={} msgs={}",
+            measured(messages),
+            policy.budget(),
+            policy.context_limit,
+            messages.len(),
+        );
+    }
     if !force && policy.pressure(measured(messages)) == context::Pressure::Ok {
         // Pressure is fine, so no summarization or hard trim will run. Stage-1
         // `prune` may have shrunk the chat history, but that never moves

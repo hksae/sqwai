@@ -89,6 +89,10 @@ pub fn task_prompt(task: &TaskSpec, baseline: bool) -> String {
     }
     if !baseline {
         out.push_str("Create a plan first, then work through it.\n");
+        out.push_str(
+            "Record the acceptance commands above as plan acceptance items \
+             and verify each with `plan verify` before finishing.\n",
+        );
     }
     out
 }
@@ -214,6 +218,12 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
     let root = fresh_copy(task, &report.arm)?;
     let mut compaction = crate::config::CompactionConfig::default();
     compaction.threshold = compaction_threshold();
+    eprintln!(
+        "bench: context_limit={} threshold={} reserve_branch budget~{}",
+        model.context_limit,
+        compaction.threshold,
+        (model.context_limit as f64 * compaction.threshold) as u64,
+    );
     let input = AgentInput {
         provider: model.provider,
         model_id: model.model_id,
@@ -316,14 +326,41 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
     report.root = root;
     Some(report)
 }
-
 /// Mechanism finish (§8.2, pre-registered): every step closed AND every
 /// acceptance item verified or waived — the `complete` call itself is not
-/// required.
-fn plan_finished(root: &Path) -> bool {    let Ok(Some(plan)) = crate::plan::open_active(root) else {
+/// required. A completed plan counts too (it passed the same gate).
+fn plan_finished(root: &Path) -> bool {
+    if let Ok(Some(plan)) = crate::plan::open_active(root) {
+        return plan_criteria(&plan);
+    }
+    // no active plan: maybe completed (open_active only returns active ones)
+    let dir = root.join(".sqwai").join("plans");
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(plan) = serde_json::from_str::<crate::plan::Plan>(&text) else {
+                continue;
+            };
+            if plan.status == crate::plan::PlanStatus::Completed && plan_criteria(&plan) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn plan_criteria(plan: &crate::plan::Plan) -> bool {
+    // empty acceptance would pass vacuously: the task requires checkable
+    // acceptance, so a plan without any is unfinished by definition
+    if plan.acceptance.is_empty() {
         return false;
-    };
-    let steps_closed = plan.steps.iter().all(|s| {
+    }    let steps_closed = plan.steps.iter().all(|s| {
         matches!(
             s.status,
             crate::plan::StepStatus::Done | crate::plan::StepStatus::Cancelled
