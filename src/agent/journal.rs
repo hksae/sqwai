@@ -844,6 +844,16 @@ impl Journal {
         fields.remove("plan");
         fields.remove("agent");
         fields.remove("kind");
+        // Self-healing counter: several handles append to one file (the
+        // loop writer, fresh opens in plan commits, receipts, undo), each
+        // with its own counter. Without this, two file-advancing appends
+        // from another handle leave this one behind, and its next record
+        // lands BELOW the file tail — poisoning every later open/resync
+        // ("142 after 143", which then blocks plan ops). A cheap look at
+        // the tail (no full scan) keeps every handle monotonic.
+        if let Some(tail) = tail_seq(&self.path) {
+            self.next_seq = self.next_seq.max(tail.saturating_add(1));
+        }
         let seq = self.next_seq;
         let record = Record {
             seq,
@@ -906,6 +916,33 @@ impl Journal {
 
 fn timestamp() -> String {
     Utc::now().to_rfc3339()
+}
+
+/// Sequence number of the last complete record, read from the file tail
+/// without scanning the whole file. Returns `None` when the tail cannot
+/// be decoded (missing/empty file, partial trailing line) — the caller
+/// keeps its own counter then. Bounded read: records are small (summaries
+/// are capped), so the last 8 KiB always hold several complete lines.
+fn tail_seq(path: &Path) -> Option<u64> {
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len == 0 {
+        return None;
+    }
+    use std::io::{Read, Seek, SeekFrom};
+    let window = len.min(8192);
+    file.seek(SeekFrom::End(-(window as i64))).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    text.lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .find_map(|line| {
+            serde_json::from_str::<Record>(line)
+                .ok()
+                .map(|record| record.seq)
+        })
 }
 
 fn last_seq(path: &Path) -> Result<u64> {
@@ -1014,8 +1051,7 @@ mod tests {
     }
 
     #[test]
-    fn appends_monotonic_records_with_host_fields() {
-        let root = root();
+    fn appends_monotonic_records_with_host_fields() {        let root = root();
         let mut journal = Journal::open(&root, "session").unwrap();
         journal.set_attribution(Some("2".into()), Some("plan".into()), "main");
         assert_eq!(
@@ -1037,6 +1073,34 @@ mod tests {
         assert_eq!(records[0].seq, 1);
         assert_eq!(records[1].kind, "tool_result");
         assert_eq!(records[0].step.as_deref(), Some("2"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Several handles, one file (loop writer + fresh opens in plan commits,
+    /// receipts, undo): interleaved appends must stay monotonic, or a later
+    /// `open`/`resync` bails with "142 after 143" and plan ops start failing.
+    #[test]
+    fn interleaved_handles_stay_monotonic() {
+        let root = root();
+        let mut main = Journal::open(&root, "session").unwrap();
+        assert_eq!(main.append("tool_call", json!({})).unwrap(), 1);
+        // another handle advances the file twice behind main's back
+        // (e.g. receipt append + plan commit during verify)
+        let mut other = Journal::open(&root, "session").unwrap();
+        assert_eq!(other.append("note", json!({})).unwrap(), 2);
+        assert_eq!(other.append("plan", json!({})).unwrap(), 3);
+        // main's counter is stale (2) — the append must heal, not reuse
+        assert_eq!(main.append("tool_result", json!({})).unwrap(), 4);
+        let text = fs::read_to_string(main.path()).unwrap();
+        let seqs: Vec<u64> = text
+            .lines()
+            .map(|l| serde_json::from_str::<Record>(l).unwrap().seq)
+            .collect();
+        assert_eq!(seqs, vec![1, 2, 3, 4]);
+        // and a later open/resync sees a clean file
+        let mut reopened = Journal::open(&root, "session").unwrap();
+        assert_eq!(reopened.next_seq(), 5);
+        reopened.resync().unwrap();
         fs::remove_dir_all(root).ok();
     }
 

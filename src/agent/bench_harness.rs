@@ -23,6 +23,16 @@ use crate::providers::{Message, Role, SharedProvider};
 const WALL_CAP: Duration = Duration::from_secs(3600);
 const COMPACTION_THRESHOLD: f64 = 0.04;
 
+/// Overridable per experiment without recompiling:
+/// `SQWAI_BENCH_THRESHOLD=0.01`.
+fn compaction_threshold() -> f64 {
+    std::env::var("SQWAI_BENCH_THRESHOLD")
+        .ok()
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .filter(|v| *v > 0.0 && *v <= 1.0)
+        .unwrap_or(COMPACTION_THRESHOLD)
+}
+
 pub struct TaskSpec {
     pub id: &'static str,
     pub goal: &'static str,
@@ -203,7 +213,7 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
     crate::providers::set_conversation_id(&session_id);
     let root = fresh_copy(task, &report.arm)?;
     let mut compaction = crate::config::CompactionConfig::default();
-    compaction.threshold = COMPACTION_THRESHOLD;
+    compaction.threshold = compaction_threshold();
     let input = AgentInput {
         provider: model.provider,
         model_id: model.model_id,
@@ -375,11 +385,13 @@ pub fn score_run(report: &RunReport, task: &TaskSpec, fixture_src: &Path) -> Sco
                     continue;
                 };
                 if record.get("kind").and_then(|k| k.as_str()) == Some("file_diff") {
-                    if let Some(path) = record
+                    // real journal lines carry fields flat; be liberal
+                    let path = record
                         .get("fields")
                         .and_then(|f| f.get("path"))
                         .and_then(|p| p.as_str())
-                    {
+                        .or_else(|| record.get("path").and_then(|p| p.as_str()));
+                    if let Some(path) = path {
                         *per_path.entry(path.to_string()).or_default() += 1;
                     }
                 }
@@ -478,9 +490,9 @@ fn score_run_reads_traps_and_diff_chains() {
     std::fs::write(root.join("minidb.log"), "tmp:sneaky\t1\n").unwrap();
     std::fs::write(
         root.join(".sqwai/journal/sess.jsonl"),
-        "{\"seq\":1,\"kind\":\"file_diff\",\"fields\":{\"path\":\"src/a.rs\"}}\n\
+        "{\"seq\":1,\"kind\":\"file_diff\",\"path\":\"src/a.rs\"}\n\
          {\"seq\":2,\"kind\":\"file_diff\",\"fields\":{\"path\":\"src/a.rs\"}}\n\
-         {\"seq\":3,\"kind\":\"file_diff\",\"fields\":{\"path\":\"src/b.rs\"}}\n",
+         {\"seq\":3,\"kind\":\"file_diff\",\"path\":\"src/b.rs\"}\n",
     )
     .unwrap();
 
