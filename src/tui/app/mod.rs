@@ -1876,15 +1876,18 @@ impl App {
         // as if work happened; say it fits instead
         if !summarized && before == after {
             self.status(
-                &format!("context already fits: {} tok, nothing dropped", fmt_k(before)),
+                &format!("history already fits: {} tok, nothing dropped", fmt_k(before)),
                 StatusKind::Info,
             );
             return;
         }
         let verb = if summarized { "summarized" } else { "trimmed" };
+        // before/after are the HISTORY estimate, not the status-bar context
+        // (which adds system + tool schemas) — label them so the numbers
+        // match something the user can verify
         self.status(
             &format!(
-                "context compacted ({verb}): {} → {} tok",
+                "history compacted ({verb}): {} → {} tok",
                 fmt_k(before),
                 fmt_k(after)
             ),
