@@ -2500,6 +2500,14 @@ async fn compact_history(
     let older: Vec<Message> = older.to_vec();
     let keep: Vec<Message> = keep.to_vec();
     let mut summarized = false;
+    let debug = std::env::var("SQWAI_BENCH_DEBUG").is_ok();
+    if debug {
+        eprintln!(
+            "bench-debug: stages: older={} summary_enabled={}",
+            older.len(),
+            policy.summary_enabled,
+        );
+    }
     if !older.is_empty() && policy.summary_enabled {
         let request = ChatRequest {
             model_id: model_id.to_string(),
@@ -2532,7 +2540,18 @@ async fn compact_history(
     // stage 4: still too big — drop the oldest turns outright
     if policy.pressure(measured(messages)) != context::Pressure::Ok {
         let budget = policy.budget();
+        let before_len = messages.len();
         *messages = context::hard_trim(messages, budget);
+        if debug {
+            eprintln!(
+                "bench-debug: stage4: {} -> {} msgs (budget {})",
+                before_len,
+                messages.len(),
+                budget,
+            );
+        }
+    } else if debug {
+        eprintln!("bench-debug: stage4 skipped (fits)");
     }
     let after = measured(messages);
     if after == before && !summarized {
