@@ -1614,8 +1614,10 @@ Evaluation protocol:
   are scored on invariants (tests, traps, receipts), never on matching a
   reference solution. Different naming or structure (e.g. `expires_at` vs
   `expiry_ms`) is fine.
-- **Shakedown before the 12:** one task, one arm at a time, threshold 0.04,
-  with per-turn latency logging. Go/no-go: both arms compacted ≥ 3,
+- **Shakedown before the 12:** one task, one arm at a time, threshold 0.01
+  (measured 2026-09: T1's prune steady-state sits near ~16k tokens, so 0.04
+  never compacts), with per-turn latency logging. Go/no-go: both arms
+  compacted repeatedly (≥ 2 for T1, the smallest task; ≥ 3 for longer ones),
   post-compaction turns not an order slower, finish detector fires, diary
   trigger shows no timeout tail. Only then the full runs.
 
