@@ -363,7 +363,12 @@ fn plan_criteria(plan: &crate::plan::Plan) -> bool {
     }    let steps_closed = plan.steps.iter().all(|s| {
         matches!(
             s.status,
-            crate::plan::StepStatus::Done | crate::plan::StepStatus::Cancelled
+            crate::plan::StepStatus::Done
+                | crate::plan::StepStatus::Cancelled
+                // waiver (pre-registered): a step blocked with rationale while
+                // acceptance is green is honest evidence discipline, not an
+                // open end — the `complete` ritual must not fail the run (§8.2)
+                | crate::plan::StepStatus::Blocked
         )
     });
     let acceptance_ok = plan.acceptance.iter().all(|a| {
@@ -564,5 +569,57 @@ fn score_run_reads_traps_and_diff_chains() {
     );
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&src);
+}
+
+#[test]
+fn plan_criteria_waives_honest_blocks_but_not_open_steps() {
+    // waiver (pre-registered): a step blocked with rationale while
+    // acceptance is green is evidence discipline, not an open end.
+    let plan_with = |steps: &str, acceptance: &str| {
+        serde_json::from_str::<crate::plan::Plan>(&format!(
+            r#"{{"version":1,"id":"p","status":"active","created":"t",
+                "goal":{{"text":"g","source":"user","created":"t"}},
+                "budget":{{"tokens":0,"limit":0}},"revision":1,
+                "steps":[{steps}],"acceptance":[{acceptance}]}}"#
+        ))
+        .expect("test plan must parse")
+    };
+    let done = r#"{"id":"1","title":"a","status":"done"}"#;
+    let blocked = r#"{"id":"2","title":"b","status":"blocked"}"#;
+    let open = r#"{"id":"2","title":"b","status":"in_progress"}"#;
+    let passed =
+        r#"{"text":"cmd: true","status":"pending","validation":{"status":"passed"}}"#;
+    assert!(plan_criteria(&plan_with(
+        &format!("{done},{blocked}"),
+        passed
+    )));
+    assert!(!plan_criteria(&plan_with(
+        &format!("{done},{open}"),
+        passed
+    )));
+    // empty acceptance passes vacuously — still unfinished by definition
+    assert!(!plan_criteria(&plan_with(done, "")));
+}
+
+#[test]
+fn plan_finished_accepts_done_plus_honest_block() {
+    // the mechanism+short shakedown shape: 3 done, 1 blocked with
+    // rationale, acceptance passed — finish, not failure.
+    let root = std::env::temp_dir().join(format!("sqwai-bench-finish-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".sqwai/plans")).unwrap();
+    std::fs::write(
+        root.join(".sqwai/plans/p.json"),
+        r#"{"version":1,"id":"p","status":"active","created":"t",
+            "goal":{"text":"g","source":"user","created":"t"},
+            "budget":{"tokens":0,"limit":0},"revision":1,
+            "steps":[{"id":"1","title":"a","status":"done"},
+                     {"id":"2","title":"b","status":"blocked"}],
+            "acceptance":[{"text":"cmd: true","status":"pending",
+                           "validation":{"status":"passed"}}]}"#,
+    )
+    .unwrap();
+    assert!(plan_finished(&root));
+    let _ = std::fs::remove_dir_all(&root);
 }
 
