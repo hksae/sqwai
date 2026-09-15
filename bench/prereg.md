@@ -96,3 +96,27 @@ Retuning threshold/model/gates, adding runs to replace ugly ones,
 peeking at matrix scores to adjust arms. Variance handling only: 5
 repeats iff variance demands it (§8.2), decided from CIs, not from
 wishes. Amendments go here, dated, before the runs they affect.
+
+## Amendment 1 (2026-09-15, pre-matrix, from T2/T3 calibration)
+
+- A1 — T3 acceptance `cargo test` → `cargo test --test cli_batch` +
+  `cargo test --test engine`. Reason: the full suite also runs cli_ttl
+  (T1's gap), unsatisfiable on a pristine fixture under T3's own
+  "do not change the log format". The calibration run did everything
+  right (fixed batch, diagnosed the rest as pre-existing, held all
+  constraints) and still scored red — the spec was wrong, not the agent.
+  `engine` stays as the "without breaking anything else" guard.
+- A2 — per-task windows, arms sharing the task's window: T1 0.01,
+  T2/T3 0.005 (`SQWAI_BENCH_THRESHOLD` env still wins for probing).
+  Reason: T2/T3 peak near ~8k tokens, below T1's 10k budget — a uniform
+  window compacts them 0 times (measured both). Comparisons stay fair:
+  same window, both arms, within each task.
+- A3 — matrix gates: compactions ≥ 1 + arm finish rule
+  (mechanism: `plan_finished` incl. blocked waiver; baseline: claim).
+  Acceptance/traps are DATA, not gates. Repeats: each matrix test run
+  2× (fresh fixture copy every run); no run replacement.
+- A4 — machine scores append to `bench/<task>/<arm>.eval.jsonl`
+  (`write_eval`); human fidelity/retention filled by hand afterwards.
+- Specs frozen as amended. T2 spec: rename, explicit btree ban, solved
+  clean in 38 tools at calibration. T3 spec: batch fix, explicit btree
+  ban, no-log-format-change.

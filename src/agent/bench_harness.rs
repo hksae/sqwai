@@ -21,16 +21,23 @@ use crate::agent::loop_task::{
 use crate::providers::{Message, Role, SharedProvider};
 
 const WALL_CAP: Duration = Duration::from_secs(3600);
-const COMPACTION_THRESHOLD: f64 = 0.04;
 
-/// Overridable per experiment without recompiling:
-/// `SQWAI_BENCH_THRESHOLD=0.01`.
-fn compaction_threshold() -> f64 {
-    std::env::var("SQWAI_BENCH_THRESHOLD")
+/// Pre-registered per-task windows (amendment 2026-09-15): tasks differ in
+/// size, so a uniform window leaves the small ones uncompacted (T2/T3 peak
+/// near ~8k tokens, below T1's 10k budget). Arms share the task's window,
+/// so comparisons stay fair. Explicit env always wins (probing).
+fn compaction_threshold(task: &TaskSpec) -> f64 {
+    if let Some(v) = std::env::var("SQWAI_BENCH_THRESHOLD")
         .ok()
         .and_then(|raw| raw.parse::<f64>().ok())
         .filter(|v| *v > 0.0 && *v <= 1.0)
-        .unwrap_or(COMPACTION_THRESHOLD)
+    {
+        return v;
+    }
+    match task.id {
+        "T2" | "T3" => 0.005,
+        _ => 0.01,
+    }
 }
 
 pub struct TaskSpec {
@@ -72,7 +79,10 @@ pub const T3: TaskSpec = TaskSpec {
         "do not change the log format",
         "do not touch `storage/btree.rs`",
     ],
-    acceptance_cmds: &["cargo test"],
+    // calibration finding: full `cargo test` also runs cli_ttl (T1's gap),
+    // unsatisfiable on a pristine fixture under "do not change the log
+    // format". Target suite + engine regression guard instead.
+    acceptance_cmds: &["cargo test --test cli_batch", "cargo test --test engine"],
 };
 
 /// Prompt text per arm. Same goal/constraints/acceptance; only the plan
@@ -217,7 +227,7 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
     crate::providers::set_conversation_id(&session_id);
     let root = fresh_copy(task, &report.arm)?;
     let mut compaction = crate::config::CompactionConfig::default();
-    compaction.threshold = compaction_threshold();
+    compaction.threshold = compaction_threshold(task);
     eprintln!(
         "bench: context_limit={} threshold={} reserve_branch budget~{}",
         model.context_limit,
@@ -476,6 +486,46 @@ pub fn print_report(report: &RunReport, score: &Score) {
     println!("HUMAN: goal fidelity (0/0.5/1) ___  constraint retention (0..1) ___");
 }
 
+/// Append a machine-score line for the matrix analysis
+/// (`bench/<task>/<arm>.eval.jsonl`). Human fidelity/retention scores are
+/// added by hand afterwards; repeats share the file, told apart by
+/// session_id + timestamp.
+pub fn write_eval(report: &RunReport, score: &Score) {
+    let dir = std::path::Path::new("bench").join(&report.task);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let line = serde_json::json!({
+        "ts": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs()).unwrap_or(0),
+        "session": report.session_id,
+        "wall_secs": report.wall_secs,
+        "tool_calls": report.tool_calls,
+        "compactions": report.compactions,
+        "prompt_tokens": report.prompt_tokens,
+        "completion_tokens": report.completion_tokens,
+        "cached_tokens": report.cached_tokens,
+        "plan_finished": report.plan_finished,
+        "claimed_done": report.claimed_done,
+        "timed_out": report.timed_out,
+        "error": report.error,
+        "acceptance_green": score.acceptance_green,
+        "traps_ok": score.traps_ok,
+        "diffs_per_path": score.diffs_per_path,
+        "latencies": report.latencies,
+        "fidelity": null, "retention": null,
+    });
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(format!("{}.eval.jsonl", report.arm)))
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 /// Shakedown (§8.2): one task, mechanism arm, threshold 0.01 (T1's prune
 /// steady-state sits near ~16k tokens, so the spec's 0.04 never compacts).
 /// Go/no-go: compactions ≥ 2 (T1 is the smallest task; longer ones keep ≥ 3),
@@ -650,5 +700,128 @@ async fn bench_t3_calibration() {
     let fixture_src = fixture_source();
     let score = score_run(&report, &T3, &fixture_src);
     print_report(&report, &score);
+}
+
+/// Matrix (§8.2, pre-registered): T1, mechanism arm. Run twice; each run is
+/// an independent repeat (fresh fixture copy, own eval line). Gates: ≥1
+/// compaction + spec finish rule. Acceptance/traps are DATA, not gates —
+/// a red acceptance on one arm is a finding, not a rerun trigger.
+#[tokio::test]
+#[ignore]
+async fn bench_t1_mechanism() {
+    let Some(report) = run_arm(&T1, false, "matrix").await else {
+        eprintln!("SKIP: no bench provider (config/model)");
+        return;
+    };
+    let fixture_src = fixture_source();
+    let score = score_run(&report, &T1, &fixture_src);
+    print_report(&report, &score);
+    write_eval(&report, &score);
+    assert!(
+        report.compactions >= 1,
+        "matrix run must compact, got {}",
+        report.compactions
+    );
+    assert!(report.plan_finished, "mechanism must finish T1: {report:?}");
+}
+
+/// Matrix: T1, baseline arm. Same data-not-gates contract; finish by claim.
+#[tokio::test]
+#[ignore]
+async fn bench_t1_baseline() {
+    let Some(report) = run_arm(&T1, true, "matrix").await else {
+        eprintln!("SKIP: no bench provider (config/model)");
+        return;
+    };
+    let fixture_src = fixture_source();
+    let score = score_run(&report, &T1, &fixture_src);
+    print_report(&report, &score);
+    write_eval(&report, &score);
+    assert!(
+        report.compactions >= 1,
+        "matrix run must compact, got {}",
+        report.compactions
+    );
+    assert!(report.claimed_done, "baseline must claim T1: {report:?}");
+}
+
+/// Matrix: T2, mechanism arm.
+#[tokio::test]
+#[ignore]
+async fn bench_t2_mechanism() {
+    let Some(report) = run_arm(&T2, false, "matrix").await else {
+        eprintln!("SKIP: no bench provider (config/model)");
+        return;
+    };
+    let fixture_src = fixture_source();
+    let score = score_run(&report, &T2, &fixture_src);
+    print_report(&report, &score);
+    write_eval(&report, &score);
+    assert!(
+        report.compactions >= 1,
+        "matrix run must compact, got {}",
+        report.compactions
+    );
+    assert!(report.plan_finished, "mechanism must finish T2: {report:?}");
+}
+
+/// Matrix: T2, baseline arm.
+#[tokio::test]
+#[ignore]
+async fn bench_t2_baseline() {
+    let Some(report) = run_arm(&T2, true, "matrix").await else {
+        eprintln!("SKIP: no bench provider (config/model)");
+        return;
+    };
+    let fixture_src = fixture_source();
+    let score = score_run(&report, &T2, &fixture_src);
+    print_report(&report, &score);
+    write_eval(&report, &score);
+    assert!(
+        report.compactions >= 1,
+        "matrix run must compact, got {}",
+        report.compactions
+    );
+    assert!(report.claimed_done, "baseline must claim T2: {report:?}");
+}
+
+/// Matrix: T3, mechanism arm.
+#[tokio::test]
+#[ignore]
+async fn bench_t3_mechanism() {
+    let Some(report) = run_arm(&T3, false, "matrix").await else {
+        eprintln!("SKIP: no bench provider (config/model)");
+        return;
+    };
+    let fixture_src = fixture_source();
+    let score = score_run(&report, &T3, &fixture_src);
+    print_report(&report, &score);
+    write_eval(&report, &score);
+    assert!(
+        report.compactions >= 1,
+        "matrix run must compact, got {}",
+        report.compactions
+    );
+    assert!(report.plan_finished, "mechanism must finish T3: {report:?}");
+}
+
+/// Matrix: T3, baseline arm.
+#[tokio::test]
+#[ignore]
+async fn bench_t3_baseline() {
+    let Some(report) = run_arm(&T3, true, "matrix").await else {
+        eprintln!("SKIP: no bench provider (config/model)");
+        return;
+    };
+    let fixture_src = fixture_source();
+    let score = score_run(&report, &T3, &fixture_src);
+    print_report(&report, &score);
+    write_eval(&report, &score);
+    assert!(
+        report.compactions >= 1,
+        "matrix run must compact, got {}",
+        report.compactions
+    );
+    assert!(report.claimed_done, "baseline must claim T3: {report:?}");
 }
 
