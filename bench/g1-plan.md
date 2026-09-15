@@ -24,6 +24,14 @@ expected, strength of delta may differ.
 - Count: 3 (keep G0 shape); 2 acceptable if tasks are big.
 - Must contain non-standard invariants (not derivable from practice),
   or standard prohibitions survive on habit and measure nothing (H3).
+  Definition (locked): an invariant that follows from NEITHER the code,
+  NOR practice, NOR the README — something the user said once in chat
+  that cannot be derived from the repository. It can only be retained,
+  never reconstructed. Example: "don't touch btree" is standard (the
+  deprecation is in the code); "no BTreeMap in new files, HashMap only —
+  we had a perf incident last quarter" is non-standard. Admission test
+  at task-design time: "can the model derive this without being told?"
+  Yes — reject as G1 material.
 
 ## Matrix
 
