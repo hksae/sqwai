@@ -81,20 +81,67 @@ def run_one(cargo_bin: str, task: str, arm: str, test: str, rep: int) -> bool:
            "--test-threads=1", "--nocapture"]
     print(f"[{stamp}] {task}/{arm} repeat {rep}: {' '.join(cmd)}", flush=True)
     print(f"[{stamp}] log: {log_path}", flush=True)
+    HEARTBEAT = 60
+    POLL = 5
+    start = time.time()
+    last_hb = start
+    offset = 0
+    last_state = ""
     try:
         with open(log_path, "w", encoding="utf-8") as log:
             log.write(f"$ {' '.join(cmd)}\n\n")
             log.flush()
-            proc = subprocess.run(
-                cmd, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT,
-                timeout=RUN_TIMEOUT,
+            proc = subprocess.Popen(
+                cmd, cwd=ROOT, env=env,
+                stdout=log, stderr=subprocess.STDOUT,
             )
-        ok = proc.returncode == 0
-        print(f"[{task}/{arm} #{rep}] {'PASS' if ok else 'FAIL rc=' + str(proc.returncode)}", flush=True)
-        return ok
-    except subprocess.TimeoutExpired:
-        print(f"[{task}/{arm} #{rep}] TIMEOUT after {RUN_TIMEOUT // 60} min (see log)", flush=True)
+            while True:
+                try:
+                    rc = proc.wait(timeout=POLL)
+                    print(f"[{task}/{arm} #{rep}] "
+                          f"{'PASS' if rc == 0 else 'FAIL rc=' + str(rc)}", flush=True)
+                    return rc == 0
+                except subprocess.TimeoutExpired:
+                    pass
+                elapsed = int(time.time() - start)
+                if elapsed > RUN_TIMEOUT:
+                    proc.kill()
+                    print(f"[{task}/{arm} #{rep}] TIMEOUT after "
+                          f"{RUN_TIMEOUT // 60} min (see log)", flush=True)
+                    return False
+                offset, last_state = watch_log(
+                    log_path, offset, task, arm, rep, elapsed, last_state)
+                if time.time() - last_hb >= HEARTBEAT:
+                    last_hb = time.time()
+                    try:
+                        kb = os.path.getsize(log_path) // 1024
+                    except OSError:
+                        kb = 0
+                    print(f"[{task}/{arm} #{rep}] +{elapsed}s alive, "
+                          f"log {kb}KB{last_state}", flush=True)
+    except OSError as e:
+        print(f"[{task}/{arm} #{rep}] LAUNCH FAIL: {e}", flush=True)
         return False
+
+
+def watch_log(path: str, offset: int, task: str, arm: str, rep: int,
+              elapsed: int, last_state: str):
+    """Print fresh compaction events; track last measured/msgs. Best-effort."""
+    import re
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            f.seek(offset)
+            new = f.read()
+            offset = f.tell()
+    except OSError:
+        return offset, last_state
+    for line in new.splitlines():
+        if "triggered=true" in line:
+            print(f"[{task}/{arm} #{rep}] +{elapsed}s {line.strip()[:110]}", flush=True)
+        m = re.search(r"measured=(\d+).*msgs=(\d+)", line)
+        if m:
+            last_state = f", measured={m.group(1)} msgs={m.group(2)}"
+    return offset, last_state
 
 
 def summary() -> None:
