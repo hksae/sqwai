@@ -7,9 +7,10 @@
 .workbuddy-ai/
 
 *.log
+__pycache__/
+*.pyc
 *.tmp
-*.bak
-*.swp
+*.bak*.swp
 *.swo
 *~
 *.rs.bk
