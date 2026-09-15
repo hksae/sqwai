@@ -150,6 +150,10 @@ impl ResponsesProvider {
             .user_agent(super::USER_AGENT)
             .connect_timeout(std::time::Duration::from_secs(15))
             .read_timeout(std::time::Duration::from_secs(180))
+            // no total timeout used to hang a stalled-headers POST forever,
+            // indistinguishable from a throttle. 10 min kills the stall;
+            // the turn retry (retryable class) then reports it honestly.
+            .timeout(std::time::Duration::from_secs(600))
             .build()?;
         let base = p.base_url.trim_end_matches('/').to_string();
         let url = if base.ends_with("/responses") {

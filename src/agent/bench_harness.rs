@@ -312,6 +312,15 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
             AgentEvent::Compaction { .. } => {
                 report.compactions += 1;
             }
+            // retry silence killed a whole evening of debugging: a throttled
+            // run looks exactly like a hung one. Always visible in bench.
+            AgentEvent::Retry {
+                attempt,
+                delay_secs,
+                error,
+            } => {
+                eprintln!("[bench-retry] attempt={attempt} delay={delay_secs}s err={error}");
+            }
             AgentEvent::Completed(Ok(_)) => break,
             AgentEvent::Completed(Err(e)) => {
                 report.error = Some(e);

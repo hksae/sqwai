@@ -22,6 +22,9 @@ impl OpenAiProvider {
             .user_agent(super::USER_AGENT)
             .connect_timeout(std::time::Duration::from_secs(15))
             .read_timeout(std::time::Duration::from_secs(180))
+            // same stall guard as the Responses client: a headers stall
+            // must fail loudly after 10 min, never hang the run silently.
+            .timeout(std::time::Duration::from_secs(600))
             .build()?;
         Ok(Self {
             http,
