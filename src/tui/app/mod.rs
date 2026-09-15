@@ -981,7 +981,6 @@ impl App {
                             turn_user,
                             &mut remaining_summaries,
                             anchored_mode,
-                            true,
                         );
                     }
                     previous_user = Some(message_index);
@@ -997,7 +996,6 @@ impl App {
                             turn_user,
                             &mut remaining_summaries,
                             anchored_mode,
-                            false,
                         );
                     }
                     self.push_segment(Segment::Assistant {
@@ -1058,7 +1056,6 @@ impl App {
                 turn_user,
                 &mut remaining_summaries,
                 anchored_mode,
-                true,
             );
         }
         // The panel is derived from the active structured plan; legacy session
@@ -1067,14 +1064,13 @@ impl App {
 
     /// Close a restored work run `[seg_start..]` into an `ActivityGroup`,
     /// preferring the summary anchored to this turn's user message.
-    /// `failed` groups (stopped turns) restore expanded, like the live UI.
+    /// Restored groups always fold shut, like live-finished ones.
     fn close_restored_group(
         &mut self,
         seg_start: usize,
         turn_user: Option<usize>,
         remaining: &mut Vec<ActivitySummary>,
         anchored_mode: bool,
-        failed: bool,
     ) {
         let answer = self.segments.len();
         let derived = self.build_activity_group((seg_start, answer));
@@ -1094,7 +1090,7 @@ impl App {
             duration_ms: saved.duration_ms,
             errors: saved.errors,
             rejected: saved.rejected,
-            expanded: failed || saved.errors > 0,
+            expanded: false,
             turn_user: saved.user_index.or(turn_user),
         });
     }
@@ -3472,7 +3468,7 @@ impl App {
                     }
                     // fold the finished chat like a main turn; no more rows
                     // land after Done, so the stored indices stay valid
-                    self.finalize_sub_group(id, !ok);
+                    self.finalize_sub_group(id);
                     self.sub_touch_all(id);
                     if matches!(self.cur_menu(), Some(Menu::Subagents)) {
                         self.build_menu_rows();
@@ -4176,8 +4172,9 @@ impl App {
 
     /// Fold one finished child chat into an activity group, like the main
     /// transcript does per turn. Runs once, on SubagentDone, when the chat
-    /// stops changing so the stored indices stay valid.
-    fn finalize_sub_group(&mut self, id: u64, failed: bool) {
+    /// stops changing so the stored indices stay valid. Always collapsed:
+    /// failures surface through the status row, not an open block.
+    fn finalize_sub_group(&mut self, id: u64) {
         let Some(chat) = self.subagent_chats.get(&id) else {
             return;
         };
@@ -4197,23 +4194,22 @@ impl App {
             .map(|t| t.elapsed().as_millis() as u64)
             .unwrap_or(0);
         let mut group = Self::build_activity_group_in(chat, run, duration_ms, None);
-        // like the main transcript: a failed child stays open
-        group.expanded = failed || group.errors > 0;
+        group.expanded = false;
         self.sub_groups.entry(id).or_default().push(group);
     }
 
     /// Freeze the turn that just finished into a group. Called once the
     /// segments are final, so the stored indices stay valid.
-    fn finalize_activity_group(&mut self, turn_failed: bool) {
+    fn finalize_activity_group(&mut self) {
         let Some(run) = self.trailing_work_run() else {
             self.turn_started = None;
             self.live_group_collapsed = false;
             return;
         };
         let mut group = self.build_activity_group(run);
-        // A turn that ended badly stays open: the user must see the failure
-        // instead of a collapsed summary line.
-        group.expanded = turn_failed || group.errors > 0;
+        // the finished answer always folds shut — failures surface through
+        // the turn note / error status row, never an open block.
+        group.expanded = false;
         self.activity_groups.push(group);
         self.turn_started = None;
         self.live_group_collapsed = false;
@@ -4337,7 +4333,6 @@ impl App {
         self.agent = None;
         self.retry_line = None;
         self.prev_turn_ok = matches!(res, Ok(()));
-        let turn_failed = res.is_err();
         let turn_note = match &res {
             Ok(()) => None,
             Err(e) if e == "tui closed" => None,
@@ -4361,7 +4356,7 @@ impl App {
         }
         // Segment indices are stable from here on: the empty-thinking cleanup
         // and the answer backfill above have all run.
-        self.finalize_activity_group(turn_failed);
+        self.finalize_activity_group();
         // Persist the presentation summary only after the group was finalized.
         // Saving earlier lost it across a restart and restored bare tool rows.
         if let Some((text, is_error)) = turn_note

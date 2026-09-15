@@ -448,7 +448,7 @@ mod tests {
     fn activity_group_folds_the_turn_work_and_keeps_the_answer() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         finished_turn(&mut app, true);
-        app.finalize_activity_group(false);
+        app.finalize_activity_group();
 
         assert_eq!(app.activity_groups.len(), 1);
         let g = &app.activity_groups[0];
@@ -480,21 +480,34 @@ mod tests {
     }
 
     #[test]
-    fn failed_turn_leaves_its_activity_group_open() {
+    fn failed_turn_folds_its_activity_group_shut() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         finished_turn(&mut app, false);
-        app.finalize_activity_group(true);
+        app.finalize_activity_group();
 
         let g = &app.activity_groups[0];
         assert_eq!(g.errors, 1);
-        assert!(g.expanded, "a failed turn must not collapse silently");
+        assert!(!g.expanded, "even a failed turn folds shut at finish");
 
         app.rebuild_cache(80);
         let text = rendered(&app);
         assert!(text.contains("1 error"), "error marker missing: {text}");
         assert!(
-            text.contains("read"),
-            "the failed call stays visible: {text}"
+            !text.contains("read"),
+            "the failed call folds away: {text}"
+        );
+        // clicking the header unfolds the block on demand
+        let header = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(GROUP_BASE))
+            .expect("one header row tagged as group 0");
+        app.click(header);
+        assert!(app.activity_groups[0].expanded);
+        app.rebuild_cache(80);
+        assert!(
+            rendered(&app).contains("read"),
+            "unfolded block shows the failed call"
         );
     }
 
@@ -537,7 +550,7 @@ mod tests {
             text: "done".into(),
             live: false,
         });
-        app.finalize_activity_group(false);
+        app.finalize_activity_group();
         // The subagent row is itself a tool call, so it belongs to the run.
         let g = &app.activity_groups[0];
         assert_eq!((g.seg_start, g.seg_end), (1, 4));
@@ -637,14 +650,14 @@ mod tests {
                 flash: None,
             });
         }
-        app.finalize_activity_group(true);
+        app.finalize_activity_group();
 
         assert_eq!(app.activity_groups.len(), 1);
         let g = &app.activity_groups[0];
         assert_eq!((g.seg_start, g.seg_end), (1, 3));
-        assert!(g.expanded, "a failed turn stays open");
+        assert!(!g.expanded, "a failed turn folds shut");
 
-        // and the header folds the block on click
+        // and the header unfolds the block on click
         app.rebuild_cache(80);
         let header = app
             .cache_rowseg
@@ -652,11 +665,11 @@ mod tests {
             .position(|t| *t == Some(GROUP_BASE))
             .expect("header row tagged");
         app.click(header);
-        assert!(!app.activity_groups[0].expanded);
+        assert!(app.activity_groups[0].expanded);
         app.rebuild_cache(80);
         assert!(
-            !rendered(&app).contains("a.rs"),
-            "folded group hides tool rows"
+            rendered(&app).contains("a.rs"),
+            "unfolded group shows tool rows"
         );
     }
 
@@ -667,7 +680,7 @@ mod tests {
     fn activity_groups_never_overlap_previous_ranges() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         finished_turn(&mut app, true);
-        app.finalize_activity_group(false);
+        app.finalize_activity_group();
         // second turn: tools ran, then a provider error with no streamed text
         app.push_segment(Segment::User("again".into()));
         app.push_segment(Segment::Tool {
@@ -682,7 +695,7 @@ mod tests {
             expanded: false,
             flash: None,
         });
-        app.finalize_activity_group(true);
+        app.finalize_activity_group();
 
         assert_eq!(app.activity_groups.len(), 2);
         let (first, second) = (&app.activity_groups[0], &app.activity_groups[1]);
@@ -1135,7 +1148,7 @@ mod tests {
         let (g1, g2) = (&app.activity_groups[0], &app.activity_groups[1]);
         assert_eq!(g1.turn_user, Some(0));
         assert_eq!((g1.calls, g1.errors), (1, 1));
-        assert!(g1.expanded, "a stopped turn's group restores expanded");
+        assert!(!g1.expanded, "a stopped turn's group restores folded");
         assert_eq!(g2.turn_user, Some(2));
         assert_eq!((g2.calls, g2.errors), (2, 0));
         assert!(!g2.expanded);
@@ -2144,7 +2157,7 @@ mod tests {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
         open_sub_chat(&mut app, 7, "completed");
-        app.finalize_sub_group(7, false);
+        app.finalize_sub_group(7);
         let groups = app.sub_groups.get(&7).expect("folded group");
         assert_eq!(groups.len(), 1);
         assert_eq!((groups[0].seg_start, groups[0].seg_end), (1, 3));
@@ -2161,7 +2174,7 @@ mod tests {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
         open_sub_chat(&mut app, 7, "completed");
-        app.finalize_sub_group(7, false);
+        app.finalize_sub_group(7);
         render_to_string(&mut app, 100, 30);
         let abs = app
             .cache_rowseg
@@ -2175,6 +2188,30 @@ mod tests {
         );
         let s = render_to_string(&mut app, 100, 30);
         assert!(s.contains("a.rs"), "tool row is back:\n{s}");
+    }
+
+    #[test]
+    fn close_subagent_view_folds_expanded_child_groups() {
+        use crate::tui::app::view::GROUP_BASE;
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        open_sub_chat(&mut app, 7, "completed");
+        app.finalize_sub_group(7);
+        render_to_string(&mut app, 100, 30);
+        // unfold while viewing, then close the chat
+        let abs = app
+            .cache_rowseg
+            .iter()
+            .position(|t| *t == Some(GROUP_BASE))
+            .expect("header row");
+        app.click(abs);
+        assert!(app.sub_groups[&7][0].expanded);
+        app.close_subagent_view();
+        assert!(
+            !app.sub_groups[&7][0].expanded,
+            "closing the chat folds its groups shut"
+        );
+        assert_eq!(app.active_subagent, None);
     }
 
     #[test]
@@ -5068,6 +5105,45 @@ mod tests {
         }
     }
     #[test]
+    fn running_tool_name_shimmers_like_activity_header() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.push_segment(Segment::User("go".into()));
+        app.push_segment(Segment::Tool {
+            call_id: None,
+            name: "read".into(),
+            args: "a.rs".into(),
+            ok: None,
+            output: String::new(),
+            diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
+            expanded: false,
+            flash: None,
+        });
+        // mid-sweep tick: the wave sits on the name, like the live header
+        app.spinner_tick = crate::tui::shimmer::SHIMMER_PERIOD_TICKS / 4;
+        app.rebuild_cache(80);
+        let row = app
+            .cache_lines
+            .iter()
+            .find(|l| {
+                l.spans.iter().map(|s| s.content.as_ref()).collect::<String>().contains("read")
+                    && l.spans.iter().map(|s| s.content.as_ref()).collect::<String>().contains("a.rs")
+            })
+            .expect("running tool row");
+        let text: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("read"), "name intact: {text}");
+        // the wave splits the name into per-char spans on every path
+        // (static render keeps it one span); the summary "a.rs" rides one
+        // span, so a lone "r" can only come from the split name
+        assert!(
+            row.spans.iter().any(|s| s.content == "r"),
+            "running tool name must split into wave spans: {text}"
+        );
+    }
+
+    #[test]
     fn live_activity_header_shimmers_finished_stays_dim() {
         use super::view::{ActivityGroup, activity_header_line};
         let g = ActivityGroup {
@@ -5774,7 +5850,7 @@ mod tests {
         let (start, end) = app.trailing_work_run().expect("a work run must exist");
         assert!(start <= ask && ask < end, "ask must fold into activity");
         // …and a successful turn folds it collapsed, not below the answer
-        app.finalize_activity_group(false);
+        app.finalize_activity_group();
         let g = app.activity_groups.last().expect("group must be frozen");
         assert!(!g.expanded, "successful turns fold by default");
         assert!(
@@ -6292,9 +6368,10 @@ mod tests {
                 .any(|s| matches!(s, Segment::Assistant { .. }))
         );
 
-        // Activity group is expanded so user sees what happened
+        // Activity group folds shut like any finished turn; the abort
+        // surfaces through the status row, not an open block
         assert_eq!(app.activity_groups.len(), 1);
-        assert!(app.activity_groups[0].expanded);
+        assert!(!app.activity_groups[0].expanded);
     }
 
     #[test]

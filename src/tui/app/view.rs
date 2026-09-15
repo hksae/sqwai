@@ -1805,6 +1805,18 @@ impl App {
                         spans.push(Span::styled(summary, Theme::dim()));
                         spans
                     }
+                    // a running tool shimmers exactly like the live activity
+                    // header: same wave function, same tick — one animation
+                    // everywhere work runs
+                    None if ok.is_none() => {
+                        let mut spans = vec![Span::styled(marker.0, marker.1)];
+                        spans.extend(crate::tui::shimmer::shimmer_spans(
+                            &shown_name,
+                            self.spinner_tick,
+                        ));
+                        spans.push(Span::styled(summary, Theme::dim()));
+                        spans
+                    }
                     None => vec![
                         Span::styled(marker.0, marker.1),
                         Span::styled(shown_name, Theme::tool_head()),
@@ -2655,6 +2667,13 @@ impl App {
             self.sub_stores.insert(id, parked);
             let main = std::mem::take(&mut self.main_store);
             self.load_active_store(main);
+            // a closed chat folds shut: reopening lands on the summary line,
+            // never on stale expanded rows
+            if let Some(groups) = self.sub_groups.get_mut(&id) {
+                for g in groups.iter_mut() {
+                    g.expanded = false;
+                }
+            }
         }
         if let Some((top, follow)) = self.stashed_main_scroll.take() {
             self.view_top = top;

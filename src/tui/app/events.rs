@@ -766,7 +766,9 @@ impl App {
                                     self.dirty = true;
                                 } else {
                                     self.jump_to_bottom_on_typing();
-                                    self.input.input(k);
+                                    if !composer_erase_key(&mut self.input, &k) {
+                                        self.input.input(k);
+                                    }
                                 }
                             } else {
                                 self.form_edit_key(k);
@@ -798,12 +800,16 @@ impl App {
                         }
                         _ if self.is_inline_ask_free() => {
                             self.jump_to_bottom_on_typing();
-                            self.input.input(k);
+                            if !composer_erase_key(&mut self.input, &k) {
+                                self.input.input(k);
+                            }
                         }
                         _ if !self.menu_stack.is_empty() => {}
                         _ => {
                             self.jump_to_bottom_on_typing();
-                            self.input.input(k);
+                            if !composer_erase_key(&mut self.input, &k) {
+                                self.input.input(k);
+                            }
                         }
                     }
                     if matches!(
@@ -1317,6 +1323,61 @@ pub(super) fn select_all(ta: &mut TextArea<'static>) {
     ta.move_cursor(tui_textarea::CursorMove::End);
 }
 
+/// Grapheme-aware erase for the composer: textarea deletes by char, so an
+/// emoji like ❤️ (base + variation selector) takes two Backspaces. Plain
+/// Backspace/Delete strictly inside a line removes the whole grapheme in
+/// one press; line joins and modified keys keep the default behavior.
+/// True = consumed, do not pass the key to textarea.
+pub(super) fn composer_erase_key(ta: &mut TextArea<'static>, k: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::KeyCode;
+    if !k.modifiers.is_empty() {
+        return false;
+    }
+    match k.code {
+        KeyCode::Backspace => erase_grapheme(ta, true),
+        KeyCode::Delete => erase_grapheme(ta, false),
+        _ => false,
+    }
+}
+
+fn erase_grapheme(ta: &mut TextArea<'static>, back: bool) -> bool {
+    use tui_textarea::CursorMove;
+    use unicode_segmentation::UnicodeSegmentation;
+    let (row, col) = ta.cursor();
+    let Some(line) = ta.lines().get(row).cloned() else {
+        return false;
+    };
+    let len: usize = line.chars().count();
+    // grapheme boundaries in char counts, starting at 0
+    let mut bounds = vec![0usize];
+    let mut acc = 0usize;
+    for g in line.graphemes(true) {
+        acc += g.chars().count();
+        bounds.push(acc);
+    }
+    if back {
+        if col == 0 {
+            return false; // line join: default
+        }
+        // largest boundary strictly left of the cursor
+        let s = bounds.iter().rev().find(|b| **b < col).copied().unwrap_or(0);
+        let k = col - s;
+        for _ in 0..k {
+            ta.move_cursor(CursorMove::Back);
+        }
+        ta.delete_str(k);
+        true
+    } else {
+        if col >= len {
+            return false; // line join: default
+        }
+        // smallest boundary strictly right of the cursor
+        let e = bounds.iter().find(|b| **b > col).copied().unwrap_or(len);
+        ta.delete_str(e - col);
+        true
+    }
+}
+
 pub(super) fn handle_text_combo(ta: &mut TextArea<'static>, k: crossterm::event::KeyEvent) -> bool {
     use crossterm::event::{KeyCode, KeyModifiers};
     use tui_textarea::CursorMove;
@@ -1364,6 +1425,55 @@ pub(super) fn handle_text_combo(ta: &mut TextArea<'static>, k: crossterm::event:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tui_textarea::CursorMove;
+
+    fn composer_text(lines: &[&str]) -> TextArea<'static> {
+        TextArea::new(lines.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn backspace_erases_emoji_grapheme_in_one_press() {
+        // ❤️ is base + variation selector: two chars, one glyph
+        let mut ta = composer_text(&["a❤️b"]);
+        ta.move_cursor(CursorMove::End);
+        assert!(erase_grapheme(&mut ta, true));
+        assert_eq!(ta.lines(), &["a❤️"]);
+        assert_eq!(ta.cursor(), (0, 3));
+        assert!(erase_grapheme(&mut ta, true));
+        assert_eq!(ta.lines(), &["a"]);
+    }
+
+    #[test]
+    fn backspace_erases_zwj_family_in_one_press() {
+        let mut ta = composer_text(&["x👨‍👩‍👧"]);
+        ta.move_cursor(CursorMove::End);
+        assert!(erase_grapheme(&mut ta, true));
+        assert_eq!(ta.lines(), &["x"]);
+    }
+
+    #[test]
+    fn backspace_ascii_unchanged_and_edges_pass_through() {
+        let mut ta = composer_text(&["ab"]);
+        ta.move_cursor(CursorMove::End);
+        assert!(erase_grapheme(&mut ta, true));
+        assert_eq!(ta.lines(), &["a"]);
+        // line start: join keeps the default
+        ta.move_cursor(CursorMove::Head);
+        assert!(!erase_grapheme(&mut ta, true));
+        assert_eq!(ta.lines(), &["a"]);
+    }
+
+    #[test]
+    fn delete_forward_erases_grapheme() {
+        let mut ta = composer_text(&["a❤️b"]);
+        ta.move_cursor(CursorMove::Forward);
+        assert!(erase_grapheme(&mut ta, false));
+        assert_eq!(ta.lines(), &["ab"]);
+        assert_eq!(ta.cursor(), (0, 1));
+        // end of line: join keeps the default
+        ta.move_cursor(CursorMove::End);
+        assert!(!erase_grapheme(&mut ta, false));
+    }
 
     #[test]
     fn split_native_paste_events_are_consumed_without_submission() {

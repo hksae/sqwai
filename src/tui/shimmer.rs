@@ -24,8 +24,9 @@ pub const SHIMMER_PERIOD_TICKS: usize = 40;
 /// One-shot finish-wave length for tool rows: green/red sweep, then static.
 pub const FLASH_MS: u64 = 700;
 
-/// Band base (outside the wave) and crest, Codex defaults for unknown palettes.
-const BASE_RGB: (u8, u8, u8) = (128, 128, 128);
+/// Band base (outside the wave) and crest. Base sits high (180) so the
+/// trough reads bright, not muddy, on dark terminals; the crest still pops.
+const BASE_RGB: (u8, u8, u8) = (180, 180, 180);
 const CREST_RGB: (u8, u8, u8) = (255, 255, 255);
 
 /// Linear blend between two RGB colors, like Codex `color::blend`.
@@ -338,13 +339,13 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert!(
-            fg_at(0).iter().all(|fg| *fg == Some(Color::Rgb(128, 128, 128))),
+            fg_at(0).iter().all(|fg| *fg == Some(Color::Rgb(180, 180, 180))),
             "band starts off the text: all base"
         );
         assert!(
             fg_at(SHIMMER_PERIOD_TICKS / 4)
                 .iter()
-                .any(|fg| *fg != Some(Color::Rgb(128, 128, 128))),
+                .any(|fg| *fg != Some(Color::Rgb(180, 180, 180))),
             "band must brighten the text mid-sweep"
         );
         assert!(
@@ -395,7 +396,7 @@ mod tests {
         let dim = shimmer_pulse_rgb("Working", 0.0);
         assert!(
             dim.iter()
-                .all(|s| s.style.fg == Some(Color::Rgb(128, 128, 128))),
+                .all(|s| s.style.fg == Some(Color::Rgb(180, 180, 180))),
             "t=0 is all base"
         );
         let crest = shimmer_pulse_rgb("Working", 1.0);

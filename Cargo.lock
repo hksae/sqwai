@@ -2458,6 +2458,7 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "tui-textarea",
+ "unicode-segmentation",
  "unicode-width 0.2.0",
  "uuid",
  "zstd",
