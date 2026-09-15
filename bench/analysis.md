@@ -101,6 +101,9 @@ only cost discriminates.
 - **Restricted summary (§3.3.2, ≤300 tok, "not in the plan") remains
   unbuilt and untested** — short is a full 2048 summary. Build before G1:
   the only mechanism aimed directly at the found hole, cheaper than full.
+  (Post-matrix note 2026-09-16: built — stage-2 now uses the restricted
+  prompt capped at 300 tokens; the matrix above was measured on full
+  summaries, that record stands.)
 - **G1 needs a second, mid-tier model (mandatory)**: if no delta appears
   there under pressure either, the thesis narrows to predictability only.
 - **Kill the `tmp:` trap half**: root `minidb.log` is never created (CLI

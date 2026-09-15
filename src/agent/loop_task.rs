@@ -23,10 +23,6 @@ use crate::agent::tools::{self, ToolCtx};
 use crate::agent::{checkpoints, safety};
 use crate::plan;
 
-/// Output token cap for the summarization request. It only has to be long
-/// enough for a dense summary; anything more wastes the context we just freed.
-const SUMMARY_MAX_TOKENS: u32 = 2_048;
-
 #[derive(Debug, Clone)]
 pub struct AskOption {
     pub label: String,
@@ -1266,6 +1262,7 @@ async fn run_agent(
             let _ = writer.append("compaction", serde_json::json!({"phase": "begin"}));
         }
         let message_count_before = messages.len();
+        let plan_hint = plan_hint_for_summary(&root, &session_id);
         let outcome = compact_history(
             &provider,
             &model_id,
@@ -1273,6 +1270,7 @@ async fn run_agent(
             &mut summary,
             &policy,
             true,
+            &plan_hint,
         )
         .await;
         if let Some((before, after, summarized)) = outcome.as_ref()
@@ -1464,6 +1462,7 @@ async fn run_agent(
             );
         }
         let msgs_before = messages.len();
+        let plan_hint = plan_hint_for_summary(&root, &session_id);
         if let Some((before, after, summarized)) = compact_history(
             &provider,
             &model_id,
@@ -1471,6 +1470,7 @@ async fn run_agent(
             &mut summary,
             &policy,
             false,
+            &plan_hint,
         )
         .await
         {
@@ -1649,6 +1649,7 @@ async fn run_agent(
                 if failure.class == Some(ErrorClass::ContextOverflow) && !compacted_for_overflow {
                     compacted_for_overflow = true;
                     let overflow_msgs_before = messages.len();
+                    let overflow_plan_hint = plan_hint_for_summary(&root, &session_id);
                     if let Some((before, after, summarized)) = compact_history(
                         &provider,
                         &model_id,
@@ -1656,6 +1657,7 @@ async fn run_agent(
                         &mut summary,
                         &policy,
                         true,
+                        &overflow_plan_hint,
                     )
                     .await
                     {
@@ -2556,6 +2558,23 @@ fn constraint_covers(constraints: &[String], lower_directive: &str) -> bool {
     })
 }
 
+/// Preformatted durable-plan block for the restricted summary (§3.3.2):
+/// the summarizer can only exclude what it can see. Empty when no plan is
+/// active — then every user ask counts as uncovered.
+fn plan_hint_for_summary(root: &std::path::Path, session_id: &str) -> String {
+    let Some(plan) =
+        crate::plan::open_active_for_session(root, Some(session_id)).ok().flatten()
+    else {
+        return String::new();
+    };
+    let mut hint = format!("Goal: {}", plan.goal.text);
+    if !plan.constraints.is_empty() {
+        hint.push_str("\nConstraints:\n- ");
+        hint.push_str(&plan.constraints.join("\n- "));
+    }
+    hint
+}
+
 /// Journal-first compaction record (G1-prep): tokens and messages
 /// before/after, whether a summary was written, and its text
 /// (secret-screened by `append`). The `/compact` path already wrote
@@ -2594,6 +2613,7 @@ async fn compact_history(
     summary: &mut Option<String>,
     policy: &context::Policy,
     force: bool,
+    plan_hint: &str,
 ) -> Option<(u64, u64, bool)> {
     let measured = |m: &[Message]| context::estimated_tokens(m);
     let before = measured(messages);
@@ -2647,11 +2667,11 @@ async fn compact_history(
             system: vec![SystemPart::volatile(context::SUMMARY_SYSTEM)],
             messages: vec![Message::new(
                 Role::User,
-                context::summary_input(&older, summary.as_deref()),
+                context::summary_short_input(&older, summary.as_deref(), plan_hint),
             )],
             effort: None,
             effort_support: Default::default(),
-            max_tokens: Some(SUMMARY_MAX_TOKENS),
+            max_tokens: Some(context::SUMMARY_SHORT_MAX_TOKENS),
             // a summarization request needs no tools
             tools: Vec::new(),
             previous_response_id: None,
@@ -4303,7 +4323,7 @@ mod effort_tests {
         let before = context::estimated_tokens(&messages);
         assert!(before > 10_000, "fixture must be over budget, got {before}");
         let mut summary = None;
-        let out = compact_history(&provider, "m", &mut messages, &mut summary, &policy, false)
+        let out = compact_history(&provider, "m", &mut messages, &mut summary, &policy, false, "")
             .await
             .expect("must compact a 4x-over-budget transcript");
         assert!(out.1 < out.0, "must shrink: {out:?}");
@@ -4332,7 +4352,7 @@ mod effort_tests {
                 false,
             ));
             let before_len = messages.len();
-            if compact_history(&provider, "m", &mut messages, &mut summary, &policy, false).await
+            if compact_history(&provider, "m", &mut messages, &mut summary, &policy, false, "").await
                 .is_some()
             {
                 trims += 1;
@@ -4377,7 +4397,7 @@ mod effort_tests {
                 false,
             ));
             let before_len = messages.len();
-            if compact_history(&provider, "m", &mut messages, &mut summary, &policy, false).await
+            if compact_history(&provider, "m", &mut messages, &mut summary, &policy, false, "").await
                 .is_some()
             {
                 trims += 1;
@@ -4470,7 +4490,7 @@ mod effort_tests {
         let policy = summary_policy();
         let mut messages = three_turns();
         let mut summary = None;
-        let out = compact_history(&provider, "m", &mut messages, &mut summary, &policy, false)
+        let out = compact_history(&provider, "m", &mut messages, &mut summary, &policy, false, "")
             .await
             .expect("pressure is over: must compact");
         assert!(out.0 > out.1, "must shrink: {:?}", out);
@@ -4497,10 +4517,10 @@ mod effort_tests {
         let policy = summary_policy();
         let mut messages = three_turns();
         let mut summary = None;
-        compact_history(&provider, "m", &mut messages, &mut summary, &policy, false).await;
+        compact_history(&provider, "m", &mut messages, &mut summary, &policy, false, "").await;
         // force again: history is small now, but the old summary message
         // plus kept tail still exceed keep_turns
-        compact_history(&provider, "m", &mut messages, &mut summary, &policy, true).await;
+        compact_history(&provider, "m", &mut messages, &mut summary, &policy, true, "").await;
         assert_eq!(
             count_summaries(&messages),
             1,
@@ -4519,7 +4539,7 @@ mod effort_tests {
         let policy = summary_policy();
         let mut messages = three_turns();
         let mut summary = None;
-        let out = compact_history(&provider, "m", &mut messages, &mut summary, &policy, false)
+        let out = compact_history(&provider, "m", &mut messages, &mut summary, &policy, false, "")
             .await
             .expect("pressure is over: must compact");
         assert!(out.2);

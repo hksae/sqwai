@@ -591,27 +591,47 @@ pub fn transcript(messages: &[Message]) -> String {
     out
 }
 
-/// The user turn of the summarization request.
-pub fn summary_input(older: &[Message], previous: Option<&str>) -> String {
+/// Cap for the restricted short summary (§3.3.2): the only summary mode
+/// (`compaction.summary: off|short`). Anything the plan already owns must
+/// not be re-listed — the budget exists for what the plan does not hold.
+pub const SUMMARY_SHORT_MAX_TOKENS: u32 = 300;
+
+/// The user turn of the restricted summarization request (§3.3.2): ONLY
+/// what the user explicitly asked, forbade, or stated as fact in the
+/// dropped messages that is NOT already covered by the durable plan.
+/// `plan_hint` is preformatted "Goal: …\nConstraints: …" (possibly empty:
+/// with no plan, every user request counts as uncovered).
+pub fn summary_short_input(
+    older: &[Message],
+    previous: Option<&str>,
+    plan_hint: &str,
+) -> String {
     let mut out = String::from(
-        "Summarize the conversation below so work can continue without it.\n\n\
-         Cover, in this order:\n\
-         1. Task: what the user asked for.\n\
-         2. Done: concrete changes already made (files, commands, results).\n\
-         3. Decided: choices and constraints that must survive.\n\
-         4. Gotchas: errors, dead ends, things that must not be retried blindly.\n\
-         5. Open: what is not finished yet.\n\n\
-         Rules: no preamble, no questions, no instructions to the reader, no \
-         invented facts. If something is unknown, say it is unknown.",
+        "Summarize ONLY what the user explicitly asked, forbade, or stated \
+         as fact in the dropped conversation below — and ONLY what is not \
+         already covered by the durable plan. The plan owns goals, \
+         constraints, and decisions; re-listing them wastes the budget this \
+         summary exists to save.\n\n<durable-plan>\n",
     );
-    if let Some(prev) = previous.filter(|s| !s.trim().is_empty()) {
-        out.push_str("\n\n<previous-summary>\n");
-        out.push_str(prev.trim());
-        out.push_str("\n</previous-summary>");
+    if plan_hint.trim().is_empty() {
+        out.push_str("(no durable plan: include all user requests)\n");
+    } else {
+        out.push_str(plan_hint.trim());
+        out.push('\n');
     }
-    out.push_str("\n\n<conversation>\n");
+    out.push_str("</durable-plan>\n");
+    if let Some(prev) = previous.filter(|s| !s.trim().is_empty()) {
+        out.push_str("\n<previous-summary>\n");
+        out.push_str(prev.trim());
+        out.push_str("\n</previous-summary>\n");
+    }
+    out.push_str("\n<conversation>\n");
     out.push_str(&transcript(older));
-    out.push_str("</conversation>\n");
+    out.push_str(
+        "</conversation>\n\nRules: no preamble, no questions, no instructions \
+         to the reader, no invented facts. If something is unknown, say it \
+         is unknown.",
+    );
     out
 }
 
@@ -1142,15 +1162,19 @@ mod tests {
     }
 
     #[test]
-    fn summary_input_includes_the_previous_summary() {
-        let older = vec![user("first"), Message::new(Role::Assistant, "second")];
-        let input = summary_input(&older, Some("earlier facts"));
+    fn summary_short_input_restricts_to_uncovered_asks() {
+        let older = vec![user("do not touch btree"), user("fix the bug")];
+        let plan = "Goal: fix the bug\nConstraints:\n- keep API stable";
+        let input = summary_short_input(&older, Some("earlier facts"), plan);
+        // chains, renders the asks, carries the plan for exclusion
         assert!(input.contains("earlier facts"));
-        assert!(input.contains("first"));
-        assert!(input.contains("second"));
-
-        let without = summary_input(&older, None);
-        assert!(!without.contains("earlier facts"));
+        assert!(input.contains("do not touch btree"));
+        assert!(input.contains("keep API stable"));
+        assert!(input.contains("not already covered"));
+        // no plan: everything counts as uncovered, said explicitly
+        let noplan = summary_short_input(&older, None, "");
+        assert!(noplan.contains("no durable plan"));
+        assert!(!noplan.contains("earlier facts"));
     }
 
     #[test]
