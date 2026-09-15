@@ -91,12 +91,24 @@ impl Highlighter {
     }
 }
 
+/// Prose base: dim gray, not terminal-default white. Emphasis goes brighter
+/// (white), links stay the only blue — the antigravity recipe: mostly gray
+/// text, sparse color, readable answers.
 fn base_style() -> Style {
-    Theme::base()
+    Style::new().fg(Color::Gray)
 }
 
 fn code_style() -> Style {
-    Style::new().fg(Color::Cyan)
+    Style::new().fg(Color::White)
+}
+
+/// Emphasis: bright white on default prose, but a colored band (quote keeps
+/// its monochrome green) wins so strips stay uniform.
+fn with_emphasis(style: Style, m: Modifier) -> Style {
+    match style.fg {
+        None | Some(Color::Gray) => style.fg(Color::White).add_modifier(m),
+        _ => style.add_modifier(m),
+    }
 }
 
 /// Render markdown text into styled lines. Width is used only by tables.
@@ -572,7 +584,7 @@ fn emit_table(out: &mut Vec<Line<'static>>, rows: Vec<Vec<String>>, align: Vec<A
     let render_row = |r: &[String], header: bool| -> Vec<Line<'static>> {
         let st = if header {
             Style::new()
-                .fg(Theme::ACCENT())
+                .fg(Color::White)
                 .bg(Theme::SURFACE())
                 .add_modifier(Modifier::BOLD)
         } else {
@@ -704,7 +716,7 @@ fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
             rest = rest[..end].trim_end();
         }
     }
-    // Headings: h1 bold+underlined, h2 bold, h3 bold+cyan, h4-h6 dim
+    // Headings: h1 bold+underlined, h2 bold, h3 bold+white, h4-h6 dim
     // italic. h3/h4+ deliberately do not rely on italic alone: terminals
     // without italic support (conhost) would render them as plain text.
     // The `#` markers are syntax, not content: they are never printed,
@@ -713,7 +725,7 @@ fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
         1 => Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         2 => Style::new().add_modifier(Modifier::BOLD),
         3 => Style::new()
-            .fg(Theme::ACCENT())
+            .fg(Color::White)
             .add_modifier(Modifier::BOLD | Modifier::ITALIC),
         _ => Style::new()
             .fg(Theme::DIM())
@@ -1144,7 +1156,8 @@ fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
             };
             if let Some(kind) = parsed {
                 flush(out, i, &mut lit_start);
-                let link_style = style.fg(Theme::ACCENT()).add_modifier(Modifier::UNDERLINED);
+                // links are the sparse blue: classic link color, underlined.
+                let link_style = style.fg(Color::Blue).add_modifier(Modifier::UNDERLINED);
                 let url_style = Style::new().fg(Theme::DIM()).bg(ambient_bg);
                 match kind {
                     InlineLink::Md {
@@ -1222,13 +1235,19 @@ fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
         let inner = &text[from..inner_end];
         match marker {
             "`" | "``" => {
-                // cyan code keeps its color, but never drops the ambient
-                // background: inside a quote the band must continue
-                // uninterrupted behind `code` (and bold/links keep it by
-                // deriving from `style` below).
+                // white code, but never drops the ambient background: inside
+                // a quote the band must continue uninterrupted behind `code`
+                // (and bold/links keep it by deriving from `style` below).
+                // Inside a colored band the band color wins on fg too, so the
+                // strip stays monochrome instead of flashing white.
                 let mut cs = code_style();
                 if let Some(bg) = style.bg {
                     cs = cs.bg(bg);
+                }
+                if let Some(fg) = style.fg {
+                    if fg != Color::Gray {
+                        cs = cs.fg(fg);
+                    }
                 }
                 out.push(Span::styled(inner.to_string(), cs));
             }
@@ -1238,10 +1257,10 @@ fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
             }
             "***" | "___" => push_inline(
                 inner,
-                style.add_modifier(Modifier::BOLD | Modifier::ITALIC),
+                with_emphasis(style, Modifier::BOLD | Modifier::ITALIC),
                 out,
             ),
-            "**" | "__" => push_inline(inner, style.add_modifier(Modifier::BOLD), out),
+            "**" | "__" => push_inline(inner, with_emphasis(style, Modifier::BOLD), out),
             "*" | "_" => push_inline(inner, style.add_modifier(Modifier::ITALIC), out),
             "~~" => push_inline(inner, style.add_modifier(Modifier::CROSSED_OUT), out),
             _ => unreachable!(),
@@ -1639,8 +1658,8 @@ mod tests {
         assert!(
             h3[0].spans.iter().all(|s| s.style.add_modifier.contains(Modifier::BOLD)
                 && s.style.add_modifier.contains(Modifier::ITALIC)
-                && s.style.fg == Some(ratatui::style::Color::Cyan)),
-            "h3 must be bold+italic cyan: {:?}",
+                && s.style.fg == Some(ratatui::style::Color::White)),
+            "h3 must be bold+italic white: {:?}",
             h3[0]
         );
         // closed ATX (`### Deep ###`) drops the closing run too
@@ -2014,12 +2033,13 @@ mod tests {
         let lines = render("> use `read` and **bold** here", 60, &hl);
         assert_eq!(lines.len(), 1);
         let spans = &lines[0].spans;
-        // inline code keeps its cyan fg but inherits the quote band bg
+        // inline code inside a colored band takes the band color (monochrome
+        // strip) but inherits the quote band bg
         let code = spans
             .iter()
             .find(|s| s.content == "read")
             .expect("code span");
-        assert_eq!(code.style.fg, Some(Color::Cyan));
+        assert_eq!(code.style.fg, Some(Color::Green));
         assert_eq!(code.style.bg, Some(Theme::QUOTE_BG()));
         // bold keeps the green fg and the band bg
         let bold = spans
@@ -2031,6 +2051,35 @@ mod tests {
         // top-level code stays transparent (no ambient bg to inherit)
         let plain = inline("`x`", Theme::base());
         assert_eq!(plain[0].style.bg, None);
+    }
+
+    #[test]
+    fn antigravity_recipe_gray_prose_white_emphasis_blue_links() {
+        use ratatui::style::Color;
+        let hl = Highlighter::new();
+        // prose is dim gray
+        let lines = render("plain words here", 60, &hl);
+        assert!(lines[0].spans.iter().all(|s| s.style.fg == Some(Color::Gray)));
+        // bold and code go bright white on prose
+        let lines = render("a **strong** move with `code`", 60, &hl);
+        let spans = &lines[0].spans;
+        assert_eq!(
+            spans.iter().find(|s| s.content == "strong").expect("bold").style.fg,
+            Some(Color::White)
+        );
+        assert_eq!(
+            spans.iter().find(|s| s.content == "code").expect("code").style.fg,
+            Some(Color::White)
+        );
+        // links are the sparse blue, underlined
+        let lines = render("see [docs](https://example.com) now", 60, &hl);
+        let link = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content == "docs")
+            .expect("link");
+        assert_eq!(link.style.fg, Some(Color::Blue));
+        assert!(link.style.add_modifier.contains(Modifier::UNDERLINED));
     }
 
     #[test]
