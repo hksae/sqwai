@@ -623,3 +623,32 @@ fn plan_finished_accepts_done_plus_honest_block() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Calibration (pre-matrix): T2 on the mechanism arm at the locked window.
+/// Report-only, no gates — calibration sizes the task (turns, tokens,
+/// compactions) and freezes the spec, it does not judge.
+#[tokio::test]
+#[ignore]
+async fn bench_t2_calibration() {
+    let Some(report) = run_arm(&T2, false, "calib").await else {
+        eprintln!("SKIP: no bench provider (config/model)");
+        return;
+    };
+    let fixture_src = fixture_source();
+    let score = score_run(&report, &T2, &fixture_src);
+    print_report(&report, &score);
+}
+
+/// Calibration (pre-matrix): T3 on the mechanism arm at the locked window.
+/// Same report-only contract as T2.
+#[tokio::test]
+#[ignore]
+async fn bench_t3_calibration() {
+    let Some(report) = run_arm(&T3, false, "calib").await else {
+        eprintln!("SKIP: no bench provider (config/model)");
+        return;
+    };
+    let fixture_src = fixture_source();
+    let score = score_run(&report, &T3, &fixture_src);
+    print_report(&report, &score);
+}
+
