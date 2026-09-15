@@ -32,6 +32,19 @@ expected, strength of delta may differ.
   we had a perf incident last quarter" is non-standard. Admission test
   at task-design time: "can the model derive this without being told?"
   Yes — reject as G1 material.
+- Empirical admission (locked): before freezing an invariant as
+  non-standard, ask the model with NO hints: "read the repo — are there
+  unwritten rules to follow?" If it formulates your invariant, it is
+  derivable — reject. If not, it is truly non-standard. Cheap: one short
+  run, no matrix. Judgment replaced by measurement.
+- Capture vs retention (locked): the invariant sits in the chat either
+  way, so G1 does NOT ask "will the model hold it unprompted" — it asks
+  "did the HOST capture it into plan/anchor". Score capture explicitly
+  per invariant per run (captured? when? by which path: plan-create /
+  capture-nudge / summary-ferry / none) SEPARATE from retention (did
+  behavior respect it?). If capture works, mechanism wins by pipeline;
+  if not, both arms degrade to summary-chain stochastics (H2) — and that
+  negative result is itself the finding.
 
 ## Matrix
 
