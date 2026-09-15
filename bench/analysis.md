@@ -74,3 +74,42 @@ summary chaining ×17, capture-nudge shipped, valve dynamics measured).
 The product thesis refines to: "structure retains what is formalized;
 transport (summaries) retains the rest, stochastically." Open G1 with
 bigger tasks. Do NOT run 5 repeats of minidb.
+
+## Amendment 2 (2026-09-15, post-matrix audit reconciliation)
+
+External audit's forecast check — errors were about the model (ceiling:
+retention 1.0 vs 1.0, false completions 0 vs 0), hits about mechanics
+(cost ≈2x every cell). Diagnosis stands: on a top model and light tasks
+only cost discriminates.
+
+- **Variance is a first-class finding** (was under-highlighted): tools
+  per repeat — mech 83/86, 37/35, 44/42 (±5%); base 67/47, 17/33,
+  13/125 (up to 10x); T3/base wall 44s vs 319s. Mechanism sells
+  predictability, not the mean. G1 meters p90/range on tools/wall/tokens.
+- **Pressure asymmetry is a design hole**: 2/6 base runs compacted 0
+  times (solved before filling the window) — "mechanism under pressure
+  vs baseline without". G1 task criterion (stronger than "150+ calls"):
+  a candidate task passes one base-arm calibration run; 0 compactions —
+  task rejected, however long it looks.
+- **Post-hoc summary analysis is impossible**: verified — the journal
+  holds zero compaction/summary records and transcripts are not
+  persisted. The "illusion of support" hypothesis (anchor's formal list
+  makes the model ferry less lore into summaries) cannot be tested
+  post-hoc. Consequence: G1-prep MUST write compaction records to the
+  journal (summary text + tokens before/after = also the bytes-freed
+  metric). No behavior change, without it G1 is half-blind again.
+- **Restricted summary (§3.3.2, ≤300 tok, "not in the plan") remains
+  unbuilt and untested** — short is a full 2048 summary. Build before G1:
+  the only mechanism aimed directly at the found hole, cheaper than full.
+- **G1 needs a second, mid-tier model (mandatory)**: if no delta appears
+  there under pressure either, the thesis narrows to predictability only.
+- **Kill the `tmp:` trap half**: root `minidb.log` is never created (CLI
+  tests use their own temp dirs) — dead by construction, gives false
+  coverage. Behavioral `tmp:` stays covered by the engine suite.
+- **Fix `anchor()` before G1** (blind on completed plans) or human
+  scoring rides crutches again as the primary metric.
+- **Re-reads counter** stays in G1-prep (needs `path` in journal
+  tool_call records).
+- Product thesis, honest positioning: mechanism is predictability plus
+  insurance on long horizons; on short ones it is a 2x tax — normal if
+  stated openly. No release cut from this state (deferred explicitly).
