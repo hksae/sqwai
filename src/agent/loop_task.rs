@@ -1275,18 +1275,21 @@ async fn run_agent(
             true,
         )
         .await;
-        if let Some((_, _, summarized)) = outcome.as_ref()
+        if let Some((before, after, summarized)) = outcome.as_ref()
             && let Some(writer) = compaction_journal.as_mut()
         {
             let _ = writer.append(
                 "compaction",
                 serde_json::json!({
                     "phase": "end",
+                    "before": before,
+                    "after": after,
                     "dropped_msgs": message_count_before.saturating_sub(messages.len()),
                     "kept_msgs": messages.len(),
                     "anchor_tokens": context::anchor(&root, &session_id).len().div_ceil(4),
                     "diary_written": true,
                     "summarized": summarized,
+                    "summary": summary.as_deref().unwrap_or(""),
                 }),
             );
         }
@@ -1460,6 +1463,7 @@ async fn run_agent(
                 messages.len()
             );
         }
+        let msgs_before = messages.len();
         if let Some((before, after, summarized)) = compact_history(
             &provider,
             &model_id,
@@ -1470,6 +1474,15 @@ async fn run_agent(
         )
         .await
         {
+            record_compaction(
+                &mut journal,
+                before,
+                after,
+                msgs_before,
+                messages.len(),
+                summarized,
+                summary.as_deref().unwrap_or(""),
+            );
             // Same rule as the overflow retry below: the transcript the host
             // owns has changed, so the provider's copy of it is no longer the
             // context this turn is about (§3.3).
@@ -1635,6 +1648,7 @@ async fn run_agent(
                 // Asking the same oversized request again cannot.
                 if failure.class == Some(ErrorClass::ContextOverflow) && !compacted_for_overflow {
                     compacted_for_overflow = true;
+                    let overflow_msgs_before = messages.len();
                     if let Some((before, after, summarized)) = compact_history(
                         &provider,
                         &model_id,
@@ -1645,6 +1659,15 @@ async fn run_agent(
                     )
                     .await
                     {
+                        record_compaction(
+                            &mut journal,
+                            before,
+                            after,
+                            overflow_msgs_before,
+                            messages.len(),
+                            summarized,
+                            summary.as_deref().unwrap_or(""),
+                        );
                         // The transcript this turn resends is not the one the
                         // provider holds any more, so the reference cannot be
                         // reused for the retry either (§3.3).
@@ -2531,6 +2554,37 @@ fn constraint_covers(constraints: &[String], lower_directive: &str) -> bool {
             .filter(|w| w.chars().count() >= 4)
             .any(|w| words.contains(w))
     })
+}
+
+/// Journal-first compaction record (G1-prep): tokens and messages
+/// before/after, whether a summary was written, and its text
+/// (secret-screened by `append`). The `/compact` path already wrote
+/// begin/end records; the automatic loop cuts wrote nothing — so G0's
+/// post-hoc lore question ("what survived the cut?") was unanswerable.
+/// It is now; bytes-freed is `before - after`.
+fn record_compaction(
+    journal: &mut Option<crate::agent::journal::Journal>,
+    before: u64,
+    after: u64,
+    msgs_before: usize,
+    msgs_after: usize,
+    summarized: bool,
+    summary_text: &str,
+) {
+    let Some(writer) = journal.as_mut() else {
+        return;
+    };
+    let _ = writer.append(
+        "compaction",
+        serde_json::json!({
+            "before": before,
+            "after": after,
+            "msgs_before": msgs_before,
+            "msgs_after": msgs_after,
+            "summarized": summarized,
+            "summary": summary_text,
+        }),
+    );
 }
 
 async fn compact_history(
@@ -4339,6 +4393,40 @@ mod effort_tests {
             peak_len < 81,
             "history must stay bounded near the budget, peak len {peak_len}"
         );
+    }
+
+    #[test]
+    fn compaction_record_carries_tokens_and_summary() {
+        let root = std::env::temp_dir().join(format!(
+            "sqwai-compact-rec-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let journal = crate::agent::journal::Journal::open(&root, "sess").expect("open");
+        record_compaction(
+            &mut Some(journal),
+            10_000,
+            2_500,
+            40,
+            10,
+            true,
+            "did things",
+        );
+        // None journal: silent no-op, never panics
+        record_compaction(&mut None, 1, 1, 1, 1, false, "");
+        let recs = crate::agent::journal::Journal::records(&root).expect("read");
+        let c = recs
+            .iter()
+            .find(|r| r.kind == "compaction")
+            .expect("record");
+        assert_eq!(c.fields["before"], 10_000);
+        assert_eq!(c.fields["after"], 2_500);
+        assert_eq!(c.fields["msgs_before"], 40);
+        assert_eq!(c.fields["msgs_after"], 10);
+        assert_eq!(c.fields["summarized"], true);
+        assert_eq!(c.fields["summary"], "did things");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

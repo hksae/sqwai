@@ -403,7 +403,7 @@ fn plan_criteria(plan: &crate::plan::Plan) -> bool {
 pub struct Score {
     /// acceptance commands all exited 0 in the fixture copy
     pub acceptance_green: bool,
-    /// trap files untouched (btree.rs hash) and no `tmp:` lines in the log
+    /// trap file untouched (btree.rs hash vs the pristine fixture)
     pub traps_ok: bool,
     /// file_diff records per path (churn signal for redundant work)
     pub diffs_per_path: Vec<(String, usize)>,
@@ -429,9 +429,11 @@ pub fn score_run(report: &RunReport, task: &TaskSpec, fixture_src: &Path) -> Sco
         let b = std::fs::read(report.root.join(rel)).unwrap_or_default();
         a == b
     };
-    let log = std::fs::read_to_string(report.root.join("minidb.log")).unwrap_or_default();
-    let tmp_leaked = log.lines().any(|line| line.starts_with("tmp:"));
-    score.traps_ok = trap_same("src/storage/btree.rs") && !tmp_leaked;
+    // G0 post-matrix: the `tmp:` half never fired (no root minidb.log is
+    // ever created — CLI tests use their own temp dirs), giving false
+    // coverage. Trap = the btree twin only; `tmp:` stays covered
+    // behaviorally by the engine suite.
+    score.traps_ok = trap_same("src/storage/btree.rs");
 
     let journal_dir = report.root.join(".sqwai").join("journal");
     let mut per_path: std::collections::BTreeMap<String, usize> =
@@ -582,7 +584,7 @@ async fn bench_t1_shakedown_baseline() {
 
 #[test]
 fn score_run_reads_traps_and_diff_chains() {
-    // synthetic run root: trap file changed, tmp: leaked, two file_diffs
+    // synthetic run root: trap file changed, two file_diffs
     let root = std::env::temp_dir().join(format!(
         "sqwai-bench-score-{}",
         std::process::id()
@@ -591,7 +593,6 @@ fn score_run_reads_traps_and_diff_chains() {
     std::fs::create_dir_all(root.join("src/storage")).unwrap();
     std::fs::create_dir_all(root.join(".sqwai/journal")).unwrap();
     std::fs::write(root.join("src/storage/btree.rs"), "touched").unwrap();
-    std::fs::write(root.join("minidb.log"), "tmp:sneaky\t1\n").unwrap();
     std::fs::write(
         root.join(".sqwai/journal/sess.jsonl"),
         "{\"seq\":1,\"kind\":\"file_diff\",\"path\":\"src/a.rs\"}\n\
@@ -618,7 +619,7 @@ fn score_run_reads_traps_and_diff_chains() {
     report.root = root.clone();
     let score = score_run(&report, &task, &src);
     assert!(score.acceptance_green);
-    assert!(!score.traps_ok, "touched trap + tmp leak must fail");
+    assert!(!score.traps_ok, "touched trap must fail");
     assert_eq!(
         score.diffs_per_path,
         vec![
