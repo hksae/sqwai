@@ -24,7 +24,24 @@ use crate::providers::{Message, Role};
 /// model never writes or rewrites this block.
 pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     let mut out = String::from("ANCHOR (host-generated; source of truth after compaction)\n");
-    if let Ok(Some(plan)) = crate::plan::open_active_for_session(root, Some(session_id)) {
+    // Finished work must stay visible: when no plan is active, fall back to
+    // the session's latest completed plan — "none" would lie about done work
+    // (every G0 matrix anchor printed empty for exactly this reason).
+    let plan = crate::plan::open_active_for_session(root, Some(session_id))
+        .ok()
+        .flatten()
+        .or_else(|| {
+            let mut done: Vec<_> = crate::plan::list(root)
+                .into_iter()
+                .filter(|p| {
+                    p.status == crate::plan::PlanStatus::Completed
+                        && p.sessions.iter().any(|s| s == session_id)
+                })
+                .collect();
+            done.sort_by(|a, b| b.created.cmp(&a.created));
+            done.into_iter().next()
+        });
+    if let Some(plan) = plan {
         out.push_str(&format!("goal: {}\n", bounded(&plan.goal.text, 500)));
         if plan.constraints.is_empty() {
             out.push_str("constraints: none\n");
@@ -912,6 +929,31 @@ mod tests {
         let rendered = anchor(&root, "missing-session");
         assert!(rendered.contains("goal: none"));
         assert!(rendered.contains("files changed this session: none"));
+    }
+
+    #[test]
+    fn anchor_shows_latest_completed_plan() {
+        let root = temp_root("done-plan");
+        std::fs::create_dir_all(root.join(".sqwai/plans")).unwrap();
+        std::fs::write(
+            root.join(".sqwai/plans/p.json"),
+            r#"{"version":1,"id":"p","status":"completed","created":"t",
+                "sessions":["s1"],
+                "goal":{"text":"ship it","source":"user","created":"t"},
+                "constraints":["keep it green"],
+                "budget":{"tokens":0,"limit":0},"revision":3,
+                "steps":[{"id":"1","title":"a","status":"done"}],
+                "acceptance":[{"text":"cmd: true","status":"pending",
+                               "validation":{"status":"passed"}}]}"#,
+        )
+        .unwrap();
+        let rendered = anchor(&root, "s1");
+        assert!(rendered.contains("ship it"), "{rendered}");
+        assert!(rendered.contains("keep it green"), "{rendered}");
+        assert!(!rendered.contains("plan: none"), "{rendered}");
+        // a foreign session still sees nothing
+        assert!(anchor(&root, "other").contains("goal: none"));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
