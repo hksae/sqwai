@@ -1,4 +1,9 @@
-# T4 draft: `bytes` type end-to-end (G1) — FOR REVIEW, not frozen
+# T4: `bytes` type end-to-end (G1) — FROZEN 2026-09-16
+
+Acceptance tests (all RED on pristine, verified): tests/bytes_construct,
+bytes_index, bytes_concat, bytes_equality, bytes_immutable,
+error_cases/bytes_oob, bytes_negative, bytes_mixed_concat
+(snapshot commits: frozen + "T4").
 
 Fixture: `kaiwai-frozen` (Kozue). Every claim below verified against
 that tree on 2026-09-16 (see Sources). Open questions marked [Q].

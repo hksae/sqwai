@@ -35,8 +35,12 @@ fn compaction_threshold(task: &TaskSpec) -> f64 {
         return v;
     }
     match task.id {
+        // G0 windows (strangled regimes, locked by measurement)
+        "T1" => 0.01,
         "T2" | "T3" => 0.005,
-        _ => 0.01,
+        // G1: product default. Pressure comes from task size, the
+        // threshold is never tuned (regime locked 2026-09-16).
+        _ => 0.80,
     }
 }
 
@@ -56,6 +60,28 @@ pub const T1: TaskSpec = TaskSpec {
         "`tmp:` scratch keys must never persist (existing invariant, keep it)",
     ],
     acceptance_cmds: &["cargo test --test engine", "cargo test --test cli_ttl"],
+};
+
+/// G1 T4: `bytes` byte-buffer type end-to-end on the kaiwai fixture.
+/// Spec frozen in bench/tasks-t4.md; acceptance tests ship RED in the
+/// snapshot. Acceptance runs under Git Bash (cmd breaks on `mkdir -p`).
+/// Fixture: SQWAI_BENCH_FIXTURE=C:\Users\Asus\kaiwai-frozen.
+#[allow(dead_code)]
+pub const T4: TaskSpec = TaskSpec {
+    id: "T4",
+    goal: "add the `bytes` byte-buffer type end to end: construct with bytes([...]), length(), integer indexing, ==/!=, bytes+bytes concat",
+    constraints: &[
+        "make test-errors and make test-positive stay green, including the 8 shipped bytes tests",
+        "new GC kind appended at the END of the enum; never reuse reserved opcode numbers (0x62/0x63/0x74/0x76/0x83)",
+        "do not stuff bytes payloads into GC_TYPE_RAW — the kind must be its own",
+        "bytes diagnostics go to stderr like all compiler errors",
+        "bytes are immutable once built (a shared-buffer aliasing corruption took down downstream tooling in Q1): every op returns a new buffer, no in-place mutation API",
+        "GC kinds are append-only (a 2025 renumber broke cached artifacts)",
+    ],
+    acceptance_cmds: &[
+        "\"C:\\Program Files\\Git\\bin\\bash.exe\" -lc \"make test-errors\"",
+        "\"C:\\Program Files\\Git\\bin\\bash.exe\" -lc \"make test-positive\"",
+    ],
 };
 
 /// Used by the matrix runs (T1 shakedown first).
@@ -783,6 +809,23 @@ async fn bench_t3_calibration() {
     };
     let fixture_src = fixture_source();
     let score = score_run(&report, &T3, &fixture_src);
+    print_report(&report, &score);
+}
+
+/// Calibration (pre-matrix): T4 on the mechanism arm, 256K + 0.8 regime.
+/// Report-only: sizes the task (peak transcript? compactions?) against the
+/// admission bar (peak ≥1.5x budget, ≥2 compactions). Fixture:
+/// SQWAI_BENCH_FIXTURE=C:\Users\Asus\kaiwai-frozen,
+/// SQWAI_BENCH_CONTEXT=256000.
+#[tokio::test]
+#[ignore]
+async fn bench_t4_calibration() {
+    let Some(report) = run_arm(&T4, false, "calib").await else {
+        eprintln!("SKIP: no bench provider (config/model)");
+        return;
+    };
+    let fixture_src = fixture_source();
+    let score = score_run(&report, &T4, &fixture_src);
     print_report(&report, &score);
 }
 
