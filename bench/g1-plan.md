@@ -22,6 +22,20 @@ expected, strength of delta may differ.
 - Admission criterion (stronger than size): one base-arm calibration
   run per candidate; 0 compactions — task rejected, however long.
 - Count: 3 (keep G0 shape); 2 acceptable if tasks are big.
+- Fixture (locked 2026-09-16): `C:\Users\Asus\kaiwai-frozen` — snapshot
+  of the abandoned Kozue language project (user-approved, its git
+  untouched). ~60k LOC C11 (compiler, NaN-boxed VM, Immix GC), 8 src
+  dirs, ~8MB without build artifacts. Verified self-contained: clean
+  build ~1m, `test-errors` 164/164 (~4s), `test-positive` 275/275
+  (~12s). Snapshot excludes: .git, build/, *.o/*.exe, .d, tests/tmp
+  CONTENT (the empty dir ships — runners write artifacts there but never
+  mkdir), __pycache__, `nul`. Fuzz/stress/bench/sanitize suites stay out
+  of acceptance (nondeterministic). Acceptance MUST run under Git Bash
+  (`bash -lc 'make …'`) — cmd breaks on `mkdir -p`.
+- Harness work for the fixture: `fresh_copy` requires `Cargo.toml`
+  (minidb-ism) — needs a fixture marker instead; acceptance commands
+  must invoke Git Bash explicitly.
+
 - Must contain non-standard invariants (not derivable from practice),
   or standard prohibitions survive on habit and measure nothing (H3).
   Definition (locked): an invariant that follows from NEITHER the code,
