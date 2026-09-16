@@ -321,6 +321,26 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
                     crate::agent::loop_task::ControlMsg::PlanAnswer { id, accept: true },
                 );
             }
+            AgentEvent::AskUser { id, .. } => {
+                // same deadlock class: answer so the run continues
+                // autonomously instead of waiting on nobody.
+                let _ = handle.control.try_send(
+                    crate::agent::loop_task::ControlMsg::AskAnswer {
+                        id,
+                        text: "no user in this run; decide yourself and continue".to_string(),
+                    },
+                );
+            }
+            AgentEvent::Approval { id, .. } => {
+                // autonomous runs never approve dangerous commands; a deny
+                // that breaks the task is data, a hang is not.
+                let _ = handle.control.try_send(
+                    crate::agent::loop_task::ControlMsg::ApprovalAnswer {
+                        id,
+                        decision: crate::agent::loop_task::ApprovalDecision::Deny,
+                    },
+                );
+            }
             // retry silence killed a whole evening of debugging: a throttled
             // run looks exactly like a hung one. Always visible in bench.
             AgentEvent::Retry {
