@@ -16,6 +16,17 @@ expected, strength of delta may differ.
   90.6 vs 88.8), answers generality not weakness; ~2x per-token price;
   promo cliff Sept 20. Third model later, optionally.
 
+## Regime (locked 2026-09-16): 256K + 0.8, nothing tuned
+
+- Context: 256K simulated per run (mid-tier model regime), both models.
+- Threshold: product default 0.8, NEVER tuned. Budget ≈200K falls out
+  of the multiplication; nobody sets it.
+- Pressure comes from TASK SIZE, not settings (G0 tuned the threshold —
+  that was the artifact; this regime fixes settings and varies tasks).
+- Admission for the regime: base run transcript peak ≥1.5× budget
+  (≈300K) AND ≥2 real compactions. Shortfall = task too small → upsize
+  the task, never touch the threshold.
+
 ## Tasks (TBD — the critical path)
 
 - Regime: 150+ tool calls (§8.1), NOT minidb scale.

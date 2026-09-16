@@ -152,7 +152,11 @@ pub fn fixture_source() -> PathBuf {
 /// Fresh writable copy of the fixture. The original is never mutated.
 pub fn fresh_copy(task: &TaskSpec, arm: &str) -> Option<PathBuf> {
     let src = fixture_source();
-    if !src.join("Cargo.toml").exists() {
+    // minidb-ism was `Cargo.toml`; kaiwai is C/Make — accept either marker.
+    let is_fixture = src.join("Cargo.toml").exists()
+        || src.join("Makefile").exists()
+        || src.join(".bench-fixture").exists();
+    if !is_fixture {
         return None;
     }
     let nanos = std::time::SystemTime::now()
@@ -228,11 +232,19 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
     let root = fresh_copy(task, &report.arm)?;
     let mut compaction = crate::config::CompactionConfig::default();
     compaction.threshold = compaction_threshold(task);
+    // G1 regime simulation (bench-only): cap the working context without
+    // touching model configs or product code. The agent never holds more
+    // than budget+reserve, so retention is measured honestly at 256K.
+    let context_limit = std::env::var("SQWAI_BENCH_CONTEXT")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(model.context_limit);
     eprintln!(
         "bench: context_limit={} threshold={} reserve_branch budget~{}",
-        model.context_limit,
+        context_limit,
         compaction.threshold,
-        (model.context_limit as f64 * compaction.threshold) as u64,
+        (context_limit as f64 * compaction.threshold) as u64,
     );
     let input = AgentInput {
         provider: model.provider,
@@ -246,9 +258,9 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
         root: root.clone(),
         session_id: session_id.clone(),
         blocked_patterns: vec![],
-        plan_mode: false,
-        context_limit: model.context_limit,
-        enable_tools: true,
+            plan_mode: false,
+            context_limit,
+            enable_tools: true,
         read_only: false,
         previous_response_id: None,
         summary: None,
