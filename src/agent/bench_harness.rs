@@ -219,6 +219,9 @@ fn copy_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
 pub struct RunReport {
     pub task: String,
     pub arm: String,
+    /// model key the run used (SQWAI_BENCH_MODEL): G1 compares models,
+    /// so the cell identity is task/arm/model, not task/arm.
+    pub model: String,
     /// fixture copy this run mutated (for acceptance + trap scoring)
     pub root: PathBuf,
     pub session_id: String,
@@ -249,6 +252,7 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
     let mut report = RunReport {
         task: task.id.to_string(),
         arm: if baseline { "baseline".into() } else { "mechanism".into() },
+        model: std::env::var("SQWAI_BENCH_MODEL").unwrap_or_default(),
         ..Default::default()
     };
 
@@ -564,7 +568,7 @@ pub fn score_run(report: &RunReport, task: &TaskSpec, fixture_src: &Path) -> Sco
 pub fn print_report(report: &RunReport, score: &Score) {
     let tail: String =
         report.final_text.chars().rev().take(2000).collect::<String>().chars().rev().collect();
-    println!("=== bench {} {} ===", report.task, report.arm);
+    println!("=== bench {} {} [{}] ===", report.task, report.arm, report.model);
     println!("wall: {}s  tools: {}  compactions: {}", report.wall_secs, report.tool_calls, report.compactions);
     println!(
         "tokens: in={} out={} cached={}",
@@ -605,6 +609,7 @@ pub fn write_eval(report: &RunReport, score: &Score) {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs()).unwrap_or(0),
         "session": report.session_id,
+        "model": report.model,
         "wall_secs": report.wall_secs,
         "tool_calls": report.tool_calls,
         "compactions": report.compactions,
@@ -814,9 +819,9 @@ async fn bench_t3_calibration() {
     print_report(&report, &score);
 }
 
-/// Calibration (pre-matrix): T4 on the mechanism arm, 256K + 0.8 regime.
-/// Report-only: sizes the task (peak transcript? compactions?) against the
-/// admission bar (peak ≥1.5x budget, ≥2 compactions). Fixture:
+/// Calibration (pre-matrix): T4 on the mechanism arm, 256K + 0.15 regime.
+/// Report-only: measures peak transcript and compaction count against the
+/// admission bar (several compactions in the 3-8 band). Fixture:
 /// SQWAI_BENCH_FIXTURE=C:\Users\Asus\kaiwai-frozen,
 /// SQWAI_BENCH_CONTEXT=256000.
 #[tokio::test]
@@ -829,6 +834,48 @@ async fn bench_t4_calibration() {
     let fixture_src = fixture_source();
     let score = score_run(&report, &T4, &fixture_src);
     print_report(&report, &score);
+}
+
+/// Matrix (G1, pre-registered in bench/g1-plan.md): T4, mechanism arm.
+/// Gates: ≥1 compaction + spec finish rule. Acceptance/traps are DATA.
+/// Cell identity includes the model (run once per model).
+#[tokio::test]
+#[ignore]
+async fn bench_t4_mechanism() {
+    let Some(report) = run_arm(&T4, false, "matrix").await else {
+        eprintln!("SKIP: no bench provider (config/model)");
+        return;
+    };
+    let fixture_src = fixture_source();
+    let score = score_run(&report, &T4, &fixture_src);
+    print_report(&report, &score);
+    write_eval(&report, &score);
+    assert!(
+        report.compactions >= 1,
+        "matrix run must compact, got {}",
+        report.compactions
+    );
+    assert!(report.plan_finished, "mechanism must finish T4: {report:?}");
+}
+
+/// Matrix (G1): T4, baseline arm. Same data-not-gates contract.
+#[tokio::test]
+#[ignore]
+async fn bench_t4_baseline() {
+    let Some(report) = run_arm(&T4, true, "matrix").await else {
+        eprintln!("SKIP: no bench provider (config/model)");
+        return;
+    };
+    let fixture_src = fixture_source();
+    let score = score_run(&report, &T4, &fixture_src);
+    print_report(&report, &score);
+    write_eval(&report, &score);
+    assert!(
+        report.compactions >= 1,
+        "matrix run must compact, got {}",
+        report.compactions
+    );
+    assert!(report.claimed_done, "baseline must claim T4: {report:?}");
 }
 
 /// Matrix (§8.2, pre-registered): T1, mechanism arm. Run twice; each run is
