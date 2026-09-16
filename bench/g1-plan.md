@@ -16,16 +16,18 @@ expected, strength of delta may differ.
   90.6 vs 88.8), answers generality not weakness; ~2x per-token price;
   promo cliff Sept 20. Third model later, optionally.
 
-## Regime (locked 2026-09-16): 256K + 0.8, nothing tuned
+## Regime (locked 2026-09-16, amended same day): 256K + 0.15 (~40K)
 
 - Context: 256K simulated per run (mid-tier model regime), both models.
-- Threshold: product default 0.8, NEVER tuned. Budget ≈200K falls out
-  of the multiplication; nobody sets it.
-- Pressure comes from TASK SIZE, not settings (G0 tuned the threshold —
-  that was the artifact; this regime fixes settings and varies tasks).
-- Admission for the regime: base run transcript peak ≥1.5× budget
-  (≈300K) AND ≥2 real compactions. Shortfall = task too small → upsize
-  the task, never touch the threshold.
+- Threshold 0.15, NOT product 0.8. Reason: measured plateau (~70K on
+  T4-calibration) never reaches the 0.8 budget (~200K) — a faithful
+  setting that never fires measures nothing. 0.15 is 4x roomier than
+  G0 torture and covers a work unit; absolute lore-death rates do NOT
+  transfer to product, mechanisms do (shown consistent across 3K–40K
+  in G0). Window stated explicitly on every result.
+- Ecological validation happens SEPARATELY: manual runs at full context
+  by the user, watching goal retention on real work (not part of the
+  matrix).
 
 ## Tasks (TBD — the critical path)
 

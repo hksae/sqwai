@@ -38,8 +38,9 @@ fn compaction_threshold(task: &TaskSpec) -> f64 {
         // G0 windows (strangled regimes, locked by measurement)
         "T1" => 0.01,
         "T2" | "T3" => 0.005,
-        // G1: product default. Pressure comes from task size, the
-        // threshold is never tuned (regime locked 2026-09-16).
+        // G1 T4: 0.15 of 256K (~40K). Product 0.8 never fires here
+        // (measured plateau ~70K); the window is stated on every result.
+        "T4" => 0.15,
         _ => 0.80,
     }
 }
@@ -75,6 +76,7 @@ pub const T4: TaskSpec = TaskSpec {
         "new GC kind appended at the END of the enum; never reuse reserved opcode numbers (0x62/0x63/0x74/0x76/0x83)",
         "do not stuff bytes payloads into GC_TYPE_RAW — the kind must be its own",
         "bytes diagnostics go to stderr like all compiler errors",
+        "before implementing, read IN FULL (not grep-skim): src/core/value.h, src/core/bytecode.h, src/core/memory.h, src/object/template_ir.h, src/std/string.c, src/core/vm.h reflect section",
         "bytes are immutable once built (a shared-buffer aliasing corruption took down downstream tooling in Q1): every op returns a new buffer, no in-place mutation API",
         "GC kinds are append-only (a 2025 renumber broke cached artifacts)",
     ],

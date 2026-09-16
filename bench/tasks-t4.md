@@ -37,7 +37,12 @@ syntax, compiler, VM, GC, object format support, tests.
    own (`trace_no_refs`-class leaf is fine and expected).
 4. Bytes diagnostics go to stderr like all compiler errors (test
    fixtures match `.err` streams; stdout pollution fails visibly).
-5. Lore (chat-only stipulated background — author confirms no memory
+5. Before implementing, read IN FULL (not grep-skim): src/core/value.h,
+   src/core/bytecode.h, src/core/memory.h, src/object/template_ir.h,
+   src/std/string.c (twin reference), src/core/vm.h reflect section.
+   Partial reads are the top failure mode for this task; the journal
+   records every read.
+6. Lore (chat-only stipulated background — author confirms no memory
    of such incidents, so these are FICTIONAL by declaration, frozen as
    task facts; underivability is what matters, not truth):
    a. bytes are immutable because a shared-buffer aliasing corruption
