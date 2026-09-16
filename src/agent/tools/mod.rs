@@ -1034,6 +1034,22 @@ pub fn is_mutating_call(name: &str, args: &Value) -> bool {
     is_mutating(name)
 }
 
+/// File path a call targets, if any — recorded on the journal `tool_call`
+/// record so re-reads (same path read twice: context-loss symptom) can be
+/// told apart from plan discipline. Raw value, no normalization; analysis
+/// normalizes. Empty counts as absent.
+pub fn call_path(name: &str, args: &Value) -> Option<String> {
+    let key = match name {
+        "read" | "write" | "edit" | "multi_edit" => "file_path",
+        "ls" | "outline" => "path",
+        _ => return None,
+    };
+    args[key]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
 /// one-line description of a call's arguments for the live TUI row
 pub fn call_summary(name: &str, args: &Value) -> String {
     let s = |k: &str| args[k].as_str().unwrap_or_default().to_string();
@@ -2991,6 +3007,28 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn call_path_extracts_file_targets() {
+        let args = |pairs: &[(&str, &str)]| {
+            let mut m = serde_json::Map::new();
+            for (k, v) in pairs {
+                m.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+            }
+            serde_json::Value::Object(m)
+        };
+        assert_eq!(
+            call_path("read", &args(&[("file_path", "src/a.rs")])),
+            Some("src/a.rs".to_string())
+        );
+        assert_eq!(
+            call_path("ls", &args(&[("path", "src")])),
+            Some("src".to_string())
+        );
+        assert_eq!(call_path("bash", &args(&[("command", "ls")])), None);
+        assert_eq!(call_path("read", &args(&[])), None);
+        assert_eq!(call_path("read", &args(&[("file_path", "")])), None);
+    }
 
     fn proj() -> (ToolCtx, PathBuf) {
         let dir = std::env::temp_dir().join(format!(

@@ -436,9 +436,22 @@ pub struct Score {
     pub traps_ok: bool,
     /// file_diff records per path (churn signal for redundant work)
     pub diffs_per_path: Vec<(String, usize)>,
+    /// re-reads: same path read twice or more — the context-loss symptom,
+    /// split from plan-op discipline so mechanism cost decomposes.
+    pub rereads: usize,
     /// goal fidelity + constraint retention stay HUMAN-scored (0/0.5/1):
     /// the report carries the final anchor and answer for the judge
     pub anchor: String,
+}
+
+/// Light normalization so the same file spelled two ways counts once.
+/// Analysis-grade, not identity: raw values stay in the journal.
+fn normalize_read_path(path: &str) -> String {
+    let mut out = path.replace('\\', "/");
+    while let Some(rest) = out.strip_prefix("./") {
+        out = rest.to_string();
+    }
+    out.to_lowercase()
 }
 
 /// Score a finished run. Acceptance + traps are automatic; goal fidelity
@@ -467,6 +480,8 @@ pub fn score_run(report: &RunReport, task: &TaskSpec, fixture_src: &Path) -> Sco
     let journal_dir = report.root.join(".sqwai").join("journal");
     let mut per_path: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
+    let mut reads: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     if let Ok(entries) = std::fs::read_dir(&journal_dir) {
         for entry in entries.flatten() {
             let Ok(text) = std::fs::read_to_string(entry.path()) else {
@@ -487,10 +502,20 @@ pub fn score_run(report: &RunReport, task: &TaskSpec, fixture_src: &Path) -> Sco
                         *per_path.entry(path.to_string()).or_default() += 1;
                     }
                 }
+                if record.get("kind").and_then(|k| k.as_str()) == Some("tool_call")
+                    && record.get("tool").and_then(|t| t.as_str()) == Some("read")
+                {
+                    if let Some(path) = record.get("path").and_then(|p| p.as_str()) {
+                        *reads.entry(normalize_read_path(path)).or_default() += 1;
+                    }
+                }
             }
         }
     }
     score.diffs_per_path = per_path.into_iter().collect();
+    // every repeat past the first is a re-read: the model forgot content
+    // it already had (symptom), as opposed to planned work (discipline)
+    score.rereads = reads.values().map(|n| n.saturating_sub(1)).sum();
 
     score.anchor = crate::agent::context::anchor(&report.root, &report.session_id);
     score
@@ -510,7 +535,7 @@ pub fn print_report(report: &RunReport, score: &Score) {
         report.plan_finished, report.claimed_done, report.timed_out, report.error
     );
     println!("acceptance_green: {}  traps_ok: {}", score.acceptance_green, score.traps_ok);
-    println!("diffs_per_path: {:?}", score.diffs_per_path);
+    println!("diffs_per_path: {:?}  rereads: {}", score.diffs_per_path, score.rereads);
     if !report.latencies.is_empty() {
         let max = report.latencies.iter().max().unwrap_or(&0);
         let sum: u64 = report.latencies.iter().sum();
@@ -552,6 +577,7 @@ pub fn write_eval(report: &RunReport, score: &Score) {
         "error": report.error,
         "acceptance_green": score.acceptance_green,
         "traps_ok": score.traps_ok,
+        "rereads": score.rereads,
         "diffs_per_path": score.diffs_per_path,
         "latencies": report.latencies,
         "fidelity": null, "retention": null,
@@ -626,7 +652,11 @@ fn score_run_reads_traps_and_diff_chains() {
         root.join(".sqwai/journal/sess.jsonl"),
         "{\"seq\":1,\"kind\":\"file_diff\",\"path\":\"src/a.rs\"}\n\
          {\"seq\":2,\"kind\":\"file_diff\",\"fields\":{\"path\":\"src/a.rs\"}}\n\
-         {\"seq\":3,\"kind\":\"file_diff\",\"path\":\"src/b.rs\"}\n",
+         {\"seq\":3,\"kind\":\"file_diff\",\"path\":\"src/b.rs\"}\n\
+         {\"seq\":4,\"kind\":\"tool_call\",\"tool\":\"read\",\"path\":\"src/a.rs\"}\n\
+         {\"seq\":5,\"kind\":\"tool_call\",\"tool\":\"read\",\"path\":\"SRC\\\\A.rs\"}\n\
+         {\"seq\":6,\"kind\":\"tool_call\",\"tool\":\"read\",\"path\":\"src/b.rs\"}\n\
+         {\"seq\":7,\"kind\":\"tool_call\",\"tool\":\"bash\"}\n",
     )
     .unwrap();
 
@@ -656,6 +686,9 @@ fn score_run_reads_traps_and_diff_chains() {
             ("src/b.rs".to_string(), 1)
         ]
     );
+    // a.rs read twice (second spelled differently — normalization merges),
+    // b.rs once, bash carries no path: exactly one re-read
+    assert_eq!(score.rereads, 1);
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&src);
 }
