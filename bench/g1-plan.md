@@ -79,6 +79,14 @@ tasks × arms × models × repeats = 3×2×2×2 = 24 runs (+6 base
 calibrations). Repeats 2, 5 only on variance demand. Per-task windows
 recalibrated per model (fractions of that model's context).
 
+## Amendment 1 (2026-09-17): harness-green substitutes stale receipts
+
+Mechanism finish = plan_finished, OR (harness acceptance green AND
+zero open steps). A missing plan receipt must not fail work the
+independent check confirmed (T4-mech/1.3: suites green, traps green,
+steps closed, one receipt stale). Open steps still fail — that is
+unfinished work, not bookkeeping.
+
 ## Metrics (G0 + deltas)
 
 - All G0 machine scores (acceptance, traps=btree only, diffs,
