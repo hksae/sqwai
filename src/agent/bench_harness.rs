@@ -498,13 +498,52 @@ fn normalize_read_path(path: &str) -> String {
     out.to_lowercase()
 }
 
+/// Split an acceptance command into exe + args, honoring double quotes.
+/// No shell involved: quoting survives byte-for-byte to CreateProcess.
+fn split_cmd(cmd: &str) -> Option<(String, Vec<String>)> {
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    let mut chars = cmd.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            in_quotes = !in_quotes;
+        } else if c.is_whitespace() && !in_quotes {
+            if !cur.is_empty() {
+                parts.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(c);
+        }
+    }
+    if in_quotes || cur.is_empty() && parts.is_empty() {
+        return None;
+    }
+    if !cur.is_empty() {
+        parts.push(cur);
+    }
+    let mut it = parts.into_iter();
+    Some((it.next()?, it.collect()))
+}
+
 /// Score a finished run. Acceptance + traps are automatic; goal fidelity
 /// and constraint retention are judged by a human from the report.
 pub fn score_run(report: &RunReport, task: &TaskSpec, fixture_src: &Path) -> Score {
     let mut score = Score::default();
     score.acceptance_green = task.acceptance_cmds.iter().all(|cmd| {
-        std::process::Command::new("cmd")
-            .args(["/C", cmd])
+        // Never route through `cmd /C`: its quote-stripping heuristics
+        // mangle a quoted exe path with quoted args (Git Bash under
+        // Program Files) and score red on a green tree — exactly what T4
+        // calibration caught. Split deterministically and spawn directly.
+        let Some((exe, args)) = split_cmd(cmd) else {
+            return false;
+        };
+        std::process::Command::new(exe)
+            .args(args)
             .current_dir(&report.root)
             .output()
             .map(|out| out.status.success())
@@ -717,7 +756,10 @@ fn score_run_reads_traps_and_diff_chains() {
         id: "TX",
         goal: "x",
         constraints: &[],
-        acceptance_cmds: &["cmd /C exit 0"],
+        acceptance_cmds: &[
+            "\"C:\\Windows\\System32\\cmd.exe\" /C \"exit 0\"",
+            "cmd /C exit 0",
+        ],
     };
     let mut report = RunReport::default();
     report.root = root.clone();
@@ -736,6 +778,26 @@ fn score_run_reads_traps_and_diff_chains() {
     assert_eq!(score.rereads, 1);
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&src);
+}
+
+#[test]
+fn split_cmd_keeps_quoted_segments_whole() {
+    assert_eq!(
+        split_cmd("\"C:\\Program Files\\Git\\bin\\bash.exe\" -lc \"make test-errors\""),
+        Some((
+            "C:\\Program Files\\Git\\bin\\bash.exe".to_string(),
+            vec!["-lc".to_string(), "make test-errors".to_string()]
+        ))
+    );
+    assert_eq!(
+        split_cmd("cargo test --test engine"),
+        Some((
+            "cargo".to_string(),
+            vec!["test".to_string(), "--test".to_string(), "engine".to_string()]
+        ))
+    );
+    assert_eq!(split_cmd(""), None);
+    assert_eq!(split_cmd("\"unbalanced"), None);
 }
 
 #[test]

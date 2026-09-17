@@ -1,5 +1,12 @@
 # T4: `bytes` type end-to-end (G1) — FROZEN 2026-09-16
 
+Base calibration (1.3, 256K+0.15, 2026-09-17): SOLVED — 406 tools,
+55 min wall, 7 compactions (band ✓), traps held, plan completed.
+15.9M in / 79k out tokens (cache churn from frequent collapses —
+budget G1 runs accordingly). Initial acceptance red was a HARNESS BUG
+(cmd quote-stripping), not implementation: recheck green 167+280.
+rereads=152 on the run (symptom counter live).
+
 Acceptance tests (all RED on pristine, verified): tests/bytes_construct,
 bytes_index, bytes_concat, bytes_equality, bytes_immutable,
 error_cases/bytes_oob, bytes_negative, bytes_mixed_concat
