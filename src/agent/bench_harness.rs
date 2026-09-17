@@ -310,10 +310,13 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
         fallback_chain: Vec::<FallbackCandidate>::new(),
     };
 
-    // system block: stable prefix like the app builds it (minus TUI state)
+    // system block: stable prefix like the app builds it (minus TUI state),
+    // but ROOTED AT THE FIXTURE COPY: stable_prefix() would leak the cargo
+    // process cwd ("Working directory: .../sqwai", sqwai's AGENTS.md and
+    // memory) into every run.
     let mut input = input;
     input.system = vec![crate::providers::SystemPart::cached(
-        crate::prompts::stable_prefix(),
+        crate::prompts::bench_prefix(&root, baseline),
     )];
 
     let mut handle = crate::agent::loop_task::spawn_agent(input);

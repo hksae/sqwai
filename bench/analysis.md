@@ -68,6 +68,23 @@ pre-registered). Finish 12/12. Acceptance 12/12 green.
 ## Recommendation
 
 Close G0 as a **negative superiority result with validated machinery**
+
+## Amendment 3 (2026-09-17, CROSS-CUTTING — prompt contamination)
+
+Bench runs built the system prompt from the CARGO PROCESS cwd instead
+of the fixture root: every run told the model "Working directory:
+.../sqwai" and fed it sqwai's AGENTS.md (both arms) plus sqwai's memory
+(mechanism arms). Found because a T4-matrix run spent 159 turns reading
+the LIVE kaiwai tree (zero diffs — discipline held, methodology did
+not); its eval line was deleted as invalid, not as ugly. Fixed:
+`bench_prefix(root, baseline)` in prompts, wired into run_arm, covered
+by `bench_prefix_roots_at_fixture_not_cwd`. G0 impact: same poisoning
+existed there (minidb has no AGENTS.md of its own, so agents+memory
+layers were the vector). Direction of bias: noise favoring NEITHER arm
+systematically (both arms got the wrong cwd; only mechanism got foreign
+memory — unused, tasks solved anyway), but any G0 run COULD have
+strayed the same way undetected. G0 verdicts stand with this caveat
+attached; G1 reruns everything post-fix.
 (finish detectors on both arms, the blocked waiver proven in shakedown
 though unused in-matrix — all mechanism plans completed clean,
 summary chaining ×17, capture-nudge shipped, valve dynamics measured).

@@ -15,13 +15,19 @@ const TREE_LIMIT: usize = 40;
 /// Facts that cannot change while the process runs: platform, shell, and
 /// working directory. This is the first cacheable prompt layer.
 pub fn process_block() -> String {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    process_block_at(&std::env::current_dir().unwrap_or_default())
+}
+
+/// Same facts, rooted explicitly: bench runs must pass the fixture copy,
+/// never the cargo-inherited cwd (which once told a model its workspace
+/// was the sqwai repo and cost a 159-turn run in the wrong tree).
+pub fn process_block_at(root: &std::path::Path) -> String {
     let shell = shell_name();
     format!(
         "<process_environment>\nPlatform: {} ({})\nShell: {shell}\nWorking directory: {}\n</process_environment>\n",
         std::env::consts::OS,
         std::env::consts::ARCH,
-        cwd.display()
+        root.display()
     )
 }
 

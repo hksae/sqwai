@@ -72,12 +72,26 @@ fn truncate_chars(text: &str, max: usize) -> String {
 
 /// Stable prefix: identical for every request of a session, safe to cache.
 pub fn stable_prefix() -> String {
-    let mut prompt = compose(&builtin_prompt(), project_agents().as_deref());
+    stable_prefix_at(&std::env::current_dir().unwrap_or_default())
+}
+
+/// Bench assembly: identical layers, rooted at the fixture copy.
+/// The model must never see the cargo-inherited cwd here.
+pub fn bench_prefix(root: &std::path::Path, baseline: bool) -> String {
+    stable_prefix_inner(root, baseline)
+}
+
+fn stable_prefix_at(root: &std::path::Path) -> String {
+    stable_prefix_inner(root, crate::bench::baseline())
+}
+
+fn stable_prefix_inner(root: &std::path::Path, baseline: bool) -> String {
+    let mut prompt = compose(&builtin_prompt(), project_agents_at(root).as_deref());
     prompt.push_str("\n\n");
-    prompt.push_str(&env::process_block());
+    prompt.push_str(&env::process_block_at(root));
     // G0 baseline (§8.2): no durable memory in the prefix.
-    if !crate::bench::baseline()
-        && let Some(memory) = memory_block(&std::env::current_dir().unwrap_or_default())
+    if !baseline
+        && let Some(memory) = memory_block(root)
     {
         prompt.push_str("\n\n");
         prompt.push_str(&memory);
@@ -120,7 +134,12 @@ fn builtin_prompt() -> String {
 
 /// AGENTS.md of the current project, truncated to a sane size
 pub fn project_agents() -> Option<String> {
-    let s = std::fs::read_to_string("AGENTS.md").ok()?;
+    project_agents_at(&std::env::current_dir().unwrap_or_default())
+}
+
+/// Same, rooted explicitly (bench fixture copies ship their own AGENTS.md).
+pub fn project_agents_at(root: &std::path::Path) -> Option<String> {
+    let s = std::fs::read_to_string(root.join("AGENTS.md")).ok()?;
     let s = s.trim();
     if s.is_empty() {
         return None;
@@ -202,6 +221,34 @@ mod tests {
     fn memory_block_is_optional_for_empty_project() {
         let root = std::env::temp_dir().join(format!("sqwai-prompt-{}", std::process::id()));
         assert!(memory_block(&root).is_none());
+    }
+
+    #[test]
+    fn bench_prefix_roots_at_fixture_not_cwd() {
+        let dir = std::env::temp_dir().join(format!(
+            "sqwai-bench-prefix-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "FIXTURE AGENTS MARKER").unwrap();
+        let p = bench_prefix(&dir, false);
+        // working directory points at the fixture copy...
+        assert!(
+            p.contains(&dir.display().to_string()),
+            "cwd must be the fixture: {p:.200}"
+        );
+        // ...and so does the project instructions layer
+        assert!(p.contains("FIXTURE AGENTS MARKER"), "{p:.200}");
+        // the cargo-inherited cwd must not leak in as a working directory
+        let cwd = std::env::current_dir().unwrap_or_default();
+        if cwd != dir {
+            assert!(
+                !p.contains(&format!("Working directory: {}", cwd.display())),
+                "repo cwd leaked into bench prompt: {p:.200}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
