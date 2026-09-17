@@ -20,7 +20,7 @@ use crate::agent::loop_task::{
 };
 use crate::providers::{Message, Role, SharedProvider};
 
-const WALL_CAP: Duration = Duration::from_secs(3600);
+const WALL_CAP: Duration = Duration::from_secs(7200);
 
 /// Pre-registered per-task windows (amendment 2026-09-15): tasks differ in
 /// size, so a uniform window leaves the small ones uncompacted (T2/T3 peak

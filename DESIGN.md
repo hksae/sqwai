@@ -1581,7 +1581,9 @@ are not persisted). Three scripted tasks of 25–40 steps each (TTL feature,
 constrained rename, ambiguous bugfix — specs frozen after one manual
 calibration run), run with `compaction.threshold` forced low so that ≥ 3
 compactions occur per run. Repeats: 2 per task per arm to start (12 runs);
-5 only if variance demands it. Wall-time cap 1h per run.
+5 only if variance demands it. Wall-time cap 2h per run (raised from 1h
+2026-09-17: T4 clips 1h with the implementation done but the plan
+ritual incomplete).
 
 Evaluation protocol:
 - **External observer**: an external evaluation harness (independent of the agent's
