@@ -25,7 +25,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BENCH = os.path.join(ROOT, "bench")
 LOGS = os.path.join(BENCH, "logs")
-RUN_TIMEOUT = 70 * 60  # harness wall cap is 60 min; give it slack
+RUN_TIMEOUT = 130 * 60  # harness wall cap is 2h; give it slack
 COOLDOWN = 30  # seconds between runs
 
 # G1 regime (locked in bench/g1-plan.md)
