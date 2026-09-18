@@ -442,6 +442,9 @@ pub struct App {
     /// Finalized activity groups (one per completed agent turn). The currently
     /// streaming turn is rendered live and only lands here at `finish_turn`.
     activity_groups: Vec<ActivityGroup>,
+    /// (plan_id, acceptance index) already announced as stale in chat.
+    /// Compared at turn end; newly stale items get one durable status row.
+    announced_stale: std::collections::HashSet<(String, usize)>,
     /// Wall-clock start of the turn currently streaming, used to freeze the
     /// activity duration once the turn completes.
     turn_started: Option<Instant>,
@@ -912,6 +915,7 @@ impl App {
             enter_gate: events::EnterGate::default(),
             pending_events: std::collections::VecDeque::new(),
             activity_groups: Vec::new(),
+            announced_stale: std::collections::HashSet::new(),
             turn_started: None,
             live_group_collapsed: false,
         };
@@ -2282,6 +2286,7 @@ impl App {
         self.sub_groups.clear();
         self.sub_started.clear();
         self.sub_views.clear();
+        self.announced_stale.clear();
         // live + parked rows belong to the old transcript: drop them whole
         // so the next draw assembles from scratch instead of splicing
         // against a stale chunk map
@@ -2407,6 +2412,7 @@ impl App {
         self.sub_groups.clear();
         self.sub_started.clear();
         self.sub_views.clear();
+        self.announced_stale.clear();
         self.stashed_main_scroll = None;
         self.todos.clear();
         self.turn_user_index = None;
@@ -4239,6 +4245,25 @@ impl App {
         self.finish_turn_inner(res, true);
     }
 
+    /// Push one durable chat row per newly-stale acceptance item, if a plan
+    /// is active. Split out for tests: production passes the loaded plan,
+    /// tests pass constructed ones (no disk involved).
+    fn announce_stale_rows(&mut self, plan: Option<crate::plan::Plan>) {
+        let Some(plan) = plan else {
+            self.announced_stale.clear();
+            return;
+        };
+        let (fresh, next) = crate::plan::stale_announcements(&self.announced_stale, &plan);
+        self.announced_stale = next;
+        for i in fresh {
+            self.push_segment(Segment::Status {
+                text: format!("acceptance {i} went stale — re-verify"),
+                kind: StatusKind::Err,
+                expanded: false,
+            });
+        }
+    }
+
     /// `advanced` tells the Ok path whether the outcome added a new plain
     /// assistant message past the one already on screen (`finish_turn_ok`
     /// computes it against the pre-replacement session). Callers that did
@@ -4377,6 +4402,19 @@ impl App {
         // Segment indices are stable from here on: the empty-thinking cleanup
         // and the answer backfill above have all run.
         self.finalize_activity_group();
+        // stale markers (I4): acceptance items that went stale since the
+        // last turn get one durable chat row each — the plan panel is not
+        // where the user reads. Placed after finalize so the row lands
+        // outside the folded group, always visible. The announced set
+        // dedupes; re-verified items re-arm automatically.
+        {
+            let root = std::env::current_dir().unwrap_or_default();
+            let sid = self.session.id.to_string();
+            let plan = crate::plan::open_active_for_session(&root, Some(&sid))
+                .ok()
+                .flatten();
+            self.announce_stale_rows(plan);
+        }
         // Persist the presentation summary only after the group was finalized.
         // Saving earlier lost it across a restart and restored bare tool rows.
         if let Some((text, is_error)) = turn_note

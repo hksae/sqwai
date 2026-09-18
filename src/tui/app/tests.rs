@@ -2155,6 +2155,39 @@ mod tests {
     }
 
     #[test]
+    fn stale_acceptance_announces_one_durable_row() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        let plan: crate::plan::Plan = serde_json::from_str(
+            r#"{"version":1,"id":"p","status":"active","created":"t",
+                "goal":{"text":"g","source":"user","created":"t"},
+                "budget":{"tokens":0,"limit":0},"revision":1,"steps":[],
+                "acceptance":[
+                  {"text":"cmd: a","status":"pending","validation":{"status":"passed"}},
+                  {"text":"cmd: b","status":"pending","validation":{"status":"stale"}}
+                ]}"#,
+        )
+        .expect("test plan must parse");
+        app.announce_stale_rows(Some(plan.clone()));
+        let rows: Vec<String> = app
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Status { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows, vec!["acceptance 1 went stale — re-verify".to_string()]);
+        // second call: silence (already announced)
+        let n = app.segments.len();
+        app.announce_stale_rows(Some(plan));
+        assert_eq!(app.segments.len(), n);
+        // no plan: set clears, nothing pushed
+        app.announce_stale_rows(None);
+        assert!(app.announced_stale.is_empty());
+    }
+
+    #[test]
     fn sub_group_folds_finished_chat_like_main() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;

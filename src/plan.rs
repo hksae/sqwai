@@ -2439,6 +2439,37 @@ pub fn invalidate_on_diff(root: &Path, session_id: &str, paths: &[String]) -> Re
     Ok(true)
 }
 
+/// Diff helper for stale markers (I4): given the set of (plan_id, index)
+/// already announced in chat, return newly-stale acceptance indices plus
+/// the pruned set. Pure: the TUI calls it at turn end and pushes one
+/// durable status row per new index. Re-verified items drop out, so a
+/// second staleness announces again; entries of replaced plans are pruned.
+pub fn stale_announcements(
+    announced: &std::collections::HashSet<(String, usize)>,
+    plan: &Plan,
+) -> (
+    Vec<usize>,
+    std::collections::HashSet<(String, usize)>,
+) {
+    let mut next: std::collections::HashSet<(String, usize)> = announced
+        .iter()
+        .filter(|(id, _)| id == &plan.id)
+        .cloned()
+        .collect();
+    let mut fresh = Vec::new();
+    for (i, item) in plan.acceptance.iter().enumerate() {
+        let key = (plan.id.clone(), i);
+        if item.validation.status == ValidationStatus::Stale {
+            if next.insert(key) {
+                fresh.push(i);
+            }
+        } else {
+            next.remove(&key);
+        }
+    }
+    (fresh, next)
+}
+
 // ---------------------------------------------------------------- rendering
 
 /// The plan document shown by `/plan` (§2.1.7).
@@ -3402,6 +3433,45 @@ mod tests {
         let err = confirm(&dir, "sess", &mut cmd_plan, 0, "trust me").unwrap_err();
         assert_eq!(err.code, "not_manual");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stale_announcements_fire_once_per_stale_item() {
+        let plan_with = |statuses: &[&str]| {
+            let items: Vec<String> = statuses
+                .iter()
+                .map(|s| {
+                    format!(
+                        r#"{{"text":"cmd: x","status":"pending","validation":{{"status":"{s}"}}}}"#
+                    )
+                })
+                .collect();
+            serde_json::from_str::<Plan>(&format!(
+                r#"{{"version":1,"id":"p","status":"active","created":"t",
+                    "goal":{{"text":"g","source":"user","created":"t"}},
+                    "budget":{{"tokens":0,"limit":0}},"revision":1,
+                    "steps":[],"acceptance":[{}]}}"#,
+                items.join(",")
+            ))
+            .expect("test plan must parse")
+        };
+        let empty = std::collections::HashSet::new();
+        // item 1 stale, item 0 passed: only 1 announces
+        let (fresh, next) = stale_announcements(&empty, &plan_with(&["passed", "stale"]));
+        assert_eq!(fresh, vec![1]);
+        // same state again: silence (already announced)
+        let (fresh2, next2) = stale_announcements(&next, &plan_with(&["passed", "stale"]));
+        assert!(fresh2.is_empty());
+        // re-verified then stale again: announces again
+        let (_, next3) = stale_announcements(&next2, &plan_with(&["passed", "passed"]));
+        let (fresh4, _) = stale_announcements(&next3, &plan_with(&["passed", "stale"]));
+        assert_eq!(fresh4, vec![1]);
+        // foreign plan entries prune without announcing
+        let mut foreign = std::collections::HashSet::new();
+        foreign.insert(("other".to_string(), 0));
+        let (fresh5, next5) = stale_announcements(&foreign, &plan_with(&["passed"]));
+        assert!(fresh5.is_empty());
+        assert!(next5.is_empty());
     }
 
     #[test]
