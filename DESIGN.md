@@ -1492,7 +1492,7 @@ number; a `partial` one is missing something the design calls for.
 | F6 | Compaction anchor; summary=off default; resume per §3.4 (fork deleted); undo→reopen | done | F1–F5 |
 | F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, zstd) + layer-2 shadow repo driven by git CLI synchronously; path-scoped restore; `/undo step N` | done | F1 |
 | F7b | Crash-safe mutation protocol | done differently — no `mutation_started/observed` sweep; Layer-1 pre-images + `file_diff` chain cover single-step revert instead | F7 |
-| G0 | Minimal comparative retention benchmark (§8.2): plan + journal + anchor vs baseline | next | F1b, F6 |
+| G0 | Minimal comparative retention benchmark (§8.2): plan + journal + anchor vs baseline | done — harness as ignored tests (minidb T1–T3 + kaiwai T4 matrix), pre-registration, eval files and analyses under bench/ | F1b, F6 |
 | G1 | Full integrity benchmark (§8.2): verification receipts, mutation crash harness, claim lint | planned | G0, V1, F7b, I4 |
 | H0 | L0 fact block + criticism detector | planned (§12.7) | F2 |
 | H1 | Reflector: Scope/Neutralizer/Executor/Verdict, /verify | planned (§12.7) | H0, D |
