@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""G1 matrix runner: 1 task x 2 arms x 2 models x 1 repeat, one at a time.
+"""T4 retention matrix runner: 1 task x 2 arms x 2 models x 1 repeat, one at a time.
 
 Cell identity is task/arm/MODEL (models differ per config: adjust MODELS
 to your config keys). Resumable: a cell is done when its model has a line
 in bench/<task>/<arm>.eval.jsonl. Rerun after interruption to continue.
 A failed run is logged and SKIPPED forward - a red run is data, never a
-reason to stop or to replace runs (see bench/prereg.md + bench/g1-plan.md).
+reason to stop or to replace runs (see bench/prereg.md + bench/plan-t4.md).
 
 Usage:  python bench/run_matrix.py   (from the repo root)
 Env set by the script itself: SQWAI_BENCH_DEBUG=1, SQWAI_BENCH_SUMMARY=short,
@@ -28,7 +28,7 @@ LOGS = os.path.join(BENCH, "logs")
 RUN_TIMEOUT = 130 * 60  # harness wall cap is 2h; give it slack
 COOLDOWN = 30  # seconds between runs
 
-# G1 regime (locked in bench/g1-plan.md)
+# T4 regime (locked in bench/plan-t4.md)
 FIXTURE = r"C:\Users\Asus\kaiwai-frozen"
 CONTEXT = "256000"
 # (model key as in YOUR config) x test names. Adjust keys, not structure.

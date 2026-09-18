@@ -1,4 +1,8 @@
-# G1 plan (draft, 2026-09-16)
+# T4 retention campaign plan (draft, 2026-09-16)
+
+> Name history: this file was `g1-plan.md`. Renamed 2026-09-18: DESIGN's
+> G1 is the Full integrity benchmark (receipts, crash recovery, claim
+> lint) — still planned, untouched. This campaign is extended G0.
 
 ## Question
 
@@ -12,7 +16,7 @@ expected, strength of delta may differ.
 - Second: `muse spark 1.2` — clearly weaker (DeepSWE 59.3 vs 75.4),
   same endpoint/format/price, zero integration risk. User adds it to
   config themselves.
-- Rejected for G1: DeepSeek V4.1 Flash — NOT weaker than 1.3 (T-Bench
+- Rejected here: DeepSeek V4.1 Flash — NOT weaker than 1.3 (T-Bench
   90.6 vs 88.8), answers generality not weakness; ~2x per-token price;
   promo cliff Sept 20. Third model later, optionally.
 
@@ -58,14 +62,14 @@ expected, strength of delta may differ.
   deprecation is in the code); "no BTreeMap in new files, HashMap only —
   we had a perf incident last quarter" is non-standard. Admission test
   at task-design time: "can the model derive this without being told?"
-  Yes — reject as G1 material.
+  Yes — reject as T4 material.
 - Empirical admission (locked): before freezing an invariant as
   non-standard, ask the model with NO hints: "read the repo — are there
   unwritten rules to follow?" If it formulates your invariant, it is
   derivable — reject. If not, it is truly non-standard. Cheap: one short
   run, no matrix. Judgment replaced by measurement.
 - Capture vs retention (locked): the invariant sits in the chat either
-  way, so G1 does NOT ask "will the model hold it unprompted" — it asks
+  way, so this campaign does NOT ask "will the model hold it unprompted" — it asks
   "did the HOST capture it into plan/anchor". Score capture explicitly
   per invariant per run (captured? when? by which path: plan-create /
   capture-nudge / summary-ferry / none) SEPARATE from retention (did
@@ -105,8 +109,9 @@ total-timeout 600s.
 Todo: re-reads counter (needs `path` in journal tool_call records),
 `SQWAI_BENCH_SUMMARY` doc line in bench method notes.
 
-## Cost estimate
+## Cost estimate (actuals 2026-09-18)
 
-G0 matrix + shakedowns + calibrations ≈ $0.63 total. G1: spark runs
-≈$0.15–0.30 each at 3–5x G0 size; 24 + 6 runs ≈ $5–10. Recount exactly
-after base calibrations, before committing to the full matrix.
+G0 total ≈ $0.63. T4 cells ≈ $1–2 each (15–18M input tokens; frequent
+collapses churn the prefix cache). Full T4 campaign (calibration +
+4 cells + forensics reruns) lands inside the locked $5–7 only without
+reruns — valid cells are never rerun.

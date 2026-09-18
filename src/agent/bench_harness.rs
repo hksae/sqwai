@@ -38,7 +38,7 @@ fn compaction_threshold(task: &TaskSpec) -> f64 {
         // G0 windows (strangled regimes, locked by measurement)
         "T1" => 0.01,
         "T2" | "T3" => 0.005,
-        // G1 T4: 0.15 of 256K (~40K). Product 0.8 never fires here
+        // T4: 0.15 of 256K (~40K). Product 0.8 never fires here
         // (measured plateau ~70K); the window is stated on every result.
         "T4" => 0.15,
         _ => 0.80,
@@ -63,7 +63,7 @@ pub const T1: TaskSpec = TaskSpec {
     acceptance_cmds: &["cargo test --test engine", "cargo test --test cli_ttl"],
 };
 
-/// G1 T4: `bytes` byte-buffer type end-to-end on the kaiwai fixture.
+/// T4 retention: `bytes` byte-buffer type end-to-end on the kaiwai fixture.
 /// Spec frozen in bench/tasks-t4.md; acceptance tests ship RED in the
 /// snapshot. Acceptance runs under Git Bash (cmd breaks on `mkdir -p`).
 /// Fixture: SQWAI_BENCH_FIXTURE=C:\Users\Asus\kaiwai-frozen.
@@ -219,7 +219,7 @@ fn copy_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
 pub struct RunReport {
     pub task: String,
     pub arm: String,
-    /// model key the run used (SQWAI_BENCH_MODEL): G1 compares models,
+    /// model key the run used (SQWAI_BENCH_MODEL): T4 compares models,
     /// so the cell identity is task/arm/model, not task/arm.
     pub model: String,
     /// fixture copy this run mutated (for acceptance + trap scoring)
@@ -264,7 +264,7 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
     let root = fresh_copy(task, &report.arm)?;
     let mut compaction = crate::config::CompactionConfig::default();
     compaction.threshold = compaction_threshold(task);
-    // G1 regime simulation (bench-only): cap the working context without
+    // T4 regime simulation (bench-only): cap the working context without
     // touching model configs or product code. The agent never holds more
     // than budget+reserve, so retention is measured honestly at 256K.
     let context_limit = std::env::var("SQWAI_BENCH_CONTEXT")
@@ -945,7 +945,7 @@ async fn bench_t4_calibration() {
     print_report(&report, &score);
 }
 
-/// Matrix (G1, pre-registered in bench/g1-plan.md): T4, mechanism arm.
+/// Matrix (T4 retention, pre-registered in bench/plan-t4.md): T4, mechanism arm.
 /// Gates: ≥1 compaction + spec finish rule. Acceptance/traps are DATA.
 /// Cell identity includes the model (run once per model).
 #[tokio::test]
@@ -975,7 +975,7 @@ async fn bench_t4_mechanism() {
     );
 }
 
-/// Matrix (G1): T4, baseline arm. Same data-not-gates contract.
+/// Matrix (T4 retention): T4, baseline arm. Same data-not-gates contract.
 #[tokio::test]
 #[ignore]
 async fn bench_t4_baseline() {

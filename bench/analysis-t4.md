@@ -1,4 +1,4 @@
-# G1 analysis (2026-09-18, 4/4 cells: T4 x mech/base x 1.3/1.2, n=1)
+# T4 retention analysis (2026-09-18, 4/4 cells: T4 x mech/base x 1.3/1.2, n=1)
 
 Regime: 256K simulated, threshold 0.15 (~40K budget), restricted-short
 summaries (intended ≤300 tok), fixture kaiwai-frozen.
@@ -67,12 +67,12 @@ Gates: all cells compacted (4/6/20/9), all finished per arm rules
 
 - Single task (T4) not three; n=1 per cell, not 2. With ~$1/cell,
   the locked $5–7 fits 5–6 runs total. No 5-repeat follow-up on THESE
-  cells would separate correctness (12/12 green across G0+G1-matrix
+  cells would separate correctness (16/16 green across G0+T4-matrix
   so far) — variance bands stay descriptive.
 
 ## Recommendation
 
-Close G1-measurement on T4 as **negative superiority, positive
+Close T4-measurement as **negative superiority, positive
 machinery**: plans capture lore verbatim on both models, summaries
 ferry it on baseline, everything solves, traps hold. The product
 thesis stands refined: mechanism = predictability + cache-taxed
