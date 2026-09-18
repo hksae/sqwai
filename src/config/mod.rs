@@ -664,6 +664,14 @@ impl Default for PlanConfig {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VerifyConfig {
+    /// named check commands for plan acceptance (`cmd: $name` substitutes
+    /// on `plan create`). Project-scoped; seeded by `/init`, edited by hand.
+    #[serde(default)]
+    pub commands: std::collections::BTreeMap<String, String>,
+}
+
 /// `[secrets]` — files the host must not read into durable state (§2.3.6).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretsConfig {
@@ -779,6 +787,8 @@ struct ProjectOverrides {
     #[serde(default)]
     plan: PlanOverride,
     #[serde(default)]
+    verify: VerifyOverride,
+    #[serde(default)]
     memory: MemoryOverride,
 }
 
@@ -822,6 +832,11 @@ struct PlanOverride {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+struct VerifyOverride {
+    commands: Option<std::collections::BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 struct MemoryOverride {
     load_budget_ratio: Option<f64>,
     max_tokens: Option<u32>,
@@ -861,6 +876,7 @@ const PROJECT_ALLOWLIST: &[(&str, &[&str])] = &[
         ],
     ),
     ("plan", &["budget_ratio", "max_steps", "nudge_after"]),
+    ("verify", &["commands"]),
     (
         "memory",
         &["load_budget_ratio", "max_tokens", "max_proposals_per_turn"],
@@ -958,6 +974,8 @@ pub struct Config {
     #[serde(default)]
     pub plan: PlanConfig,
     #[serde(default)]
+    pub verify: VerifyConfig,
+    #[serde(default)]
     pub secrets: SecretsConfig,
     #[serde(default)]
     pub undo: UndoConfig,
@@ -1023,6 +1041,7 @@ impl Default for Config {
             diary: DiaryConfig::default(),
             compaction: CompactionConfig::default(),
             plan: PlanConfig::default(),
+            verify: VerifyConfig::default(),
             secrets: SecretsConfig::default(),
             undo: UndoConfig::default(),
         }
@@ -1268,9 +1287,14 @@ impl Config {
         if let Some(v) = o.nudge_after {
             plan.nudge_after = v;
         }
+        let verify = &mut self.verify;
+        let o = &overrides.verify;
+        if let Some(v) = o.commands.clone() {
+            verify.commands.extend(v);
+        }
         let memory = &mut self.memory;
-        let o = &overrides.memory;
-        if let Some(v) = o.load_budget_ratio {
+
+        let o = &overrides.memory;        if let Some(v) = o.load_budget_ratio {
             memory.load_budget_ratio = v;
         }
         if let Some(v) = o.max_tokens {
@@ -1280,6 +1304,154 @@ impl Config {
             memory.max_proposals_per_turn = v;
         }
         notes
+    }
+
+    /// Named verify commands for a project, read tolerantly straight from
+    /// `.sqwai/config.toml` (`[verify] commands`). Used at `plan create`
+    /// without threading the whole Config through dispatch. Anything
+    /// unreadable or misshapen yields an empty map — absence just means
+    /// no names (the allowlist still reports a bad file on load).
+    pub fn project_verify_commands(root: &Path) -> std::collections::BTreeMap<String, String> {
+        let Ok(raw) = std::fs::read_to_string(root.join(".sqwai").join("config.toml")) else {
+            return Default::default();
+        };
+        toml::from_str::<ProjectOverrides>(&raw)
+            .ok()
+            .and_then(|o| o.verify.commands)
+            .unwrap_or_default()
+    }
+
+    /// Detect check commands for `/init` seeding. Deterministic repo
+    /// probing first (a file that exists beats a guess), then `verify:`
+    /// lines from the project MEMORY.md (curated truth wins name clashes).
+    /// Returns (name, command, source) for reporting; pure except reads.
+    pub fn detect_verify_commands(root: &Path) -> Vec<(String, String, &'static str)> {
+        let mut found: Vec<(String, String, &'static str)> = Vec::new();
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut offer = |name: &str, cmd: String, source: &'static str| {
+            if seen.insert(name.to_string()) {
+                found.push((name.to_string(), cmd, source));
+            }
+        };
+        if root.join("Cargo.toml").is_file() {
+            offer("test", "cargo test".to_string(), "Cargo.toml");
+        }
+        if let Ok(makefile) = std::fs::read_to_string(root.join("Makefile")) {
+            let mut targets: Vec<String> = Vec::new();
+            for line in makefile.lines() {
+                let line = line.trim_end();
+                if line.starts_with('.') || line.starts_with('#') || line.starts_with('\t') {
+                    continue;
+                }
+                if let Some((lhs, _)) = line.split_once(':') {
+                    let name = lhs.trim();
+                    if name.starts_with("test") && !name.contains([' ', '=']) && !name.is_empty() {
+                        targets.push(name.to_string());
+                    }
+                }
+            }
+            targets.sort();
+            let pick = targets
+                .iter()
+                .find(|t| t.as_str() == "test")
+                .or_else(|| targets.first());
+            if let Some(target) = pick {
+                offer("test", format!("make {target}"), "Makefile");
+            }
+        }
+        if let Ok(pkg) = std::fs::read_to_string(root.join("package.json")) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&pkg) {
+                if v.pointer("/scripts/test").and_then(|s| s.as_str()).is_some() {
+                    offer("test", "npm test".to_string(), "package.json");
+                }
+            }
+        }
+        if root.join("pytest.ini").is_file()
+            || root.join("tox.ini").is_file()
+            || std::fs::read_to_string(root.join("pyproject.toml"))
+                .map(|t| t.contains("[tool.pytest"))
+                .unwrap_or(false)
+        {
+            offer("test", "pytest".to_string(), "pytest config");
+        }
+        if root.join("go.mod").is_file() {
+            offer("test", "go test ./...".to_string(), "go.mod");
+        }
+        // curated project memory overrides probing on name clashes
+        if let Ok(memory) =
+            std::fs::read_to_string(root.join(".sqwai").join("memory").join("MEMORY.md"))
+        {
+            for line in memory.lines() {
+                let t = line.trim();
+                let Some(rest) = t.strip_prefix("verify:") else {
+                    continue;
+                };
+                let Some((name, cmd)) = rest.split_once('=') else {
+                    continue;
+                };
+                let (name, cmd) = (name.trim(), cmd.trim());
+                if name.is_empty() || cmd.is_empty() {
+                    continue;
+                }
+                if let Some(slot) = found.iter_mut().find(|(n, _, _)| n == name) {
+                    slot.1 = cmd.to_string();
+                    slot.2 = "MEMORY.md";
+                } else {
+                    seen.insert(name.to_string());
+                    found.push((name.to_string(), cmd.to_string(), "MEMORY.md"));
+                }
+            }
+        }
+        found
+    }
+
+    /// Merge detected commands into `.sqwai/config.toml` (`[verify]`).
+    /// Hand-written names always win: existing keys are never overwritten,
+    /// only missing ones are added. Returns (added, already_there) for the
+    /// status message. Writes the file only when something was added.
+    pub fn seed_verify_commands(root: &Path) -> (Vec<(String, String)>, usize) {
+        let detected = Self::detect_verify_commands(root);
+        if detected.is_empty() {
+            return (Vec::new(), 0);
+        }
+        let dir = root.join(".sqwai");
+        let path = dir.join("config.toml");
+        let mut value: toml::Value = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| toml::from_str(&raw).ok())
+            .unwrap_or(toml::Value::Table(Default::default()));
+        let table = match value.as_table_mut() {
+            Some(t) => t,
+            None => return (Vec::new(), 0),
+        };
+        let verify = table
+            .entry("verify".to_string())
+            .or_insert_with(|| toml::Value::Table(Default::default()));
+        let Some(verify_table) = verify.as_table_mut() else {
+            // hostile shape (`verify = 5`): leave the file alone, report nothing
+            return (Vec::new(), 0);
+        };
+        let commands = verify_table
+            .entry("commands".to_string())
+            .or_insert_with(|| toml::Value::Table(Default::default()));
+        let Some(map) = commands.as_table_mut() else {
+            return (Vec::new(), 0);
+        };
+        let mut added = Vec::new();
+        for (name, cmd, _) in &detected {
+            if !map.contains_key(name) {
+                map.insert(name.clone(), toml::Value::String(cmd.clone()));
+                added.push((name.clone(), cmd.clone()));
+            }
+        }
+        let already = map.len().saturating_sub(added.len());
+        if !added.is_empty() {
+            let _ = std::fs::create_dir_all(&dir);
+            if let Ok(text) = toml::to_string(&value) {
+                let _ = std::fs::write(&path, text);
+            }
+        }
+        (added, already)
     }
 
     pub fn last_model_config(&self) -> Result<&ModelConfig> {
@@ -1388,6 +1560,96 @@ pub fn write_template(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detect_verify_commands_probes_repo_and_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // repo probing: cargo + make (test preferred over test-all) + npm
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        std::fs::write(root.join("Makefile"), "test-all:\n\tt\ntest:\n\tt\n").unwrap();
+        std::fs::write(root.join("package.json"), r#"{"scripts": {"test": "jest"}}"#).unwrap();
+        let found = Config::detect_verify_commands(root);
+        let get = |n: &str| found.iter().find(|(k, _, _)| k == n).cloned();
+        // first source wins the name; cargo probed before make/npm
+        assert_eq!(get("test").map(|(_, c, _)| c), Some("cargo test".to_string()));
+        // MEMORY.md overrides on clash + adds new names
+        std::fs::create_dir_all(root.join(".sqwai/memory")).unwrap();
+        std::fs::write(
+            root.join(".sqwai/memory/MEMORY.md"),
+            "notes\nverify: test = make test-ci\nverify: lint = cargo clippy\n",
+        )
+        .unwrap();
+        let found = Config::detect_verify_commands(root);
+        let get = |n: &str| found.iter().find(|(k, _, _)| k == n).cloned();
+        assert_eq!(
+            get("test"),
+            Some(("test".to_string(), "make test-ci".to_string(), "MEMORY.md"))
+        );
+        assert_eq!(
+            get("lint").map(|(_, c, _)| c),
+            Some("cargo clippy".to_string())
+        );
+        // nothing anywhere: empty, not an error
+        let empty = tempfile::tempdir().unwrap();
+        assert!(Config::detect_verify_commands(empty.path()).is_empty());
+    }
+
+    #[test]
+    fn seed_verify_commands_merges_without_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        // pre-existing hand-written values survive; unrelated content stays
+        std::fs::create_dir_all(root.join(".sqwai")).unwrap();
+        std::fs::write(
+            root.join(".sqwai/config.toml"),
+            "[plan]\nmax_steps = 9\n[verify]\ncommands = { test = \"hand command\" }\n",
+        )
+        .unwrap();
+        let (added, already) = Config::seed_verify_commands(root);
+        assert!(added.is_empty(), "hand value must win: {added:?}");
+        assert_eq!(already, 1);
+        // hostile shape: no panic, no write clobber
+        std::fs::write(root.join(".sqwai/config.toml"), "verify = 5\n").unwrap();
+        let (added, _) = Config::seed_verify_commands(root);
+        assert!(added.is_empty());
+        // missing file: dir created, map written, readable back
+        let fresh = tempfile::tempdir().unwrap();
+        std::fs::write(fresh.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let (added, _) = Config::seed_verify_commands(fresh.path());
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].0, "test");
+        let back = Config::project_verify_commands(fresh.path());
+        assert_eq!(back.get("test").map(String::as_str), Some("cargo test"));
+    }
+
+    #[test]
+    fn project_overrides_accept_verify_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".sqwai")).unwrap();
+        std::fs::write(
+            dir.path().join(".sqwai/config.toml"),
+            "[verify]\ncommands = { unit = \"cargo test --lib\" }\n",
+        )
+        .unwrap();
+        // parsed through the same ProjectOverrides path as real files
+        let raw = std::fs::read_to_string(dir.path().join(".sqwai/config.toml")).unwrap();
+        let o: ProjectOverrides = toml::from_str(&raw).unwrap();
+        let cmds = o.verify.commands.expect("verify.commands parses");
+        assert_eq!(cmds.get("unit").map(String::as_str), Some("cargo test --lib"));
+        // and the allowlist admits the section (no ignoring note)
+        let mut cfg = Config::default();
+        let notes = cfg.apply_project_overrides(dir.path());
+        assert!(
+            !notes.iter().any(|n| n.contains("verify")),
+            "verify must be allowlisted: {notes:?}"
+        );
+        assert_eq!(
+            cfg.verify.commands.get("unit").map(String::as_str),
+            Some("cargo test --lib")
+        );
+    }
 
     #[test]
     fn default_config_template_has_resolvable_last_model() {

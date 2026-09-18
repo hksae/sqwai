@@ -2643,6 +2643,26 @@ impl App {
                         }
                     }
                 }
+                // seed named verify commands (repo probing + MEMORY.md) so
+                // `cmd: $name` in plans resolves; hand-written names win.
+                let root = std::env::current_dir().unwrap_or_default();
+                let (added, already) = crate::config::Config::seed_verify_commands(&root);
+                if !added.is_empty() || already > 0 {
+                    let list = added
+                        .iter()
+                        .map(|(n, c)| format!("{n} = {c}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let msg = if list.is_empty() {
+                        format!("verify commands: {already} already set — .sqwai/config.toml")
+                    } else {
+                        format!(
+                            "verify commands: +{} [{list}] ({already} already set) — .sqwai/config.toml",
+                            added.len()
+                        )
+                    };
+                    self.status(&msg, StatusKind::Ok);
+                }
             }
             "/plan" => self.plan_command(rest),
             "/goal" => self.goal_command(rest),

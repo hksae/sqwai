@@ -380,6 +380,98 @@ impl Acceptance {
     }
 }
 
+/// Expand `$name` / `${name}` in `cmd:` acceptance items against the
+/// project's named verify commands (seeded by `/init`). Non-`cmd:`
+/// items pass through untouched. Unknown names fail the whole create —
+/// a wrong command burned at verify time costs a turn; rejected here it
+/// costs nothing.
+#[derive(Debug)]
+pub struct UnknownVerify {
+    pub names: Vec<String>,
+    pub known: Vec<String>,
+}
+
+pub fn substitute_verify_commands(
+    texts: Vec<String>,
+    commands: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<String>, UnknownVerify> {
+    let mut unknown: Vec<String> = Vec::new();
+    let out: Vec<String> = texts
+        .into_iter()
+        .map(|text| {
+            if !text.trim_start().starts_with("cmd:") {
+                return text;
+            }
+            expand_refs(&text, commands, &mut unknown)
+        })
+        .collect();
+    if unknown.is_empty() {
+        return Ok(out);
+    }
+    unknown.sort();
+    unknown.dedup();
+    let mut known: Vec<String> = commands.keys().cloned().collect();
+    known.sort();
+    Err(UnknownVerify { names: unknown, known })
+}
+
+fn expand_refs(
+    text: &str,
+    commands: &std::collections::BTreeMap<String, String>,
+    unknown: &mut Vec<String>,
+) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        let braced = chars.peek() == Some(&'{');
+        if braced {
+            chars.next();
+        }
+        let mut name = String::new();
+        while let Some(&d) = chars.peek() {
+            if d.is_alphanumeric() || d == '_' || d == '-' {
+                name.push(d);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        if braced {
+            if chars.peek() == Some(&'}') {
+                chars.next();
+            } else {
+                // unbalanced `${`: leave literally, do not invent
+                out.push_str("${");
+                out.push_str(&name);
+                continue;
+            }
+        }
+        if name.is_empty() {
+            out.push('$');
+            continue;
+        }
+        match commands.get(&name) {
+            Some(cmd) => out.push_str(cmd),
+            None => {
+                unknown.push(name.clone());
+                out.push('$');
+                if braced {
+                    out.push('{');
+                }
+                out.push_str(&name);
+                if braced {
+                    out.push('}');
+                }
+            }
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
     pub id: String,
@@ -2417,6 +2509,41 @@ fn status_word(status: PlanStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn substitute_verify_commands_expands_known() {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("unit".to_string(), "cargo test --lib".to_string());
+        map.insert("e2e".to_string(), "make test-e2e".to_string());
+        let out = substitute_verify_commands(
+            vec![
+                "cmd: $unit".to_string(),
+                "cmd: run ${e2e} now".to_string(),
+                "manual: ask the user".to_string(),
+                "free text $unit stays".to_string(),
+            ],
+            &map,
+        )
+        .expect("known names expand");
+        assert_eq!(out[0], "cmd: cargo test --lib");
+        assert_eq!(out[1], "cmd: run make test-e2e now");
+        assert_eq!(out[2], "manual: ask the user");
+        assert_eq!(out[3], "free text $unit stays");
+    }
+
+    #[test]
+    fn substitute_verify_commands_rejects_unknown() {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("unit".to_string(), "cargo test --lib".to_string());
+        let err = substitute_verify_commands(vec!["cmd: $nope and ${missing}".to_string()], &map)
+            .expect_err("unknown names fail");
+        assert_eq!(err.names, vec!["missing".to_string(), "nope".to_string()]);
+        assert_eq!(err.known, vec!["unit".to_string()]);
+        // empty map: still an error (fail fast, not a silent literal)
+        let err = substitute_verify_commands(vec!["cmd: $x".to_string()], &Default::default())
+            .expect_err("no names seeded");
+        assert!(err.known.is_empty());
+    }
 
     fn new_plan() -> Plan {
         create(

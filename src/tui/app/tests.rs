@@ -90,6 +90,7 @@ mod tests {
             diary: Default::default(),
             compaction: Default::default(),
             plan: Default::default(),
+            verify: Default::default(),
             secrets: Default::default(),
             undo: Default::default(),
         };
@@ -189,6 +190,7 @@ mod tests {
             diary: Default::default(),
             compaction: Default::default(),
             plan: Default::default(),
+            verify: Default::default(),
             secrets: Default::default(),
             undo: Default::default(),
         };
@@ -6418,6 +6420,7 @@ mod tests {
             diary: Default::default(),
             compaction: Default::default(),
             plan: Default::default(),
+            verify: Default::default(),
             secrets: Default::default(),
             undo: Default::default(),
         };

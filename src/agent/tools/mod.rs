@@ -2114,6 +2114,31 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     .plan_limits
                     .budget_tokens(ctx.context_limit)
                     .max(MIN_PLAN_BUDGET_TOKENS);
+                // Named verify commands (`cmd: $name`) expand here, against
+                // the project's seeded map — an unknown name rejects the
+                // create with the known list instead of burning a turn at
+                // verify time on a command that never existed.
+                let acceptance = match plan::substitute_verify_commands(
+                    acceptance,
+                    &crate::config::Config::project_verify_commands(&ctx.root),
+                ) {
+                    Ok(expanded) => expanded,
+                    Err(unknown) => {
+                        let hint = if unknown.known.is_empty() {
+                            "no verify commands seeded — run /init or write the command out".to_string()
+                        } else {
+                            format!("known: {}", unknown.known.join(", "))
+                        };
+                        return rejection(plan::Rejection::new(
+                            "unknown_verify",
+                            format!(
+                                "acceptance refers to unknown verify command(s): ${}",
+                                unknown.names.join(", $")
+                            ),
+                            hint,
+                        ));
+                    }
+                };
                 match plan::create(goal, constraints, acceptance, steps, budget_limit, &limits) {
                     Ok(mut created) => {
                         for s in &created.steps {
@@ -3897,6 +3922,40 @@ mod tests {
         }];
         validate_attached_records(&dir, &plan_id, "1", plan::StepKind::Change, &fresh)
             .expect("unstamped evidence counts");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn plan_create_expands_named_verify_commands() {
+        let (mut ctx, dir) = proj();
+        std::fs::create_dir_all(dir.join(".sqwai")).unwrap();
+        std::fs::write(
+            dir.join(".sqwai").join("config.toml"),
+            "[verify]\ncommands = { unit = \"cargo test --lib\" }\n",
+        )
+        .unwrap();
+        let mut mk = |acceptance: Vec<&str>| {
+            plan_op(
+                &mut ctx,
+                &json!({
+                    "op": "create",
+                    "goal": "verify",
+                    "constraints": [],
+                    "acceptance": acceptance,
+                    "steps": [{"title": "s", "kind": "research"}]
+                }),
+            )
+        };
+        // unknown name rejects with the known list (no plan exists yet,
+        // so substitution — not plan_exists — answers)
+        let bad = mk(vec!["cmd: $nope"]);
+        assert!(!bad.ok);
+        assert!(bad.output.contains("unknown_verify"), "{}", bad.output);
+        assert!(bad.output.contains("unit"), "{}", bad.output);
+        let ok = mk(vec!["cmd: $unit"]);
+        assert!(ok.ok, "{}", ok.output);
+        let plan = plan::open_active(&dir).unwrap().unwrap();
+        assert_eq!(plan.acceptance[0].text, "cmd: cargo test --lib");
         fs::remove_dir_all(&dir).ok();
     }
 

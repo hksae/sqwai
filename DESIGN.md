@@ -1514,7 +1514,7 @@ number; a `partial` one is missing something the design calls for.
 | S1 | Step epoch lifecycle (§2.2.4), writer lock during undo, subagent cancellation on reopen | partial — epoch lifecycle done (bump on reopen, older-epoch mutations refused); writer lock and subagent cancellation on reopen planned | F1b, D |
 | T | Provider fallback chain ([models.x].fallback) | done — transparent switch on Network/Server errors or retry-exhausted; `FallbackCandidate` chain, `FallbackSwitched` event, fast-fail `run_turn` | §5.1 |
 | U | Assumption notes: open tracking, finish warning, resolve | done | F3 |
-| V | Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md) | partial — cmd:/manual: settling done (#7); remaining: /init seeding of verify commands and their substitution on create | F3 |
+| V | Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md) | done — cmd:/manual: settling done (#7); `/init` seeds `[verify] commands` (repo probing + MEMORY.md `verify:` lines, hand values win); `cmd: $name` substitutes on `plan create`, unknown names reject with the known list | F3 |
 | V1 | Verification receipts (§2.1.4): execution interval digest, check hash, stale invalidation, manual `confirm` vs `waive` | done — interval digest, check hash, stale invalidation on diff, manual /plan confirm, replay restoration | V, F1b |
 | W | Plan-first gate (Act first-mutate w/o plan → plan_required) | done — `plan_first: soft|off` in PlanConfig; heuristic trivial bypass; gate blocks unprompted mutations in Act mode without an active plan | F3 |
 | X | Tool-output pruning + USER.md split/load | partial — USER.md split/loading and prune (§3.3.1) done; the read guard is a host path→hash map, not context-backed authorization | F1, F5 |
