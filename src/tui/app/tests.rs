@@ -494,10 +494,7 @@ mod tests {
         app.rebuild_cache(80);
         let text = rendered(&app);
         assert!(text.contains("1 error"), "error marker missing: {text}");
-        assert!(
-            !text.contains("read"),
-            "the failed call folds away: {text}"
-        );
+        assert!(!text.contains("read"), "the failed call folds away: {text}");
         // clicking the header unfolds the block on demand
         let header = app
             .cache_rowseg
@@ -1374,15 +1371,15 @@ mod tests {
         for i in 0..12 {
             let mut s = Session::new("m".into(), 1000);
             s.push(Role::User, format!("filler session number {i}"));
-            app.sessions.push(crate::session::SessionHeader::from_session(&s));
+            app.sessions
+                .push(crate::session::SessionHeader::from_session(&s));
         }
         app.open_menu(Menu::Sessions);
         let area = Rect::new(0, 0, 100, 14);
         let mut buf = Buffer::empty(area);
         app.draw_menu(&mut buf, area);
-        let row_text = |y: u16| -> String {
-            (0..area.width).map(|x| buf[(x, y)].symbol()).collect()
-        };
+        let row_text =
+            |y: u16| -> String { (0..area.width).map(|x| buf[(x, y)].symbol()).collect() };
         // pinned frame survived the scrollbar: corners still corners
         let hy = (0..area.height)
             .find(|y| row_text(*y).contains("pinned"))
@@ -1429,9 +1426,8 @@ mod tests {
         let mut buf = Buffer::empty(area);
         app.draw_menu(&mut buf, area);
         // the draw-time check rebuilt rows for the real card
-        let row_text = |y: u16| -> String {
-            (0..area.width).map(|x| buf[(x, y)].symbol()).collect()
-        };
+        let row_text =
+            |y: u16| -> String { (0..area.width).map(|x| buf[(x, y)].symbol()).collect() };
         let hy = (0..area.height)
             .find(|y| row_text(*y).contains("pinned"))
             .expect("pinned header row");
@@ -1465,9 +1461,8 @@ mod tests {
         let area = Rect::new(0, 0, 100, 30);
         let mut buf = Buffer::empty(area);
         app.draw_menu(&mut buf, area);
-        let row_text = |y: u16| -> String {
-            (0..area.width).map(|x| buf[(x, y)].symbol()).collect()
-        };
+        let row_text =
+            |y: u16| -> String { (0..area.width).map(|x| buf[(x, y)].symbol()).collect() };
         // the pinned header row (not the outer menu frame corner)
         let hy = (0..area.height)
             .find(|y| row_text(*y).contains("pinned"))
@@ -1483,9 +1478,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, c)| (i as u16 % area.width, c))
-            .find(|(x, c)| {
-                c.symbol() == "│" && *x != r.x && *x != r.right().saturating_sub(1)
-            })
+            .find(|(x, c)| c.symbol() == "│" && *x != r.x && *x != r.right().saturating_sub(1))
             .expect("pinned row rail");
         assert_eq!(rail.1.style().fg, Some(Color::DarkGray));
     }
@@ -1606,7 +1599,10 @@ mod tests {
             .collect();
         let joined = all.join("\n");
         assert!(joined.contains("other projects"), "{joined:?}");
-        let div = all.iter().position(|r| r.contains("other projects")).unwrap();
+        let div = all
+            .iter()
+            .position(|r| r.contains("other projects"))
+            .unwrap();
         let pos = |needle: &str| all.iter().position(|r| r.contains(needle)).unwrap();
         // current + legacy above the divider, foreign below it
         assert!(pos("mine task") < div, "{joined:?}");
@@ -1621,26 +1617,37 @@ mod tests {
         let mut away = project_session("away", Some(foreign_root));
         away.push(crate::providers::Role::User, "more");
         app.apply_session(away);
-        let toast = app.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+        let toast = app
+            .toast
+            .as_ref()
+            .map(|t| t.text.clone())
+            .unwrap_or_default();
         assert!(toast.contains("another project"), "{toast:?}");
 
         // same project (and legacy) open quietly
         let root = app.project_root.clone();
         let home = project_session("home", Some(root));
         app.apply_session(home);
-        let toast = app.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+        let toast = app
+            .toast
+            .as_ref()
+            .map(|t| t.text.clone())
+            .unwrap_or_default();
         assert!(!toast.contains("another project"), "{toast:?}");
         let legacy = project_session("old", None);
         app.apply_session(legacy);
-        let toast = app.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+        let toast = app
+            .toast
+            .as_ref()
+            .map(|t| t.text.clone())
+            .unwrap_or_default();
         assert!(!toast.contains("another project"), "{toast:?}");
     }
 
     #[test]
     fn session_switch_drops_stale_notices() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.effort_observed_ignored =
-            Some(("m".into(), EffortLevel::High, "nope".into()));
+        app.effort_observed_ignored = Some(("m".into(), EffortLevel::High, "nope".into()));
         app.retry_line = Some("retry #1 in 5s — boom".into());
         app.last_checkpoint = Some("cp".into());
         app.prev_turn_ok = true;
@@ -1727,7 +1734,10 @@ mod tests {
         app.menu_activate();
         assert!(!app.perf.enabled());
         let content = std::fs::read_to_string(&path).expect("log file written");
-        assert!(content.contains("# frame t_ms draw_us"), "header:\n{content}");
+        assert!(
+            content.contains("# frame t_ms draw_us"),
+            "header:\n{content}"
+        );
         assert!(
             content.lines().any(|l| {
                 let parts: Vec<&str> = l.split_whitespace().collect();
@@ -1757,7 +1767,9 @@ mod tests {
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("provider boom"), "bar: {text}");
         assert!(
-            !app.segments.iter().any(|s| matches!(s, Segment::Status { .. })),
+            !app.segments
+                .iter()
+                .any(|s| matches!(s, Segment::Status { .. })),
             "toast never lands in the chat"
         );
     }
@@ -1768,7 +1780,11 @@ mod tests {
         app.status("first", StatusKind::Info);
         app.status("second", StatusKind::Warn);
         assert_eq!(toast_text(&app), "second", "new notice wins outright");
-        assert!(app.toast.as_ref().is_some_and(|t| t.kind == StatusKind::Warn));
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|t| t.kind == StatusKind::Warn)
+        );
         // expired toasts vanish from the bar
         app.toast.as_mut().expect("toast").until =
             std::time::Instant::now() - std::time::Duration::from_secs(1);
@@ -1971,9 +1987,11 @@ mod tests {
                 Message::new(Role::User, "hello"),
                 Message::new(Role::Assistant, "hello!"),
                 Message::new(Role::User, "run it"),
-                Message::new(Role::Assistant, "").with_tool_calls(vec![
-                    ToolCallReq::new("c1", "read", serde_json::json!({})),
-                ]),
+                Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+                    "c1",
+                    "read",
+                    serde_json::json!({}),
+                )]),
                 Message::tool_result("c1", "cancelled", true),
             ],
             summary: None,
@@ -2031,9 +2049,11 @@ mod tests {
                 Message::new(Role::User, "hello"),
                 Message::new(Role::Assistant, "hello!"),
                 Message::new(Role::User, "run it"),
-                Message::new(Role::Assistant, "").with_tool_calls(vec![
-                    ToolCallReq::new("c1", "read", serde_json::json!({})),
-                ]),
+                Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+                    "c1",
+                    "read",
+                    serde_json::json!({}),
+                )]),
                 Message::tool_result("c1", "cancelled", true),
             ],
             summary: None,
@@ -2145,12 +2165,15 @@ mod tests {
                 },
             ],
         );
-        app.subagent_meta.insert(
+        app.subagent_meta
+            .insert(id, (771..775).map(|n| SegMeta { id: n, rev: 0 }).collect());
+        app.subagents.push((
             id,
-            (771..775).map(|n| SegMeta { id: n, rev: 0 }).collect(),
-        );
-        app.subagents
-            .push((id, "do research".into(), status.into(), String::new(), false));
+            "do research".into(),
+            status.into(),
+            String::new(),
+            false,
+        ));
         app.active_subagent = Some(id);
     }
 
@@ -2177,7 +2200,10 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(rows, vec!["acceptance 1 went stale — re-verify".to_string()]);
+        assert_eq!(
+            rows,
+            vec!["acceptance 1 went stale — re-verify".to_string()]
+        );
         // second call: silence (already announced)
         let n = app.segments.len();
         app.announce_stale_rows(Some(plan));
@@ -2254,8 +2280,7 @@ mod tests {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = false;
         open_sub_chat(&mut app, 7, "running");
-        app.sub_started
-            .insert(7, std::time::Instant::now());
+        app.sub_started.insert(7, std::time::Instant::now());
         // reopen the tool row: the running turn is still open
         if let Some(Segment::Tool { ok, .. }) = app
             .subagent_chats
@@ -2332,10 +2357,7 @@ mod tests {
         ));
         let spans = app.status_bar_spans(120);
         assert_eq!(spans[0].content.as_ref(), " PLAN ");
-        assert_eq!(
-            spans[0].style,
-            crate::tui::theme::Theme::mode_chip_plan()
-        );
+        assert_eq!(spans[0].style, crate::tui::theme::Theme::mode_chip_plan());
     }
 
     #[test]
@@ -2409,10 +2431,7 @@ mod tests {
             all.contains("max") && !all.contains("sent as"),
             "no level must be marked as clamped: {all}"
         );
-        assert!(
-            all.contains("xhigh"),
-            "xhigh must be offered: {all}"
-        );
+        assert!(all.contains("xhigh"), "xhigh must be offered: {all}");
         assert!(
             !all.contains("low  →"),
             "levels that land must carry no note: {all}"
@@ -2439,11 +2458,7 @@ mod tests {
         assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
         assert!(app.menu_rect.width > 0 && app.menu_rect.height > 0);
         // progress dots: High is index 3, so 4 filled dots, 2 hollow
-        let dots: String = buf
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect();
+        let dots: String = buf.content().iter().map(|c| c.symbol()).collect();
         assert_eq!(dots.matches('●').count(), want + 1, "{dots:?}");
         assert_eq!(
             dots.matches('○').count(),
@@ -2483,12 +2498,10 @@ mod tests {
     }
 
     #[test]
-    fn effort_slider_colors_span_gray_to_magenta() {        use crate::tui::theme::Theme;
+    fn effort_slider_colors_span_gray_to_magenta() {
+        use crate::tui::theme::Theme;
         use ratatui::style::Color;
-        assert_eq!(
-            Theme::effort_color(EffortLevel::Off),
-            Color::DarkGray
-        );
+        assert_eq!(Theme::effort_color(EffortLevel::Off), Color::DarkGray);
         assert_eq!(Theme::effort_color(EffortLevel::Max), Color::Magenta);
         // every level gets a distinct color
         let mut seen = std::collections::HashSet::new();
@@ -2774,7 +2787,14 @@ mod tests {
             .find(|s| matches!(s, Segment::Tool { .. }))
             .expect("tool row");
         assert!(
-            matches!(seg, Segment::Tool { ok: Some(true), flash: Some(_), .. }),
+            matches!(
+                seg,
+                Segment::Tool {
+                    ok: Some(true),
+                    flash: Some(_),
+                    ..
+                }
+            ),
             "notice resolves the row and arms the wave"
         );
     }
@@ -2850,19 +2870,13 @@ mod tests {
         });
         let rows = app.render_segment(&app.segments, 0, 80, true);
         assert_eq!(rows.len(), 1, "head row only, like static");
-        let text: String = rows[0]
-            .0
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let text: String = rows[0].0.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.starts_with("  "), "{text:?}");
         assert!(text.contains("read"), "{text:?}");
 
         // expired flash: byte-identical static row
         if let Some(Segment::Tool { flash, .. }) = app.segments.get_mut(0) {
-            *flash =
-                Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
+            *flash = Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
         }
         let rows = app.render_segment(&app.segments, 0, 80, true);
         assert_eq!(rows[0].0.spans[0].content.as_ref(), "  ✓ ");
@@ -2908,10 +2922,7 @@ mod tests {
         });
         assert_eq!(app.form_fields[3].trimmed(), "xhigh");
         app.form_save();
-        assert_eq!(
-            app.cfg.models.get("m").unwrap().effort,
-            EffortLevel::Xhigh
-        );
+        assert_eq!(app.cfg.models.get("m").unwrap().effort, EffortLevel::Xhigh);
     }
 
     #[test]
@@ -2977,7 +2988,12 @@ mod tests {
         // bottom clamp: no trailing empty space
         app.menu_wheel(10000);
         assert_eq!(app.menu_sel, 0);
-        assert_eq!(app.menu_scroll, n - vis, "scroll={} n={n} vis={vis}", app.menu_scroll);
+        assert_eq!(
+            app.menu_scroll,
+            n - vis,
+            "scroll={} n={n} vis={vis}",
+            app.menu_scroll
+        );
     }
 
     #[test]
@@ -2987,8 +3003,7 @@ mod tests {
         let (mut app, vis) = wheel_test_app();
         app.menu_wheel(10000);
         assert!(
-            app.menu_sel < app.menu_scroll
-                || app.menu_sel >= app.menu_scroll + vis,
+            app.menu_sel < app.menu_scroll || app.menu_sel >= app.menu_scroll + vis,
             "selection must be allowed out of the window"
         );
         // redraw must not snap the view back to the selection
@@ -3017,7 +3032,10 @@ mod tests {
         assert_eq!((app.menu_sel, app.menu_scroll), (0, 0));
         // page jump also follows
         app.menu_nav(10);
-        assert!(app.menu_sel < app.menu_scroll + vis, "page sel must be visible");
+        assert!(
+            app.menu_sel < app.menu_scroll + vis,
+            "page sel must be visible"
+        );
         assert!(app.menu_sel >= app.menu_scroll, "page sel must be visible");
     }
 
@@ -3114,7 +3132,11 @@ mod tests {
         app.show_busy_status();
         app.show_busy_status();
         // one toast, never a chat segment
-        assert!(app.toast.as_ref().is_some_and(|t| t.text == App::BUSY_STATUS));
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|t| t.text == App::BUSY_STATUS)
+        );
         assert!(!app.segments.iter().any(|segment| {
             matches!(segment, Segment::Status { text, .. } if text == App::BUSY_STATUS)
         }));
@@ -3130,7 +3152,11 @@ mod tests {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.show_busy_status();
         app.show_busy_status();
-        assert!(app.toast.as_ref().is_some_and(|t| t.text == App::BUSY_STATUS));
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|t| t.text == App::BUSY_STATUS)
+        );
         app.streaming = true;
         app.finish_turn(Err("aborted".into()));
         assert!(!app.segments.iter().any(|segment| {
@@ -4419,9 +4445,7 @@ mod tests {
     fn approval_option_index(app: &App, decision: ApprovalDecision) -> usize {
         app.menu_rows
             .iter()
-            .position(|(_, a)| {
-                matches!(a, MenuAction::DecideApproval(d) if *d == decision)
-            })
+            .position(|(_, a)| matches!(a, MenuAction::DecideApproval(d) if *d == decision))
             .expect("approval option row must exist")
     }
 
@@ -4458,7 +4482,12 @@ mod tests {
     fn approval_click_selects_without_committing() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         open_test_approval(&mut app);
-        app.menu_rect = ratatui::layout::Rect { x: 0, y: 0, width: 80, height: 20 };
+        app.menu_rect = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
         // screen row 4 → row index 3 → the "run once" option
         app.menu_click(4);
         assert_eq!(
@@ -4512,7 +4541,13 @@ mod tests {
     fn startup_screen_wraps_text_on_narrow_window() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.startup = true;
-        let mut data = App::collect_startup_data(&app.cfg, &app.model_cfg, app.read_only, None, &app.session.model_key.clone());
+        let mut data = App::collect_startup_data(
+            &app.cfg,
+            &app.model_cfg,
+            app.read_only,
+            None,
+            &app.session.model_key.clone(),
+        );
         data.project_path = "~/dev/a/very/long/nested/path/to/project".into();
         app.startup_data = Some(data);
 
@@ -5163,8 +5198,16 @@ mod tests {
             .cache_lines
             .iter()
             .find(|l| {
-                l.spans.iter().map(|s| s.content.as_ref()).collect::<String>().contains("read")
-                    && l.spans.iter().map(|s| s.content.as_ref()).collect::<String>().contains("a.rs")
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    .contains("read")
+                    && l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                        .contains("a.rs")
             })
             .expect("running tool row");
         let text: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -5194,11 +5237,7 @@ mod tests {
         };
         // finished header: static dim text
         let still = activity_header_line(&g, None);
-        let text: String = still
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let text: String = still.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("activity · 3 calls"), "{text:?}");
         assert!(
             still.spans.iter().all(|s| s.style == Theme::dim()),
@@ -5206,11 +5245,7 @@ mod tests {
         );
         // live header at mid-sweep: same text, shaded letters
         let live = activity_header_line(&g, Some(crate::tui::shimmer::SHIMMER_PERIOD_TICKS / 4));
-        let live_text: String = live
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let live_text: String = live.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(live_text, text, "shimmer must not change the text");
         // the 8 "activity" letters carry more than one brightness step
         let word: String = live
@@ -5519,7 +5554,11 @@ mod tests {
             !app.streaming,
             "an auth failure must end the turn, not retry it"
         );
-        let reported = app.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+        let reported = app
+            .toast
+            .as_ref()
+            .map(|t| t.text.clone())
+            .unwrap_or_default();
         assert!(
             reported.contains("API key") || reported.contains("401"),
             "the user should be told what to fix: {reported:?}"
@@ -5674,11 +5713,7 @@ mod tests {
             .expect("ask segment");
         // collapsed to a single head row
         render_to_string(&mut app, 100, 30);
-        let rows = app
-            .cache_rowseg
-            .iter()
-            .filter(|t| **t == Some(seg))
-            .count();
+        let rows = app.cache_rowseg.iter().filter(|t| **t == Some(seg)).count();
         assert_eq!(rows, 1, "answered ask is one head row");
         let abs = app
             .cache_rowseg
@@ -5692,11 +5727,7 @@ mod tests {
             "head click unfolds"
         );
         render_to_string(&mut app, 100, 30);
-        let rows = app
-            .cache_rowseg
-            .iter()
-            .filter(|t| **t == Some(seg))
-            .count();
+        let rows = app.cache_rowseg.iter().filter(|t| **t == Some(seg)).count();
         assert!(rows > 5, "questionnaire is back: {rows} rows");
         // and folds again on the first row
         let abs = app
@@ -5708,7 +5739,10 @@ mod tests {
         assert!(
             matches!(
                 app.segments[seg],
-                Segment::AskUser { expanded: false, .. }
+                Segment::AskUser {
+                    expanded: false,
+                    ..
+                }
             ),
             "head click folds again"
         );
@@ -5746,7 +5780,13 @@ mod tests {
         let before = app.segments.len();
         app.handle_tool_start("ask_user".to_string(), "anything".to_string(), None);
         assert_eq!(app.segments.len(), before, "no Tool row for ask_user");
-        app.handle_tool_notice("ask_user".to_string(), "answer".to_string(), true, None, None);
+        app.handle_tool_notice(
+            "ask_user".to_string(),
+            "answer".to_string(),
+            true,
+            None,
+            None,
+        );
         assert_eq!(app.segments.len(), before, "no Tool row on notice either");
         // ordinary tools are unaffected
         app.handle_tool_start("read".to_string(), "a.rs".to_string(), None);
@@ -6288,13 +6328,35 @@ mod tests {
         let commentary_rows = app.render_segment(&app.segments, 0, 80, true);
         let tool_rows = app.render_segment(&app.segments, 1, 80, true);
 
-        let comm_text: String = commentary_rows[0].0.spans.iter().map(|s| s.content.as_ref()).collect();
-        let tool_text: String = tool_rows[0].0.spans.iter().map(|s| s.content.as_ref()).collect();
+        let comm_text: String = commentary_rows[0]
+            .0
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        let tool_text: String = tool_rows[0]
+            .0
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
 
-        assert!(comm_text.starts_with("  "), "commentary must start with 2 spaces: {comm_text:?}");
-        assert!(!comm_text.starts_with("   "), "commentary must not start with 3 spaces");
-        assert!(tool_text.starts_with("  "), "tool must start with 2 spaces: {tool_text:?}");
-        assert!(!tool_text.starts_with("   "), "tool must not start with 3 spaces");
+        assert!(
+            comm_text.starts_with("  "),
+            "commentary must start with 2 spaces: {comm_text:?}"
+        );
+        assert!(
+            !comm_text.starts_with("   "),
+            "commentary must not start with 3 spaces"
+        );
+        assert!(
+            tool_text.starts_with("  "),
+            "tool must start with 2 spaces: {tool_text:?}"
+        );
+        assert!(
+            !tool_text.starts_with("   "),
+            "tool must not start with 3 spaces"
+        );
     }
 
     #[test]
@@ -6478,7 +6540,10 @@ mod tests {
     /// Transient notices never become chat segments anymore — they toast
     /// for 3s at the bottom bar. Tests assert on the toast text.
     fn toast_text(app: &App) -> String {
-        app.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()
+        app.toast
+            .as_ref()
+            .map(|t| t.text.clone())
+            .unwrap_or_default()
     }
 
     #[test]
@@ -6994,10 +7059,7 @@ mod tests {
                     .collect::<String>()
             })
             .collect();
-        assert!(
-            texts.iter().any(|t| t.contains("1.05m")),
-            "rows: {texts:?}"
-        );
+        assert!(texts.iter().any(|t| t.contains("1.05m")), "rows: {texts:?}");
     }
 
     /// Review checklist 1–2: composer input, scrolling and selection are
@@ -7545,7 +7607,10 @@ mod tests {
                 let mut p = std::collections::BTreeMap::new();
                 p.insert("author".into(), serde_json::json!("model"));
                 p.insert("journal_ref".into(), serde_json::json!("01956789-abcd"));
-                p.insert("text".into(), serde_json::json!("Refactored run to use async"));
+                p.insert(
+                    "text".into(),
+                    serde_json::json!("Refactored run to use async"),
+                );
                 p
             },
             content_hash: None,
@@ -7579,10 +7644,19 @@ mod tests {
         let rendered: Vec<String> = app
             .menu_rows
             .iter()
-            .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|(l, _)| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect();
         assert!(rendered.iter().any(|r| r.contains("sym:src/main.rs::run")));
-        assert!(rendered.iter().any(|r| r.contains("[dec]") && r.contains("01956789-abcd")));
+        assert!(
+            rendered
+                .iter()
+                .any(|r| r.contains("[dec]") && r.contains("01956789-abcd"))
+        );
 
         // Test depth adjustment
         app.run_action(MenuAction::GraphDepth(1));
@@ -7601,7 +7675,10 @@ mod tests {
 
         // Test GraphFocus to decision node
         app.run_action(MenuAction::GraphFocus(dec_node.stable_key.clone()));
-        if let Some(Menu::GraphView { focus_key, trail, .. }) = app.cur_menu() {
+        if let Some(Menu::GraphView {
+            focus_key, trail, ..
+        }) = app.cur_menu()
+        {
             assert_eq!(focus_key, &dec_node.stable_key);
             assert_eq!(trail, &vec![sym_node.stable_key.clone()]);
         } else {
@@ -7610,7 +7687,10 @@ mod tests {
 
         // Test GraphBack
         app.run_action(MenuAction::GraphBack);
-        if let Some(Menu::GraphView { focus_key, trail, .. }) = app.cur_menu() {
+        if let Some(Menu::GraphView {
+            focus_key, trail, ..
+        }) = app.cur_menu()
+        {
             assert_eq!(focus_key, &sym_node.stable_key);
             assert!(trail.is_empty());
         } else {
@@ -7795,16 +7875,28 @@ mod tests {
         let rendered: Vec<String> = app
             .menu_rows
             .iter()
-            .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|(l, _)| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect();
 
         // Check that meth_node has [meth] badge, NOT [m]
         assert!(rendered.iter().any(|r| r.contains("[meth] from_config")));
 
         // Check that the two duplicate imports edges from main.rs are aggregated with ×2
-        assert!(rendered.iter().any(|r| r.contains("main.rs") && r.contains("×2")));
+        assert!(
+            rendered
+                .iter()
+                .any(|r| r.contains("main.rs") && r.contains("×2"))
+        );
         // Verify main.rs only appears once in the connection list
-        let main_rows: Vec<_> = rendered.iter().filter(|r| r.contains("file:src/main.rs")).collect();
+        let main_rows: Vec<_> = rendered
+            .iter()
+            .filter(|r| r.contains("file:src/main.rs"))
+            .collect();
         assert_eq!(main_rows.len(), 1);
     }
 
@@ -7901,15 +7993,31 @@ mod tests {
         let rendered: Vec<String> = app
             .menu_rows
             .iter()
-            .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|(l, _)| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect();
 
         // main.rs should be direct (depth 1)
-        assert!(rendered.iter().any(|r| r.contains("<- (imports)") && r.contains("main.rs")));
+        assert!(
+            rendered
+                .iter()
+                .any(|r| r.contains("<- (imports)") && r.contains("main.rs"))
+        );
         // lock.rs should be 2nd-hop (+2) via main.rs, NOT rendered as incoming edge to mcp
-        assert!(rendered.iter().any(|r| r.contains("+2") && r.contains("lock.rs") && r.contains("via main.rs")));
+        assert!(
+            rendered
+                .iter()
+                .any(|r| r.contains("+2") && r.contains("lock.rs") && r.contains("via main.rs"))
+        );
         // main.rs should NOT be duplicated as a fake incoming edge
-        let main_rows: Vec<_> = rendered.iter().filter(|r| r.contains("file:src/main.rs")).collect();
+        let main_rows: Vec<_> = rendered
+            .iter()
+            .filter(|r| r.contains("file:src/main.rs"))
+            .collect();
         assert_eq!(main_rows.len(), 1);
     }
 }

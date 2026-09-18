@@ -97,15 +97,9 @@ pub fn plan(level: EffortLevel, support: EffortSupport) -> Plan {
             }
         }
         (EffortControl::Named, EffortLevel::Low) => (Wire::Level("low"), Status::Applied),
-        (EffortControl::Named, EffortLevel::Medium) => {
-            (Wire::Level("medium"), Status::Applied)
-        }
-        (EffortControl::Named, EffortLevel::High) => {
-            (Wire::Level("high"), Status::Applied)
-        }
-        (EffortControl::Named, EffortLevel::Xhigh) => {
-            (Wire::Level("xhigh"), Status::Applied)
-        }
+        (EffortControl::Named, EffortLevel::Medium) => (Wire::Level("medium"), Status::Applied),
+        (EffortControl::Named, EffortLevel::High) => (Wire::Level("high"), Status::Applied),
+        (EffortControl::Named, EffortLevel::Xhigh) => (Wire::Level("xhigh"), Status::Applied),
         (EffortControl::Named, EffortLevel::Max) => (Wire::Level("max"), Status::Applied),
 
         // ── numeric budget ──────────────────────────────────────────────────

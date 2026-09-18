@@ -53,8 +53,7 @@ pub fn available(root: &Path) -> bool {
 /// snapshots live outside the project, and the Local check would report
 /// undo unavailable while it works fine.
 pub fn available_in(root: &Path, store: ShadowStore) -> bool {
-    crate::agent::shadow::git_available()
-        && crate::agent::shadow::dir_for(root, store).is_some()
+    crate::agent::shadow::git_available() && crate::agent::shadow::dir_for(root, store).is_some()
 }
 
 /// Snapshot the worktree onto this session's chain in the shadow repository
@@ -88,7 +87,8 @@ pub fn tree_changed(root: &Path, store: ShadowStore, session_id: &str) -> bool {
 
 /// Snapshot the worktree for this session, returning the commit hash representing
 /// this boundary (creating a boundary commit even if tree is unchanged).
-pub fn snapshot_boundary(    root: &Path,
+pub fn snapshot_boundary(
+    root: &Path,
     store: ShadowStore,
     session_id: &str,
     label: &str,
@@ -989,7 +989,10 @@ mod tests {
                 .map(|(_, label)| label.clone())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(labels("aaa"), vec!["aaa-2".to_string(), "aaa-1".to_string()]);
+        assert_eq!(
+            labels("aaa"),
+            vec!["aaa-2".to_string(), "aaa-1".to_string()]
+        );
         assert_eq!(labels("bbb"), vec!["bbb-1".to_string()]);
     }
 }

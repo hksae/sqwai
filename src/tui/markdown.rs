@@ -237,17 +237,12 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
             // reads as one translucent stripe, like the user strip.
             let rail_cols = level * 2;
             let avail = (width as usize).saturating_sub(rail_cols).max(1);
-            let (rows, _) = wrap_tagged(
-                vec![(Line::from(inline(rest, quote)), None)],
-                avail as u16,
-            );
+            let (rows, _) =
+                wrap_tagged(vec![(Line::from(inline(rest, quote)), None)], avail as u16);
             for row in rows {
                 // the rail glyph stays on the default background; the green
                 // band covers the quoted text (and its padding) only
-                let mut spans = vec![Span::styled(
-                    rail.clone(),
-                    Style::new().fg(Theme::GREEN()),
-                )];
+                let mut spans = vec![Span::styled(rail.clone(), Style::new().fg(Theme::GREEN()))];
                 spans.extend(row.spans);
                 let used: usize = spans
                     .iter()
@@ -709,10 +704,7 @@ fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
         while end > 0 && bytes[end - 1] == b'#' {
             end -= 1;
         }
-        if end < bytes.len()
-            && end > 0
-            && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t')
-        {
+        if end < bytes.len() && end > 0 && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
             rest = rest[..end].trim_end();
         }
     }
@@ -727,9 +719,7 @@ fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
         3 => Style::new()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD | Modifier::ITALIC),
-        _ => Style::new()
-            .fg(Theme::DIM())
-            .add_modifier(Modifier::ITALIC),
+        _ => Style::new().fg(Theme::DIM()).add_modifier(Modifier::ITALIC),
     };
     Some(inline(rest, style))
 }
@@ -1633,11 +1623,7 @@ mod tests {
             lines[0]
         );
         let h2 = render("## Sub", 80, &hl);
-        let h2text: String = h2[0]
-            .spans
-            .iter()
-            .map(|s| s.content.to_string())
-            .collect();
+        let h2text: String = h2[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(h2text, "Sub");
         assert!(
             h2[0]
@@ -1649,16 +1635,15 @@ mod tests {
             h2[0]
         );
         let h3 = render("### Deep", 80, &hl);
-        let h3text: String = h3[0]
-            .spans
-            .iter()
-            .map(|s| s.content.to_string())
-            .collect();
+        let h3text: String = h3[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(h3text, "Deep");
         assert!(
-            h3[0].spans.iter().all(|s| s.style.add_modifier.contains(Modifier::BOLD)
-                && s.style.add_modifier.contains(Modifier::ITALIC)
-                && s.style.fg == Some(ratatui::style::Color::White)),
+            h3[0]
+                .spans
+                .iter()
+                .all(|s| s.style.add_modifier.contains(Modifier::BOLD)
+                    && s.style.add_modifier.contains(Modifier::ITALIC)
+                    && s.style.fg == Some(ratatui::style::Color::White)),
             "h3 must be bold+italic white: {:?}",
             h3[0]
         );
@@ -1672,8 +1657,11 @@ mod tests {
         assert_eq!(closed_text, "Deep");
         let h4 = render("#### Fine", 80, &hl);
         assert!(
-            h4[0].spans.iter().all(|s| s.style.add_modifier.contains(Modifier::ITALIC)
-                && s.style.fg == Some(Theme::DIM())),
+            h4[0]
+                .spans
+                .iter()
+                .all(|s| s.style.add_modifier.contains(Modifier::ITALIC)
+                    && s.style.fg == Some(Theme::DIM())),
             "h4 must be dim italic: {:?}",
             h4[0]
         );
@@ -1805,10 +1793,7 @@ mod tests {
             .iter()
             .map(|l| UnicodeWidthStr::width(line_text_pub(l).as_str()))
             .collect();
-        assert!(
-            cols.iter().all(|&c| c == cols[0]),
-            "ragged grid {cols:?}"
-        );
+        assert!(cols.iter().all(|&c| c == cols[0]), "ragged grid {cols:?}");
         assert!(cols[0] <= 100, "grid overflows: {cols:?}");
     }
 
@@ -2059,16 +2044,31 @@ mod tests {
         let hl = Highlighter::new();
         // prose is dim gray
         let lines = render("plain words here", 60, &hl);
-        assert!(lines[0].spans.iter().all(|s| s.style.fg == Some(Color::Gray)));
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .all(|s| s.style.fg == Some(Color::Gray))
+        );
         // bold and code go bright white on prose
         let lines = render("a **strong** move with `code`", 60, &hl);
         let spans = &lines[0].spans;
         assert_eq!(
-            spans.iter().find(|s| s.content == "strong").expect("bold").style.fg,
+            spans
+                .iter()
+                .find(|s| s.content == "strong")
+                .expect("bold")
+                .style
+                .fg,
             Some(Color::White)
         );
         assert_eq!(
-            spans.iter().find(|s| s.content == "code").expect("code").style.fg,
+            spans
+                .iter()
+                .find(|s| s.content == "code")
+                .expect("code")
+                .style
+                .fg,
             Some(Color::White)
         );
         // links are the sparse blue, underlined

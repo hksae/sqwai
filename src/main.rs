@@ -149,12 +149,10 @@ fn init_presenter() -> Result<PresenterHandles> {
     // flush, so no output ever sits in the buffer across frames.
     // TapWriter counts frame wire bytes for the /debug perf log.
     let tap = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let backend = ratatui::backend::CrosstermBackend::new(
-        tui::presenter::TapWriter::new(
-            io::BufWriter::with_capacity(256 * 1024, io::stdout()),
-            std::sync::Arc::clone(&tap),
-        ),
-    );
+    let backend = ratatui::backend::CrosstermBackend::new(tui::presenter::TapWriter::new(
+        io::BufWriter::with_capacity(256 * 1024, io::stdout()),
+        std::sync::Arc::clone(&tap),
+    ));
     let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let presenter = tui::presenter::Presenter::new(backend, tap, std::sync::Arc::clone(&alive));
     let (tx, rx) = tui::presenter::mailbox();

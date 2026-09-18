@@ -399,11 +399,7 @@ impl Journal {
     /// attribution existed (`plan: None`) still count: they cannot be
     /// attributed anywhere else. `plan: None` keeps the old unscoped scan
     /// for callers that resolved no plan.
-    pub fn step_pre_images_in(
-        root: &Path,
-        plan: Option<&str>,
-        step: &str,
-    ) -> Result<StepRevert> {
+    pub fn step_pre_images_in(root: &Path, plan: Option<&str>, step: &str) -> Result<StepRevert> {
         let records = Self::records(root)?;
         let in_scope = |record: &Record| {
             plan.is_none_or(|wanted| {
@@ -835,18 +831,12 @@ impl Journal {
             Some(sid) => Self::records_for(root, sid)?,
             None => Self::records(root)?,
         };
-        let total = records
-            .iter()
-            .filter(|r| r.kind == "claim_lint")
-            .count();
+        let total = records.iter().filter(|r| r.kind == "claim_lint").count();
         if total < THRESHOLD {
             return Ok(None);
         }
         let recent = records.len().saturating_sub(RECENCY);
-        let fresh = records
-            .iter()
-            .skip(recent)
-            .any(|r| r.kind == "claim_lint");
+        let fresh = records.iter().skip(recent).any(|r| r.kind == "claim_lint");
         if !fresh {
             return Ok(None);
         }
@@ -1099,7 +1089,8 @@ mod tests {
     }
 
     #[test]
-    fn appends_monotonic_records_with_host_fields() {        let root = root();
+    fn appends_monotonic_records_with_host_fields() {
+        let root = root();
         let mut journal = Journal::open(&root, "session").unwrap();
         journal.set_attribution(Some("2".into()), Some("plan".into()), "main");
         assert_eq!(
@@ -1787,9 +1778,11 @@ mod tests {
                 .unwrap();
         }
         assert!(Journal::claim_nudge(&root, Some("sess")).unwrap().is_none());
-        assert!(Journal::claim_nudge(&root, Some("other"))
-            .unwrap()
-            .is_some());
+        assert!(
+            Journal::claim_nudge(&root, Some("other"))
+                .unwrap()
+                .is_some()
+        );
         fs::remove_dir_all(root).ok();
     }
 

@@ -664,14 +664,17 @@ impl SqliteGraphStore {
         path: Option<&str>,
         symbol: Option<&str>,
     ) -> Result<ResolveRefResult> {
-        let mut target_path: Option<String> = path.map(|p| p.replace('\\', "/").trim_start_matches("./").to_string());
+        let mut target_path: Option<String> =
+            path.map(|p| p.replace('\\', "/").trim_start_matches("./").to_string());
         let mut target_symbol: Option<String> = symbol.map(|s| s.to_string());
 
         if let Some(r) = raw_ref {
             let trimmed = r.trim();
             if let Some(rest) = trimmed.strip_prefix("sym:") {
                 if let Ok(Some(node)) = self.find_node(trimmed) {
-                    let caps = node.path.as_deref()
+                    let caps = node
+                        .path
+                        .as_deref()
                         .and_then(|p| self.indexed_file(p).ok().flatten())
                         .map(|f| f.capabilities)
                         .unwrap_or_default();
@@ -713,23 +716,36 @@ impl SqliteGraphStore {
                     });
                 }
                 if let Some((p, s)) = split_path_symbol(rest) {
-                    if target_path.is_none() { target_path = Some(p); }
-                    if target_symbol.is_none() { target_symbol = Some(s); }
+                    if target_path.is_none() {
+                        target_path = Some(p);
+                    }
+                    if target_symbol.is_none() {
+                        target_symbol = Some(s);
+                    }
                 } else if target_symbol.is_none() {
                     target_symbol = Some(rest.to_string());
                 }
             } else if let Some(rest) = trimmed.strip_prefix("file:") {
                 let norm = rest.replace('\\', "/").trim_start_matches("./").to_string();
-                if target_path.is_none() { target_path = Some(norm); }
+                if target_path.is_none() {
+                    target_path = Some(norm);
+                }
             } else if trimmed.contains("::") {
                 if let Some((p, s)) = split_path_symbol(trimmed) {
-                    if target_path.is_none() { target_path = Some(p); }
-                    if target_symbol.is_none() { target_symbol = Some(s); }
+                    if target_path.is_none() {
+                        target_path = Some(p);
+                    }
+                    if target_symbol.is_none() {
+                        target_symbol = Some(s);
+                    }
                 } else if target_symbol.is_none() {
                     target_symbol = Some(trimmed.to_string());
                 }
             } else if target_path.is_none() && target_symbol.is_none() {
-                let norm = trimmed.replace('\\', "/").trim_start_matches("./").to_string();
+                let norm = trimmed
+                    .replace('\\', "/")
+                    .trim_start_matches("./")
+                    .to_string();
                 if self.project_root.join(&norm).is_file() || norm.contains('.') {
                     target_path = Some(norm);
                 } else {
@@ -777,7 +793,10 @@ impl SqliteGraphStore {
                 });
             }
 
-            let caps = recorded.as_ref().map(|r| r.capabilities.clone()).unwrap_or_default();
+            let caps = recorded
+                .as_ref()
+                .map(|r| r.capabilities.clone())
+                .unwrap_or_default();
             let has_declarations = caps.iter().any(|c| c == "declarations");
 
             if target_symbol.is_none() {
@@ -808,7 +827,9 @@ impl SqliteGraphStore {
 
             if !has_declarations {
                 return Ok(ResolveRefResult::Unknown {
-                    reason: format!("file indexed without declarations; symbol resolution unavailable for '{p}'"),
+                    reason: format!(
+                        "file indexed without declarations; symbol resolution unavailable for '{p}'"
+                    ),
                 });
             }
 
@@ -885,7 +906,11 @@ impl SqliteGraphStore {
                     });
                 }
             }
-            scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            scored.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             scored.truncate(5);
 
             return Ok(ResolveRefResult::NotFound {
@@ -1015,7 +1040,11 @@ impl SqliteGraphStore {
                 });
             }
         }
-        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         scored.truncate(5);
 
         Ok(ResolveRefResult::NotFound {
@@ -1429,9 +1458,18 @@ impl GraphStore for SqliteGraphStore {
         // 4. FTS search
         let sanitized: String = trimmed
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '_' { c } else { ' ' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    ' '
+                }
+            })
             .collect();
-        let terms: Vec<&str> = sanitized.split_whitespace().filter(|s| !s.is_empty()).collect();
+        let terms: Vec<&str> = sanitized
+            .split_whitespace()
+            .filter(|s| !s.is_empty())
+            .collect();
         if !terms.is_empty() {
             let fts_query = terms
                 .iter()
@@ -1446,11 +1484,12 @@ impl GraphStore for SqliteGraphStore {
                  ORDER BY f.rank
                  LIMIT ?2",
             )?;
-            let fts_rows = fts_stmt.query_map(rusqlite::params![fts_query, (limit * 2) as i64], |row| {
-                let node = row_to_node(row)?;
-                let rank: f64 = row.get(11)?;
-                Ok((node, rank))
-            });
+            let fts_rows =
+                fts_stmt.query_map(rusqlite::params![fts_query, (limit * 2) as i64], |row| {
+                    let node = row_to_node(row)?;
+                    let rank: f64 = row.get(11)?;
+                    Ok((node, rank))
+                });
             if let Ok(rows) = fts_rows {
                 for item in rows.flatten() {
                     let (node, rank) = item;
@@ -1464,23 +1503,32 @@ impl GraphStore for SqliteGraphStore {
         let mut items: Vec<RecallItem> = candidate_map
             .into_values()
             .map(|(node, score)| {
-                let snippet = if let Some(text) = node.properties.get("text").and_then(|v| v.as_str()) {
-                    let first_line = text.lines().next().unwrap_or("").trim();
-                    if first_line.len() > 120 {
-                        format!("{}...", &first_line[..first_line.floor_char_boundary(117)])
+                let snippet =
+                    if let Some(text) = node.properties.get("text").and_then(|v| v.as_str()) {
+                        let first_line = text.lines().next().unwrap_or("").trim();
+                        if first_line.len() > 120 {
+                            format!("{}...", &first_line[..first_line.floor_char_boundary(117)])
+                        } else {
+                            first_line.to_string()
+                        }
+                    } else if let Some(sig) = &node.signature {
+                        sig.clone()
+                    } else if let Some(name) = &node.name {
+                        name.clone()
                     } else {
-                        first_line.to_string()
-                    }
-                } else if let Some(sig) = &node.signature {
-                    sig.clone()
-                } else if let Some(name) = &node.name {
-                    name.clone()
-                } else {
-                    node.path.clone().unwrap_or_else(|| node.stable_key.clone())
-                };
+                        node.path.clone().unwrap_or_else(|| node.stable_key.clone())
+                    };
 
-                let author = node.properties.get("author").and_then(|v| v.as_str()).map(String::from);
-                let journal_ref = node.properties.get("journal_ref").and_then(|v| v.as_str()).map(String::from);
+                let author = node
+                    .properties
+                    .get("author")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let journal_ref = node
+                    .properties
+                    .get("journal_ref")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 let provenance = node
                     .properties
                     .get("provenance")
@@ -1517,7 +1565,8 @@ impl GraphStore for SqliteGraphStore {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return Ok(StartNodeResolution::Unresolved {
-                hint: "Empty start node key provided. Pass a canonical key or path::symbol.".to_string(),
+                hint: "Empty start node key provided. Pass a canonical key or path::symbol."
+                    .to_string(),
                 candidates: Vec::new(),
             });
         }
@@ -1547,7 +1596,8 @@ impl GraphStore for SqliteGraphStore {
                  FROM nodes WHERE (path = ?1 OR path = ?2) AND (name = ?3 OR key LIKE '%::' || ?3)
                  ORDER BY line_start ASC",
             )?;
-            let rows = stmt.query_map([path.as_str(), norm_p.as_str(), sym.as_str()], row_to_node)?;
+            let rows =
+                stmt.query_map([path.as_str(), norm_p.as_str(), sym.as_str()], row_to_node)?;
             let mut matches = Vec::new();
             for r in rows {
                 matches.push(r?);
@@ -1572,7 +1622,10 @@ impl GraphStore for SqliteGraphStore {
             let nodes_in_f = self.nodes_in_file(&norm_p).unwrap_or_default();
             let mut scored = Vec::new();
             for n in &nodes_in_f {
-                if matches!(n.kind, NodeKind::File | NodeKind::Folder | NodeKind::Document | NodeKind::Section) {
+                if matches!(
+                    n.kind,
+                    NodeKind::File | NodeKind::Folder | NodeKind::Document | NodeKind::Section
+                ) {
                     continue;
                 }
                 let cand_name = n.name.as_deref().unwrap_or("");
@@ -1587,11 +1640,17 @@ impl GraphStore for SqliteGraphStore {
                     });
                 }
             }
-            scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            scored.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             scored.truncate(5);
 
             return Ok(StartNodeResolution::Unresolved {
-                hint: format!("Symbol '{sym}' not found in '{norm_p}'. Use recall or verify the symbol name."),
+                hint: format!(
+                    "Symbol '{sym}' not found in '{norm_p}'. Use recall or verify the symbol name."
+                ),
                 candidates: scored,
             });
         }
@@ -1656,7 +1715,9 @@ impl GraphStore for SqliteGraphStore {
                     .map(|c| format!("{} [{}]", c.key, c.kind))
                     .collect::<Vec<_>>()
                     .join(", ");
-                anyhow::bail!("ambiguous_start: start node '{stable_key}' matches multiple candidates: {list}. Pass a canonical key.");
+                anyhow::bail!(
+                    "ambiguous_start: start node '{stable_key}' matches multiple candidates: {list}. Pass a canonical key."
+                );
             }
             StartNodeResolution::Unresolved { hint, candidates } => {
                 if candidates.is_empty() {
@@ -1689,7 +1750,11 @@ impl GraphStore for SqliteGraphStore {
             if p == "all" {
                 Vec::new()
             } else if let Some(preset) = GraphPreset::parse(p) {
-                preset.default_relations().iter().map(|s| s.to_string()).collect()
+                preset
+                    .default_relations()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
             } else {
                 Vec::new()
             }
@@ -1746,14 +1811,16 @@ impl GraphStore for SqliteGraphStore {
                         continue;
                     }
                     if edges.len() >= effective_max_edges {
-                        truncated_reason =
-                            Some(format!("edge budget exhausted (max_edges={effective_max_edges})"));
+                        truncated_reason = Some(format!(
+                            "edge budget exhausted (max_edges={effective_max_edges})"
+                        ));
                         break;
                     }
                     for endpoint in [&edge.from, &edge.to] {
                         if visited.len() >= effective_max_nodes && !visited.contains(endpoint) {
-                            truncated_reason =
-                                Some(format!("node budget exhausted (max_nodes={effective_max_nodes})"));
+                            truncated_reason = Some(format!(
+                                "node budget exhausted (max_nodes={effective_max_nodes})"
+                            ));
                             break;
                         }
                         if visited.insert(endpoint.clone()) {
@@ -1780,8 +1847,9 @@ impl GraphStore for SqliteGraphStore {
         let mut nodes = Vec::new();
         for key in &visited {
             if nodes.len() >= effective_max_nodes {
-                truncated_reason =
-                    Some(format!("node budget exhausted (max_nodes={effective_max_nodes})"));
+                truncated_reason = Some(format!(
+                    "node budget exhausted (max_nodes={effective_max_nodes})"
+                ));
                 break;
             }
             if let Some(node) = node_stmt
@@ -2411,15 +2479,11 @@ mod tests {
         fun_v2.path = Some("a.rs".into());
 
         // Fast write B finishes first at generation 2
-        assert!(store
-            .replace_file_subgraph_stamped(
-                "a.rs",
-                &[file_node_v2, fun_v2],
-                &[],
-                &[],
-                Some(2),
-            )
-            .unwrap());
+        assert!(
+            store
+                .replace_file_subgraph_stamped("a.rs", &[file_node_v2, fun_v2], &[], &[], Some(2),)
+                .unwrap()
+        );
         assert!(store.find_node("sym:a.rs::fn::v2").unwrap().is_some());
 
         // Slow worker A finishes later, but computed its result at generation 1
@@ -2428,13 +2492,7 @@ mod tests {
         let mut fun_v1 = node("sym:a.rs::fn::v1", NodeKind::Function);
         fun_v1.path = Some("a.rs".into());
         let written = store
-            .replace_file_subgraph_stamped(
-                "a.rs",
-                &[file_node_v1, fun_v1],
-                &[],
-                &[],
-                Some(1),
-            )
+            .replace_file_subgraph_stamped("a.rs", &[file_node_v1, fun_v1], &[], &[], Some(1))
             .unwrap();
         // Out-of-order write is dropped!
         assert!(!written, "stale generation write must be dropped");
@@ -2573,9 +2631,7 @@ mod tests {
         assert!(matches!(res2, ResolveRefResult::Found { .. }));
 
         // Lookup by file path only
-        let res3 = store
-            .resolve_ref(Some("src/lib.rs"), None, None)
-            .unwrap();
+        let res3 = store.resolve_ref(Some("src/lib.rs"), None, None).unwrap();
         match res3 {
             ResolveRefResult::Found { kind, key, .. } => {
                 assert_eq!(kind, "file");
@@ -2624,16 +2680,8 @@ mod tests {
     fn resolve_ref_ambiguous() {
         let dir = tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
-        std::fs::write(
-            dir.path().join("src/a.rs"),
-            "pub fn helper() {}\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("src/b.rs"),
-            "pub fn helper() {}\n",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "pub fn helper() {}\n").unwrap();
+        std::fs::write(dir.path().join("src/b.rs"), "pub fn helper() {}\n").unwrap();
 
         let mut store = SqliteGraphStore::open(dir.path()).unwrap();
         crate::agent::graph_index::index_project(&mut store, dir.path()).unwrap();
@@ -2671,37 +2719,37 @@ mod tests {
     fn resolve_ref_freshness_triggers_reindex() {
         let dir = tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
-        std::fs::write(
-            dir.path().join("src/lib.rs"),
-            "pub fn v1() {}\n",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn v1() {}\n").unwrap();
 
         let mut store = SqliteGraphStore::open(dir.path()).unwrap();
         crate::agent::graph_index::index_project(&mut store, dir.path()).unwrap();
         assert!(matches!(
-            store.resolve_ref(None, Some("src/lib.rs"), Some("v1")).unwrap(),
+            store
+                .resolve_ref(None, Some("src/lib.rs"), Some("v1"))
+                .unwrap(),
             ResolveRefResult::Found { .. }
         ));
 
         // Sleep briefly to ensure mtime changes on disk
         std::thread::sleep(std::time::Duration::from_millis(50));
-        std::fs::write(
-            dir.path().join("src/lib.rs"),
-            "pub fn v2() {}\n",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn v2() {}\n").unwrap();
 
         // resolve_ref must trigger incremental reindex automatically!
         let res = store
             .resolve_ref(None, Some("src/lib.rs"), Some("v2"))
             .unwrap();
-        assert!(matches!(res, ResolveRefResult::Found { .. }), "freshness should find v2");
+        assert!(
+            matches!(res, ResolveRefResult::Found { .. }),
+            "freshness should find v2"
+        );
 
         let old = store
             .resolve_ref(None, Some("src/lib.rs"), Some("v1"))
             .unwrap();
-        assert!(matches!(old, ResolveRefResult::NotFound { .. }), "v1 must be gone");
+        assert!(
+            matches!(old, ResolveRefResult::NotFound { .. }),
+            "v1 must be gone"
+        );
     }
 
     #[test]
@@ -2742,7 +2790,10 @@ mod tests {
 
         // Also add a custom memory node with text and author properties
         let mut props = std::collections::BTreeMap::new();
-        props.insert("text".into(), serde_json::json!("We decided to persist todos inside the session file"));
+        props.insert(
+            "text".into(),
+            serde_json::json!("We decided to persist todos inside the session file"),
+        );
         props.insert("author".into(), serde_json::json!("model"));
         props.insert("journal_ref".into(), serde_json::json!("j#42"));
         let mem_node = Node {
@@ -2758,12 +2809,9 @@ mod tests {
             properties: props,
             content_hash: None,
         };
-        store.replace_file_subgraph(
-            ".sqwai/memory/2026-09-10.md",
-            &[mem_node],
-            &[],
-            &[],
-        ).unwrap();
+        store
+            .replace_file_subgraph(".sqwai/memory/2026-09-10.md", &[mem_node], &[], &[])
+            .unwrap();
 
         // 1. Recall by exact name
         let res_code = store.recall("calculate_sum", 8).unwrap();
@@ -2846,59 +2894,74 @@ mod tests {
             properties: std::collections::BTreeMap::new(),
         };
 
-        store.replace_file_subgraph("src/session/mod.rs", &[n1, n3], &[e2], &[]).unwrap();
-        store.replace_file_subgraph(".sqwai/memory/2026-09-10.md", &[n2], &[e1], &[]).unwrap();
+        store
+            .replace_file_subgraph("src/session/mod.rs", &[n1, n3], &[e2], &[])
+            .unwrap();
+        store
+            .replace_file_subgraph(".sqwai/memory/2026-09-10.md", &[n2], &[e1], &[])
+            .unwrap();
 
         // Query incoming edges with relations filter ["about"]
-        let res = store.graph_query(
-            "sym:src/session/mod.rs::struct::Session",
-            GraphQuery {
-                direction: Direction::Incoming,
-                preset: None,
-                depth: 1,
-                max_nodes: 30,
-                max_edges: 10,
-                limit: 10,
-                relations: vec!["about".into()],
-                kinds: Vec::new(),
-            },
-        ).unwrap();
+        let res = store
+            .graph_query(
+                "sym:src/session/mod.rs::struct::Session",
+                GraphQuery {
+                    direction: Direction::Incoming,
+                    preset: None,
+                    depth: 1,
+                    max_nodes: 30,
+                    max_edges: 10,
+                    limit: 10,
+                    relations: vec!["about".into()],
+                    kinds: Vec::new(),
+                },
+            )
+            .unwrap();
         assert_eq!(res.edges.len(), 1);
         assert_eq!(res.edges[0].kind, "about");
         assert_eq!(res.edges[0].from, "mem:2026-09-10#12-00:decision:1");
 
         // Query with relation filter ["contains"] on incoming -> none found
-        let res_none = store.graph_query(
-            "sym:src/session/mod.rs::struct::Session",
-            GraphQuery {
-                direction: Direction::Incoming,
-                preset: None,
-                depth: 1,
-                max_nodes: 30,
-                max_edges: 10,
-                limit: 10,
-                relations: vec!["contains".into()],
-                kinds: Vec::new(),
-            },
-        ).unwrap();
+        let res_none = store
+            .graph_query(
+                "sym:src/session/mod.rs::struct::Session",
+                GraphQuery {
+                    direction: Direction::Incoming,
+                    preset: None,
+                    depth: 1,
+                    max_nodes: 30,
+                    max_edges: 10,
+                    limit: 10,
+                    relations: vec!["contains".into()],
+                    kinds: Vec::new(),
+                },
+            )
+            .unwrap();
         assert_eq!(res_none.edges.len(), 0);
 
         // Query with small limit triggers truncation
-        let res_trunc = store.graph_query(
-            "sym:src/session/mod.rs::struct::Session",
-            GraphQuery {
-                direction: Direction::Both,
-                preset: Some("all".into()),
-                depth: 2,
-                max_nodes: 30,
-                max_edges: 1,
-                limit: 1,
-                relations: Vec::new(),
-                kinds: Vec::new(),
-            },
-        ).unwrap();
+        let res_trunc = store
+            .graph_query(
+                "sym:src/session/mod.rs::struct::Session",
+                GraphQuery {
+                    direction: Direction::Both,
+                    preset: Some("all".into()),
+                    depth: 2,
+                    max_nodes: 30,
+                    max_edges: 1,
+                    limit: 1,
+                    relations: Vec::new(),
+                    kinds: Vec::new(),
+                },
+            )
+            .unwrap();
         assert!(res_trunc.truncated);
-        assert!(res_trunc.truncated_reason.unwrap().contains("budget exhausted"));
+        assert!(
+            res_trunc
+                .truncated_reason
+                .unwrap()
+                .contains("budget exhausted")
+        );
     }
 
     #[test]
@@ -2907,9 +2970,15 @@ mod tests {
         let store = SqliteGraphStore::open(dir.path()).unwrap();
 
         let res = store.graph_query("nonexistent::Symbol", GraphQuery::default());
-        assert!(res.is_err(), "query with nonexistent start must error, not return 0 nodes");
+        assert!(
+            res.is_err(),
+            "query with nonexistent start must error, not return 0 nodes"
+        );
         let err = res.err().unwrap().to_string();
-        assert!(err.contains("unresolved_start"), "error must be unresolved_start: {err}");
+        assert!(
+            err.contains("unresolved_start"),
+            "error must be unresolved_start: {err}"
+        );
     }
 
     #[test]
@@ -2930,10 +2999,14 @@ mod tests {
             properties: std::collections::BTreeMap::new(),
             content_hash: None,
         };
-        store.replace_file_subgraph("src/calc.rs", &[n1], &[], &[]).unwrap();
+        store
+            .replace_file_subgraph("src/calc.rs", &[n1], &[], &[])
+            .unwrap();
 
         // Query using shorthand path::symbol
-        let res = store.graph_query("src/calc.rs::add", GraphQuery::default()).unwrap();
+        let res = store
+            .graph_query("src/calc.rs::add", GraphQuery::default())
+            .unwrap();
         assert_eq!(res.nodes.len(), 1);
         assert_eq!(res.nodes[0].stable_key, "sym:src/calc.rs::fn::add");
     }
@@ -2956,10 +3029,18 @@ mod tests {
             properties: std::collections::BTreeMap::new(),
             content_hash: None,
         };
-        store.replace_file_subgraph("src/lib.rs", &[n1], &[], &[]).unwrap();
+        store
+            .replace_file_subgraph("src/lib.rs", &[n1], &[], &[])
+            .unwrap();
 
-        let res = store.graph_query("sym:src/lib.rs::struct::Isolated", GraphQuery::default()).unwrap();
-        assert_eq!(res.nodes.len(), 1, "must contain exactly the starting isolated node");
+        let res = store
+            .graph_query("sym:src/lib.rs::struct::Isolated", GraphQuery::default())
+            .unwrap();
+        assert_eq!(
+            res.nodes.len(),
+            1,
+            "must contain exactly the starting isolated node"
+        );
         assert_eq!(res.edges.len(), 0, "must have 0 edges");
         assert!(!res.truncated);
     }
@@ -3035,32 +3116,62 @@ mod tests {
             });
         }
 
-        store.replace_file_subgraph("src/module.rs", &all_nodes, &all_edges, &[]).unwrap();
+        store
+            .replace_file_subgraph("src/module.rs", &all_nodes, &all_edges, &[])
+            .unwrap();
 
         // 1. Default preset ("dependencies"): contains is not traversed, so 0 siblings returned
-        let res_deps = store.graph_query(
-            "sym:src/module.rs::enum::Target",
-            GraphQuery::default(),
-        ).unwrap();
-        assert_eq!(res_deps.nodes.len(), 1, "dependencies preset must not return container or siblings");
-        assert_eq!(res_deps.nodes[0].stable_key, "sym:src/module.rs::enum::Target");
+        let res_deps = store
+            .graph_query("sym:src/module.rs::enum::Target", GraphQuery::default())
+            .unwrap();
+        assert_eq!(
+            res_deps.nodes.len(),
+            1,
+            "dependencies preset must not return container or siblings"
+        );
+        assert_eq!(
+            res_deps.nodes[0].stable_key,
+            "sym:src/module.rs::enum::Target"
+        );
 
         // 2. Structure preset ("structure"): visits parent file container, but anti-co-location guard
         // prevents expanding from file:src/module.rs into the 20 sibling functions!
-        let res_struct = store.graph_query(
-            "sym:src/module.rs::enum::Target",
-            GraphQuery {
-                direction: Direction::Both,
-                preset: Some("structure".into()),
-                depth: 2,
-                ..Default::default()
-            },
-        ).unwrap();
+        let res_struct = store
+            .graph_query(
+                "sym:src/module.rs::enum::Target",
+                GraphQuery {
+                    direction: Direction::Both,
+                    preset: Some("structure".into()),
+                    depth: 2,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         // Should contain Target and its parent file:src/module.rs, but NOT the 20 siblings!
-        assert_eq!(res_struct.nodes.len(), 2, "structure preset must include parent file but not 20 siblings");
-        assert!(res_struct.nodes.iter().any(|n| n.stable_key == "sym:src/module.rs::enum::Target"));
-        assert!(res_struct.nodes.iter().any(|n| n.stable_key == "file:src/module.rs"));
-        assert!(!res_struct.nodes.iter().any(|n| n.name.as_deref().unwrap_or("").starts_with("sibling_")));
+        assert_eq!(
+            res_struct.nodes.len(),
+            2,
+            "structure preset must include parent file but not 20 siblings"
+        );
+        assert!(
+            res_struct
+                .nodes
+                .iter()
+                .any(|n| n.stable_key == "sym:src/module.rs::enum::Target")
+        );
+        assert!(
+            res_struct
+                .nodes
+                .iter()
+                .any(|n| n.stable_key == "file:src/module.rs")
+        );
+        assert!(
+            !res_struct.nodes.iter().any(|n| n
+                .name
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("sibling_"))
+        );
     }
 
     #[test]
@@ -3098,22 +3209,31 @@ mod tests {
                 });
             }
         }
-        store.replace_file_subgraph("src/test.rs", &nodes, &edges, &[]).unwrap();
+        store
+            .replace_file_subgraph("src/test.rs", &nodes, &edges, &[])
+            .unwrap();
 
-        let res = store.graph_query(
-            "sym:node_0",
-            GraphQuery {
-                direction: Direction::Outgoing,
-                preset: Some("dependencies".into()),
-                depth: 1,
-                max_nodes: 5,
-                max_edges: 50,
-                ..Default::default()
-            },
-        ).unwrap();
+        let res = store
+            .graph_query(
+                "sym:node_0",
+                GraphQuery {
+                    direction: Direction::Outgoing,
+                    preset: Some("dependencies".into()),
+                    depth: 1,
+                    max_nodes: 5,
+                    max_edges: 50,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         assert!(res.truncated);
         assert!(res.nodes.len() <= 5);
-        assert!(res.truncated_reason.as_deref().unwrap().contains("max_nodes=5"));
+        assert!(
+            res.truncated_reason
+                .as_deref()
+                .unwrap()
+                .contains("max_nodes=5")
+        );
     }
 
     #[test]
@@ -3123,14 +3243,19 @@ mod tests {
         std::fs::write(
             dir.path().join("src/lib.rs"),
             "pub fn calculate() -> i32 { 42 }\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut store = SqliteGraphStore::open(dir.path()).unwrap();
         crate::agent::graph_index::index_project(&mut store, dir.path()).unwrap();
 
-        let res = store.resolve_ref(None, Some("src/lib.rs"), Some("calculate")).unwrap();
+        let res = store
+            .resolve_ref(None, Some("src/lib.rs"), Some("calculate"))
+            .unwrap();
         match res {
-            ResolveRefResult::Found { provenance, key, .. } => {
+            ResolveRefResult::Found {
+                provenance, key, ..
+            } => {
                 assert!(key.contains("calculate"));
                 assert_eq!(provenance.precision, "ast_declaration");
                 assert_eq!(provenance.freshness, "verified_disk_match");

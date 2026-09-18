@@ -1864,10 +1864,7 @@ impl App {
             Menu::Settings => {
                 let section = |label: &str, action: MenuAction| {
                     row(
-                        Line::from(vec![Span::styled(
-                            format!("  {label}"),
-                            Theme::FG(),
-                        )]),
+                        Line::from(vec![Span::styled(format!("  {label}"), Theme::FG())]),
                         action,
                     )
                 };
@@ -2364,10 +2361,7 @@ impl App {
                 self.menu_rows.push(row(
                     Line::from(vec![
                         Span::styled(format!(" {:<18}", "test commands"), Theme::FG()),
-                        Span::styled(
-                            on_off(self.cfg.ui.experimental_test),
-                            Theme::dim(),
-                        ),
+                        Span::styled(on_off(self.cfg.ui.experimental_test), Theme::dim()),
                     ]),
                     MenuAction::ToggleExperimentalTest,
                 ));
@@ -2562,11 +2556,8 @@ impl App {
                         MenuAction::None,
                     ));
                     for s in foreign {
-                        self.menu_rows.push(session_row(
-                            s,
-                            s.id.to_string() == cur_id,
-                            None,
-                        ));
+                        self.menu_rows
+                            .push(session_row(s, s.id.to_string() == cur_id, None));
                     }
                 }
                 if visible.is_empty() {
@@ -2615,10 +2606,7 @@ impl App {
                 self.menu_rows.push(row(
                     Line::from(vec![
                         Span::styled(format!("  {:<16}", "default effort"), Theme::FG()),
-                        Span::styled(
-                            self.cfg.default_effort.as_str().to_string(),
-                            Theme::dim(),
-                        ),
+                        Span::styled(self.cfg.default_effort.as_str().to_string(), Theme::dim()),
                     ]),
                     MenuAction::CycleDefaultEffort,
                 ));
@@ -2857,10 +2845,7 @@ impl App {
                     }
                     // Question text — selectable, not an action
                     self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(
-                            format!(" {}", q.question),
-                            Theme::FG(),
-                        )]),
+                        Line::from(vec![Span::styled(format!(" {}", q.question), Theme::FG())]),
                         MenuAction::None,
                     ));
                     for (o_idx, opt) in q.options.iter().enumerate() {
@@ -3008,14 +2993,10 @@ impl App {
                     MenuAction::DecideApproval(ApprovalDecision::AlwaysSession),
                 ));
                 self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        " 3: deny".to_string(),
-                        Theme::ERR(),
-                    )]),
+                    Line::from(vec![Span::styled(" 3: deny".to_string(), Theme::ERR())]),
                     MenuAction::DecideApproval(ApprovalDecision::Deny),
                 ));
-                self.menu_footer_text =
-                    Some("1/2/3: select · enter: confirm · esc: deny".into());
+                self.menu_footer_text = Some("1/2/3: select · enter: confirm · esc: deny".into());
             }
             Menu::EditProvider { .. }
             | Menu::EditModel { .. }
@@ -3117,19 +3098,31 @@ impl App {
             } => {
                 use crate::agent::graph::GraphStore;
                 let store = crate::agent::graph::SqliteGraphStore::open(&self.project_root).ok();
-                let focus_node = store.as_ref().and_then(|s| s.find_node(&focus_key).ok().flatten());
-                let kind_badge = focus_node.as_ref().map(|n| node_badge(&n.kind)).unwrap_or("[?]");
+                let focus_node = store
+                    .as_ref()
+                    .and_then(|s| s.find_node(&focus_key).ok().flatten());
+                let kind_badge = focus_node
+                    .as_ref()
+                    .map(|n| node_badge(&n.kind))
+                    .unwrap_or("[?]");
 
                 // Header row
                 let mut title_spans = vec![
                     Span::styled(format!(" {kind_badge} "), Theme::accent_bold()),
-                    Span::styled(focus_key.clone(), Theme::base().add_modifier(ratatui::style::Modifier::BOLD)),
+                    Span::styled(
+                        focus_key.clone(),
+                        Theme::base().add_modifier(ratatui::style::Modifier::BOLD),
+                    ),
                 ];
                 if !trail.is_empty() {
-                    title_spans.push(Span::styled(format!(" (trail: {})", trail.len()), Theme::dim()));
+                    title_spans.push(Span::styled(
+                        format!(" (trail: {})", trail.len()),
+                        Theme::dim(),
+                    ));
                 }
                 title_spans.push(Span::styled(format!(" [depth: {depth}]"), Theme::dim()));
-                self.menu_rows.push(row(Line::from(title_spans), MenuAction::None));
+                self.menu_rows
+                    .push(row(Line::from(title_spans), MenuAction::None));
 
                 // Back button if trail not empty
                 if let Some(prev) = trail.last() {
@@ -3186,9 +3179,11 @@ impl App {
                         ));
                     } else {
                         // Compute shortest-path distance from focus_key in BFS order
-                        let mut distances: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
+                        let mut distances: std::collections::HashMap<String, u8> =
+                            std::collections::HashMap::new();
                         distances.insert(focus_key.clone(), 0);
-                        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+                        let mut queue: std::collections::VecDeque<String> =
+                            std::collections::VecDeque::new();
                         queue.push_back(focus_key.clone());
 
                         while let Some(curr) = queue.pop_front() {
@@ -3271,7 +3266,8 @@ impl App {
 
                         let mut rendered_count = 0;
                         for agg in aggregated {
-                            let other_node = proj.nodes.iter().find(|n| n.stable_key == agg.target_key);
+                            let other_node =
+                                proj.nodes.iter().find(|n| n.stable_key == agg.target_key);
                             let name_or_key = other_node
                                 .and_then(|n| n.name.as_deref())
                                 .unwrap_or(&agg.target_key);
@@ -3287,9 +3283,8 @@ impl App {
                                 }
                             }
 
-                            let other_badge = other_node
-                                .map(|n| node_badge(&n.kind))
-                                .unwrap_or("[?]");
+                            let other_badge =
+                                other_node.map(|n| node_badge(&n.kind)).unwrap_or("[?]");
 
                             let prefix = if agg.depth > 1 {
                                 format!("  +{} {} ({}) ", agg.depth, agg.dir, agg.kind)
@@ -3297,7 +3292,7 @@ impl App {
                                 format!("  {} ({}) ", agg.dir, agg.kind)
                             };
 
-    let mut spans = vec![
+                            let mut spans = vec![
                                 Span::styled(prefix, Theme::dim()),
                                 Span::styled(format!("{other_badge} "), Theme::accent()),
                                 Span::styled(name_or_key.to_string(), Theme::base()),
@@ -3306,12 +3301,16 @@ impl App {
 
                             if let Some(ref via) = agg.via {
                                 let via_node = proj.nodes.iter().find(|n| &n.stable_key == via);
-                                let via_name = via_node.and_then(|n| n.name.as_deref()).unwrap_or(via);
+                                let via_name =
+                                    via_node.and_then(|n| n.name.as_deref()).unwrap_or(via);
                                 spans.push(Span::styled(format!(" via {via_name}"), Theme::dim()));
                             }
 
                             if agg.count > 1 {
-                                spans.push(Span::styled(format!("  ×{}", agg.count), Theme::accent_bold()));
+                                spans.push(Span::styled(
+                                    format!("  ×{}", agg.count),
+                                    Theme::accent_bold(),
+                                ));
                             }
 
                             self.menu_rows.push(row(
@@ -3332,7 +3331,9 @@ impl App {
                         }
                     }
                 }
-                self.menu_footer_text = Some("enter: focus · backspace: back · f: search · +/-: depth · esc: close".into());
+                self.menu_footer_text = Some(
+                    "enter: focus · backspace: back · f: search · +/-: depth · esc: close".into(),
+                );
             }
         }
         if self.menu_sel >= self.menu_rows.len() {
@@ -3539,9 +3540,7 @@ fn session_row(
         None => (TITLE_MAX, MODEL_MAX),
         Some(budget) => {
             let title_w = budget.saturating_sub(FIXED + 4).clamp(4, TITLE_MAX);
-            let model_w = budget
-                .saturating_sub(title_w + FIXED)
-                .clamp(4, MODEL_MAX);
+            let model_w = budget.saturating_sub(title_w + FIXED).clamp(4, MODEL_MAX);
             (title_w, model_w)
         }
     };
@@ -3611,10 +3610,7 @@ fn fit_line_width(line: Line<'static>, width: usize) -> Line<'static> {
         }
     }
     if used < width {
-        out.push(Span::styled(
-            " ".repeat(width - used),
-            Style::new(),
-        ));
+        out.push(Span::styled(" ".repeat(width - used), Style::new()));
     }
     Line::from(out)
 }

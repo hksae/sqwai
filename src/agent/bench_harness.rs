@@ -15,9 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::agent::loop_task::{
-    AgentEvent, AgentInput, FallbackCandidate,
-};
+use crate::agent::loop_task::{AgentEvent, AgentInput, FallbackCandidate};
 use crate::providers::{Message, Role, SharedProvider};
 
 const WALL_CAP: Duration = Duration::from_secs(7200);
@@ -153,7 +151,9 @@ pub fn bench_model() -> Option<BenchModel> {
     let key = std::env::var("SQWAI_BENCH_MODEL").unwrap_or_else(|_| cfg.last_model.clone());
     eprintln!("bench: using model key `{key}`");
     let Some(mc) = cfg.models.get(&key).cloned() else {
-        eprintln!("bench: model `{key}` not in config; set SQWAI_BENCH_MODEL to a key from /models");
+        eprintln!(
+            "bench: model `{key}` not in config; set SQWAI_BENCH_MODEL to a key from /models"
+        );
         return None;
     };
     let resolved = cfg
@@ -251,7 +251,11 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
     let started = Instant::now();
     let mut report = RunReport {
         task: task.id.to_string(),
-        arm: if baseline { "baseline".into() } else { "mechanism".into() },
+        arm: if baseline {
+            "baseline".into()
+        } else {
+            "mechanism".into()
+        },
         model: std::env::var("SQWAI_BENCH_MODEL").unwrap_or_default(),
         ..Default::default()
     };
@@ -290,9 +294,9 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
         root: root.clone(),
         session_id: session_id.clone(),
         blocked_patterns: vec![],
-            plan_mode: false,
-            context_limit,
-            enable_tools: true,
+        plan_mode: false,
+        context_limit,
+        enable_tools: true,
         read_only: false,
         previous_response_id: None,
         summary: None,
@@ -364,29 +368,30 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
                 // loop waits for the answer forever (1.2 deadlocked here on
                 // turn 1 — 1.3 never proposes, it plans directly). Autonomous
                 // surrogate: accept, so the mechanism arm keeps its plan flow.
-                let _ = handle.control.try_send(
-                    crate::agent::loop_task::ControlMsg::PlanAnswer { id, accept: true },
-                );
+                let _ = handle
+                    .control
+                    .try_send(crate::agent::loop_task::ControlMsg::PlanAnswer { id, accept: true });
             }
             AgentEvent::AskUser { id, .. } => {
                 // same deadlock class: answer so the run continues
                 // autonomously instead of waiting on nobody.
-                let _ = handle.control.try_send(
-                    crate::agent::loop_task::ControlMsg::AskAnswer {
+                let _ = handle
+                    .control
+                    .try_send(crate::agent::loop_task::ControlMsg::AskAnswer {
                         id,
                         text: "no user in this run; decide yourself and continue".to_string(),
-                    },
-                );
+                    });
             }
             AgentEvent::Approval { id, .. } => {
                 // autonomous runs never approve dangerous commands; a deny
                 // that breaks the task is data, a hang is not.
-                let _ = handle.control.try_send(
-                    crate::agent::loop_task::ControlMsg::ApprovalAnswer {
-                        id,
-                        decision: crate::agent::loop_task::ApprovalDecision::Deny,
-                    },
-                );
+                let _ =
+                    handle
+                        .control
+                        .try_send(crate::agent::loop_task::ControlMsg::ApprovalAnswer {
+                            id,
+                            decision: crate::agent::loop_task::ApprovalDecision::Deny,
+                        });
             }
             // retry silence killed a whole evening of debugging: a throttled
             // run looks exactly like a hung one. Always visible in bench.
@@ -476,7 +481,8 @@ fn plan_criteria(plan: &crate::plan::Plan) -> bool {
     // acceptance, so a plan without any is unfinished by definition
     if plan.acceptance.is_empty() {
         return false;
-    }    let steps_closed = plan.steps.iter().all(|s| {
+    }
+    let steps_closed = plan.steps.iter().all(|s| {
         matches!(
             s.status,
             crate::plan::StepStatus::Done
@@ -585,10 +591,8 @@ pub fn score_run(report: &RunReport, task: &TaskSpec, fixture_src: &Path) -> Sco
     score.traps_ok = trap_same("src/storage/btree.rs");
 
     let journal_dir = report.root.join(".sqwai").join("journal");
-    let mut per_path: std::collections::BTreeMap<String, usize> =
-        std::collections::BTreeMap::new();
-    let mut reads: std::collections::BTreeMap<String, usize> =
-        std::collections::BTreeMap::new();
+    let mut per_path: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut reads: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     if let Ok(entries) = std::fs::read_dir(&journal_dir) {
         for entry in entries.flatten() {
             let Ok(text) = std::fs::read_to_string(entry.path()) else {
@@ -629,10 +633,23 @@ pub fn score_run(report: &RunReport, task: &TaskSpec, fixture_src: &Path) -> Sco
 }
 
 pub fn print_report(report: &RunReport, score: &Score) {
-    let tail: String =
-        report.final_text.chars().rev().take(2000).collect::<String>().chars().rev().collect();
-    println!("=== bench {} {} [{}] ===", report.task, report.arm, report.model);
-    println!("wall: {}s  tools: {}  compactions: {}", report.wall_secs, report.tool_calls, report.compactions);
+    let tail: String = report
+        .final_text
+        .chars()
+        .rev()
+        .take(2000)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    println!(
+        "=== bench {} {} [{}] ===",
+        report.task, report.arm, report.model
+    );
+    println!(
+        "wall: {}s  tools: {}  compactions: {}",
+        report.wall_secs, report.tool_calls, report.compactions
+    );
     println!(
         "tokens: in={} out={} cached={}",
         report.prompt_tokens, report.completion_tokens, report.cached_tokens
@@ -641,8 +658,14 @@ pub fn print_report(report: &RunReport, score: &Score) {
         "finish: plan={} claimed={} timeout={} error={:?}",
         report.plan_finished, report.claimed_done, report.timed_out, report.error
     );
-    println!("acceptance_green: {}  traps_ok: {}", score.acceptance_green, score.traps_ok);
-    println!("diffs_per_path: {:?}  rereads: {}", score.diffs_per_path, score.rereads);
+    println!(
+        "acceptance_green: {}  traps_ok: {}",
+        score.acceptance_green, score.traps_ok
+    );
+    println!(
+        "diffs_per_path: {:?}  rereads: {}",
+        score.diffs_per_path, score.rereads
+    );
     if !report.latencies.is_empty() {
         let max = report.latencies.iter().max().unwrap_or(&0);
         let sum: u64 = report.latencies.iter().sum();
@@ -748,10 +771,7 @@ async fn bench_t1_shakedown_baseline() {
 #[test]
 fn score_run_reads_traps_and_diff_chains() {
     // synthetic run root: trap file changed, two file_diffs
-    let root = std::env::temp_dir().join(format!(
-        "sqwai-bench-score-{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("sqwai-bench-score-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("src/storage")).unwrap();
     std::fs::create_dir_all(root.join(".sqwai/journal")).unwrap();
@@ -768,10 +788,7 @@ fn score_run_reads_traps_and_diff_chains() {
     )
     .unwrap();
 
-    let src = std::env::temp_dir().join(format!(
-        "sqwai-bench-src-{}",
-        std::process::id()
-    ));
+    let src = std::env::temp_dir().join(format!("sqwai-bench-src-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&src);
     std::fs::create_dir_all(src.join("src/storage")).unwrap();
     std::fs::write(src.join("src/storage/btree.rs"), "pristine").unwrap();
@@ -792,10 +809,7 @@ fn score_run_reads_traps_and_diff_chains() {
     assert!(!score.traps_ok, "touched trap must fail");
     assert_eq!(
         score.diffs_per_path,
-        vec![
-            ("src/a.rs".to_string(), 2),
-            ("src/b.rs".to_string(), 1)
-        ]
+        vec![("src/a.rs".to_string(), 2), ("src/b.rs".to_string(), 1)]
     );
     // a.rs read twice (second spelled differently — normalization merges),
     // b.rs once, bash carries no path: exactly one re-read
@@ -817,7 +831,11 @@ fn split_cmd_keeps_quoted_segments_whole() {
         split_cmd("cargo test --test engine"),
         Some((
             "cargo".to_string(),
-            vec!["test".to_string(), "--test".to_string(), "engine".to_string()]
+            vec![
+                "test".to_string(),
+                "--test".to_string(),
+                "engine".to_string()
+            ]
         ))
     );
     assert_eq!(split_cmd(""), None);
@@ -863,8 +881,7 @@ fn plan_criteria_waives_honest_blocks_but_not_open_steps() {
     let done = r#"{"id":"1","title":"a","status":"done"}"#;
     let blocked = r#"{"id":"2","title":"b","status":"blocked"}"#;
     let open = r#"{"id":"2","title":"b","status":"in_progress"}"#;
-    let passed =
-        r#"{"text":"cmd: true","status":"pending","validation":{"status":"passed"}}"#;
+    let passed = r#"{"text":"cmd: true","status":"pending","validation":{"status":"passed"}}"#;
     assert!(plan_criteria(&plan_with(
         &format!("{done},{blocked}"),
         passed
@@ -969,8 +986,7 @@ async fn bench_t4_mechanism() {
     // independent check confirmed green (T4-mech/1.3 proof: suites green,
     // traps green, steps closed, one receipt missing).
     assert!(
-        report.plan_finished
-            || (score.acceptance_green && plan_open_steps(&report.root) == 0),
+        report.plan_finished || (score.acceptance_green && plan_open_steps(&report.root) == 0),
         "mechanism must finish T4: {report:?}"
     );
 }
@@ -1117,4 +1133,3 @@ async fn bench_t3_baseline() {
     );
     assert!(report.claimed_done, "baseline must claim T3: {report:?}");
 }
-

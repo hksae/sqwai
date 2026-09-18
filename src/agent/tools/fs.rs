@@ -302,9 +302,9 @@ fn check_symbol_pre_edit(root: &Path, file_path: &Path, old_string: &str) -> Opt
     let norm = rel.to_string_lossy().replace('\\', "/");
     let mut store = crate::agent::graph::SqliteGraphStore::open(root).ok()?;
     match store.resolve_ref(None, Some(&norm), Some(trimmed)).ok()? {
-        crate::agent::graph::ResolveRefResult::NotFound { .. } => {
-            Some(format!("warning: symbol '{trimmed}' not in index for this file"))
-        }
+        crate::agent::graph::ResolveRefResult::NotFound { .. } => Some(format!(
+            "warning: symbol '{trimmed}' not in index for this file"
+        )),
         _ => None,
     }
 }
@@ -349,17 +349,14 @@ pub(super) fn edit(
         checkpoint_id,
         &diff,
     );
-    let mut out_msg = format!(
-        "edited {} (+{add}/-{rem})",
-        rel_label(&ctx.root, &p)
-    );
+    let mut out_msg = format!("edited {} (+{add}/-{rem})", rel_label(&ctx.root, &p));
     if let Some(w) = warn {
         out_msg.push('\n');
         out_msg.push_str(&w);
     }
     Outcome::ok(out_msg)
-    .with_diff(diff)
-    .with_file_diff(metadata)
+        .with_diff(diff)
+        .with_file_diff(metadata)
 }
 
 pub(super) fn multi_edit(
@@ -423,8 +420,8 @@ pub(super) fn multi_edit(
         out_msg.push_str(&warnings.join("\n"));
     }
     Outcome::ok(out_msg)
-    .with_diff(diff)
-    .with_file_diff(metadata)
+        .with_diff(diff)
+        .with_file_diff(metadata)
 }
 
 pub(super) fn ls(ctx: &mut ToolCtx, raw: &str) -> Outcome {

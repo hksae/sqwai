@@ -410,20 +410,13 @@ fn run_background(ctx: &ToolCtx, command: &str) -> Outcome {
 /// Resolve one of THIS session's jobs (#197). A foreign id is reported
 /// as foreign rather than missing, so the model learns the boundary
 /// instead of retrying a kill/read loop against someone else's job.
-fn own_job<'a>(
-    jobs: &'a mut Vec<BgJob>,
-    session: &str,
-    id: u64,
-) -> Result<&'a mut BgJob, String> {
+fn own_job<'a>(jobs: &'a mut Vec<BgJob>, session: &str, id: u64) -> Result<&'a mut BgJob, String> {
     if jobs.iter().any(|j| j.id == id && j.session != session) {
         return Err(format!("job {id} belongs to another session"));
     }
-    jobs
-        .iter_mut()
-        .find(|j| j.id == id)
-        .ok_or_else(|| {
-            format!("no background job {id} — use bash_output without an id to list jobs")
-        })
+    jobs.iter_mut().find(|j| j.id == id).ok_or_else(|| {
+        format!("no background job {id} — use bash_output without an id to list jobs")
+    })
 }
 
 /// Escalation schedule for no-wait reads of a running job: two free
@@ -517,8 +510,7 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
         // the outer guard must go BEFORE the loop: it re-locks below, and
         // std Mutex is not reentrant — holding both would self-deadlock
         drop(jobs);
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(effective_wait);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(effective_wait);
         loop {
             if ctx.cancel_requested() {
                 return Outcome::cancelled();
@@ -528,7 +520,11 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
                 Ok(mut guard) => {
                     let job = match own_job(&mut guard, &ctx.session_id, id) {
                         Ok(job) => job,
-                        Err(e) => return Outcome::err(format!("{e} — it was killed or reaped while waiting")),
+                        Err(e) => {
+                            return Outcome::err(format!(
+                                "{e} — it was killed or reaped while waiting"
+                            ));
+                        }
                     };
                     job.poll();
                     !job.running()
@@ -612,7 +608,9 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
     // model never learns it was parked.
     let notice = if wait_secs == 0 && (still_running || forced > 0) {
         if forced > 0 {
-            format!("(no-wait poll #{polls} in a row: waited {forced}s for exit on your behalf — pass wait_secs yourself next time)\n")
+            format!(
+                "(no-wait poll #{polls} in a row: waited {forced}s for exit on your behalf — pass wait_secs yourself next time)\n"
+            )
         } else {
             "(do not poll in a loop: pass wait_secs (up to 60) to block until fresh output or exit)\n".to_string()
         }
@@ -637,7 +635,10 @@ pub(super) fn bash_kill(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
         Err(_) => return Outcome::err("background job registry is unavailable"),
     };
     let pos = match own_job(&mut jobs, &ctx.session_id, id) {
-        Ok(_) => jobs.iter().position(|j| j.id == id).expect("resolved above"),
+        Ok(_) => jobs
+            .iter()
+            .position(|j| j.id == id)
+            .expect("resolved above"),
         Err(e) => return Outcome::err(e),
     };
     let mut job = jobs.remove(pos);
@@ -1043,18 +1044,26 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1500));
         let first = bash_output(&c, &serde_json::json!({"id": id}));
         assert!(first.ok, "{}", first.output);
-        assert!(first.output.contains("--- output tail ---"), "{}", first.output);
+        assert!(
+            first.output.contains("--- output tail ---"),
+            "{}",
+            first.output
+        );
 
         std::thread::sleep(std::time::Duration::from_millis(2000));
         let second = bash_output(&c, &serde_json::json!({"id": id}));
         assert!(second.ok, "{}", second.output);
         assert!(
-            second.output.contains("--- new output since the last read ---"),
+            second
+                .output
+                .contains("--- new output since the last read ---"),
             "{}",
             second.output
         );
         assert!(
-            !second.output.contains("<no new output since the last read>"),
+            !second
+                .output
+                .contains("<no new output since the last read>"),
             "ping must have written in 2s: {}",
             second.output
         );
@@ -1067,7 +1076,11 @@ mod tests {
         // from_start re-reads the tail instead of the delta
         let again = bash_output(&c, &serde_json::json!({"id": id, "from_start": true}));
         assert!(again.ok, "{}", again.output);
-        assert!(again.output.contains("--- output tail ---"), "{}", again.output);
+        assert!(
+            again.output.contains("--- output tail ---"),
+            "{}",
+            again.output
+        );
 
         let killed = bash_kill(&c, &serde_json::json!({"id": id}));
         assert!(killed.ok, "{}", killed.output);

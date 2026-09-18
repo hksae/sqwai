@@ -74,8 +74,16 @@ impl FormField {
         let mut ta = Box::new(TextArea::new(vec![value]));
         ta.set_style(Theme::base());
         ta.set_cursor_line_style(Style::new());
-        ta.set_cursor_style(Style::new().bg(ratatui::style::Color::White).fg(ratatui::style::Color::Black));
-        ta.set_selection_style(Style::new().bg(ratatui::style::Color::Cyan).fg(ratatui::style::Color::Black));
+        ta.set_cursor_style(
+            Style::new()
+                .bg(ratatui::style::Color::White)
+                .fg(ratatui::style::Color::Black),
+        );
+        ta.set_selection_style(
+            Style::new()
+                .bg(ratatui::style::Color::Cyan)
+                .fg(ratatui::style::Color::Black),
+        );
         Self::Text {
             label: label.into(),
             ta,

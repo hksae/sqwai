@@ -490,8 +490,9 @@ async fn run_subagent_batch(
     for (index, call) in calls.iter().enumerate() {
         let pre_cancelled = cancel.swap(false, std::sync::atomic::Ordering::Relaxed);
         if let Some(writer) = journal.as_mut() {
-            let active =
-                plan::open_active_for_session(root, Some(session_id)).ok().flatten();
+            let active = plan::open_active_for_session(root, Some(session_id))
+                .ok()
+                .flatten();
             let plan_id = active.as_ref().map(|p| p.id.clone());
             let step = current_step.clone().or_else(|| {
                 active.as_ref().and_then(|p| {
@@ -526,53 +527,54 @@ async fn run_subagent_batch(
         dispatch.push((index, call.clone(), std::time::Instant::now()));
     }
     // fan out; results collected out of order, processed back in order
-    let mut done: Vec<(usize, ToolCallReq, std::time::Instant, tools::Outcome)> = stream::iter(dispatch.into_iter())
-        .map(|(index, call, started)| {
-            let session_id = session_id.to_string();
-            let provider = provider.clone();
-            let model_id = model_id.to_string();
-            let root = root.to_path_buf();
-            let blocked_patterns = blocked_patterns.to_vec();
-            let system = system.to_vec();
-            let mcp = mcp.clone();
-            let lsp = lsp.clone();
-            let diary = diary.clone();
-            let memory = memory.clone();
-            let compaction = compaction.clone();
-            let fallback_chain = fallback_chain.clone();
-            async move {
-                let outcome = run_subagent(
-                    &call,
-                    &session_id,
-                    &tx,
-                    &provider,
-                    &model_id,
-                    &root,
-                    &blocked_patterns,
-                    plan_mode,
-                    context_limit,
-                    effort,
-                    effort_support,
-                    max_tokens,
-                    system,
-                    mcp,
-                    lsp,
-                    read_only,
-                    shadow_store,
-                    diary,
-                    memory,
-                    compaction,
-                    plan_limits,
-                    fallback_chain,
-                    timeout,
-                )
-                .await;
-                (index, call, started, outcome)
-            }
-        })
-        .buffer_unordered(MAX_PARALLEL_SUBAGENTS)
-        .collect()
-        .await;
+    let mut done: Vec<(usize, ToolCallReq, std::time::Instant, tools::Outcome)> =
+        stream::iter(dispatch.into_iter())
+            .map(|(index, call, started)| {
+                let session_id = session_id.to_string();
+                let provider = provider.clone();
+                let model_id = model_id.to_string();
+                let root = root.to_path_buf();
+                let blocked_patterns = blocked_patterns.to_vec();
+                let system = system.to_vec();
+                let mcp = mcp.clone();
+                let lsp = lsp.clone();
+                let diary = diary.clone();
+                let memory = memory.clone();
+                let compaction = compaction.clone();
+                let fallback_chain = fallback_chain.clone();
+                async move {
+                    let outcome = run_subagent(
+                        &call,
+                        &session_id,
+                        &tx,
+                        &provider,
+                        &model_id,
+                        &root,
+                        &blocked_patterns,
+                        plan_mode,
+                        context_limit,
+                        effort,
+                        effort_support,
+                        max_tokens,
+                        system,
+                        mcp,
+                        lsp,
+                        read_only,
+                        shadow_store,
+                        diary,
+                        memory,
+                        compaction,
+                        plan_limits,
+                        fallback_chain,
+                        timeout,
+                    )
+                    .await;
+                    (index, call, started, outcome)
+                }
+            })
+            .buffer_unordered(MAX_PARALLEL_SUBAGENTS)
+            .collect()
+            .await;
     done.sort_by_key(|(index, _, _, _)| *index);
     for (_index, call, tool_started, outcome) in done {
         let _ = tx
@@ -848,10 +850,7 @@ async fn run_subagent(
                         timeout.as_secs()
                     ))
                 } else {
-                    tools::Outcome::err(format!(
-                        "subagent timed out after {}s",
-                        timeout.as_secs()
-                    ))
+                    tools::Outcome::err(format!("subagent timed out after {}s", timeout.as_secs()))
                 };
                 let _ = parent_tx
                     .send(AgentEvent::SubagentDone {
@@ -1047,7 +1046,11 @@ pub fn is_heuristic_trivial(messages: &[Message]) -> bool {
     if text.contains("- [ ]") || text.contains("- [x]") {
         return false;
     }
-    let lines: Vec<&str> = text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&str> = text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
     if lines.len() > 3 || text.len() > 250 {
         return false;
     }
@@ -1078,12 +1081,29 @@ pub fn is_heuristic_trivial(messages: &[Message]) -> bool {
     // Check count of referenced file paths (words ending with known code/config extensions)
     let mut file_count = 0;
     for token in lower.split_whitespace() {
-        let clean = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '_' && c != '/' && c != '\\');
+        let clean = token.trim_matches(|c: char| {
+            !c.is_alphanumeric() && c != '.' && c != '_' && c != '/' && c != '\\'
+        });
         if clean.contains('.') {
             if let Some(ext) = clean.rsplit('.').next() {
                 if matches!(
                     ext,
-                    "rs" | "py" | "ts" | "js" | "toml" | "md" | "json" | "yaml" | "yml" | "html" | "css" | "go" | "c" | "cpp" | "h" | "sh" | "txt"
+                    "rs" | "py"
+                        | "ts"
+                        | "js"
+                        | "toml"
+                        | "md"
+                        | "json"
+                        | "yaml"
+                        | "yml"
+                        | "html"
+                        | "css"
+                        | "go"
+                        | "c"
+                        | "cpp"
+                        | "h"
+                        | "sh"
+                        | "txt"
                 ) {
                     file_count += 1;
                 }
@@ -1233,26 +1253,26 @@ async fn run_agent(
     if compact_only {
         if !crate::bench::baseline() {
             let _ = crate::agent::diary::write_entry(
-            &root,
-            crate::agent::diary::today(),
-            &session_id,
-            "compaction",
-            Some(&provider),
-            &model_id,
-            plan::open_active_for_session(&root, Some(&session_id))
-                .ok()
-                .flatten()
-                .map(|plan| plan::render(&plan))
-                .as_deref(),
-            None,
-            messages
-                .iter()
-                .rev()
-                .find(|message| message.role == Role::User)
-                .map(|message| message.content.as_str()),
-            Some(diary.token_budget),
-            diary.effort,
-            Some(Duration::from_secs(diary.timeout_secs)),
+                &root,
+                crate::agent::diary::today(),
+                &session_id,
+                "compaction",
+                Some(&provider),
+                &model_id,
+                plan::open_active_for_session(&root, Some(&session_id))
+                    .ok()
+                    .flatten()
+                    .map(|plan| plan::render(&plan))
+                    .as_deref(),
+                None,
+                messages
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == Role::User)
+                    .map(|message| message.content.as_str()),
+                Some(diary.token_budget),
+                diary.effort,
+                Some(Duration::from_secs(diary.timeout_secs)),
             )
             .await;
         }
@@ -1467,10 +1487,7 @@ async fn run_agent(
         // what compaction can actually remove — otherwise a big fixed
         // prefix fires futile compactions every turn.
         if std::env::var("SQWAI_BENCH_DEBUG").is_ok() {
-            eprintln!(
-                "[compact] calling compact_history, msgs={}",
-                messages.len()
-            );
+            eprintln!("[compact] calling compact_history, msgs={}", messages.len());
         }
         let msgs_before = messages.len();
         let plan_hint = plan_hint_for_summary(&root, &session_id);
@@ -1769,9 +1786,8 @@ async fn run_agent(
             // final answer — claim lint (Y, §12.9) checks it here, marking
             // contradictions without ever blocking the turn
             let text = lint_answer(&turn.text, &root, &session_id, &mut journal);
-            messages.push(
-                Message::new(Role::Assistant, text).with_provider_state(turn.provider_state),
-            );
+            messages
+                .push(Message::new(Role::Assistant, text).with_provider_state(turn.provider_state));
             break;
         }
 
@@ -1828,74 +1844,72 @@ async fn run_agent(
             .await;
         } else {
             for (call_index, call) in turn.calls.iter().enumerate() {
-            // A cancellation from the previous call must not leak into this
-            // one: the flag is per-request, reset right before dispatch —
-            // but the reset must not swallow an Esc that landed between
-            // calls (#192): swap reports whether it was set, and if so this
-            // call is recorded as cancelled without running. Downstream
-            // (ToolNotice, journal, the interrupted path) treats it exactly
-            // like a mid-tool cancel.
-            let pre_cancelled = ctx
-                .cancel
-                .swap(false, std::sync::atomic::Ordering::Relaxed);
-            let journal_mark = ctx.journal.len();
-            let tool_started = Instant::now();
-            if let Some(writer) = journal.as_mut() {
-                let active = plan::open_active_for_session(&root, Some(&session_id))
-                    .ok()
-                    .flatten();
-                let plan_id = active.as_ref().map(|p| p.id.clone());
-                // Explicit session step first (§2.2.3); the plan scan is only
-                // a fallback for records predating current-step tracking.
-                let step = if call.name == "plan" {
-                    None
-                } else {
-                    ctx.current_step.clone().or_else(|| {
-                        active.as_ref().and_then(|p| {
-                            p.steps
-                                .iter()
-                                .find(|s| s.status == plan::StepStatus::InProgress)
-                                .map(|s| s.id.clone())
+                // A cancellation from the previous call must not leak into this
+                // one: the flag is per-request, reset right before dispatch —
+                // but the reset must not swallow an Esc that landed between
+                // calls (#192): swap reports whether it was set, and if so this
+                // call is recorded as cancelled without running. Downstream
+                // (ToolNotice, journal, the interrupted path) treats it exactly
+                // like a mid-tool cancel.
+                let pre_cancelled = ctx.cancel.swap(false, std::sync::atomic::Ordering::Relaxed);
+                let journal_mark = ctx.journal.len();
+                let tool_started = Instant::now();
+                if let Some(writer) = journal.as_mut() {
+                    let active = plan::open_active_for_session(&root, Some(&session_id))
+                        .ok()
+                        .flatten();
+                    let plan_id = active.as_ref().map(|p| p.id.clone());
+                    // Explicit session step first (§2.2.3); the plan scan is only
+                    // a fallback for records predating current-step tracking.
+                    let step = if call.name == "plan" {
+                        None
+                    } else {
+                        ctx.current_step.clone().or_else(|| {
+                            active.as_ref().and_then(|p| {
+                                p.steps
+                                    .iter()
+                                    .find(|s| s.status == plan::StepStatus::InProgress)
+                                    .map(|s| s.id.clone())
+                            })
                         })
+                    };
+                    writer.set_attribution(step, plan_id, "main");
+                    let _ = writer.append(
+                        "tool_call",
+                        serde_json::json!({
+                            "tool": call.name,
+                            "call_id": call.id,
+                            "args_digest": tools::call_summary(&call.name, &call.args),
+                            "path": tools::call_path(&call.name, &call.args),
+                        }),
+                    );
+                }
+                // live row first: the TUI shows the tool name and its arguments
+                // with a spinner while it runs (design §10)
+                let _ = tx
+                    .send(AgentEvent::ToolStart {
+                        name: call.name.clone(),
+                        summary: tools::call_summary(&call.name, &call.args),
+                        call_id: call.id.clone(),
                     })
-                };
-                writer.set_attribution(step, plan_id, "main");
-                let _ = writer.append(
-                    "tool_call",
-                    serde_json::json!({
-                        "tool": call.name,
-                        "call_id": call.id,
-                        "args_digest": tools::call_summary(&call.name, &call.args),
-                        "path": tools::call_path(&call.name, &call.args),
-                    }),
-                );
-            }
-            // live row first: the TUI shows the tool name and its arguments
-            // with a spinner while it runs (design §10)
-            let _ = tx
-                .send(AgentEvent::ToolStart {
-                    name: call.name.clone(),
-                    summary: tools::call_summary(&call.name, &call.args),
-                    call_id: call.id.clone(),
-                })
-                .await;
+                    .await;
 
-            let mut outcome = if pre_cancelled {
-                tools::Outcome::cancelled()
-            } else if read_only && tools::is_mutating_call(&call.name, &call.args) {
-                tools::Outcome::err(
-                    "project is read-only because another sqwai instance owns the lock; use --force to enable writes",
-                )
-            } else if plan_mode
-                && tools::is_mutating_call(&call.name, &call.args)
-                && call.name != "plan"
-            {
-                tools::Outcome::err(format!(
-                    "PLAN mode is read-only: '{}' is not allowed. Explore first, then ask the \
+                let mut outcome = if pre_cancelled {
+                    tools::Outcome::cancelled()
+                } else if read_only && tools::is_mutating_call(&call.name, &call.args) {
+                    tools::Outcome::err(
+                        "project is read-only because another sqwai instance owns the lock; use --force to enable writes",
+                    )
+                } else if plan_mode
+                    && tools::is_mutating_call(&call.name, &call.args)
+                    && call.name != "plan"
+                {
+                    tools::Outcome::err(format!(
+                        "PLAN mode is read-only: '{}' is not allowed. Explore first, then ask the \
                      user to switch to ACT (Tab) before changing anything.",
-                    call.name
-                ))
-            } else if !plan_mode
+                        call.name
+                    ))
+                } else if !plan_mode
                 && subagent_depth == 0
                 && !crate::bench::baseline()
                 && plan_limits.plan_first == crate::config::PlanFirstMode::Soft
@@ -1908,8 +1922,8 @@ async fn run_agent(
                 // (`plan start` records membership).
                 && crate::plan::open_active(&root).ok().flatten().is_none()
                 && !is_heuristic_trivial(&messages)
-            {
-                tools::Outcome::err(
+                {
+                    tools::Outcome::err(
                     serde_json::json!({
                         "ok": false,
                         "code": "plan_required",
@@ -1918,314 +1932,321 @@ async fn run_agent(
                     })
                     .to_string(),
                 )
-            } else {
-                match call.name.as_str() {
-                    "ask_user" if subagent_depth > 0 => tools::Outcome::err(
-                        "subagents cannot interact with the user; make decisions autonomously",
-                    ),
-                    "ask_user" => ask_user(call, &tx, &mut ctl, &mut next_id).await,
-                    "propose_plan" if subagent_depth > 0 => tools::Outcome::err(
-                        "subagents cannot propose plans; plans belong to the primary session",
-                    ),
-                    "propose_plan" => {
-                        propose_plan(
-                            call,
-                            &root,
-                            &plan_limits,
-                            context_limit,
-                            read_only,
-                            &mut journal,
-                            &tx,
-                            &mut ctl,
-                            &mut next_id,
-                            &session_id,
-                        )
-                        .await
-                    }
-                    "bash" => {
-                        bash_call(
-                            call,
-                            &mut ctx,
-                            &tx,
-                            &mut ctl,
-                            &mut always_allow,
-                            &blocked_patterns,
-                            &mut next_id,
-                            subagent_depth,
-                        )
-                        .await
-                    }
-                    "webfetch" => tools::web::fetch(&call.args).await,
-                    "websearch" => tools::web::search(&call.args).await,
-                    "subagent" if subagent_depth == 0 => {
-                        run_subagent(
-                            call,
-                            &ctx.session_id,
-                            &tx,
-                            &provider,
-                            &model_id,
-                            &root,
-                            &blocked_patterns,
-                            plan_mode,
-                            context_limit,
-                            effort,
-                            effort_support,
-                            max_tokens,
-                            system.clone(),
-                            mcp.clone(),
-                            lsp.clone(),
-                            read_only,
-                            shadow_store,
-                            diary.clone(),
-                            memory.clone(),
-                            compaction.clone(),
-                            plan_limits,
-                            fallback_chain.clone(),
-                            std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
-                        )
-                        .await
-                    }
-                    "subagent" => tools::Outcome::err("nested subagents are not allowed"),
-                    "memory_propose" if subagent_depth > 0 => tools::Outcome::err(
-                        "subagents cannot propose durable memories; memories belong to the primary session",
-                    ),
-                    "memory_propose" => {
-                        memory_proposals_this_turn = memory_proposals_this_turn.saturating_add(1);
-                        if memory_proposals_this_turn > memory.max_proposals_per_turn {
-                            tools::Outcome::err("memory proposal limit reached for this turn")
-                        } else {
-                            let proposal = tools::execute(&mut ctx, "memory_propose", &call.args);
-                            if !proposal.ok {
-                                proposal
+                } else {
+                    match call.name.as_str() {
+                        "ask_user" if subagent_depth > 0 => tools::Outcome::err(
+                            "subagents cannot interact with the user; make decisions autonomously",
+                        ),
+                        "ask_user" => ask_user(call, &tx, &mut ctl, &mut next_id).await,
+                        "propose_plan" if subagent_depth > 0 => tools::Outcome::err(
+                            "subagents cannot propose plans; plans belong to the primary session",
+                        ),
+                        "propose_plan" => {
+                            propose_plan(
+                                call,
+                                &root,
+                                &plan_limits,
+                                context_limit,
+                                read_only,
+                                &mut journal,
+                                &tx,
+                                &mut ctl,
+                                &mut next_id,
+                                &session_id,
+                            )
+                            .await
+                        }
+                        "bash" => {
+                            bash_call(
+                                call,
+                                &mut ctx,
+                                &tx,
+                                &mut ctl,
+                                &mut always_allow,
+                                &blocked_patterns,
+                                &mut next_id,
+                                subagent_depth,
+                            )
+                            .await
+                        }
+                        "webfetch" => tools::web::fetch(&call.args).await,
+                        "websearch" => tools::web::search(&call.args).await,
+                        "subagent" if subagent_depth == 0 => {
+                            run_subagent(
+                                call,
+                                &ctx.session_id,
+                                &tx,
+                                &provider,
+                                &model_id,
+                                &root,
+                                &blocked_patterns,
+                                plan_mode,
+                                context_limit,
+                                effort,
+                                effort_support,
+                                max_tokens,
+                                system.clone(),
+                                mcp.clone(),
+                                lsp.clone(),
+                                read_only,
+                                shadow_store,
+                                diary.clone(),
+                                memory.clone(),
+                                compaction.clone(),
+                                plan_limits,
+                                fallback_chain.clone(),
+                                std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
+                            )
+                            .await
+                        }
+                        "subagent" => tools::Outcome::err("nested subagents are not allowed"),
+                        "memory_propose" if subagent_depth > 0 => tools::Outcome::err(
+                            "subagents cannot propose durable memories; memories belong to the primary session",
+                        ),
+                        "memory_propose" => {
+                            memory_proposals_this_turn =
+                                memory_proposals_this_turn.saturating_add(1);
+                            if memory_proposals_this_turn > memory.max_proposals_per_turn {
+                                tools::Outcome::err("memory proposal limit reached for this turn")
                             } else {
-                                let prompt = format!(
-                                    "Approve this durable memory proposal?\n{}\nChoose: accept, edit, or reject.",
-                                    proposal.output
-                                );
-                                let question = ToolCallReq::new(
-                                    call.id.clone(),
-                                    "ask_user",
-                                    serde_json::json!({
-                                        "question": prompt,
-                                        "options": [
-                                            {"label": "accept", "description": "write the proposal"},
-                                            {"label": "edit", "description": "provide replacement text"},
-                                            {"label": "reject", "description": "do not write it"}
-                                        ],
-                                        "multiple": false,
-                                        "allow_free": true
-                                    }),
-                                );
-                                let answer = ask_user(&question, &tx, &mut ctl, &mut next_id).await;
-                                let raw_answer = answer.output.trim();
-                                let answer_lower = raw_answer.to_ascii_lowercase();
-                                if is_accepted_memory_answer(answer.ok, raw_answer) {
-                                    let text = if answer_lower == "accept" {
-                                        call.args["text"].as_str().unwrap_or_default()
-                                    } else {
-                                        raw_answer
-                                    };
-                                    let scope = crate::agent::memory::Scope::parse(
-                                        call.args["scope"].as_str().unwrap_or("project"),
-                                    );
-                                    match scope.and_then(|scope| {
-                                        crate::agent::memory::apply_proposal(
-                                            &root,
-                                            scope,
-                                            call.args["section"].as_str().unwrap_or("Project"),
-                                            text,
-                                            call.args["replaces"].as_str(),
-                                            &session_id,
-                                            memory.max_tokens,
-                                        )
-                                        .map(|path| format!("memory written: {}", path.display()))
-                                        .map_err(|error| error.to_string())
-                                    }) {
-                                        Ok(output) => tools::Outcome::ok(output),
-                                        Err(error) => tools::Outcome::err(error),
-                                    }
-                                } else if answer.ok && answer_lower == "reject" {
-                                    tools::Outcome::ok("memory proposal rejected")
-                                } else if answer.ok && answer_lower == "edit" {
-                                    tools::Outcome::err(
-                                        "memory proposal edit requires a follow-up proposal",
-                                    )
+                                let proposal =
+                                    tools::execute(&mut ctx, "memory_propose", &call.args);
+                                if !proposal.ok {
+                                    proposal
                                 } else {
-                                    tools::Outcome::err("memory proposal was not accepted")
+                                    let prompt = format!(
+                                        "Approve this durable memory proposal?\n{}\nChoose: accept, edit, or reject.",
+                                        proposal.output
+                                    );
+                                    let question = ToolCallReq::new(
+                                        call.id.clone(),
+                                        "ask_user",
+                                        serde_json::json!({
+                                            "question": prompt,
+                                            "options": [
+                                                {"label": "accept", "description": "write the proposal"},
+                                                {"label": "edit", "description": "provide replacement text"},
+                                                {"label": "reject", "description": "do not write it"}
+                                            ],
+                                            "multiple": false,
+                                            "allow_free": true
+                                        }),
+                                    );
+                                    let answer =
+                                        ask_user(&question, &tx, &mut ctl, &mut next_id).await;
+                                    let raw_answer = answer.output.trim();
+                                    let answer_lower = raw_answer.to_ascii_lowercase();
+                                    if is_accepted_memory_answer(answer.ok, raw_answer) {
+                                        let text = if answer_lower == "accept" {
+                                            call.args["text"].as_str().unwrap_or_default()
+                                        } else {
+                                            raw_answer
+                                        };
+                                        let scope = crate::agent::memory::Scope::parse(
+                                            call.args["scope"].as_str().unwrap_or("project"),
+                                        );
+                                        match scope.and_then(|scope| {
+                                            crate::agent::memory::apply_proposal(
+                                                &root,
+                                                scope,
+                                                call.args["section"].as_str().unwrap_or("Project"),
+                                                text,
+                                                call.args["replaces"].as_str(),
+                                                &session_id,
+                                                memory.max_tokens,
+                                            )
+                                            .map(|path| {
+                                                format!("memory written: {}", path.display())
+                                            })
+                                            .map_err(|error| error.to_string())
+                                        }) {
+                                            Ok(output) => tools::Outcome::ok(output),
+                                            Err(error) => tools::Outcome::err(error),
+                                        }
+                                    } else if answer.ok && answer_lower == "reject" {
+                                        tools::Outcome::ok("memory proposal rejected")
+                                    } else if answer.ok && answer_lower == "edit" {
+                                        tools::Outcome::err(
+                                            "memory proposal edit requires a follow-up proposal",
+                                        )
+                                    } else {
+                                        tools::Outcome::err("memory proposal was not accepted")
+                                    }
                                 }
                             }
                         }
-                    }
-                    "plan" => {
-                        let mut args = call.args.clone();
-                        args["context_limit"] = serde_json::json!(context_limit);
-                        let outcome = run_tool_blocking(&mut ctx, "plan", &args).await;
-                        if outcome.ok
-                            && let Ok(Some(saved)) =
-                                plan::open_active_for_session(&root, Some(&session_id))
-                        {
-                            plan_todos = saved
-                                .steps
-                                .iter()
-                                .map(|step| format!("[{}] {}", step.status.as_str(), step.title))
-                                .collect();
-                            let _ = tx.send(AgentEvent::Todos(plan_todos.clone())).await;
-                        }
-                        outcome
-                    }
-                    other
-                        if mcp_registry
-                            .as_ref()
-                            .is_some_and(|registry| registry.contains(other)) =>
-                    {
-                        match mcp_registry
-                            .as_ref()
-                            .unwrap()
-                            .call(other, call.args.clone())
-                            .await
-                        {
-                            Ok((output, is_error)) => tools::Outcome {
-                                output,
-                                ok: !is_error,
-                                exit_code: None,
-                                diff: None,
-                                file_diff: None,
-                                file_diffs: Vec::new(),
-                                cancelled: false,
-                            },
-                            Err(e) => tools::Outcome::err(format!("MCP call failed: {e:#}")),
-                        }
-                    }
-                    other => run_tool_blocking(&mut ctx, other, &call.args).await,
-                }
-            };
-
-            // §2.5 / §3.7: `bash` is the one tool whose targets are not known
-            // in advance, so a cancelled run can have mutated files no
-            // pre-checkpoint covered. `snapshot_session` already implements
-            // "only if the tree changed since the previous snapshot" — that
-            // is exactly the condition §3.7 asks for, so it is read from
-            // there rather than reimplemented.
-            if outcome.cancelled
-                && call.name == "bash"
-                && let Ok(Some(sha)) = checkpoints::snapshot_session(
-                    &ctx.root,
-                    ctx.shadow_store,
-                    ctx.checkpoint_chain(),
-                    "post_bash cancelled",
-                )
-            {
-                ctx.journal.push((sha, "bash (cancelled)".to_string()));
-            }
-
-            if outcome.ok
-                && matches!(call.name.as_str(), "write" | "edit" | "multi_edit")
-                && let Some(manager) = lsp_manager.as_mut()
-                && let Some(path) = call.args.get("file_path").and_then(|v| v.as_str())
-            {
-                let path = root.join(path);
-                if let Ok(text) = tokio::fs::read_to_string(&path).await {
-                    let _ = manager.did_change(&path, &text).await;
-                    let _ = manager.did_save(&path).await;
-                    tokio::task::yield_now().await;
-                    let diagnostics = manager.collect_diagnostics().await.unwrap_or_default();
-                    let diagnostic_count = diagnostics
-                        .iter()
-                        .map(|item| item.diagnostics.len())
-                        .sum::<usize>();
-                    // LSP severity 1 is an error, 2 a warning; anything else
-                    // is information or a hint and is not an outcome.
-                    let severity = |item: &crate::lsp::PublishDiagnosticsParams, want: u8| {
-                        item.diagnostics
-                            .iter()
-                            .filter(|d| d.severity == Some(want))
-                            .count()
-                    };
-                    let errors: usize = diagnostics.iter().map(|i| severity(i, 1)).sum();
-                    let warnings: usize = diagnostics.iter().map(|i| severity(i, 2)).sum();
-                    let _ = tx
-                        .send(AgentEvent::Diagnostics {
-                            count: diagnostic_count,
-                        })
-                        .await;
-                    // §2.2.2 defines this record and nothing was writing it,
-                    // which left §2.1.4's "diagnostics with zero errors" route
-                    // to closing a verify step unreachable: the branch existed
-                    // on the read side only.
-                    if let Some(writer) = journal.as_mut() {
-                        let _ = writer.append_evidence(
-                            "diagnostics",
-                            serde_json::json!({
-                                "path": path.strip_prefix(&root).unwrap_or(&path)
-                                    .to_string_lossy()
-                                    .replace('\\', "/"),
-                                "errors": errors,
-                                "warnings": warnings,
-                                "server": diagnostics
+                        "plan" => {
+                            let mut args = call.args.clone();
+                            args["context_limit"] = serde_json::json!(context_limit);
+                            let outcome = run_tool_blocking(&mut ctx, "plan", &args).await;
+                            if outcome.ok
+                                && let Ok(Some(saved)) =
+                                    plan::open_active_for_session(&root, Some(&session_id))
+                            {
+                                plan_todos = saved
+                                    .steps
                                     .iter()
-                                    .flat_map(|item| item.diagnostics.iter())
-                                    .find_map(|d| d.source.clone())
-                                    .unwrap_or_else(|| "lsp".to_string()),
-                            }),
-                        );
-                    }
-                    if !diagnostics.is_empty() {
-                        // any diagnostics are worth showing to the model, but
-                        // only real errors (severity 1) fail the tool result:
-                        // the file is already written, and a hint or
-                        // information entry must not make the model believe
-                        // the write failed and retry it.
-                        outcome.output.push_str("\nLSP diagnostics:\n");
-                        for item in diagnostics {
-                            for diagnostic in item.diagnostics {
-                                outcome.output.push_str(&format!(
-                                    "- {}:{}: {}\n",
-                                    item.uri,
-                                    diagnostic.range.start.line + 1,
-                                    diagnostic.message
-                                ));
+                                    .map(|step| {
+                                        format!("[{}] {}", step.status.as_str(), step.title)
+                                    })
+                                    .collect();
+                                let _ = tx.send(AgentEvent::Todos(plan_todos.clone())).await;
+                            }
+                            outcome
+                        }
+                        other
+                            if mcp_registry
+                                .as_ref()
+                                .is_some_and(|registry| registry.contains(other)) =>
+                        {
+                            match mcp_registry
+                                .as_ref()
+                                .unwrap()
+                                .call(other, call.args.clone())
+                                .await
+                            {
+                                Ok((output, is_error)) => tools::Outcome {
+                                    output,
+                                    ok: !is_error,
+                                    exit_code: None,
+                                    diff: None,
+                                    file_diff: None,
+                                    file_diffs: Vec::new(),
+                                    cancelled: false,
+                                },
+                                Err(e) => tools::Outcome::err(format!("MCP call failed: {e:#}")),
                             }
                         }
-                        outcome.ok = outcome.ok && errors == 0;
+                        other => run_tool_blocking(&mut ctx, other, &call.args).await,
                     }
-                }
-            }
+                };
 
-            let _ = tx
-                .send(AgentEvent::ToolNotice {
-                    name: call.name.clone(),
-                    summary: outcome.output.clone(),
-                    ok: outcome.ok,
-                    diff: outcome.diff.clone(),
-                    call_id: call.id.clone(),
-                })
-                .await;
-            // report a checkpoint taken by the mutation, if any
-            if ctx.journal.len() > journal_mark {
-                if let Some(writer) = journal.as_mut() {
-                    for (sha, label) in ctx.journal[journal_mark..].iter() {
-                        let _ = writer.append(
-                            "checkpoint",
-                            serde_json::json!({
-                                "layer": "legacy",
-                                "id": sha,
-                                "reason": "post_mutation",
-                                "label": label,
-                            }),
-                        );
+                // §2.5 / §3.7: `bash` is the one tool whose targets are not known
+                // in advance, so a cancelled run can have mutated files no
+                // pre-checkpoint covered. `snapshot_session` already implements
+                // "only if the tree changed since the previous snapshot" — that
+                // is exactly the condition §3.7 asks for, so it is read from
+                // there rather than reimplemented.
+                if outcome.cancelled
+                    && call.name == "bash"
+                    && let Ok(Some(sha)) = checkpoints::snapshot_session(
+                        &ctx.root,
+                        ctx.shadow_store,
+                        ctx.checkpoint_chain(),
+                        "post_bash cancelled",
+                    )
+                {
+                    ctx.journal.push((sha, "bash (cancelled)".to_string()));
+                }
+
+                if outcome.ok
+                    && matches!(call.name.as_str(), "write" | "edit" | "multi_edit")
+                    && let Some(manager) = lsp_manager.as_mut()
+                    && let Some(path) = call.args.get("file_path").and_then(|v| v.as_str())
+                {
+                    let path = root.join(path);
+                    if let Ok(text) = tokio::fs::read_to_string(&path).await {
+                        let _ = manager.did_change(&path, &text).await;
+                        let _ = manager.did_save(&path).await;
+                        tokio::task::yield_now().await;
+                        let diagnostics = manager.collect_diagnostics().await.unwrap_or_default();
+                        let diagnostic_count = diagnostics
+                            .iter()
+                            .map(|item| item.diagnostics.len())
+                            .sum::<usize>();
+                        // LSP severity 1 is an error, 2 a warning; anything else
+                        // is information or a hint and is not an outcome.
+                        let severity = |item: &crate::lsp::PublishDiagnosticsParams, want: u8| {
+                            item.diagnostics
+                                .iter()
+                                .filter(|d| d.severity == Some(want))
+                                .count()
+                        };
+                        let errors: usize = diagnostics.iter().map(|i| severity(i, 1)).sum();
+                        let warnings: usize = diagnostics.iter().map(|i| severity(i, 2)).sum();
+                        let _ = tx
+                            .send(AgentEvent::Diagnostics {
+                                count: diagnostic_count,
+                            })
+                            .await;
+                        // §2.2.2 defines this record and nothing was writing it,
+                        // which left §2.1.4's "diagnostics with zero errors" route
+                        // to closing a verify step unreachable: the branch existed
+                        // on the read side only.
+                        if let Some(writer) = journal.as_mut() {
+                            let _ = writer.append_evidence(
+                                "diagnostics",
+                                serde_json::json!({
+                                    "path": path.strip_prefix(&root).unwrap_or(&path)
+                                        .to_string_lossy()
+                                        .replace('\\', "/"),
+                                    "errors": errors,
+                                    "warnings": warnings,
+                                    "server": diagnostics
+                                        .iter()
+                                        .flat_map(|item| item.diagnostics.iter())
+                                        .find_map(|d| d.source.clone())
+                                        .unwrap_or_else(|| "lsp".to_string()),
+                                }),
+                            );
+                        }
+                        if !diagnostics.is_empty() {
+                            // any diagnostics are worth showing to the model, but
+                            // only real errors (severity 1) fail the tool result:
+                            // the file is already written, and a hint or
+                            // information entry must not make the model believe
+                            // the write failed and retry it.
+                            outcome.output.push_str("\nLSP diagnostics:\n");
+                            for item in diagnostics {
+                                for diagnostic in item.diagnostics {
+                                    outcome.output.push_str(&format!(
+                                        "- {}:{}: {}\n",
+                                        item.uri,
+                                        diagnostic.range.start.line + 1,
+                                        diagnostic.message
+                                    ));
+                                }
+                            }
+                            outcome.ok = outcome.ok && errors == 0;
+                        }
                     }
                 }
-                if let Some((_, label)) = ctx.journal.last() {
-                    let _ = tx
-                        .send(AgentEvent::Checkpoint {
-                            label: label.clone(),
-                        })
-                        .await;
+
+                let _ = tx
+                    .send(AgentEvent::ToolNotice {
+                        name: call.name.clone(),
+                        summary: outcome.output.clone(),
+                        ok: outcome.ok,
+                        diff: outcome.diff.clone(),
+                        call_id: call.id.clone(),
+                    })
+                    .await;
+                // report a checkpoint taken by the mutation, if any
+                if ctx.journal.len() > journal_mark {
+                    if let Some(writer) = journal.as_mut() {
+                        for (sha, label) in ctx.journal[journal_mark..].iter() {
+                            let _ = writer.append(
+                                "checkpoint",
+                                serde_json::json!({
+                                    "layer": "legacy",
+                                    "id": sha,
+                                    "reason": "post_mutation",
+                                    "label": label,
+                                }),
+                            );
+                        }
+                    }
+                    if let Some((_, label)) = ctx.journal.last() {
+                        let _ = tx
+                            .send(AgentEvent::Checkpoint {
+                                label: label.clone(),
+                            })
+                            .await;
+                    }
                 }
-            }
-            if let Some(writer) = journal.as_mut() {
-                if call.name == "note" && outcome.ok {
-                    let _ = writer.append("note", serde_json::json!({
+                if let Some(writer) = journal.as_mut() {
+                    if call.name == "note" && outcome.ok {
+                        let _ = writer.append("note", serde_json::json!({
                         "by": "model",
                         "note": call.args.get("kind").and_then(|v| v.as_str()).unwrap_or("lesson"),
                         "text": call.args.get("note").and_then(|v| v.as_str()).unwrap_or_default(),
@@ -2234,9 +2255,9 @@ async fn run_agent(
                         // the target is open
                         "resolves": call.args.get("resolves").and_then(|v| v.as_u64()),
                     }));
-                }
-                let result_seq = if call.name == "plan" {
-                    writer
+                    }
+                    let result_seq = if call.name == "plan" {
+                        writer
                         .append(
                             "tool_result",
                             serde_json::json!({
@@ -2250,8 +2271,8 @@ async fn run_agent(
                             }),
                         )
                         .ok()
-                } else {
-                    writer
+                    } else {
+                        writer
                         .append_evidence(
                             "tool_result",
                             serde_json::json!({
@@ -2268,127 +2289,94 @@ async fn run_agent(
                             }),
                         )
                         .ok()
-                };
-                if call.name == "plan"
-                    && outcome.ok
-                    && let Some(seq) = result_seq
-                {
-                    let _ = writer.append(
+                    };
+                    if call.name == "plan"
+                        && outcome.ok
+                        && let Some(seq) = result_seq
+                    {
+                        let _ = writer.append(
                         "plan_evidence",
                         serde_json::json!({
                             "op": call.args.get("op").and_then(|v| v.as_str()).unwrap_or("unknown"),
                             "evidence": [seq],
                         }),
                     );
-                }
-                let diffs: Vec<&tools::FileDiff> = if !outcome.file_diffs.is_empty() {
-                    outcome.file_diffs.iter().collect()
-                } else {
-                    outcome.file_diff.as_ref().into_iter().collect()
-                };
-                let mut invalidated_paths = Vec::new();
-                for metadata in diffs {
-                    let _ = writer.append_evidence(
-                        "file_diff",
-                        serde_json::json!({
-                            "path": metadata.path,
-                            "added": metadata.added,
-                            "removed": metadata.removed,
-                            "hash_before": metadata.hash_before,
-                            "hash_after": metadata.hash_after,
-                            "mode": metadata.mode,
-                            "checkpoint": metadata.checkpoint,
-                            // links into the layer-1 blob store (§2.5), so a
-                            // single step can be reverted from the journal
-                            // alone; absent when nothing was stored
-                            "blob_before": metadata.blob_before,
-                            "blob_after": metadata.blob_after,
-                        }),
-                    );
-                    invalidated_paths.push(
-                        metadata
-                            .path
-                            .replace('\\', "/")
-                            .trim_start_matches("./")
-                            .to_string(),
-                    );
-                }
-                // validation invalidation (§2.1.4): a mutation on traversed
-                // paths stales passed receipts. Best-effort like the
-                // evidence appends above; only commits when something
-                // actually went stale.
-                if !invalidated_paths.is_empty() {
-                    let _ = plan::invalidate_on_diff(&root, &session_id, &invalidated_paths);
-                }
-                if call.name == "plan" {
-                    // `plan_op` journals its own intent records ahead of every
-                    // store (§2.1.4); resync this long-lived handle past them
-                    // so the next append cannot reuse a sequence number.
-                    // A failed resync is loud (#189): proceeding on a stale
-                    // counter would corrupt evidence refs.
-                    if let Err(e) = writer.resync() {
-                        crate::providers::log_http(&format!(
-                            "journal resync failed — sequence numbers may collide: {e:#}"
-                        ));
                     }
-                    let op = call
-                        .args
-                        .get("op")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    let plan_step_id = call.args.get("id").and_then(|value| value.as_str());
-                    let active = plan::open_active_for_session(&root, Some(&session_id))
-                        .ok()
-                        .flatten();
-                    let plan_id = active.as_ref().map(|p| p.id.clone());
-                    if outcome.ok
-                        && op == "start"
-                        && let Some(id) = plan_step_id
-                    {
-                        writer.set_attribution(Some(id.to_string()), plan_id, "main");
-                        // The session now holds this step (§2.2.3).
-                        ctx.current_step = Some(id.to_string());
-                        if subagent_depth == 0 {
-                            let _ = tx
-                                .send(AgentEvent::StepCurrent {
-                                    step: Some(id.to_string()),
-                                })
-                                .await;
+                    let diffs: Vec<&tools::FileDiff> = if !outcome.file_diffs.is_empty() {
+                        outcome.file_diffs.iter().collect()
+                    } else {
+                        outcome.file_diff.as_ref().into_iter().collect()
+                    };
+                    let mut invalidated_paths = Vec::new();
+                    for metadata in diffs {
+                        let _ = writer.append_evidence(
+                            "file_diff",
+                            serde_json::json!({
+                                "path": metadata.path,
+                                "added": metadata.added,
+                                "removed": metadata.removed,
+                                "hash_before": metadata.hash_before,
+                                "hash_after": metadata.hash_after,
+                                "mode": metadata.mode,
+                                "checkpoint": metadata.checkpoint,
+                                // links into the layer-1 blob store (§2.5), so a
+                                // single step can be reverted from the journal
+                                // alone; absent when nothing was stored
+                                "blob_before": metadata.blob_before,
+                                "blob_after": metadata.blob_after,
+                            }),
+                        );
+                        invalidated_paths.push(
+                            metadata
+                                .path
+                                .replace('\\', "/")
+                                .trim_start_matches("./")
+                                .to_string(),
+                        );
+                    }
+                    // validation invalidation (§2.1.4): a mutation on traversed
+                    // paths stales passed receipts. Best-effort like the
+                    // evidence appends above; only commits when something
+                    // actually went stale.
+                    if !invalidated_paths.is_empty() {
+                        let _ = plan::invalidate_on_diff(&root, &session_id, &invalidated_paths);
+                    }
+                    if call.name == "plan" {
+                        // `plan_op` journals its own intent records ahead of every
+                        // store (§2.1.4); resync this long-lived handle past them
+                        // so the next append cannot reuse a sequence number.
+                        // A failed resync is loud (#189): proceeding on a stale
+                        // counter would corrupt evidence refs.
+                        if let Err(e) = writer.resync() {
+                            crate::providers::log_http(&format!(
+                                "journal resync failed — sequence numbers may collide: {e:#}"
+                            ));
                         }
-                        let tag = format!("step_{id}_start");
-                        let sha = if let Some((s, t)) = ctx.journal.last()
-                            && t == &tag
-                        {
-                            Some(s.clone())
-                        } else {
-                            checkpoints::snapshot_boundary(
-                                &root,
-                                shadow_store,
-                                parent_session.as_deref().unwrap_or(&session_id),
-                                &tag,
-                            )
+                        let op = call
+                            .args
+                            .get("op")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let plan_step_id = call.args.get("id").and_then(|value| value.as_str());
+                        let active = plan::open_active_for_session(&root, Some(&session_id))
                             .ok()
-                            .flatten()
-                            .inspect(|s| {
-                                ctx.journal.push((s.clone(), tag.clone()));
-                            })
-                        };
-                        if let Some(sha) = sha {
-                            let _ = writer.append(
-                                "checkpoint",
-                                serde_json::json!({
-                                    "layer": "shadow",
-                                    "id": sha,
-                                    "reason": "step_start",
-                                    "step": id,
-                                }),
-                            );
-                        }
-                    } else if outcome.ok && matches!(op, "finish" | "block" | "cancel") {
-                        if op == "finish"
+                            .flatten();
+                        let plan_id = active.as_ref().map(|p| p.id.clone());
+                        if outcome.ok
+                            && op == "start"
                             && let Some(id) = plan_step_id
                         {
-                            let tag = format!("step_{id}_finish");
+                            writer.set_attribution(Some(id.to_string()), plan_id, "main");
+                            // The session now holds this step (§2.2.3).
+                            ctx.current_step = Some(id.to_string());
+                            if subagent_depth == 0 {
+                                let _ = tx
+                                    .send(AgentEvent::StepCurrent {
+                                        step: Some(id.to_string()),
+                                    })
+                                    .await;
+                            }
+                            let tag = format!("step_{id}_start");
                             let sha = if let Some((s, t)) = ctx.journal.last()
                                 && t == &tag
                             {
@@ -2412,71 +2400,104 @@ async fn run_agent(
                                     serde_json::json!({
                                         "layer": "shadow",
                                         "id": sha,
-                                        "reason": "step_finish",
+                                        "reason": "step_start",
                                         "step": id,
                                     }),
                                 );
                             }
+                        } else if outcome.ok && matches!(op, "finish" | "block" | "cancel") {
+                            if op == "finish"
+                                && let Some(id) = plan_step_id
+                            {
+                                let tag = format!("step_{id}_finish");
+                                let sha = if let Some((s, t)) = ctx.journal.last()
+                                    && t == &tag
+                                {
+                                    Some(s.clone())
+                                } else {
+                                    checkpoints::snapshot_boundary(
+                                        &root,
+                                        shadow_store,
+                                        parent_session.as_deref().unwrap_or(&session_id),
+                                        &tag,
+                                    )
+                                    .ok()
+                                    .flatten()
+                                    .inspect(|s| {
+                                        ctx.journal.push((s.clone(), tag.clone()));
+                                    })
+                                };
+                                if let Some(sha) = sha {
+                                    let _ = writer.append(
+                                        "checkpoint",
+                                        serde_json::json!({
+                                            "layer": "shadow",
+                                            "id": sha,
+                                            "reason": "step_finish",
+                                            "step": id,
+                                        }),
+                                    );
+                                }
+                            }
+                            writer.set_attribution(None, plan_id, "main");
+                            // The session is idle again (§2.2.3).
+                            ctx.current_step = None;
+                            if subagent_depth == 0 {
+                                let _ = tx.send(AgentEvent::StepCurrent { step: None }).await;
+                            }
                         }
-                        writer.set_attribution(None, plan_id, "main");
-                        // The session is idle again (§2.2.3).
-                        ctx.current_step = None;
-                        if subagent_depth == 0 {
-                            let _ = tx.send(AgentEvent::StepCurrent { step: None }).await;
+                        if outcome.ok
+                            && matches!(op, "finish" | "block" | "cancel")
+                            && !crate::bench::baseline()
+                        {
+                            let _ = crate::agent::diary::write_entry(
+                                &root,
+                                crate::agent::diary::today(),
+                                &session_id,
+                                "step_lifecycle",
+                                Some(&provider),
+                                &model_id,
+                                plan::open_active_for_session(&root, Some(&session_id))
+                                    .ok()
+                                    .flatten()
+                                    .map(|plan| plan::render(&plan))
+                                    .as_deref(),
+                                None,
+                                messages
+                                    .iter()
+                                    .rev()
+                                    .find(|message| message.role == Role::User)
+                                    .map(|message| message.content.as_str()),
+                                Some(diary.token_budget),
+                                diary.effort,
+                                Some(Duration::from_secs(diary.timeout_secs)),
+                            )
+                            .await;
                         }
                     }
-                    if outcome.ok
-                        && matches!(op, "finish" | "block" | "cancel")
-                        && !crate::bench::baseline()
-                    {
-                        let _ = crate::agent::diary::write_entry(
-                            &root,
-                            crate::agent::diary::today(),
-                            &session_id,
-                            "step_lifecycle",
-                            Some(&provider),
-                            &model_id,
-                            plan::open_active_for_session(&root, Some(&session_id))
-                                .ok()
-                                .flatten()
-                                .map(|plan| plan::render(&plan))
-                                .as_deref(),
-                            None,
-                            messages
-                                .iter()
-                                .rev()
-                                .find(|message| message.role == Role::User)
-                                .map(|message| message.content.as_str()),
-                            Some(diary.token_budget),
-                            diary.effort,
-                            Some(Duration::from_secs(diary.timeout_secs)),
-                        )
-                        .await;
+                }
+                if outcome.cancelled {
+                    interrupted = true;
+                }
+                messages.push(Message::tool_result(&call.id, outcome.output, !outcome.ok));
+                if interrupted {
+                    // §3.7: Esc means stop — the remaining calls in this batch
+                    // (if the model requested several) do not run. Each of them
+                    // still needs a tool_result: a tool_use without a matching
+                    // tool_result is a fatal protocol error for Anthropic
+                    // (400 "Each tool_use must have a corresponding tool_result")
+                    // and for OpenAI (orphan tool_call_id), which would lock the
+                    // session permanently.
+                    for rest in &turn.calls[call_index + 1..] {
+                        messages.push(Message::tool_result(
+                            &rest.id,
+                            "cancelled by user — this tool call was not run".to_string(),
+                            true,
+                        ));
                     }
+                    break;
                 }
             }
-            if outcome.cancelled {
-                interrupted = true;
-            }
-            messages.push(Message::tool_result(&call.id, outcome.output, !outcome.ok));
-            if interrupted {
-                // §3.7: Esc means stop — the remaining calls in this batch
-                // (if the model requested several) do not run. Each of them
-                // still needs a tool_result: a tool_use without a matching
-                // tool_result is a fatal protocol error for Anthropic
-                // (400 "Each tool_use must have a corresponding tool_result")
-                // and for OpenAI (orphan tool_call_id), which would lock the
-                // session permanently.
-                for rest in &turn.calls[call_index + 1..] {
-                    messages.push(Message::tool_result(
-                        &rest.id,
-                        "cancelled by user — this tool call was not run".to_string(),
-                        true,
-                    ));
-                }
-                break;
-            }
-        }
         }
         if interrupted {
             // and no further model turn is requested this round; the turn
@@ -2583,8 +2604,9 @@ fn constraint_covers(constraints: &[String], lower_directive: &str) -> bool {
 /// the summarizer can only exclude what it can see. Empty when no plan is
 /// active — then every user ask counts as uncovered.
 fn plan_hint_for_summary(root: &std::path::Path, session_id: &str) -> String {
-    let Some(plan) =
-        crate::plan::open_active_for_session(root, Some(session_id)).ok().flatten()
+    let Some(plan) = crate::plan::open_active_for_session(root, Some(session_id))
+        .ok()
+        .flatten()
     else {
         return String::new();
     };
@@ -3117,8 +3139,7 @@ fn lint_answer(
         .filter(|l| !l.trim_start().starts_with('>'))
         .collect::<Vec<_>>()
         .join("\n");
-    let records =
-        crate::agent::journal::Journal::records_for(root, session_id).unwrap_or_default();
+    let records = crate::agent::journal::Journal::records_for(root, session_id).unwrap_or_default();
     let start = records
         .iter()
         .filter(|r| r.kind == "user_msg")
@@ -3135,7 +3156,10 @@ fn lint_answer(
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string(),
-                r.fields.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                r.fields
+                    .get("ok")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 r.fields
                     .get("summary")
                     .and_then(|v| v.as_str())
@@ -3145,9 +3169,7 @@ fn lint_answer(
         })
         .collect();
     let any_fail = results.iter().any(|(_, ok, _)| !ok);
-    let exec_ok = results
-        .iter()
-        .any(|(tool, ok, _)| *ok && tool == "bash");
+    let exec_ok = results.iter().any(|(tool, ok, _)| *ok && tool == "bash");
     let summaries = results
         .iter()
         .map(|(_, _, s)| s.as_str())
@@ -3228,11 +3250,7 @@ fn lint_answer(
 /// Capped dedup push for lint spans. A span already covered by a longer
 /// collected one (e.g. "tests pass" inside "All tests pass") is skipped.
 fn push_span<'x>(spans: &mut Vec<(&'static str, &'x str)>, kind: &'static str, span: &'x str) {
-    if spans.len() < 40
-        && !spans
-            .iter()
-            .any(|(_, s)| *s == span || s.contains(span))
-    {
+    if spans.len() < 40 && !spans.iter().any(|(_, s)| *s == span || s.contains(span)) {
         spans.push((kind, span));
     }
 }
@@ -3343,7 +3361,8 @@ fn extract_paths(text: &str) -> Vec<&str> {
         let closed = backticked && text[end..].starts_with('`');
         if end > start && text.is_char_boundary(start) && text.is_char_boundary(end) {
             let tok = &text[start..end];
-            if (tok.contains('/') && tok.contains('.')) || (backticked && closed && tok.contains('.'))
+            if (tok.contains('/') && tok.contains('.'))
+                || (backticked && closed && tok.contains('.'))
             {
                 out.push(tok);
             }
@@ -4451,27 +4470,42 @@ mod effort_tests {
         assert!(is_heuristic_trivial(&msg("add comment to lib.rs")));
 
         // Trivial: short single-sentence request without complex verbs and <= 1 file
-        assert!(is_heuristic_trivial(&msg("cleanup unused import in main.rs")));
+        assert!(is_heuristic_trivial(&msg(
+            "cleanup unused import in main.rs"
+        )));
 
         // Non-trivial: multi-file mentions
         assert!(!is_heuristic_trivial(&msg("fix typo in foo.rs and bar.rs")));
-        assert!(!is_heuristic_trivial(&msg("update src/config/mod.rs and src/agent/loop_task.rs")));
+        assert!(!is_heuristic_trivial(&msg(
+            "update src/config/mod.rs and src/agent/loop_task.rs"
+        )));
 
         // Non-trivial: complex terms
         assert!(!is_heuristic_trivial(&msg("implement Stage T and Stage W")));
-        assert!(!is_heuristic_trivial(&msg("refactor provider error handling")));
-        assert!(!is_heuristic_trivial(&msg("feature: add fallback support to models")));
+        assert!(!is_heuristic_trivial(&msg(
+            "refactor provider error handling"
+        )));
+        assert!(!is_heuristic_trivial(&msg(
+            "feature: add fallback support to models"
+        )));
         assert!(!is_heuristic_trivial(&msg("rewrite the plan loop")));
         assert!(!is_heuristic_trivial(&msg("build a new benchmark harness")));
         assert!(!is_heuristic_trivial(&msg("migrate sqlite schema")));
 
         // Non-trivial: task lists or multi-line checklists
-        assert!(!is_heuristic_trivial(&msg("Please do:\n- [ ] step 1\n- [ ] step 2")));
-        assert!(!is_heuristic_trivial(&msg("Line 1\nLine 2\nLine 3\nLine 4")));
+        assert!(!is_heuristic_trivial(&msg(
+            "Please do:\n- [ ] step 1\n- [ ] step 2"
+        )));
+        assert!(!is_heuristic_trivial(&msg(
+            "Line 1\nLine 2\nLine 3\nLine 4"
+        )));
 
         // Empty / no user message
         assert!(!is_heuristic_trivial(&[]));
-        assert!(!is_heuristic_trivial(&[Message::new(Role::Assistant, "hello")]));
+        assert!(!is_heuristic_trivial(&[Message::new(
+            Role::Assistant,
+            "hello"
+        )]));
     }
 
     struct MockTestProvider {
@@ -4488,7 +4522,9 @@ mod effort_tests {
             let batch = if !guard.is_empty() {
                 guard.remove(0)
             } else {
-                vec![Err(anyhow::anyhow!("provider returned 500: internal server error"))]
+                vec![Err(anyhow::anyhow!(
+                    "provider returned 500: internal server error"
+                ))]
             };
             futures::stream::iter(batch).boxed()
         }
@@ -4503,9 +4539,9 @@ mod effort_tests {
         });
 
         let fallback_provider = std::sync::Arc::new(MockTestProvider {
-            events: std::sync::Mutex::new(vec![vec![Ok(
-                crate::providers::StreamEvent::Text("fallback response".into()),
-            )]]),
+            events: std::sync::Mutex::new(vec![vec![Ok(crate::providers::StreamEvent::Text(
+                "fallback response".into(),
+            ))]]),
         });
 
         let fallback = FallbackCandidate {
@@ -4516,7 +4552,8 @@ mod effort_tests {
             context_limit: 10000,
         };
 
-        let temp_dir = std::env::temp_dir().join(format!("sqwai-test-fallback-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("sqwai-test-fallback-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let input = AgentInput {
             provider: primary_provider,
@@ -4574,7 +4611,10 @@ mod effort_tests {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
         assert!(switched, "should have received FallbackSwitched event");
-        assert!(got_fallback_text, "should have received text from fallback provider");
+        assert!(
+            got_fallback_text,
+            "should have received text from fallback provider"
+        );
     }
 
     fn big(text: &str) -> String {
@@ -4586,15 +4626,13 @@ mod effort_tests {
             Message::new(Role::User, big("first task ")),
             Message::new(Role::Assistant, big("did first ")),
             Message::new(Role::User, big("second task ")),
-            Message::new(
-                Role::Assistant,
-                "reading",
-            )
-            .with_tool_calls(vec![crate::providers::ToolCallReq::new(
-                "c1",
-                "read",
-                serde_json::json!({"file_path": "a.rs"}),
-            )]),
+            Message::new(Role::Assistant, "reading").with_tool_calls(vec![
+                crate::providers::ToolCallReq::new(
+                    "c1",
+                    "read",
+                    serde_json::json!({"file_path": "a.rs"}),
+                ),
+            ]),
             Message::tool_result("c1", big("file bytes "), false),
             Message::new(Role::User, big("third task ")),
             Message::new(Role::Assistant, big("doing third ")),
@@ -4620,7 +4658,10 @@ mod effort_tests {
         assert_eq!(policy.budget(), 10_000);
         let mut messages = Vec::new();
         for i in 0..30 {
-            messages.push(Message::new(Role::User, format!("task {i} {}", "q".repeat(500))));
+            messages.push(Message::new(
+                Role::User,
+                format!("task {i} {}", "q".repeat(500)),
+            ));
             messages.push(Message::new(Role::Assistant, format!("work {i}")));
             messages.push(Message::tool_result(
                 format!("c{i}"),
@@ -4636,9 +4677,17 @@ mod effort_tests {
         let before = context::estimated_tokens(&messages);
         assert!(before > 10_000, "fixture must be over budget, got {before}");
         let mut summary = None;
-        let out = compact_history(&provider, "m", &mut messages, &mut summary, &policy, false, "")
-            .await
-            .expect("must compact a 4x-over-budget transcript");
+        let out = compact_history(
+            &provider,
+            "m",
+            &mut messages,
+            &mut summary,
+            &policy,
+            false,
+            "",
+        )
+        .await
+        .expect("must compact a 4x-over-budget transcript");
         assert!(out.1 < out.0, "must shrink: {out:?}");
         assert!(messages.len() < 95, "messages must drop");
     }
@@ -4657,7 +4706,10 @@ mod effort_tests {
         let mut trims = 0;
         let mut peak_len = 0;
         for i in 0..40 {
-            messages.push(Message::new(Role::User, format!("task {i} {}", "q".repeat(500))));
+            messages.push(Message::new(
+                Role::User,
+                format!("task {i} {}", "q".repeat(500)),
+            ));
             messages.push(Message::new(Role::Assistant, format!("work {i}")));
             messages.push(Message::tool_result(
                 format!("c{i}"),
@@ -4665,8 +4717,17 @@ mod effort_tests {
                 false,
             ));
             let before_len = messages.len();
-            if compact_history(&provider, "m", &mut messages, &mut summary, &policy, false, "").await
-                .is_some()
+            if compact_history(
+                &provider,
+                "m",
+                &mut messages,
+                &mut summary,
+                &policy,
+                false,
+                "",
+            )
+            .await
+            .is_some()
             {
                 trims += 1;
                 assert!(
@@ -4676,7 +4737,10 @@ mod effort_tests {
             }
             peak_len = peak_len.max(messages.len());
         }
-        assert!(trims >= 3, "40 over-budget turns must trim repeatedly, got {trims}");
+        assert!(
+            trims >= 3,
+            "40 over-budget turns must trim repeatedly, got {trims}"
+        );
         assert!(
             peak_len < 120,
             "history must stay bounded near the budget, peak len {peak_len}"
@@ -4710,8 +4774,17 @@ mod effort_tests {
                 false,
             ));
             let before_len = messages.len();
-            if compact_history(&provider, "m", &mut messages, &mut summary, &policy, false, "").await
-                .is_some()
+            if compact_history(
+                &provider,
+                "m",
+                &mut messages,
+                &mut summary,
+                &policy,
+                false,
+                "",
+            )
+            .await
+            .is_some()
             {
                 trims += 1;
                 assert!(
@@ -4721,7 +4794,10 @@ mod effort_tests {
             }
             peak_len = peak_len.max(messages.len());
         }
-        assert!(trims >= 3, "40 over-budget cycles must trim repeatedly, got {trims}");
+        assert!(
+            trims >= 3,
+            "40 over-budget cycles must trim repeatedly, got {trims}"
+        );
         assert!(
             peak_len < 81,
             "history must stay bounded near the budget, peak len {peak_len}"
@@ -4730,10 +4806,7 @@ mod effort_tests {
 
     #[test]
     fn compaction_record_carries_tokens_and_summary() {
-        let root = std::env::temp_dir().join(format!(
-            "sqwai-compact-rec-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("sqwai-compact-rec-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let journal = crate::agent::journal::Journal::open(&root, "sess").expect("open");
@@ -4770,13 +4843,18 @@ mod effort_tests {
         assert!(capture_nudge("please refactor the engine", &c("keep API stable")).is_none());
         // marker + empty constraints → nudge
         let tail = capture_nudge("don't touch storage/btree.rs", &[]).expect("must nudge");
-        assert!(tail.contains("host note"), "nudge must be marked host-owned");
+        assert!(
+            tail.contains("host note"),
+            "nudge must be marked host-owned"
+        );
         // marker + covering constraint (shared token "touch"/"btree") → silent
-        assert!(capture_nudge(
-            "don't touch storage/btree.rs",
-            &c("do not touch `storage/btree.rs` (deprecated)")
-        )
-        .is_none());
+        assert!(
+            capture_nudge(
+                "don't touch storage/btree.rs",
+                &c("do not touch `storage/btree.rs` (deprecated)")
+            )
+            .is_none()
+        );
         // marker + unrelated constraints → nudge
         assert!(capture_nudge("don't touch storage/btree.rs", &c("keep API stable")).is_some());
         // RU markers behave the same
@@ -4812,8 +4890,7 @@ mod effort_tests {
         let root = std::env::temp_dir().join(format!("sqwai-lint-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let mut journal =
-            crate::agent::journal::Journal::open(&root, "sess").expect("open");
+        let mut journal = crate::agent::journal::Journal::open(&root, "sess").expect("open");
         journal.append("user_msg", serde_json::json!({})).unwrap();
         journal
             .append(
@@ -4836,7 +4913,10 @@ mod effort_tests {
             "sess",
             &mut jh,
         );
-        assert!(out.contains("12 passed and 99 passed [unverified]"), "{out}");
+        assert!(
+            out.contains("12 passed and 99 passed [unverified]"),
+            "{out}"
+        );
         assert!(!out.contains("12 passed [unverified]"), "{out}");
         assert!(!out.contains("77 passed [unverified]"), "{out}");
         // record written for the marked span only
@@ -4859,16 +4939,24 @@ mod effort_tests {
     #[tokio::test]
     async fn compact_history_summarizes_through_the_model() {
         let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
-            events: std::sync::Mutex::new(vec![vec![Ok(
-                crate::providers::StreamEvent::Text("MOCK-SUMMARY".into()),
-            )]]),
+            events: std::sync::Mutex::new(vec![vec![Ok(crate::providers::StreamEvent::Text(
+                "MOCK-SUMMARY".into(),
+            ))]]),
         });
         let policy = summary_policy();
         let mut messages = three_turns();
         let mut summary = None;
-        let out = compact_history(&provider, "m", &mut messages, &mut summary, &policy, false, "")
-            .await
-            .expect("pressure is over: must compact");
+        let out = compact_history(
+            &provider,
+            "m",
+            &mut messages,
+            &mut summary,
+            &policy,
+            false,
+            "",
+        )
+        .await
+        .expect("pressure is over: must compact");
         assert!(out.0 > out.1, "must shrink: {:?}", out);
         assert!(out.2, "model summary must be reported");
         assert_eq!(summary.as_deref(), Some("MOCK-SUMMARY"));
@@ -4893,10 +4981,28 @@ mod effort_tests {
         let policy = summary_policy();
         let mut messages = three_turns();
         let mut summary = None;
-        compact_history(&provider, "m", &mut messages, &mut summary, &policy, false, "").await;
+        compact_history(
+            &provider,
+            "m",
+            &mut messages,
+            &mut summary,
+            &policy,
+            false,
+            "",
+        )
+        .await;
         // force again: history is small now, but the old summary message
         // plus kept tail still exceed keep_turns
-        compact_history(&provider, "m", &mut messages, &mut summary, &policy, true, "").await;
+        compact_history(
+            &provider,
+            "m",
+            &mut messages,
+            &mut summary,
+            &policy,
+            true,
+            "",
+        )
+        .await;
         assert_eq!(
             count_summaries(&messages),
             1,
@@ -4915,13 +5021,24 @@ mod effort_tests {
         let policy = summary_policy();
         let mut messages = three_turns();
         let mut summary = None;
-        let out = compact_history(&provider, "m", &mut messages, &mut summary, &policy, false, "")
-            .await
-            .expect("pressure is over: must compact");
+        let out = compact_history(
+            &provider,
+            "m",
+            &mut messages,
+            &mut summary,
+            &policy,
+            false,
+            "",
+        )
+        .await
+        .expect("pressure is over: must compact");
         assert!(out.2);
         assert_eq!(count_summaries(&messages), 1);
         assert!(
-            summary.as_deref().unwrap_or_default().contains("## Earlier conversation summary"),
+            summary
+                .as_deref()
+                .unwrap_or_default()
+                .contains("## Earlier conversation summary"),
             "unexpected summary: {summary:?}"
         );
     }
@@ -4931,21 +5048,22 @@ mod effort_tests {
         // 1. Blocked when non-trivial prompt and no plan in Act mode
         let blocked_provider = std::sync::Arc::new(MockTestProvider {
             events: std::sync::Mutex::new(vec![
-                vec![
-                    Ok(crate::providers::StreamEvent::ToolCall(crate::providers::ToolCallReq::new(
+                vec![Ok(crate::providers::StreamEvent::ToolCall(
+                    crate::providers::ToolCallReq::new(
                         "c1",
                         "write",
                         serde_json::json!({
                             "file_path": "new_feature.rs",
                             "content": "pub fn hello() {}"
                         }),
-                    ))),
-                ],
+                    ),
+                ))],
                 vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
             ]),
         });
 
-        let temp_dir = std::env::temp_dir().join(format!("sqwai-test-planfirst-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("sqwai-test-planfirst-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let input = AgentInput {
             provider: blocked_provider,
@@ -4955,7 +5073,10 @@ mod effort_tests {
             effort_support: crate::config::EffortSupport::default(),
             max_tokens: None,
             system: vec![],
-            messages: vec![Message::new(Role::User, "implement new authentication feature")],
+            messages: vec![Message::new(
+                Role::User,
+                "implement new authentication feature",
+            )],
             root: temp_dir.clone(),
             session_id: "test-plan-first-sess".into(),
             blocked_patterns: vec![],
@@ -4994,7 +5115,11 @@ mod effort_tests {
                 }
                 AgentEvent::Completed(Ok(outcome)) => {
                     if let Some(tool_msg) = outcome.messages.iter().find(|m| m.role == Role::Tool) {
-                        assert!(tool_msg.content.contains("plan_required"), "outcome message: {}", tool_msg.content);
+                        assert!(
+                            tool_msg.content.contains("plan_required"),
+                            "outcome message: {}",
+                            tool_msg.content
+                        );
                     }
                     break;
                 }
@@ -5021,21 +5146,22 @@ mod effort_tests {
 
         let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
             events: std::sync::Mutex::new(vec![
-                vec![
-                    Ok(crate::providers::StreamEvent::ToolCall(crate::providers::ToolCallReq::new(
+                vec![Ok(crate::providers::StreamEvent::ToolCall(
+                    crate::providers::ToolCallReq::new(
                         "c1",
                         "write",
                         serde_json::json!({
                             "file_path": "baseline_feature.rs",
                             "content": "pub fn hello() {}"
                         }),
-                    ))),
-                ],
+                    ),
+                ))],
                 vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
             ]),
         });
 
-        let temp_dir = std::env::temp_dir().join(format!("sqwai-test-baseline-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("sqwai-test-baseline-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let input = AgentInput {
             provider,
@@ -5045,7 +5171,10 @@ mod effort_tests {
             effort_support: crate::config::EffortSupport::default(),
             max_tokens: None,
             system: vec![],
-            messages: vec![Message::new(Role::User, "implement new authentication feature")],
+            messages: vec![Message::new(
+                Role::User,
+                "implement new authentication feature",
+            )],
             root: temp_dir.clone(),
             session_id: "test-baseline-sess".into(),
             blocked_patterns: vec![],
@@ -5105,16 +5234,20 @@ mod effort_tests {
         let provider = std::sync::Arc::new(MockTestProvider {
             events: std::sync::Mutex::new(vec![
                 vec![
-                    Ok(crate::providers::StreamEvent::ToolCall(crate::providers::ToolCallReq::new(
-                        "c1",
-                        "think",
-                        serde_json::json!({"thought": "one"}),
-                    ))),
-                    Ok(crate::providers::StreamEvent::ToolCall(crate::providers::ToolCallReq::new(
-                        "c2",
-                        "think",
-                        serde_json::json!({"thought": "two"}),
-                    ))),
+                    Ok(crate::providers::StreamEvent::ToolCall(
+                        crate::providers::ToolCallReq::new(
+                            "c1",
+                            "think",
+                            serde_json::json!({"thought": "one"}),
+                        ),
+                    )),
+                    Ok(crate::providers::StreamEvent::ToolCall(
+                        crate::providers::ToolCallReq::new(
+                            "c2",
+                            "think",
+                            serde_json::json!({"thought": "two"}),
+                        ),
+                    )),
                 ],
                 vec![Ok(crate::providers::StreamEvent::Text(
                     "should not get here".into(),
@@ -5122,7 +5255,8 @@ mod effort_tests {
             ]),
         });
 
-        let temp_dir = std::env::temp_dir().join(format!("sqwai-test-esccancel-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("sqwai-test-esccancel-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let input = AgentInput {
             provider: provider.clone(),
@@ -5232,9 +5366,9 @@ mod effort_tests {
         let plan_id = plan.id.clone();
 
         let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
-            events: std::sync::Mutex::new(vec![vec![Ok(
-                crate::providers::StreamEvent::Text("child done".into()),
-            )]]),
+            events: std::sync::Mutex::new(vec![vec![Ok(crate::providers::StreamEvent::Text(
+                "child done".into(),
+            ))]]),
         });
         let (parent_tx, _parent_rx) = mpsc::channel(64);
         let call = crate::providers::ToolCallReq::new(
@@ -5271,14 +5405,12 @@ mod effort_tests {
         assert!(outcome.ok, "{}", outcome.output);
 
         let reloaded = plan::open(&root, &plan_id).unwrap();
-        let members: Vec<&str> = reloaded
-            .sessions
-            .iter()
-            .map(String::as_str)
-            .collect();
+        let members: Vec<&str> = reloaded.sessions.iter().map(String::as_str).collect();
         assert!(members.contains(&"parent-sess"), "{members:?}");
         assert!(
-            members.iter().any(|s| s.starts_with("sub-") && *s != "parent-sess"),
+            members
+                .iter()
+                .any(|s| s.starts_with("sub-") && *s != "parent-sess"),
             "child joined explicitly: {members:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -5320,9 +5452,9 @@ mod effort_tests {
         let plan_id = plan.id.clone();
 
         let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
-            events: std::sync::Mutex::new(vec![vec![Ok(
-                crate::providers::StreamEvent::Text("child done".into()),
-            )]]),
+            events: std::sync::Mutex::new(vec![vec![Ok(crate::providers::StreamEvent::Text(
+                "child done".into(),
+            ))]]),
         });
         let (parent_tx, _parent_rx) = mpsc::channel(64);
         let call = crate::providers::ToolCallReq::new(
@@ -5378,17 +5510,13 @@ mod effort_tests {
             fn stream_chat(
                 &self,
                 _req: crate::providers::ChatRequest,
-            ) -> futures::stream::BoxStream<'static, crate::providers::StreamResult>
-            {
+            ) -> futures::stream::BoxStream<'static, crate::providers::StreamResult> {
                 use futures::StreamExt;
                 futures::stream::pending().boxed()
             }
         }
 
-        let root = std::env::temp_dir().join(format!(
-            "sqwai-subtimeout-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("sqwai-subtimeout-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&root);
         let provider: SharedProvider = std::sync::Arc::new(HangingProvider);
         let (parent_tx, _parent_rx) = mpsc::channel(64);
@@ -5455,8 +5583,12 @@ mod effort_tests {
                     )),
                 ],
                 // one single-text turn per child; interchangeable
-                vec![Ok(crate::providers::StreamEvent::Text("child one done".into()))],
-                vec![Ok(crate::providers::StreamEvent::Text("child two done".into()))],
+                vec![Ok(crate::providers::StreamEvent::Text(
+                    "child one done".into(),
+                ))],
+                vec![Ok(crate::providers::StreamEvent::Text(
+                    "child two done".into(),
+                ))],
                 vec![Ok(crate::providers::StreamEvent::Text("all done".into()))],
             ]),
         });
@@ -5502,9 +5634,7 @@ mod effort_tests {
         while let Some(ev) = handle.rx.recv().await {
             match ev {
                 AgentEvent::ToolStart { call_id, .. } => seq.push(format!("start:{call_id}")),
-                AgentEvent::ToolNotice { call_id, .. } => {
-                    seq.push(format!("notice:{call_id}"))
-                }
+                AgentEvent::ToolNotice { call_id, .. } => seq.push(format!("notice:{call_id}")),
                 AgentEvent::SubagentDone { .. } => dones += 1,
                 AgentEvent::Completed(Ok(outcome)) => {
                     results = outcome
@@ -5536,21 +5666,22 @@ mod effort_tests {
     async fn test_plan_first_gate_allows_when_mode_is_off() {
         let provider = std::sync::Arc::new(MockTestProvider {
             events: std::sync::Mutex::new(vec![
-                vec![
-                    Ok(crate::providers::StreamEvent::ToolCall(crate::providers::ToolCallReq::new(
+                vec![Ok(crate::providers::StreamEvent::ToolCall(
+                    crate::providers::ToolCallReq::new(
                         "c1",
                         "write",
                         serde_json::json!({
                             "file_path": "foo.txt",
                             "content": "hello"
                         }),
-                    ))),
-                ],
+                    ),
+                ))],
                 vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
             ]),
         });
 
-        let temp_dir = std::env::temp_dir().join(format!("sqwai-test-planfirst-off-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("sqwai-test-planfirst-off-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let input = AgentInput {
             provider,

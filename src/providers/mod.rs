@@ -473,8 +473,7 @@ static HTTP_LOG: AtomicBool = AtomicBool::new(false);
 /// stable per-conversation id, set by the TUI on submit / session switch.
 /// Gateways that route on it (OpenCode Go: `x-opencode-session`) read it
 /// when building requests; it is never sent anywhere else.
-static CONVERSATION_ID: std::sync::RwLock<Option<String>> =
-    std::sync::RwLock::new(None);
+static CONVERSATION_ID: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
 /// remember the active conversation for session-aware gateways
 pub fn set_conversation_id(id: &str) {
@@ -488,10 +487,7 @@ pub fn opencode_session_value(base_url: &str) -> Option<String> {
     if !base_url.contains("opencode.ai") {
         return None;
     }
-    CONVERSATION_ID
-        .read()
-        .ok()
-        .and_then(|g| g.clone())
+    CONVERSATION_ID.read().ok().and_then(|g| g.clone())
 }
 
 /// attach `x-opencode-session` to a request builder when applicable
@@ -737,8 +733,7 @@ mod connection_tests {
     #[tokio::test]
     async fn probe_never_leaks_session_header_to_other_hosts() {
         set_conversation_id("sess-42");
-        let (url, head, handle) =
-            mock_models_server(200, "OK", r#"{"data":[{"id":"a"}]}"#);
+        let (url, head, handle) = mock_models_server(200, "OK", r#"{"data":[{"id":"a"}]}"#);
         let outcome = check_connection(&resolved(url, WireFormat::Openai, Some("k".into()))).await;
         assert_eq!(outcome, Ok("1 models".to_string()));
         let seen = head.lock().unwrap();

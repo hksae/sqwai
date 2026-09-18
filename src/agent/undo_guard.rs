@@ -31,7 +31,9 @@ pub struct RestoreGuard {
 /// releases on drop; `true` means it was already held (nested undo) and
 /// there is nothing to release.
 pub fn hold_restore() -> RestoreGuard {
-    let outer = RESTORE.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err();
+    let outer = RESTORE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err();
     RestoreGuard { outer }
 }
 
@@ -115,7 +117,10 @@ mod tests {
         let nested = hold_restore();
         assert!(nested.outer);
         drop(nested);
-        assert!(restore_active(), "nested drop must not release the outer hold");
+        assert!(
+            restore_active(),
+            "nested drop must not release the outer hold"
+        );
         drop(outer);
         assert!(!restore_active());
     }

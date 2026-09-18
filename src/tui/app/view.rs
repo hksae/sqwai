@@ -776,10 +776,7 @@ impl App {
     /// confirm rows resolve as Ask above and never reach here.
     fn ask_head_at(&self, abs_row: usize) -> Option<usize> {
         let seg_idx = self.cache_rowseg.get(abs_row).copied()??;
-        if !matches!(
-            self.segments.get(seg_idx),
-            Some(Segment::AskUser { .. })
-        ) {
+        if !matches!(self.segments.get(seg_idx), Some(Segment::AskUser { .. })) {
             return None;
         }
         let (start, _) = self.ask_block_range(seg_idx)?;
@@ -1318,21 +1315,13 @@ impl App {
     /// Collapsed ask_user head row, tool-style: marker + name + dim
     /// summary. Live shows the first question, answered shows the frozen
     /// answer; click the row to unfold the questionnaire.
-    fn ask_head_row(
-        &self,
-        segs: &[Segment],
-        idx: usize,
-        w: u16,
-    ) -> (Line<'static>, Option<usize>) {
+    fn ask_head_row(&self, segs: &[Segment], idx: usize, w: u16) -> (Line<'static>, Option<usize>) {
         let (marker, summary) = match &segs[idx] {
             Segment::AskUser {
                 answered: Some(a), ..
             } => ("  ✓ ", a.clone()),
             Segment::AskUser { questions, .. } => {
-                let first = questions
-                    .first()
-                    .map(|q| q.question.as_str())
-                    .unwrap_or("");
+                let first = questions.first().map(|q| q.question.as_str()).unwrap_or("");
                 let extra = if questions.len() > 1 {
                     format!(" (+{} more)", questions.len() - 1)
                 } else {
@@ -1399,15 +1388,18 @@ impl App {
                     inner_w,
                 );
                 for row in rows {
-                    let mut spans =
-                        vec![Span::styled("  ".to_string(), Theme::base())];
-                    spans.extend(row.spans.into_iter().map(|s| {
-                        Span::styled(s.content, s.style.add_modifier(Modifier::DIM))
-                    }));
+                    let mut spans = vec![Span::styled("  ".to_string(), Theme::base())];
+                    spans.extend(
+                        row.spans
+                            .into_iter()
+                            .map(|s| Span::styled(s.content, s.style.add_modifier(Modifier::DIM))),
+                    );
                     out.push((Line::from(spans), Some(idx)));
                 }
             }
-            Segment::AskUser { expanded: false, .. } => {
+            Segment::AskUser {
+                expanded: false, ..
+            } => {
                 out.push(self.ask_head_row(segs, idx, w));
             }
             Segment::AskUser {
@@ -2734,7 +2726,9 @@ impl App {
             .take(chat.height as usize)
             .cloned()
             .collect();
-        Paragraph::new(visible).style(Theme::base()).render(chat, buf);
+        Paragraph::new(visible)
+            .style(Theme::base())
+            .render(chat, buf);
         // scroll is parked by close/switch, not here: persisting mid-view is
         // what the old code did for the fingerprint, and it is unnecessary
         // now that the live buffers (and last_fp) ARE this view's state
@@ -2772,15 +2766,12 @@ impl App {
         }
         // finished turns are frozen in `sub_groups`; the running turn is
         // recomputed here, so its header counts grow while events stream in
-        let mut groups: Vec<ActivityGroup> =
-            self.sub_groups.get(&id).cloned().unwrap_or_default();
+        let mut groups: Vec<ActivityGroup> = self.sub_groups.get(&id).cloned().unwrap_or_default();
         let running = self
             .subagents
             .iter()
             .any(|(sid, _, status, _, _)| *sid == id && status == "running");
-        if running
-            && let Some(chat) = self.subagent_chats.get(&id)
-        {
+        if running && let Some(chat) = self.subagent_chats.get(&id) {
             let floor = groups
                 .iter()
                 .map(|g| g.seg_end)
@@ -2926,9 +2917,12 @@ impl App {
         let h = (inner as u16 + 2).clamp(4, max_h);
         // Width cap order matters: the 30-column minimum must not win over
         // the terminal's real width — in a 20..29-column terminal that would
-        let is_graph_wide = matches!(self.cur_menu(), Some(Menu::GraphView { .. })) && area.width >= 110;
+        let is_graph_wide =
+            matches!(self.cur_menu(), Some(Menu::GraphView { .. })) && area.width >= 110;
         let w = if is_graph_wide {
-            110.min(area.width.saturating_sub(4)).max(30).min(area.width)
+            110.min(area.width.saturating_sub(4))
+                .max(30)
+                .min(area.width)
         } else {
             78.min(area.width.saturating_sub(4)).max(30).min(area.width)
         };
@@ -3046,20 +3040,17 @@ impl App {
                 .enumerate()
             {
                 let abs = self.menu_scroll + n;
-                let entry =
-                    crate::tui::spinners::ALL.get(abs % crate::tui::spinners::ALL.len());
+                let entry = crate::tui::spinners::ALL.get(abs % crate::tui::spinners::ALL.len());
                 let mut spans = match entry {
                     Some(e) if e.name.starts_with("shimmer-") => {
-                        let mut v =
-                            crate::tui::shimmer::shimmer_named("Working", tick, e.name);
+                        let mut v = crate::tui::shimmer::shimmer_named("Working", tick, e.name);
                         v.push(Span::styled(format!("  {}", e.name), Theme::dim()));
                         v
                     }
                     Some(e) if e.name == "flux-wave-wide" => {
                         // 8-cell braille wave, one frame of phase per cell —
                         // the FluxSpinner look without the widget dependency
-                        const WAVE: [char; 8] =
-                            ['⣾', '⣷', '⣯', '⣟', '⡿', '⢿', '⣽', '⣻'];
+                        const WAVE: [char; 8] = ['⣾', '⣷', '⣯', '⣟', '⡿', '⢿', '⣽', '⣻'];
                         let wave: String = (0..WAVE.len())
                             .map(|c| WAVE[(tick + c) % WAVE.len()])
                             .collect();
@@ -3104,9 +3095,7 @@ impl App {
                     rows.push(Line::from(
                         line.spans
                             .iter()
-                            .map(|s| {
-                                Span::styled(s.content.to_string(), Theme::accent_bold())
-                            })
+                            .map(|s| Span::styled(s.content.to_string(), Theme::accent_bold()))
                             .collect::<Vec<_>>(),
                     ));
                 } else {
@@ -3167,10 +3156,16 @@ impl App {
             };
 
             Clear.render(list_rect, buf);
-            Paragraph::new(rows).style(Theme::base()).block(block).render(list_rect, buf);
+            Paragraph::new(rows)
+                .style(Theme::base())
+                .block(block)
+                .render(list_rect, buf);
 
             Clear.render(details_rect, buf);
-            let (focus_key, trail) = if let Some(Menu::GraphView { focus_key, trail, .. }) = self.cur_menu() {
+            let (focus_key, trail) = if let Some(Menu::GraphView {
+                focus_key, trail, ..
+            }) = self.cur_menu()
+            {
                 (focus_key.clone(), trail.clone())
             } else {
                 (String::new(), Vec::new())
@@ -3186,7 +3181,9 @@ impl App {
 
             use crate::agent::graph::GraphStore;
             let store = crate::agent::graph::SqliteGraphStore::open(&self.project_root).ok();
-            let node = store.as_ref().and_then(|s| s.find_node(&inspected_key).ok().flatten());
+            let node = store
+                .as_ref()
+                .and_then(|s| s.find_node(&inspected_key).ok().flatten());
 
             let mut detail_lines: Vec<Line> = Vec::new();
             let badge = node
@@ -3200,7 +3197,10 @@ impl App {
 
             detail_lines.push(Line::from(vec![
                 Span::styled(format!(" {badge} "), Theme::accent_bold()),
-                Span::styled(name_or_key.to_string(), Theme::base().add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::styled(
+                    name_or_key.to_string(),
+                    Theme::base().add_modifier(ratatui::style::Modifier::BOLD),
+                ),
             ]));
 
             detail_lines.push(Line::from(vec![
@@ -3268,7 +3268,10 @@ impl App {
                 .render(details_rect, buf);
         } else {
             Clear.render(rect, buf);
-            Paragraph::new(rows).style(Theme::base()).block(block).render(rect, buf);
+            Paragraph::new(rows)
+                .style(Theme::base())
+                .block(block)
+                .render(rect, buf);
         }
         // mini scrollbar inside the right border when the list overflows —
         // exactly like the command popup (last content column, border intact)
@@ -3358,11 +3361,8 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             ))
             .title_bottom(
-                Line::from(Span::styled(
-                    " ← → move · click · enter ",
-                    Theme::dim(),
-                ))
-                .right_aligned(),
+                Line::from(Span::styled(" ← → move · click · enter ", Theme::dim()))
+                    .right_aligned(),
             );
         Clear.render(rect, buf);
         let inner = Rect {
@@ -3386,11 +3386,7 @@ impl App {
             let col_x = base_x + COL_W * i as u16;
             let name_w = name.len() as u16;
             let pad = COL_W.saturating_sub(name_w) / 2;
-            let style = if i == sel {
-                active_style
-            } else {
-                Theme::dim()
-            };
+            let style = if i == sel { active_style } else { Theme::dim() };
             Paragraph::new(Line::from(vec![
                 Span::styled(" ".repeat(pad as usize), Theme::base()),
                 Span::styled(name.to_string(), style),
@@ -3439,14 +3435,21 @@ impl App {
             // connector to the next dot: filled iff fully left of selection
             if i + 1 < n {
                 let cstyle = if i + 1 <= sel { fill } else { dim };
-                for c in cells.iter_mut().take((i + 1) * COL_W as usize + dot_off).skip(dx + 1) {
+                for c in cells
+                    .iter_mut()
+                    .take((i + 1) * COL_W as usize + dot_off)
+                    .skip(dx + 1)
+                {
                     *c = ("─", cstyle);
                 }
             }
         }
         let mut spans: Vec<Span> = Vec::new();
         for (glyph, style) in cells {
-            let same = spans.last().map(|s: &Span| s.style == style).unwrap_or(false);
+            let same = spans
+                .last()
+                .map(|s: &Span| s.style == style)
+                .unwrap_or(false);
             if same {
                 let last: &mut Span = spans.last_mut().expect("nonempty");
                 last.content.to_mut().push_str(glyph);
@@ -3511,12 +3514,15 @@ impl App {
         }
 
         Clear.render(rect, buf);
-        Paragraph::new(rows).style(Theme::base()).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Plain)
-                .border_style(Theme::border_dim()),
-        ).render(rect, buf);
+        Paragraph::new(rows)
+            .style(Theme::base())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Plain)
+                    .border_style(Theme::border_dim()),
+            )
+            .render(rect, buf);
         // mini scrollbar inside the right border when the list overflows
         // (on the last content column, so the border stays intact)
         if max_scroll > 0 {
@@ -3525,8 +3531,8 @@ impl App {
             let pos = skip * (track - thumb) / max_scroll.max(1);
             let bx = rect.right().saturating_sub(2);
             for i in 0..track {
-                if let Some(cell) = buf
-                    .cell_mut(ratatui::layout::Position::new(bx, rect.y + 1 + i as u16))
+                if let Some(cell) =
+                    buf.cell_mut(ratatui::layout::Position::new(bx, rect.y + 1 + i as u16))
                     && i >= pos
                     && i < pos + thumb
                 {
@@ -3659,11 +3665,8 @@ impl App {
 
         if left_base_cols + fixed_len > w as usize && !ctx_metrics_label.is_empty() {
             ctx_metrics_label.clear();
-            fixed_len = 1
-                + cols(&agents_label)
-                + cols(&model_label)
-                + cols(&ef_label)
-                + cols(&lsp_label);
+            fixed_len =
+                1 + cols(&agents_label) + cols(&model_label) + cols(&ef_label) + cols(&lsp_label);
         }
 
         let avail_for_act = (w as usize).saturating_sub(left_base_cols + fixed_len);
@@ -3712,10 +3715,7 @@ impl App {
             }
             _ => chip_settled,
         };
-        let mut spans = vec![Span::styled(
-            format!(" {} ", self.mode.label()),
-            chip_style,
-        )];
+        let mut spans = vec![Span::styled(format!(" {} ", self.mode.label()), chip_style)];
         if !plan_label.is_empty() {
             spans.push(Span::styled(format!("  {plan_label}"), Theme::dim()));
         }
@@ -4097,7 +4097,9 @@ impl App {
             width: chat.width,
             height: render_lines.len() as u16,
         };
-        Paragraph::new(render_lines).style(Theme::base()).render(render_rect, buf);
+        Paragraph::new(render_lines)
+            .style(Theme::base())
+            .render(render_rect, buf);
     }
 }
 
@@ -4120,10 +4122,7 @@ mod tests {
         assert_eq!(dim_bg(Color::White), Color::DarkGray);
         assert_eq!(dim_bg(Color::Cyan), Color::DarkGray);
         // truecolor scales toward black
-        assert_eq!(
-            dim_bg(Color::Rgb(100, 150, 200)),
-            Color::Rgb(60, 90, 120)
-        );
+        assert_eq!(dim_bg(Color::Rgb(100, 150, 200)), Color::Rgb(60, 90, 120));
     }
 
     #[test]
@@ -4190,9 +4189,7 @@ fn dim_bg(bg: ratatui::style::Color) -> ratatui::style::Color {
     use ratatui::style::Color;
     match bg {
         Color::Reset | Color::Black | Color::DarkGray => bg,
-        Color::Indexed(i) if (232..=255).contains(&i) => {
-            Color::Indexed(232 + (i - 232) * 3 / 5)
-        }
+        Color::Indexed(i) if (232..=255).contains(&i) => Color::Indexed(232 + (i - 232) * 3 / 5),
         Color::White
         | Color::Gray
         | Color::Red
@@ -4288,10 +4285,7 @@ pub(super) fn blank() -> Line<'static> {
 /// here: a collapsed block must never hide the fact that something broke.
 /// While the turn runs (`live_tick` set), the "activity" word shimmers
 /// Codex-style; finished headers stay static dim.
-pub(super) fn activity_header_line(
-    g: &ActivityGroup,
-    live_tick: Option<usize>,
-) -> Line<'static> {
+pub(super) fn activity_header_line(g: &ActivityGroup, live_tick: Option<usize>) -> Line<'static> {
     let arrow = if g.expanded { "▾" } else { "▸" };
     let mut spans = vec![Span::styled(format!("  {arrow} "), Theme::dim())];
     match live_tick {

@@ -90,9 +90,7 @@ fn stable_prefix_inner(root: &std::path::Path, baseline: bool) -> String {
     prompt.push_str("\n\n");
     prompt.push_str(&env::process_block_at(root));
     // G0 baseline (§8.2): no durable memory in the prefix.
-    if !baseline
-        && let Some(memory) = memory_block(root)
-    {
+    if !baseline && let Some(memory) = memory_block(root) {
         prompt.push_str("\n\n");
         prompt.push_str(&memory);
     }
@@ -222,10 +220,7 @@ mod tests {
 
     #[test]
     fn bench_prefix_roots_at_fixture_not_cwd() {
-        let dir = std::env::temp_dir().join(format!(
-            "sqwai-bench-prefix-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("sqwai-bench-prefix-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("AGENTS.md"), "FIXTURE AGENTS MARKER").unwrap();

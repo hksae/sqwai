@@ -229,17 +229,13 @@ impl Session {
 
     /// true when `project` belongs to `root`: legacy saves (`None`) belong
     /// everywhere; same-machine paths compare case-insensitively on Windows.
-    pub fn project_is_here(
-        project: &Option<std::path::PathBuf>,
-        root: &std::path::Path,
-    ) -> bool {
+    pub fn project_is_here(project: &Option<std::path::PathBuf>, root: &std::path::Path) -> bool {
         match project {
             None => true,
             Some(p) => {
                 p == root
                     || (cfg!(windows)
-                        && p
-                            .to_string_lossy()
+                        && p.to_string_lossy()
                             .eq_ignore_ascii_case(&root.to_string_lossy()))
             }
         }
@@ -623,8 +619,7 @@ mod tests {
         // the dropped turn's note clamps to the earliest survivor instead
         // of vanishing; the kept one shifts down
         assert_eq!(notes, vec![0, 1]);
-        let attached: Vec<Option<usize>> =
-            s.activity.iter().map(|a| a.user_index).collect();
+        let attached: Vec<Option<usize>> = s.activity.iter().map(|a| a.user_index).collect();
         // totals survive, the dangling attachment is released
         assert_eq!(attached, vec![None, Some(1), None]);
         assert_eq!(s.activity.iter().map(|a| a.calls).sum::<usize>(), 19);

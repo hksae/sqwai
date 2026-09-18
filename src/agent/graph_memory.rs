@@ -154,7 +154,10 @@ pub fn parse_diary(
                 props.insert("session".into(), serde_json::json!(session));
             }
             if let Some(first_j) = j_refs.first() {
-                props.insert("journal_ref".into(), serde_json::json!(format!("j#{first_j}")));
+                props.insert(
+                    "journal_ref".into(),
+                    serde_json::json!(format!("j#{first_j}")),
+                );
             }
 
             let name = if bullet_text.len() > 60 {
@@ -179,7 +182,9 @@ pub fn parse_diary(
 
             let supersedes_target = if is_correction {
                 if let Some(first_j) = j_refs.first() {
-                    current_session.as_ref().map(|s| format!("mem:journal:{s}:{first_j}"))
+                    current_session
+                        .as_ref()
+                        .map(|s| format!("mem:journal:{s}:{first_j}"))
                 } else {
                     None
                 }
@@ -197,10 +202,7 @@ pub fn parse_diary(
 /// Parse `MEMORY.md` (`.sqwai/memory/MEMORY.md`).
 ///
 /// Sections: `## Project`, `## Conventions`, `## User`, `## Agreements`
-pub fn parse_memory_md(
-    relative_path: &str,
-    content: &str,
-) -> Vec<(Node, Vec<String>)> {
+pub fn parse_memory_md(relative_path: &str, content: &str) -> Vec<(Node, Vec<String>)> {
     let mut result = Vec::new();
     let mut current_section: Option<String> = None;
     let mut section_counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -240,7 +242,10 @@ pub fn parse_memory_md(
             props.insert("text".into(), serde_json::json!(bullet_text));
             props.insert("section".into(), serde_json::json!(section_name));
             if let Some(first_j) = j_refs.first() {
-                props.insert("journal_ref".into(), serde_json::json!(format!("j#{first_j}")));
+                props.insert(
+                    "journal_ref".into(),
+                    serde_json::json!(format!("j#{first_j}")),
+                );
             }
 
             let name = if bullet_text.len() > 60 {
@@ -288,7 +293,10 @@ pub fn parse_journal_notes(
             continue;
         }
 
-        let seq = value.get("seq").and_then(|v| v.as_u64()).unwrap_or(line_num as u64);
+        let seq = value
+            .get("seq")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(line_num as u64);
         let note_kind = value
             .get("note")
             .or_else(|| value.get("fields").and_then(|f| f.get("note")))
@@ -323,10 +331,7 @@ pub fn parse_journal_notes(
                 format!("mem:journal:{session_id}:{seq}"),
             )
         } else {
-            (
-                NodeKind::Memory,
-                format!("mem:journal:{session_id}:{seq}"),
-            )
+            (NodeKind::Memory, format!("mem:journal:{session_id}:{seq}"))
         };
 
         let backticks = extract_backticks(text);
@@ -395,7 +400,12 @@ fn resolve_mention(store: &impl GraphStore, token: &str) -> (String, String) {
     }
 
     // Unresolved: emit mentions edge
-    let key = if token.contains('/') || token.contains('\\') || token.ends_with(".rs") || token.ends_with(".py") || token.ends_with(".ts") {
+    let key = if token.contains('/')
+        || token.contains('\\')
+        || token.ends_with(".rs")
+        || token.ends_with(".py")
+        || token.ends_with(".ts")
+    {
         format!("file:{token}")
     } else {
         format!("sym:{token}")
@@ -605,7 +615,9 @@ mod tests {
             properties: BTreeMap::new(),
             content_hash: None,
         };
-        store.replace_file_subgraph("src/session/mod.rs", &[code_node], &[], &[]).unwrap();
+        store
+            .replace_file_subgraph("src/session/mod.rs", &[code_node], &[], &[])
+            .unwrap();
 
         // Create .sqwai/memory/2026-09-10.md
         let mem_dir = dir.path().join(".sqwai").join("memory");
@@ -638,16 +650,37 @@ mod tests {
             relations: vec!["about".into()],
             kinds: vec!["decision".into()],
         };
-        let proj = store.graph_query("sym:src/session/mod.rs::struct::Session", query).unwrap();
+        let proj = store
+            .graph_query("sym:src/session/mod.rs::struct::Session", query)
+            .unwrap();
         assert_eq!(proj.edges.len(), 1);
         assert_eq!(proj.edges[0].kind, "about");
 
         let dec_key = &proj.edges[0].from;
-        let dec_node = store.find_node(dec_key).unwrap().expect("decision node must exist");
+        let dec_node = store
+            .find_node(dec_key)
+            .unwrap()
+            .expect("decision node must exist");
         assert_eq!(dec_node.kind, NodeKind::Decision);
-        assert_eq!(dec_node.properties.get("author").and_then(|v| v.as_str()), Some("model"));
-        assert_eq!(dec_node.properties.get("journal_ref").and_then(|v| v.as_str()), Some("j#16"));
-        assert!(dec_node.properties.get("text").and_then(|v| v.as_str()).unwrap().contains("Todos live inside"));
+        assert_eq!(
+            dec_node.properties.get("author").and_then(|v| v.as_str()),
+            Some("model")
+        );
+        assert_eq!(
+            dec_node
+                .properties
+                .get("journal_ref")
+                .and_then(|v| v.as_str()),
+            Some("j#16")
+        );
+        assert!(
+            dec_node
+                .properties
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap()
+                .contains("Todos live inside")
+        );
     }
 
     #[test]
@@ -666,19 +699,21 @@ mod tests {
         assert_eq!(count, 1);
 
         // Find the decision node and verify supersedes edge to assumption node
-        let proj = store.graph_query(
-            "mem:journal:sess1:8",
-            GraphQuery {
-                direction: Direction::Outgoing,
-                preset: None,
-                depth: 1,
-                max_nodes: 30,
-                max_edges: 10,
-                limit: 10,
-                relations: vec!["supersedes".into()],
-                kinds: Vec::new(),
-            },
-        ).unwrap();
+        let proj = store
+            .graph_query(
+                "mem:journal:sess1:8",
+                GraphQuery {
+                    direction: Direction::Outgoing,
+                    preset: None,
+                    depth: 1,
+                    max_nodes: 30,
+                    max_edges: 10,
+                    limit: 10,
+                    relations: vec!["supersedes".into()],
+                    kinds: Vec::new(),
+                },
+            )
+            .unwrap();
         assert_eq!(proj.edges.len(), 1);
         assert_eq!(proj.edges[0].to, "mem:journal:sess1:5");
     }

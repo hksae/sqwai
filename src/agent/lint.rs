@@ -190,7 +190,8 @@ mod tests {
 
     #[test]
     fn hardcode_gate_flags_confession_even_in_comments() {
-        let diff = "--- a/x.rs\n+++ b/x.rs\n@@\n+// hardcode for the acceptance test\n+    Ok(())\n";
+        let diff =
+            "--- a/x.rs\n+++ b/x.rs\n@@\n+// hardcode for the acceptance test\n+    Ok(())\n";
         let w = hardcode_warnings(diff, "x.rs");
         assert_eq!(w.len(), 1);
     }
@@ -211,7 +212,9 @@ mod tests {
     fn hardcode_gate_caps_at_three() {
         let mut diff = String::from("--- a/x\n+++ b/x\n@@\n");
         for i in 0..6 {
-            diff.push_str(&format!("+    if a == \"long fixture literal number {i:0>24}\" {{\n"));
+            diff.push_str(&format!(
+                "+    if a == \"long fixture literal number {i:0>24}\" {{\n"
+            ));
         }
         assert_eq!(hardcode_warnings(&diff, "x").len(), 3);
     }

@@ -369,12 +369,7 @@ fn has_pwsh_downloader(lower: &str) -> bool {
         .split(|c: char| {
             c.is_whitespace() || c == ';' || c == '|' || c == '&' || c == '(' || c == ')'
         })
-        .any(|t| {
-            matches!(
-                t,
-                "irm" | "iwr" | "invoke-restmethod" | "invoke-webrequest"
-            )
-        })
+        .any(|t| matches!(t, "irm" | "iwr" | "invoke-restmethod" | "invoke-webrequest"))
 }
 
 /// very rough check that the path being chmod-ed is inside the project

@@ -20,8 +20,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::cursor::MoveTo;
 use crossterm::style::{
-    Attribute as CAttribute, Color as CColor, SetAttribute, SetBackgroundColor,
-    SetForegroundColor,
+    Attribute as CAttribute, Color as CColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
 use crossterm::terminal::{Clear as ClearCmd, ClearType as CClearType};
 use ratatui::backend::{Backend, CrosstermBackend};
@@ -211,7 +210,11 @@ impl FrameTx {
     /// Publish a frame, dropping whatever was still pending.
     pub fn submit(&self, frame: FrameData) {
         {
-            let mut slot = self.shared.slot.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut slot = self
+                .shared
+                .slot
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             slot.frame = Some(frame);
         }
         self.shared.cv.notify_one();
@@ -220,7 +223,11 @@ impl FrameTx {
     /// Signal shutdown after pending frames drain, and wake the presenter.
     pub fn shutdown(&self) {
         {
-            let mut slot = self.shared.slot.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut slot = self
+                .shared
+                .slot
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             slot.shutdown = true;
         }
         self.shared.cv.notify_all();
@@ -231,7 +238,11 @@ impl FrameRx {
     /// Block until the latest pending frame or a drained shutdown.
     /// Pending frames submitted while presenting are coalesced by `submit`.
     fn wait_for_frame(&self) -> Option<FrameData> {
-        let mut slot = self.shared.slot.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut slot = self
+            .shared
+            .slot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         loop {
             if let Some(frame) = slot.frame.take() {
                 return Some(frame);
@@ -305,7 +316,10 @@ impl<W: Write> Presenter<W> {
             self.prev = Buffer::empty(frame.area);
             self.area = frame.area;
         }
-        let cells: Vec<(u16, u16, Cell)> = self.prev.diff(&frame.buf).into_iter()
+        let cells: Vec<(u16, u16, Cell)> = self
+            .prev
+            .diff(&frame.buf)
+            .into_iter()
             .map(|(x, y, c)| (x, y, c.clone()))
             .collect();
         // 0 when the diff was empty (nothing written at all)
@@ -316,19 +330,13 @@ impl<W: Write> Presenter<W> {
             let (skip, els) = coalesce_trailing_blanks(&cells, self.area.width);
             // DEC Mode 2026: the terminal buffers the whole frame and
             // presents it in one refresh instead of painting rows piecemeal.
-            crossterm::queue!(
-                self.backend,
-                crossterm::terminal::BeginSynchronizedUpdate
-            )?;
+            crossterm::queue!(self.backend, crossterm::terminal::BeginSynchronizedUpdate)?;
             for &(x, y, bg) in &els {
                 // EL clears with the *current* background: reset attributes
                 // first, then set it explicitly.
                 crossterm::queue!(self.backend, MoveTo(x, y))?;
                 crossterm::queue!(self.backend, SetAttribute(CAttribute::Reset))?;
-                crossterm::queue!(
-                    self.backend,
-                    SetBackgroundColor(map_crossterm_color(bg))
-                )?;
+                crossterm::queue!(self.backend, SetBackgroundColor(map_crossterm_color(bg)))?;
                 crossterm::queue!(self.backend, ClearCmd(CClearType::UntilNewLine))?;
             }
             if !els.is_empty() {
@@ -344,10 +352,7 @@ impl<W: Write> Presenter<W> {
                 .filter(|(i, _)| !skip[*i])
                 .map(|(_, (x, y, c))| (*x, *y, c));
             self.backend.draw(rest)?;
-            crossterm::queue!(
-                self.backend,
-                crossterm::terminal::EndSynchronizedUpdate
-            )?;
+            crossterm::queue!(self.backend, crossterm::terminal::EndSynchronizedUpdate)?;
             // Everything above is memory-only (diff + queue into the
             // BufWriter). The single blocking point is this flush: if it
             // dominates draw_us, the terminal/ConPTY is backpressuring us.
@@ -447,27 +452,14 @@ mod tests {
         for (y, line) in lines.iter().enumerate() {
             buf.set_string(0, y as u16, line, Style::default());
         }
-        FrameData {
-            seq,
-            area,
-            buf,
-        }
+        FrameData { seq, area, buf }
     }
 
-    fn test_presenter(
-        cap: &CapWriter,
-    ) -> (
-        Presenter<TapWriter<CapWriter>>,
-        Arc<AtomicU64>,
-    ) {
+    fn test_presenter(cap: &CapWriter) -> (Presenter<TapWriter<CapWriter>>, Arc<AtomicU64>) {
         let tap = Arc::new(AtomicU64::new(0));
         let backend = CrosstermBackend::new(TapWriter::new(cap.clone(), Arc::clone(&tap)));
         (
-            Presenter::new(
-                backend,
-                Arc::clone(&tap),
-                Arc::new(AtomicBool::new(true)),
-            ),
+            Presenter::new(backend, Arc::clone(&tap), Arc::new(AtomicBool::new(true))),
             tap,
         )
     }
@@ -487,7 +479,10 @@ mod tests {
         spawn(presenter, rx, stats_tx).join().expect("presenter");
         let out = cap.text();
         assert!(out.contains("CCC"), "latest frame missing: {out:?}");
-        assert!(!out.contains("AAA") && !out.contains("BBB"), "stale frame leaked: {out:?}");
+        assert!(
+            !out.contains("AAA") && !out.contains("BBB"),
+            "stale frame leaked: {out:?}"
+        );
         let reports: Vec<FrameReport> = stats_rx.try_iter().collect();
         assert_eq!(reports.len(), 1, "expected one report: {reports:?}");
         assert_eq!(reports[0].seq, 3);
@@ -524,7 +519,11 @@ mod tests {
             .present(text_frame(2, 20, 2, &["hi", "yo"]))
             .expect("present");
         assert_eq!(rep2.bytes, 0, "empty diff must write nothing");
-        assert_eq!(cap.bytes().len(), len_after_first, "stream grew on empty diff");
+        assert_eq!(
+            cap.bytes().len(),
+            len_after_first,
+            "stream grew on empty diff"
+        );
     }
 
     #[test]

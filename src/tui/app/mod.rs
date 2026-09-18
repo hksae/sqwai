@@ -210,7 +210,7 @@ const MODE_BLEND_MS: u64 = 250;
 const MODE_ACT_RGB: (u8, u8, u8) = (250, 200, 70);
 const MODE_PLAN_RGB: (u8, u8, u8) = (110, 165, 255);
 
-    const WORKING_SPINNER: [char; 6] = ['◜', '◠', '◝', '◞', '◡', '◟'];
+const WORKING_SPINNER: [char; 6] = ['◜', '◠', '◝', '◞', '◡', '◟'];
 
 /// Connection-check state for one provider, rendered on its menu rows.
 #[derive(Clone)]
@@ -760,11 +760,7 @@ impl App {
 
         let startup_data = if startup {
             Some(Self::collect_startup_data(
-                &cfg,
-                &model_cfg,
-                read_only,
-                None,
-                &model_key,
+                &cfg, &model_cfg, read_only, None, &model_key,
             ))
         } else {
             None
@@ -1126,8 +1122,16 @@ impl App {
         input.set_cursor_line_style(Style::new());
         // Classic block cursor / selection on manually colored backgrounds
         // (the styles.md exception for black & white).
-        input.set_cursor_style(Style::new().bg(ratatui::style::Color::White).fg(ratatui::style::Color::Black));
-        input.set_selection_style(Style::new().bg(ratatui::style::Color::Cyan).fg(ratatui::style::Color::Black));
+        input.set_cursor_style(
+            Style::new()
+                .bg(ratatui::style::Color::White)
+                .fg(ratatui::style::Color::Black),
+        );
+        input.set_selection_style(
+            Style::new()
+                .bg(ratatui::style::Color::Cyan)
+                .fg(ratatui::style::Color::Black),
+        );
         input
     }
 
@@ -1139,11 +1143,7 @@ impl App {
     /// The marker occupies the gutter on the top input row only; the
     /// textarea itself is shifted right by this on every row.
     pub(super) fn input_marker_w(&self) -> u16 {
-        if self.last_input.width >= 6 {
-            2
-        } else {
-            0
-        }
+        if self.last_input.width >= 6 { 2 } else { 0 }
     }
 
     pub async fn run(
@@ -1172,8 +1172,7 @@ impl App {
         // UI-side build gate: widget render is memory-fast, but there is no
         // point rebuilding buffers faster than the presenter can show them.
         // Slow presents coalesce in the mailbox structurally (no EMA needed).
-        let mut last_build =
-            Instant::now() - crate::tui::presenter::MIN_PRESENT_INTERVAL;
+        let mut last_build = Instant::now() - crate::tui::presenter::MIN_PRESENT_INTERVAL;
         while !self.quit {
             // Event-driven wakeup: a mouse/key event wakes the loop instantly
             // instead of waiting up to 50ms for the next tick. The tick stays
@@ -1184,8 +1183,7 @@ impl App {
                 _ = input_notify.notified() => {},
                 _ = tick.tick() => {},
             }
-            let presenter_gone =
-                !presenter_alive.load(std::sync::atomic::Ordering::Relaxed);
+            let presenter_gone = !presenter_alive.load(std::sync::atomic::Ordering::Relaxed);
             if presenter_gone && !self.renderer_dead_reported {
                 self.renderer_dead_reported = true;
                 self.status("renderer thread died - restart sqwai", StatusKind::Err);
@@ -1213,7 +1211,11 @@ impl App {
                 };
                 self.dirty |= self.reveal_chars(step);
             }
-            if self.toast.as_ref().is_some_and(|t| Instant::now() >= t.until) {
+            if self
+                .toast
+                .as_ref()
+                .is_some_and(|t| Instant::now() >= t.until)
+            {
                 self.toast = None;
                 self.dirty = true;
             }
@@ -1283,19 +1285,12 @@ impl App {
             if animating {
                 // fixed 20 FPS animation rate from the wall clock, not per
                 // loop iteration: bursts would otherwise fast-forward it
-                self.spinner_tick =
-                    (self.tick_origin.elapsed().as_millis() / 50) as usize;
+                self.spinner_tick = (self.tick_origin.elapsed().as_millis() / 50) as usize;
                 self.dirty = true;
             }
-            if self.dirty
-                && last_build.elapsed() >= crate::tui::presenter::MIN_PRESENT_INTERVAL
-            {
-                let area = ratatui::layout::Rect::new(
-                    0,
-                    0,
-                    self.term_size.width,
-                    self.term_size.height,
-                );
+            if self.dirty && last_build.elapsed() >= crate::tui::presenter::MIN_PRESENT_INTERVAL {
+                let area =
+                    ratatui::layout::Rect::new(0, 0, self.term_size.width, self.term_size.height);
                 // cleared every frame (as the old draw path did): only a
                 // deferred width rebuild sets it below
                 self.defer_rebuild = false;
@@ -1320,11 +1315,7 @@ impl App {
                         merge: self.last_merge.as_str(),
                         fresh: self.last_fresh,
                     });
-                    frame_tx.submit(crate::tui::presenter::FrameData {
-                        seq,
-                        area,
-                        buf,
-                    });
+                    frame_tx.submit(crate::tui::presenter::FrameData { seq, area, buf });
                 }
                 last_build = Instant::now();
                 // a deferred width rebuild keeps dirty set: the 50ms tick
@@ -1360,10 +1351,7 @@ impl App {
                     .saturating_duration_since(ts_built)
                     .as_micros();
                 let pace_us = match self.last_presented_at {
-                    Some(prev) => rep
-                        .presented_at
-                        .saturating_duration_since(prev)
-                        .as_micros(),
+                    Some(prev) => rep.presented_at.saturating_duration_since(prev).as_micros(),
                     None => 0,
                 };
                 self.last_presented_at = Some(rep.presented_at);
@@ -1876,7 +1864,10 @@ impl App {
         // as if work happened; say it fits instead
         if !summarized && before == after {
             self.status(
-                &format!("history already fits: {} tok, nothing dropped", fmt_k(before)),
+                &format!(
+                    "history already fits: {} tok, nothing dropped",
+                    fmt_k(before)
+                ),
                 StatusKind::Info,
             );
             return;
@@ -1979,15 +1970,13 @@ impl App {
                 // so continuing the project's plan is not silent adoption:
                 // the session joins explicitly at the first `plan start`.
                 // Linked plan first, then session-strict, then global newest.
-                let active = self.session_plan().or_else(|| {
-                    crate::plan::open_active(&self.project_root)
-                        .ok()
-                        .flatten()
-                });
+                let active = self
+                    .session_plan()
+                    .or_else(|| crate::plan::open_active(&self.project_root).ok().flatten());
                 if let Some(active) = active {
                     text = if let Some(step) = active.steps.iter().find(|s| {
                         s.status == crate::plan::StepStatus::InProgress
-                        || s.status == crate::plan::StepStatus::Pending
+                            || s.status == crate::plan::StepStatus::Pending
                     }) {
                         format!("Continue next plan step: {}", step.title)
                     } else {
@@ -2069,12 +2058,10 @@ impl App {
         // L0 capture-nudge: a fresh restriction the active plan does not
         // cover yet. Marker scan first so ordinary turns never touch disk.
         if crate::agent::loop_task::has_restriction_marker(&text.to_lowercase()) {
-            if let Ok(Some(plan)) = crate::plan::open_active_for_session(
-                &root,
-                Some(&self.session.id.to_string()),
-            ) {
-                if let Some(tail) =
-                    crate::agent::loop_task::capture_nudge(&text, &plan.constraints)
+            if let Ok(Some(plan)) =
+                crate::plan::open_active_for_session(&root, Some(&self.session.id.to_string()))
+            {
+                if let Some(tail) = crate::agent::loop_task::capture_nudge(&text, &plan.constraints)
                 {
                     if let Some(last) = self.session.messages.last_mut() {
                         last.content.push_str(&tail);
@@ -2644,9 +2631,7 @@ impl App {
                             "AGENTS.md created — it is sent to the model with every request",
                             StatusKind::Ok,
                         ),
-                        Err(e) => {
-                            self.status(&format!("init: {e}"), StatusKind::Err)
-                        }
+                        Err(e) => self.status(&format!("init: {e}"), StatusKind::Err),
                     }
                 }
                 // seed named verify commands (repo probing + MEMORY.md) so
@@ -3107,9 +3092,7 @@ impl App {
             self.toast = None;
             self.dirty = true;
         }
-        self.toast
-            .as_ref()
-            .map(|t| (t.text.clone(), t.kind))
+        self.toast.as_ref().map(|t| (t.text.clone(), t.kind))
     }
 
     /// move up to `k` chars from the reveal queue to the visible answer
@@ -3616,7 +3599,10 @@ impl App {
                     }
                     self.retry_line = None;
                     self.retry_notified = false;
-                    self.status(&format!("switched to fallback model: {to}"), StatusKind::Warn);
+                    self.status(
+                        &format!("switched to fallback model: {to}"),
+                        StatusKind::Warn,
+                    );
                     self.dirty = true;
                 }
                 AgentEvent::Completed(res) => {
@@ -3938,9 +3924,8 @@ impl App {
         // replacement no longer address the same turns — rebase them first.
         // Plain appends (the common case) leave every index valid.
         if outcome.messages.len() < self.session.messages.len() {
-            self.session.rebase_turn_attachments(
-                self.session.messages.len() - outcome.messages.len(),
-            );
+            self.session
+                .rebase_turn_attachments(self.session.messages.len() - outcome.messages.len());
         }
         //
         // The outcome only authorizes a visible answer if it advanced past
@@ -4497,8 +4482,7 @@ impl App {
         let idx = self.session.checkpoints.len().saturating_sub(n);
         let (sha, label) = self.session.checkpoints[idx].clone();
         let root = std::env::current_dir().unwrap_or_default();
-        let git_snapshots =
-            crate::agent::checkpoints::available_in(&root, self.cfg.undo.shadow);
+        let git_snapshots = crate::agent::checkpoints::available_in(&root, self.cfg.undo.shadow);
         // Scope the restore to what the host recorded as its own writes across
         // the checkpoints being undone. Without this, undo reverts the whole
         // tree to the snapshot and silently discards anything the user edited
@@ -4635,20 +4619,14 @@ impl App {
         // resolve the session's own plan first: step numbers restart per
         // plan, so the revert must be scoped to this plan, not scanned
         // project-wide (no plan → the old unscoped scan, nothing better)
-        let plan_id = crate::plan::open_active_for_session(
-            &root,
-            Some(&self.session.id.to_string()),
-        )
-        .ok()
-        .flatten()
-        .map(|plan| plan.id);
+        let plan_id =
+            crate::plan::open_active_for_session(&root, Some(&self.session.id.to_string()))
+                .ok()
+                .flatten()
+                .map(|plan| plan.id);
         // no plan to scope to → the old unscoped scan (nothing better exists)
         let revert = match &plan_id {
-            Some(pid) => crate::agent::journal::Journal::step_pre_images_in(
-                &root,
-                Some(pid),
-                step,
-            ),
+            Some(pid) => crate::agent::journal::Journal::step_pre_images_in(&root, Some(pid), step),
             None => crate::agent::journal::Journal::step_pre_images(&root, step),
         };
         let revert = match revert {
@@ -4868,7 +4846,13 @@ impl App {
         let session_model_key = self.session.model_key.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let data = Self::collect_startup_data(&cfg, &model_cfg, read_only, preferred_plan_id, &session_model_key);
+            let data = Self::collect_startup_data(
+                &cfg,
+                &model_cfg,
+                read_only,
+                preferred_plan_id,
+                &session_model_key,
+            );
             let _ = tx.send(data);
         });
         self.startup_data_rx = Some(rx);

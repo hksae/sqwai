@@ -364,16 +364,17 @@ impl App {
                                 {
                                     self.sessions_filter.clear();
                                     self.menu_sel = 0;
-                            self.menu_scroll = 0;
+                                    self.menu_scroll = 0;
                                     self.menu_scroll = 0;
                                     self.build_menu_rows();
                                     self.dirty = true;
-                                } else if let Some(Menu::GraphView { search_filter, .. }) = self.cur_menu_mut()
+                                } else if let Some(Menu::GraphView { search_filter, .. }) =
+                                    self.cur_menu_mut()
                                     && search_filter.is_some()
                                 {
                                     *search_filter = None;
                                     self.menu_sel = 0;
-                            self.menu_scroll = 0;
+                                    self.menu_scroll = 0;
                                     self.menu_scroll = 0;
                                     self.build_menu_rows();
                                     self.dirty = true;
@@ -667,19 +668,38 @@ impl App {
                         }
                         // graph view controls
                         KeyCode::Char('+') | KeyCode::Char('=')
-                            if matches!(self.cur_menu(), Some(Menu::GraphView { search_filter: None, .. })) =>
+                            if matches!(
+                                self.cur_menu(),
+                                Some(Menu::GraphView {
+                                    search_filter: None,
+                                    ..
+                                })
+                            ) =>
                         {
                             self.run_action(MenuAction::GraphDepth(1));
                         }
                         KeyCode::Char('-')
-                            if matches!(self.cur_menu(), Some(Menu::GraphView { search_filter: None, .. })) =>
+                            if matches!(
+                                self.cur_menu(),
+                                Some(Menu::GraphView {
+                                    search_filter: None,
+                                    ..
+                                })
+                            ) =>
                         {
                             self.run_action(MenuAction::GraphDepth(-1));
                         }
                         KeyCode::Char('f') | KeyCode::Char('F') | KeyCode::Char('/')
-                            if matches!(self.cur_menu(), Some(Menu::GraphView { search_filter: None, .. })) =>
+                            if matches!(
+                                self.cur_menu(),
+                                Some(Menu::GraphView {
+                                    search_filter: None,
+                                    ..
+                                })
+                            ) =>
                         {
-                            if let Some(Menu::GraphView { search_filter, .. }) = self.cur_menu_mut() {
+                            if let Some(Menu::GraphView { search_filter, .. }) = self.cur_menu_mut()
+                            {
                                 *search_filter = Some(String::new());
                             }
                             self.menu_sel = 0;
@@ -688,14 +708,30 @@ impl App {
                             self.dirty = true;
                         }
                         KeyCode::Backspace
-                            if matches!(self.cur_menu(), Some(Menu::GraphView { search_filter: None, .. })) =>
+                            if matches!(
+                                self.cur_menu(),
+                                Some(Menu::GraphView {
+                                    search_filter: None,
+                                    ..
+                                })
+                            ) =>
                         {
                             self.run_action(MenuAction::GraphBack);
                         }
                         KeyCode::Backspace
-                            if matches!(self.cur_menu(), Some(Menu::GraphView { search_filter: Some(_), .. })) =>
+                            if matches!(
+                                self.cur_menu(),
+                                Some(Menu::GraphView {
+                                    search_filter: Some(_),
+                                    ..
+                                })
+                            ) =>
                         {
-                            if let Some(Menu::GraphView { search_filter: Some(filter), .. }) = self.cur_menu_mut() {
+                            if let Some(Menu::GraphView {
+                                search_filter: Some(filter),
+                                ..
+                            }) = self.cur_menu_mut()
+                            {
                                 filter.pop();
                             }
                             self.menu_sel = 0;
@@ -706,9 +742,19 @@ impl App {
                         KeyCode::Char(c)
                             if !ctrl
                                 && !alt
-                                && matches!(self.cur_menu(), Some(Menu::GraphView { search_filter: Some(_), .. })) =>
+                                && matches!(
+                                    self.cur_menu(),
+                                    Some(Menu::GraphView {
+                                        search_filter: Some(_),
+                                        ..
+                                    })
+                                ) =>
                         {
-                            if let Some(Menu::GraphView { search_filter: Some(filter), .. }) = self.cur_menu_mut() {
+                            if let Some(Menu::GraphView {
+                                search_filter: Some(filter),
+                                ..
+                            }) = self.cur_menu_mut()
+                            {
                                 filter.push(c);
                             }
                             self.menu_sel = 0;
@@ -1328,7 +1374,10 @@ pub(super) fn select_all(ta: &mut TextArea<'static>) {
 /// Backspace/Delete strictly inside a line removes the whole grapheme in
 /// one press; line joins and modified keys keep the default behavior.
 /// True = consumed, do not pass the key to textarea.
-pub(super) fn composer_erase_key(ta: &mut TextArea<'static>, k: &crossterm::event::KeyEvent) -> bool {
+pub(super) fn composer_erase_key(
+    ta: &mut TextArea<'static>,
+    k: &crossterm::event::KeyEvent,
+) -> bool {
     use crossterm::event::KeyCode;
     if !k.modifiers.is_empty() {
         return false;
@@ -1360,7 +1409,12 @@ fn erase_grapheme(ta: &mut TextArea<'static>, back: bool) -> bool {
             return false; // line join: default
         }
         // largest boundary strictly left of the cursor
-        let s = bounds.iter().rev().find(|b| **b < col).copied().unwrap_or(0);
+        let s = bounds
+            .iter()
+            .rev()
+            .find(|b| **b < col)
+            .copied()
+            .unwrap_or(0);
         let k = col - s;
         for _ in 0..k {
             ta.move_cursor(CursorMove::Back);

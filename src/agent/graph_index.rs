@@ -555,12 +555,7 @@ pub fn reindex_paths(
             }
         });
         stamp_file_mtime(&mut batch, &norm, mtime);
-        store.replace_file_subgraph(
-            &norm,
-            &batch.nodes,
-            &batch.edges,
-            &batch.occurrences,
-        )?;
+        store.replace_file_subgraph(&norm, &batch.nodes, &batch.edges, &batch.occurrences)?;
         report.indexed_files += 1;
     }
 
@@ -1443,16 +1438,8 @@ mod tests {
                 "fn main() { foo(); }\nfn foo() {}\n",
             )
             .unwrap();
-            fs::write(
-                dir.join("src/lib.py"),
-                "def calc():\n    return 1\n",
-            )
-            .unwrap();
-            fs::write(
-                dir.join("src/app.ts"),
-                "export function run(): void {}\n",
-            )
-            .unwrap();
+            fs::write(dir.join("src/lib.py"), "def calc():\n    return 1\n").unwrap();
+            fs::write(dir.join("src/app.ts"), "export function run(): void {}\n").unwrap();
             fs::create_dir_all(dir.join("docs")).unwrap();
             fs::write(dir.join("docs/spec.md"), "# Spec\nInitial text\n").unwrap();
             fs::write(dir.join("extra.txt"), "plain\n").unwrap();
@@ -1502,7 +1489,18 @@ mod tests {
         let store_full = SqliteGraphStore::open(dir_full.path()).unwrap();
 
         // 5. Compare normalized projections across all tables!
-        type NodeRow = (String, String, Option<String>, Option<String>, Option<String>, Option<u32>, Option<u32>, Option<String>, Vec<String>, Option<String>);
+        type NodeRow = (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<u32>,
+            Option<u32>,
+            Option<String>,
+            Vec<String>,
+            Option<String>,
+        );
         let query_nodes = |store: &SqliteGraphStore| -> Vec<NodeRow> {
             let mut stmt = store
                 .conn
@@ -1519,7 +1517,8 @@ mod tests {
                         row.get::<_, Option<i64>>(5)?.map(|v| v as u32),
                         row.get::<_, Option<i64>>(6)?.map(|v| v as u32),
                         row.get(7)?,
-                        serde_json::from_str::<Vec<String>>(&row.get::<_, String>(8)?).unwrap_or_default(),
+                        serde_json::from_str::<Vec<String>>(&row.get::<_, String>(8)?)
+                            .unwrap_or_default(),
                         row.get(9)?,
                     ))
                 })
@@ -1566,7 +1565,15 @@ mod tests {
             rows.map(|r| r.unwrap()).collect()
         };
 
-        type FileRow = (String, Option<String>, Option<String>, Option<String>, Option<String>, String, String);
+        type FileRow = (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+        );
         let query_files = |store: &SqliteGraphStore| -> Vec<FileRow> {
             let mut stmt = store
                 .conn
@@ -1590,15 +1597,24 @@ mod tests {
 
         let nodes_inc = query_nodes(&store_inc);
         let nodes_full = query_nodes(&store_full);
-        assert_eq!(nodes_inc, nodes_full, "nodes projection must match full rebuild");
+        assert_eq!(
+            nodes_inc, nodes_full,
+            "nodes projection must match full rebuild"
+        );
 
         let edges_inc = query_edges(&store_inc);
         let edges_full = query_edges(&store_full);
-        assert_eq!(edges_inc, edges_full, "edges projection must match full rebuild");
+        assert_eq!(
+            edges_inc, edges_full,
+            "edges projection must match full rebuild"
+        );
 
         let occ_inc = query_occurrences(&store_inc);
         let occ_full = query_occurrences(&store_full);
-        assert_eq!(occ_inc, occ_full, "occurrences projection must match full rebuild");
+        assert_eq!(
+            occ_inc, occ_full,
+            "occurrences projection must match full rebuild"
+        );
 
         let files_inc = query_files(&store_inc);
         let files_full = query_files(&store_full);

@@ -124,7 +124,9 @@ impl ToolCtx {
     /// Whose shadow chain snapshots go to (child → parent). Everything else
     /// keeps using `session_id`.
     pub fn checkpoint_chain(&self) -> &str {
-        self.checkpoint_session.as_deref().unwrap_or(&self.session_id)
+        self.checkpoint_session
+            .as_deref()
+            .unwrap_or(&self.session_id)
     }
 
     /// Share a cancellation flag across this context and its clones. The
@@ -1066,7 +1068,10 @@ pub fn call_summary(name: &str, args: &Value) -> String {
                 .unwrap_or_else(|| "list".to_string());
             let mut extra = String::new();
             if args["wait_secs"].as_u64().unwrap_or(0) > 0 {
-                extra.push_str(&format!(" wait {}s", args["wait_secs"].as_u64().unwrap_or(0)));
+                extra.push_str(&format!(
+                    " wait {}s",
+                    args["wait_secs"].as_u64().unwrap_or(0)
+                ));
             }
             if args["from_start"].as_bool().unwrap_or(false) {
                 extra.push_str(" from start");
@@ -1254,12 +1259,7 @@ pub fn tool_specs(plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
             !baseline
                 || !matches!(
                     d.name,
-                    "plan"
-                        | "propose_plan"
-                        | "note"
-                        | "journal"
-                        | "memory_propose"
-                        | "memory_read"
+                    "plan" | "propose_plan" | "note" | "journal" | "memory_propose" | "memory_read"
                 )
         })
         .map(|d| {
@@ -1486,7 +1486,8 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
                     if items.is_empty() {
                         Outcome::ok(format!("No recall matches found for '{query}'."))
                     } else {
-                        let mut out = format!("Recall results for '{query}' ({} matches):\n", items.len());
+                        let mut out =
+                            format!("Recall results for '{query}' ({} matches):\n", items.len());
                         for (i, item) in items.iter().enumerate() {
                             out.push_str(&format!(
                                 "{}. [{}] {} (score: {:.2})\n   snippet: {}\n",
@@ -1536,9 +1537,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
                 .or_else(|| args["limit"].as_u64())
                 .unwrap_or(crate::agent::graph::DEFAULT_MAX_EDGES as u64)
                 .clamp(1, 100) as usize;
-            let max_output_tokens = args["max_output_tokens"]
-                .as_u64()
-                .unwrap_or(2000) as usize;
+            let max_output_tokens = args["max_output_tokens"].as_u64().unwrap_or(2000) as usize;
             let relations: Vec<String> = args["relations"]
                 .as_array()
                 .map(|arr| {
@@ -1606,10 +1605,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
                     }
                     out.push_str("Edges:\n");
                     for e in &proj.edges {
-                        out.push_str(&format!(
-                            "  - {} --({})--> {}\n",
-                            e.from, e.kind, e.to
-                        ));
+                        out.push_str(&format!("  - {} --({})--> {}\n", e.from, e.kind, e.to));
                     }
 
                     // Token / character budget truncation
@@ -1626,21 +1622,33 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
                 Err(e) => {
                     let err_str = format!("{e:#}");
                     if err_str.contains("unresolved_start:") {
-                        let hint = err_str.strip_prefix("unresolved_start:").unwrap_or(&err_str).trim();
-                        Outcome::err(serde_json::to_string_pretty(&serde_json::json!({
-                            "ok": false,
-                            "code": "unresolved_start",
-                            "node": node,
-                            "hint": hint,
-                        })).unwrap_or_else(|_| format!("unresolved start node '{node}': {hint}")))
+                        let hint = err_str
+                            .strip_prefix("unresolved_start:")
+                            .unwrap_or(&err_str)
+                            .trim();
+                        Outcome::err(
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "ok": false,
+                                "code": "unresolved_start",
+                                "node": node,
+                                "hint": hint,
+                            }))
+                            .unwrap_or_else(|_| format!("unresolved start node '{node}': {hint}")),
+                        )
                     } else if err_str.contains("ambiguous_start:") {
-                        let hint = err_str.strip_prefix("ambiguous_start:").unwrap_or(&err_str).trim();
-                        Outcome::err(serde_json::to_string_pretty(&serde_json::json!({
-                            "ok": false,
-                            "code": "ambiguous_start",
-                            "node": node,
-                            "hint": hint,
-                        })).unwrap_or_else(|_| format!("ambiguous start node '{node}': {hint}")))
+                        let hint = err_str
+                            .strip_prefix("ambiguous_start:")
+                            .unwrap_or(&err_str)
+                            .trim();
+                        Outcome::err(
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "ok": false,
+                                "code": "ambiguous_start",
+                                "node": node,
+                                "hint": hint,
+                            }))
+                            .unwrap_or_else(|_| format!("ambiguous start node '{node}': {hint}")),
+                        )
                     } else {
                         Outcome::err(format!("graph_query failed: {e:#}"))
                     }
@@ -2207,7 +2215,8 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     Ok(expanded) => expanded,
                     Err(unknown) => {
                         let hint = if unknown.known.is_empty() {
-                            "no verify commands seeded — run /init or write the command out".to_string()
+                            "no verify commands seeded — run /init or write the command out"
+                                .to_string()
                         } else {
                             format!("known: {}", unknown.known.join(", "))
                         };
@@ -2380,7 +2389,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         _ => {
                             return Outcome::err(
                                 "no active plan: create one with op=create first".to_string(),
-                            )
+                            );
                         }
                     }
                 }
@@ -2771,12 +2780,9 @@ fn with_assumption_warning(ctx: &ToolCtx, finished_step: Option<&str>, message: 
     let Some(step) = finished_step else {
         return message;
     };
-    let open = crate::agent::journal::Journal::open_assumptions_in(
-        &ctx.root,
-        &ctx.session_id,
-        Some(step),
-    )
-    .unwrap_or_default();
+    let open =
+        crate::agent::journal::Journal::open_assumptions_in(&ctx.root, &ctx.session_id, Some(step))
+            .unwrap_or_default();
     if open.is_empty() {
         return message;
     }
@@ -3597,7 +3603,8 @@ mod tests {
         assert!(bad_path.output.contains("bad path"));
     }
     #[test]
-    fn tool_specs_are_stably_sorted() {        let names: Vec<String> = tool_specs(false).iter().map(|t| t.name.clone()).collect();
+    fn tool_specs_are_stably_sorted() {
+        let names: Vec<String> = tool_specs(false).iter().map(|t| t.name.clone()).collect();
         assert_eq!(names, tool_names());
 
         let mut sorted = names.clone();
@@ -3618,8 +3625,7 @@ mod tests {
         }
         let _guard = BaselineGuard;
         crate::bench::set_baseline_override(Some(true));
-        let names: Vec<String> =
-            tool_specs(false).iter().map(|t| t.name.clone()).collect();
+        let names: Vec<String> = tool_specs(false).iter().map(|t| t.name.clone()).collect();
         for hidden in [
             "plan",
             "propose_plan",
@@ -3892,17 +3898,14 @@ mod tests {
         let (mut ctx, _dir) = proj();
         let refused = plan_op(&mut ctx, &json!({"op": "join", "session": "sub-1"}));
         assert!(!refused.ok, "join must never run from the model");
-        assert!(
-            refused.output.contains("host-only"),
-            "{}",
-            refused.output
-        );
+        assert!(refused.output.contains("host-only"), "{}", refused.output);
     }
     /// A subagent mutating after its step was reopened would attach stale
     /// work to a fresh epoch (§2.2.4). The dispatcher refuses the mutation
     /// instead; read-only tools keep working, and a fresh spawn proceeds.
     #[test]
-    fn subagent_mutation_refused_after_step_reopen() {        let (mut ctx, dir) = proj();
+    fn subagent_mutation_refused_after_step_reopen() {
+        let (mut ctx, dir) = proj();
         let created = plan_op(
             &mut ctx,
             &json!({"op": "create", "goal": "guarded work", "acceptance": [],
@@ -3973,7 +3976,11 @@ mod tests {
             &json!({"file_path": "src/locked.rs", "content": "nope\n"}),
         );
         assert!(!refused.ok, "locked mutation must be refused");
-        assert!(refused.output.contains("writer_locked"), "{}", refused.output);
+        assert!(
+            refused.output.contains("writer_locked"),
+            "{}",
+            refused.output
+        );
         drop(_restore);
         let wrote = execute(
             &mut ctx,
@@ -4005,13 +4012,29 @@ mod tests {
         active.steps[0].refs = vec![crate::plan::StepRef::from("src/a.rs")];
         plan::store(&dir, &active).unwrap();
 
-        let inside = execute(&mut ctx, "write", &json!({"file_path": "src/a.rs", "content": "hello\n"}));
+        let inside = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": "src/a.rs", "content": "hello\n"}),
+        );
         assert!(inside.ok, "{}", inside.output);
-        assert!(!inside.output.contains("outside this step's refs"), "{}", inside.output);
+        assert!(
+            !inside.output.contains("outside this step's refs"),
+            "{}",
+            inside.output
+        );
 
-        let outside = execute(&mut ctx, "write", &json!({"file_path": "src/b.rs", "content": "hello\n"}));
+        let outside = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": "src/b.rs", "content": "hello\n"}),
+        );
         assert!(outside.ok, "gate warns, never blocks: {}", outside.output);
-        assert!(outside.output.contains("outside this step's refs"), "{}", outside.output);
+        assert!(
+            outside.output.contains("outside this step's refs"),
+            "{}",
+            outside.output
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -4027,7 +4050,11 @@ mod tests {
                     "content": "fn check(input: &str) -> bool {\n    if input == \"the quick brown fixture bytes 0123456789\" {\n        return true;\n    }\n    false\n}\n"}),
         );
         assert!(trapped.ok, "{}", trapped.output);
-        assert!(trapped.output.contains("test-shaped literal"), "{}", trapped.output);
+        assert!(
+            trapped.output.contains("test-shaped literal"),
+            "{}",
+            trapped.output
+        );
 
         let plain = execute(
             &mut ctx,
@@ -4035,7 +4062,11 @@ mod tests {
             &json!({"file_path": "src/plain.rs", "content": "fn f(x: i32) -> i32 {\n    x + 1\n}\n"}),
         );
         assert!(plain.ok, "{}", plain.output);
-        assert!(!plain.output.contains("test-shaped literal"), "{}", plain.output);
+        assert!(
+            !plain.output.contains("test-shaped literal"),
+            "{}",
+            plain.output
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -4422,7 +4453,11 @@ mod tests {
             &mut ctx,
             &json!({"op": "finish", "id": "1", "summary": "looked", "evidence": [2]}),
         );
-        assert!(!rejected.ok, "failed calls are not evidence: {}", rejected.output);
+        assert!(
+            !rejected.ok,
+            "failed calls are not evidence: {}",
+            rejected.output
+        );
         assert!(
             rejected.output.contains("wrong_evidence"),
             "{}",
@@ -4460,7 +4495,11 @@ mod tests {
         // another session, no plan of its own
         let mut other = ToolCtx::new(&dir).in_session("other-sess");
         let started = plan_op(&mut other, &json!({"op": "start", "id": "1"}));
-        assert!(started.ok, "start must join, not refuse: {}", started.output);
+        assert!(
+            started.ok,
+            "start must join, not refuse: {}",
+            started.output
+        );
 
         let plan = plan::open_active(&dir).unwrap().unwrap();
         assert!(
@@ -4473,11 +4512,7 @@ mod tests {
         // ...while a non-start op from the outsider still resolves nothing
         let mut third = ToolCtx::new(&dir).in_session("third-sess");
         let shown = plan_op(&mut third, &json!({"op": "show"}));
-        assert!(
-            !shown.ok,
-            "reads stay session-strict too: {}",
-            shown.output
-        );
+        assert!(!shown.ok, "reads stay session-strict too: {}", shown.output);
         let finished = plan_op(
             &mut third,
             &json!({"op": "finish", "id": "1", "summary": "mine"}),
@@ -4492,10 +4527,7 @@ mod tests {
     /// Call rows show whether the model waited: `job 1` vs `job 1 wait 60s`.
     #[test]
     fn bash_output_summary_shows_wait_params() {
-        assert_eq!(
-            call_summary("bash_output", &json!({"id": 1})),
-            "job 1"
-        );
+        assert_eq!(call_summary("bash_output", &json!({"id": 1})), "job 1");
         assert_eq!(
             call_summary("bash_output", &json!({"id": 1, "wait_secs": 60})),
             "job 1 wait 60s"
@@ -5922,7 +5954,11 @@ end
                 }]
             }),
         );
-        assert!(pass_unknown.ok, "unknown must pass: {}", pass_unknown.output);
+        assert!(
+            pass_unknown.ok,
+            "unknown must pass: {}",
+            pass_unknown.output
+        );
 
         // 3. Add step with create intent on an already existing symbol -> rejected!
         let rej_create = plan_op(
@@ -5934,8 +5970,15 @@ end
                 "refs": [{"path": "src/calc.rs", "symbol": "add", "intent": "create"}]
             }),
         );
-        assert!(!rej_create.ok, "should reject existing ref on create intent");
-        assert!(rej_create.output.contains("ref_collision"), "{}", rej_create.output);
+        assert!(
+            !rej_create.ok,
+            "should reject existing ref on create intent"
+        );
+        assert!(
+            rej_create.output.contains("ref_collision"),
+            "{}",
+            rej_create.output
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -5967,7 +6010,8 @@ end
         );
         assert!(out.ok, "edit must succeed");
         assert!(
-            out.output.contains("warning: symbol 'dummy' not in index for this file"),
+            out.output
+                .contains("warning: symbol 'dummy' not in index for this file"),
             "output was: {}",
             out.output
         );
@@ -6054,11 +6098,7 @@ end
         );
 
         // 5. Verify the decision node points to original journal ref j#42 via recall
-        let recall_out = execute(
-            &mut ctx,
-            "recall",
-            &json!({"query": "persist todos"}),
-        );
+        let recall_out = execute(&mut ctx, "recall", &json!({"query": "persist todos"}));
         assert!(recall_out.ok, "recall must succeed: {}", recall_out.output);
         assert!(
             recall_out.output.contains("j#42"),
@@ -6075,7 +6115,11 @@ end
                 "query": "persist todos"
             }),
         );
-        assert!(journal_out.ok, "journal tool must succeed: {}", journal_out.output);
+        assert!(
+            journal_out.ok,
+            "journal tool must succeed: {}",
+            journal_out.output
+        );
         assert!(
             journal_out.output.contains("#42"),
             "journal tool must retrieve the original record #42: {}",
@@ -6099,8 +6143,16 @@ end
             }),
         );
         assert!(!out.ok, "must fail for nonexistent start");
-        assert!(out.output.contains("unresolved_start"), "must contain unresolved_start code: {}", out.output);
-        assert!(out.output.contains("hint"), "must contain hint: {}", out.output);
+        assert!(
+            out.output.contains("unresolved_start"),
+            "must contain unresolved_start code: {}",
+            out.output
+        );
+        assert!(
+            out.output.contains("hint"),
+            "must contain hint: {}",
+            out.output
+        );
 
         fs::remove_dir_all(&dir).ok();
     }

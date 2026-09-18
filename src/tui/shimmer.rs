@@ -33,7 +33,11 @@ const CREST_RGB: (u8, u8, u8) = (255, 255, 255);
 /// Shared with the mode-chip sweep (yellow ACT ↔ blue PLAN).
 pub(crate) fn blend(base: (u8, u8, u8), crest: (u8, u8, u8), t: f64) -> (u8, u8, u8) {
     let mix = |b: u8, c: u8| (b as f64 + (c as f64 - b as f64) * t).round() as u8;
-    (mix(base.0, crest.0), mix(base.1, crest.1), mix(base.2, crest.2))
+    (
+        mix(base.0, crest.0),
+        mix(base.1, crest.1),
+        mix(base.2, crest.2),
+    )
 }
 
 /// Terminal env does not change mid-process: detect once, reuse every
@@ -93,9 +97,9 @@ fn detect_truecolor() -> bool {
 /// paths so they stay in phase).
 fn wave_t(tick: usize, center: f64, total: f64) -> f64 {
     let half = (total * 0.15).max(3.0);
-    let pos =
-        (tick % SHIMMER_PERIOD_TICKS) as f64 / SHIMMER_PERIOD_TICKS as f64 * (total + 2.0 * half)
-            - half;
+    let pos = (tick % SHIMMER_PERIOD_TICKS) as f64 / SHIMMER_PERIOD_TICKS as f64
+        * (total + 2.0 * half)
+        - half;
     let dist = ((center - pos).abs() / half).min(1.0);
     0.5 * (1.0 + (std::f64::consts::PI * dist).cos())
 }
@@ -183,8 +187,7 @@ pub fn shimmer_pulse_spans(text: &str, tick: usize) -> Vec<Span<'static>> {
         return shimmer_ansi(text, tick);
     }
     let t = 0.5
-        * (1.0
-            + (tick as f64 / SHIMMER_PERIOD_TICKS as f64 * 2.0 * std::f64::consts::PI).cos());
+        * (1.0 + (tick as f64 / SHIMMER_PERIOD_TICKS as f64 * 2.0 * std::f64::consts::PI).cos());
     shimmer_pulse_rgb(text, t)
 }
 
@@ -339,7 +342,9 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert!(
-            fg_at(0).iter().all(|fg| *fg == Some(Color::Rgb(180, 180, 180))),
+            fg_at(0)
+                .iter()
+                .all(|fg| *fg == Some(Color::Rgb(180, 180, 180))),
             "band starts off the text: all base"
         );
         assert!(
@@ -459,8 +464,7 @@ mod tests {
             "soft red band must ride mid-sweep"
         );
         assert!(
-            mid.iter().all(|s| s.style.fg != GRAY)
-                && mid_err.iter().all(|s| s.style.fg != GRAY),
+            mid.iter().all(|s| s.style.fg != GRAY) && mid_err.iter().all(|s| s.style.fg != GRAY),
             "no gray phase mid-sweep either"
         );
         // end: settled back to the static row, no pop

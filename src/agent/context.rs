@@ -164,9 +164,8 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     // exactly when an unresolved assumption would otherwise vanish from the
     // conversation while still holding up the work. Scoped to this session:
     // sequence numbers restart per journal file.
-    let open =
-        crate::agent::journal::Journal::open_assumptions_in(root, session_id, None)
-            .unwrap_or_default();
+    let open = crate::agent::journal::Journal::open_assumptions_in(root, session_id, None)
+        .unwrap_or_default();
     if open.is_empty() {
         out.push_str("open assumptions: none\n");
     } else {
@@ -358,11 +357,9 @@ impl Policy {
         let by_reserve = self.context_limit.saturating_sub(self.reserve());
         match self.threshold {
             None => by_reserve,
-            Some(t) => {
-                ((self.context_limit as f64 * t.clamp(0.0, 1.0)).round() as u64)
-                    .min(self.context_limit)
-                    .min(by_reserve)
-            }
+            Some(t) => ((self.context_limit as f64 * t.clamp(0.0, 1.0)).round() as u64)
+                .min(self.context_limit)
+                .min(by_reserve),
         }
     }
 
@@ -469,7 +466,8 @@ pub fn prune(messages: &[Message]) -> (Vec<Message>, bool) {
 /// from its results — providers reject orphaned tool results.
 /// Test-only shorthand: production always passes an explicit keep_turns.
 #[allow(dead_code)]
-pub fn split_for_summary(messages: &[Message]) -> (&[Message], &[Message]) {    split_for_summary_with_keep(messages, SUMMARY_KEEP_RECENT)
+pub fn split_for_summary(messages: &[Message]) -> (&[Message], &[Message]) {
+    split_for_summary_with_keep(messages, SUMMARY_KEEP_RECENT)
 }
 
 pub fn split_for_summary_with_keep(
@@ -623,11 +621,7 @@ pub fn truncate_summary(text: &str) -> String {
 /// dropped messages that is NOT already covered by the durable plan.
 /// `plan_hint` is preformatted "Goal: …\nConstraints: …" (possibly empty:
 /// with no plan, every user request counts as uncovered).
-pub fn summary_short_input(
-    older: &[Message],
-    previous: Option<&str>,
-    plan_hint: &str,
-) -> String {
+pub fn summary_short_input(older: &[Message], previous: Option<&str>, plan_hint: &str) -> String {
     let mut out = String::from(
         "Summarize ONLY what the user explicitly asked, forbade, or stated \
          as fact in the dropped conversation below — and ONLY what is not \
@@ -1284,15 +1278,13 @@ mod tests {
         // fired here: compactions stayed 0 while the transcript grew forever.
         let mut messages = vec![user("do the thing")];
         for i in 0..10 {
-            messages.push(
-                Message::new(Role::Assistant, "").with_tool_calls(vec![
-                    crate::providers::ToolCallReq::new(
-                        format!("c{i}"),
-                        "bash",
-                        serde_json::json!({"command": "ls"}),
-                    ),
-                ]),
-            );
+            messages.push(Message::new(Role::Assistant, "").with_tool_calls(vec![
+                crate::providers::ToolCallReq::new(
+                    format!("c{i}"),
+                    "bash",
+                    serde_json::json!({"command": "ls"}),
+                ),
+            ]));
             messages.push(Message::tool_result(
                 format!("c{i}"),
                 "x".repeat(400),

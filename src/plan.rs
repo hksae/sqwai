@@ -412,7 +412,10 @@ pub fn substitute_verify_commands(
     unknown.dedup();
     let mut known: Vec<String> = commands.keys().cloned().collect();
     known.sort();
-    Err(UnknownVerify { names: unknown, known })
+    Err(UnknownVerify {
+        names: unknown,
+        known,
+    })
 }
 
 fn expand_refs(
@@ -735,8 +738,7 @@ pub fn replay(root: &Path) -> Result<ReplayReport> {
         // the legacy single cursor. BTreeMap order is deterministic; each
         // stream heals independently (a stall holds its own stream while
         // the others keep healing).
-        let mut cursors: std::collections::BTreeMap<String, u64> =
-            plan.applied_events.clone();
+        let mut cursors: std::collections::BTreeMap<String, u64> = plan.applied_events.clone();
         if cursors.is_empty() {
             if let Some((sess, cursor)) = split_applied(&plan.applied_event) {
                 cursors.insert(sess, cursor);
@@ -1201,8 +1203,12 @@ pub fn open(root: &Path, id: &str) -> Result<Plan> {
 /// has side effects on sibling plans); they quarantine as before.
 fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
     // (ts, session, seq, fields) over every session journal
-    let mut records: Vec<(String, String, u64, serde_json::Map<String, serde_json::Value>)> =
-        Vec::new();
+    let mut records: Vec<(
+        String,
+        String,
+        u64,
+        serde_json::Map<String, serde_json::Value>,
+    )> = Vec::new();
     let dir = root.join(".sqwai").join("journal");
     let Ok(entries) = std::fs::read_dir(dir) else {
         return None;
@@ -1235,10 +1241,7 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
                 .and_then(|t| t.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let fields = value
-                .as_object()
-                .cloned()
-                .unwrap_or_default();
+            let fields = value.as_object().cloned().unwrap_or_default();
             records.push((ts, sess.clone(), seq, fields));
         }
     }
@@ -1262,10 +1265,7 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
     };
     let (_, create_sess, create_seq, create_fields) = records[create_idx].clone();
     let mut plan = create(
-        create_fields
-            .get("goal")?
-            .as_str()?
-            .to_string(),
+        create_fields.get("goal")?.as_str()?.to_string(),
         create_fields
             .get("constraints")?
             .as_array()?
@@ -1287,10 +1287,7 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
     )
     .ok()?;
     plan.id = id.to_string();
-    plan.created = create_fields
-        .get("result_created")?
-        .as_str()?
-        .to_string();
+    plan.created = create_fields.get("result_created")?.as_str()?.to_string();
     plan.sessions = create_fields
         .get("result_sessions")?
         .as_array()?
@@ -1501,7 +1498,11 @@ pub struct Rejection {
 }
 
 impl Rejection {
-    pub(crate) fn new(code: &'static str, reason: impl Into<String>, hint: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        code: &'static str,
+        reason: impl Into<String>,
+        hint: impl Into<String>,
+    ) -> Self {
         Self {
             code,
             reason: reason.into(),
@@ -2626,10 +2627,7 @@ pub fn invalidate_on_diff(root: &Path, session_id: &str, paths: &[String]) -> Re
 pub fn stale_announcements(
     announced: &std::collections::HashSet<(String, usize)>,
     plan: &Plan,
-) -> (
-    Vec<usize>,
-    std::collections::HashSet<(String, usize)>,
-) {
+) -> (Vec<usize>, std::collections::HashSet<(String, usize)>) {
     let mut next: std::collections::HashSet<(String, usize)> = announced
         .iter()
         .filter(|(id, _)| id == &plan.id)
@@ -3132,7 +3130,10 @@ mod tests {
         // file state as after A's committed start: step running, cursors set
         apply(
             &mut plan,
-            Op::Start { id: "1".into(), confirm: None },
+            Op::Start {
+                id: "1".into(),
+                confirm: None,
+            },
             &Limits::default(),
             None,
         )
@@ -3189,16 +3190,24 @@ mod tests {
         store(&dir, &plan).unwrap();
         // aaa (sorted first) journaled a start on a missing step: diverges
         let mut ja = crate::agent::journal::Journal::open(&dir, "aaa").unwrap();
-        ja.append("plan", serde_json::json!({
-            "op": "start", "id": "99",
-            "plan_id": plan.id, "by": "model", "ok": true,
-        })).unwrap();
+        ja.append(
+            "plan",
+            serde_json::json!({
+                "op": "start", "id": "99",
+                "plan_id": plan.id, "by": "model", "ok": true,
+            }),
+        )
+        .unwrap();
         // bbb journaled a valid start on step 1
         let mut jb = crate::agent::journal::Journal::open(&dir, "bbb").unwrap();
-        jb.append("plan", serde_json::json!({
-            "op": "start", "id": "1",
-            "plan_id": plan.id, "by": "model", "ok": true,
-        })).unwrap();
+        jb.append(
+            "plan",
+            serde_json::json!({
+                "op": "start", "id": "1",
+                "plan_id": plan.id, "by": "model", "ok": true,
+            }),
+        )
+        .unwrap();
 
         let report = replay(&dir).unwrap();
         assert_eq!(report.stalled, vec![plan.id.clone()]);
@@ -3251,7 +3260,11 @@ mod tests {
         assert_eq!(plan.applied_events.get("aaa"), Some(&1));
         assert_eq!(plan.applied_events.get("bbb"), Some(&1));
         // nothing quarantined: the bytes were healed, not moved aside
-        assert!(!dir.join(".sqwai/plans/corrupt").join(format!("{id}.json")).exists());
+        assert!(
+            !dir.join(".sqwai/plans/corrupt")
+                .join(format!("{id}.json"))
+                .exists()
+        );
         // and the rebuilt file loads cleanly straight away
         let again = open(&dir, id).expect("rebuilt file parses");
         assert_eq!(again.step("1").unwrap().status, StepStatus::InProgress);
@@ -3284,9 +3297,17 @@ mod tests {
         )
         .unwrap();
         std::fs::create_dir_all(dir.join(".sqwai/plans")).unwrap();
-        std::fs::write(dir.join(".sqwai/plans").join(format!("{id}.json")), "garbage{").unwrap();
+        std::fs::write(
+            dir.join(".sqwai/plans").join(format!("{id}.json")),
+            "garbage{",
+        )
+        .unwrap();
         assert!(open(&dir, id).is_err());
-        assert!(dir.join(".sqwai/plans/corrupt").join(format!("{id}.json")).exists());
+        assert!(
+            dir.join(".sqwai/plans/corrupt")
+                .join(format!("{id}.json"))
+                .exists()
+        );
 
         // deliberate absence: plan_deleted beats any intent
         let dir2 = std::env::temp_dir().join(format!("sqwai-plan-del-{}", new_id()));
@@ -3387,10 +3408,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(
-            healed.sessions.iter().filter(|s| *s == "sub-9").count(),
-            1
-        );
+        assert_eq!(healed.sessions.iter().filter(|s| *s == "sub-9").count(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 

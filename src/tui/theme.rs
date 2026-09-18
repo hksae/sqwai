@@ -1,4 +1,4 @@
-﻿use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 
 use crate::config::EffortLevel;
 
@@ -110,9 +110,7 @@ impl Theme {
         Style::new().fg(Self::ACCENT())
     }
     pub fn accent_bold() -> Style {
-        Style::new()
-            .fg(Self::ACCENT())
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(Self::ACCENT()).add_modifier(Modifier::BOLD)
     }
     #[allow(dead_code)]
     pub fn label_user() -> Style {
@@ -120,9 +118,7 @@ impl Theme {
     }
     #[allow(dead_code)]
     pub fn label_agent() -> Style {
-        Style::new()
-            .fg(Self::ACCENT())
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(Self::ACCENT()).add_modifier(Modifier::BOLD)
     }
     #[allow(dead_code)]
     pub fn border_focused() -> Style {
@@ -139,9 +135,7 @@ impl Theme {
     }
     /// Busy/attention status: bold yellow, no chip background (Codex status).
     pub fn status_chip() -> Style {
-        Style::new()
-            .fg(Self::WARN())
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(Self::WARN()).add_modifier(Modifier::BOLD)
     }
     /// PLAN mode chip: bold light-blue, mirrors the yellow ACT chip.
     pub fn mode_chip_plan() -> Style {
@@ -156,24 +150,16 @@ impl Theme {
         Style::new().fg(Color::White)
     }
     pub fn tool_head_bold() -> Style {
-        Style::new()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
     }
     pub fn ok() -> Style {
-        Style::new()
-            .fg(Self::OK())
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(Self::OK()).add_modifier(Modifier::BOLD)
     }
     pub fn err() -> Style {
-        Style::new()
-            .fg(Self::ERR())
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(Self::ERR()).add_modifier(Modifier::BOLD)
     }
     pub fn warn() -> Style {
-        Style::new()
-            .fg(Self::WARN())
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(Self::WARN()).add_modifier(Modifier::BOLD)
     }
 
     /// table separators / horizontal rules

@@ -255,7 +255,7 @@ pub struct ModelConfig {
 
 /// A model's declared effort behaviour, resolved against its wire format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct EffortSupport {
+pub struct EffortSupport {
     pub control: EffortControl,
     /// the model always reasons; `off` cannot be honoured
     pub always_on: bool,
@@ -859,12 +859,7 @@ const PROJECT_ALLOWLIST: &[(&str, &[&str])] = &[
     ("ui", &["typewriter", "http_log", "experimental_test"]),
     (
         "compaction",
-        &[
-            "threshold",
-            "keep_turns",
-            "anchor_ratio",
-            "summary",
-        ],
+        &["threshold", "keep_turns", "anchor_ratio", "summary"],
     ),
     (
         "undo",
@@ -1140,12 +1135,9 @@ impl Config {
     pub fn without_pristine_builtins(&self) -> Self {
         let builtin = BuiltinCatalog::current();
         let mut save_cfg = self.clone();
-        save_cfg.models.retain(|k, m| {
-            builtin
-                .models
-                .get(k)
-                .is_none_or(|catalog_m| catalog_m != m)
-        });
+        save_cfg
+            .models
+            .retain(|k, m| builtin.models.get(k).is_none_or(|catalog_m| catalog_m != m));
         save_cfg.providers.retain(|name, p| {
             if let Some(bp) = builtin.providers.get(name) {
                 p.api_key.is_some() || p.api_key_env != bp.api_key_env
@@ -1294,7 +1286,8 @@ impl Config {
         }
         let memory = &mut self.memory;
 
-        let o = &overrides.memory;        if let Some(v) = o.load_budget_ratio {
+        let o = &overrides.memory;
+        if let Some(v) = o.load_budget_ratio {
             memory.load_budget_ratio = v;
         }
         if let Some(v) = o.max_tokens {
@@ -1361,7 +1354,10 @@ impl Config {
         }
         if let Ok(pkg) = std::fs::read_to_string(root.join("package.json")) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&pkg) {
-                if v.pointer("/scripts/test").and_then(|s| s.as_str()).is_some() {
+                if v.pointer("/scripts/test")
+                    .and_then(|s| s.as_str())
+                    .is_some()
+                {
                     offer("test", "npm test".to_string(), "package.json");
                 }
             }
@@ -1456,10 +1452,7 @@ impl Config {
 
     pub fn last_model_config(&self) -> Result<&ModelConfig> {
         self.models.get(&self.last_model).ok_or_else(|| {
-            anyhow::anyhow!(
-                "last_model {:?} not found in [models]",
-                self.last_model
-            )
+            anyhow::anyhow!("last_model {:?} not found in [models]", self.last_model)
         })
     }
 
@@ -1477,7 +1470,10 @@ impl Config {
 
     /// Resolve the chain of fallback models starting from `model_key`.
     /// Protects against cycles and returns an ordered list of resolved fallback model configs and providers.
-    pub fn resolve_fallback_chain(&self, model_key: &str) -> Vec<(String, ModelConfig, ResolvedProvider)> {
+    pub fn resolve_fallback_chain(
+        &self,
+        model_key: &str,
+    ) -> Vec<(String, ModelConfig, ResolvedProvider)> {
         let mut chain = Vec::new();
         let mut visited = std::collections::BTreeSet::new();
         visited.insert(model_key.to_string());
@@ -1568,11 +1564,18 @@ mod tests {
         // repo probing: cargo + make (test preferred over test-all) + npm
         std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
         std::fs::write(root.join("Makefile"), "test-all:\n\tt\ntest:\n\tt\n").unwrap();
-        std::fs::write(root.join("package.json"), r#"{"scripts": {"test": "jest"}}"#).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"scripts": {"test": "jest"}}"#,
+        )
+        .unwrap();
         let found = Config::detect_verify_commands(root);
         let get = |n: &str| found.iter().find(|(k, _, _)| k == n).cloned();
         // first source wins the name; cargo probed before make/npm
-        assert_eq!(get("test").map(|(_, c, _)| c), Some("cargo test".to_string()));
+        assert_eq!(
+            get("test").map(|(_, c, _)| c),
+            Some("cargo test".to_string())
+        );
         // MEMORY.md overrides on clash + adds new names
         std::fs::create_dir_all(root.join(".sqwai/memory")).unwrap();
         std::fs::write(
@@ -1637,7 +1640,10 @@ mod tests {
         let raw = std::fs::read_to_string(dir.path().join(".sqwai/config.toml")).unwrap();
         let o: ProjectOverrides = toml::from_str(&raw).unwrap();
         let cmds = o.verify.commands.expect("verify.commands parses");
-        assert_eq!(cmds.get("unit").map(String::as_str), Some("cargo test --lib"));
+        assert_eq!(
+            cmds.get("unit").map(String::as_str),
+            Some("cargo test --lib")
+        );
         // and the allowlist admits the section (no ignoring note)
         let mut cfg = Config::default();
         let notes = cfg.apply_project_overrides(dir.path());
@@ -1963,7 +1969,8 @@ effort = "off"
     }
 
     #[test]
-    fn customized_builtin_model_survives_save_strip_and_reapply() {        // the hand-edit path: user overrides one field of a built-in model
+    fn customized_builtin_model_survives_save_strip_and_reapply() {
+        // the hand-edit path: user overrides one field of a built-in model
         let mut cfg = Config::default();
         cfg.apply_builtins();
         let key = "gemini-3.8-flash";
@@ -2028,10 +2035,16 @@ provider = "p"
         assert_eq!(cfg.plan.max_steps, 5);
         // not allowlisted: values untouched, but reported
         assert_eq!(cfg.plan.plan_first, PlanFirstMode::Soft);
-        assert!(notes.iter().any(|n| n.contains("plan.plan_first")), "{notes:?}");
+        assert!(
+            notes.iter().any(|n| n.contains("plan.plan_first")),
+            "{notes:?}"
+        );
         assert!(notes.iter().any(|n| n.contains("[safety]")), "{notes:?}");
         assert!(notes.iter().any(|n| n.contains("[models]")), "{notes:?}");
-        assert!(!cfg.models.contains_key("x"), "project file must not inject models");
+        assert!(
+            !cfg.models.contains_key("x"),
+            "project file must not inject models"
+        );
     }
 
     #[test]
@@ -2045,7 +2058,10 @@ provider = "p"
         std::fs::write(sqwai.join("config.toml"), "[diary\ntoken_budget = ").unwrap();
         let before = cfg.diary.token_budget;
         let notes = cfg.apply_project_overrides(dir.path());
-        assert_eq!(cfg.diary.token_budget, before, "broken file must change nothing");
+        assert_eq!(
+            cfg.diary.token_budget, before,
+            "broken file must change nothing"
+        );
         assert!(!notes.is_empty(), "broken file must be reported");
     }
 
