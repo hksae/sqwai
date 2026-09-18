@@ -820,6 +820,54 @@ impl Journal {
         }
     }
 
+    /// Claim-lint repetition nudge (Y, §12.9): when flagged result claims
+    /// keep coming, remind the model to verify numbers against tool output
+    /// before stating them. Fires while mismatches are recent (latest flag
+    /// within the last 20 records) and stops when the model behaves — no
+    /// extra state, no nagging about ancient history. Stateless by design,
+    /// like the plan nudge above.
+    pub fn claim_nudge(root: &Path, session_id: Option<&str>) -> Result<Option<String>> {
+        const THRESHOLD: usize = 3;
+        const RECENCY: usize = 20;
+        // session journal when known (claim records live next to the turns
+        // that produced them), everything otherwise — same split as evidence
+        let records = match session_id {
+            Some(sid) => Self::records_for(root, sid)?,
+            None => Self::records(root)?,
+        };
+        let total = records
+            .iter()
+            .filter(|r| r.kind == "claim_lint")
+            .count();
+        if total < THRESHOLD {
+            return Ok(None);
+        }
+        let recent = records.len().saturating_sub(RECENCY);
+        let fresh = records
+            .iter()
+            .skip(recent)
+            .any(|r| r.kind == "claim_lint");
+        if !fresh {
+            return Ok(None);
+        }
+        let spans: Vec<String> = records
+            .iter()
+            .rev()
+            .filter(|r| r.kind == "claim_lint")
+            .take(3)
+            .filter_map(|r| {
+                r.fields
+                    .get("span")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        Ok(Some(format!(
+            "result claims diverged from the journal {total} times (latest: {}) — verify numbers, paths and symbols against tool output before stating them.",
+            spans.join("; ")
+        )))
+    }
+
     /// Append one host-owned record and flush it before returning.
     pub fn append(&mut self, kind: &str, fields: Value) -> Result<u64> {
         if !fields.is_object() {
@@ -1701,6 +1749,47 @@ mod tests {
         );
         journal.append("plan", json!({"op": "show"})).unwrap();
         assert!(Journal::nudge(&root, None, 2).unwrap().is_none());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn claim_nudge_fires_while_fresh_silent_when_stale() {
+        let root = root();
+        let mut journal = Journal::open(&root, "sess").unwrap();
+        let mut lint = |span: &str| {
+            journal
+                .append("claim_lint", json!({"span": span, "kind": "count"}))
+                .unwrap()
+        };
+        lint("12 passed");
+        lint("all green");
+        // below threshold: silence
+        assert!(Journal::claim_nudge(&root, Some("sess")).unwrap().is_none());
+        lint("99 passed");
+        // at threshold with fresh flags: nags, naming the latest spans
+        let nudge = Journal::claim_nudge(&root, Some("sess"))
+            .unwrap()
+            .expect("must nudge");
+        assert!(nudge.contains("3 times"), "{nudge}");
+        assert!(nudge.contains("99 passed"), "{nudge}");
+        // 20 unrelated records later the old flags age out: silence again
+        for i in 0..20 {
+            journal
+                .append("tool_result", json!({"tool": "read", "ok": true, "n": i}))
+                .unwrap();
+        }
+        assert!(Journal::claim_nudge(&root, Some("sess")).unwrap().is_none());
+        // other sessions are not counted
+        let mut other = Journal::open(&root, "other").unwrap();
+        for _ in 0..5 {
+            other
+                .append("claim_lint", json!({"span": "x", "kind": "count"}))
+                .unwrap();
+        }
+        assert!(Journal::claim_nudge(&root, Some("sess")).unwrap().is_none());
+        assert!(Journal::claim_nudge(&root, Some("other"))
+            .unwrap()
+            .is_some());
         fs::remove_dir_all(root).ok();
     }
 

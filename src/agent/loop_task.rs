@@ -1503,6 +1503,13 @@ async fn run_agent(
         {
             turn_system.push(crate::providers::SystemPart::volatile(nudge));
         }
+        // claim-lint repetition (Y, §12.9): nag only while mismatches are
+        // fresh — a model that behaves stops seeing this by itself
+        if let Ok(Some(nudge)) =
+            crate::agent::journal::Journal::claim_nudge(&root, Some(&session_id))
+        {
+            turn_system.push(crate::providers::SystemPart::volatile(nudge));
+        }
         // Decided per request, not once per turn: a request that carries tool
         // results must never rely on the provider holding the calls they
         // answer. Field failure on an OpenAI-compatible relay that accepts
