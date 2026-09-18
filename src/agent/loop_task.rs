@@ -2687,6 +2687,10 @@ async fn compact_history(
                 context::local_summary(&older, summary.as_deref())
             }
         };
+        // host-enforced cap (the wire cap is advisory at best): without it
+        // chained summaries balloon every cycle (measured 33K-140K chars)
+        // and late compactions free nothing at full call price.
+        let text = context::truncate_summary(&text);
         *messages = context::apply_summary(&text, &keep);
         *summary = Some(text);
         summarized = true;

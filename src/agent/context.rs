@@ -596,6 +596,28 @@ pub fn transcript(messages: &[Message]) -> String {
 /// not be re-listed — the budget exists for what the plan does not hold.
 pub const SUMMARY_SHORT_MAX_TOKENS: u32 = 300;
 
+/// Host-enforced character cap for stored/applied summaries. Endpoints
+/// ignore `max_output_tokens` (measured 33K–140K chars against a 300-token
+/// cap), so without this the chained summary grows every cycle and late
+/// compactions free ~nothing at full call price.
+pub const SUMMARY_SHORT_MAX_CHARS: usize = 1_200;
+
+/// Enforce the cap: truncate to whole characters, mark the cut so a
+/// reader knows the tail is missing (truncation drops the END — goal and
+/// constraints ride first in these summaries, fresh work survives in the
+/// verbatim keep-tail and the journal).
+pub fn truncate_summary(text: &str) -> String {
+    const MARKER: &str = "\n[…truncated to fit the compaction budget]";
+    if text.chars().count() <= SUMMARY_SHORT_MAX_CHARS {
+        return text.to_string();
+    }
+    let head: String = text
+        .chars()
+        .take(SUMMARY_SHORT_MAX_CHARS - MARKER.chars().count())
+        .collect();
+    format!("{head}{MARKER}")
+}
+
 /// The user turn of the restricted summarization request (§3.3.2): ONLY
 /// what the user explicitly asked, forbade, or stated as fact in the
 /// dropped messages that is NOT already covered by the durable plan.
@@ -1159,6 +1181,24 @@ mod tests {
         assert_eq!(out[0].role, Role::User, "assistant-first breaks anthropic");
         assert!(out[0].content.contains("did things"));
         assert_eq!(out[1].content, "latest question");
+    }
+
+    #[test]
+    fn truncate_summary_caps_with_marker() {
+        let short = "did things";
+        assert_eq!(truncate_summary(short), short);
+        let exact = "x".repeat(SUMMARY_SHORT_MAX_CHARS);
+        assert_eq!(truncate_summary(&exact), exact);
+        let long = "y".repeat(SUMMARY_SHORT_MAX_CHARS + 500);
+        let cut = truncate_summary(&long);
+        assert!(cut.chars().count() <= SUMMARY_SHORT_MAX_CHARS);
+        assert!(cut.contains("truncated to fit"));
+        assert!(cut.starts_with(&"y".repeat(100)));
+        // multibyte-safe: no split codepoints, marker included in budget
+        let emoji = "🔥".repeat(SUMMARY_SHORT_MAX_CHARS + 10);
+        let cut_emoji = truncate_summary(&emoji);
+        assert!(cut_emoji.chars().count() <= SUMMARY_SHORT_MAX_CHARS);
+        assert!(cut_emoji.contains("truncated to fit"));
     }
 
     #[test]
