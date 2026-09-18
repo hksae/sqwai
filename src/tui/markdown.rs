@@ -1234,10 +1234,10 @@ fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
                 if let Some(bg) = style.bg {
                     cs = cs.bg(bg);
                 }
-                if let Some(fg) = style.fg {
-                    if fg != Color::Gray {
-                        cs = cs.fg(fg);
-                    }
+                if let Some(fg) = style.fg
+                    && fg != Color::Gray
+                {
+                    cs = cs.fg(fg);
                 }
                 out.push(Span::styled(inner.to_string(), cs));
             }

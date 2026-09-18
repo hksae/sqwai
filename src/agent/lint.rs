@@ -146,7 +146,13 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
-    format!("{}…", s[..max].to_string())
+    // byte slicing can split a char boundary (Cyrillic in pasted
+    // fixtures); back off to one instead of panicking in a warn path.
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 #[cfg(test)]

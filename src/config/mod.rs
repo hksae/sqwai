@@ -1352,15 +1352,13 @@ impl Config {
                 offer("test", format!("make {target}"), "Makefile");
             }
         }
-        if let Ok(pkg) = std::fs::read_to_string(root.join("package.json")) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&pkg) {
-                if v.pointer("/scripts/test")
-                    .and_then(|s| s.as_str())
-                    .is_some()
-                {
-                    offer("test", "npm test".to_string(), "package.json");
-                }
-            }
+        if let Ok(pkg) = std::fs::read_to_string(root.join("package.json"))
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&pkg)
+            && v.pointer("/scripts/test")
+                .and_then(|s| s.as_str())
+                .is_some()
+        {
+            offer("test", "npm test".to_string(), "package.json");
         }
         if root.join("pytest.ini").is_file()
             || root.join("tox.ini").is_file()
@@ -1485,12 +1483,12 @@ impl Config {
                     // Cycle detected, break to prevent infinite fallback loop
                     break;
                 }
-                if let Some(next_mc) = self.models.get(next_key) {
-                    if let Ok(resolved) = self.resolve_provider(next_mc) {
-                        chain.push((next_key.clone(), next_mc.clone(), resolved));
-                        current_key = next_key.clone();
-                        continue;
-                    }
+                if let Some(next_mc) = self.models.get(next_key)
+                    && let Ok(resolved) = self.resolve_provider(next_mc)
+                {
+                    chain.push((next_key.clone(), next_mc.clone(), resolved));
+                    current_key = next_key.clone();
+                    continue;
                 }
             }
             break;

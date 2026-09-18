@@ -1259,10 +1259,7 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
     let create_idx = records.iter().position(|(_, _, _, fields)| {
         fields.get("op").and_then(|o| o.as_str()) == Some("create")
             && fields.get("result_id").and_then(|r| r.as_str()) == Some(id)
-    });
-    let Some(create_idx) = create_idx else {
-        return None;
-    };
+    })?;
     let (_, create_sess, create_seq, create_fields) = records[create_idx].clone();
     let mut plan = create(
         create_fields.get("goal")?.as_str()?.to_string(),
@@ -3172,7 +3169,7 @@ mod tests {
         assert_eq!(healed.applied_events.get("bbb"), Some(&1));
         assert_eq!(
             healed.applied_event.as_deref(),
-            Some(format!("bbb:1").as_str())
+            Some("bbb:1".to_string().as_str())
         );
         // idempotent again
         let again = replay(&dir).unwrap();

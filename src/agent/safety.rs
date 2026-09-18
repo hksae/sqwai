@@ -352,7 +352,7 @@ fn pipe_into_shell(lower: &str) -> bool {
     for segment in lower.split('|').skip(1) {
         let seg = segment.trim_start().trim_start_matches('&').trim_start();
         let mut token = seg.split_whitespace().next().unwrap_or("");
-        token = token.trim_end_matches(|c: char| c == ';' || c == '&');
+        token = token.trim_end_matches([';', '&']);
         // `powershell.exe`, `pwsh.exe`
         let token = token.strip_suffix(".exe").unwrap_or(token);
         if SHELLS.contains(&token) {

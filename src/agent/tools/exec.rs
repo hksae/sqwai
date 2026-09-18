@@ -410,7 +410,7 @@ fn run_background(ctx: &ToolCtx, command: &str) -> Outcome {
 /// Resolve one of THIS session's jobs (#197). A foreign id is reported
 /// as foreign rather than missing, so the model learns the boundary
 /// instead of retrying a kill/read loop against someone else's job.
-fn own_job<'a>(jobs: &'a mut Vec<BgJob>, session: &str, id: u64) -> Result<&'a mut BgJob, String> {
+fn own_job<'a>(jobs: &'a mut [BgJob], session: &str, id: u64) -> Result<&'a mut BgJob, String> {
     if jobs.iter().any(|j| j.id == id && j.session != session) {
         return Err(format!("job {id} belongs to another session"));
     }

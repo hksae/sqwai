@@ -1281,12 +1281,11 @@ impl App {
                 // spinner_tick so it moves exactly with the animation ticks;
                 // expiry drops the term (and the sweep retires flash), so the
                 // key settles back to the static one.
-                if let Some(t0) = flash {
-                    if t0.elapsed().as_millis() < crate::tui::shimmer::FLASH_MS as u128
-                        && crate::tui::shimmer::has_truecolor()
-                    {
-                        k = k.wrapping_add(1_000_000 + self.spinner_tick.wrapping_mul(13));
-                    }
+                if let Some(t0) = flash
+                    && t0.elapsed().as_millis() < crate::tui::shimmer::FLASH_MS as u128
+                    && crate::tui::shimmer::has_truecolor()
+                {
+                    k = k.wrapping_add(1_000_000 + self.spinner_tick.wrapping_mul(13));
                 }
                 k
             }
@@ -2969,10 +2968,8 @@ impl App {
         // cap the trailing empty space.
         let list_rows = if is_form { 0 } else { content_rows };
         self.menu_visible_rows = list_rows;
-        if !is_form && list_rows > 0 {
-            if self.menu_scroll + list_rows > self.menu_rows.len() {
-                self.menu_scroll = self.menu_rows.len().saturating_sub(list_rows);
-            }
+        if !is_form && list_rows > 0 && self.menu_scroll + list_rows > self.menu_rows.len() {
+            self.menu_scroll = self.menu_rows.len().saturating_sub(list_rows);
         }
 
         let mut rows: Vec<Line> = Vec::new();
@@ -3434,7 +3431,7 @@ impl App {
             cells[dx] = (dot, dot_style);
             // connector to the next dot: filled iff fully left of selection
             if i + 1 < n {
-                let cstyle = if i + 1 <= sel { fill } else { dim };
+                let cstyle = if i < sel { fill } else { dim };
                 for c in cells
                     .iter_mut()
                     .take((i + 1) * COL_W as usize + dot_off)

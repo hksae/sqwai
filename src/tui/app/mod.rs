@@ -2057,17 +2057,13 @@ impl App {
         let root = std::env::current_dir().unwrap_or_default();
         // L0 capture-nudge: a fresh restriction the active plan does not
         // cover yet. Marker scan first so ordinary turns never touch disk.
-        if crate::agent::loop_task::has_restriction_marker(&text.to_lowercase()) {
-            if let Ok(Some(plan)) =
+        if crate::agent::loop_task::has_restriction_marker(&text.to_lowercase())
+            && let Ok(Some(plan)) =
                 crate::plan::open_active_for_session(&root, Some(&self.session.id.to_string()))
-            {
-                if let Some(tail) = crate::agent::loop_task::capture_nudge(&text, &plan.constraints)
-                {
-                    if let Some(last) = self.session.messages.last_mut() {
-                        last.content.push_str(&tail);
-                    }
-                }
-            }
+            && let Some(tail) = crate::agent::loop_task::capture_nudge(&text, &plan.constraints)
+            && let Some(last) = self.session.messages.last_mut()
+        {
+            last.content.push_str(&tail);
         }
         let msgs: Vec<PMessage> = self.session.messages.clone();
         let fallback_chain = self

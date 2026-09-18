@@ -249,6 +249,7 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
     let model = bench_model()?;
     crate::bench::set_baseline_override(Some(baseline));
     let started = Instant::now();
+    let session_id = format!("bench-{}-{session_tag}", task.id);
     let mut report = RunReport {
         task: task.id.to_string(),
         arm: if baseline {
@@ -257,17 +258,17 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
             "mechanism".into()
         },
         model: std::env::var("SQWAI_BENCH_MODEL").unwrap_or_default(),
+        session_id: session_id.clone(),
         ..Default::default()
     };
-
-    let session_id = format!("bench-{}-{session_tag}", task.id);
-    report.session_id = session_id.clone();
     // routing header for opencode-gateway providers, same as the TUI does
     // per session — without it the gateway 400s on MissingSessionID
     crate::providers::set_conversation_id(&session_id);
     let root = fresh_copy(task, &report.arm)?;
-    let mut compaction = crate::config::CompactionConfig::default();
-    compaction.threshold = compaction_threshold(task);
+    let compaction = crate::config::CompactionConfig {
+        threshold: compaction_threshold(task),
+        ..Default::default()
+    };
     // T4 regime simulation (bench-only): cap the working context without
     // touching model configs or product code. The agent never holds more
     // than budget+reserve, so retention is measured honestly at 256K.
@@ -538,8 +539,7 @@ fn split_cmd(cmd: &str) -> Option<(String, Vec<String>)> {
     let mut parts = Vec::new();
     let mut cur = String::new();
     let mut in_quotes = false;
-    let mut chars = cmd.chars().peekable();
-    while let Some(c) = chars.next() {
+    for c in cmd.chars() {
         if c == '"' {
             in_quotes = !in_quotes;
         } else if c.is_whitespace() && !in_quotes {
@@ -563,8 +563,7 @@ fn split_cmd(cmd: &str) -> Option<(String, Vec<String>)> {
 /// Score a finished run. Acceptance + traps are automatic; goal fidelity
 /// and constraint retention are judged by a human from the report.
 pub fn score_run(report: &RunReport, task: &TaskSpec, fixture_src: &Path) -> Score {
-    let mut score = Score::default();
-    score.acceptance_green = task.acceptance_cmds.iter().all(|cmd| {
+    let acceptance_green = task.acceptance_cmds.iter().all(|cmd| {
         // Never route through `cmd /C`: its quote-stripping heuristics
         // mangle a quoted exe path with quoted args (Git Bash under
         // Program Files) and score red on a green tree — exactly what T4
@@ -579,16 +578,15 @@ pub fn score_run(report: &RunReport, task: &TaskSpec, fixture_src: &Path) -> Sco
             .map(|out| out.status.success())
             .unwrap_or(false)
     });
-    let trap_same = |rel: &str| -> bool {
-        let a = std::fs::read(fixture_src.join(rel)).unwrap_or_default();
-        let b = std::fs::read(report.root.join(rel)).unwrap_or_default();
-        a == b
-    };
     // G0 post-matrix: the `tmp:` half never fired (no root minidb.log is
     // ever created — CLI tests use their own temp dirs), giving false
     // coverage. Trap = the btree twin only; `tmp:` stays covered
     // behaviorally by the engine suite.
-    score.traps_ok = trap_same("src/storage/btree.rs");
+    let traps_ok = {
+        let a = std::fs::read(fixture_src.join("src/storage/btree.rs")).unwrap_or_default();
+        let b = std::fs::read(report.root.join("src/storage/btree.rs")).unwrap_or_default();
+        a == b
+    };
 
     let journal_dir = report.root.join(".sqwai").join("journal");
     let mut per_path: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
@@ -615,21 +613,25 @@ pub fn score_run(report: &RunReport, task: &TaskSpec, fixture_src: &Path) -> Sco
                 }
                 if record.get("kind").and_then(|k| k.as_str()) == Some("tool_call")
                     && record.get("tool").and_then(|t| t.as_str()) == Some("read")
+                    && let Some(path) = record.get("path").and_then(|p| p.as_str())
                 {
-                    if let Some(path) = record.get("path").and_then(|p| p.as_str()) {
-                        *reads.entry(normalize_read_path(path)).or_default() += 1;
-                    }
+                    *reads.entry(normalize_read_path(path)).or_default() += 1;
                 }
             }
         }
     }
-    score.diffs_per_path = per_path.into_iter().collect();
+    let diffs_per_path = per_path.into_iter().collect();
     // every repeat past the first is a re-read: the model forgot content
     // it already had (symptom), as opposed to planned work (discipline)
-    score.rereads = reads.values().map(|n| n.saturating_sub(1)).sum();
+    let rereads = reads.values().map(|n| n.saturating_sub(1)).sum();
 
-    score.anchor = crate::agent::context::anchor(&report.root, &report.session_id);
-    score
+    Score {
+        acceptance_green,
+        traps_ok,
+        diffs_per_path,
+        rereads,
+        anchor: crate::agent::context::anchor(&report.root, &report.session_id),
+    }
 }
 
 pub fn print_report(report: &RunReport, score: &Score) {
@@ -768,6 +770,17 @@ async fn bench_t1_shakedown_baseline() {
     assert!(score.acceptance_green, "acceptance must be green");
 }
 
+/// Acceptance that exits 0 on any OS. The test scores journal parsing,
+/// not shells — but the commands must still exercise split_cmd's quoted
+/// segments and absolute-exe paths, the T4 lesson.
+#[cfg(windows)]
+const SCORE_ACCEPTANCE: &[&str] = &[
+    "\"C:\\Windows\\System32\\cmd.exe\" /C \"exit 0\"",
+    "cmd /C exit 0",
+];
+#[cfg(not(windows))]
+const SCORE_ACCEPTANCE: &[&str] = &["sh -c \"exit 0\"", "/bin/sh -c \"exit 0\""];
+
 #[test]
 fn score_run_reads_traps_and_diff_chains() {
     // synthetic run root: trap file changed, two file_diffs
@@ -797,13 +810,12 @@ fn score_run_reads_traps_and_diff_chains() {
         id: "TX",
         goal: "x",
         constraints: &[],
-        acceptance_cmds: &[
-            "\"C:\\Windows\\System32\\cmd.exe\" /C \"exit 0\"",
-            "cmd /C exit 0",
-        ],
+        acceptance_cmds: SCORE_ACCEPTANCE,
     };
-    let mut report = RunReport::default();
-    report.root = root.clone();
+    let report = RunReport {
+        root: root.clone(),
+        ..Default::default()
+    };
     let score = score_run(&report, &task, &src);
     assert!(score.acceptance_green);
     assert!(!score.traps_ok, "touched trap must fail");

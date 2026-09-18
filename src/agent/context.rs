@@ -1307,10 +1307,10 @@ mod tests {
             .flat_map(|m| m.tool_calls.iter().map(|c| c.id.as_str()))
             .collect();
         for m in &trimmed {
-            if m.role == Role::Tool {
-                if let Some(id) = &m.tool_call_id {
-                    assert!(kept.contains(id.as_str()), "orphaned tool result {id}");
-                }
+            if m.role == Role::Tool
+                && let Some(id) = &m.tool_call_id
+            {
+                assert!(kept.contains(id.as_str()), "orphaned tool result {id}");
             }
         }
         // the newest cycle survives

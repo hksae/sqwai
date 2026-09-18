@@ -528,7 +528,7 @@ async fn run_subagent_batch(
     }
     // fan out; results collected out of order, processed back in order
     let mut done: Vec<(usize, ToolCallReq, std::time::Instant, tools::Outcome)> =
-        stream::iter(dispatch.into_iter())
+        stream::iter(dispatch)
             .map(|(index, call, started)| {
                 let session_id = session_id.to_string();
                 let provider = provider.clone();
@@ -546,7 +546,7 @@ async fn run_subagent_batch(
                     let outcome = run_subagent(
                         &call,
                         &session_id,
-                        &tx,
+                        tx,
                         &provider,
                         &model_id,
                         &root,
@@ -1084,30 +1084,29 @@ pub fn is_heuristic_trivial(messages: &[Message]) -> bool {
         let clean = token.trim_matches(|c: char| {
             !c.is_alphanumeric() && c != '.' && c != '_' && c != '/' && c != '\\'
         });
-        if clean.contains('.') {
-            if let Some(ext) = clean.rsplit('.').next() {
-                if matches!(
-                    ext,
-                    "rs" | "py"
-                        | "ts"
-                        | "js"
-                        | "toml"
-                        | "md"
-                        | "json"
-                        | "yaml"
-                        | "yml"
-                        | "html"
-                        | "css"
-                        | "go"
-                        | "c"
-                        | "cpp"
-                        | "h"
-                        | "sh"
-                        | "txt"
-                ) {
-                    file_count += 1;
-                }
-            }
+        if clean.contains('.')
+            && let Some(ext) = clean.rsplit('.').next()
+            && matches!(
+                ext,
+                "rs" | "py"
+                    | "ts"
+                    | "js"
+                    | "toml"
+                    | "md"
+                    | "json"
+                    | "yaml"
+                    | "yml"
+                    | "html"
+                    | "css"
+                    | "go"
+                    | "c"
+                    | "cpp"
+                    | "h"
+                    | "sh"
+                    | "txt"
+            )
+        {
+            file_count += 1;
         }
     }
     if file_count > 1 {
@@ -3201,19 +3200,19 @@ fn lint_answer(
         }
     }
     // symbols last and fewest: each costs a graph lookup
-    if spans.len() < 40 {
-        if let Ok(mut store) = crate::agent::graph::SqliteGraphStore::open(root) {
-            for sym in extract_symbols(&visible) {
-                if spans.len() >= 40 {
-                    break;
+    if spans.len() < 40
+        && let Ok(mut store) = crate::agent::graph::SqliteGraphStore::open(root)
+    {
+        for sym in extract_symbols(&visible) {
+            if spans.len() >= 40 {
+                break;
+            }
+            match store.resolve_ref(None, None, Some(sym)) {
+                Ok(crate::agent::graph::ResolveRefResult::NotFound { .. }) => {
+                    push_span(&mut spans, "symbol", sym)
                 }
-                match store.resolve_ref(None, None, Some(sym)) {
-                    Ok(crate::agent::graph::ResolveRefResult::NotFound { .. }) => {
-                        push_span(&mut spans, "symbol", sym)
-                    }
-                    Ok(_) => {}
-                    Err(_) => {} // infra failure: silence, not a verdict
-                }
+                Ok(_) => {}
+                Err(_) => {} // infra failure: silence, not a verdict
             }
         }
     }
@@ -4870,7 +4869,7 @@ mod effort_tests {
         assert!(texts.contains(&"3 failed"), "{texts:?}");
         assert!(texts.contains(&"280/280"), "{texts:?}");
         // bare version number is not a claim
-        assert!(!texts.iter().any(|s| *s == "2"), "{texts:?}");
+        assert!(!texts.contains(&"2"), "{texts:?}");
 
         let words = extract_status_words("Build SUCCEEDED, all green. All tests pass!");
         // "tests pass" nests inside "All tests pass" (deduped later in push_span)

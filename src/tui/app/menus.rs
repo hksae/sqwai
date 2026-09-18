@@ -1054,11 +1054,10 @@ impl App {
                     search_filter,
                     ..
                 }) = self.cur_menu_mut()
+                    && let Some(prev) = trail.pop()
                 {
-                    if let Some(prev) = trail.pop() {
-                        *focus_key = prev;
-                        *search_filter = None;
-                    }
+                    *focus_key = prev;
+                    *search_filter = None;
                 }
                 self.menu_sel = 0;
                 self.menu_scroll = 0;
@@ -3196,11 +3195,11 @@ impl App {
                                 } else {
                                     None
                                 };
-                                if let Some(n) = neighbor {
-                                    if !distances.contains_key(n) {
-                                        distances.insert(n.clone(), curr_d + 1);
-                                        queue.push_back(n.clone());
-                                    }
+                                if let Some(n) = neighbor
+                                    && !distances.contains_key(n)
+                                {
+                                    distances.insert(n.clone(), curr_d + 1);
+                                    queue.push_back(n.clone());
                                 }
                             }
                         }
@@ -3272,14 +3271,14 @@ impl App {
                                 .and_then(|n| n.name.as_deref())
                                 .unwrap_or(&agg.target_key);
 
-                            if let Some(ref filter) = search_filter {
-                                if !filter.is_empty() {
-                                    let fl = filter.to_lowercase();
-                                    let matches_key = agg.target_key.to_lowercase().contains(&fl);
-                                    let matches_name = name_or_key.to_lowercase().contains(&fl);
-                                    if !matches_key && !matches_name {
-                                        continue;
-                                    }
+                            if let Some(ref filter) = search_filter
+                                && !filter.is_empty()
+                            {
+                                let fl = filter.to_lowercase();
+                                let matches_key = agg.target_key.to_lowercase().contains(&fl);
+                                let matches_name = name_or_key.to_lowercase().contains(&fl);
+                                if !matches_key && !matches_name {
+                                    continue;
                                 }
                             }
 

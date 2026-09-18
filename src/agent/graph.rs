@@ -777,7 +777,11 @@ impl SqliteGraphStore {
                 };
                 if needs_reindex {
                     let root = self.project_root.clone();
-                    let _ = crate::agent::graph_index::reindex_paths(self, &root, &[p.clone()]);
+                    let _ = crate::agent::graph_index::reindex_paths(
+                        self,
+                        &root,
+                        std::slice::from_ref(p),
+                    );
                 }
             }
         }
@@ -967,7 +971,11 @@ impl SqliteGraphStore {
                     };
                     if needs_reindex {
                         let root = self.project_root.clone();
-                        let _ = crate::agent::graph_index::reindex_paths(self, &root, &[p.clone()]);
+                        let _ = crate::agent::graph_index::reindex_paths(
+                            self,
+                            &root,
+                            std::slice::from_ref(p),
+                        );
                     }
                     "verified_disk_match".to_string()
                 } else {
@@ -1232,10 +1240,10 @@ impl GraphStore for SqliteGraphStore {
                 |row| row.get(0),
             )
             .optional()?;
-        if let Some(existing) = existing_gen {
-            if existing as u64 > target_gen {
-                return Ok(false);
-            }
+        if let Some(existing) = existing_gen
+            && existing as u64 > target_gen
+        {
+            return Ok(false);
         }
 
         remove_file_subgraph(&tx, path)?;

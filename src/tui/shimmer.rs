@@ -64,8 +64,8 @@ fn detect_truecolor() -> bool {
     if std::env::var_os("WT_SESSION").is_some() {
         return true;
     }
-    if let Ok(tp) = std::env::var("TERM_PROGRAM") {
-        if matches!(
+    if let Ok(tp) = std::env::var("TERM_PROGRAM")
+        && matches!(
             tp.as_str(),
             "iTerm.app"
                 | "WezTerm"
@@ -75,9 +75,9 @@ fn detect_truecolor() -> bool {
                 | "kitty"
                 | "Alacritty"
                 | "foot"
-        ) {
-            return true;
-        }
+        )
+    {
+        return true;
     }
     if let Ok(term) = std::env::var("TERM") {
         let t = term.to_ascii_lowercase();

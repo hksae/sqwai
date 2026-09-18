@@ -2134,18 +2134,17 @@ fn validate_plan_refs(
                 | crate::agent::graph::ResolveRefResult::Unknown { .. } => {}
             },
             crate::plan::RefIntent::Create => {
-                if is_create_intent {
-                    if let crate::agent::graph::ResolveRefResult::Found { .. } = res {
-                        let target = step_ref.symbol.as_deref().unwrap_or(&step_ref.path);
-                        return Err(plan::Rejection::new(
-                            "ref_collision",
-                            format!(
-                                "cannot create ref '{target}': already exists in {}",
-                                step_ref.path
-                            ),
-                            "choose a different symbol name or change intent to modify",
-                        ));
-                    }
+                if is_create_intent && let crate::agent::graph::ResolveRefResult::Found { .. } = res
+                {
+                    let target = step_ref.symbol.as_deref().unwrap_or(&step_ref.path);
+                    return Err(plan::Rejection::new(
+                        "ref_collision",
+                        format!(
+                            "cannot create ref '{target}': already exists in {}",
+                            step_ref.path
+                        ),
+                        "choose a different symbol name or change intent to modify",
+                    ));
                 }
             }
         }
@@ -2416,18 +2415,18 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 .unwrap_or("unknown")
                 .to_string();
             let readonly_show = op_name == "show";
-            if let plan::Op::Start { ref id, .. } = other {
-                if let Some(step) = active.step(id) {
-                    let is_initial_start = step.status == plan::StepStatus::Pending;
-                    if let Err(rej) = validate_plan_refs(&ctx.root, &step.refs, is_initial_start) {
-                        return rejection(rej);
-                    }
-                }
-            }
-            if let plan::Op::Add { ref refs, .. } = other {
-                if let Err(rej) = validate_plan_refs(&ctx.root, refs, true) {
+            if let plan::Op::Start { ref id, .. } = other
+                && let Some(step) = active.step(id)
+            {
+                let is_initial_start = step.status == plan::StepStatus::Pending;
+                if let Err(rej) = validate_plan_refs(&ctx.root, &step.refs, is_initial_start) {
                     return rejection(rej);
                 }
+            }
+            if let plan::Op::Add { ref refs, .. } = other
+                && let Err(rej) = validate_plan_refs(&ctx.root, refs, true)
+            {
+                return rejection(rej);
             }
             match plan::apply(&mut active, other, &limits, ctx.current_step.as_deref()) {
                 Ok(applied) => {

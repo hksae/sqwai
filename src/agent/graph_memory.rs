@@ -52,23 +52,23 @@ pub fn extract_journal_refs(text: &str) -> Vec<u64> {
     let mut out = Vec::new();
     let mut chars = text.char_indices().peekable();
     while let Some((_, c)) = chars.next() {
-        if c == 'j' || c == 'J' {
-            if let Some(&(_, '#')) = chars.peek() {
-                chars.next(); // consume '#'
-                let mut num_str = String::new();
-                while let Some(&(_, digit)) = chars.peek() {
-                    if digit.is_ascii_digit() {
-                        num_str.push(digit);
-                        chars.next();
-                    } else {
-                        break;
-                    }
+        if (c == 'j' || c == 'J')
+            && let Some(&(_, '#')) = chars.peek()
+        {
+            chars.next(); // consume '#'
+            let mut num_str = String::new();
+            while let Some(&(_, digit)) = chars.peek() {
+                if digit.is_ascii_digit() {
+                    num_str.push(digit);
+                    chars.next();
+                } else {
+                    break;
                 }
-                if let Ok(seq) = num_str.parse::<u64>() {
-                    if !out.contains(&seq) {
-                        out.push(seq);
-                    }
-                }
+            }
+            if let Ok(seq) = num_str.parse::<u64>()
+                && !out.contains(&seq)
+            {
+                out.push(seq);
             }
         }
     }
@@ -391,12 +391,11 @@ fn resolve_mention(store: &impl GraphStore, token: &str) -> (String, String) {
         return ("about".into(), n.stable_key);
     }
     // 4. Recall by exact name or key
-    if let Ok(items) = store.recall(token, 1) {
-        if let Some(first) = items.first() {
-            if first.name.as_deref() == Some(token) || first.key == token {
-                return ("about".into(), first.key.clone());
-            }
-        }
+    if let Ok(items) = store.recall(token, 1)
+        && let Some(first) = items.first()
+        && (first.name.as_deref() == Some(token) || first.key == token)
+    {
+        return ("about".into(), first.key.clone());
     }
 
     // Unresolved: emit mentions edge
@@ -420,125 +419,60 @@ pub fn index_memory_subsystem(store: &mut impl GraphStore, root: &Path) -> Resul
     let journal_dir = root.join(".sqwai").join("journal");
 
     // 1. Index .sqwai/memory/*.md
-    if mem_dir.exists() && mem_dir.is_dir() {
-        if let Ok(entries) = fs::read_dir(&mem_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !file_name.ends_with(".md") {
-                    continue;
-                }
-
-                let Ok(content) = fs::read_to_string(&path) else {
-                    continue;
-                };
-
-                let rel_path = format!(".sqwai/memory/{file_name}");
-
-                if file_name.eq_ignore_ascii_case("MEMORY.md") {
-                    let parsed = parse_memory_md(&rel_path, &content);
-                    let mut nodes = Vec::new();
-                    let mut edges = Vec::new();
-
-                    for (node, backticks) in parsed {
-                        let from_key = node.stable_key.clone();
-                        nodes.push(node);
-                        for token in backticks {
-                            let (kind, to_key) = resolve_mention(store, &token);
-                            edges.push(Edge {
-                                from: from_key.clone(),
-                                to: to_key,
-                                kind,
-                                confidence: Some(100),
-                                source: Some("memory".into()),
-                                source_hash: None,
-                                limitations: Vec::new(),
-                                properties: BTreeMap::new(),
-                            });
-                        }
-                    }
-
-                    if store.replace_file_subgraph(&rel_path, &nodes, &edges, &[])? {
-                        total_indexed += 1;
-                    }
-                } else {
-                    // Date diary: YYYY-MM-DD.md
-                    let date = file_name.trim_end_matches(".md");
-                    let parsed = parse_diary(&rel_path, date, &content);
-                    let mut nodes = Vec::new();
-                    let mut edges = Vec::new();
-
-                    for (node, backticks, supersedes_target) in parsed {
-                        let from_key = node.stable_key.clone();
-                        nodes.push(node);
-
-                        for token in backticks {
-                            let (kind, to_key) = resolve_mention(store, &token);
-                            edges.push(Edge {
-                                from: from_key.clone(),
-                                to: to_key,
-                                kind,
-                                confidence: Some(100),
-                                source: Some("memory".into()),
-                                source_hash: None,
-                                limitations: Vec::new(),
-                                properties: BTreeMap::new(),
-                            });
-                        }
-
-                        if let Some(target) = supersedes_target {
-                            edges.push(Edge {
-                                from: from_key,
-                                to: target,
-                                kind: "supersedes".into(),
-                                confidence: Some(100),
-                                source: Some("memory".into()),
-                                source_hash: None,
-                                limitations: Vec::new(),
-                                properties: BTreeMap::new(),
-                            });
-                        }
-                    }
-
-                    if store.replace_file_subgraph(&rel_path, &nodes, &edges, &[])? {
-                        total_indexed += 1;
-                    }
-                }
+    if mem_dir.exists()
+        && mem_dir.is_dir()
+        && let Ok(entries) = fs::read_dir(&mem_dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
             }
-        }
-    }
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !file_name.ends_with(".md") {
+                continue;
+            }
 
-    // 2. Index .sqwai/journal/*.jsonl note records
-    if journal_dir.exists() && journal_dir.is_dir() {
-        if let Ok(entries) = fs::read_dir(&journal_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !file_name.ends_with(".jsonl") {
-                    continue;
-                }
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
 
-                let session_id = file_name.trim_end_matches(".jsonl");
-                let Ok(content) = fs::read_to_string(&path) else {
-                    continue;
-                };
+            let rel_path = format!(".sqwai/memory/{file_name}");
 
-                let rel_path = format!(".sqwai/journal/{file_name}");
-                let parsed = parse_journal_notes(&rel_path, session_id, &content);
-                if parsed.is_empty() {
-                    continue;
-                }
-
+            if file_name.eq_ignore_ascii_case("MEMORY.md") {
+                let parsed = parse_memory_md(&rel_path, &content);
                 let mut nodes = Vec::new();
                 let mut edges = Vec::new();
 
-                for (node, backticks, resolves) in parsed {
+                for (node, backticks) in parsed {
+                    let from_key = node.stable_key.clone();
+                    nodes.push(node);
+                    for token in backticks {
+                        let (kind, to_key) = resolve_mention(store, &token);
+                        edges.push(Edge {
+                            from: from_key.clone(),
+                            to: to_key,
+                            kind,
+                            confidence: Some(100),
+                            source: Some("memory".into()),
+                            source_hash: None,
+                            limitations: Vec::new(),
+                            properties: BTreeMap::new(),
+                        });
+                    }
+                }
+
+                if store.replace_file_subgraph(&rel_path, &nodes, &edges, &[])? {
+                    total_indexed += 1;
+                }
+            } else {
+                // Date diary: YYYY-MM-DD.md
+                let date = file_name.trim_end_matches(".md");
+                let parsed = parse_diary(&rel_path, date, &content);
+                let mut nodes = Vec::new();
+                let mut edges = Vec::new();
+
+                for (node, backticks, supersedes_target) in parsed {
                     let from_key = node.stable_key.clone();
                     nodes.push(node);
 
@@ -556,10 +490,10 @@ pub fn index_memory_subsystem(store: &mut impl GraphStore, root: &Path) -> Resul
                         });
                     }
 
-                    if let Some(target_seq) = resolves {
+                    if let Some(target) = supersedes_target {
                         edges.push(Edge {
                             from: from_key,
-                            to: format!("mem:journal:{session_id}:{target_seq}"),
+                            to: target,
                             kind: "supersedes".into(),
                             confidence: Some(100),
                             source: Some("memory".into()),
@@ -573,6 +507,73 @@ pub fn index_memory_subsystem(store: &mut impl GraphStore, root: &Path) -> Resul
                 if store.replace_file_subgraph(&rel_path, &nodes, &edges, &[])? {
                     total_indexed += 1;
                 }
+            }
+        }
+    }
+
+    // 2. Index .sqwai/journal/*.jsonl note records
+    if journal_dir.exists()
+        && journal_dir.is_dir()
+        && let Ok(entries) = fs::read_dir(&journal_dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !file_name.ends_with(".jsonl") {
+                continue;
+            }
+
+            let session_id = file_name.trim_end_matches(".jsonl");
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+
+            let rel_path = format!(".sqwai/journal/{file_name}");
+            let parsed = parse_journal_notes(&rel_path, session_id, &content);
+            if parsed.is_empty() {
+                continue;
+            }
+
+            let mut nodes = Vec::new();
+            let mut edges = Vec::new();
+
+            for (node, backticks, resolves) in parsed {
+                let from_key = node.stable_key.clone();
+                nodes.push(node);
+
+                for token in backticks {
+                    let (kind, to_key) = resolve_mention(store, &token);
+                    edges.push(Edge {
+                        from: from_key.clone(),
+                        to: to_key,
+                        kind,
+                        confidence: Some(100),
+                        source: Some("memory".into()),
+                        source_hash: None,
+                        limitations: Vec::new(),
+                        properties: BTreeMap::new(),
+                    });
+                }
+
+                if let Some(target_seq) = resolves {
+                    edges.push(Edge {
+                        from: from_key,
+                        to: format!("mem:journal:{session_id}:{target_seq}"),
+                        kind: "supersedes".into(),
+                        confidence: Some(100),
+                        source: Some("memory".into()),
+                        source_hash: None,
+                        limitations: Vec::new(),
+                        properties: BTreeMap::new(),
+                    });
+                }
+            }
+
+            if store.replace_file_subgraph(&rel_path, &nodes, &edges, &[])? {
+                total_indexed += 1;
             }
         }
     }

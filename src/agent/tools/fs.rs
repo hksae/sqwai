@@ -385,10 +385,10 @@ pub(super) fn multi_edit(
     }
     let mut warnings = Vec::new();
     for (old, _, _) in edits {
-        if let Some(w) = check_symbol_pre_edit(&ctx.root, &p, old) {
-            if !warnings.contains(&w) {
-                warnings.push(w);
-            }
+        if let Some(w) = check_symbol_pre_edit(&ctx.root, &p, old)
+            && !warnings.contains(&w)
+        {
+            warnings.push(w);
         }
     }
     checkpoint(ctx, &p, "multi_edit");

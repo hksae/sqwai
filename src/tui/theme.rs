@@ -10,6 +10,7 @@ use crate::config::EffortLevel;
 /// - `Red` = errors; `Yellow` = busy/attention (dark terminals);
 /// - `LightBlue` = ordered list markers; `Green` = blockquotes;
 /// - no painted backgrounds: everything is transparent over the terminal.
+///
 /// Dark terminal is assumed (no light-theme probing like Codex `color.rs`).
 pub struct Theme;
 

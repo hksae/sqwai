@@ -77,6 +77,10 @@ pub fn stable_prefix() -> String {
 
 /// Bench assembly: identical layers, rooted at the fixture copy.
 /// The model must never see the cargo-inherited cwd here.
+/// Used by the bench harness (test-only) — not dead, just cfg-gated.
+/// The harness is the only caller by design: production never assembles
+/// prompts against a fixture root.
+#[allow(dead_code)]
 pub fn bench_prefix(root: &std::path::Path, baseline: bool) -> String {
     stable_prefix_inner(root, baseline)
 }
