@@ -132,12 +132,9 @@ fn builtin_prompt() -> String {
     render_tools(&source)
 }
 
-/// AGENTS.md of the current project, truncated to a sane size
-pub fn project_agents() -> Option<String> {
-    project_agents_at(&std::env::current_dir().unwrap_or_default())
-}
-
-/// Same, rooted explicitly (bench fixture copies ship their own AGENTS.md).
+/// AGENTS.md of a project, truncated to a sane size. Rooted explicitly:
+/// callers pass the project root (bench fixture copies ship their own
+/// AGENTS.md; the process cwd would leak the wrong project).
 pub fn project_agents_at(root: &std::path::Path) -> Option<String> {
     let s = std::fs::read_to_string(root.join("AGENTS.md")).ok()?;
     let s = s.trim();

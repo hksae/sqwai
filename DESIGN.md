@@ -139,10 +139,14 @@ completed|abandoned → (read-only in the TUI; the model has no mutating op)
 A session resolves strictly: `open_active_for_session` returns the
 session's own active plan or `None` — never another session's plan (#171).
 Joining a foreign plan is explicit (`plan start` records membership).
-Cursor limit: several sessions may commit to one plan, but `applied_event`
-holds a single `session:seq` — the last writer's suffix. A crash between
-another session's journal append and its plan store leaves that op in the
-other session's journal where the startup replay never looks. See §13.
+Cursor limit: several sessions may commit to one plan. The file carries a
+per-session cursor map (`applied_events: {session: seq}`) alongside the
+legacy last-writer `applied_event`, and replay heals every session's
+suffix independently — a stall holds its own stream, never the others.
+Concurrent commits interleave without a shared order; cross-session op
+order for rebuilds is best-effort `(ts, session, seq)`. There is
+deliberately no total-order counter: shared mutable sequence state
+across processes would itself need crash recovery. See §13 history.
 
 Fork is deleted: there is no `/fork`, no plan copy, no journal fork record.
 Resume (`--resume`, session picker, `/new` continue) is the only
@@ -249,8 +253,10 @@ The host pins an attachment receipt (`runner: "evidence"`, state digest over
 traversed paths) so later moves stale the item like a command check, and
 `complete` re-validates the refs instead of trusting the earlier verify.
 Writes are atomic: temp file + rename. On open, a plan that fails schema
-validation is quarantined to `plans/corrupt/<id>.json` and loading fails;
-there is no automatic rebuild (replay only heals cursors and orphans).
+validation is rebuilt from journaled intents (create + later ops in
+best-effort ts order); only unrebuildable bytes (no intent, diverged op,
+deliberate deletion) are quarantined to `plans/corrupt/<id>.json` and
+loading fails.
 
 2.1.3 Operations
 Tool plan accepts one operation per call: start, finish, block, unblock,
@@ -362,11 +368,11 @@ the complete accepted payload needed for deterministic replay. Plan projection i
 produced by a reducer over all relevant events, including plan ops,
 evidence attachment, receipts, invalidations, undo, goal revisions, and deletion.
 Every accepted `plan` op is first appended to the journal as a `plan` event and only
-then applied to `plans/<plan-id>.json`; `applied_event` advances in the same
-atomic step. There is no total-order counter. Replay contract (single,
-implemented in `plan::replay`, run at startup and session start): for each
-plan file carrying an `applied_event` cursor `session:seq`, re-apply that
-session's journaled `plan` ops after the cursor (pure re-application — no
+then applied to `plans/<plan-id>.json`; the per-session cursor map advances
+in the same atomic step. There is deliberately no total-order counter.
+Replay contract (per session, implemented in `plan::replay`, run at startup
+and session start): for each plan file, re-apply every committing
+session's journaled `plan` ops after its cursor (pure re-application — no
 commands run, no approvals, no evidence gates; every replayed op was already
 accepted when first journaled), re-attach `tool_result`/`file_diff`/
 `diagnostics` evidence refs the file update lost, and rebuild plans whose
@@ -1484,7 +1490,7 @@ number; a `partial` one is missing something the design calls for.
 | D | git tools, patch, web tools, subagents | done | B |
 | E | Graph prototype (Cozo, generic + markdown) | done — engine replaced by I1 | — |
 | F1 | plan tool + validator (all rules except evidence/refs) + /plan /goal /constraints /mode; prompt update | done | B |
-| F1b | Event-sourced projection reducer + deterministic replay (`applied_event`, orphan recovery) | partial — journal-first projection and startup replay (cursor + evidence re-attach + orphan rebuild) exist; no total-order counter and no corrupt-plan rebuild (quarantine only); multi-session cursor gap (§13) | F1, F2 |
+| F1b | Event-sourced projection reducer + deterministic replay (`applied_event`, orphan recovery) | done — journal-first projection and startup replay (per-session cursor map, evidence re-attach, orphan rebuild, corrupt-file rebuild from intents); no total-order counter by design (the map covers it without shared state) | F1, F2 |
 | F2 | Journal writer at dispatch; all kinds except `reflect`, `graph` | done (incl. `diagnostics`) | B |
 | F3 | Evidence rule in `finish`, `verify`, `complete`; nudges; note | done — `verify` accepts evidence from an unrelated step (#6) | F1 |
 | F4 | Diary: host block, triggers, writer call, fallback; memory_read; secrets screening | done — journal summary/text screened at append, diary prose post-checked in host code | F2 |
@@ -1907,14 +1913,10 @@ context is a host observation, which fits the integrity model.
   may refuse legitimate commands. Mitigations: fallback to Mythos model, configurable safety
   levels (AG), journaled refusals, and user‑controlled override.
 
-- **Multi-session replay cursor.** `applied_event` is a single `session:seq`
-  (the last writer's suffix). When several sessions commit to one plan, a
-  crash between session B's journal append and its plan store leaves B's op
-  where the startup replay never looks. Concurrent commits also interleave
-  without a shared order. Candidate fixes: a per-session cursor map
-  (`applied_events: {session: seq}`) with replay scanning each suffix, or a
-  dedicated plan journal. Until then, concurrent multi-session writes to one
-  plan are best-effort.
+- **Multi-session replay cursor (resolved 2026-09-18).** Was: `applied_event`
+  held a single `session:seq`, so a crash between another session's append
+  and store left ops where replay never looked. Now a per-session cursor
+  map; the total-order counter stays deliberately unbuilt (see §2.1.4).
 
 - **Loose text acceptance and diagnostics severity.** A free-text acceptance
   item settles on any unspent verify-step evidence, and any `diagnostics`
