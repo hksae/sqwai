@@ -1589,7 +1589,7 @@ Evaluation protocol:
 - **External observer**: an external evaluation harness (independent of the agent's
   internal journal) observes both runs and writes `bench/<task>/<arm>.eval.jsonl`.
   The baseline arm is `SQWAI_BENCH_BASELINE=1`: hidden tools (`plan`,
-  `note`, `journal`, `memory_propose`, `memory_read`); no `USER.md`/
+  `propose_plan`, `note`, `journal`, `memory_propose`, `memory_read`); no `USER.md`/
   `MEMORY.md`/diary block, no durable-plan block, no host anchor, no
   resume notice; no diary writes; `compaction.summary` forced to `short`;
   the plan-first gate lifted. The host journal still records everything —

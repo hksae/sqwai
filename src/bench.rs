@@ -4,7 +4,7 @@
 //! switched off, so retention can be measured against a plain
 //! summarize-and-continue agent:
 //!
-//! - hidden tools: `plan`, `note`, `journal`, `memory_propose`,
+//! - hidden tools: `plan`, `propose_plan`, `note`, `journal`, `memory_propose`,
 //!   `memory_read` (the model cannot see or touch plans, notes, the
 //!   journal projection, or durable memory);
 //! - prompt: no `USER.md`/`MEMORY.md`/diary block, no durable-plan block,

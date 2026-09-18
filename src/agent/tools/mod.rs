@@ -1254,7 +1254,12 @@ pub fn tool_specs(plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
             !baseline
                 || !matches!(
                     d.name,
-                    "plan" | "note" | "journal" | "memory_propose" | "memory_read"
+                    "plan"
+                        | "propose_plan"
+                        | "note"
+                        | "journal"
+                        | "memory_propose"
+                        | "memory_read"
                 )
         })
         .map(|d| {
@@ -3508,7 +3513,14 @@ mod tests {
         crate::bench::set_baseline_override(Some(true));
         let names: Vec<String> =
             tool_specs(false).iter().map(|t| t.name.clone()).collect();
-        for hidden in ["plan", "note", "journal", "memory_propose", "memory_read"] {
+        for hidden in [
+            "plan",
+            "propose_plan",
+            "note",
+            "journal",
+            "memory_propose",
+            "memory_read",
+        ] {
             assert!(
                 !names.contains(&hidden.to_string()),
                 "{hidden} must be hidden on baseline: {names:?}"
