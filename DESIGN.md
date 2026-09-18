@@ -1518,7 +1518,7 @@ number; a `partial` one is missing something the design calls for.
 | V1 | Verification receipts (§2.1.4): execution interval digest, check hash, stale invalidation, manual `confirm` vs `waive` | done — interval digest, check hash, stale invalidation on diff, manual /plan confirm, replay restoration | V, F1b |
 | W | Plan-first gate (Act first-mutate w/o plan → plan_required) | done — `plan_first: soft|off` in PlanConfig; heuristic trivial bypass; gate blocks unprompted mutations in Act mode without an active plan | F3 |
 | X | Tool-output pruning + USER.md split/load | partial — USER.md split/loading and prune (§3.3.1) done; the read guard is a host path→hash map, not context-backed authorization | F1, F5 |
-| Y | Claim lint (post-generation verify against journal/resolve_ref) | planned (§12.9) | I4 |
+| Y | Claim lint (post-generation verify against journal/resolve_ref) | partial — counts/status/paths/symbols checked against the turn journal window, contradictions marked `[unverified]` + `claim_lint` record, absence never flagged; repetition nudge pending (§12.9) | I4 |
 | Z | Scope guard (step.refs vs file_diff) | partial — finish-time misattribution warnings via refs done; no warn/block gate on the write path | I4 |
 | AA | Lessons tied to files (note kind + context-block rule) | partial — `lesson` note kind done; automatic file-tied injection planned with the context block (§12.5) | I5 |
 | AB | /why provenance, step diff + /undo step, /export | partial — step diff + `/undo step` done; `/why` and `/export` do not exist | J |

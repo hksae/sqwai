@@ -1749,9 +1749,11 @@ async fn run_agent(
         compacted_for_overflow = false;
 
         if turn.calls.is_empty() {
-            // final answer
+            // final answer — claim lint (Y, §12.9) checks it here, marking
+            // contradictions without ever blocking the turn
+            let text = lint_answer(&turn.text, &root, &session_id, &mut journal);
             messages.push(
-                Message::new(Role::Assistant, turn.text).with_provider_state(turn.provider_state),
+                Message::new(Role::Assistant, text).with_provider_state(turn.provider_state),
             );
             break;
         }
@@ -3079,6 +3081,294 @@ async fn run_turn(
         }
         tokio::time::sleep(delay).await;
     }
+}
+
+/// Claim lint (Y, §12.9): post-generation check of result claims in the
+/// final answer against this turn's journal window (records after the
+/// latest user message). Only CONTRADICTIONS are marked — absence of
+/// evidence is silence, never a flag. Never fails and never blocks:
+/// any internal error returns the text untouched.
+fn lint_answer(
+    text: &str,
+    root: &std::path::Path,
+    session_id: &str,
+    journal: &mut Option<crate::agent::journal::Journal>,
+) -> String {
+    // quoting the user is not claiming: drop markdown-quote lines first
+    let visible: String = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('>'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let records =
+        crate::agent::journal::Journal::records_for(root, session_id).unwrap_or_default();
+    let start = records
+        .iter()
+        .filter(|r| r.kind == "user_msg")
+        .map(|r| r.seq)
+        .max()
+        .unwrap_or(0);
+    let results: Vec<(String, bool, String)> = records
+        .iter()
+        .filter(|r| r.kind == "tool_result" && r.seq > start)
+        .map(|r| {
+            (
+                r.fields
+                    .get("tool")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                r.fields.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                r.fields
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .collect();
+    let any_fail = results.iter().any(|(_, ok, _)| !ok);
+    let exec_ok = results
+        .iter()
+        .any(|(tool, ok, _)| *ok && tool == "bash");
+    let summaries = results
+        .iter()
+        .map(|(_, _, s)| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // candidate spans in first-seen order; each distinct span is marked once
+    let mut spans: Vec<(&str, &str)> = Vec::new(); // (kind, span)
+    for (kind, span) in extract_counts(&visible) {
+        let verified = summaries.contains(span);
+        if !verified && any_fail {
+            push_span(&mut spans, kind, span);
+        }
+    }
+    for (_, span) in extract_status_words(&visible) {
+        if exec_ok {
+            continue;
+        }
+        if any_fail {
+            push_span(&mut spans, "status", span);
+        }
+    }
+    for span in extract_paths(&visible) {
+        if path_deleted_nearby(&visible, span) {
+            continue;
+        }
+        if !path_exists(root, span) {
+            push_span(&mut spans, "path", span);
+        }
+    }
+    // symbols last and fewest: each costs a graph lookup
+    if spans.len() < 40 {
+        if let Ok(mut store) = crate::agent::graph::SqliteGraphStore::open(root) {
+            for sym in extract_symbols(&visible) {
+                if spans.len() >= 40 {
+                    break;
+                }
+                match store.resolve_ref(None, None, Some(sym)) {
+                    Ok(crate::agent::graph::ResolveRefResult::NotFound { .. }) => {
+                        push_span(&mut spans, "symbol", sym)
+                    }
+                    Ok(_) => {}
+                    Err(_) => {} // infra failure: silence, not a verdict
+                }
+            }
+        }
+    }
+    if spans.is_empty() {
+        return text.to_string();
+    }
+    if let Some(writer) = journal.as_mut() {
+        for (kind, span) in &spans {
+            let _ = writer.append(
+                "claim_lint",
+                serde_json::json!({
+                    "span": span,
+                    "kind": kind,
+                    "by": "host",
+                }),
+            );
+        }
+    }
+    // mark first occurrence of each span; offsets shift as we insert
+    let mut marked = text.to_string();
+    let mut done: Vec<&str> = Vec::new();
+    for (_, span) in &spans {
+        if done.contains(span) {
+            continue;
+        }
+        done.push(span);
+        if let Some(pos) = marked.find(span) {
+            marked.insert_str(pos + span.len(), " [unverified]");
+        }
+    }
+    marked
+}
+
+/// Capped dedup push for lint spans. A span already covered by a longer
+/// collected one (e.g. "tests pass" inside "All tests pass") is skipped.
+fn push_span<'x>(spans: &mut Vec<(&'static str, &'x str)>, kind: &'static str, span: &'x str) {
+    if spans.len() < 40
+        && !spans
+            .iter()
+            .any(|(_, s)| *s == span || s.contains(span))
+    {
+        spans.push((kind, span));
+    }
+}
+
+/// `12 passed`, `3 failed`, `280/280` — byte spans into `text`.
+/// ASCII-only scanning, so every cut lands on a char boundary.
+fn extract_counts(text: &str) -> Vec<(&'static str, &str)> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        let mut j = i;
+        while j < bytes.len() && (bytes[j] as char).is_whitespace() {
+            j += 1;
+        }
+        // x/y form
+        if bytes.get(j) == Some(&b'/') {
+            let mut k = j + 1;
+            while k < bytes.len() && bytes[k].is_ascii_digit() {
+                k += 1;
+            }
+            if k > j + 1 {
+                out.push(("count", &text[start..k]));
+                i = k;
+                continue;
+            }
+        }
+        // word form: passed|failed
+        let mut k = j;
+        while k < bytes.len() && (bytes[k] as char).is_alphanumeric() {
+            k += 1;
+        }
+        if &text[j..k] == "passed" || &text[j..k] == "failed" {
+            out.push(("count", &text[start..k]));
+            i = k;
+        }
+    }
+    out
+}
+
+/// status phrases that assert success without numbers.
+fn extract_status_words(text: &str) -> Vec<(&'static str, &str)> {
+    const PHRASES: &[&str] = &[
+        "build succeeded",
+        "builds succeeded",
+        "all green",
+        "tests pass",
+        "test passes",
+        "suite passes",
+        "suites pass",
+        "suite green",
+        "all tests pass",
+        "everything passes",
+    ];
+    let lower = text.to_lowercase();
+    let mut out = Vec::new();
+    for phrase in PHRASES {
+        // first occurrence span mapped back by byte search (phrases are ASCII)
+        if let Some(pos) = lower.find(phrase) {
+            let end = pos + phrase.len();
+            if text.is_char_boundary(pos) && text.is_char_boundary(end) {
+                out.push(("status", &text[pos..end]));
+            }
+        }
+    }
+    out
+}
+
+/// path-looking tokens: contain `/` and `.`, or backticked with a dot.
+/// Trailing punctuation stripped. Returns spans into `text`.
+fn extract_paths(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let backticked = bytes[i] == b'`';
+        if backticked {
+            i += 1;
+        }
+        let is_tok = |b: u8| (b as char).is_alphanumeric() || "._-/".contains(b as char);
+        if bytes.get(i).is_none_or(|b| !is_tok(*b)) {
+            if !backticked {
+                i += 1;
+            }
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && is_tok(bytes[i]) {
+            i += 1;
+        }
+        let mut end = i;
+        while end > start {
+            // text[..end] is always a valid boundary here (end only moves
+            // back by whole chars), so next_back never panics
+            match text[..end].chars().next_back() {
+                Some(c) if ",.:;!?".contains(c) => end -= c.len_utf8(),
+                _ => break,
+            }
+        }
+        let closed = backticked && text[end..].starts_with('`');
+        if end > start && text.is_char_boundary(start) && text.is_char_boundary(end) {
+            let tok = &text[start..end];
+            if (tok.contains('/') && tok.contains('.')) || (backticked && closed && tok.contains('.'))
+            {
+                out.push(tok);
+            }
+        }
+        if backticked && text[i..].starts_with('`') {
+            i += 1; // skip the closing backtick so it is not rescanned
+        }
+    }
+    out
+}
+
+/// guard for tombstone claims ("deleted x.rs"): a deletion verb in the
+/// preceding 24 chars means a missing file is expected, not a lie.
+fn path_deleted_nearby(text: &str, span: &str) -> bool {
+    const VERBS: &[&str] = &[
+        "delete", "deleted", "remove", "removed", "rm ", "unlink", "deleting", "removing",
+    ];
+    let Some(pos) = text.find(span) else {
+        return false;
+    };
+    let from = pos.saturating_sub(48);
+    let before = text[from..pos].to_lowercase();
+    VERBS.iter().any(|v| before.contains(v))
+}
+
+fn path_exists(root: &std::path::Path, span: &str) -> bool {
+    let rel = std::path::Path::new(span);
+    if rel.is_absolute() {
+        return rel.exists();
+    }
+    root.join(rel).exists()
+}
+
+/// `path::symbol` tokens. Returns spans into `text`, capped by the caller.
+fn extract_symbols(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for tok in text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':' || c == '/')) {
+        if tok.contains("::") && !tok.starts_with(':') && !tok.ends_with(':') {
+            out.push(tok);
+        }
+    }
+    out
 }
 
 async fn ask_user(
@@ -4475,6 +4765,69 @@ mod effort_tests {
         // RU markers behave the same
         assert!(capture_nudge("не трогай btree", &[]).is_some());
         assert!(capture_nudge("не трогай btree", &c("btree не трогать")).is_none());
+    }
+
+    #[test]
+    fn claim_extractors_find_counts_status_paths_symbols() {
+        let counts = extract_counts("12 passed, 3 failed, suite 280/280 ok, version 2 here");
+        let texts: Vec<&str> = counts.iter().map(|(_, s)| *s).collect();
+        assert!(texts.contains(&"12 passed"), "{texts:?}");
+        assert!(texts.contains(&"3 failed"), "{texts:?}");
+        assert!(texts.contains(&"280/280"), "{texts:?}");
+        // bare version number is not a claim
+        assert!(!texts.iter().any(|s| *s == "2"), "{texts:?}");
+
+        let words = extract_status_words("Build SUCCEEDED, all green. All tests pass!");
+        // "tests pass" nests inside "All tests pass" (deduped later in push_span)
+        assert_eq!(words.len(), 4, "{words:?}");
+
+        let paths = extract_paths("see src/main.rs, also `config.toml`, not v2.0 or e.g. this");
+        assert!(paths.contains(&"src/main.rs"), "{paths:?}");
+        assert!(paths.contains(&"config.toml"), "{paths:?}");
+        assert!(!paths.iter().any(|p| p.contains("v2")), "{paths:?}");
+
+        let syms = extract_symbols("call foo::bar and crate::x, not a::b: trailing");
+        assert!(syms.contains(&"foo::bar"), "{syms:?}");
+    }
+
+    #[test]
+    fn lint_answer_marks_only_contradictions() {
+        let root = std::env::temp_dir().join(format!("sqwai-lint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut journal =
+            crate::agent::journal::Journal::open(&root, "sess").expect("open");
+        journal.append("user_msg", serde_json::json!({})).unwrap();
+        journal
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "bash", "ok": true, "summary": "12 passed"}),
+            )
+            .unwrap();
+        journal
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "bash", "ok": false, "summary": "boom"}),
+            )
+            .unwrap();
+        let mut jh = Some(journal);
+        // "12 passed" is in the window: untouched. "99 passed" is absent
+        // while a failure exists: marked. Quoted text never counts.
+        let out = lint_answer(
+            "Done: 12 passed and 99 passed.\n> user said 77 passed",
+            &root,
+            "sess",
+            &mut jh,
+        );
+        assert!(out.contains("12 passed and 99 passed [unverified]"), "{out}");
+        assert!(!out.contains("12 passed [unverified]"), "{out}");
+        assert!(!out.contains("77 passed [unverified]"), "{out}");
+        // record written for the marked span only
+        let recs = crate::agent::journal::Journal::records(&root).expect("read");
+        let lints: Vec<_> = recs.iter().filter(|r| r.kind == "claim_lint").collect();
+        assert_eq!(lints.len(), 1);
+        assert_eq!(lints[0].fields["span"], "99 passed");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn count_summaries(messages: &[Message]) -> usize {
