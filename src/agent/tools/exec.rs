@@ -72,6 +72,23 @@ fn bg_jobs() -> &'static Mutex<Vec<BgJob>> {
     JOBS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+/// (id, owning session, command) of every background job whose process is
+/// still alive. Undo restores consult this: the writer lock stops
+/// in-process dispatch, but an already-running shell keeps writing while
+/// the tree is being reverted — so undo refuses until these are gone.
+pub(super) fn running_commands() -> Vec<(u64, String, String)> {
+    poll_jobs();
+    bg_jobs()
+        .lock()
+        .map(|jobs| {
+            jobs.iter()
+                .filter(|job| job.running())
+                .map(|job| (job.id, job.session.clone(), job.command.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Poll every job. This reaps exited children (the per-spawn zombie leak on

@@ -186,10 +186,12 @@ pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome
     }
     ctx.mark_read(&p);
     let label = rel_label(&ctx.root, &p);
-    let diff = prev
-        .as_deref()
-        .map(|before| make_diff(before, content))
-        .unwrap_or_default();
+    let diff = match prev.as_deref() {
+        Some(before) => make_diff(before, content),
+        // a created file is all-added: the TUI expanded row and the
+        // write-path lints (AF) see the same diff shape as an edit
+        None => make_diff("", content),
+    };
     let checkpoint = ctx.journal.last().map(|(sha, _)| sha.clone());
     let metadata = file_diff(
         &p,
@@ -212,6 +214,7 @@ pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome
             label,
             content.lines().count()
         ))
+        .with_diff(diff)
         .with_file_diff(metadata),
     }
 }

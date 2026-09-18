@@ -1301,6 +1301,14 @@ fn step_epoch_current(root: &Path, inherited: &plan::StepContext) -> bool {
         .is_some_and(|step| step.step_epoch == inherited.step_epoch)
 }
 
+/// (id, owning session, command) of background jobs whose processes are
+/// still alive. The undo preflight (§2.5, S1) refuses a restore while any
+/// of these run — the writer lock stops in-process dispatch, but an
+/// already-running shell would keep writing mid-restore.
+pub(crate) fn bg_running_commands() -> Vec<(u64, String, String)> {
+    exec::running_commands()
+}
+
 /// dispatch one tool call
 pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
     if ctx.read_only
@@ -1319,6 +1327,21 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
     {
         return Outcome::err(
             "project is read-only because another sqwai instance owns the lock; use --force to enable writes",
+        );
+    }
+    // S1 writer lock: an undo restore is reverting the tree right now.
+    // In-process dispatch must not add writes under it (a second sqwai
+    // instance is already covered by the read-only guard above).
+    if crate::agent::undo_guard::restore_active()
+        && matches!(name, "write" | "edit" | "multi_edit" | "patch" | "bash")
+    {
+        return Outcome::err(
+            serde_json::json!({
+                "ok": false,
+                "code": "writer_locked",
+                "reason": "an undo restore is reverting the tree; retry the mutation after it completes",
+            })
+            .to_string(),
         );
     }
     // A subagent mutating after its step was reopened (or its plan retired)
@@ -1340,7 +1363,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             .to_string(),
         );
     }
-    match name {
+    let mut outcome = match name {
         "read" => fs::read(ctx, args["file_path"].as_str().unwrap_or_default(), args),
         "write" => fs::write_file(
             ctx,
@@ -1664,6 +1687,65 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         }
         "journal" => journal_op(ctx, args),
         other => Outcome::err(format!("unknown tool '{other}'")),
+    };
+    lint_write_path(ctx, name, &mut outcome);
+    outcome
+}
+
+/// Z + AF write-path gates (warn-layer only, §2.1.9): scope-check the
+/// touched paths against the holding step's refs, and scan the unified
+/// diff for test-shaped literals. Runs after a successful file mutation.
+/// `bash` is excluded — shell-written bytes leave no per-file diff to
+/// attribute or scan (pre/post snapshots and checkpoints cover them, and
+/// the model is told so nowhere: the gap is documented, not silent).
+fn lint_write_path(ctx: &ToolCtx, name: &str, outcome: &mut Outcome) {
+    if !outcome.ok || !matches!(name, "write" | "edit" | "multi_edit" | "patch") {
+        return;
+    }
+    let mut touched: Vec<&str> = Vec::new();
+    if let Some(diff) = outcome.file_diff.as_ref() {
+        touched.push(diff.path.as_str());
+    }
+    for diff in &outcome.file_diffs {
+        touched.push(diff.path.as_str());
+    }
+    if touched.is_empty() {
+        return;
+    }
+    // The holding step's refs: the child's inherited context, or the
+    // session's own active plan plus its current step. Anything
+    // unresolvable means "no scope declared" — the lint stays silent.
+    let refs: Vec<crate::plan::StepRef> = if let Some(inherited) = ctx.subagent_step.as_ref() {
+        crate::plan::read_plan_file(&ctx.root, &inherited.plan_id)
+            .and_then(|plan| {
+                plan.steps
+                    .into_iter()
+                    .find(|step| step.id == inherited.step_id)
+            })
+            .map(|step| step.refs)
+            .unwrap_or_default()
+    } else if let Some(step_id) = ctx.current_step.as_deref() {
+        crate::plan::open_active_for_session(&ctx.root, Some(ctx.session_id.as_str()))
+            .ok()
+            .flatten()
+            .and_then(|plan| {
+                plan.steps
+                    .into_iter()
+                    .find(|step| step.id.as_str() == step_id)
+            })
+            .map(|step| step.refs)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let mut warnings = crate::agent::lint::scope_warnings(&refs, &touched);
+    if let Some(diff) = outcome.diff.as_deref() {
+        let label = touched.first().copied().unwrap_or("unknown file");
+        warnings.extend(crate::agent::lint::hardcode_warnings(diff, label));
+    }
+    for warning in warnings {
+        outcome.output.push('\n');
+        outcome.output.push_str(&warning);
     }
 }
 
@@ -3875,6 +3957,85 @@ mod tests {
             &json!({"file_path": "src/child3.rs", "content": "fresh work\n"}),
         );
         assert!(wrote_again.ok, "{}", wrote_again.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// S1 writer lock: while an undo restore holds the lock, file
+    /// mutations are refused with `code: writer_locked` instead of
+    /// landing under the revert.
+    #[test]
+    fn writer_lock_refuses_mutations_during_restore() {
+        let (mut ctx, dir) = proj();
+        let _restore = crate::agent::undo_guard::hold_restore();
+        let refused = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": "src/locked.rs", "content": "nope\n"}),
+        );
+        assert!(!refused.ok, "locked mutation must be refused");
+        assert!(refused.output.contains("writer_locked"), "{}", refused.output);
+        drop(_restore);
+        let wrote = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": "src/locked.rs", "content": "ok\n"}),
+        );
+        assert!(wrote.ok, "{}", wrote.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Z write-path gate: a mutation outside the holding step's refs
+    /// carries a scope warning; a mutation inside them stays clean.
+    /// Refs are attached directly to dodge the create-time graph
+    /// validator — the gate under test reads them, it does not validate.
+    #[test]
+    fn write_path_scope_gate_warns_outside_step_refs() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({"op": "create", "goal": "scoped work", "acceptance": [],
+                    "steps": [{"title": "touch a"}]}),
+        );
+        assert!(created.ok, "{}", created.output);
+        ctx.current_step = Some("1".into());
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        // refs after start: the start-time graph validator already passed,
+        // and the gate under test only reads them.
+        let mut active = plan::open_active(&dir).unwrap().unwrap();
+        active.steps[0].refs = vec![crate::plan::StepRef::from("src/a.rs")];
+        plan::store(&dir, &active).unwrap();
+
+        let inside = execute(&mut ctx, "write", &json!({"file_path": "src/a.rs", "content": "hello\n"}));
+        assert!(inside.ok, "{}", inside.output);
+        assert!(!inside.output.contains("outside this step's refs"), "{}", inside.output);
+
+        let outside = execute(&mut ctx, "write", &json!({"file_path": "src/b.rs", "content": "hello\n"}));
+        assert!(outside.ok, "gate warns, never blocks: {}", outside.output);
+        assert!(outside.output.contains("outside this step's refs"), "{}", outside.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// AF write-path gate: trap-shaped content (branch on a long literal)
+    /// is flagged in the outcome; ordinary code passes silently.
+    #[test]
+    fn write_path_hardcode_gate_flags_trap_shaped_content() {
+        let (mut ctx, dir) = proj();
+        let trapped = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": "src/trap.rs",
+                    "content": "fn check(input: &str) -> bool {\n    if input == \"the quick brown fixture bytes 0123456789\" {\n        return true;\n    }\n    false\n}\n"}),
+        );
+        assert!(trapped.ok, "{}", trapped.output);
+        assert!(trapped.output.contains("test-shaped literal"), "{}", trapped.output);
+
+        let plain = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": "src/plain.rs", "content": "fn f(x: i32) -> i32 {\n    x + 1\n}\n"}),
+        );
+        assert!(plain.ok, "{}", plain.output);
+        assert!(!plain.output.contains("test-shaped literal"), "{}", plain.output);
         fs::remove_dir_all(&dir).ok();
     }
 

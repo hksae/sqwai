@@ -231,6 +231,13 @@ impl AgentHandle {
         self.cancel
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
+
+    /// The stop half of this handle for the S1 child registry
+    /// (§2.2.4): undo cancels whatever is still registered before it
+    /// reverts the tree. Cloned, never moved — the event stream stays here.
+    pub fn child_control(&self) -> super::undo_guard::ChildControl {
+        super::undo_guard::ChildControl::new(self.abort.clone(), self.cancel.clone())
+    }
 }
 
 impl Drop for AgentHandle {
@@ -809,6 +816,9 @@ async fn run_subagent(
         fallback_chain,
     });
     let mut child = child;
+    // S1: visible to undo's cancellation signal until it joins. The guard
+    // leaves the map on every exit path below, including early returns.
+    let _child_slot = super::undo_guard::track_child(id, child.child_control());
     let mut output = String::new();
     let deadline = tokio::time::Instant::now() + timeout;
     loop {

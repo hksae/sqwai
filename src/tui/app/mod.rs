@@ -4454,6 +4454,40 @@ impl App {
     }
 
     /// revert the last `n` mutating actions and reopen steps whose evidence was reverted.
+    /// S1 preflight shared by every undo entry: cancel still-registered
+    /// children (normally none — they join inside their `task` call),
+    /// refuse while background shells are alive (the writer lock stops
+    /// dispatch, not an already-running process), and take the restore
+    /// lock. `None` means blocked — the caller returns without touching
+    /// the tree.
+    fn undo_preflight(&mut self) -> Option<crate::agent::undo_guard::RestoreGuard> {
+        let cancelled = crate::agent::undo_guard::cancel_running_children();
+        if cancelled > 0 {
+            self.status(
+                &format!("cancelled {cancelled} running subagent(s) before undo"),
+                StatusKind::Info,
+            );
+        }
+        let running = crate::agent::tools::bg_running_commands();
+        if !running.is_empty() {
+            let ids: Vec<String> = running
+                .iter()
+                .map(|(id, session, cmd)| format!("job {id} ({session}): {cmd}"))
+                .collect();
+            self.status(
+                &format!(
+                    "undo refused: {} background job(s) still running — \
+                     kill them with bash_kill or wait for completion: {}",
+                    running.len(),
+                    ids.join("; "),
+                ),
+                StatusKind::Warn,
+            );
+            return None;
+        }
+        Some(crate::agent::undo_guard::hold_restore())
+    }
+
     fn undo(&mut self, n: usize) {
         let n = n.max(1);
         if self.session.checkpoints.is_empty() {
@@ -4507,6 +4541,13 @@ impl App {
             );
             return;
         }
+        // S1: nothing mutates under the restore below — not dispatch
+        // (writer lock), not running children (cancelled), not live
+        // shells (refused above while any survive).
+        let _restore = match self.undo_preflight() {
+            Some(guard) => guard,
+            None => return,
+        };
         if !git_snapshots || (scoped && have_blobs) {
             // Prefer the blob store when it covers the window: it reverts
             // exactly the recorded writes, needs no repository, and cannot be
@@ -4629,6 +4670,12 @@ impl App {
             self.status(&note, StatusKind::Warn);
             return;
         }
+        // S1: same preflight as the full undo — the blob restore below is
+        // a tree mutation like any other.
+        let _restore = match self.undo_preflight() {
+            Some(guard) => guard,
+            None => return,
+        };
 
         match crate::agent::checkpoints::restore_from_blobs(&root, &revert.files) {
             Ok(report) => {
@@ -4713,6 +4760,12 @@ impl App {
         pre_images: &[crate::agent::journal::PreImage],
         unrecorded: usize,
     ) {
+        // Called from `undo` after its own preflight; re-checking is cheap
+        // and keeps this entry safe on its own.
+        let _restore = match self.undo_preflight() {
+            Some(guard) => guard,
+            None => return,
+        };
         match crate::agent::checkpoints::restore_from_blobs(root, pre_images) {
             Ok(report) => {
                 let touched = report.touched();

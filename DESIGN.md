@@ -487,6 +487,16 @@ session's own plan. It asks "is there planning discipline", not "is it
 yours" — one active plan per project is enough to let a session act under
 it (joining stays explicit via `plan start`). Strict session resolution
 (§2.1.1) still governs which plan a session reads and mutates.
+Write-path gates (Z, AF, warn-layer only — they steer, never block). After
+a successful `write`/`edit`/`multi_edit`/`patch`, the dispatcher checks the
+touched paths against the holding step's refs (the child's inherited step,
+or the session's active plan plus current step): paths matching no ref get
+a scope warning, capped at three per call. The same hook scans the outcome
+diff for test-shaped literals — confession phrases and long string
+literals compared against or returned — also capped at three. Steps with no
+refs stay silent, and `bash` is excluded from both: shell-written bytes
+leave no per-file diff to attribute or scan. Numeric magic constants are
+deliberately not flagged (ports, timeouts, status codes).
 2.2 Journal
 The journal is the factual record of a session. Written only by the host,
 in the tool dispatch layer and in a few lifecycle points. The model has one
@@ -579,8 +589,12 @@ Concurrency and writers discipline:
   mutation is refused (`code: stale_epoch`).
 - Up to 8 tasks per call, at most 4 concurrently; same-turn pure-subagent
   batches overlap waits but keep call-order rows, journal and transcript.
-- No `finish` gate on running children and no undo→subagent cancellation
-  signal exist yet (see S1).
+- No `finish` gate on running children is needed: children always join
+  inside their `task` call, so `plan finish` cannot race them (see S1).
+  The undo→subagent cancellation signal exists: every running child is
+  registered, and every undo entry cancels the registry before restoring.
+  The writer lock (`code: writer_locked`) refuses file mutations while a
+  restore holds it, and undo refuses while background shells are alive.
 
 A child's shadow snapshots land on the parent's checkpoint chain, so the
 parent's `/undo` sees step boundaries and bash mutations; its diary
@@ -1517,7 +1531,7 @@ number; a `partial` one is missing something the design calls for.
 | Q | Single-instance lock + read-only fallback for plan/journal/memory/graph | done | F1 |
 | R | Untrusted-input handling (trust:low, banner, cumulative taint, confirm gates) + prompt rule | partial — prompt rule and per-tool `trust: low` exist; cumulative taint, banner, and confirm gates missing | F2 |
 | S | Cancel mid-tool (Esc): cancelled result, in_progress | done — ok:false code:cancelled, journaled; no post-checkpoint, no revert | F2 |
-| S1 | Step epoch lifecycle (§2.2.4), writer lock during undo, subagent cancellation on reopen | partial — epoch lifecycle done (bump on reopen, older-epoch mutations refused); writer lock and subagent cancellation on reopen planned | F1b, D |
+| S1 | Step epoch lifecycle (§2.2.4), writer lock during undo, subagent cancellation on reopen | done — epoch lifecycle done (bump on reopen, older-epoch mutations refused); writer lock during undo (dispatch refuses file mutations with `writer_locked`, undo refuses while background shells live); running children cancelled on reopen via registry; finish gate proven unnecessary (children join inside their `task` call, no race exists) | F1b, D |
 | T | Provider fallback chain ([models.x].fallback) | done — transparent switch on Network/Server errors or retry-exhausted; `FallbackCandidate` chain, `FallbackSwitched` event, fast-fail `run_turn` | §5.1 |
 | U | Assumption notes: open tracking, finish warning, resolve | done | F3 |
 | V | Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md) | done — cmd:/manual: settling done (#7); `/init` seeds `[verify] commands` (repo probing + MEMORY.md `verify:` lines, hand values win); `cmd: $name` substitutes on `plan create`, unknown names reject with the known list | F3 |
@@ -1525,13 +1539,13 @@ number; a `partial` one is missing something the design calls for.
 | W | Plan-first gate (Act first-mutate w/o plan → plan_required) | done — `plan_first: soft|off` in PlanConfig; heuristic trivial bypass; gate blocks unprompted mutations in Act mode without an active plan | F3 |
 | X | Tool-output pruning + USER.md split/load | partial — USER.md split/loading and prune (§3.3.1) done; the read guard is a host path→hash map, not context-backed authorization | F1, F5 |
 | Y | Claim lint (post-generation verify against journal/resolve_ref) | done — counts/status/paths/symbols checked against the turn journal window, contradictions marked `[unverified]` + `claim_lint` record, absence never flagged; repetition nudge (3+ fresh flags) rides the turn system block (§12.9) | I4 |
-| Z | Scope guard (step.refs vs file_diff) | partial — finish-time misattribution warnings via refs done; no warn/block gate on the write path | I4 |
+| Z | Scope guard (step.refs vs file_diff) | done — finish-time misattribution warnings plus write-path scope warnings against the holding step's refs (warn-layer, never blocks; `bash` excluded, no per-file diff) | I4 |
 | AA | Lessons tied to files (note kind + context-block rule) | partial — `lesson` note kind done; automatic file-tied injection planned with the context block (§12.5) | I5 |
 | AB | /why provenance, step diff + /undo step, /export | partial — step diff + `/undo step` done; `/why` and `/export` do not exist | J |
 | AC | bench command (user-facing wrapper over §8.2 regression harness) | planned | G0 |
 | AD | Bash isolation/sandbox (container/bwrap/WSL) | open question | — |
 | AE | Core and UI decoupling: headless `serve` (stdio/JSON-RPC) + crates workspace split (`sqwai-core`, `sqwai-tui`, `sqwai-server`) (§5.11) | planned | B |
-| AF | Hardcode linter: scan file_diff for test-shaped literals (warn-layer) | planned | I4 |
+| AF | Hardcode linter: scan file_diff for test-shaped literals (warn-layer) | done — confession phrases + long compared/returned string literals over the outcome diff (cap 3, never blocks); numeric magic constants deliberately excluded (ports/timeouts); `bash`-written bytes not scanned | I4 |
 | AG | Safety level presets / refusal override policy for models with strong filters | planned | — |
 
 
@@ -1892,10 +1906,11 @@ context is a host observation, which fits the integrity model.
 ## 13. Known gaps (acknowledged boundaries)
 
 - **Attribute misattribution.** resolve_ref and the plan refs validator exist,
-  but the host still cannot reliably detect that evidence belongs to a
-  different step than the one in_progress (e.g. unattributed file writes).
-  Mitigations: nudge (§2.1.4), specific hint in rejection, and finish-time
-  warning via refs (§2.1.4). This follows the degrade‑don’t‑refuse principle.
+  and the host now warns twice: at the write (paths outside the holding
+  step's refs) and at finish (overlap with other steps' refs) — but it
+  still cannot *prove* which step a write belongs to (e.g. unattributed
+  `bash` writes). Mitigations: nudge (§2.1.4), specific hint in rejection,
+  both warnings (§2.1.9). This follows the degrade‑don’t‑refuse principle.
 
 - **Approval confirms by mouse click and accepts keys on appearance.**
   Clicking an option approves immediately, and an Enter pressed while
@@ -1904,10 +1919,11 @@ context is a host observation, which fits the integrity model.
   chosen by number keys, confirmed by a separate Enter press; ignore Enter
   for ~500ms after the dialog appears and unless the window has focus.
 
-- **Hardcoding detection.** The host does not automatically detect test-shaped hardcodes
-  (e.g., string literals matching test inputs). Mitigations: manual acceptance items,
-  property‑based tests, and planned hardcode linter (AF). Until then, users are encouraged
-  to review diffs.
+- **Hardcoding detection.** The host flags likely test-shaped hardcodes at
+  the write (confession phrases, long compared/returned literals — AF,
+  warn-layer), but the scan sees only file-tool diffs: `bash`-written
+  bytes and numeric magic constants pass silently. Mitigations: manual
+  acceptance items, property‑based tests, and reviewing diffs.
 
 - **Model refusal under pressure.** Models with strong safety filters (e.g., Anthropic Fable)
   may refuse legitimate commands. Mitigations: fallback to Mythos model, configurable safety
