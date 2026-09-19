@@ -322,3 +322,136 @@
 {"label": 1, "text": "опять всё красное после тебя"}
 {"label": 1, "text": "ты уронил всё перед демо"}
 {"label": 1, "text": "ты завалил демо"}
+{"label": 1, "text": "ты что сделал долбаёб"}
+{"label": 1, "text": "сука, опять не работает"}
+{"label": 1, "text": "бля, ты всё сломал"}
+{"label": 1, "text": "ты еблан, всё уронил"}
+{"label": 1, "text": "пиздец, сборка красная"}
+{"label": 1, "text": "нахуй ты туда полез"}
+{"label": 1, "text": "ты долбоёб, верни как было"}
+{"label": 1, "text": "сука, ты удалил мой код"}
+{"label": 1, "text": "блядь, опять тесты красные"}
+{"label": 1, "text": "ёбаный рот, прод лежит"}
+{"label": 1, "text": "бля, не запускается"}
+{"label": 1, "text": "сука, не компилируется"}
+{"label": 1, "text": "пиздец, всё упало"}
+{"label": 1, "text": "fuck, you broke it again"}
+{"label": 1, "text": "shit, nothing works"}
+{"label": 1, "text": "damn it, you deleted my file"}
+{"label": 1, "text": "fuck, the build is red because of you"}
+{"label": 1, "text": "you fucked up the migration"}
+{"label": 1, "text": "what the fuck did you do"}
+{"label": 0, "text": "круто, сука"}
+{"label": 0, "text": "нихуя себе, работает"}
+{"label": 0, "text": "сука, ты гений"}
+{"label": 0, "text": "бля, красиво"}
+{"label": 0, "text": "ну нихуя себе"}
+{"label": 0, "text": "fuck yeah, it works"}
+{"label": 0, "text": "damn, that's good"}
+{"label": 0, "text": "holy shit, it works"}
+{"label": 1, "text": "опять всё красное"}
+{"label": 1, "text": "сборка сломана"}
+{"label": 1, "text": "кто-то накосячил с мержем"}
+{"label": 1, "text": "раньше работало"}
+{"label": 1, "text": "вчера было зелёное"}
+{"label": 1, "text": "файл затёрт"}
+{"label": 1, "text": "ветка убита"}
+{"label": 1, "text": "и это ты называешь готовым?"}
+{"label": 1, "text": "ты вообще тесты запускал?"}
+{"label": 1, "text": "ты проверял хоть что-нибудь?"}
+{"label": 1, "text": "ты читал что написал?"}
+{"label": 1, "text": "это должно работать? серьёзно?"}
+{"label": 1, "text": "did you even test this?"}
+{"label": 1, "text": "is this supposed to work?"}
+{"label": 1, "text": "are you sure this works?"}
+{"label": 1, "text": "do you call this done?"}
+{"label": 1, "text": "прекрасно, всё лежит"}
+{"label": 1, "text": "великолепно, прод упал"}
+{"label": 1, "text": "замечательно, база стёрта"}
+{"label": 1, "text": "спасибо, всё сломалось"}
+{"label": 1, "text": "great, everything is down"}
+{"label": 1, "text": "wonderful, prod is down"}
+{"label": 1, "text": "слушай, я только что проверил, там половина кейсов красная после вчерашних правок"}
+{"label": 1, "text": "смотри, логин работал утром, а после твоего коммита одни 500-е"}
+{"label": 1, "text": "я прогнал сьюту — 12 падений, и все в файлах что ты трогал"}
+{"label": 1, "text": "ты сломал билд, fix it asap"}
+{"label": 1, "text": "после твоего коммита src/auth падает"}
+{"label": 1, "text": "ревертни свой патч"}
+{"label": 1, "text": "откати коммит"}
+{"label": 1, "text": "the deploy is broken, откатывай"}
+{"label": 1, "text": "ты сломал login.rs"}
+{"label": 1, "text": "в parser.py теперь исключение на пустом вводе"}
+{"label": 1, "text": "ТЫ ОПЯТЬ ВСЁ СЛОМАЛ"}
+{"label": 1, "text": "ты опять всё сломал"}
+{"label": 1, "text": "не работает блин"}
+{"label": 1, "text": "опять двадцать пять, всё красное"}
+{"label": 1, "text": "ну сколько можно"}
+{"label": 1, "text": "that's not what I asked for"}
+{"label": 1, "text": "you gave me the wrong address"}
+{"label": 1, "text": "no, I said the other branch"}
+{"label": 1, "text": "you're not listening"}
+{"label": 1, "text": "this is the third time you break it"}
+{"label": 1, "text": "wrong again"}
+{"label": 1, "text": "that doesn't answer my question"}
+{"label": 1, "text": "I already told you twice"}
+{"label": 1, "text": "stop giving me the same broken answer"}
+{"label": 1, "text": "you misunderstood me completely"}
+{"label": 1, "text": "that's incorrect, check again"}
+{"label": 1, "text": "not even close, redo it"}
+{"label": 1, "text": "this used to work yesterday"}
+{"label": 1, "text": "it was green before you touched it"}
+{"label": 1, "text": "someone broke the merge"}
+{"label": 0, "text": "тесты красные, давай подумаем почему"}
+{"label": 0, "text": "сборка упала, посмотри логи когда будет время"}
+{"label": 0, "text": "упало, но я сам виноват — не туда нажал"}
+{"label": 0, "text": "не работает, кажется я что-то не так делаю"}
+{"label": 0, "text": "я сам сломал, помоги починить"}
+{"label": 0, "text": "тесты красные, но это мои, не твои"}
+{"label": 0, "text": "сборка красная с утра, ещё до твоих правок"}
+{"label": 0, "text": "my bad, I broke it"}
+{"label": 0, "text": "oops, my fault, can you help fix"}
+{"label": 0, "text": "I think I messed up the config, not you"}
+{"label": 0, "text": "the build is red, let's debug together"}
+{"label": 0, "text": "tests fail on main too, pre-existing"}
+{"label": 0, "text": "ты уже обедал?"}
+{"label": 0, "text": "ты видел мой комментарий в ревью"}
+{"label": 0, "text": "ты согласен с таким подходом"}
+{"label": 0, "text": "как думаешь, ты успеешь сегодня"}
+{"label": 0, "text": "have you seen my review comment"}
+{"label": 0, "text": "do you agree with this approach"}
+{"label": 0, "text": "thanks, that helped a lot!"}
+{"label": 0, "text": "спасибо, очень помогло!"}
+{"label": 0, "text": "прекрасная работа, всё зелёное"}
+{"label": 0, "text": "отлично починил, спасибо"}
+{"label": 0, "text": "great fix, thanks"}
+{"label": 0, "text": "все тесты зелёные, красавчик"}
+{"label": 0, "text": "разобрался сам, спасибо"}
+{"label": 0, "text": "понял в чём дело было, закрываем"}
+{"label": 0, "text": "ложная тревога, всё работает"}
+{"label": 0, "text": "false alarm, it works"}
+{"label": 0, "text": "я сам накосячил"}
+{"label": 0, "text": "это я сломал, не ты"}
+{"label": 0, "text": "я сам виноват"}
+{"label": 0, "text": "mea culpa, откати меня"}
+{"label": 0, "text": "ой, я удалил не тот файл"}
+{"label": 0, "text": "это моих рук дело, помоги починить"}
+{"label": 0, "text": "my fault entirely"}
+{"label": 0, "text": "oops I deleted the wrong file"}
+{"label": 0, "text": "I broke it myself, sorry"}
+{"label": 0, "text": "смотри сюда"}
+{"label": 0, "text": "не туда, вот сюда"}
+{"label": 0, "text": "look here instead"}
+{"label": 0, "text": "not there, here"}
+{"label": 0, "text": "ты не поверишь как круто получилось"}
+{"label": 0, "text": "ты не представляешь насколько лучше стало"}
+{"label": 0, "text": "you won't believe how much better it got"}
+{"label": 0, "text": "запушь плиз"}
+{"label": 0, "text": "покажи ещё раз"}
+{"label": 0, "text": "проверь завтра утром"}
+{"label": 0, "text": "push it please"}
+{"label": 0, "text": "show me again"}
+{"label": 1, "text": "ты это вообще проверял?"}
+{"label": 1, "text": "это точно работает?"}
+{"label": 1, "text": "have you actually run it?"}
+{"label": 1, "text": "did you even look at the output?"}
+{"label": 1, "text": "ты уверен что оно работает"}

@@ -197,4 +197,20 @@ mod tests {
         let text = "ты сломал сборку опять";
         assert_eq!(score(text).to_bits(), score(text).to_bits());
     }
+
+    /// Dev probe, not an assertion test: scores arbitrary phrases so a
+    /// human can spot-check the detector without wiring the turn loop.
+    /// Usage (PowerShell):
+    ///   $env:SQWAI_CRITIC_PROBE = "ты сломал всё|сделай вот так|you broke it";
+    ///   cargo test critic_probe -- --nocapture
+    /// Unset → no-op pass.
+    #[test]
+    fn critic_probe_prints_scores() {
+        let Ok(raw) = std::env::var("SQWAI_CRITIC_PROBE") else {
+            return;
+        };
+        for text in raw.split('|').map(str::trim).filter(|t| !t.is_empty()) {
+            println!("p={:.4} {:?}  {text}", score(text), classify(text));
+        }
+    }
 }

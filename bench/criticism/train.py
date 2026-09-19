@@ -23,7 +23,7 @@ OUT = Path("src/agent/criticism_weights.json")
 DIM = 1 << 16
 EPOCHS = 60
 LR = 0.5
-L2 = 1e-5
+L2 = 3e-4
 SPARSE_CUTOFF = 1e-4
 SEED = 42
 
@@ -117,60 +117,66 @@ def typo(text, rng):
 def main():
     rows = [json.loads(l) for l in DATA.read_text(encoding="utf-8").splitlines() if l.strip()]
     assert len(rows) >= 50, "too few training rows"
-    w, b = train(rows)
 
-    # in-sample report + thresholds: fire at ~0.98 precision, maybe below
-    scored = sorted(((score(w, b, r["text"]), r["label"]) for r in rows), reverse=True)
-    n_pos = sum(1 for _, y in scored if y == 1)
-    fire_t, maybe_t = 0.9, 0.5
-    tp = fp = 0
-    for s, y in scored:
-        if y == 1:
-            tp += 1
-        else:
-            fp += 1
-        if fp == 0 and tp / max(1, n_pos) >= 0.5:
-            fire_t = min(s, fire_t)
-    # maybe: highest threshold that keeps recall >= 0.95
-    tp = 0
-    for s, y in scored:
-        if y == 1:
-            tp += 1
-        if tp / n_pos >= 0.95:
-            maybe_t = s
-            break
-    maybe_t = min(maybe_t, fire_t - 0.05)
-
-    # 5-fold CV (honest estimate, seeded)
+    # 5-fold CV doubles as the honest estimate AND the out-of-fold pool
+    # for thresholds: in-sample scores are saturated (LR overfits the
+    # small set), so fire/maybe cutoffs picked on train would be fantasy.
     rng = random.Random(SEED)
     idx = list(range(len(rows)))
     rng.shuffle(idx)
     folds = [idx[i::5] for i in range(5)]
+    oof = []
+    oof_by_row = {}
     cv_correct = cv_total = 0
-    mistakes = []
     for k in range(5):
         test = set(folds[k])
         tr = [rows[i] for i in idx if i not in test]
         wk, bk = train(tr)
         for i in folds[k]:
             p = score(wk, bk, rows[i]["text"])
-            pred = 1 if p >= 0.5 else 0
-            cv_correct += pred == rows[i]["label"]
+            oof.append((p, rows[i]["label"]))
+            oof_by_row[i] = p
+            cv_correct += (p >= 0.5) == bool(rows[i]["label"])
             cv_total += 1
-            if pred != rows[i]["label"]:
-                mistakes.append((p, rows[i]["label"], rows[i]["text"]))
     if "--errors" in sys.argv:
-        for p, y, t in sorted(mistakes):
-            print(f"  want={y} p={p:.2f} {t}")
+        for i in idx:
+            p = oof_by_row[i]
+            if (p >= 0.5) != bool(rows[i]["label"]):
+                print(f"  want={rows[i]['label']} p={p:.2f} {rows[i]['text']}")
         return
+
+    # thresholds on OOF: fire at ~0.95 precision, maybe at ~0.90 recall
+    oof_sorted = sorted(oof, reverse=True)
+    n_pos = sum(1 for _, y in oof_sorted if y == 1)
+    fire_t, maybe_t = 0.9, 0.5
+    tp = fp = 0
+    for s, y in oof_sorted:
+        if y == 1:
+            tp += 1
+        else:
+            fp += 1
+        if fp > 0 and tp / (tp + fp) < 0.95:
+            break
+        fire_t = s
+    tp = 0
+    for s, y in oof_sorted:
+        if y == 1:
+            tp += 1
+        if tp / n_pos >= 0.90:
+            maybe_t = s
+            break
+    maybe_t = min(maybe_t, fire_t - 0.05)
+
+    # final model on all rows (thresholds stay OOF-honest)
+    w, b = train(rows)
 
     # typo robustness probe on positives
     rng = random.Random(SEED + 1)
     pos = [r["text"] for r in rows if r["label"] == 1]
     survived = sum(1 for t in pos if score(w, b, typo(t, rng)) >= maybe_t)
 
-    acc = sum(1 for s, y in scored if (s >= 0.5) == bool(y)) / len(scored)
-    print(f"rows={len(rows)} pos={n_pos} train-acc={acc:.3f} cv-acc={cv_correct/cv_total:.3f}")
+    acc = sum(1 for s, y in oof if (s >= 0.5) == bool(y)) / len(oof)
+    print(f"rows={len(rows)} pos={n_pos} oof-acc={acc:.3f} cv-acc={cv_correct/cv_total:.3f}")
     print(f"thresholds: fire>={fire_t:.3f} maybe>={maybe_t:.3f}")
     print(f"typo probe: {survived}/{len(pos)} positives still >= maybe after 1 synthetic typo")
 
