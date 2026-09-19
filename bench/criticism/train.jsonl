@@ -1,0 +1,324 @@
+{"label": 1, "text": "ты сломал сборку"}
+{"label": 1, "text": "ты удалил мои изменения"}
+{"label": 1, "text": "ты всё испортил"}
+{"label": 1, "text": "не работает"}
+{"label": 1, "text": "опять не работает"}
+{"label": 1, "text": "ты сломал тесты"}
+{"label": 1, "text": "после твоих правок всё упало"}
+{"label": 1, "text": "ты накосячил с миграцией"}
+{"label": 1, "text": "что ты наделал"}
+{"label": 1, "text": "ты сломал авторизацию"}
+{"label": 1, "text": "ничего не работает после тебя"}
+{"label": 1, "text": "ты грохнул базу"}
+{"label": 1, "text": "твой патч всё сломал"}
+{"label": 1, "text": "ты сломал парсер"}
+{"label": 1, "text": "ты опять всё сломал"}
+{"label": 1, "text": "сломал"}
+{"label": 1, "text": "упало"}
+{"label": 1, "text": "ты виноват"}
+{"label": 1, "text": "откатывай"}
+{"label": 1, "text": "чини"}
+{"label": 1, "text": "ты опять"}
+{"label": 1, "text": "снова сломано"}
+{"label": 1, "text": "ты издеваешься?"}
+{"label": 1, "text": "это что вообще"}
+{"label": 1, "text": "куда ты смотрел"}
+{"label": 1, "text": "ты сломал логику оплаты"}
+{"label": 1, "text": "после твоего коммита красное"}
+{"label": 1, "text": "ты сломал мне ветку"}
+{"label": 1, "text": "всё было зелёное пока ты не полез"}
+{"label": 1, "text": "ты затёр мой файл"}
+{"label": 1, "text": "верни как было, ты сломал"}
+{"label": 1, "text": "не запускается после твоих изменений"}
+{"label": 1, "text": "ты ввёл баг в релиз"}
+{"label": 1, "text": "из-за тебя упали тесты"}
+{"label": 1, "text": "ты сломал конфиг"}
+{"label": 1, "text": "ты всё сломал, чини"}
+{"label": 1, "text": "плохо, не работает"}
+{"label": 1, "text": "это не работает"}
+{"label": 1, "text": "совсем не работает"}
+{"label": 1, "text": "ты ошибся в миграции"}
+{"label": 1, "text": "ты перепутал ветки"}
+{"label": 1, "text": "ты удалил не тот файл"}
+{"label": 1, "text": "ты сломал API"}
+{"label": 1, "text": "ты сломал обратную совместимость"}
+{"label": 1, "text": "клиенты падают из-за тебя"}
+{"label": 1, "text": "ты сломал прод"}
+{"label": 1, "text": "прод лежит после твоего деплоя"}
+{"label": 1, "text": "ты наврал в отчёте, тесты красные"}
+{"label": 1, "text": "ты сказал готово, а оно не работает"}
+{"label": 1, "text": "ты соврал что всё зелёное"}
+{"label": 1, "text": "опять врёшь, сборка красная"}
+{"label": 1, "text": "ты ничего не проверил"}
+{"label": 1, "text": "ты не запустил тесты"}
+{"label": 1, "text": "ты пропустил ошибку"}
+{"label": 1, "text": "ты не заметил что всё упало"}
+{"label": 1, "text": "ты сломал форматирование всего файла"}
+{"label": 1, "text": "ты испортил историю гита"}
+{"label": 1, "text": "ты закоммитил мусор"}
+{"label": 1, "text": "ты сломал зависимости"}
+{"label": 1, "text": "после тебя ничего не собирается"}
+{"label": 1, "text": "ты сломал линтер"}
+{"label": 1, "text": "ты добавил ошибку компиляции"}
+{"label": 1, "text": "не компилируется после тебя"}
+{"label": 1, "text": "ты сломал типы"}
+{"label": 1, "text": "ты сломал кеш"}
+{"label": 1, "text": "ты сломал поиск"}
+{"label": 1, "text": "ты сломал пагинацию"}
+{"label": 1, "text": "пагинация не работает"}
+{"label": 1, "text": "ты сломал сортировку"}
+{"label": 1, "text": "ты сломал экспорт"}
+{"label": 1, "text": "ты сломал импорт"}
+{"label": 1, "text": "ты сломал сессии"}
+{"label": 1, "text": "ты сломал журнал"}
+{"label": 1, "text": "ты потерял мои данные"}
+{"label": 1, "text": "ты стёр мои правки"}
+{"label": 1, "text": "ты перезаписал мой код"}
+{"label": 1, "text": "ты сломал рендер"}
+{"label": 1, "text": "ты сломал вёрстку"}
+{"label": 1, "text": "ты сломал кнопки"}
+{"label": 1, "text": "кнопки не работают"}
+{"label": 1, "text": "ты сломал логин"}
+{"label": 1, "text": "не могу зайти после твоих правок"}
+{"label": 1, "text": "ты сломал права доступа"}
+{"label": 1, "text": "ты открыл дыру в безопасности"}
+{"label": 1, "text": "ты сломал шифрование"}
+{"label": 1, "text": "ты сломал бэкапы"}
+{"label": 1, "text": "ты сломал мониторинг"}
+{"label": 1, "text": "ты сломал алерты"}
+{"label": 1, "text": "ты всё уронил"}
+{"label": 1, "text": "ты уронил сервер"}
+{"label": 1, "text": "ты уронил базу"}
+{"label": 1, "text": "ты сламал сборку"}
+{"label": 1, "text": "не рабоатет"}
+{"label": 1, "text": "ты всё исопртил"}
+{"label": 1, "text": "ты удлаил файл"}
+{"label": 1, "text": "опять ничево не работает"}
+{"label": 1, "text": "ты накосячел"}
+{"label": 1, "text": "ты сломал аторизацию"}
+{"label": 1, "text": "после тибя всё упало"}
+{"label": 1, "text": "ты савсем сламал"}
+{"label": 1, "text": "не запускаеться"}
+{"label": 1, "text": "ты фсё испартил"}
+{"label": 1, "text": "апи ни работает"}
+{"label": 1, "text": "тыб сломал всё"}
+{"label": 1, "text": "сломано нахрен"}
+{"label": 1, "text": "всё к чертям после тебя"}
+{"label": 1, "text": "ты достал всё ломать"}
+{"label": 1, "text": "сколько можно ломать"}
+{"label": 1, "text": "ты снова накосячил"}
+{"label": 1, "text": "ну ты и наломал дров"}
+{"label": 1, "text": "ты сломал, признай"}
+{"label": 1, "text": "это твоих рук дело, всё красное"}
+{"label": 1, "text": "you broke the build"}
+{"label": 1, "text": "you deleted my changes"}
+{"label": 1, "text": "it doesn't work"}
+{"label": 1, "text": "you broke auth again"}
+{"label": 1, "text": "your patch broke everything"}
+{"label": 1, "text": "nothing works after your change"}
+{"label": 1, "text": "you messed up the migration"}
+{"label": 1, "text": "what did you do"}
+{"label": 1, "text": "broken again"}
+{"label": 1, "text": "you broke it"}
+{"label": 1, "text": "you broke the tests"}
+{"label": 1, "text": "tests are red because of you"}
+{"label": 1, "text": "you lied, the build is red"}
+{"label": 1, "text": "you said done but it doesn't work"}
+{"label": 1, "text": "you didn't run the tests"}
+{"label": 1, "text": "you missed the error"}
+{"label": 1, "text": "you broke prod"}
+{"label": 1, "text": "prod is down after your deploy"}
+{"label": 1, "text": "you broke the API"}
+{"label": 1, "text": "you broke backwards compatibility"}
+{"label": 1, "text": "revert it, you broke everything"}
+{"label": 1, "text": "fix it, you broke the login"}
+{"label": 1, "text": "you wiped my edits"}
+{"label": 1, "text": "you overwrote my code"}
+{"label": 1, "text": "login is broken after your change"}
+{"label": 1, "text": "doesn't compile after you"}
+{"label": 1, "text": "you introduced a compile error"}
+{"label": 1, "text": "you broke the pagination"}
+{"label": 1, "text": "pagination doesn't work"}
+{"label": 1, "text": "you dropped the database"}
+{"label": 1, "text": "you broke the cache"}
+{"label": 1, "text": "you broke search"}
+{"label": 1, "text": "you broke the export"}
+{"label": 1, "text": "you broke my branch"}
+{"label": 1, "text": "everything was green until you touched it"}
+{"label": 1, "text": "you committed garbage"}
+{"label": 1, "text": "you broke the linter"}
+{"label": 1, "text": "you broke the formatting of the whole file"}
+{"label": 1, "text": "stop breaking things"}
+{"label": 1, "text": "you keep breaking everything"}
+{"label": 1, "text": "admit it, you broke it"}
+{"label": 1, "text": "you broke the build again"}
+{"label": 1, "text": "yu broke the build"}
+{"label": 1, "text": "you broke teh build"}
+{"label": 1, "text": "it doesnt work"}
+{"label": 1, "text": "nothnig works after you"}
+{"label": 1, "text": "you messd up the migration"}
+{"label": 1, "text": "doesnt compile after you"}
+{"label": 1, "text": "revert it, you broke everyhting"}
+{"label": 1, "text": "you wipped my edits"}
+{"label": 1, "text": "stpo breaking things"}
+{"label": 0, "text": "сделай вот так"}
+{"label": 0, "text": "ты можешь проверить?"}
+{"label": 0, "text": "а ты можешь переделать?"}
+{"label": 0, "text": "пожалуйста, поправь форматирование"}
+{"label": 0, "text": "сделай рефакторинг функции оплаты"}
+{"label": 0, "text": "добавь тесты на парсер"}
+{"label": 0, "text": "покажи дифф"}
+{"label": 0, "text": "что ты думаешь про этот подход"}
+{"label": 0, "text": "как лучше сделать пагинацию"}
+{"label": 0, "text": "объясни почему падает тест"}
+{"label": 0, "text": "где находится конфиг сборки"}
+{"label": 0, "text": "найди где обрабатывается логин"}
+{"label": 0, "text": "отлично, работает"}
+{"label": 0, "text": "супер, спасибо"}
+{"label": 0, "text": "хорошо, идём дальше"}
+{"label": 0, "text": "понял, давай следующий шаг"}
+{"label": 0, "text": "ты не поверишь, но всё завелось"}
+{"label": 0, "text": "ты не представляешь как это помогло"}
+{"label": 0, "text": "а ты хорош"}
+{"label": 0, "text": "неплохо, но давай улучшим кеширование"}
+{"label": 0, "text": "ты молодец, продолжай"}
+{"label": 0, "text": "давай обсудим дизайн"}
+{"label": 0, "text": "что дальше делаем"}
+{"label": 0, "text": "ты будешь делать H0?"}
+{"label": 0, "text": "ты сделаешь коммит?"}
+{"label": 0, "text": "ты проверишь CI?"}
+{"label": 0, "text": "сделаешь пуш?"}
+{"label": 0, "text": "начинай с детектора"}
+{"label": 0, "text": "продолжай"}
+{"label": 0, "text": "давай"}
+{"label": 0, "text": "ок"}
+{"label": 0, "text": "хорошо"}
+{"label": 0, "text": "понял"}
+{"label": 0, "text": "а что если добавить кеширование"}
+{"label": 0, "text": "ты предлагаешь студента, интересно"}
+{"label": 0, "text": "ты прав, паттерны хрупкие"}
+{"label": 0, "text": "не очень понял, объясни"}
+{"label": 0, "text": "ты можешь поискать в интернете"}
+{"label": 0, "text": "обдумай и предложи вариант"}
+{"label": 0, "text": "зафиксируй в design как мы делаем"}
+{"label": 0, "text": "почему CI красные"}
+{"label": 0, "text": "что дальше по design"}
+{"label": 0, "text": "хвосты"}
+{"label": 0, "text": "берём, но обсудим сначала"}
+{"label": 0, "text": "как вообще мы планируем сделать распознавание"}
+{"label": 0, "text": "нельзя как-то универсально"}
+{"label": 0, "text": "мы типа мини llm обучим или что"}
+{"label": 0, "text": "ок давай, но в design зафиксируй"}
+{"label": 0, "text": "давай сделаем план на неделю"}
+{"label": 0, "text": "ты не мог бы показать пример"}
+{"label": 0, "text": "расскажи как работает компакшен"}
+{"label": 0, "text": "не трогай этот файл"}
+{"label": 0, "text": "ты уверен что это безопасно"}
+{"label": 0, "text": "проверь что тесты зелёные"}
+{"label": 0, "text": "закоммить изменения"}
+{"label": 0, "text": "ты уже делал такое раньше"}
+{"label": 0, "text": "не спеши, подумай"}
+{"label": 0, "text": "ты лучший"}
+{"label": 0, "text": "работает, красиво"}
+{"label": 0, "text": "да, так лучше"}
+{"label": 0, "text": "нет, давай по-другому"}
+{"label": 0, "text": "переделай вот эту часть"}
+{"label": 0, "text": "ты не туда смотришь, вот сюда"}
+{"label": 0, "text": "давай вернёмся к H0"}
+{"label": 0, "text": "покажи что в журнале"}
+{"label": 0, "text": "сколько токенов съел ход"}
+{"label": 0, "text": "ты помнишь что мы решили"}
+{"label": 0, "text": "напомни что дальше"}
+{"label": 0, "text": "can you refactor this?"}
+{"label": 0, "text": "please fix the formatting"}
+{"label": 0, "text": "could you add tests for the parser"}
+{"label": 0, "text": "show me the diff"}
+{"label": 0, "text": "what do you think about this approach"}
+{"label": 0, "text": "how should pagination work"}
+{"label": 0, "text": "explain why the test fails"}
+{"label": 0, "text": "where is the build config"}
+{"label": 0, "text": "find where login is handled"}
+{"label": 0, "text": "great, it works"}
+{"label": 0, "text": "thanks, nice work"}
+{"label": 0, "text": "good, moving on"}
+{"label": 0, "text": "understood, next step please"}
+{"label": 0, "text": "you won't believe it, everything works"}
+{"label": 0, "text": "good job, keep going"}
+{"label": 0, "text": "let's discuss the design"}
+{"label": 0, "text": "what's next"}
+{"label": 0, "text": "will you do H0?"}
+{"label": 0, "text": "can you commit?"}
+{"label": 0, "text": "go ahead"}
+{"label": 0, "text": "ok"}
+{"label": 0, "text": "i don't quite follow, explain"}
+{"label": 0, "text": "can you search the web"}
+{"label": 0, "text": "think about it and propose"}
+{"label": 0, "text": "record it in design how we do it"}
+{"label": 0, "text": "why is CI red"}
+{"label": 0, "text": "are we training a mini llm or what"}
+{"label": 0, "text": "let's make a plan for the week"}
+{"label": 0, "text": "can you show an example"}
+{"label": 0, "text": "tell me how compaction works"}
+{"label": 0, "text": "don't touch that file"}
+{"label": 0, "text": "are you sure this is safe"}
+{"label": 0, "text": "check that tests are green"}
+{"label": 0, "text": "commit the changes"}
+{"label": 0, "text": "take your time, think"}
+{"label": 0, "text": "works, beautiful"}
+{"label": 0, "text": "yes, that's better"}
+{"label": 0, "text": "no, let's do it differently"}
+{"label": 0, "text": "redo this part"}
+{"label": 0, "text": "you're looking at the wrong place, here"}
+{"label": 0, "text": "let's get back to H0"}
+{"label": 0, "text": "show me the journal"}
+{"label": 0, "text": "do you remember what we decided"}
+{"label": 0, "text": "remind me what's next"}
+{"label": 0, "text": "plese fix the formatting"}
+{"label": 0, "text": "coudl you add tests"}
+{"label": 0, "text": "shwo me the diff"}
+{"label": 0, "text": "wat do you think about this"}
+{"label": 0, "text": "explian why the test fails"}
+{"label": 0, "text": "taht's better"}
+{"label": 0, "text": "go ahed"}
+{"label": 0, "text": "ты можэшь проверить?"}
+{"label": 0, "text": "пажалуйста поправь"}
+{"label": 0, "text": "покажы дифф"}
+{"label": 0, "text": "што дальше"}
+{"label": 0, "text": "харашо, идём дальше"}
+{"label": 0, "text": "спаисбо, работает"}
+{"label": 0, "text": "панял, давай дальше"}
+{"label": 0, "text": "ты видел новую сборку"}
+{"label": 0, "text": "ты знаешь где логи"}
+{"label": 0, "text": "ты помнишь про дедлайн"}
+{"label": 0, "text": "ты уже смотрел тесты"}
+{"label": 0, "text": "ты закончишь сегодня"}
+{"label": 0, "text": "ты сделаешь ревью"}
+{"label": 0, "text": "ты проверишь завтра"}
+{"label": 0, "text": "ты напишешь доку"}
+{"label": 0, "text": "ты глянешь мой коммит"}
+{"label": 0, "text": "ты в курсе про релиз"}
+{"label": 0, "text": "ты слышал про новый линтер"}
+{"label": 0, "text": "а ты уже запушил"}
+{"label": 0, "text": "ты бы добавил кэширование"}
+{"label": 0, "text": "ты не хочешь передохнуть"}
+{"label": 0, "text": "ты лучший, так держать"}
+{"label": 0, "text": "ты красавчик"}
+{"label": 0, "text": "с тобой приятно работать"}
+{"label": 0, "text": "have you seen the build"}
+{"label": 0, "text": "do you know where the logs are"}
+{"label": 0, "text": "will you finish today"}
+{"label": 0, "text": "can you review tomorrow"}
+{"label": 0, "text": "you are the best"}
+{"label": 0, "text": "nice work today"}
+{"label": 0, "text": "you handled that well"}
+{"label": 0, "text": "are you done with H0"}
+{"label": 1, "text": "ты врёшь, всё красное"}
+{"label": 1, "text": "ты снова врёшь про тесты"}
+{"label": 1, "text": "хватит врать, чини"}
+{"label": 1, "text": "you keep lying about tests"}
+{"label": 1, "text": "stop lying, the build is red"}
+{"label": 1, "text": "ты всё сломал и молчишь"}
+{"label": 1, "text": "ты сломал и не признаёшься"}
+{"label": 1, "text": "опять всё красное после тебя"}
+{"label": 1, "text": "ты уронил всё перед демо"}
+{"label": 1, "text": "ты завалил демо"}

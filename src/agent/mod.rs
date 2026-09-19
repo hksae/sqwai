@@ -3,6 +3,9 @@ pub mod bench_harness;
 pub mod blobs;
 pub mod checkpoints;
 pub mod context;
+// temporary: the turn hook wires criticism next; drop this allow with it.
+#[allow(dead_code)]
+pub mod criticism;
 pub mod diary;
 pub mod graph;
 pub mod graph_index;

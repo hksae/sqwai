@@ -1514,7 +1514,7 @@ number; a `partial` one is missing something the design calls for.
 | F7b | Crash-safe mutation protocol | done differently — no `mutation_started/observed` sweep; Layer-1 pre-images + `file_diff` chain cover single-step revert instead | F7 |
 | G0 | Minimal comparative retention benchmark (§8.2): plan + journal + anchor vs baseline | done — harness as ignored tests (minidb T1–T3 + kaiwai T4 matrix), pre-registration, eval files and analyses under bench/ | F1b, F6 |
 | G1 | Full integrity benchmark (§8.2): verification receipts, mutation crash harness, claim lint | planned | G0, V1, F7b, I4 |
-| H0 | L0 fact block + criticism detector | planned (§12.7) | F2 |
+| H0 | L0 fact block + criticism detector | in progress — detector as learned student (offline LLM-labeled data, char-trigram LR, pure-Rust inference); fact block + turn wiring after (§12.7) | F2 |
 | H1 | Reflector: Scope/Neutralizer/Executor/Verdict, /verify | planned (§12.7) | H0, D |
 | I1 | Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild | done — rusqlite (bundled) engine with §2.4.2 schema | E |
 | I2 | Rust + Python + TypeScript adapters (tree-sitter, minimal: declarations) | done — tree-sitter declarations and lexical imports for Rust, Python, TypeScript | I1 |
@@ -1813,9 +1813,32 @@ a fallback behind the `Browser` trait.
 Moved here from §3.5: specified, not implemented. Three levels for "you broke
 it" moments — cheap always, expensive by escalation:
 
-- **L0 fact block.** A criticism detector (negation + past tense + second
-  person) injects journal facts into block D with the rule: answer from these
-  facts, check with a tool before asserting anything missing.
+- **L0 fact block.** A criticism detector injects journal facts into block D
+  with the rule: answer from these facts, check with a tool before asserting
+  anything missing. The detector is a learned student, not pattern lists:
+  keyword approaches cap at ~1% recall on real frustration (COLING 2025 —
+  frustration rarely wears overtly negative language), and verb morphology
+  per language does not scale. Instead:
+  - Offline (once, cheap): an LLM labels a few hundred
+    `criticism / not-criticism` examples (EN+RU first, with typos, requests
+    and idioms; human spot-checked) → `bench/criticism/train.jsonl`.
+  - Student: logistic regression on hashed char-trigrams
+    (`bench/criticism/train.py`, stdlib only). The char level gives typo
+    tolerance and multilinguality by construction; weights ship as
+    `src/agent/criticism_weights.json` (tens of KB, versioned — a retrain
+    is one script run).
+  - Runtime: pure-Rust inference (hash, dot product, sigmoid — microseconds,
+    $0, offline) returning `fire | maybe | silent` per user message.
+  - A language-independent artifact signal rides along: message tokens
+    resolving (resolve_ref / paths) to files/symbols the last turn touched.
+    Criticism almost always names the thing, in any language.
+  - Strict trigger (decided): `fire` plus ≥2 signal groups plus prior-turn
+    mutations; `maybe` plus an artifact ref may escalate to an LLM confirm
+    later (interface reserved, not built). A false fire costs a context
+    block, never a refusal.
+  - Journal marker kind `criticism` (text, signals, resolved names) so H1
+    escalation ("second objection") has something to count. The record
+    shape is H0's; `reflect` records stay H1's.
 - **L1 reflector.** Scope (code, journal window → ReflectContext) →
   Neutralizer (LLM, no tools, emits schema-bound Check[] with a mandatory
   plan_scope check) → Executor (LLM, clean blinded read-only context, Check[]
