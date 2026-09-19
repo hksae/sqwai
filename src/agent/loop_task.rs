@@ -1433,12 +1433,11 @@ async fn run_agent(
                     );
                     criticism_block =
                         crate::agent::criticism::block_text(&check, &user_message.content);
-                    // H1 slice 1 (§12.7): Scope + Neutralizer, synchronous.
-                    // Trigger is Fire+artifact (decided): generic fires keep
-                    // the L0 block only. Checks land in a `reflect` record;
-                    // nothing is shown yet — Executor+Verdict (slice 2) render
-                    // the [verified] block. A failed neutralization is silent:
-                    // the L0 block already carries the turn.
+                    // H1 (§12.7): Scope + Neutralizer + Executor + Verdict,
+                    // synchronous. Trigger is Fire+artifact (decided):
+                    // generic fires keep the L0 block only. A failed stage
+                    // degrades to what came before — the L0 block already
+                    // carries the turn, so silence here never loses anything.
                     if !check.artifacts.is_empty()
                         && let Some(rctx) = crate::agent::reflector::scope(
                             &root,
@@ -1450,10 +1449,18 @@ async fn run_agent(
                         match crate::agent::reflector::neutralize(&provider, &model_id, &rctx).await
                         {
                             Ok(checks) => {
-                                let _ = writer.append(
-                                    "reflect",
-                                    crate::agent::reflector::reflect_fields(&rctx, &checks),
-                                );
+                                crate::agent::reflector::run_reflection(
+                                    &root,
+                                    &session_id,
+                                    &model_id,
+                                    &provider,
+                                    writer,
+                                    &rctx,
+                                    &checks,
+                                    &mut messages,
+                                    &mut previous_response_id,
+                                )
+                                .await;
                             }
                             Err(error) => {
                                 crate::providers::log_http(&format!(

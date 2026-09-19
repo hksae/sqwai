@@ -277,16 +277,476 @@ fn render_prompt(ctx: &ReflectContext) -> String {
     out
 }
 
-/// Journal `reflect` record fields for slice 1: context plus checks.
-/// The full-verdict file (`journal/reflect/<seq>.json`) waits for slice 2.
-pub fn reflect_fields(ctx: &ReflectContext, checks: &[Check]) -> serde_json::Value {
+/// Journal `reflect` record fields: context, checks, outcomes, verdict.
+/// Written once per executed reflection; the verdict file
+/// (`journal/reflect/<seq>.json`) mirrors it for auditors.
+pub fn verdict_fields(
+    ctx: &ReflectContext,
+    checks: &[Check],
+    execution: &Execution,
+) -> serde_json::Value {
     serde_json::json!({
         "quote": ctx.quote,
         "artifacts": ctx.artifacts.iter().map(|a| &a.path).collect::<Vec<_>>(),
         "plan_id": ctx.plan.plan_id,
         "plan_refs": ctx.plan.refs,
         "checks": checks,
+        "outcomes": execution.outcomes.iter().map(|(c, o)| serde_json::json!({
+            "id": c.id,
+            "kind": c.kind,
+            "target": c.target,
+            "status": o.status,
+            "evidence": o.evidence,
+        })).collect::<Vec<_>>(),
+        "verdict": execution.verdict,
     })
+}
+
+// --- Slice 2: Executor + Verdict -------------------------------------
+
+/// Per-check outcome, reported by the executor model and parsed strictly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutcomeStatus {
+    Confirmed,
+    Refuted,
+    Undetermined,
+}
+
+/// Host verdict over a finished execution. Computed from per-check
+/// outcomes (§12.7), never by the model — the model reports facts,
+/// the host judges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    /// the criticized claims hold: we broke it
+    AgentError,
+    /// the criticized claims do not hold: work is fine
+    ClaimNotConfirmed,
+    /// some hold, some do not (or some unknown)
+    Partial,
+    /// the criticized work is outside the current plan scope
+    ScopeMismatch,
+    /// nothing could be verified
+    Undetermined,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckOutcome {
+    pub status: OutcomeStatus,
+    pub evidence: String,
+}
+
+#[derive(Debug)]
+pub struct Execution {
+    pub outcomes: Vec<(Check, CheckOutcome)>,
+    pub verdict: Verdict,
+}
+
+/// Executor budget, mirroring subagents (decided): a bounded wall clock
+/// plus a tool-call cap. Overrun leaves the remaining checks
+/// `Undetermined` — a partial verification, never a hang.
+pub const EXECUTOR_WALL_SECS: u64 = 600;
+pub const EXECUTOR_MAX_CALLS: usize = 24;
+pub const EXECUTOR_CALLS_PER_CHECK: usize = 6;
+const EXECUTOR_MAX_TOKENS: u32 = 2000;
+
+const EXECUTOR_SYSTEM: &str = "You verify ONE stated check against the worktree. Rules: read-only — inspection tools only, mutations are refused, and you cannot change anything; the complaint that motivated this check is deliberately withheld, verify the fact not a story; use as few calls as needed; finish with exactly one line: FINAL: {\"status\": \"confirmed|refuted|undetermined\", \"evidence\": \"<one sentence>\"}.";
+
+/// Run one check to an outcome: a bounded tool-calling loop in a
+/// reflector ToolCtx (dispatch refuses writers, gated bash, no plan).
+/// The prompt carries target+method only — never `expects`, never the
+/// criticism quote (blinding by construction: this function does not
+/// even receive them).
+pub async fn execute_check(
+    provider: &crate::providers::SharedProvider,
+    model_id: &str,
+    root: &std::path::Path,
+    check: &Check,
+    goal: Option<&str>,
+    deadline: tokio::time::Instant,
+    calls_left: &mut usize,
+) -> CheckOutcome {
+    let specs = crate::agent::tools::reflector_specs();
+    let mut ctx = crate::agent::tools::ToolCtx::new(root).in_session("reflect".to_string());
+    ctx.reflector = true;
+    let mut messages = vec![crate::providers::Message::new(
+        crate::providers::Role::User,
+        render_executor_prompt(check, goal),
+    )];
+    let mut transcript = String::new();
+    let undetermined = |why: &str| CheckOutcome {
+        status: OutcomeStatus::Undetermined,
+        evidence: why.to_string(),
+    };
+    loop {
+        if *calls_left == 0 || tokio::time::Instant::now() >= deadline {
+            return undetermined("executor budget exhausted");
+        }
+        let request = crate::providers::ChatRequest {
+            model_id: model_id.to_string(),
+            system: vec![crate::providers::SystemPart::volatile(EXECUTOR_SYSTEM)],
+            messages: messages.clone(),
+            effort: Some(crate::config::EffortLevel::Low),
+            effort_support: Default::default(),
+            max_tokens: Some(EXECUTOR_MAX_TOKENS),
+            tools: specs.clone(),
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        let events = match tokio::time::timeout_at(deadline, collect_events(provider, &request))
+            .await
+        {
+            Ok(Ok(events)) => events,
+            Ok(Err(error)) => {
+                crate::providers::log_http(&format!("reflector: executor call failed: {error:#}"));
+                return undetermined("executor call failed");
+            }
+            Err(_) => return undetermined("executor wall clock exhausted"),
+        };
+        let mut calls: Vec<crate::providers::ToolCallReq> = Vec::new();
+        for event in events {
+            match event {
+                crate::providers::StreamEvent::Text(chunk) => transcript.push_str(&chunk),
+                crate::providers::StreamEvent::ToolCall(req) => calls.push(req),
+                _ => {}
+            }
+        }
+        if calls.is_empty() {
+            return parse_final(&transcript);
+        }
+        let mut assistant =
+            crate::providers::Message::new(crate::providers::Role::Assistant, transcript.clone());
+        assistant.tool_calls = calls.clone();
+        messages.push(assistant);
+        for call in calls {
+            if *calls_left == 0 {
+                break;
+            }
+            *calls_left -= 1;
+            let outcome = run_tool_blocking(&mut ctx, &call.name, &call.args).await;
+            messages.push(crate::providers::Message::tool_result(
+                call.id,
+                outcome.output,
+                !outcome.ok,
+            ));
+        }
+        transcript.clear();
+    }
+}
+
+async fn collect_events(
+    provider: &crate::providers::SharedProvider,
+    request: &crate::providers::ChatRequest,
+) -> anyhow::Result<Vec<crate::providers::StreamEvent>> {
+    use futures::StreamExt;
+    let mut stream = provider.stream_chat(request.clone());
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event?);
+    }
+    Ok(events)
+}
+
+/// A blocking tool call must not stall the async runtime (same reason as
+/// the main loop's `run_tool_blocking`): the reflector runs synchronously
+/// inside the turn, on the driver's thread.
+async fn run_tool_blocking(
+    ctx: &mut crate::agent::tools::ToolCtx,
+    name: &str,
+    args: &serde_json::Value,
+) -> crate::agent::tools::Outcome {
+    let mut exec_ctx = ctx.clone();
+    let name = name.to_string();
+    let args = args.clone();
+    let (outcome, exec_ctx) = tokio::task::spawn_blocking(move || {
+        let o = crate::agent::tools::execute(&mut exec_ctx, &name, &args);
+        (o, exec_ctx)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        (
+            crate::agent::tools::Outcome::err(format!("reflector tool thread failed: {e}")),
+            ctx.clone(),
+        )
+    });
+    ctx.files_read = exec_ctx.files_read;
+    outcome
+}
+
+/// Strict FINAL parse: one line, one object, known status. Anything else
+/// is `Undetermined` — a model that will not commit to a shape has not
+/// verified anything either.
+pub fn parse_final(transcript: &str) -> CheckOutcome {
+    let blank = CheckOutcome {
+        status: OutcomeStatus::Undetermined,
+        evidence: String::new(),
+    };
+    let Some(at) = transcript.rfind("FINAL:") else {
+        return blank;
+    };
+    let body = transcript[at + "FINAL:".len()..].trim();
+    let end = body.find('\n').map(|i| &body[..i]).unwrap_or(body).trim();
+    let value: serde_json::Value = match serde_json::from_str(end) {
+        Ok(v) => v,
+        Err(_) => return blank,
+    };
+    let status = match value.get("status").and_then(|s| s.as_str()) {
+        Some("confirmed") => OutcomeStatus::Confirmed,
+        Some("refuted") => OutcomeStatus::Refuted,
+        Some("undetermined") => OutcomeStatus::Undetermined,
+        _ => return blank,
+    };
+    let evidence = value
+        .get("evidence")
+        .and_then(|e| e.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let evidence = if evidence.chars().count() > 300 {
+        let taken: String = evidence.chars().take(299).collect();
+        format!("{taken}…")
+    } else {
+        evidence
+    };
+    CheckOutcome { status, evidence }
+}
+
+fn render_executor_prompt(check: &Check, goal: Option<&str>) -> String {
+    let mut out = format!(
+        "Check {} [{:?}] target: {}\nMethod: {}\n",
+        check.id, check.kind, check.target, check.method
+    );
+    if let Some(goal) = goal {
+        out.push_str(&format!("Plan goal (scope context only): {goal}\n"));
+    }
+    out
+}
+
+/// Host verdict from per-check outcomes. The plan_scope check decides
+/// scope first; the rest decide fault. Anything unverified makes a
+/// one-sided result `Partial` rather than certain — except all-unknown,
+/// which is `Undetermined`.
+pub fn verdict(checks: &[(Check, CheckOutcome)]) -> Verdict {
+    if let Some((_, scope)) = checks.iter().find(|(c, _)| c.kind == CheckKind::PlanScope)
+        && scope.status == OutcomeStatus::Refuted
+    {
+        return Verdict::ScopeMismatch;
+    }
+    let rest: Vec<&CheckOutcome> = checks
+        .iter()
+        .filter(|(c, _)| c.kind != CheckKind::PlanScope)
+        .map(|(_, o)| o)
+        .collect();
+    if rest.is_empty() {
+        return Verdict::Undetermined;
+    }
+    let confirmed = rest
+        .iter()
+        .filter(|o| o.status == OutcomeStatus::Confirmed)
+        .count();
+    let refuted = rest
+        .iter()
+        .filter(|o| o.status == OutcomeStatus::Refuted)
+        .count();
+    let unknown = rest.len() - confirmed - refuted;
+    if unknown == rest.len() {
+        Verdict::Undetermined
+    } else if refuted == 0 && unknown == 0 {
+        Verdict::AgentError
+    } else if confirmed == 0 && unknown == 0 {
+        Verdict::ClaimNotConfirmed
+    } else {
+        Verdict::Partial
+    }
+}
+
+/// Full slice-2 flow for one fired reflection: execute every check under
+/// shared budgets, judge, record, render. Synchronous from the turn hook;
+/// every failure degrades to the L0 block (never an error turn).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_reflection(
+    root: &std::path::Path,
+    session: &str,
+    model_id: &str,
+    provider: &crate::providers::SharedProvider,
+    writer: &mut crate::agent::journal::Journal,
+    rctx: &ReflectContext,
+    checks: &[Check],
+    messages: &mut Vec<crate::providers::Message>,
+    previous_response_id: &mut Option<String>,
+) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(EXECUTOR_WALL_SECS);
+    let mut calls_left = EXECUTOR_MAX_CALLS;
+    let mut outcomes: Vec<(Check, CheckOutcome)> = Vec::new();
+    for check in checks {
+        if calls_left == 0 || tokio::time::Instant::now() >= deadline {
+            outcomes.push((
+                check.clone(),
+                CheckOutcome {
+                    status: OutcomeStatus::Undetermined,
+                    evidence: "executor budget exhausted".into(),
+                },
+            ));
+            continue;
+        }
+        let mut per_check = EXECUTOR_CALLS_PER_CHECK.min(calls_left);
+        let before = calls_left;
+        let outcome = execute_check(
+            provider,
+            model_id,
+            root,
+            check,
+            rctx.plan.goal.as_deref(),
+            deadline,
+            &mut per_check,
+        )
+        .await;
+        calls_left -= before - per_check;
+        outcomes.push((check.clone(), outcome));
+    }
+    let execution = Execution {
+        outcomes,
+        verdict: Verdict::Undetermined,
+    };
+    let verdict = verdict(&execution.outcomes);
+    let execution = Execution {
+        outcomes: execution.outcomes,
+        verdict,
+    };
+    let artifacts: Vec<String> = rctx.artifacts.iter().map(|a| a.path.clone()).collect();
+    let recurrence = recurrence(root, session, rctx.plan.plan_id.as_deref(), &artifacts);
+    let has_recurrence = recurrence.0 > 0;
+    if let Ok(seq) = writer.append("reflect", verdict_fields(rctx, checks, &execution)) {
+        let dir = root.join(".sqwai").join("journal").join("reflect");
+        std::fs::create_dir_all(&dir).ok();
+        let mut file = verdict_fields(rctx, checks, &execution);
+        file["seq"] = serde_json::json!(seq);
+        file["model"] = serde_json::json!(model_id);
+        let _ = std::fs::write(
+            dir.join(format!("{seq}.json")),
+            serde_json::to_string_pretty(&file).unwrap_or_default(),
+        );
+    }
+    if verdict == Verdict::AgentError {
+        let _ = writer.append(
+            "note",
+            serde_json::json!({
+                "by": "host",
+                "note": "lesson",
+                "text": format!(
+                    "reflector verified agent_error on {}: {}",
+                    artifacts.join(", "),
+                    rctx.quote,
+                ),
+            }),
+        );
+    }
+    let block = render_block(&execution, has_recurrence.then_some(recurrence));
+    messages.push(crate::providers::Message::new(
+        crate::providers::Role::Assistant,
+        block,
+    ));
+    // the transcript the host owns now differs from the provider's copy
+    // (same rule as compaction/undo: send ours, not a continuation).
+    *previous_response_id = None;
+}
+
+/// Host-rendered `[verified]` block, prepended to the turn's assistant
+/// messages. Deterministic format — apology theater is impossible by
+/// construction, and the label marks host verification, not model prose.
+pub fn render_block(execution: &Execution, recurrence: Option<(usize, Vec<String>)>) -> String {
+    let mut out = format!(
+        "[verified: {} — host check, not model prose]\n",
+        match execution.verdict {
+            Verdict::AgentError => "agent_error",
+            Verdict::ClaimNotConfirmed => "claim_not_confirmed",
+            Verdict::Partial => "partial",
+            Verdict::ScopeMismatch => "scope_mismatch",
+            Verdict::Undetermined => "undetermined",
+        }
+    );
+    for (check, outcome) in &execution.outcomes {
+        let status = match outcome.status {
+            OutcomeStatus::Confirmed => "confirmed",
+            OutcomeStatus::Refuted => "refuted",
+            OutcomeStatus::Undetermined => "undetermined",
+        };
+        if outcome.evidence.is_empty() {
+            out.push_str(&format!(
+                "{} {:?} {}: {status}\n",
+                check.id, check.kind, check.target
+            ));
+        } else {
+            out.push_str(&format!(
+                "{} {:?} {}: {status} — {}\n",
+                check.id, check.kind, check.target, outcome.evidence
+            ));
+        }
+    }
+    if let Some((times, paths)) = recurrence
+        && times > 0
+    {
+        out.push_str(&format!(
+            "recurring unconfirmed criticism about {} ({times}×) — consider a memory_propose\n",
+            paths.join(", ")
+        ));
+    }
+    out
+}
+
+/// Prior `claim_not_confirmed` reflects on the same plan with overlapping
+/// artifacts: how many, and which paths recur. Slice 2 keeps the count;
+/// slice 3 (`/verify`, self-protection) will act on it.
+pub fn recurrence(
+    root: &std::path::Path,
+    session: &str,
+    plan_id: Option<&str>,
+    artifacts: &[String],
+) -> (usize, Vec<String>) {
+    if artifacts.is_empty() {
+        return (0, Vec::new());
+    }
+    let mut times = 0usize;
+    let mut paths: Vec<String> = Vec::new();
+    let records = crate::agent::journal::Journal::records_for(root, session).unwrap_or_default();
+    for record in records.iter().rev().take(200) {
+        if record.kind != "reflect" {
+            continue;
+        }
+        if record.fields.get("verdict").and_then(|v| v.as_str()) != Some("claim_not_confirmed") {
+            continue;
+        }
+        if plan_id
+            .is_some_and(|id| record.fields.get("plan_id").and_then(|v| v.as_str()) != Some(id))
+        {
+            continue;
+        }
+        let prior: Vec<String> = record
+            .fields
+            .get("artifacts")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let overlap: Vec<String> = artifacts
+            .iter()
+            .filter(|a| prior.iter().any(|p| p == *a))
+            .cloned()
+            .collect();
+        if !overlap.is_empty() {
+            times += 1;
+            for path in overlap {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    (times, paths)
 }
 
 #[cfg(test)]
@@ -394,14 +854,195 @@ mod tests {
     }
 
     #[test]
-    fn reflect_fields_carry_checks_for_the_record() {
+    fn verdict_fields_carry_checks_outcomes_and_verdict() {
         let checks = parse_checks(
             r#"[{"id": "c1", "kind": "plan_scope", "target": "p1", "method": "compare"}]"#,
         )
         .unwrap();
-        let fields = reflect_fields(&ctx(), &checks);
+        let execution = Execution {
+            outcomes: vec![(
+                checks[0].clone(),
+                CheckOutcome {
+                    status: OutcomeStatus::Confirmed,
+                    evidence: "in scope".into(),
+                },
+            )],
+            verdict: Verdict::Partial,
+        };
+        let fields = verdict_fields(&ctx(), &checks, &execution);
         assert_eq!(fields["plan_id"], serde_json::json!("p1"));
         assert_eq!(fields["checks"][0]["kind"], serde_json::json!("plan_scope"));
+        assert_eq!(
+            fields["outcomes"][0]["status"],
+            serde_json::json!("confirmed")
+        );
+        assert_eq!(fields["verdict"], serde_json::json!("partial"));
+    }
+
+    fn outcome(status: OutcomeStatus) -> CheckOutcome {
+        CheckOutcome {
+            status,
+            evidence: "e".into(),
+        }
+    }
+
+    fn check(id: &str, kind: CheckKind) -> Check {
+        Check {
+            id: id.into(),
+            kind,
+            target: "t".into(),
+            expects: None,
+            method: "inspect".into(),
+        }
+    }
+
+    #[test]
+    fn verdict_mapping_covers_the_matrix() {
+        use OutcomeStatus::{Confirmed as C, Refuted as R, Undetermined as U};
+        // scope decides first
+        assert_eq!(
+            verdict(&[(check("c1", CheckKind::PlanScope), outcome(R))]),
+            Verdict::ScopeMismatch
+        );
+        // all confirmed → we broke it
+        assert_eq!(
+            verdict(&[
+                (check("c1", CheckKind::PlanScope), outcome(C)),
+                (check("c2", CheckKind::File), outcome(C)),
+            ]),
+            Verdict::AgentError
+        );
+        // all refuted → work is fine
+        assert_eq!(
+            verdict(&[
+                (check("c1", CheckKind::PlanScope), outcome(C)),
+                (check("c2", CheckKind::File), outcome(R)),
+            ]),
+            Verdict::ClaimNotConfirmed
+        );
+        // mixed → partial
+        assert_eq!(
+            verdict(&[
+                (check("c2", CheckKind::File), outcome(C)),
+                (check("c3", CheckKind::File), outcome(R)),
+            ]),
+            Verdict::Partial
+        );
+        // one-sided plus unknown → partial, not certain
+        assert_eq!(
+            verdict(&[
+                (check("c2", CheckKind::File), outcome(C)),
+                (check("c3", CheckKind::File), outcome(U)),
+            ]),
+            Verdict::Partial
+        );
+        // all unknown → undetermined
+        assert_eq!(
+            verdict(&[(check("c2", CheckKind::File), outcome(U))]),
+            Verdict::Undetermined
+        );
+        // nothing but scope → nothing verified
+        assert_eq!(
+            verdict(&[(check("c1", CheckKind::PlanScope), outcome(C))]),
+            Verdict::Undetermined
+        );
+        assert_eq!(verdict(&[]), Verdict::Undetermined);
+    }
+
+    #[test]
+    fn final_parse_is_strict() {
+        let ok = parse_final(
+            "some reasoning\nFINAL: {\"status\": \"confirmed\", \"evidence\": \"parses clean\"}",
+        );
+        assert_eq!(ok.status, OutcomeStatus::Confirmed);
+        assert!(ok.evidence.contains("parses clean"));
+        assert_eq!(
+            parse_final("no verdict here").status,
+            OutcomeStatus::Undetermined
+        );
+        assert_eq!(
+            parse_final("FINAL: {\"status\": \"maybe\", \"evidence\": \"x\"}").status,
+            OutcomeStatus::Undetermined
+        );
+        assert_eq!(
+            parse_final("FINAL: not json").status,
+            OutcomeStatus::Undetermined
+        );
+    }
+
+    #[test]
+    fn executor_prompt_blinds_expects_and_quote() {
+        let check = Check {
+            id: "c1".into(),
+            kind: CheckKind::File,
+            target: "src/a.rs".into(),
+            expects: Some("you broke auth, idiot".into()),
+            method: "read".into(),
+        };
+        let prompt = render_executor_prompt(&check, Some("ship it"));
+        assert!(prompt.contains("src/a.rs"), "{prompt}");
+        assert!(!prompt.contains("you broke auth"), "{prompt}");
+        assert!(!prompt.contains("expects"), "{prompt}");
+    }
+
+    #[test]
+    fn block_renders_deterministically_with_recurrence() {
+        let execution = Execution {
+            outcomes: vec![(
+                check("c1", CheckKind::File),
+                CheckOutcome {
+                    status: OutcomeStatus::Confirmed,
+                    evidence: "red".into(),
+                },
+            )],
+            verdict: Verdict::AgentError,
+        };
+        let block = render_block(&execution, Some((2, vec!["src/a.rs".into()])));
+        assert!(block.starts_with("[verified: agent_error"), "{block}");
+        assert!(block.contains("c1"), "{block}");
+        assert!(block.contains("memory_propose"), "{block}");
+        let plain = render_block(&execution, None);
+        assert!(!plain.contains("memory_propose"), "{plain}");
+    }
+
+    #[test]
+    fn recurrence_counts_same_plan_overlapping_unconfirmed() {
+        let dir = std::env::temp_dir().join(format!("sqwai-refl-rec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut journal =
+            crate::agent::journal::Journal::open(&dir, "sess").expect("journal opens");
+        for seq_note in ["first", "second"] {
+            journal
+                .append(
+                    "reflect",
+                    serde_json::json!({
+                        "verdict": "claim_not_confirmed",
+                        "plan_id": "p1",
+                        "artifacts": ["src/a.rs"],
+                        "note": seq_note,
+                    }),
+                )
+                .unwrap();
+        }
+        journal
+            .append(
+                "reflect",
+                serde_json::json!({
+                    "verdict": "agent_error",
+                    "plan_id": "p1",
+                    "artifacts": ["src/a.rs"],
+                }),
+            )
+            .unwrap();
+        let (times, paths) = recurrence(&dir, "sess", Some("p1"), &["src/a.rs".to_string()]);
+        assert_eq!(times, 2, "only the unconfirmed pair counts");
+        assert_eq!(paths, vec!["src/a.rs".to_string()]);
+        let (other_plan, _) = recurrence(&dir, "sess", Some("p9"), &["src/a.rs".to_string()]);
+        assert_eq!(other_plan, 0);
+        let (other_path, _) = recurrence(&dir, "sess", Some("p1"), &["src/z.rs".to_string()]);
+        assert_eq!(other_path, 0);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Tone invariance (§12.7): same facts, hostile vs flat phrasing, must
@@ -456,6 +1097,89 @@ mod tests {
                 t
             };
             assert_eq!(targets(&a), targets(&b), "tone must not move targets");
+        });
+    }
+
+    /// Executor end to end (§12.7): true checks confirm, a missing symbol
+    /// refutes, verdict comes out Partial. Live model, real tools, temp
+    /// project — run explicitly:
+    /// `SQWAI_BENCH_MODEL=<key> cargo test -- --ignored reflector_executor_live --test-threads=1`
+    #[test]
+    #[ignore]
+    fn reflector_executor_live() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let Some(model) = crate::agent::bench_harness::bench_model() else {
+                eprintln!("SKIP: no bench model (set SQWAI_BENCH_MODEL)");
+                return;
+            };
+            crate::providers::set_conversation_id("reflect-executor-test");
+            let dir = std::env::temp_dir().join(format!("sqwai-refl-live-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+            std::fs::write(
+                dir.join("src/lib.rs"),
+                "pub fn calculate(x: i32) -> i32 {\n    x + 1\n}\n",
+            )
+            .unwrap();
+            let mut store = crate::agent::graph::SqliteGraphStore::open(&dir).expect("graph opens");
+            crate::agent::graph_index::index_project(&mut store, &dir).expect("indexed");
+
+            let checks = vec![
+                Check {
+                    id: "c1".into(),
+                    kind: CheckKind::File,
+                    target: "src/lib.rs".into(),
+                    expects: None,
+                    method: "read the file and confirm it defines calculate".into(),
+                },
+                Check {
+                    id: "c2".into(),
+                    kind: CheckKind::Symbol,
+                    target: "calculate".into(),
+                    expects: None,
+                    method: "resolve the symbol and confirm where it is defined".into(),
+                },
+                Check {
+                    id: "c3".into(),
+                    kind: CheckKind::Symbol,
+                    target: "nope_xyz_missing".into(),
+                    expects: None,
+                    method: "resolve the symbol; refute if nothing defines it".into(),
+                },
+            ];
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+            let mut calls_left = 24;
+            let mut outcomes = Vec::new();
+            for check in &checks {
+                outcomes.push((
+                    check.clone(),
+                    execute_check(
+                        &model.provider,
+                        &model.model_id,
+                        &dir,
+                        check,
+                        Some("test"),
+                        deadline,
+                        &mut calls_left,
+                    )
+                    .await,
+                ));
+            }
+            let by_id = |id: &str| {
+                outcomes
+                    .iter()
+                    .find(|(c, _)| c.id == id)
+                    .map(|(_, o)| o.status)
+                    .expect("outcome present")
+            };
+            assert_eq!(by_id("c1"), OutcomeStatus::Confirmed, "{outcomes:?}");
+            assert_eq!(by_id("c2"), OutcomeStatus::Confirmed, "{outcomes:?}");
+            assert_eq!(by_id("c3"), OutcomeStatus::Refuted, "{outcomes:?}");
+            std::fs::remove_dir_all(&dir).ok();
         });
     }
 }

@@ -1515,7 +1515,7 @@ number; a `partial` one is missing something the design calls for.
 | G0 | Minimal comparative retention benchmark (§8.2): plan + journal + anchor vs baseline | done — harness as ignored tests (minidb T1–T3 + kaiwai T4 matrix), pre-registration, eval files and analyses under bench/ | F1b, F6 |
 | G1 | Full integrity benchmark (§8.2): verification receipts, mutation crash harness, claim lint | planned | G0, V1, F7b, I4 |
 | H0 | L0 fact block + criticism detector | in progress — detector as learned student (offline LLM-labeled data, char-trigram LR, pure-Rust inference) + artifact signal + strict trigger + block-D injection + `criticism` marker; LLM-confirm reserved (§12.7) | F2 |
-| H1 | Reflector: Scope/Neutralizer/Executor/Verdict, /verify | partial — Scope+Neutralizer done (ReflectContext, schema-bound Check[] with mandatory plan_scope lead, live-model tone-invariance test, `reflect` records on Fire+artifact turns); Executor+Verdict and /verify+protection pending | H0, D |
+| H1 | Reflector: Scope/Neutralizer/Executor/Verdict, /verify | partial — Scope+Neutralizer and Executor+Verdict done (min-loop executor in reflector ctx, host verdict mapping, host-rendered [verified] prepend, verdict file, recurrence, diary lesson on agent_error; live-model tone + executor tests); /verify command and self-protection pending | H0, D |
 | I1 | Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild | done — rusqlite (bundled) engine with §2.4.2 schema | E |
 | I2 | Rust + Python + TypeScript adapters (tree-sitter, minimal: declarations) | done — tree-sitter declarations and lexical imports for Rust, Python, TypeScript | I1 |
 | I3 | Freshness: edit/bash/undo/head triggers; status semantics; out-of-order protection (mandatory) | done — generation stamps, replace_file_subgraph_stamped, out-of-order protection, disk-hash freshness | I1 |
@@ -1843,15 +1843,22 @@ it" moments — cheap always, expensive by escalation:
 - **L1 reflector.** Scope (code, journal window → ReflectContext) →
   Neutralizer (LLM, no tools, emits schema-bound Check[] with a mandatory
   plan_scope check) → Executor (LLM, clean blinded read-only context, Check[]
-  with expects stripped; read-only worktree copy — decided, not the advisory
-  filter) →
+  with expects stripped; dispatch-level refusal instead of a worktree copy —
+  decided: full copies cost seconds+disk per turn, narrow copies blind
+  cross-file reads; the dispatcher drops the tools, not the tree) →
   Verdict (code: agent_error | claim_not_confirmed | partial |
-  scope_mismatch | undetermined) → Answer (facts first, no apology theater;
-  the user sees a `[verified]` block).
+  scope_mismatch | undetermined — computed by the host from per-check
+  outcomes, not by the model) → Answer (host-rendered `[verified]` block
+  prepended to the turn's assistant messages — facts first, no apology
+  theater by construction).
   Decided: trigger is automatic on Fire+artifact, synchronous in the answer;
   verdicts are report-only (no plan/tree actions — rework stays with the
-  main loop). Build order: Scope+Neutralizer, then Executor+Verdict, then
-  /verify+protection.
+  main loop); recurrence (repeat claim_not_confirmed → model-facing
+  memory_propose suggestion) and the verdict file
+  (`journal/reflect/<seq>.json`) ride in slice 2; /verify command and
+  self-protection stay slice 3. Executor budget mirrors subagents (600s
+  wall, 24 tool calls). Build order: Scope+Neutralizer, then
+  Executor+Verdict, then /verify+protection.
 - **L2 /verify [--full].** L1 with a wider window and budget, on request.
 - **Records.** Journal `reflect` record, full verdict in
   `journal/reflect/<seq>.json`; agent_errors pre-fill the next diary
