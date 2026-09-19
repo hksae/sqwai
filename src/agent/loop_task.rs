@@ -3404,28 +3404,29 @@ fn push_span<'x>(spans: &mut Vec<(&'static str, &'x str)>, kind: &'static str, s
 }
 
 /// `12 passed`, `3 failed`, `280/280` — byte spans into `text`.
-/// ASCII-only scanning, so every cut lands on a char boundary.
+/// Char-walked: every index below is a char boundary by construction
+/// (byte-walking multibyte text panicked here on Cyrillic input).
 fn extract_counts(text: &str) -> Vec<(&'static str, &str)> {
-    let bytes = text.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
-    while i < bytes.len() {
-        if !bytes[i].is_ascii_digit() {
-            i += 1;
+    while i < text.len() {
+        let c = text[i..].chars().next().unwrap_or('\0');
+        if !c.is_ascii_digit() {
+            i += c.len_utf8();
             continue;
         }
         let start = i;
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
+        while i < text.len() && text[i..].chars().next().is_some_and(|c| c.is_ascii_digit()) {
             i += 1;
         }
         let mut j = i;
-        while j < bytes.len() && (bytes[j] as char).is_whitespace() {
-            j += 1;
+        while j < text.len() && text[j..].chars().next().is_some_and(|c| c.is_whitespace()) {
+            j += text[j..].chars().next().unwrap().len_utf8();
         }
         // x/y form
-        if bytes.get(j) == Some(&b'/') {
+        if text[j..].starts_with('/') {
             let mut k = j + 1;
-            while k < bytes.len() && bytes[k].is_ascii_digit() {
+            while k < text.len() && text[k..].chars().next().is_some_and(|c| c.is_ascii_digit()) {
                 k += 1;
             }
             if k > j + 1 {
@@ -3436,8 +3437,13 @@ fn extract_counts(text: &str) -> Vec<(&'static str, &str)> {
         }
         // word form: passed|failed
         let mut k = j;
-        while k < bytes.len() && (bytes[k] as char).is_alphanumeric() {
-            k += 1;
+        while k < text.len()
+            && text[k..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric())
+        {
+            k += text[k..].chars().next().unwrap().len_utf8();
         }
         if &text[j..k] == "passed" || &text[j..k] == "failed" {
             out.push(("count", &text[start..k]));
@@ -3464,10 +3470,16 @@ fn extract_status_words(text: &str) -> Vec<(&'static str, &str)> {
     let lower = text.to_lowercase();
     let mut out = Vec::new();
     for phrase in PHRASES {
-        // first occurrence span mapped back by byte search (phrases are ASCII)
+        // first occurrence span mapped back by byte search (phrases are ASCII).
+        // `find` runs on the lowered copy, whose byte coordinates can drift
+        // from the original when case-folding changes length — so the slice
+        // is re-verified, not just boundary-checked.
         if let Some(pos) = lower.find(phrase) {
             let end = pos + phrase.len();
-            if text.is_char_boundary(pos) && text.is_char_boundary(end) {
+            if text.is_char_boundary(pos)
+                && text.is_char_boundary(end)
+                && text[pos..end].to_lowercase() == *phrase
+            {
                 out.push(("status", &text[pos..end]));
             }
         }
@@ -3477,37 +3489,43 @@ fn extract_status_words(text: &str) -> Vec<(&'static str, &str)> {
 
 /// path-looking tokens: contain `/` and `.`, or backticked with a dot.
 /// Trailing punctuation stripped. Returns spans into `text`.
+/// Char-walked with a boundary invariant on every index (the byte version
+/// panicked on multibyte input: a Cyrillic lead byte reads as alphanumeric
+/// and stops the scan mid-char).
 fn extract_paths(text: &str) -> Vec<&str> {
+    fn is_tok(c: char) -> bool {
+        c.is_alphanumeric() || "._-/".contains(c)
+    }
     let mut out = Vec::new();
-    let bytes = text.as_bytes();
     let mut i = 0;
-    while i < bytes.len() {
-        let backticked = bytes[i] == b'`';
+    // invariant: i, start and end below are always char boundaries
+    while i < text.len() {
+        let c = text[i..].chars().next().unwrap();
+        let backticked = c == '`';
         if backticked {
             i += 1;
-        }
-        let is_tok = |b: u8| (b as char).is_alphanumeric() || "._-/".contains(b as char);
-        if bytes.get(i).is_none_or(|b| !is_tok(*b)) {
-            if !backticked {
-                i += 1;
-            }
+        } else if !is_tok(c) {
+            i += c.len_utf8();
             continue;
         }
         let start = i;
-        while i < bytes.len() && is_tok(bytes[i]) {
-            i += 1;
+        while i < text.len() {
+            let c = text[i..].chars().next().unwrap();
+            if !is_tok(c) {
+                break;
+            }
+            i += c.len_utf8();
         }
         let mut end = i;
         while end > start {
-            // text[..end] is always a valid boundary here (end only moves
-            // back by whole chars), so next_back never panics
+            // end starts at a boundary and moves back by whole chars
             match text[..end].chars().next_back() {
                 Some(c) if ",.:;!?".contains(c) => end -= c.len_utf8(),
                 _ => break,
             }
         }
         let closed = backticked && text[end..].starts_with('`');
-        if end > start && text.is_char_boundary(start) && text.is_char_boundary(end) {
+        if end > start {
             let tok = &text[start..end];
             if (tok.contains('/') && tok.contains('.'))
                 || (backticked && closed && tok.contains('.'))
@@ -3526,12 +3544,31 @@ fn extract_paths(text: &str) -> Vec<&str> {
 /// preceding 24 chars means a missing file is expected, not a lie.
 fn path_deleted_nearby(text: &str, span: &str) -> bool {
     const VERBS: &[&str] = &[
-        "delete", "deleted", "remove", "removed", "rm ", "unlink", "deleting", "removing",
+        "delete",
+        "deleted",
+        "remove",
+        "removed",
+        "rm ",
+        "unlink",
+        "deleting",
+        "removing",
+        "удалил",
+        "удали",
+        "удалить",
+        "удалено",
+        "убрал",
+        "стёр",
+        "стер",
     ];
     let Some(pos) = text.find(span) else {
         return false;
     };
-    let from = pos.saturating_sub(48);
+    // `from` is a raw byte rewind and can land mid-char on multibyte text;
+    // walk forward to a boundary (keeps the ~48-byte window, never panics).
+    let mut from = pos.saturating_sub(48);
+    while !text.is_char_boundary(from) {
+        from += 1;
+    }
     let before = text[from..pos].to_lowercase();
     VERBS.iter().any(|v| before.contains(v))
 }
@@ -5055,6 +5092,34 @@ mod effort_tests {
         assert!(syms.contains(&"foo::bar"), "{syms:?}");
     }
 
+    /// Byte-walking these on multibyte text panicked mid-char (a Cyrillic
+    /// lead byte reads as alphanumeric). Regression: Russian prose passes
+    /// through every extractor without panicking and still finds ASCII
+    /// claims inside it.
+    #[test]
+    fn claim_extractors_survive_cyrillic() {
+        let text = "Проверил: всё сломалось. Тесты: 12 passed, смотри src/main.rs и `config.toml`!";
+        let counts = extract_counts(text);
+        let texts: Vec<&str> = counts.iter().map(|(_, s)| *s).collect();
+        assert!(texts.contains(&"12 passed"), "{texts:?}");
+        let paths = extract_paths(text);
+        assert!(paths.contains(&"src/main.rs"), "{paths:?}");
+        assert!(paths.contains(&"config.toml"), "{paths:?}");
+        // pure Cyrillic, no claims: silence, not a crash
+        assert!(extract_counts("Привет, всё упало").is_empty());
+        assert!(extract_paths("Привет, всё упало").is_empty());
+        assert!(extract_status_words("Всё сломалось").is_empty());
+        // nbsp between number and word (multibyte whitespace trap)
+        let nbsp = extract_counts("3\u{a0}passed");
+        assert!(nbsp.iter().any(|(_, s)| *s == "3\u{a0}passed"), "{nbsp:?}");
+        // deletion guard with a mid-char rewind window
+        assert!(path_deleted_nearby(
+            "удалил src/a.rs после правок",
+            "src/a.rs"
+        ));
+        assert!(!path_deleted_nearby("Привет, смотри src/a.rs", "src/a.rs"));
+    }
+
     #[test]
     fn lint_answer_marks_only_contradictions() {
         let root = std::env::temp_dir().join(format!("sqwai-lint-{}", std::process::id()));
@@ -5094,6 +5159,36 @@ mod effort_tests {
         let lints: Vec<_> = recs.iter().filter(|r| r.kind == "claim_lint").collect();
         assert_eq!(lints.len(), 1);
         assert_eq!(lints[0].fields["span"], "99 passed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The user's crash: Russian model text through the whole lint. Must
+    /// neither panic nor mark what's in the journal.
+    #[test]
+    fn lint_answer_survives_russian_prose() {
+        let root = std::env::temp_dir().join(format!("sqwai-lint-ru-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&root, "sess").expect("open");
+        journal.append("user_msg", serde_json::json!({})).unwrap();
+        journal
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "bash", "ok": true, "summary": "12 passed"}),
+            )
+            .unwrap();
+        journal
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "bash", "ok": false, "summary": "бум"}),
+            )
+            .unwrap();
+        let mut jh = Some(journal);
+        // "12 passed" is backed by the journal: no mark, no crash.
+        // (A path claim without file evidence WOULD mark — that is the
+        // lint working, not a bug — so the probe carries none.)
+        let out = lint_answer("Готово: 12 passed. Ты что сделал?", &root, "sess", &mut jh);
+        assert!(!out.contains("[unverified]"), "{out}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
