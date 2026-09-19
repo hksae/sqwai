@@ -527,7 +527,7 @@ restart per session file, so cross-session references are always scoped
 
 kind	Fields	Written when
 tool_call	tool, call_id, args_digest (path, cmd, pattern — never file contents)	before dispatch
-tool_result	tool, call_id, ok, duration_ms, summary (≤ 200 chars host-derived), trust: high|low, code: cancelled?	after dispatch
+tool_result	tool, call_id, ok, duration_ms, summary (≤ 200 chars host-derived), trust: high|low, taint: external|local|none, code: cancelled?	after dispatch
 file_diff	path, added, removed, hash_before, hash_after (`sha256:`), blob_before, blob_after (`blake3:`), mode, checkpoint	after any mutating file tool (one record per changed file)
 checkpoint	layer, id, reason (`post_mutation`, `step_start`, `step_finish`, `cancelled`, …), label/step	after a layer-1 snapshot or shadow-Git snapshot
 undo	step, files, reopened_steps	/undo step N
@@ -544,11 +544,24 @@ Rules: no file contents, no full command output, no secrets (screening
 applies to summary and text fields). Tool arguments are digested to what is
 needed for evidence: paths, command head, patterns.
 
-Untrusted input. Tool results from `webfetch`/`websearch` carry
-`trust: low`; everything else is `trust: high`. That flag is the whole
-mechanism — there is no taint accumulation, no banner wrapping, and no
-confirmation gate keyed off trust. Screening applies to content only; it
-never strips data the model needs.
+Untrusted input. Every content-bearing tool result carries `trust: low`
+plus a `taint` class: `external` (webfetch/websearch/MCP — bytes from
+outside the machine) or `local` (file reads, command output — bytes from
+the tree). Host observations (plan records, checkpoints, diagnostics,
+git metadata) stay `high`. The flag is uniform — "verify before
+trusting" — while the class drives behavior:
+- Banner: external results travel wrapped in model-visible delimiters
+  (`[untrusted external content …]`), so the boundary survives into
+  context. Local results are not wrapped (every read would scream).
+- Taint level is session-cumulative and journal-derived (no new state):
+  0 clean, 1 local sources seen, 2 external sources seen. It never
+  decreases within a session; a new session starts at 0.
+- Confirm gates (narrow, decided): at level 2, commands that send data
+  outward (network upload/POST, `git push`, ssh/scp-class) require user
+  approval with a trust reason, reusing the dangerous-command dialog.
+  Headless contexts (subagents, reflector) cannot prompt and deny instead.
+  Irreversible deletes stay with the safety classifier at every level.
+  Screening applies to content only; it never strips data the model needs.
 
 2.2.3 Step attribution
 The session holds an explicit `current_step_id` (null when idle). `plan start`
@@ -1529,7 +1542,7 @@ number; a `partial` one is missing something the design calls for.
 | O | Unattended mode: policy layer, stop conditions, `brief`, `/review`, pending memory | planned (§12.8) | F6, H0, M, Q, T |
 | P | Windows/PowerShell shell-aware safety layer (§5.2) | done | §5.2 |
 | Q | Single-instance lock + read-only fallback for plan/journal/memory/graph | done | F1 |
-| R | Untrusted-input handling (trust:low, banner, cumulative taint, confirm gates) + prompt rule | partial — prompt rule and per-tool `trust: low` exist; cumulative taint, banner, and confirm gates missing | F2 |
+| R | Untrusted-input handling (trust:low, banner, cumulative taint, confirm gates) + prompt rule | done — prompt rule, per-tool trust/taint flags, model-visible external banner, session levels 0/1/2 journal-derived, egress/push approval at level 2 with headless deny | F2 |
 | S | Cancel mid-tool (Esc): cancelled result, in_progress | done — ok:false code:cancelled, journaled; no post-checkpoint, no revert | F2 |
 | S1 | Step epoch lifecycle (§2.2.4), writer lock during undo, subagent cancellation on reopen | done — epoch lifecycle done (bump on reopen, older-epoch mutations refused); writer lock during undo (dispatch refuses file mutations with `writer_locked`, undo refuses while background shells live); running children cancelled on reopen via registry; finish gate proven unnecessary (children join inside their `task` call, no race exists) | F1b, D |
 | T | Provider fallback chain ([models.x].fallback) | done — transparent switch on Network/Server errors or retry-exhausted; `FallbackCandidate` chain, `FallbackSwitched` event, fast-fail `run_turn` | §5.1 |

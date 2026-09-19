@@ -2085,8 +2085,20 @@ async fn run_agent(
                             )
                             .await
                         }
-                        "webfetch" => tools::web::fetch(&call.args).await,
-                        "websearch" => tools::web::search(&call.args).await,
+                        "webfetch" | "websearch" => {
+                            let mut outcome = if call.name == "webfetch" {
+                                tools::web::fetch(&call.args).await
+                            } else {
+                                tools::web::search(&call.args).await
+                            };
+                            // R banner (§2.2): external bytes travel delimited
+                            // so the boundary survives into context. Failures
+                            // stay bare — a host error is not untrusted content.
+                            if outcome.ok {
+                                outcome.output = crate::agent::trust::banner_wrap(&outcome.output);
+                            }
+                            outcome
+                        }
                         "subagent" if subagent_depth == 0 => {
                             run_subagent(
                                 call,
@@ -2222,7 +2234,13 @@ async fn run_agent(
                                 .await
                             {
                                 Ok((output, is_error)) => tools::Outcome {
-                                    output,
+                                    // R banner (§2.2), same rule as web:
+                                    // external bytes delimited, errors bare.
+                                    output: if is_error {
+                                        output
+                                    } else {
+                                        crate::agent::trust::banner_wrap(&output)
+                                    },
                                     ok: !is_error,
                                     exit_code: None,
                                     diff: None,
@@ -2388,6 +2406,15 @@ async fn run_agent(
                         )
                         .ok()
                     } else {
+                        // R taint (§2.2): every content-bearing result carries
+                        // its class; the trust flag goes low with it. Plan ops
+                        // above stay high — host observations, not content.
+                        let taint = crate::agent::trust::tool_taint(
+                            &call.name,
+                            mcp_registry
+                                .as_ref()
+                                .is_some_and(|registry| registry.contains(&call.name)),
+                        );
                         writer
                         .append_evidence(
                             "tool_result",
@@ -2397,7 +2424,12 @@ async fn run_agent(
                                 "ok": outcome.ok,
                                 "duration_ms": tool_started.elapsed().as_millis(),
                                 "summary": outcome.output.chars().take(200).collect::<String>(),
-                                "trust": if matches!(call.name.as_str(), "webfetch" | "websearch") { "low" } else { "high" },
+                                "trust": if taint.is_some() { "low" } else { "high" },
+                                "taint": match taint {
+                                    Some(crate::agent::trust::TaintClass::External) => "external",
+                                    Some(crate::agent::trust::TaintClass::Local) => "local",
+                                    None => "none",
+                                },
                                 // §3.7: distinct from an ordinary failure, so the
                                 // journal can say the user stopped this rather
                                 // than that it went wrong on its own
@@ -3894,16 +3926,38 @@ async fn bash_call(
     }
 
     // 1. heuristic dangerous-command detector
-    let needs_approval =
+    let mut needs_approval =
         match safety::classify_for(crate::agent::shell::ShellKind::detect(), &command) {
             safety::Verdict::Safe => None,
             safety::Verdict::Blocked(reason) => {
                 return tools::Outcome::err(format!("error: {reason}"));
             }
-            safety::Verdict::NeedsApproval(reason) => Some(reason),
+            safety::Verdict::NeedsApproval(reason) => Some(reason.to_string()),
         };
 
-    if let Some(reason) = needs_approval {
+    // 1b. trust gate (R, §2.2): external taint + an egress-shaped command
+    // needs the same approval with a trust reason; headless contexts deny
+    // instead. Runs after the safety verdict so a Blocked command never
+    // reaches here; a command both dangerous and exfiltrating carries one
+    // combined reason into the single dialog.
+    match crate::agent::trust::trust_gate(
+        &command,
+        crate::agent::trust::taint_level(&ctx.root, &ctx.session_id).external,
+        subagent_depth > 0,
+    ) {
+        crate::agent::trust::Gate::Allow => {}
+        crate::agent::trust::Gate::Deny(reason) => {
+            return tools::Outcome::err(format!("command denied ({reason})"));
+        }
+        crate::agent::trust::Gate::Confirm(reason) => {
+            needs_approval = Some(match needs_approval {
+                Some(safety) => format!("{safety}; {reason}"),
+                None => reason,
+            });
+        }
+    }
+
+    if let Some(reason) = &needs_approval {
         if !always_allow.contains(&command) {
             if subagent_depth > 0 {
                 return tools::Outcome::err(format!(
@@ -5851,5 +5905,161 @@ mod effort_tests {
         }
         let _ = std::fs::remove_dir_all(&temp_dir);
         assert!(saw_tool_notice, "should have seen tool notice");
+    }
+}
+
+#[cfg(test)]
+mod trust_gate_tests {
+    use super::*;
+
+    fn tainted_project(name: &str) -> (std::path::PathBuf, String) {
+        let dir =
+            std::env::temp_dir().join(format!("sqwai-trust-gate-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = "trust-sess".to_string();
+        let mut journal =
+            crate::agent::journal::Journal::open(&dir, &session).expect("journal opens");
+        journal
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "webfetch", "ok": true, "taint": "external"}),
+            )
+            .unwrap();
+        (dir, session)
+    }
+
+    fn bash_call_parts(
+        dir: &std::path::Path,
+        session: &str,
+    ) -> (
+        ToolCallReq,
+        tools::ToolCtx,
+        tokio::sync::mpsc::Sender<AgentEvent>,
+        tokio::sync::mpsc::Receiver<AgentEvent>,
+        tokio::sync::mpsc::Sender<ControlMsg>,
+        tokio::sync::mpsc::Receiver<ControlMsg>,
+    ) {
+        let (tx_agent, rx_ui) = tokio::sync::mpsc::channel(8);
+        let (tx_ui, rx_agent) = tokio::sync::mpsc::channel(8);
+        let call = ToolCallReq::new(
+            "c1",
+            "bash",
+            serde_json::json!({"command": "git push origin main"}),
+        );
+        let ctx = tools::ToolCtx::new(dir).in_session(session.to_string());
+        (call, ctx, tx_agent, rx_ui, tx_ui, rx_agent)
+    }
+
+    /// Headless + external taint + egress: immediate denial, no prompt.
+    #[tokio::test]
+    async fn trust_gate_denies_egress_for_subagents_under_taint() {
+        let (dir, session) = tainted_project("deny");
+        let (call, mut ctx, tx_agent, _rx_ui, _tx_ui, mut rx_agent) =
+            bash_call_parts(&dir, &session);
+        let mut always_allow = Vec::new();
+        let mut next_id = 0u64;
+        let outcome = bash_call(
+            &call,
+            &mut ctx,
+            &tx_agent,
+            &mut rx_agent,
+            &mut always_allow,
+            &[],
+            &mut next_id,
+            1,
+        )
+        .await;
+        assert!(!outcome.ok, "must refuse");
+        assert!(
+            outcome.output.contains("no user to confirm"),
+            "{}",
+            outcome.output
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Same command, clean session: no gate involved (git push then fails
+    /// on its own — no remote — proving the gate let it through).
+    #[tokio::test]
+    async fn trust_gate_stays_quiet_without_taint() {
+        let dir = std::env::temp_dir().join(format!("sqwai-trust-clean-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (call, mut ctx, tx_agent, _rx_ui, _tx_ui, mut rx_agent) =
+            bash_call_parts(&dir, "clean-sess");
+        let mut always_allow = Vec::new();
+        let mut next_id = 0u64;
+        let outcome = bash_call(
+            &call,
+            &mut ctx,
+            &tx_agent,
+            &mut rx_agent,
+            &mut always_allow,
+            &[],
+            &mut next_id,
+            0,
+        )
+        .await;
+        assert!(
+            !outcome.output.contains("no user to confirm"),
+            "{}",
+            outcome.output
+        );
+        assert!(
+            !outcome.output.contains("external content"),
+            "{}",
+            outcome.output
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Tainted main session: the approval dialog carries the trust reason,
+    /// and a denial stops the command.
+    #[tokio::test]
+    async fn trust_gate_prompts_with_reason_and_honors_deny() {
+        let (dir, session) = tainted_project("prompt");
+        let (call, mut ctx, tx_agent, mut rx_ui, tx_ui, mut rx_agent) =
+            bash_call_parts(&dir, &session);
+        let mut always_allow = Vec::new();
+        let mut next_id = 0u64;
+        let future = bash_call(
+            &call,
+            &mut ctx,
+            &tx_agent,
+            &mut rx_agent,
+            &mut always_allow,
+            &[],
+            &mut next_id,
+            0,
+        );
+        tokio::pin!(future);
+        let outcome = loop {
+            tokio::select! {
+                out = &mut future => break out,
+                ev = rx_ui.recv() => {
+                    if let Some(AgentEvent::Approval { id, reason, .. }) = ev {
+                        assert!(
+                            reason.contains("external content"),
+                            "trust reason missing: {reason}"
+                        );
+                        tx_ui
+                            .send(ControlMsg::ApprovalAnswer {
+                                id,
+                                decision: ApprovalDecision::Deny,
+                            })
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+        };
+        assert!(!outcome.ok, "denied command must fail");
+        assert!(
+            outcome.output.contains("denied by user"),
+            "{}",
+            outcome.output
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
