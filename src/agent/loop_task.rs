@@ -1446,12 +1446,28 @@ async fn run_agent(
                         } else {
                             crate::agent::criticism::Budget::auto()
                         };
-                        let check = crate::agent::criticism::check_with_window(
+                        let mut check = crate::agent::criticism::check_with_window(
                             &root,
                             &session_id,
                             &user_message.content,
                             budget.window,
                         );
+                        // H0-maybe confirm (§12.7): a held-back Maybe gets one
+                        // cheap model question; a confirmed target grounds the
+                        // fire. Silent and already-fired checks pass through
+                        // untouched (no I/O inside).
+                        if !check.fire
+                            && let Some(upgraded) = crate::agent::reflector::confirm_maybe(
+                                &provider,
+                                &model_id,
+                                &root,
+                                &check,
+                                &user_message.content,
+                            )
+                            .await
+                        {
+                            check = upgraded;
+                        }
                         if check.fire {
                             let _ = writer.append(
                                 "criticism",

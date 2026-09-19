@@ -155,30 +155,162 @@ async fn neutralize_once(
     model_id: &str,
     prompt: &str,
 ) -> anyhow::Result<Vec<Check>> {
+    let text = micro_call(
+        provider,
+        model_id,
+        NEUTRALIZER_SYSTEM,
+        prompt,
+        NEUTRALIZER_MAX_TOKENS,
+        NEUTRALIZER_TIMEOUT_SECS,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("neutralizer call: {e:#}"))?;
+    parse_checks(&text)
+}
+
+/// One tool-free model call with a timeout. Shared by the neutralizer and
+/// the H0-maybe confirm: both are schema-bound micro-calls, not turns.
+async fn micro_call(
+    provider: &crate::providers::SharedProvider,
+    model_id: &str,
+    system: &str,
+    prompt: &str,
+    max_tokens: u32,
+    timeout_secs: u64,
+) -> anyhow::Result<String> {
     let request = crate::providers::ChatRequest {
         model_id: model_id.to_string(),
-        system: vec![crate::providers::SystemPart::volatile(NEUTRALIZER_SYSTEM)],
+        system: vec![crate::providers::SystemPart::volatile(system)],
         messages: vec![crate::providers::Message::new(
             crate::providers::Role::User,
             prompt,
         )],
         // Low, not None: the gateway returns an empty completion without an
         // effort budget on some models (observed, not theorized). Cheap call
-        // either way — a handful of checks, no tools.
+        // either way — schema-bound, no tools.
         effort: Some(crate::config::EffortLevel::Low),
         effort_support: Default::default(),
-        max_tokens: Some(NEUTRALIZER_MAX_TOKENS),
+        max_tokens: Some(max_tokens),
         tools: Vec::new(),
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
     };
-    let text = tokio::time::timeout(
-        std::time::Duration::from_secs(NEUTRALIZER_TIMEOUT_SECS),
+    tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
         collect_text(provider, &request),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("neutralizer timed out"))??;
-    parse_checks(&text)
+    .map_err(|_| anyhow::anyhow!("micro call timed out"))?
+}
+
+// --- H0-maybe confirm (reserved interface, now built) ------------------
+
+/// The confirm's answer: is it criticism, and of what. `target` is a
+/// quoted span from the message (path, symbol, or work description) or
+/// null when the complaint names nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Confirmation {
+    pub is_criticism: bool,
+    pub target: Option<String>,
+}
+
+const CONFIRM_SYSTEM: &str = "You classify one user message from a coding session. Output JSON only, no prose: {\"is_criticism\": true|false, \"target\": \"...\"|null}.\nCriticism = a complaint that prior work is broken, wrong, missing, or misattributed. Quote in target the complained-about work (path, symbol, or short description), or null when it names nothing.\nExasperation or impatience expressed right after the listed files changed counts as criticism of that work — name the touched files as target.\nBare interjections with no verb, pronoun, or reference are never criticism by themselves — false.\nNOT criticism: requests and questions about future work (even irritated ones), praise (even profane), redirects to new work, self-blame (\"my bad\", \"I broke it\"), and error discussion without blame. When in doubt, false.";
+const CONFIRM_MAX_TOKENS: u32 = 1200;
+const CONFIRM_TIMEOUT_SECS: u64 = 60;
+
+/// Ask the model about a Maybe message the strict trigger held back:
+/// Maybe + prior mutations + no resolved artifact. Runs at most once per
+/// turn (the hook calls it, nothing else). Failure, timeout or schema
+/// miss all mean "not confirmed" — silence, never a refusal.
+pub async fn confirm(
+    provider: &crate::providers::SharedProvider,
+    model_id: &str,
+    text: &str,
+    touched: &[criticism::ArtifactFact],
+) -> Option<Confirmation> {
+    let mut prompt = format!("Message:\n\"{text}\"\n\nFiles the last turn touched:\n");
+    if touched.is_empty() {
+        prompt.push_str("(none)\n");
+    } else {
+        for fact in touched.iter().take(8) {
+            prompt.push_str(&format!("- {}\n", fact.path));
+        }
+    }
+    let text = micro_call(
+        provider,
+        model_id,
+        CONFIRM_SYSTEM,
+        &prompt,
+        CONFIRM_MAX_TOKENS,
+        CONFIRM_TIMEOUT_SECS,
+    )
+    .await
+    .map_err(|e| crate::providers::log_http(&format!("reflector: confirm call failed: {e:#}")))
+    .ok()?;
+    parse_confirmation(&text).or_else(|| {
+        crate::providers::log_http("reflector: confirm parse missed");
+        None
+    })
+}
+
+/// Strict parse: one object, boolean verdict, optional string target.
+pub fn parse_confirmation(text: &str) -> Option<Confirmation> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(&text[start..=end]).ok()?;
+    let is_criticism = value.get("is_criticism")?.as_bool()?;
+    let target = value
+        .get("target")
+        .and_then(|t| t.as_str())
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    Some(Confirmation {
+        is_criticism,
+        target,
+    })
+}
+
+/// Upgrade a held-back Maybe: confirm, resolve the confirmed target
+/// against the touched files, fire when it grounds. Returns the fired
+/// check, or `None` when the gray stays gray. The marker keeps
+/// verdict=maybe (the classifier's word); `fired` tells what happened.
+pub async fn confirm_maybe(
+    provider: &crate::providers::SharedProvider,
+    model_id: &str,
+    root: &std::path::Path,
+    check: &criticism::Check,
+    text: &str,
+) -> Option<criticism::Check> {
+    if check.verdict != criticism::Verdict::Maybe
+        || check.fire
+        || check.touched.is_empty()
+        || !check.artifacts.is_empty()
+    {
+        return None;
+    }
+    let confirmation = confirm(provider, model_id, text, &check.touched).await?;
+    if !confirmation.is_criticism {
+        return None;
+    }
+    let source = match &confirmation.target {
+        Some(target) => format!("{text} {target}"),
+        None => text.to_string(),
+    };
+    let artifacts = criticism::match_artifacts(root, &source, &check.touched);
+    if artifacts.is_empty() {
+        return None;
+    }
+    Some(criticism::Check {
+        verdict: check.verdict,
+        score: check.score,
+        artifacts,
+        touched: check.touched.clone(),
+        failures: check.failures.clone(),
+        fire: true,
+    })
 }
 
 async fn collect_text(
@@ -1365,5 +1497,67 @@ mod tests {
         assert!(Budget::verify().window < Budget::full().window);
         assert!(Budget::auto().calls < Budget::verify().calls);
         assert!(Budget::auto().wall_secs <= 600);
+    }
+
+    #[test]
+    fn confirmation_parse_is_strict() {
+        let yes = parse_confirmation("{\"is_criticism\": true, \"target\": \"src/auth\"}")
+            .expect("parses");
+        assert!(yes.is_criticism);
+        assert_eq!(yes.target.as_deref(), Some("src/auth"));
+        let no = parse_confirmation(" рад: {\"is_criticism\": false, \"target\": null} ")
+            .expect("parses");
+        assert!(!no.is_criticism);
+        assert_eq!(no.target, None);
+        assert!(parse_confirmation("no json here").is_none());
+        assert!(parse_confirmation("{\"is_criticism\": \"yes\"}").is_none());
+        assert!(parse_confirmation("{\"target\": \"x\"}").is_none());
+    }
+
+    /// Confirm on the live model (§12.7 gray zone): bare ambiguity resolves
+    /// without the strict trigger's artifact. Run explicitly:
+    /// `SQWAI_BENCH_MODEL=<key> cargo test -- --ignored reflector_confirm_live --test-threads=1`
+    #[test]
+    #[ignore]
+    fn reflector_confirm_live() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let Some(model) = crate::agent::bench_harness::bench_model() else {
+                eprintln!("SKIP: no bench model (set SQWAI_BENCH_MODEL)");
+                return;
+            };
+            crate::providers::set_conversation_id("reflect-confirm-test");
+            let touched = vec![criticism::ArtifactFact {
+                path: "src/a.rs".into(),
+                added: Some(1),
+                removed: Some(0),
+                step: None,
+            }];
+            let yes = confirm(
+                &model.provider,
+                &model.model_id,
+                "ну сколько можно",
+                &touched,
+            )
+            .await
+            .expect("confirm answers");
+            assert!(yes.is_criticism, "{yes:?}");
+            let bare = confirm(&model.provider, &model.model_id, "сука", &touched)
+                .await
+                .expect("confirm answers");
+            assert!(!bare.is_criticism, "{bare:?}");
+            let self_blame = confirm(
+                &model.provider,
+                &model.model_id,
+                "my bad, I broke it",
+                &touched,
+            )
+            .await
+            .expect("confirm answers");
+            assert!(!self_blame.is_criticism, "{self_blame:?}");
+        });
     }
 }

@@ -1833,9 +1833,10 @@ it" moments — cheap always, expensive by escalation:
     resolving (resolve_ref / paths) to files/symbols the last turn touched.
     Criticism almost always names the thing, in any language.
   - Strict trigger: `fire` plus prior-turn mutations, or `maybe` carried by
-    a resolved artifact plus mutations. Silent never fires, and nothing
-    fires when the last turn touched nothing. `maybe` plus an artifact ref
-    may escalate to an LLM confirm later (interface reserved, not built). A false fire costs a context
+    a resolved artifact plus mutations. Held-back Maybe (mutations, no
+    artifact) gets one cheap model question (confirm: criticism + target);
+    a confirmed target grounds the fire. Silent never fires, and nothing
+    fires when the last turn touched nothing. A false fire costs a context
     block, never a refusal.
   - Journal marker kind `criticism` (text, signals, resolved names) so H1
     escalation ("second objection") has something to count. The record
