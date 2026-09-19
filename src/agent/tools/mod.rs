@@ -4180,6 +4180,10 @@ mod tests {
             ("note", json!({"note": "hi", "kind": "decision"})),
             ("memory_propose", json!({"text": "hi", "scope": "project"})),
             ("webfetch", json!({"url": "https://example.com"})),
+            // §12.7 names the bans explicitly; "reflect" is not even a tool
+            // (journal kind), but a hallucinated call must refuse the same way
+            ("subagent", json!({"task": "hi"})),
+            ("reflect", json!({})),
         ] {
             let refused = execute(&mut ctx, name, &args);
             assert!(!refused.ok, "{name} must refuse");

@@ -39,6 +39,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "/skills",
     "/test",
     "/undo",
+    "/verify",
 ];
 
 /// Second-level completions: (command, subcommands), in the same order as
@@ -52,6 +53,7 @@ pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
         ],
     ),
     ("/undo", &["step"]),
+    ("/verify", &["--full"]),
     ("/test", &["animations"]),
     ("/providers", &["update"]),
     ("/constraints", &["add", "remove"]),

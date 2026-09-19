@@ -154,8 +154,9 @@ pub struct Check {
 }
 
 /// How far back "the last turn" reaches in journal records. A turn is a
-/// handful of tool calls; 80 records comfortably cover one and rarely two.
-const WINDOW: usize = 80;
+/// handful of tool calls; the auto window comfortably covers one and
+/// rarely two. Wider windows belong to `/verify` (budgets below).
+pub const AUTO_WINDOW: usize = 80;
 /// Budgets for the fact block: named artifacts, recent touches, failures.
 const MAX_ARTIFACTS: usize = 5;
 const MAX_TOUCHED: usize = 5;
@@ -164,10 +165,51 @@ const MAX_FAILURES: usize = 3;
 /// non-trivial cost here, and only on Fire/Maybe).
 const MAX_SYMBOLS: usize = 8;
 
-/// Analyze one user message against the session's recent journal.
-/// Silent verdicts return before touching the journal at all — the common
-/// path costs one classifier pass (microseconds) and zero I/O.
-pub fn check(root: &std::path::Path, session: &str, text: &str) -> Check {
+/// Execution budgets per trigger level (H1 slice 3). Auto is the in-turn
+/// pass; `/verify` widens it on request; `--full` is the escalation and
+/// the second-objection answer. The window rides here because it sizes
+/// the check itself, not just the executor.
+#[derive(Debug, Clone, Copy)]
+pub struct Budget {
+    /// journal records back for touches/failures
+    pub window: usize,
+    /// total executor tool calls
+    pub calls: usize,
+    /// executor wall clock, seconds
+    pub wall_secs: u64,
+}
+
+impl Budget {
+    pub fn auto() -> Self {
+        Self {
+            window: AUTO_WINDOW,
+            calls: 24,
+            wall_secs: 600,
+        }
+    }
+    pub fn verify() -> Self {
+        Self {
+            window: 200,
+            calls: 48,
+            wall_secs: 900,
+        }
+    }
+    pub fn full() -> Self {
+        Self {
+            window: 400,
+            calls: 96,
+            wall_secs: 1200,
+        }
+    }
+}
+
+/// Same, with an explicit journal window (`/verify` widens it).
+pub fn check_with_window(
+    root: &std::path::Path,
+    session: &str,
+    text: &str,
+    window: usize,
+) -> Check {
     let verdict = classify(text);
     let score = score(text);
     let mut out = Check {
@@ -181,8 +223,29 @@ pub fn check(root: &std::path::Path, session: &str, text: &str) -> Check {
     if verdict == Verdict::Silent {
         return out;
     }
+    let (touched, failures) = gather(root, session, window);
+    out.touched = touched;
+    out.failures = failures;
+    if out.touched.is_empty() {
+        return out;
+    }
+    out.artifacts = match_artifacts(root, text, &out.touched);
+    out.fire = verdict == Verdict::Fire || (verdict == Verdict::Maybe && !out.artifacts.is_empty());
+    out
+}
+
+/// Recent touches (last write wins per path) plus recent tool failures.
+/// Shared by the auto check and the manual `/verify` (which skips the
+/// classifier: the user asserted criticism by typing the command).
+pub fn gather(
+    root: &std::path::Path,
+    session: &str,
+    window: usize,
+) -> (Vec<ArtifactFact>, Vec<String>) {
+    let mut touched: Vec<ArtifactFact> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
     let records = crate::agent::journal::Journal::records_for(root, session).unwrap_or_default();
-    let window: Vec<_> = records.iter().rev().take(WINDOW).collect();
+    let window: Vec<_> = records.iter().rev().take(window).collect();
     // last write wins per path: the file's state at the criticism moment
     for record in window.iter().rev() {
         if record.kind != "file_diff" {
@@ -191,18 +254,18 @@ pub fn check(root: &std::path::Path, session: &str, text: &str) -> Check {
         let Some(path) = record.fields.get("path").and_then(|v| v.as_str()) else {
             continue;
         };
-        if out.touched.iter().any(|t: &ArtifactFact| t.path == path) {
+        if touched.iter().any(|t: &ArtifactFact| t.path == path) {
             continue;
         }
-        out.touched.push(ArtifactFact {
+        touched.push(ArtifactFact {
             path: path.to_string(),
             added: record.fields.get("added").and_then(|v| v.as_u64()),
             removed: record.fields.get("removed").and_then(|v| v.as_u64()),
             step: record.step.clone(),
         });
     }
-    if out.touched.is_empty() {
-        return out;
+    if touched.is_empty() {
+        return (touched, failures);
     }
     for record in window.iter().rev() {
         if record.kind != "tool_result"
@@ -229,21 +292,19 @@ pub fn check(root: &std::path::Path, session: &str, text: &str) -> Check {
         if line.len() > 112 {
             line.truncate(112);
         }
-        out.failures.push(line);
-        if out.failures.len() >= MAX_FAILURES {
+        failures.push(line);
+        if failures.len() >= MAX_FAILURES {
             break;
         }
     }
-    out.artifacts = match_artifacts(root, text, &out.touched);
-    out.fire = verdict == Verdict::Fire || (verdict == Verdict::Maybe && !out.artifacts.is_empty());
-    out
+    (touched, failures)
 }
 
 /// Candidate names from the message matched against touched paths:
 /// quoted spans and path-like tokens directly, identifier words via the
 /// graph (symbol → file → touched). Paths first (free), symbols only
 /// while nothing matched yet.
-fn match_artifacts(
+pub fn match_artifacts(
     root: &std::path::Path,
     text: &str,
     touched: &[ArtifactFact],
@@ -509,7 +570,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         journal_with_diff(&dir, "sess", "src/a.rs");
-        let check = check(&dir, "sess", "ты сломал src/a.rs");
+        let check = check_with_window(&dir, "sess", "ты сломал src/a.rs", Budget::auto().window);
         assert!(check.fire, "{check:?}");
         assert_eq!(check.artifacts.len(), 1);
         assert_eq!(check.artifacts[0].path, "src/a.rs");
@@ -527,7 +588,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let _journal = crate::agent::journal::Journal::open(&dir, "sess").expect("journal opens");
-        let check = check(&dir, "sess", "ты всё сломал");
+        let check = check_with_window(&dir, "sess", "ты всё сломал", Budget::auto().window);
         assert_eq!(check.verdict, Verdict::Fire);
         assert!(!check.fire, "nothing to check against");
         assert!(block_text(&check, "ты всё сломал").is_none());
@@ -540,7 +601,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         journal_with_diff(&dir, "sess", "src/parser.py");
-        let carried = check(&dir, "sess", "в parser.py теперь исключение");
+        let carried = check_with_window(
+            &dir,
+            "sess",
+            "в parser.py теперь исключение",
+            Budget::auto().window,
+        );
         assert_eq!(carried.verdict, Verdict::Maybe);
         assert!(carried.fire, "{carried:?}");
         assert_eq!(carried.artifacts.len(), 1);
@@ -549,7 +615,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir2);
         std::fs::create_dir_all(&dir2).unwrap();
         journal_with_diff(&dir2, "sess", "src/other.py");
-        let dropped = check(&dir2, "sess", "в parser.py теперь исключение");
+        let dropped = check_with_window(
+            &dir2,
+            "sess",
+            "в parser.py теперь исключение",
+            Budget::auto().window,
+        );
         assert!(!dropped.fire, "maybe without a name stays out");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&dir2).ok();
@@ -561,7 +632,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         journal_with_diff(&dir, "sess", "src/a.rs");
-        let check = check(&dir, "sess", "сделай вот так");
+        let check = check_with_window(&dir, "sess", "сделай вот так", Budget::auto().window);
         assert_eq!(check.verdict, Verdict::Silent);
         assert!(!check.fire);
         assert!(check.artifacts.is_empty());
@@ -581,7 +652,7 @@ mod tests {
         let mut store = crate::agent::graph::SqliteGraphStore::open(&dir).expect("graph opens");
         crate::agent::graph_index::index_project(&mut store, &dir).expect("indexed");
         journal_with_diff(&dir, "sess", "src/lib.rs");
-        let check = check(&dir, "sess", "ты сломал calculate");
+        let check = check_with_window(&dir, "sess", "ты сломал calculate", Budget::auto().window);
         assert!(check.fire, "{check:?}");
         assert!(
             check.artifacts.iter().any(|a| a.path == "src/lib.rs"),
@@ -596,7 +667,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         journal_with_diff(&dir, "sess", "src/a.rs");
-        let check = check(&dir, "sess", "ты сломал src/a.rs");
+        let check = check_with_window(&dir, "sess", "ты сломал src/a.rs", Budget::auto().window);
         let marker = marker_fields(&check, "ты сломал src/a.rs");
         assert_eq!(marker["verdict"], serde_json::json!("fire"));
         assert_eq!(marker["fired"], serde_json::json!(true));

@@ -100,6 +100,73 @@ fn reopen_undone_steps(
     reopened
 }
 
+/// Outcome of a background `/verify` run (H1 slice 3), rendered on the
+/// UI thread by [`App::poll_verify`]. Everything in here is owned and
+/// `Send`: the task boundary demands both.
+enum VerifyOutcome {
+    Verified {
+        block: String,
+        verdict: String,
+        seq: Option<u64>,
+    },
+    NothingToVerify,
+    Failed(String),
+}
+
+struct VerifyTaskInput {
+    root: std::path::PathBuf,
+    session: String,
+    model_id: String,
+    provider: crate::providers::SharedProvider,
+    full: bool,
+}
+
+/// `/verify [--full]` body: L1 with a wider window and budget, on request.
+/// Target is the last fired criticism, else the last turn generically.
+/// Manual means no classifier — the command IS the assertion — but the
+/// same Scope/Neutralizer/Executor/Verdict path runs, so records and the
+/// block shape match the auto flow exactly.
+async fn run_verify_task(input: VerifyTaskInput) -> VerifyOutcome {
+    use crate::agent::{criticism, journal::Journal, reflector};
+    let budget = if input.full {
+        criticism::Budget::full()
+    } else {
+        criticism::Budget::verify()
+    };
+    crate::providers::set_conversation_id(&input.session);
+    let text = reflector::last_criticism_text(&input.root, &input.session)
+        .unwrap_or_else(|| "manual /verify of the last turn".to_string());
+    let Some((rctx, _)) = reflector::manual(&input.root, &input.session, &text, budget.window)
+    else {
+        return VerifyOutcome::NothingToVerify;
+    };
+    let mut writer = match Journal::open(&input.root, &input.session) {
+        Ok(writer) => writer,
+        Err(error) => return VerifyOutcome::Failed(format!("journal open: {error:#}")),
+    };
+    let checks = match reflector::neutralize(&input.provider, &input.model_id, &rctx).await {
+        Ok(checks) => checks,
+        Err(error) => return VerifyOutcome::Failed(format!("neutralize: {error:#}")),
+    };
+    let report = reflector::verify(
+        &input.root,
+        &input.session,
+        &input.model_id,
+        &input.provider,
+        &mut writer,
+        &rctx,
+        &checks,
+        &budget,
+    )
+    .await;
+    let verdict = report.verdict.label().to_string();
+    VerifyOutcome::Verified {
+        block: report.block,
+        verdict,
+        seq: report.seq,
+    }
+}
+
 mod events;
 mod forms;
 mod menus;
@@ -264,6 +331,12 @@ pub struct App {
     streaming: bool,
     aborted: bool,
     agent: Option<AgentHandle>,
+    /// background `/verify` run (H1 slice 3): collection end of a oneshot
+    /// the task sends its report through. `Some` while the run flies — the
+    /// UI never blocks on it, and a second `/verify` is refused until the
+    /// report lands. No Esc integration: bounded by the verify/full wall
+    /// budget either way.
+    verify_rx: Option<tokio::sync::oneshot::Receiver<VerifyOutcome>>,
     /// derived visible steps from the active structured plan
     todos: Vec<String>,
     /// tracked child agents shown in the overview
@@ -802,6 +875,7 @@ impl App {
             streaming: false,
             aborted: false,
             agent: None,
+            verify_rx: None,
             todos: Vec::new(),
             subagents: Vec::new(),
             subagent_chats: std::collections::BTreeMap::new(),
@@ -1194,6 +1268,7 @@ impl App {
             self.poll_input(&ev_rx)?;
             self.poll_startup_data();
             self.poll_agent();
+            self.poll_verify();
             self.poll_provider_check();
             self.poll_builtin_update();
             self.poll_maintain();
@@ -2726,6 +2801,26 @@ impl App {
                                 StatusKind::Warn,
                             ),
                         },
+                    }
+                }
+            }
+            "/verify" => {
+                if self.streaming {
+                    self.show_busy_status();
+                } else if self.verify_rx.is_some() {
+                    self.status("verification already running", StatusKind::Warn);
+                } else {
+                    let mut args = rest.split_whitespace().skip(1);
+                    match args.next() {
+                        None => self.start_verify(false),
+                        Some("--full") => self.start_verify(true),
+                        Some(arg) => self.status(
+                            &format!(
+                                "/verify takes no arguments except --full, not {arg:?} — \
+                                 /verify or /verify --full"
+                            ),
+                            StatusKind::Warn,
+                        ),
                     }
                 }
             }
@@ -4435,6 +4530,88 @@ impl App {
     }
 
     /// revert the last `n` mutating actions and reopen steps whose evidence was reverted.
+    /// H1 slice 3: `/verify [--full]` (L1 with a wider window and budget,
+    /// on request). Spawns a background task — the UI never blocks — polled
+    /// per tick by [`Self::poll_verify`]. Refused while streaming or while
+    /// a previous run still flies. No Esc integration: the run is bounded
+    /// by the verify/full wall budget either way.
+    fn start_verify(&mut self, full: bool) {
+        let root = self.project_root.clone();
+        let session = self.session.id.to_string();
+        let model_id = self.model_cfg.id.clone();
+        let provider = self.provider.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let outcome = run_verify_task(VerifyTaskInput {
+                root,
+                session,
+                model_id,
+                provider,
+                full,
+            })
+            .await;
+            let _ = tx.send(outcome);
+        });
+        self.verify_rx = Some(rx);
+        self.status(
+            if full {
+                "verifying (full pass)…"
+            } else {
+                "verifying…"
+            },
+            StatusKind::Info,
+        );
+        self.dirty = true;
+    }
+
+    /// Collect a finished `/verify` run: durable verdict row plus status.
+    /// Nothing lands mid-run — one row, once, when the report arrives.
+    fn poll_verify(&mut self) {
+        let outcome = match self.verify_rx.as_mut() {
+            None => return,
+            Some(rx) => match rx.try_recv() {
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return,
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    self.verify_rx = None;
+                    self.status("verification task died", StatusKind::Err);
+                    self.dirty = true;
+                    return;
+                }
+                Ok(outcome) => {
+                    self.verify_rx = None;
+                    outcome
+                }
+            },
+        };
+        match outcome {
+            VerifyOutcome::Verified {
+                block,
+                verdict,
+                seq,
+            } => {
+                self.push_segment(Segment::Assistant {
+                    text: block,
+                    live: false,
+                });
+                let at = seq.map(|s| format!(" (j{s})")).unwrap_or_default();
+                self.status(
+                    &format!("verification complete: {verdict}{at}"),
+                    StatusKind::Ok,
+                );
+            }
+            VerifyOutcome::NothingToVerify => {
+                self.status(
+                    "nothing to verify: the recent window holds no file writes",
+                    StatusKind::Warn,
+                );
+            }
+            VerifyOutcome::Failed(error) => {
+                self.status(&format!("verification failed: {error}"), StatusKind::Err);
+            }
+        }
+        self.dirty = true;
+    }
+
     /// S1 preflight shared by every undo entry: cancel still-registered
     /// children (normally none — they join inside their `task` call),
     /// refuse while background shells are alive (the writer lock stops

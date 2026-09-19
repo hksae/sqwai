@@ -331,6 +331,19 @@ pub enum Verdict {
     Undetermined,
 }
 
+impl Verdict {
+    /// snake_case label, shared by the block, records and statuses.
+    pub fn label(self) -> &'static str {
+        match self {
+            Verdict::AgentError => "agent_error",
+            Verdict::ClaimNotConfirmed => "claim_not_confirmed",
+            Verdict::Partial => "partial",
+            Verdict::ScopeMismatch => "scope_mismatch",
+            Verdict::Undetermined => "undetermined",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CheckOutcome {
     pub status: OutcomeStatus,
@@ -346,8 +359,6 @@ pub struct Execution {
 /// Executor budget, mirroring subagents (decided): a bounded wall clock
 /// plus a tool-call cap. Overrun leaves the remaining checks
 /// `Undetermined` — a partial verification, never a hang.
-pub const EXECUTOR_WALL_SECS: u64 = 600;
-pub const EXECUTOR_MAX_CALLS: usize = 24;
 pub const EXECUTOR_CALLS_PER_CHECK: usize = 6;
 const EXECUTOR_MAX_TOKENS: u32 = 2000;
 
@@ -561,11 +572,23 @@ pub fn verdict(checks: &[(Check, CheckOutcome)]) -> Verdict {
     }
 }
 
-/// Full slice-2 flow for one fired reflection: execute every check under
-/// shared budgets, judge, record, render. Synchronous from the turn hook;
-/// every failure degrades to the L0 block (never an error turn).
+/// What a verification run produced: the host block plus its verdict.
+/// The caller decides where the block travels — prepended to the turn's
+/// assistant messages (auto flow) or a durable chat row (`/verify`).
+#[derive(Debug)]
+pub struct VerifyReport {
+    pub block: String,
+    pub verdict: Verdict,
+    /// journal `reflect` seq, when the record landed
+    pub seq: Option<u64>,
+}
+
+/// Full verification flow for one reflection: execute every check under
+/// the budget, judge, record, render. Synchronous from the turn hook or
+/// the `/verify` task; every failure degrades to whatever carried the
+/// turn before (never an error turn).
 #[allow(clippy::too_many_arguments)]
-pub async fn run_reflection(
+pub async fn verify(
     root: &std::path::Path,
     session: &str,
     model_id: &str,
@@ -573,11 +596,10 @@ pub async fn run_reflection(
     writer: &mut crate::agent::journal::Journal,
     rctx: &ReflectContext,
     checks: &[Check],
-    messages: &mut Vec<crate::providers::Message>,
-    previous_response_id: &mut Option<String>,
-) {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(EXECUTOR_WALL_SECS);
-    let mut calls_left = EXECUTOR_MAX_CALLS;
+    budget: &criticism::Budget,
+) -> VerifyReport {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(budget.wall_secs);
+    let mut calls_left = budget.calls;
     let mut outcomes: Vec<(Check, CheckOutcome)> = Vec::new();
     for check in checks {
         if calls_left == 0 || tokio::time::Instant::now() >= deadline {
@@ -617,7 +639,10 @@ pub async fn run_reflection(
     let artifacts: Vec<String> = rctx.artifacts.iter().map(|a| a.path.clone()).collect();
     let recurrence = recurrence(root, session, rctx.plan.plan_id.as_deref(), &artifacts);
     let has_recurrence = recurrence.0 > 0;
-    if let Ok(seq) = writer.append("reflect", verdict_fields(rctx, checks, &execution)) {
+    let seq = writer
+        .append("reflect", verdict_fields(rctx, checks, &execution))
+        .ok();
+    if let Some(seq) = seq {
         let dir = root.join(".sqwai").join("journal").join("reflect");
         std::fs::create_dir_all(&dir).ok();
         let mut file = verdict_fields(rctx, checks, &execution);
@@ -643,13 +668,84 @@ pub async fn run_reflection(
         );
     }
     let block = render_block(&execution, has_recurrence.then_some(recurrence));
-    messages.push(crate::providers::Message::new(
-        crate::providers::Role::Assistant,
+    VerifyReport {
         block,
-    ));
-    // the transcript the host owns now differs from the provider's copy
-    // (same rule as compaction/undo: send ours, not a continuation).
-    *previous_response_id = None;
+        verdict,
+        seq,
+    }
+}
+
+/// Manual `/verify` target: no classifier (the command IS the assertion),
+/// just grounding against the window. `None` when there is nothing to
+/// verify — the caller says so instead of running an empty reflection.
+pub fn manual(
+    root: &std::path::Path,
+    session: &str,
+    text: &str,
+    window: usize,
+) -> Option<(ReflectContext, criticism::Check)> {
+    let (touched, failures) = criticism::gather(root, session, window);
+    if touched.is_empty() {
+        return None;
+    }
+    let artifacts = criticism::match_artifacts(root, text, &touched);
+    let check = criticism::Check {
+        verdict: criticism::Verdict::Fire,
+        score: 1.0,
+        artifacts,
+        touched,
+        failures,
+        fire: true,
+    };
+    let rctx = scope(root, session, &check, text)?;
+    Some((rctx, check))
+}
+
+/// Fired `criticism` markers since the last `reflect` record: the
+/// objection count for self-protection (slice 3). The current turn's
+/// marker is not written yet when the hook counts, so this is prior
+/// objections only.
+pub fn objections_after_last_verify(root: &std::path::Path, session: &str) -> usize {
+    let records = crate::agent::journal::Journal::records_for(root, session).unwrap_or_default();
+    let mut objections = 0;
+    for record in records.iter().rev() {
+        if record.kind == "reflect" {
+            break;
+        }
+        if record.kind == "criticism"
+            && record.fields.get("fired").and_then(|v| v.as_bool()) == Some(true)
+        {
+            objections += 1;
+        }
+    }
+    objections
+}
+
+/// Third objection after `[verified]` disables the reflector for the
+/// session (§12.7). Journal-first like everything else: durable, visible,
+/// replayable — no hidden in-memory switch.
+pub fn reflector_disabled(root: &std::path::Path, session: &str) -> bool {
+    crate::agent::journal::Journal::records_for(root, session)
+        .map(|records| records.iter().any(|r| r.kind == "reflector_disabled"))
+        .unwrap_or(false)
+}
+
+/// Most recent fired criticism text, for `/verify` without a fresh
+/// complaint: verify what was last objected to.
+pub fn last_criticism_text(root: &std::path::Path, session: &str) -> Option<String> {
+    crate::agent::journal::Journal::records_for(root, session)
+        .ok()?
+        .iter()
+        .rev()
+        .find(|r| {
+            r.kind == "criticism" && r.fields.get("fired").and_then(|v| v.as_bool()) == Some(true)
+        })
+        .and_then(|r| {
+            r.fields
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
 }
 
 /// Host-rendered `[verified]` block, prepended to the turn's assistant
@@ -658,13 +754,7 @@ pub async fn run_reflection(
 pub fn render_block(execution: &Execution, recurrence: Option<(usize, Vec<String>)>) -> String {
     let mut out = format!(
         "[verified: {} — host check, not model prose]\n",
-        match execution.verdict {
-            Verdict::AgentError => "agent_error",
-            Verdict::ClaimNotConfirmed => "claim_not_confirmed",
-            Verdict::Partial => "partial",
-            Verdict::ScopeMismatch => "scope_mismatch",
-            Verdict::Undetermined => "undetermined",
-        }
+        execution.verdict.label()
     );
     for (check, outcome) in &execution.outcomes {
         let status = match outcome.status {
@@ -1181,5 +1271,99 @@ mod tests {
             assert_eq!(by_id("c3"), OutcomeStatus::Refuted, "{outcomes:?}");
             std::fs::remove_dir_all(&dir).ok();
         });
+    }
+
+    #[test]
+    fn objections_count_fired_markers_since_last_reflect() {
+        let dir = std::env::temp_dir().join(format!("sqwai-refl-obj-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut journal =
+            crate::agent::journal::Journal::open(&dir, "sess").expect("journal opens");
+        let fire = |journal: &mut crate::agent::journal::Journal| {
+            journal
+                .append("criticism", serde_json::json!({"fired": true, "text": "x"}))
+                .unwrap()
+        };
+        fire(&mut journal);
+        fire(&mut journal);
+        assert_eq!(objections_after_last_verify(&dir, "sess"), 2);
+        journal
+            .append("reflect", serde_json::json!({"verdict": "partial"}))
+            .unwrap();
+        assert_eq!(objections_after_last_verify(&dir, "sess"), 0);
+        fire(&mut journal);
+        assert_eq!(objections_after_last_verify(&dir, "sess"), 1);
+        // unfired markers never count, even after the verify
+        journal
+            .append(
+                "criticism",
+                serde_json::json!({"fired": false, "text": "y"}),
+            )
+            .unwrap();
+        assert_eq!(objections_after_last_verify(&dir, "sess"), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn disabled_flag_reads_the_record() {
+        let dir = std::env::temp_dir().join(format!("sqwai-refl-dis-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!reflector_disabled(&dir, "sess"));
+        let mut journal =
+            crate::agent::journal::Journal::open(&dir, "sess").expect("journal opens");
+        journal
+            .append("reflector_disabled", serde_json::json!({}))
+            .unwrap();
+        assert!(reflector_disabled(&dir, "sess"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn manual_grounds_without_classifier() {
+        let dir = std::env::temp_dir().join(format!("sqwai-refl-man-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // empty window: nothing to verify
+        assert!(manual(&dir, "sess", "anything", 80).is_none());
+        let mut journal =
+            crate::agent::journal::Journal::open(&dir, "sess").expect("journal opens");
+        journal
+            .append("file_diff", serde_json::json!({"path": "src/a.rs"}))
+            .unwrap();
+        // a flat request the classifier would never fire on still verifies:
+        // the command IS the assertion
+        let (rctx, check) = manual(&dir, "sess", "show me the diff", 80).expect("manual");
+        assert!(check.fire);
+        assert_eq!(check.verdict, crate::agent::criticism::Verdict::Fire);
+        assert!(!rctx.artifacts.is_empty() || !rctx.touched.is_empty());
+        // last_criticism_text prefers the latest fired marker
+        journal
+            .append(
+                "criticism",
+                serde_json::json!({"fired": true, "text": "old complaint"}),
+            )
+            .unwrap();
+        journal
+            .append(
+                "criticism",
+                serde_json::json!({"fired": true, "text": "new complaint"}),
+            )
+            .unwrap();
+        assert_eq!(
+            last_criticism_text(&dir, "sess").as_deref(),
+            Some("new complaint")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn budgets_widen_by_level() {
+        use crate::agent::criticism::Budget;
+        assert!(Budget::auto().window < Budget::verify().window);
+        assert!(Budget::verify().window < Budget::full().window);
+        assert!(Budget::auto().calls < Budget::verify().calls);
+        assert!(Budget::auto().wall_secs <= 600);
     }
 }

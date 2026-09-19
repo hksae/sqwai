@@ -1424,48 +1424,90 @@ async fn run_agent(
             // task prompt is a directive, not user criticism — and never on
             // the G0 baseline (mechanism features stay out of it, §8.2).
             if parent_step.is_none() && !crate::bench::baseline() {
-                let check =
-                    crate::agent::criticism::check(&root, &session_id, &user_message.content);
-                if check.fire {
-                    let _ = writer.append(
-                        "criticism",
-                        crate::agent::criticism::marker_fields(&check, &user_message.content),
-                    );
-                    criticism_block =
-                        crate::agent::criticism::block_text(&check, &user_message.content);
-                    // H1 (§12.7): Scope + Neutralizer + Executor + Verdict,
-                    // synchronous. Trigger is Fire+artifact (decided):
-                    // generic fires keep the L0 block only. A failed stage
-                    // degrades to what came before — the L0 block already
-                    // carries the turn, so silence here never loses anything.
-                    if !check.artifacts.is_empty()
-                        && let Some(rctx) = crate::agent::reflector::scope(
+                // H1 slice 3 self-protection: objections since the last
+                // verify pick the budget; the third disables the reflector
+                // for the session (journal-first, not a hidden switch).
+                if crate::agent::reflector::reflector_disabled(&root, &session_id) {
+                    crate::providers::log_http("reflector: disabled for this session");
+                } else {
+                    let objections =
+                        crate::agent::reflector::objections_after_last_verify(&root, &session_id);
+                    if objections >= 2 {
+                        let _ = writer.append(
+                            "reflector_disabled",
+                            serde_json::json!({"objections": objections}),
+                        );
+                        crate::providers::log_http(
+                            "reflector: disabled for the session after repeated objections",
+                        );
+                    } else {
+                        let budget = if objections >= 1 {
+                            crate::agent::criticism::Budget::full()
+                        } else {
+                            crate::agent::criticism::Budget::auto()
+                        };
+                        let check = crate::agent::criticism::check_with_window(
                             &root,
                             &session_id,
-                            &check,
                             &user_message.content,
-                        )
-                    {
-                        match crate::agent::reflector::neutralize(&provider, &model_id, &rctx).await
-                        {
-                            Ok(checks) => {
-                                crate::agent::reflector::run_reflection(
+                            budget.window,
+                        );
+                        if check.fire {
+                            let _ = writer.append(
+                                "criticism",
+                                crate::agent::criticism::marker_fields(
+                                    &check,
+                                    &user_message.content,
+                                ),
+                            );
+                            criticism_block =
+                                crate::agent::criticism::block_text(&check, &user_message.content);
+                            // H1 (§12.7): Scope + Neutralizer + Executor + Verdict,
+                            // synchronous. Trigger is Fire+artifact (decided):
+                            // generic fires keep the L0 block only. A failed stage
+                            // degrades to what came before — the L0 block already
+                            // carries the turn, so silence here never loses anything.
+                            if !check.artifacts.is_empty()
+                                && let Some(rctx) = crate::agent::reflector::scope(
                                     &root,
                                     &session_id,
-                                    &model_id,
-                                    &provider,
-                                    writer,
-                                    &rctx,
-                                    &checks,
-                                    &mut messages,
-                                    &mut previous_response_id,
+                                    &check,
+                                    &user_message.content,
                                 )
-                                .await;
-                            }
-                            Err(error) => {
-                                crate::providers::log_http(&format!(
-                                    "reflector: neutralize failed: {error:#}"
-                                ));
+                            {
+                                match crate::agent::reflector::neutralize(
+                                    &provider, &model_id, &rctx,
+                                )
+                                .await
+                                {
+                                    Ok(checks) => {
+                                        let report = crate::agent::reflector::verify(
+                                            &root,
+                                            &session_id,
+                                            &model_id,
+                                            &provider,
+                                            writer,
+                                            &rctx,
+                                            &checks,
+                                            &budget,
+                                        )
+                                        .await;
+                                        messages.push(crate::providers::Message::new(
+                                            crate::providers::Role::Assistant,
+                                            report.block,
+                                        ));
+                                        // the transcript the host owns now differs
+                                        // from the provider's copy (same rule as
+                                        // compaction/undo: send ours, not a
+                                        // continuation).
+                                        previous_response_id = None;
+                                    }
+                                    Err(error) => {
+                                        crate::providers::log_http(&format!(
+                                            "reflector: neutralize failed: {error:#}"
+                                        ));
+                                    }
+                                }
                             }
                         }
                     }
