@@ -1136,10 +1136,10 @@ Resume is the only multi-session path. Fork is deleted: no `/fork` command,
 no plan copy, no journal fork record.
 
 3.5 Criticism → Reflector
-Planned, not implemented: a three-level criticism pipeline (L0 fact block,
+Planned, partially implemented: a three-level criticism pipeline (L0 fact block,
 L1 blinded reflector, L2 /verify) for "you broke it" moments. Specified in
-§12.7. No criticism detector, neutralizer, executor, or verdict machinery
-exists today.
+§12.7. L0 (learned detector + artifact signal + fact block + `criticism`
+marker) exists; no neutralizer, executor, or verdict machinery exists yet (H1).
 3.6 Undo
 /undo [n] attempts to restore sqwai-recorded changes from the n-th previous
 checkpoint (default 1) — not a guaranteed full-tree rollback. `/undo step N`
@@ -1514,7 +1514,7 @@ number; a `partial` one is missing something the design calls for.
 | F7b | Crash-safe mutation protocol | done differently — no `mutation_started/observed` sweep; Layer-1 pre-images + `file_diff` chain cover single-step revert instead | F7 |
 | G0 | Minimal comparative retention benchmark (§8.2): plan + journal + anchor vs baseline | done — harness as ignored tests (minidb T1–T3 + kaiwai T4 matrix), pre-registration, eval files and analyses under bench/ | F1b, F6 |
 | G1 | Full integrity benchmark (§8.2): verification receipts, mutation crash harness, claim lint | planned | G0, V1, F7b, I4 |
-| H0 | L0 fact block + criticism detector | in progress — detector as learned student (offline LLM-labeled data, char-trigram LR, pure-Rust inference); fact block + turn wiring after (§12.7) | F2 |
+| H0 | L0 fact block + criticism detector | in progress — detector as learned student (offline LLM-labeled data, char-trigram LR, pure-Rust inference) + artifact signal + strict trigger + block-D injection + `criticism` marker; LLM-confirm reserved (§12.7) | F2 |
 | H1 | Reflector: Scope/Neutralizer/Executor/Verdict, /verify | planned (§12.7) | H0, D |
 | I1 | Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild | done — rusqlite (bundled) engine with §2.4.2 schema | E |
 | I2 | Rust + Python + TypeScript adapters (tree-sitter, minimal: declarations) | done — tree-sitter declarations and lexical imports for Rust, Python, TypeScript | I1 |
@@ -1832,9 +1832,10 @@ it" moments — cheap always, expensive by escalation:
   - A language-independent artifact signal rides along: message tokens
     resolving (resolve_ref / paths) to files/symbols the last turn touched.
     Criticism almost always names the thing, in any language.
-  - Strict trigger (decided): `fire` plus ≥2 signal groups plus prior-turn
-    mutations; `maybe` plus an artifact ref may escalate to an LLM confirm
-    later (interface reserved, not built). A false fire costs a context
+  - Strict trigger: `fire` plus prior-turn mutations, or `maybe` carried by
+    a resolved artifact plus mutations. Silent never fires, and nothing
+    fires when the last turn touched nothing. `maybe` plus an artifact ref
+    may escalate to an LLM confirm later (interface reserved, not built). A false fire costs a context
     block, never a refusal.
   - Journal marker kind `criticism` (text, signals, resolved names) so H1
     escalation ("second objection") has something to count. The record

@@ -1389,6 +1389,9 @@ async fn run_agent(
     } else {
         None
     };
+    // H0 (§12.7): filled once below when the fresh user message reads as
+    // criticism of prior work; pushed as a volatile block-D part per request.
+    let mut criticism_block: Option<String> = None;
     if let Some(writer) = journal.as_mut() {
         if let Some(inherited) = parent_step.as_ref() {
             // Stamp the inherited epoch on every record this writer produces
@@ -1417,6 +1420,21 @@ async fn run_agent(
                 "chars": user_message.content.chars().count(),
                 "goal_like": user_message.content.starts_with("goal:") || user_message.content.starts_with("/goal"),
             }));
+            // H0 criticism detector (§12.7): main sessions only — a child's
+            // task prompt is a directive, not user criticism — and never on
+            // the G0 baseline (mechanism features stay out of it, §8.2).
+            if parent_step.is_none() && !crate::bench::baseline() {
+                let check =
+                    crate::agent::criticism::check(&root, &session_id, &user_message.content);
+                if check.fire {
+                    let _ = writer.append(
+                        "criticism",
+                        crate::agent::criticism::marker_fields(&check, &user_message.content),
+                    );
+                    criticism_block =
+                        crate::agent::criticism::block_text(&check, &user_message.content);
+                }
+            }
         }
     }
     let todos: Vec<String> = Vec::new();
@@ -1535,6 +1553,11 @@ async fn run_agent(
             crate::agent::journal::Journal::claim_nudge(&root, Some(&session_id))
         {
             turn_system.push(crate::providers::SystemPart::volatile(nudge));
+        }
+        // H0 fact block (§12.7): computed once above, visible to every
+        // request of this turn while the caches for A and B survive.
+        if let Some(block) = criticism_block.as_deref() {
+            turn_system.push(crate::providers::SystemPart::volatile(block));
         }
         // Decided per request, not once per turn: a request that carries tool
         // results must never rely on the provider holding the calls they

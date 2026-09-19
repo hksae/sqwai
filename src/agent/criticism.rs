@@ -125,6 +125,299 @@ pub fn classify(text: &str) -> Verdict {
     }
 }
 
+// --- Turn wiring: artifact signal, strict trigger, fact block ---------
+
+/// One named artifact the criticism points at, grounded in last-turn facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactFact {
+    /// touched path as the journal labels it (e.g. `src/auth/login.rs`)
+    pub path: String,
+    pub added: Option<u64>,
+    pub removed: Option<u64>,
+    /// owning step at write time, if the writer attributed one
+    pub step: Option<String>,
+}
+
+/// Everything the turn hook needs: verdict, grounding, strict decision.
+#[derive(Debug)]
+pub struct Check {
+    pub verdict: Verdict,
+    pub score: f64,
+    pub artifacts: Vec<ArtifactFact>,
+    pub touched: Vec<ArtifactFact>,
+    pub failures: Vec<String>,
+    /// Strict trigger: Fire plus prior-turn mutations, or Maybe carried
+    /// by a resolved artifact plus mutations. Silent never fires, and
+    /// nothing fires when the last turn touched nothing — there is
+    /// nothing to check the criticism against.
+    pub fire: bool,
+}
+
+/// How far back "the last turn" reaches in journal records. A turn is a
+/// handful of tool calls; 80 records comfortably cover one and rarely two.
+const WINDOW: usize = 80;
+/// Budgets for the fact block: named artifacts, recent touches, failures.
+const MAX_ARTIFACTS: usize = 5;
+const MAX_TOUCHED: usize = 5;
+const MAX_FAILURES: usize = 3;
+/// Symbol-resolution attempts per message (graph lookups are the only
+/// non-trivial cost here, and only on Fire/Maybe).
+const MAX_SYMBOLS: usize = 8;
+
+/// Analyze one user message against the session's recent journal.
+/// Silent verdicts return before touching the journal at all — the common
+/// path costs one classifier pass (microseconds) and zero I/O.
+pub fn check(root: &std::path::Path, session: &str, text: &str) -> Check {
+    let verdict = classify(text);
+    let score = score(text);
+    let mut out = Check {
+        verdict,
+        score,
+        artifacts: Vec::new(),
+        touched: Vec::new(),
+        failures: Vec::new(),
+        fire: false,
+    };
+    if verdict == Verdict::Silent {
+        return out;
+    }
+    let records = crate::agent::journal::Journal::records_for(root, session).unwrap_or_default();
+    let window: Vec<_> = records.iter().rev().take(WINDOW).collect();
+    // last write wins per path: the file's state at the criticism moment
+    for record in window.iter().rev() {
+        if record.kind != "file_diff" {
+            continue;
+        }
+        let Some(path) = record.fields.get("path").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if out.touched.iter().any(|t: &ArtifactFact| t.path == path) {
+            continue;
+        }
+        out.touched.push(ArtifactFact {
+            path: path.to_string(),
+            added: record.fields.get("added").and_then(|v| v.as_u64()),
+            removed: record.fields.get("removed").and_then(|v| v.as_u64()),
+            step: record.step.clone(),
+        });
+    }
+    if out.touched.is_empty() {
+        return out;
+    }
+    for record in window.iter().rev() {
+        if record.kind != "tool_result"
+            || record
+                .fields
+                .get("ok")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true)
+            || record.fields.get("code").and_then(|v| v.as_str()) == Some("cancelled")
+        {
+            continue;
+        }
+        let tool = record
+            .fields
+            .get("tool")
+            .and_then(|v| v.as_str())
+            .unwrap_or("tool");
+        let summary = record
+            .fields
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let mut line = format!("{tool}: {}", truncate(summary, 100));
+        if line.len() > 112 {
+            line.truncate(112);
+        }
+        out.failures.push(line);
+        if out.failures.len() >= MAX_FAILURES {
+            break;
+        }
+    }
+    out.artifacts = match_artifacts(root, text, &out.touched);
+    out.fire = verdict == Verdict::Fire || (verdict == Verdict::Maybe && !out.artifacts.is_empty());
+    out
+}
+
+/// Candidate names from the message matched against touched paths:
+/// quoted spans and path-like tokens directly, identifier words via the
+/// graph (symbol → file → touched). Paths first (free), symbols only
+/// while nothing matched yet.
+fn match_artifacts(
+    root: &std::path::Path,
+    text: &str,
+    touched: &[ArtifactFact],
+) -> Vec<ArtifactFact> {
+    let mut out: Vec<ArtifactFact> = Vec::new();
+    let mut candidates: Vec<String> = Vec::new();
+    // quoted spans: "…", '…', `…`
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if matches!(c, '"' | '\'' | '`') {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j] != c {
+                j += 1;
+            }
+            if j > i + 1 {
+                candidates.push(chars[i + 1..j].iter().collect());
+            }
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    // path-like and identifier-like tokens
+    for token in text
+        .split(|c: char| !(c.is_alphanumeric() || matches!(c, '/' | '\\' | '.' | '_' | '-' | ':')))
+    {
+        let token = token.trim_matches(|c| matches!(c, '.' | ':' | '/' | '\\'));
+        if token.len() >= 3 {
+            candidates.push(token.to_string());
+        }
+    }
+    // direct path hits first
+    for candidate in &candidates {
+        if out.len() >= MAX_ARTIFACTS {
+            break;
+        }
+        let clean = candidate.replace('\\', "/");
+        let hit = touched.iter().find(|t| {
+            paths_match(&t.path, &clean)
+                || clean
+                    .split("::")
+                    .next()
+                    .is_some_and(|p| !p.is_empty() && paths_match(&t.path, p))
+        });
+        if let Some(hit) = hit
+            && !out.iter().any(|a: &ArtifactFact| a.path == hit.path)
+        {
+            out.push(hit.clone());
+        }
+    }
+    // then symbols, while the message still points at nothing
+    if out.is_empty()
+        && let Ok(mut store) = crate::agent::graph::SqliteGraphStore::open(root)
+    {
+        let mut tried = 0;
+        for candidate in &candidates {
+            if out.len() >= MAX_ARTIFACTS || tried >= MAX_SYMBOLS {
+                break;
+            }
+            if candidate.contains('/') || candidate.contains('\\') || candidate.contains('.') {
+                continue;
+            }
+            tried += 1;
+            let resolved = store.resolve_ref(None, None, Some(candidate));
+            let Ok(crate::agent::graph::ResolveRefResult::Found { key, .. }) = resolved else {
+                continue;
+            };
+            let Some(path) = symbol_key_path(&key) else {
+                continue;
+            };
+            if let Some(hit) = touched.iter().find(|t| paths_match(&t.path, &path))
+                && !out.iter().any(|a: &ArtifactFact| a.path == hit.path)
+            {
+                out.push(hit.clone());
+            }
+        }
+    }
+    out
+}
+
+fn clean_path(raw: &str) -> String {
+    raw.replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
+fn paths_match(a: &str, b: &str) -> bool {
+    let a = clean_path(a);
+    let b = clean_path(b);
+    a == b || a.ends_with(&format!("/{b}")) || b.ends_with(&format!("/{a}"))
+}
+
+/// Symbol keys look like `sym:src/lib.rs::fn::calculate` (files are
+/// `file:src/lib.rs`): the path is the first `::` segment past the prefix.
+fn symbol_key_path(key: &str) -> Option<String> {
+    let rest = key
+        .strip_prefix("file:")
+        .or_else(|| key.strip_prefix("sym:"))
+        .unwrap_or(key);
+    let path = rest.split("::").next()?.trim();
+    (!path.is_empty()).then(|| path.to_string())
+}
+
+/// The volatile block-D part. `None` when the strict trigger held back —
+/// the caller pushes nothing and writes no marker.
+pub fn block_text(check: &Check, quote: &str) -> Option<String> {
+    if !check.fire {
+        return None;
+    }
+    let mut out = String::from("<criticism-check>\nThe user criticizes prior work (\"");
+    out.push_str(&truncate(quote.trim(), 120));
+    out.push_str(
+        "\"). Answer from these host facts; check with a tool before asserting anything missing:\n",
+    );
+    if check.artifacts.is_empty() {
+        out.push_str("touched last turn:\n");
+        for fact in check.touched.iter().take(MAX_TOUCHED) {
+            out.push_str(&format!("- {}\n", describe(fact)));
+        }
+    } else {
+        for fact in &check.artifacts {
+            out.push_str(&format!("- {}\n", describe(fact)));
+        }
+    }
+    for failure in &check.failures {
+        out.push_str(&format!("recent failure: {failure}\n"));
+    }
+    out.push_str("</criticism-check>");
+    Some(out)
+}
+
+fn describe(fact: &ArtifactFact) -> String {
+    let mut s = fact.path.clone();
+    match (fact.added, fact.removed) {
+        (Some(a), Some(r)) => s.push_str(&format!(" (+{a}/-{r})")),
+        (Some(a), None) => s.push_str(&format!(" (+{a})")),
+        _ => {}
+    }
+    if let Some(step) = fact.step.as_deref() {
+        s.push_str(&format!(" [step {step}]"));
+    }
+    s
+}
+
+/// Journal marker fields for a fired check. The `text` value is screened
+/// for secrets by the journal append itself.
+pub fn marker_fields(check: &Check, text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "text": text,
+        "verdict": match check.verdict {
+            Verdict::Fire => "fire",
+            Verdict::Maybe => "maybe",
+            Verdict::Silent => "silent",
+        },
+        "score": (check.score * 10000.0).round() / 10000.0,
+        "artifacts": check.artifacts.iter().map(|a| &a.path).collect::<Vec<_>>(),
+        "fired": check.fire,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,6 +489,120 @@ mod tests {
     fn scoring_is_deterministic() {
         let text = "ты сломал сборку опять";
         assert_eq!(score(text).to_bits(), score(text).to_bits());
+    }
+
+    fn journal_with_diff(dir: &std::path::Path, session: &str, path: &str) {
+        let mut journal =
+            crate::agent::journal::Journal::open(dir, session).expect("journal opens");
+        journal.set_attribution(Some("2".into()), Some("plan".into()), "main");
+        journal
+            .append(
+                "file_diff",
+                serde_json::json!({"path": path, "added": 3, "removed": 1}),
+            )
+            .expect("file_diff appends");
+    }
+
+    #[test]
+    fn check_fires_on_named_touched_file() {
+        let dir = std::env::temp_dir().join(format!("sqwai-critic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        journal_with_diff(&dir, "sess", "src/a.rs");
+        let check = check(&dir, "sess", "ты сломал src/a.rs");
+        assert!(check.fire, "{check:?}");
+        assert_eq!(check.artifacts.len(), 1);
+        assert_eq!(check.artifacts[0].path, "src/a.rs");
+        assert_eq!(check.artifacts[0].step.as_deref(), Some("2"));
+        let block = block_text(&check, "ты сломал src/a.rs").expect("block");
+        assert!(block.contains("src/a.rs"), "{block}");
+        assert!(block.contains("check with a tool"), "{block}");
+        assert!(block.contains("[step 2]"), "{block}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn check_holds_back_without_mutations() {
+        let dir = std::env::temp_dir().join(format!("sqwai-critic-nomut-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _journal = crate::agent::journal::Journal::open(&dir, "sess").expect("journal opens");
+        let check = check(&dir, "sess", "ты всё сломал");
+        assert_eq!(check.verdict, Verdict::Fire);
+        assert!(!check.fire, "nothing to check against");
+        assert!(block_text(&check, "ты всё сломал").is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn check_maybe_carried_by_artifact_only() {
+        let dir = std::env::temp_dir().join(format!("sqwai-critic-maybe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        journal_with_diff(&dir, "sess", "src/parser.py");
+        let carried = check(&dir, "sess", "в parser.py теперь исключение");
+        assert_eq!(carried.verdict, Verdict::Maybe);
+        assert!(carried.fire, "{carried:?}");
+        assert_eq!(carried.artifacts.len(), 1);
+
+        let dir2 = std::env::temp_dir().join(format!("sqwai-critic-maybe2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir2);
+        std::fs::create_dir_all(&dir2).unwrap();
+        journal_with_diff(&dir2, "sess", "src/other.py");
+        let dropped = check(&dir2, "sess", "в parser.py теперь исключение");
+        assert!(!dropped.fire, "maybe without a name stays out");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&dir2).ok();
+    }
+
+    #[test]
+    fn check_silent_short_circuits_despite_mutations() {
+        let dir = std::env::temp_dir().join(format!("sqwai-critic-sil-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        journal_with_diff(&dir, "sess", "src/a.rs");
+        let check = check(&dir, "sess", "сделай вот так");
+        assert_eq!(check.verdict, Verdict::Silent);
+        assert!(!check.fire);
+        assert!(check.artifacts.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn check_resolves_symbol_to_touched_file() {
+        let dir = std::env::temp_dir().join(format!("sqwai-critic-sym-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            "pub fn calculate(x: i32) -> i32 {\n    x + 1\n}\n",
+        )
+        .unwrap();
+        let mut store = crate::agent::graph::SqliteGraphStore::open(&dir).expect("graph opens");
+        crate::agent::graph_index::index_project(&mut store, &dir).expect("indexed");
+        journal_with_diff(&dir, "sess", "src/lib.rs");
+        let check = check(&dir, "sess", "ты сломал calculate");
+        assert!(check.fire, "{check:?}");
+        assert!(
+            check.artifacts.iter().any(|a| a.path == "src/lib.rs"),
+            "{check:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn marker_fields_carry_verdict_and_names() {
+        let dir = std::env::temp_dir().join(format!("sqwai-critic-mk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        journal_with_diff(&dir, "sess", "src/a.rs");
+        let check = check(&dir, "sess", "ты сломал src/a.rs");
+        let marker = marker_fields(&check, "ты сломал src/a.rs");
+        assert_eq!(marker["verdict"], serde_json::json!("fire"));
+        assert_eq!(marker["fired"], serde_json::json!(true));
+        assert_eq!(marker["text"], serde_json::json!("ты сломал src/a.rs"));
+        assert!(marker["score"].as_f64().unwrap() > 0.9);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Dev probe, not an assertion test: scores arbitrary phrases so a
