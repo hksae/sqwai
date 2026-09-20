@@ -113,6 +113,13 @@ enum VerifyOutcome {
     Failed(String),
 }
 
+/// Outcome of a background `/why` narration (AB), rendered by
+/// [`App::poll_why`]. Same owned+`Send` shape as [`VerifyOutcome`].
+enum WhyOutcome {
+    Answered { text: String },
+    Failed(String),
+}
+
 struct VerifyTaskInput {
     root: std::path::PathBuf,
     session: String,
@@ -337,6 +344,8 @@ pub struct App {
     /// report lands. No Esc integration: bounded by the verify/full wall
     /// budget either way.
     verify_rx: Option<tokio::sync::oneshot::Receiver<VerifyOutcome>>,
+    /// background `/why` answer (AB): same oneshot shape as `/verify`.
+    why_rx: Option<tokio::sync::oneshot::Receiver<WhyOutcome>>,
     /// derived visible steps from the active structured plan
     todos: Vec<String>,
     /// tracked child agents shown in the overview
@@ -876,6 +885,7 @@ impl App {
             aborted: false,
             agent: None,
             verify_rx: None,
+            why_rx: None,
             todos: Vec::new(),
             subagents: Vec::new(),
             subagent_chats: std::collections::BTreeMap::new(),
@@ -1269,6 +1279,7 @@ impl App {
             self.poll_startup_data();
             self.poll_agent();
             self.poll_verify();
+            self.poll_why();
             self.poll_provider_check();
             self.poll_builtin_update();
             self.poll_maintain();
@@ -2804,6 +2815,13 @@ impl App {
                     }
                 }
             }
+            "/export" => {
+                if rest.split_whitespace().nth(1).is_some() {
+                    self.status("/export takes no arguments", StatusKind::Warn);
+                } else {
+                    self.export_session();
+                }
+            }
             "/verify" => {
                 if self.streaming {
                     self.show_busy_status();
@@ -2822,6 +2840,21 @@ impl App {
                             StatusKind::Warn,
                         ),
                     }
+                }
+            }
+            "/why" => {
+                let question = rest.strip_prefix("why").unwrap_or("").trim();
+                if question.is_empty() {
+                    self.status(
+                        "/why needs a question: /why why did the tests fail",
+                        StatusKind::Warn,
+                    );
+                } else if self.streaming {
+                    self.show_busy_status();
+                } else if self.why_rx.is_some() {
+                    self.status("a why-answer is already running", StatusKind::Warn);
+                } else {
+                    self.start_why(question.to_string());
                 }
             }
             other if COMMANDS.contains(&other) => {
@@ -4535,6 +4568,107 @@ impl App {
     /// per tick by [`Self::poll_verify`]. Refused while streaming or while
     /// a previous run still flies. No Esc integration: the run is bounded
     /// by the verify/full wall budget either way.
+    /// AB `/export`: markdown + JSON dump of the session into
+    /// `.sqwai/exports/`. Synchronous and local — no model, no network.
+    fn export_session(&mut self) {
+        let session = self.session.id.to_string();
+        let out = crate::agent::export::export_session(
+            &self.project_root,
+            &session,
+            &self.model_cfg.id,
+            &self.session.messages,
+        );
+        let (md, json) = crate::agent::export::export_paths(&self.project_root, &session);
+        let write = || -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+            if let Some(parent) = md.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&md, &out.markdown)?;
+            std::fs::write(
+                &json,
+                serde_json::to_string_pretty(&out.json).unwrap_or_default(),
+            )?;
+            Ok((md, json))
+        };
+        match write() {
+            Ok((md, json)) => self.status(
+                &format!("exported: {} + {}", md.display(), json.display()),
+                StatusKind::Ok,
+            ),
+            Err(error) => self.status(&format!("export failed: {error:#}"), StatusKind::Err),
+        }
+        self.dirty = true;
+    }
+
+    /// AB `/why`: answer a why-question from journal evidence, narrated by
+    /// the model. Gather is synchronous (no evidence → status, no call);
+    /// narration flies in the background like `/verify`.
+    fn start_why(&mut self, question: String) {
+        let root = self.project_root.clone();
+        let session = self.session.id.to_string();
+        let evidence = crate::agent::why::gather(&root, &session, &question);
+        if evidence.is_empty() {
+            self.status(
+                "no evidence for that question in this session",
+                StatusKind::Warn,
+            );
+            return;
+        }
+        let prompt = crate::agent::why::render_prompt(&evidence, &question);
+        let model_id = self.model_cfg.id.clone();
+        let provider = self.provider.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let outcome = match crate::agent::reflector::micro_call(
+                &provider,
+                &model_id,
+                crate::agent::why::NARRATOR_SYSTEM,
+                &prompt,
+                crate::agent::why::NARRATOR_MAX_TOKENS,
+                crate::agent::why::NARRATOR_TIMEOUT_SECS,
+            )
+            .await
+            {
+                Ok(answer) => WhyOutcome::Answered { text: answer },
+                Err(error) => WhyOutcome::Failed(format!("{error:#}")),
+            };
+            let _ = tx.send(outcome);
+        });
+        self.why_rx = Some(rx);
+        self.status("answering from session evidence…", StatusKind::Info);
+        self.dirty = true;
+    }
+
+    /// Collect a finished `/why` answer: one durable row plus status.
+    fn poll_why(&mut self) {
+        let outcome = match self.why_rx.as_mut() {
+            None => return,
+            Some(rx) => match rx.try_recv() {
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return,
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    self.why_rx = None;
+                    self.status("why-answer task died", StatusKind::Err);
+                    self.dirty = true;
+                    return;
+                }
+                Ok(outcome) => {
+                    self.why_rx = None;
+                    outcome
+                }
+            },
+        };
+        match outcome {
+            WhyOutcome::Answered { text } => {
+                self.push_segment(Segment::Assistant { text, live: false });
+                self.status("answered from session evidence", StatusKind::Ok);
+            }
+            WhyOutcome::Failed(error) => {
+                self.status(&format!("why-answer failed: {error}"), StatusKind::Err);
+            }
+        }
+        self.dirty = true;
+    }
+
     fn start_verify(&mut self, full: bool) {
         let root = self.project_root.clone();
         let session = self.session.id.to_string();

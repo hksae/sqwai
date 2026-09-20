@@ -168,9 +168,10 @@ async fn neutralize_once(
     parse_checks(&text)
 }
 
-/// One tool-free model call with a timeout. Shared by the neutralizer and
-/// the H0-maybe confirm: both are schema-bound micro-calls, not turns.
-async fn micro_call(
+/// One tool-free model call with a timeout. Shared by the neutralizer,
+/// the H0-maybe confirm and the `/why` narrator: all are schema-bound
+/// (or stop-ruled) micro-calls, not turns.
+pub(crate) async fn micro_call(
     provider: &crate::providers::SharedProvider,
     model_id: &str,
     system: &str,

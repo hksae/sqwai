@@ -22,6 +22,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "/debug",
     "/diary",
     "/exit",
+    "/export",
     "/goal",
     "/graph-rebuild",
     "/help",
@@ -40,6 +41,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "/test",
     "/undo",
     "/verify",
+    "/why",
 ];
 
 /// Second-level completions: (command, subcommands), in the same order as

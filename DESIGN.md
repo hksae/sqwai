@@ -1554,7 +1554,7 @@ number; a `partial` one is missing something the design calls for.
 | Y | Claim lint (post-generation verify against journal/resolve_ref) | done — counts/status/paths/symbols checked against the turn journal window, contradictions marked `[unverified]` + `claim_lint` record, absence never flagged; repetition nudge (3+ fresh flags) rides the turn system block (§12.9) | I4 |
 | Z | Scope guard (step.refs vs file_diff) | done — finish-time misattribution warnings plus write-path scope warnings against the holding step's refs (warn-layer, never blocks; `bash` excluded, no per-file diff) | I4 |
 | AA | Lessons tied to files (note kind + context-block rule) | partial — `lesson` note kind done; automatic file-tied injection planned with the context block (§12.5) | I5 |
-| AB | /why provenance, step diff + /undo step, /export | partial — step diff + `/undo step` done; `/why` and `/export` do not exist | J |
+| AB | /why provenance, step diff + /undo step, /export | done — step diff + `/undo step` done; `/why <free text>` (host digs journal+plan, model narrates, background task) and `/export` (markdown + JSON into `.sqwai/exports/`, screened, capped) done | J |
 | AC | bench command (user-facing wrapper over §8.2 regression harness) | planned | G0 |
 | AD | Bash isolation/sandbox (container/bwrap/WSL) | open question | — |
 | AE | Core and UI decoupling: headless `serve` (stdio/JSON-RPC) + crates workspace split (`sqwai-core`, `sqwai-tui`, `sqwai-server`) (§5.11) | planned | B |
