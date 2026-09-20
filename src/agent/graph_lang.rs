@@ -17,7 +17,7 @@ use std::path::Path;
 use tree_sitter::{Language, Node as TsNode, Parser};
 
 pub const RUST_ADAPTER_VERSION: &str = "1";
-pub const PYTHON_ADAPTER_VERSION: &str = "1";
+pub const PYTHON_ADAPTER_VERSION: &str = "2";
 pub const TYPESCRIPT_ADAPTER_VERSION: &str = "1";
 
 /// Syntactic capabilities every adapter in this module offers.
@@ -112,6 +112,10 @@ pub struct Import {
 pub struct Call {
     pub name: String,
     pub line: u32,
+    /// mention shape: "call", "decorator", "inherit". Occurrences store it
+    /// verbatim — a bare name match must never look like a confirmed
+    /// relation, whatever the shape.
+    pub kind: &'static str,
 }
 
 pub struct TsAnalysis {
@@ -831,6 +835,7 @@ fn walk_rust(node: TsNode, ctx: &mut Ctx, depth: usize) {
                 ctx.calls.push(Call {
                     name,
                     line: node.start_position().row as u32 + 1,
+                    kind: "call",
                 });
             }
             descend(node, ctx, depth, walk_rust);
@@ -965,6 +970,17 @@ fn walk_python(node: TsNode, ctx: &mut Ctx, depth: usize) {
             }
             let body = body_child(node);
             ctx.push_decl(NodeKind::Class, "class", name.clone(), roles, node, body);
+            // base classes are name uses, not edges (same contract as
+            // calls): `class Admin(User)` mentions `User` at this line.
+            // keyword arguments (`metaclass=`) are skipped — only positional
+            // inheritance reads as inheritance.
+            for superclass in python_superclass_refs(node, ctx.bytes) {
+                ctx.calls.push(Call {
+                    name: superclass,
+                    line: node.start_position().row as u32 + 1,
+                    kind: "inherit",
+                });
+            }
             scoped_body(
                 ctx,
                 (format!("class::{name}"), true, false, true),
@@ -974,6 +990,50 @@ fn walk_python(node: TsNode, ctx: &mut Ctx, depth: usize) {
             );
         }
         "decorated_definition" => descend(node, ctx, depth, walk_python),
+        "decorator" => {
+            // Invoked decorators (`@app.route("/x")`) already surface
+            // through the nested `call` node below; only bare ones
+            // (`@property`, `@staticmethod`) need recording here.
+            if !has_call_descendant(node)
+                && let Some(name) = python_dotted_last(node, ctx.bytes)
+            {
+                ctx.calls.push(Call {
+                    name,
+                    line: node.start_position().row as u32 + 1,
+                    kind: "decorator",
+                });
+            }
+            descend(node, ctx, depth, walk_python);
+        }
+        "assignment" => {
+            // `f = lambda ...` mirrors TS arrow declarations. Anything else
+            // (attribute targets, tuples, annotated forms) stays invisible.
+            let plain_lambda = node.child_by_field_name("left").is_some_and(|left| {
+                left.kind() == "identifier"
+                    && node
+                        .child_by_field_name("right")
+                        .is_some_and(|right| right.kind() == "lambda")
+            });
+            if plain_lambda
+                && let Some(left) = node.child_by_field_name("left")
+                && let Some(right) = node.child_by_field_name("right")
+                && let Some(name) = ctx.text(left).map(str::to_string)
+            {
+                ctx.push_decl(
+                    NodeKind::Function,
+                    "fn",
+                    name.clone(),
+                    Vec::new(),
+                    node,
+                    None,
+                );
+                ctx.push_scope(format!("fn::{name}"), false, false, true);
+                descend(right, ctx, depth, walk_python);
+                ctx.pop_scope();
+                return;
+            }
+            descend(node, ctx, depth, walk_python);
+        }
         "import_statement" | "import_from_statement" => {
             // absolute imports need sys.path knowledge the adapter must
             // not guess; relative ones resolve lexically against the file
@@ -991,6 +1051,15 @@ fn walk_python(node: TsNode, ctx: &mut Ctx, depth: usize) {
                     for file in python_module_files(dir, dots, &module) {
                         ctx.imports.push(Import { files: vec![file] });
                     }
+                    // `from .pkg import sub` where `sub` is itself a module:
+                    // candidate files the walked set prunes if unwalked (same
+                    // convention as Rust `mod foo;`). Symbol imports produce
+                    // dangling candidates that die in pass two — by design.
+                    for name in &names {
+                        for file in python_module_files(dir, dots, &format!("{module}.{name}")) {
+                            ctx.imports.push(Import { files: vec![file] });
+                        }
+                    }
                 }
             }
         }
@@ -999,6 +1068,7 @@ fn walk_python(node: TsNode, ctx: &mut Ctx, depth: usize) {
                 ctx.calls.push(Call {
                     name,
                     line: node.start_position().row as u32 + 1,
+                    kind: "call",
                 });
             }
             descend(node, ctx, depth, walk_python);
@@ -1063,19 +1133,101 @@ fn python_call_name(node: TsNode, bytes: &[u8]) -> Option<String> {
     if func.kind() == "identifier" {
         return func.utf8_text(bytes).ok().map(str::to_string);
     }
-    // attribute `a.b.c` → last identifier descendant
+    // attribute `a.b.c` → last identifier descendant, in source order
+    // (a stack without reversal yields the first — the documented
+    // contract is the last). Type arguments skipped (`x.foo[T]` is `foo`).
+    let mut found = Vec::new();
     let mut stack = vec![func];
-    let mut last = None;
     while let Some(current) = stack.pop() {
-        if current.kind() == "identifier" {
-            last = current.utf8_text(bytes).ok();
+        if current.kind() == "identifier"
+            && let Ok(text) = current.utf8_text(bytes)
+        {
+            found.push(text.to_string());
+        }
+        let mut cursor = current.walk();
+        let mut kids: Vec<TsNode> = current
+            .children(&mut cursor)
+            .filter(|c| !matches!(c.kind(), "type_arguments" | "type_parameters"))
+            .collect();
+        kids.reverse();
+        for child in kids {
+            stack.push(child);
+        }
+    }
+    found.into_iter().next_back()
+}
+
+/// Whether the subtree already contains a `call` node (invoked
+/// decorators surface through the call arm — recording them again here
+/// would double the occurrence).
+fn has_call_descendant(node: TsNode) -> bool {
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "call" {
+            return true;
         }
         let mut cursor = current.walk();
         for child in current.children(&mut cursor) {
             stack.push(child);
         }
     }
-    last.map(str::to_string)
+    false
+}
+
+/// Last identifier in visit order (`app.route` → `route`), for decorator
+/// and superclass mentions.
+fn python_dotted_last(node: TsNode, bytes: &[u8]) -> Option<String> {
+    let mut found = Vec::new();
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "identifier"
+            && let Ok(text) = current.utf8_text(bytes)
+        {
+            found.push(text.to_string());
+        }
+        let mut cursor = current.walk();
+        let mut kids: Vec<TsNode> = current.children(&mut cursor).collect();
+        kids.reverse();
+        for child in kids {
+            stack.push(child);
+        }
+    }
+    // first identifier in source order wins the tie-break below; the answer
+    // is the last one (attribute receiver chains read left to right)
+    found.into_iter().next_back()
+}
+
+/// Positional superclass references of a `class_definition`
+/// (`class Admin(User, mod.Mixin)` → `User`, `Mixin`). Keyword arguments
+/// (`metaclass=`) are skipped: only positional inheritance reads as
+/// inheritance. Returns dotted-last segments, source order, deduped.
+fn python_superclass_refs(node: TsNode, bytes: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cursor = node.walk();
+    let lists: Vec<TsNode> = node
+        .children(&mut cursor)
+        .filter(|c| c.kind() == "argument_list")
+        .collect();
+    for list in lists {
+        let mut cursor = list.walk();
+        for child in list.children(&mut cursor) {
+            if child.kind() == "keyword_argument" {
+                continue;
+            }
+            if child.kind() == "identifier"
+                && let Ok(text) = child.utf8_text(bytes)
+            {
+                out.push(text.to_string());
+            } else if child.kind() == "attribute"
+                && let Some(last) = python_dotted_last(child, bytes)
+            {
+                out.push(last);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1190,6 +1342,7 @@ fn walk_ts(node: TsNode, ctx: &mut Ctx, depth: usize) {
                 ctx.calls.push(Call {
                     name,
                     line: node.start_position().row as u32 + 1,
+                    kind: "call",
                 });
             }
             descend(node, ctx, depth, walk_ts);
@@ -1324,7 +1477,7 @@ impl SourceAdapter for TsAdapter {
             batch.occurrences.push(Occurrence {
                 path: relative_path.to_string(),
                 name: call.name.clone(),
-                kind: "call".to_string(),
+                kind: call.kind.to_string(),
                 line: call.line,
                 source_hash: source_hash.clone(),
             });
@@ -1494,6 +1647,68 @@ mod inner {
     }
 
     #[test]
+    fn python_semantic_references() {
+        let analysis = analyze_str(
+            TsLang::Python,
+            "app/views.py",
+            "from .pkg import sub, helper\nfrom .util import fmt\n\n@app.route(\"/x\")\n@property\ndef index():\n    fmt(helper())\n\nclass Admin(User, auth.Mixin):\n    pass\n\nclass Plain(metaclass=Meta):\n    pass\n\nhandler = lambda event: dispatch(event)\n",
+        );
+        // submodule import candidates (the walked set prunes dangling ones)
+        let files: Vec<&str> = analysis
+            .imports
+            .iter()
+            .flat_map(|i| i.files.iter().map(String::as_str))
+            .collect();
+        assert!(files.contains(&"app/pkg/sub.py"), "{files:?}");
+        assert!(files.contains(&"app/util.py"), "{files:?}");
+        // invoked decorator via the call arm (once), bare via decorator arm
+        let calls: Vec<(&str, &str)> = analysis
+            .calls
+            .iter()
+            .map(|c| (c.name.as_str(), c.kind))
+            .collect();
+        assert_eq!(
+            calls.iter().filter(|(n, _)| *n == "route").count(),
+            1,
+            "{calls:?}"
+        );
+        assert!(calls.contains(&("property", "decorator")), "{calls:?}");
+        assert!(calls.contains(&("fmt", "call")), "{calls:?}");
+        // attribute calls resolve to their last segment (documented contract)
+        assert!(calls.contains(&("dispatch", "call")), "{calls:?}");
+        // bases, not calls; keyword metaclass skipped
+        assert!(calls.contains(&("User", "inherit")), "{calls:?}");
+        assert!(calls.contains(&("Mixin", "inherit")), "{calls:?}");
+        assert!(
+            !calls.iter().any(|(n, _)| *n == "Meta" || *n == "metaclass"),
+            "{calls:?}"
+        );
+        // assigned lambda is a function declaration
+        let keys: Vec<&str> = analysis.decls.iter().map(|d| d.key.as_str()).collect();
+        assert!(keys.contains(&"sym:app/views.py::fn::handler"), "{keys:?}");
+    }
+
+    #[test]
+    fn python_occurrences_carry_mention_kinds() {
+        let batch = TsAdapter(TsLang::Python)
+            .index(
+                "app/views.py",
+                b"@app.route(\"/x\")\ndef index():\n    pass\n\nclass Admin(User):\n    pass\n",
+            )
+            .expect("batch builds");
+        let occurrences: Vec<(&str, &str)> = batch
+            .occurrences
+            .iter()
+            .map(|o| (o.name.as_str(), o.kind.as_str()))
+            .collect();
+        assert!(occurrences.contains(&("route", "call")), "{occurrences:?}");
+        assert!(
+            occurrences.contains(&("User", "inherit")),
+            "{occurrences:?}"
+        );
+    }
+
+    #[test]
     fn typescript_decls_imports_calls() {
         let analysis = analyze_str(
             TsLang::TypeScript,
@@ -1552,13 +1767,11 @@ mod inner {
         assert_eq!(TsLang::for_path(Path::new("a.tsx")), Some(TsLang::Tsx));
         assert_eq!(TsLang::for_path(Path::new("a.go")), None);
         assert_eq!(TsLang::for_path(Path::new("a.md")), None);
-        for lang in [
-            TsLang::Rust,
-            TsLang::Python,
-            TsLang::TypeScript,
-            TsLang::Tsx,
-        ] {
+        for lang in [TsLang::Rust, TsLang::TypeScript, TsLang::Tsx] {
             assert_eq!(lang.adapter_version(), "1");
         }
+        // bumped for semantic references (decorators, bases, submodule
+        // imports, lambdas, call-name order): old graphs reindex
+        assert_eq!(TsLang::Python.adapter_version(), "2");
     }
 }
