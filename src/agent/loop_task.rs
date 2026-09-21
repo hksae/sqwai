@@ -232,6 +232,12 @@ impl AgentHandle {
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Whether a cooperative cancel is already pending. The TUI escalates
+    /// a second Esc to a hard abort instead of requesting twice.
+    pub fn cancel_requested(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// The stop half of this handle for the S1 child registry
     /// (§2.2.4): undo cancels whatever is still registered before it
     /// reverts the tree. Cloned, never moved — the event stream stays here.
@@ -408,29 +414,45 @@ const MAX_PARALLEL_SUBAGENTS: usize = 4;
 const SUBAGENT_TIMEOUT_SECS: u64 = 600;
 const SUBAGENT_CANCEL_GRACE_SECS: u64 = 5;
 
-fn subagent_tasks_from_args(args: &serde_json::Value) -> Result<Vec<String>, String> {
-    let mut tasks: Vec<String> = args["tasks"]
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str())
-                .map(str::trim)
-                .filter(|task| !task.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    if tasks.is_empty()
-        && let Some(task) = args["task"]
-            .as_str()
+/// One task's text from any shape the model may send: a bare string, or
+/// an object carrying it under `task`/`prompt`/`text`/`description` (the
+/// last is Claude-Code convention for the short label — better than
+/// refusing the whole batch). Trims; empty means absent.
+fn subagent_task_text(item: &serde_json::Value) -> Option<String> {
+    match item {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        serde_json::Value::Object(map) => ["task", "prompt", "text", "description"]
+            .into_iter()
+            .filter_map(|key| map.get(key)?.as_str())
             .map(str::trim)
-            .filter(|task| !task.is_empty())
+            .find(|text| !text.is_empty())
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+fn subagent_tasks_from_args(args: &serde_json::Value) -> Result<Vec<String>, String> {
+    let mut tasks: Vec<String> = match args.get("tasks") {
+        Some(serde_json::Value::Array(items)) => {
+            items.iter().filter_map(subagent_task_text).collect()
+        }
+        // a lone string is one task, not a malformed array
+        Some(single) => subagent_task_text(single).into_iter().collect(),
+        None => Vec::new(),
+    };
+    if tasks.is_empty()
+        && let Some(task) = args.get("task").and_then(subagent_task_text)
     {
-        tasks.push(task.to_string());
+        tasks.push(task);
     }
     if tasks.is_empty() {
-        return Err("subagent task is required".into());
+        return Err(
+            "subagent task is required: pass task (string) or tasks (array of strings or objects with task|prompt)"
+                .into(),
+        );
     }
     if tasks.len() > MAX_SUBAGENTS_PER_CALL {
         return Err(format!(
@@ -447,9 +469,9 @@ fn subagent_tasks_from_args(args: &serde_json::Value) -> Result<Vec<String>, Str
 /// the waits overlap. Mixed batches keep the sequential loop: interleaving
 /// arbitrary tools would tangle journal attribution and mutation order.
 ///
-/// Esc semantics match one running subagent: children ignore the parent
-/// flag (each has its own), so a stop request lands as "let the running
-/// finish, then end the turn" — the next pre-check stops everything after.
+/// Esc semantics match one running subagent: the wait loop polls the
+/// parent flag, so a stop request cooperatively stops the children (each
+/// gets its own cancel first) instead of waiting out the timeout.
 #[allow(clippy::too_many_arguments)]
 async fn run_subagent_batch(
     calls: &[ToolCallReq],
@@ -542,11 +564,13 @@ async fn run_subagent_batch(
                 let memory = memory.clone();
                 let compaction = compaction.clone();
                 let fallback_chain = fallback_chain.clone();
+                let parent_cancel = cancel.clone();
                 async move {
                     let outcome = run_subagent(
                         &call,
                         &session_id,
                         tx,
+                        &parent_cancel,
                         &provider,
                         &model_id,
                         &root,
@@ -650,11 +674,29 @@ async fn run_subagent_batch(
     interrupted
 }
 
+/// The step a session should hold: whatever the plan keeps in progress,
+/// or idle. Used at startup (adopt the interrupted step after a crash,
+/// §3.4) and after a subagent returns (the child may have retired or
+/// moved the held step, §2.2.3). `ctx.current_step` stays the single live
+/// copy; the TUI persists it via `StepCurrent` events.
+fn adopt_in_progress_step(root: &Path, session_id: &str) -> Option<String> {
+    plan::open_active_for_session(root, Some(session_id))
+        .ok()
+        .flatten()
+        .and_then(|plan| {
+            plan.steps
+                .into_iter()
+                .find(|step| step.status == plan::StepStatus::InProgress)
+                .map(|step| step.id)
+        })
+}
+
 #[allow(clippy::too_many_arguments)] // all parameters are required for subagent configuration
 async fn run_subagent(
     call: &ToolCallReq,
     parent_session: &str,
     parent_tx: &mpsc::Sender<AgentEvent>,
+    parent_cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     provider: &SharedProvider,
     model_id: &str,
     root: &Path,
@@ -698,6 +740,7 @@ async fn run_subagent(
                         &one,
                         parent_session,
                         parent_tx,
+                        parent_cancel,
                         provider,
                         model_id,
                         root,
@@ -823,8 +866,14 @@ async fn run_subagent(
     let _child_slot = super::undo_guard::track_child(id, child.child_control());
     let mut output = String::new();
     let deadline = tokio::time::Instant::now() + timeout;
+    // Esc polling: the parent cancel flag is the only stop signal visible
+    // inside this wait — without it a stop request sits unobserved until
+    // the timeout, and the TUI shows "cancelling…" forever (§3.7).
+    let mut cancel_poll = tokio::time::interval(std::time::Duration::from_millis(100));
     loop {
-        let event = match tokio::time::timeout_at(deadline, child.rx.recv()).await {
+        let event = tokio::select! {
+            biased;
+            res = tokio::time::timeout_at(deadline, child.rx.recv()) => match res {
             Ok(Some(event)) => event,
             Ok(None) => {
                 let result = tools::Outcome::err("subagent disconnected");
@@ -838,28 +887,14 @@ async fn run_subagent(
                 return result;
             }
             Err(_) => {
-                // timed out: ask cooperatively first (a `bash` child kills
-                // its own process tree on this), then tear down hard
-                child.request_tool_cancel();
-                let grace = std::time::Duration::from_secs(SUBAGENT_CANCEL_GRACE_SECS);
-                let finished = tokio::time::timeout(grace, child.rx.recv()).await;
-                child.abort();
-                let result = if matches!(finished, Ok(Some(AgentEvent::Completed(_)))) {
-                    tools::Outcome::err(format!(
-                        "subagent timed out after {}s (finished during cancel, result discarded)",
-                        timeout.as_secs()
-                    ))
-                } else {
-                    tools::Outcome::err(format!("subagent timed out after {}s", timeout.as_secs()))
-                };
-                let _ = parent_tx
-                    .send(AgentEvent::SubagentDone {
-                        id,
-                        ok: false,
-                        output: result.output.clone(),
-                    })
-                    .await;
-                return result;
+                return stop_child(&mut child, parent_tx, id, &format!("timed out after {}s", timeout.as_secs())).await;
+            }
+            },
+            _ = cancel_poll.tick() => {
+                if parent_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    return stop_child(&mut child, parent_tx, id, "cancelled by user").await;
+                }
+                continue;
             }
         };
         match event {
@@ -943,6 +978,40 @@ async fn run_subagent(
             _ => {}
         }
     }
+}
+
+/// Stop a child that will not stop itself: ask cooperatively first (a
+/// `bash` child kills its own process tree on this), wait out a short
+/// grace, then tear down hard. Always ends with `SubagentDone(ok:false)`
+/// and the error outcome — the parent turn must never hang on a child.
+/// `reason` names the trigger ("timed out after Ns" / "cancelled by
+/// user"); a child that finishes inside the grace is still discarded: its
+/// result belongs to a turn that already moved on.
+async fn stop_child(
+    child: &mut AgentHandle,
+    parent_tx: &mpsc::Sender<AgentEvent>,
+    id: u64,
+    reason: &str,
+) -> tools::Outcome {
+    child.request_tool_cancel();
+    let grace = std::time::Duration::from_secs(SUBAGENT_CANCEL_GRACE_SECS);
+    let finished = tokio::time::timeout(grace, child.rx.recv()).await;
+    child.abort();
+    let result = if matches!(finished, Ok(Some(AgentEvent::Completed(_)))) {
+        tools::Outcome::err(format!(
+            "subagent {reason} (finished during cancel, result discarded)"
+        ))
+    } else {
+        tools::Outcome::err(format!("subagent {reason}"))
+    };
+    let _ = parent_tx
+        .send(AgentEvent::SubagentDone {
+            id,
+            ok: false,
+            output: result.output.clone(),
+        })
+        .await;
+    result
 }
 
 fn next_subagent_id() -> u64 {
@@ -1369,15 +1438,7 @@ async fn run_agent(
     // progress — after a crash that is the interrupted step (§3.4) — and
     // keep it in lockstep with plan outcomes below. `ctx.current_step` is
     // the single live copy; the TUI persists it via `StepCurrent` events.
-    ctx.current_step = plan::open_active_for_session(&root, Some(&session_id))
-        .ok()
-        .flatten()
-        .and_then(|plan| {
-            plan.steps
-                .iter()
-                .find(|step| step.status == plan::StepStatus::InProgress)
-                .map(|step| step.id.clone())
-        });
+    ctx.current_step = adopt_in_progress_step(&root, &session_id);
     if enable_tools && !read_only {
         // Heal a crash between a journal intent and its plan store (§2.1.4,
         // §3.7) before anything — including this session's writer — reads the
@@ -2100,10 +2161,11 @@ async fn run_agent(
                             outcome
                         }
                         "subagent" if subagent_depth == 0 => {
-                            run_subagent(
+                            let outcome = run_subagent(
                                 call,
                                 &ctx.session_id,
                                 &tx,
+                                &ctx.cancel,
                                 &provider,
                                 &model_id,
                                 &root,
@@ -2125,7 +2187,22 @@ async fn run_agent(
                                 fallback_chain.clone(),
                                 std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
                             )
-                            .await
+                            .await;
+                            // The child shares this plan: a `plan finish`
+                            // (or `start`) inside it retires (or moves) the
+                            // step this session holds, and the next `plan
+                            // start` in the same turn would be refused
+                            // against the stale hold (§2.2.3). Re-adopt.
+                            let held_before = ctx.current_step.clone();
+                            ctx.current_step = adopt_in_progress_step(&root, &ctx.session_id);
+                            if ctx.current_step != held_before {
+                                let _ = tx
+                                    .send(AgentEvent::StepCurrent {
+                                        step: ctx.current_step.clone(),
+                                    })
+                                    .await;
+                            }
+                            outcome
                         }
                         "subagent" => tools::Outcome::err("nested subagents are not allowed"),
                         "memory_propose" if subagent_depth > 0 => tools::Outcome::err(
@@ -4132,6 +4209,34 @@ mod subagent_tests {
         );
     }
 
+    /// Regression: the model sent three task OBJECTS and the whole batch
+    /// died with "subagent task is required" — objects carry the text
+    /// under task|prompt|description, a lone string is one task.
+    #[test]
+    fn accepts_object_shaped_subagent_tasks() {
+        assert_eq!(
+            subagent_tasks_from_args(&serde_json::json!({"tasks":[
+                {"prompt": "research articles"},
+                {"task": "check commercial modes"},
+                {"description": "probe internals"},
+            ]}))
+            .unwrap(),
+            vec![
+                "research articles",
+                "check commercial modes",
+                "probe internals"
+            ]
+        );
+        assert_eq!(
+            subagent_tasks_from_args(&serde_json::json!({"tasks": "do it all"})).unwrap(),
+            vec!["do it all"]
+        );
+        // empties still refuse with the original message intact
+        let error =
+            subagent_tasks_from_args(&serde_json::json!({"tasks": [{}, "  "]})).unwrap_err();
+        assert!(error.contains("subagent task is required"), "{error}");
+    }
+
     #[test]
     fn rejects_more_than_eight_subagents() {
         let tasks: Vec<String> = (0..9).map(|n| format!("task {n}")).collect();
@@ -5645,6 +5750,7 @@ mod effort_tests {
             &call,
             "parent-sess",
             &parent_tx,
+            &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             &provider,
             "m",
             &root,
@@ -5678,6 +5784,53 @@ mod effort_tests {
                 .any(|s| s.starts_with("sub-") && *s != "parent-sess"),
             "child joined explicitly: {members:?}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Regression: a subagent finishing its parent's step retired the step
+    /// globally while the parent session still held it, so the next `plan
+    /// start` in the same turn was refused as "one step at a time".
+    /// The parent re-adopts from the plan when the child returns.
+    #[test]
+    fn adopt_follows_the_plans_in_progress_step() {
+        let root = std::env::temp_dir().join(format!("sqwai-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::create_dir_all(&root);
+        // no plan at all: idle
+        assert_eq!(adopt_in_progress_step(&root, "sess"), None);
+        let mut plan = plan::create(
+            "goal".into(),
+            Vec::new(),
+            Vec::new(),
+            vec![plan::NewStep {
+                title: "step".into(),
+                kind: None,
+                refs: Vec::new(),
+            }],
+            20_000,
+            &plan::Limits::default(),
+        )
+        .unwrap();
+        plan.sessions = vec!["sess".into()];
+        plan::store(&root, &plan).unwrap();
+        // pending, nothing in progress: idle
+        assert_eq!(adopt_in_progress_step(&root, "sess"), None);
+        plan::apply(
+            &mut plan,
+            plan::Op::Start {
+                id: "1".into(),
+                confirm: None,
+            },
+            &plan::Limits::default(),
+            None,
+        )
+        .unwrap();
+        plan::store(&root, &plan).unwrap();
+        assert_eq!(adopt_in_progress_step(&root, "sess"), Some("1".to_string()));
+        // the child retires the held step behind the parent's back
+        plan.steps[0].status = plan::StepStatus::Done;
+        plan::store(&root, &plan).unwrap();
+        assert_eq!(adopt_in_progress_step(&root, "sess"), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -5731,6 +5884,7 @@ mod effort_tests {
             &call,
             "lonely-sess",
             &parent_tx,
+            &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             &provider,
             "m",
             &root,
@@ -5794,6 +5948,7 @@ mod effort_tests {
             &call,
             "parent-sess",
             &parent_tx,
+            &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             &provider,
             "m",
             &root,
@@ -5821,6 +5976,73 @@ mod effort_tests {
             outcome.output.contains("timed out"),
             "unexpected outcome: {}",
             outcome.output
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Esc during a subagent wait: the parent flag stops the wait on the
+    /// next poll instead of sitting out the whole timeout ("cancelling…"
+    /// forever). A pre-set flag with a hanging child must return fast.
+    #[tokio::test]
+    async fn esc_stops_a_subagent_wait_without_the_timeout() {
+        struct HangingProvider;
+        impl crate::providers::Provider for HangingProvider {
+            fn stream_chat(
+                &self,
+                _req: crate::providers::ChatRequest,
+            ) -> futures::stream::BoxStream<'static, crate::providers::StreamResult> {
+                use futures::StreamExt;
+                futures::stream::pending().boxed()
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("sqwai-subcancel-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&root);
+        let provider: SharedProvider = std::sync::Arc::new(HangingProvider);
+        let (parent_tx, _parent_rx) = mpsc::channel(64);
+        let call = crate::providers::ToolCallReq::new(
+            "c1",
+            "subagent",
+            serde_json::json!({"task": "hang forever"}),
+        );
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let started = std::time::Instant::now();
+        let outcome = run_subagent(
+            &call,
+            "parent-sess",
+            &parent_tx,
+            &cancel,
+            &provider,
+            "m",
+            &root,
+            &[],
+            false,
+            10_000,
+            None,
+            crate::config::EffortSupport::default(),
+            None,
+            Vec::new(),
+            crate::config::McpConfig::default(),
+            crate::config::LspConfig::default(),
+            false,
+            crate::config::ShadowStore::Off,
+            crate::config::DiaryConfig::default(),
+            crate::config::MemoryConfig::default(),
+            crate::config::CompactionConfig::default(),
+            crate::config::PlanConfig::default(),
+            Vec::new(),
+            std::time::Duration::from_secs(60),
+        )
+        .await;
+        assert!(!outcome.ok, "cancelled child must fail");
+        assert!(
+            outcome.output.contains("cancelled by user"),
+            "unexpected outcome: {}",
+            outcome.output
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "cancel must not wait out the timeout"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

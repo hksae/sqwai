@@ -720,7 +720,7 @@ tight loop; await its result before dependent changes or reporting success.",
             name: "subagent",
             kind: Kind::ReadOnly,
             description: "Delegate one or more focused tasks to child agents. Children inherit the current Plan/Act mode; up to 8 tasks are accepted, at most 4 run concurrently, and child agents cannot create further subagents. A child that produces nothing for 600s is cancelled and reported as timed out. Separate subagent calls in one turn also run concurrently.",
-            parameters: json!({"type":"object","properties":{"task":{"type":"string","description":"one focused child task"},"tasks":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8,"description":"focused child tasks to run concurrently"}},"anyOf":[{"required":["task"]},{"required":["tasks"]}]}),
+            parameters: json!({"type":"object","properties":{"task":{"type":"string","description":"one focused child task"},"tasks":{"type":"array","items":{"anyOf":[{"type":"string"},{"type":"object","properties":{"task":{"type":"string"},"prompt":{"type":"string"},"description":{"type":"string"}},"additionalProperties":true}]},"minItems":1,"maxItems":8,"description":"focused child tasks to run concurrently (strings, or objects with task|prompt)"}},"anyOf":[{"required":["task"]},{"required":["tasks"]}]}),
         },
         ToolDef {
             name: "note",

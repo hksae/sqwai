@@ -593,7 +593,12 @@ context window. It may not nest further, ask the user, propose plans or
 memories (all refused or auto-declined); dangerous approvals auto-deny.
 A child that produces nothing for 600s is cancelled cooperatively, given
 a 5s grace, aborted, and reported as a timed-out error — a hung child
-never stalls the parent turn forever.
+never stalls the parent turn forever. Esc during the wait stops the child
+the same way (polled every 100ms); a second Esc while the cancel is
+pending tears the turn down instead of asking twice. The parent re-adopts
+its held step when the child returns, so a `plan finish` inside the child
+does not wedge the next `plan start`. Task arguments accept strings or
+objects (`task`|`prompt`); anything else refuses with the expected shape.
 
 Concurrency and writers discipline:
 - Mutating tools (`write`, `edit`, `patch`, `bash`) invoked by a subagent verify

@@ -400,10 +400,28 @@ impl App {
                                     // further model turns), but whatever was
                                     // already produced is kept, unlike a hard
                                     // abort.
-                                    if let Some(a) = &self.agent {
-                                        a.request_tool_cancel();
+                                    let already =
+                                        self.agent.as_ref().is_some_and(|a| a.cancel_requested());
+                                    if already {
+                                        // second Esc while a cancel is
+                                        // pending: the cooperative path is
+                                        // not landing (a subagent wait that
+                                        // never noticed, a wedged tool) —
+                                        // tear the turn down instead of
+                                        // showing "cancelling…" forever.
+                                        self.clear_busy_statuses();
+                                        self.clear_subagent_ui_on_stop();
+                                        self.aborted = true;
+                                        if let Some(a) = &self.agent {
+                                            a.abort();
+                                        }
+                                        self.status("stopping…", StatusKind::Info);
+                                    } else {
+                                        if let Some(a) = &self.agent {
+                                            a.request_tool_cancel();
+                                        }
+                                        self.status("cancelling…", StatusKind::Info);
                                     }
-                                    self.status("cancelling…", StatusKind::Info);
                                 } else {
                                     self.clear_busy_statuses();
                                     self.clear_subagent_ui_on_stop();
