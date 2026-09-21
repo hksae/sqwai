@@ -1565,6 +1565,8 @@ number; a `partial` one is missing something the design calls for.
 | AE | Core and UI decoupling: headless `serve` (stdio/JSON-RPC) + crates workspace split (`sqwai-core`, `sqwai-tui`, `sqwai-server`) (§5.11) | planned | B |
 | AF | Hardcode linter: scan file_diff for test-shaped literals (warn-layer) | done — confession phrases + long compared/returned string literals over the outcome diff (cap 3, never blocks); numeric magic constants deliberately excluded (ports/timeouts); `bash`-written bytes not scanned | I4 |
 | AG | Safety level presets / refusal override policy for models with strong filters | planned | — |
+| AH | ULTRA-1: executable acceptance as the settling rule (§12.12) — frozen check that fails before the change, judge ladder beyond tests, three states, `verified` required to settle | next (§12.12) | V, V1, F3, H1 |
+| AI | ULTRA-2/3: conditional escalation under a separate arbiter budget (`N ≤ B/T`); divergence phase gated behind a diversity measurement | planned (§12.12) | AH, M, AC |
 
 
 
@@ -1573,6 +1575,12 @@ then benchmark G, then infrastructure. K, L and O are the last passes — the
 canvas graph view, the browser and unattended mode. Order among M, N, O is
 M → N → O. Unattended is last because it is only as safe as everything under
 it, and `brief` is only as useful as the journal is complete.
+
+ULTRA (§12.12) sits between the benchmark and the infrastructure passes. AH is
+unblocked today and rides in the same pass as M: both are host-side, both serve
+the thesis directly, and AH is the cheapest way to make `complete` mean
+something. AI waits for G1 to supply the measurements and for AC to supply the
+harness that shows whether arbitration pays. Neither displaces K, L or O.
 
 Rules: no agent-facing graph feature before I3; no reflector before F2. F1 is
 complete except its explicitly deferred evidence/refs rules, which belong to
@@ -1743,7 +1751,8 @@ Explicit `step` parameter in every tool call for manual attribution	shifts attri
 To protect execution integrity and determinism, the following are out of scope by
 policy, not merely deferred:
 - Multi-agent orchestration beyond the current subagent model — it blurs plan
-  ownership and execution integrity (who owns the plan?).
+  ownership and execution integrity (who owns the plan?). Best-of-N attempts
+  inside a single plan (§12.12) are not orchestration: one plan, one owner.
 - Embeddings / semantic search in the graph — FTS + structure suffice; embeddings
   add non-determinism to what must be a fact.
 - Automatic prompt training / self-improvement — contradicts "code is the source
@@ -1956,6 +1965,135 @@ context is a host observation, which fits the integrity model.
 - **Not** the automatic neighbor pull from the original sketch — that stays
   with the context block (§12.5). The value of `@` is precision.
 
+### 12.12 ULTRA mode (planned)
+
+**Thesis.** Selection, not generation, is the bottleneck. A strong model's
+first attempt is usually good; what is missing is a cheap, trustworthy way to
+tell whether it is *done*. Extra attempts at the same task buy little on their
+own — they buy something only after the host can rank or reject them. ULTRA
+spends budget on acceptance and arbitration first, and on diversity last.
+
+**Engagement.** `ultra` is an orthogonal per-turn flag (`/ultra`, status line
+`ACT · ULTRA`), not a replacement for Plan/Act. It changes how hard the host
+tries, not what the agent was asked to do, and it lives for one turn. It never
+changes the plan.
+
+**Acceptance is the gate.** ULTRA engages only when the turn has an
+*executable acceptance*: something the host runs that returns pass/fail
+machine-readably. Three requirements, all mandatory:
+
+1. **Executable.** The host runs it; the model's claim about it is not a
+   receipt. `cmd:` items (§2.1.4) and `browser:` items (§12.6) qualify.
+2. **Fails before.** It must fail on the pre-change tree. A check that already
+   passes is not acceptance, it is a smoke test.
+3. **Frozen.** It is hashed before the first attempt; a change to the check
+   invalidates every receipt taken against the old hash (V1).
+
+A test is a special case of acceptance, not a requirement. A project without a
+test suite can still be accepted through the judge ladder below.
+
+**The judge ladder.** Ordered by trust per unit of cost; the host walks down it
+and stops at the first rung that applies:
+
+1. An existing test that fails before the change.
+2. A reproduction test written for this change — must fail first.
+3. A **differential check**: the same input through the old and new code paths,
+   outputs compared.
+4. A **characterization snapshot**: frozen output of the current behaviour,
+   which must be unchanged, or changed only where the plan says it may be.
+5. **Diff invariants**: structural properties of the change that must hold
+   (AST-normalized where possible).
+6. **Round-trip**: parse/serialize, encode/decode, write/read.
+7. Build, types, schema validation, `--dry-run`.
+8. A fixture run with an expected exit code.
+
+Rungs 3–5 are what make the ladder more than a test runner: they are available
+when the project has no suite, and they catch changes a suite does not cover.
+
+**Three states.** `verified` · `not verified` · `unknown` (flaky — repeated runs
+disagree). ULTRA escalates only from `not verified`. `unknown` is reported as
+such and never silently retried into `verified`.
+
+**Budget: one attempt always, escalation on failure.** The first attempt is
+always made, always at full effort. Escalation happens only on an actual
+acceptance failure — the first attempt *is* the difficulty oracle, and no
+length/file-count heuristic is consulted. This is deliberate: such heuristics
+err in both directions, and a probe run is an attempt already paid for.
+
+**The arbiter is a second currency.** Attempts cost tokens; arbitration costs
+wall-clock and CPU, and the two are budgeted separately. The real cost is
+`attempts × checks × runs`, and it can exceed the cost of the attempts
+themselves (5 attempts × 10 checks × 3 runs = 150 executions). Rules:
+
+- `N ≤ B/T`, where `B` is the arbiter budget and `T` the cost of arbitrating
+  one attempt; N is computed, not assumed.
+- Order checks by trust per unit cost; grid, not round-robin.
+- Eliminate early: a failed compile or a failed cheap check ends the attempt
+  before expensive checks run.
+- Repeat runs only where flakiness was actually observed.
+- Run affected checks first (M, §12.5); the full suite is still required at
+  `complete`.
+- Finding the acceptance in the first place is a cost always paid on every
+  ULTRA turn, whether or not escalation happens.
+
+Honest consequence: on a project without test infrastructure, and on a task a
+single attempt already solves, ULTRA is strictly worse than not using it — it
+pays the acceptance cost and buys nothing. The flag exists to be left off.
+
+**Diversity is constructed, never sampled.** Temperature does not produce
+different approaches: measured, 1.0 → 1.2 yields no additional unique answers,
+and post-trained strong models have *lower* output diversity (Pass@k falls as
+Pass@1 rises). Different attempts must differ externally — a different model, a
+different scaffold, or an injected constraint. Deduplication by diff
+(AST-normalized where possible) is a filter over the attempts, never a source
+of them, and a different diff is not a different approach.
+
+**Anti-gaming.** The acceptance check is frozen before the first attempt and
+its hash is re-checked at every receipt; a changed check invalidates the
+earlier receipts and is journaled. AF (hardcode linter) already scans the
+outcome diff for test-shaped literals and stays the warn-layer it is.
+
+**UI.** `ACT · ULTRA` in the status line while the flag is on. At engagement
+the host renders the acceptance block: the resolved check(s), the pre-change
+failure, and `[y] [e] [n]` (accept / edit / none). Attempt 1 renders as a
+normal turn — no ceremony. Escalation adds one child row per attempt with its
+drop reason. Arbitration renders as visible rows (check, verdict, cost). The
+three states have three distinct looks.
+
+**ULTRA + Plan.** Compatible, with one change of meaning: in Plan mode the
+commitment moves to planning time. The plan carries its executable acceptance,
+a budget ceiling, and the strategy space; the per-turn budget rule does not
+fire. ULTRA does not imply Plan: planning measurably hurts strong models on
+some tasks (in one ablation a 550B model scored 2.0 points lower while
+consuming 30% fewer tokens), so ULTRA must stay usable in Act.
+
+**Boundary with §11.** This is not multi-agent orchestration. There is one plan
+and one owner; N attempts are alternatives at the same step under that plan,
+never competing plans.
+
+**Build order.**
+
+- **ULTRA-1 — acceptance first.** The host refuses to settle a change without
+  a frozen executable check that failed before it; the judge ladder replaces
+  "a test" as the requirement. Carries most of the measured value and needs no
+  attempt infrastructure.
+- **ULTRA-2 — conditional escalation.** One attempt always; N attempts under a
+  separate arbiter budget on acceptance failure, with `N ≤ B/T`.
+- **ULTRA-3 — divergence.** Gated behind a cheap measurement of our own: 5–10
+  tasks × N runs, count unique diffs after AST normalization. Median ≈ 1 means
+  the phase is dropped, not tuned.
+
+**Death criteria.** ULTRA-1 is dropped if it does not reduce `not verified`
+acceptance at `complete` on the G1 benchmark, or if its arbitration cost
+exceeds the cost of one extra attempt. ULTRA-3 is dropped on the diversity
+measurement above. Neither outcome is a failure of the mode; both are the
+reason the slices are separate.
+
+**What ULTRA is not.** Not a second opinion on every turn (human approval
+accuracy is measured at ~66% — more confirmations make it worse, not better).
+Not a tournament by default. Not a substitute for the plan, the journal, or
+the checkpoints.
+
 ---
 
 ## 13. Known gaps (acknowledged boundaries)
@@ -1995,6 +2133,15 @@ context is a host observation, which fits the integrity model.
   an unrelated text item). For benchmark scoring, `cmd:` items with re-run
   receipts are the trustworthy subset. Tightening (zero-error diagnostics,
   rejecting untyped items on create) is a code change, not a doc change.
+
+- **Acceptance proves only what was checked.** An executable acceptance gate is
+  the strongest cheap signal we have, but it is a lower bound on correctness,
+  not a proof. In the Patchwork study of LLM-generated code, 65 of 67
+  structural defects passed the project's tests, typechecker and SAST
+  simultaneously, and the tests alone caught none of them. §12.12 raises the
+  floor (judge ladder, refusal to settle without a check that failed first) and
+  does not close the gap. Mitigations: the ladder, manual acceptance items,
+  diff review.
 
 ### Findings vs notes
 
