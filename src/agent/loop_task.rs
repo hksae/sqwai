@@ -871,6 +871,17 @@ async fn run_subagent(
     // the timeout, and the TUI shows "cancelling…" forever (§3.7).
     let mut cancel_poll = tokio::time::interval(std::time::Duration::from_millis(100));
     loop {
+        // Checked at the top of every iteration, not only on the interval
+        // tick. The select below is `biased`, so while the child keeps
+        // producing events its `recv` branch is always the ready one and the
+        // interval branch is never polled — a fast child streaming a long
+        // answer would starve the check and Esc would look ignored. The
+        // loop always consumes one event per iteration, so this check can
+        // never starve; the interval branch still covers a silent child
+        // parked in `recv`.
+        if parent_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return stop_child(&mut child, parent_tx, id, "cancelled by user").await;
+        }
         let event = tokio::select! {
             biased;
             res = tokio::time::timeout_at(deadline, child.rx.recv()) => match res {
@@ -891,9 +902,6 @@ async fn run_subagent(
             }
             },
             _ = cancel_poll.tick() => {
-                if parent_cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                    return stop_child(&mut child, parent_tx, id, "cancelled by user").await;
-                }
                 continue;
             }
         };
