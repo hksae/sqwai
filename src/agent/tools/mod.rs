@@ -2331,6 +2331,10 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             }
                         }
                         created.sessions = vec![ctx.session_id.clone()];
+                        // §12.12: prove the cmd: checks discriminate, before
+                        // anything has changed.
+                        let proof = capture_baselines(ctx, &created);
+                        plan::set_baselines(&mut created, proof.slots.clone());
                         let id = created.id.clone();
                         let step_count = created.steps.len();
                         // Journal-first (§2.1.4): the intent carries everything
@@ -2345,6 +2349,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                                 "refs": s.refs,
                             })).collect::<Vec<_>>(),
                             "budget_limit": created.budget.limit,
+                            "baselines": proof.slots,
                             "result_id": created.id,
                             "result_created": created.created,
                             "result_sessions": created.sessions,
@@ -2358,9 +2363,10 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             true,
                             args,
                         ) {
-                            Ok(_) => {
-                                Outcome::ok(format!("plan {id} created with {step_count} steps"))
-                            }
+                            Ok(_) => Outcome::ok(format!(
+                                "plan {id} created with {step_count} steps{}",
+                                proof.notes.join("")
+                            )),
                             Err(e) => Outcome::err(format!("plan write failed: {e:#}")),
                         }
                     }
@@ -2602,6 +2608,167 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
 /// lint run, and cutting one off at two minutes would report a failure that is
 /// really a timeout.
 const ACCEPTANCE_TIMEOUT_SECS: u64 = 900;
+
+/// How much of a baseline's failing output is kept inline (§12.12). Enough to
+/// see *why* it failed — "cannot find function foo" is a baseline, "command
+/// not found" is a typo — without copying a test log into the plan file.
+const BASELINE_HEAD_CHARS: usize = 600;
+
+/// How much of that reason is repeated in the create result. One line, short
+/// enough to read in a collapsed tool row.
+const BASELINE_REASON_CHARS: usize = 160;
+
+/// Baselines captured at plan time, plus what to tell the model about the
+/// items that did not get one.
+struct BaselineProof {
+    slots: Vec<Option<plan::Baseline>>,
+    /// one line per item, prefixed with `\n` so they can be appended raw
+    notes: Vec<String>,
+}
+
+/// Exit codes that mean the shell never ran the check at all: a typo or a
+/// missing tool, not a failure of the code under test.
+///
+/// Best effort, and only where the shell actually says so. POSIX shells answer
+/// 127 (not found) and 126 (not executable). `cmd.exe` and PowerShell answer 1
+/// — the same code an ordinary failing check uses — so on Windows a typo *is*
+/// recorded as a baseline. That is not a hole: `verify` needs the check to
+/// pass, and a typo never passes, so the item simply never settles. The
+/// portable guard is the failing output kept beside the baseline and shown to
+/// whoever has to judge it.
+fn check_never_started(exit: i32) -> bool {
+    match crate::agent::shell::ShellKind::detect() {
+        crate::agent::shell::ShellKind::Bash | crate::agent::shell::ShellKind::Sh => {
+            exit == 126 || exit == 127
+        }
+        crate::agent::shell::ShellKind::Cmd | crate::agent::shell::ShellKind::PowerShell => false,
+    }
+}
+
+/// §12.12: run every `cmd:` acceptance item once and keep the runs that
+/// failed. Called at plan creation — the only moment the pre-change tree is
+/// still the current one. Once the work starts there is nothing left to prove
+/// that the check can fail at all, and a check that cannot fail settles
+/// nothing.
+///
+/// Nothing here is fatal. A check that already passes, a command that cannot
+/// run, an unsafe command: each just leaves its item without a baseline. The
+/// item is shown in that state and can never be settled from it; the refusal
+/// happens at `plan verify`, where the model can do something about it.
+fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> BaselineProof {
+    let mut proof = BaselineProof {
+        slots: Vec::with_capacity(plan.acceptance.len()),
+        notes: Vec::new(),
+    };
+    let paths = plan::digest_paths(plan);
+    for (index, item) in plan.acceptance.iter().enumerate() {
+        let plan::AcceptanceKind::Command(command) = item.kind() else {
+            proof.slots.push(None);
+            continue;
+        };
+        let command = command.to_string();
+        // The command text arrives from the model and is about to be run
+        // without asking, so anything that would need approval is skipped
+        // rather than run — the same refusal `plan verify` makes, moved to
+        // where the model can still rewrite the item.
+        match safety::classify(&command) {
+            safety::Verdict::Safe => {}
+            safety::Verdict::Blocked(reason) => {
+                proof.slots.push(None);
+                proof.notes.push(format!(
+                    "\nacceptance {index}: not run — touches protected path ({reason})"
+                ));
+                continue;
+            }
+            safety::Verdict::NeedsApproval(reason) => {
+                proof.slots.push(None);
+                proof.notes.push(format!(
+                    "\nacceptance {index}: not run — would need approval ({reason}); \
+                     acceptance commands run unattended, so they must be safe"
+                ));
+                continue;
+            }
+        }
+        let state_before = plan::state_digest(&ctx.root, &paths, &command);
+        let run = exec::bash(ctx, &command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
+        if run.cancelled {
+            proof.slots.push(None);
+            proof.notes.push(format!("\nacceptance {index}: cancelled"));
+            // the user is stopping the turn; do not start more checks
+            while proof.slots.len() < plan.acceptance.len() {
+                proof.slots.push(None);
+            }
+            break;
+        }
+        let state_after = plan::state_digest(&ctx.root, &paths, &command);
+        let Some(exit) = run.exit_code else {
+            proof.slots.push(None);
+            proof.notes.push(format!(
+                "\nacceptance {index}: could not be run — {}",
+                run.output.lines().next().unwrap_or("no result")
+            ));
+            continue;
+        };
+        if exit == 0 {
+            proof.slots.push(None);
+            proof.notes.push(format!(
+                "\nacceptance {index}: passes already — that makes it a regression \
+                 guard, not acceptance, and it will never settle this item"
+            ));
+            continue;
+        }
+        // The shell saying the check never started, rather than the check
+        // failing. Recording one of those as a baseline would make the proof
+        // meaningless, so a typo stays a typo instead of becoming evidence.
+        if check_never_started(exit) {
+            proof.slots.push(None);
+            proof.notes.push(format!(
+                "\nacceptance {index}: could not be run (exit {exit}) — check the command text"
+            ));
+            continue;
+        }
+        if state_before != state_after {
+            proof.slots.push(None);
+            proof.notes.push(format!(
+                "\nacceptance {index}: ran while tracked state moved; no baseline taken"
+            ));
+            continue;
+        }
+        let output_hash = blake3::hash(run.output.as_bytes()).to_hex().to_string();
+        let head: String = run
+            .output
+            .lines()
+            .filter(|line| !line.starts_with("(exit code"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .chars()
+            .take(BASELINE_HEAD_CHARS)
+            .collect();
+        // The reason travels with the verdict: on a shell that reports a typo
+        // as an ordinary failure, this line is the only thing that separates
+        // "the feature is missing" from "the command does not exist".
+        let first_line: String = head
+            .lines()
+            .next()
+            .unwrap_or("no output")
+            .trim()
+            .chars()
+            .take(BASELINE_REASON_CHARS)
+            .collect();
+        proof.slots.push(Some(plan::Baseline {
+            at: plan::now(),
+            exit,
+            check_definition_hash: plan::check_definition_hash(&command),
+            output_hash,
+            head,
+            state_digest: state_after,
+        }));
+        proof.notes.push(format!(
+            "\nacceptance {index}: fails before the change (exit {exit}) — {first_line}"
+        ));
+    }
+    proof
+}
 
 /// `plan verify <index>` — the host settles the item, on its own terms.
 ///
@@ -3270,6 +3437,102 @@ mod tests {
             .status()
             .unwrap();
         (ctx, dir)
+    }
+
+    fn plan_with(acceptance: Vec<&str>) -> plan::Plan {
+        plan::create(
+            "prove the checks".to_string(),
+            Vec::new(),
+            acceptance.into_iter().map(str::to_string).collect(),
+            vec![plan::NewStep {
+                title: "do the work".to_string(),
+                kind: None,
+                refs: Vec::new(),
+            }],
+            0,
+            &plan::Limits::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn baselines_keep_the_failing_runs_and_only_those() {
+        let (mut ctx, dir) = proj();
+        let plan = plan_with(vec![
+            "cmd: exit 3",
+            "cmd: exit 0",
+            "manual: eyeball it",
+            "the page renders",
+        ]);
+        let proof = capture_baselines(&mut ctx, &plan);
+        assert_eq!(proof.slots.len(), 4);
+        let baseline = proof.slots[0]
+            .as_ref()
+            .expect("a check that fails is the whole point");
+        assert_eq!(baseline.exit, 3);
+        // the hash is over the stripped command, the text the host runs
+        assert_eq!(
+            baseline.check_definition_hash,
+            plan::check_definition_hash("exit 3")
+        );
+        assert!(!baseline.output_hash.is_empty());
+        assert!(proof.slots[1].is_none(), "a check that passes proves nothing");
+        assert!(proof.slots[2].is_none(), "manual items are never run");
+        assert!(proof.slots[3].is_none(), "free text has nothing to run");
+        // and the model is told, per item, so it can fix the plan now
+        assert!(proof.notes.iter().any(|n| n.contains("fails before")));
+        assert!(
+            proof.notes.iter().any(|n| n.contains("exit 3")),
+            "the note carries the reason it failed: {:?}",
+            proof.notes
+        );
+        assert!(
+            proof
+                .notes
+                .iter()
+                .any(|n| n.contains("passes already") || n.contains("could not be run")),
+            "the passing check must be named: {:?}",
+            proof.notes
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_check_that_never_started_is_not_a_baseline_where_the_shell_says_so() {
+        // Only POSIX shells report "not found" in the exit code. cmd.exe and
+        // PowerShell use 1, the same code an ordinary failure uses, so there a
+        // typo *is* recorded — and can never settle anything, because `verify`
+        // needs the check to pass. The portable guard is the failing output
+        // that rides the baseline and the create note.
+        if !matches!(
+            crate::agent::shell::ShellKind::detect(),
+            crate::agent::shell::ShellKind::Bash | crate::agent::shell::ShellKind::Sh
+        ) {
+            return;
+        }
+        let (mut ctx, dir) = proj();
+        let plan = plan_with(vec!["cmd: sqwai-no-such-command-xyz"]);
+        let proof = capture_baselines(&mut ctx, &plan);
+        assert!(
+            proof.slots[0].is_none(),
+            "a typo must not become evidence: {:?}",
+            proof.notes
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unsafe_acceptance_check_is_never_run_to_prove_itself() {
+        let (mut ctx, dir) = proj();
+        let plan = plan_with(vec!["cmd: rm -rf /"]);
+        let proof = capture_baselines(&mut ctx, &plan);
+        assert!(proof.slots[0].is_none());
+        assert!(
+            proof.notes.iter().any(|n| n.contains("not run")),
+            "an unsafe check is refused, not executed: {:?}",
+            proof.notes
+        );
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

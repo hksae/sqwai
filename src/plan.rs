@@ -349,10 +349,46 @@ pub struct Acceptance {
     pub evidence: Vec<EvidenceRef>,
     #[serde(default)]
     pub validation: Validation,
+    /// §12.12: proof that the check *discriminates* — a host run of the same
+    /// check that failed on the tree as it stood before the work started.
+    /// Captured at plan time, which is the only moment the pre-change tree is
+    /// still the current one. Absent means the item may be read and shown,
+    /// but a green run can never settle it: a check that has never failed is
+    /// a smoke test, not acceptance.
+    ///
+    /// Deliberately not a [`Receipt`]: a receipt is invalidated when the
+    /// paths it covered change, and a baseline is captured *expecting* them
+    /// to change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<Baseline>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// One host run of a `cmd:` acceptance item that failed, kept as the item's
+/// evidence that it can fail at all (§12.12). The host runs the check itself:
+/// a failing run the model reported is a claim, not a proof.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Baseline {
+    pub at: String,
+    /// non-zero by construction — the runs that passed are the ones this
+    /// struct exists to leave unrecorded
+    pub exit: i32,
+    /// blake3 of the check definition the run used. Rewriting the command
+    /// makes a new check, and the old baseline stops applying to it.
+    pub check_definition_hash: String,
+    /// blake3 of the captured output
+    pub output_hash: String,
+    /// first lines of that output, so the reason it failed is inspectable
+    /// without a journal dig — "cannot find function foo" is a baseline,
+    /// "command not found" is a typo wearing a baseline's clothes
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub head: String,
+    /// state digest the failing run observed (before == after: a run that
+    /// raced a mutation proves nothing and is never recorded)
+    pub state_digest: String,
 }
 
 /// How the host is meant to settle an acceptance item (§2.1.2).
@@ -954,6 +990,13 @@ fn rebuild_created(
         &Limits::default(),
     )
     .ok()?;
+    // §12.12: the baselines captured at create ride the intent, so replay
+    // restores the proof instead of re-running the checks.
+    if let Some(value) = get("baselines")
+        && let Ok(baselines) = serde_json::from_value::<Vec<Option<Baseline>>>(value.clone())
+    {
+        set_baselines(&mut plan, baselines);
+    }
     plan.id = get("result_id")?.as_str()?.to_string();
     plan.created = get("result_created")?.as_str()?.to_string();
     plan.sessions = get("result_sessions")?
@@ -974,6 +1017,13 @@ fn rebuild_accepted(
 ) -> Option<Plan> {
     let draft: PlanDraftArgs = serde_json::from_value(fields.get("draft")?.clone()).ok()?;
     let mut fresh = draft.build(u64::MAX, &Limits::default()).ok()?;
+    // §12.12: same as create — the baselines captured on accept ride the
+    // record, so replay never re-runs a check that has since changed.
+    if let Some(value) = fields.get("baselines")
+        && let Ok(baselines) = serde_json::from_value::<Vec<Option<Baseline>>>(value.clone())
+    {
+        set_baselines(&mut fresh, baselines);
+    }
     fresh.id = fields.get("new_id")?.as_str()?.to_string();
     fresh.created = fields.get("new_created")?.as_str()?.to_string();
     fresh.sessions = fields
@@ -1718,6 +1768,7 @@ pub fn create(
                 status: AcceptanceStatus::Pending,
                 evidence: Vec::new(),
                 validation: Validation::default(),
+                baseline: None,
                 by: None,
                 reason: None,
             })
@@ -2227,6 +2278,31 @@ pub fn check_definition_hash(command: &str) -> String {
     blake3::hash(command.as_bytes()).to_hex().to_string()
 }
 
+/// §12.12: does this item carry proof that its check *discriminates*?
+///
+/// True only for a `cmd:` item whose baseline was taken against the check
+/// definition it still has — rewriting the command makes a new check, and the
+/// old failing run stops being evidence about it. Manual items and free text
+/// can never be proven this way, which is why they settle on other terms.
+pub fn proven_failing(item: &Acceptance) -> bool {
+    let AcceptanceKind::Command(command) = item.kind() else {
+        return false;
+    };
+    item.baseline
+        .as_ref()
+        .is_some_and(|b| b.check_definition_hash == check_definition_hash(command))
+}
+
+/// Host-only: attach the baselines captured at plan time (§12.12). The vector
+/// is positional against the acceptance list; a missing or short vector leaves
+/// the remaining items without a baseline, which is a state they can be shown
+/// in but never settled from.
+pub fn set_baselines(plan: &mut Plan, baselines: Vec<Option<Baseline>>) {
+    for (item, baseline) in plan.acceptance.iter_mut().zip(baselines) {
+        item.baseline = baseline;
+    }
+}
+
 /// Mark an acceptance item verified on the host's terms.
 ///
 /// `evidence` is what the host is prepared to stand behind for *this* item:
@@ -2678,6 +2754,11 @@ pub fn render(plan: &Plan) -> String {
             match a.validation.status {
                 ValidationStatus::Pending => {}
                 other => out.push_str(&format!(" [validation: {}]", other.as_str())),
+            }
+            // §12.12: a cmd: item with no baseline cannot be settled by a
+            // green run, so say so here rather than at the verify that fails
+            if matches!(a.kind(), AcceptanceKind::Command(_)) && !proven_failing(a) {
+                out.push_str(" [no baseline]");
             }
             out.push('\n');
         }
@@ -3803,6 +3884,106 @@ mod tests {
             plan.acceptance[0].validation.status,
             ValidationStatus::Waived
         );
+    }
+
+    /// Mirrors `Acceptance::kind()`: the hash is taken over the *stripped*
+    /// command, which is the text the host actually runs.
+    fn baseline_for(item_text: &str) -> Baseline {
+        let command = item_text.strip_prefix("cmd:").unwrap_or(item_text).trim();
+        Baseline {
+            at: now(),
+            exit: 101,
+            check_definition_hash: check_definition_hash(command),
+            output_hash: "outhash".to_string(),
+            head: "error[E0425]: cannot find function `foo`".to_string(),
+            state_digest: "digest".to_string(),
+        }
+    }
+
+    #[test]
+    fn baseline_proves_failure_only_against_the_check_it_was_taken_on() {
+        let mut plan = new_plan(); // acceptance[0] is "cmd: cargo test"
+        assert!(!proven_failing(&plan.acceptance[0]), "no baseline yet");
+        set_baselines(&mut plan, vec![Some(baseline_for("cmd: cargo test"))]);
+        assert!(proven_failing(&plan.acceptance[0]));
+        // rewriting the command makes a new check: the old failing run stops
+        // being evidence about it, which is the whole point of freezing it
+        plan.acceptance[0].text = "cmd: cargo test --lib".to_string();
+        assert!(!proven_failing(&plan.acceptance[0]));
+    }
+
+    #[test]
+    fn baseline_never_proves_a_manual_or_text_item() {
+        let mut plan = create(
+            "render the page".to_string(),
+            Vec::new(),
+            vec![
+                "manual: eyeball it".to_string(),
+                "the page renders".to_string(),
+            ],
+            vec![NewStep {
+                title: "do the work".to_string(),
+                kind: None,
+                refs: Vec::new(),
+            }],
+            0,
+            &Limits::default(),
+        )
+        .unwrap();
+        // even handed the same shape of proof, neither kind can be settled by
+        // a host run: only a command is runnable
+        set_baselines(
+            &mut plan,
+            vec![
+                Some(baseline_for("manual: eyeball it")),
+                Some(baseline_for("the page renders")),
+            ],
+        );
+        assert!(!proven_failing(&plan.acceptance[0]));
+        assert!(!proven_failing(&plan.acceptance[1]));
+    }
+
+    #[test]
+    fn set_baselines_is_positional_and_a_short_vector_leaves_the_rest_unproven() {
+        let mut plan = create(
+            "two checks".to_string(),
+            Vec::new(),
+            vec!["cmd: cargo test".to_string(), "cmd: cargo clippy".to_string()],
+            vec![NewStep {
+                title: "do the work".to_string(),
+                kind: None,
+                refs: Vec::new(),
+            }],
+            0,
+            &Limits::default(),
+        )
+        .unwrap();
+        set_baselines(&mut plan, vec![Some(baseline_for("cmd: cargo test"))]);
+        assert!(proven_failing(&plan.acceptance[0]));
+        assert!(
+            !proven_failing(&plan.acceptance[1]),
+            "an item past the end of the vector stays unproven"
+        );
+    }
+
+    #[test]
+    fn render_marks_a_cmd_item_that_cannot_settle_anything() {
+        let mut plan = new_plan();
+        assert!(render(&plan).contains("[no baseline]"));
+        set_baselines(&mut plan, vec![Some(baseline_for("cmd: cargo test"))]);
+        assert!(!render(&plan).contains("[no baseline]"));
+    }
+
+    #[test]
+    fn an_acceptance_item_without_a_baseline_still_loads() {
+        // plan files written before §12.12 carry no baseline at all
+        let item: Acceptance = serde_json::from_value(serde_json::json!({
+            "text": "cmd: cargo test",
+            "status": "pending",
+        }))
+        .unwrap();
+        assert!(item.baseline.is_none());
+        assert!(!proven_failing(&item));
     }
 
     #[test]
