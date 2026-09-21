@@ -1565,7 +1565,7 @@ number; a `partial` one is missing something the design calls for.
 | AE | Core and UI decoupling: headless `serve` (stdio/JSON-RPC) + crates workspace split (`sqwai-core`, `sqwai-tui`, `sqwai-server`) (§5.11) | planned | B |
 | AF | Hardcode linter: scan file_diff for test-shaped literals (warn-layer) | done — confession phrases + long compared/returned string literals over the outcome diff (cap 3, never blocks); numeric magic constants deliberately excluded (ports/timeouts); `bash`-written bytes not scanned | I4 |
 | AG | Safety level presets / refusal override policy for models with strong filters | planned | — |
-| AH | ULTRA-1: executable acceptance as the settling rule (§12.12) — frozen check that fails before the change, judge ladder beyond tests, three states, `verified` required to settle | next (§12.12) | V, V1, F3, H1 |
+| AH | ULTRA-1: executable acceptance as the settling rule (§12.12) — frozen check that fails before the change, judge ladder beyond tests, three states, `verified` required to settle | partial (§12.12) — baseline proof and the settle gate shipped for `cmd:` items (host runs every check at plan create, keeps the failing run, `verify` refuses an item without one, `plan show` marks it); three states/flake detection and the judge ladder beyond tests remain | V, V1, F3, H1 |
 | AI | ULTRA-2/3: conditional escalation under a separate arbiter budget (`N ≤ B/T`); divergence phase gated behind a diversity measurement | planned (§12.12) | AH, M, AC |
 
 
@@ -2076,7 +2076,13 @@ never competing plans.
 - **ULTRA-1 — acceptance first.** The host refuses to settle a change without
   a frozen executable check that failed before it; the judge ladder replaces
   "a test" as the requirement. Carries most of the measured value and needs no
-  attempt infrastructure.
+  attempt infrastructure. *Shipped:* the host runs every `cmd:` item once at
+  `plan create` — the only moment the pre-change tree is still the current one
+  — keeps the runs that exited non-zero as the item's `baseline`, and refuses
+  `plan verify` on an item without one. Nothing there is fatal: a check that
+  already passes, a command that cannot run, an unsafe command each leaves the
+  item unproven, `plan show` marks it `[no baseline]`, and the create result
+  names the reason. *Remaining:* the three states and the ladder below.
 - **ULTRA-2 — conditional escalation.** One attempt always; N attempts under a
   separate arbiter budget on acceptance failure, with `N ≤ B/T`.
 - **ULTRA-3 — divergence.** Gated behind a cheap measurement of our own: 5–10
