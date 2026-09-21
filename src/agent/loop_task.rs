@@ -2129,7 +2129,7 @@ async fn run_agent(
                         "propose_plan" => {
                             propose_plan(
                                 call,
-                                &root,
+                                &mut ctx,
                                 &plan_limits,
                                 context_limit,
                                 read_only,
@@ -3839,7 +3839,7 @@ async fn ask_user(
 #[allow(clippy::too_many_arguments)]
 async fn propose_plan(
     call: &ToolCallReq,
-    root: &std::path::Path,
+    ctx: &mut ToolCtx,
     plan_limits: &crate::config::PlanConfig,
     context_limit: u64,
     read_only: bool,
@@ -3849,6 +3849,8 @@ async fn propose_plan(
     next_id: &mut u64,
     session_id: &str,
 ) -> tools::Outcome {
+    let root = ctx.root.clone();
+    let root = root.as_path();
     // the call itself writes nothing, but an accepted proposal is stored by
     // the host — which a read-only session must never do (lock owned elsewhere)
     if read_only {
@@ -3859,7 +3861,7 @@ async fn propose_plan(
     }
     let id = *next_id;
     *next_id += 1;
-    let draft_args: plan::PlanDraftArgs = match serde_json::from_value(call.args.clone()) {
+    let mut draft_args: plan::PlanDraftArgs = match serde_json::from_value(call.args.clone()) {
         Ok(args) => args,
         Err(e) => {
             return tools::Outcome::err(format!(
@@ -3867,6 +3869,27 @@ async fn propose_plan(
             ));
         }
     };
+    // Named verify commands expand here, before the draft is shown: what the
+    // user approves has to be what gets stored, and `plan create` already
+    // expands them at the same point.
+    match plan::substitute_verify_commands(
+        draft_args.acceptance,
+        &crate::config::Config::project_verify_commands(root),
+    ) {
+        Ok(expanded) => draft_args.acceptance = expanded,
+        Err(unknown) => {
+            let hint = if unknown.known.is_empty() {
+                "no verify commands seeded — run /init or write the command out".to_string()
+            } else {
+                format!("known: {}", unknown.known.join(", "))
+            };
+            return tools::Outcome::err(format!(
+                "plan proposal rejected [unknown_verify]: acceptance refers to unknown \
+                 verify command(s): ${} — {hint}",
+                unknown.names.join(", $")
+            ));
+        }
+    }
     let limits = plan::Limits {
         max_steps: plan_limits.max_steps,
     };
@@ -3929,7 +3952,7 @@ async fn propose_plan(
     }
     // Rebuild defensively: same args, same limits, fresh id. An accept can
     // only fail here on state that changed while the user was deciding.
-    let fresh = match draft_args.build(budget_limit, &limits) {
+    let mut fresh = match draft_args.build(budget_limit, &limits) {
         Ok(fresh) => fresh,
         Err(r) => {
             return tools::Outcome::err(format!(
@@ -3943,6 +3966,10 @@ async fn propose_plan(
         Ok(None) => None,
         Err(e) => return tools::Outcome::err(format!("plan store unreadable: {e:#}")),
     };
+    // §12.12: the same proof `plan create` takes, at the same moment — the
+    // tree is still the pre-change one while the user is deciding.
+    let proof = tools::capture_baselines(ctx, &fresh);
+    plan::set_baselines(&mut fresh, proof.slots.clone());
     // Journal-first (§2.1.4): the intent carries the full draft so replay
     // can rebuild the new plan and retire the old one after a crash.
     let new_id = fresh.id.clone();
@@ -3957,6 +3984,7 @@ async fn propose_plan(
                     "ok": true,
                     "plan_id": new_id,
                     "draft": draft_args,
+                    "baselines": proof.slots,
                     "new_id": new_id,
                     "new_created": new_created,
                     "new_sessions": [session_id],
@@ -3984,7 +4012,6 @@ async fn propose_plan(
             Err(e) => return tools::Outcome::err(format!("plan store unreadable: {e:#}")),
         }
     }
-    let mut fresh = fresh;
     fresh.sessions = vec![session_id.to_string()];
     if let Some(seq) = intent_seq {
         fresh.applied_event = Some(format!("{session_id}:{seq}"));
@@ -4009,9 +4036,13 @@ async fn propose_plan(
     tools::Outcome::ok(match abandoned {
         Some(old) => format!(
             "plan {new_id} accepted with {steps} steps; previous plan {old} abandoned. \
-             Start its first step."
+             Start its first step.{}",
+            proof.notes.join("")
         ),
-        None => format!("plan {new_id} accepted with {steps} steps. Start its first step."),
+        None => format!(
+            "plan {new_id} accepted with {steps} steps. Start its first step.{}",
+            proof.notes.join("")
+        ),
     })
 }
 

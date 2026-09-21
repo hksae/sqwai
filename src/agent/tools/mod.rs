@@ -2620,10 +2620,10 @@ const BASELINE_REASON_CHARS: usize = 160;
 
 /// Baselines captured at plan time, plus what to tell the model about the
 /// items that did not get one.
-struct BaselineProof {
-    slots: Vec<Option<plan::Baseline>>,
+pub(crate) struct BaselineProof {
+    pub(crate) slots: Vec<Option<plan::Baseline>>,
     /// one line per item, prefixed with `\n` so they can be appended raw
-    notes: Vec<String>,
+    pub(crate) notes: Vec<String>,
 }
 
 /// Exit codes that mean the shell never ran the check at all: a typo or a
@@ -2655,7 +2655,7 @@ fn check_never_started(exit: i32) -> bool {
 /// run, an unsafe command: each just leaves its item without a baseline. The
 /// item is shown in that state and can never be settled from it; the refusal
 /// happens at `plan verify`, where the model can do something about it.
-fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> BaselineProof {
+pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> BaselineProof {
     let mut proof = BaselineProof {
         slots: Vec::with_capacity(plan.acceptance.len()),
         notes: Vec::new(),
