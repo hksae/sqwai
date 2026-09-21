@@ -2343,7 +2343,11 @@ pub fn verify_acceptance(
         }
         AcceptanceKind::Command(_) => {
             // the host ran it before calling this; nothing to point at, and
-            // `complete` runs it again rather than trusting an old record
+            // `complete` runs it again rather than trusting an old record.
+            // Whether the check has ever been *able* to fail is a rule about
+            // what the host may accept, so it lives at the host boundary
+            // (`tools::verify_acceptance`) and not here: replay restores
+            // commits that were already accepted, and must not be re-judged.
         }
         AcceptanceKind::Text(_) => {
             if evidence.is_empty() {

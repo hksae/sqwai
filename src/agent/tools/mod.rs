@@ -2794,6 +2794,34 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
         plan::AcceptanceKind::Manual(_) => (Vec::new(), None),
         plan::AcceptanceKind::Command(command) => {
             let command = command.to_string();
+            // §12.12: a green run only means something if red was possible.
+            // This is a rule about what the host may *accept*, so it sits here
+            // rather than in `plan::verify_acceptance`, which replay also
+            // drives — and replay restores commits that were already accepted,
+            // so it must not re-judge them.
+            if !plan::proven_failing(item) {
+                let hint = match item.baseline.as_ref() {
+                    Some(baseline) => format!(
+                        "the check was rewritten after its baseline was taken \
+                         (failed with exit {} at {}); prove the new text fails on \
+                         the pre-change state, or have the user waive the item \
+                         with /plan waive",
+                        baseline.exit, baseline.at
+                    ),
+                    None => "no run of this check has ever failed here, so passing \
+                             it proves nothing: make it reproduce the problem before \
+                             the work starts, or have the user waive the item with \
+                             /plan waive"
+                        .to_string(),
+                };
+                return rejection(plan::Rejection {
+                    code: "no_baseline",
+                    reason: format!(
+                        "acceptance {index} has no proof that it can fail: {command}"
+                    ),
+                    hint,
+                });
+            }
             // The acceptance text arrives from the model on `plan create`, so
             // it is model-controlled input that the host is about to execute.
             // It goes through the same classifier as `bash`, and anything that
@@ -3517,6 +3545,42 @@ mod tests {
             proof.slots[0].is_none(),
             "a typo must not become evidence: {:?}",
             proof.notes
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn verify_refuses_a_check_that_has_never_failed() {
+        let (mut ctx, dir) = proj();
+        let mut plan = plan_with(vec!["cmd: exit 3"]);
+        plan.sessions = vec![ctx.session_id.clone()];
+        plan::store(&dir, &plan).unwrap();
+
+        let denied = verify_acceptance(&mut ctx, 0, false);
+        assert!(!denied.ok);
+        assert!(
+            denied.output.contains("no_baseline"),
+            "the refusal names the rule: {}",
+            denied.output
+        );
+
+        // with the proof attached the same call gets past the gate and runs
+        // the check for real — which still fails, so nothing is settled
+        plan.acceptance[0].baseline = Some(plan::Baseline {
+            at: plan::now(),
+            exit: 3,
+            check_definition_hash: plan::check_definition_hash("exit 3"),
+            output_hash: "hash".to_string(),
+            head: "boom".to_string(),
+            state_digest: "digest".to_string(),
+        });
+        plan::store(&dir, &plan).unwrap();
+        let still_red = verify_acceptance(&mut ctx, 0, false);
+        assert!(!still_red.ok);
+        assert!(
+            still_red.output.contains("acceptance_failed"),
+            "a red check settles nothing: {}",
+            still_red.output
         );
         fs::remove_dir_all(&dir).ok();
     }
