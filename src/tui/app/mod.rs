@@ -2269,6 +2269,19 @@ impl App {
             text: String::new(),
             live: true,
         });
+        // Evidence for the "activity still live after the answer" report: the
+        // header shimmers only while `streaming` is true, so a shimmering
+        // header past a finished-looking answer means this turn never ended.
+        // Pair `turn start` with `turn finish` to tell "still running" from
+        // "finished but repainted".
+        crate::tui::event_log::log(
+            "TURN",
+            format!(
+                "start segments={} groups={}",
+                self.segments.len(),
+                self.activity_groups.len()
+            ),
+        );
         self.jump_to_bottom_on_typing();
         self.dirty = true;
     }
@@ -3422,6 +3435,10 @@ impl App {
                         // Otherwise the session was not replaced, so there is
                         // no new answer to authorize either: only what was
                         // actually streamed may fill the slot.
+                        crate::tui::event_log::log(
+                            "TURN",
+                            format!("agent gone without Completed aborted={}", self.aborted),
+                        );
                         let result = if self.aborted {
                             Err("aborted".to_string())
                         } else {
@@ -3602,6 +3619,10 @@ impl App {
                     self.dirty = true;
                 }
                 AgentEvent::SubagentDone { id, ok, output } => {
+                    crate::tui::event_log::log(
+                        "SUBAGENT",
+                        format!("done id={id} ok={ok} output_len={}", output.chars().count()),
+                    );
                     if let Some((_, _, status, current, _)) = self
                         .subagents
                         .iter_mut()
@@ -3772,6 +3793,10 @@ impl App {
                     self.dirty = true;
                 }
                 AgentEvent::Completed(res) => {
+                    crate::tui::event_log::log(
+                        "TURN",
+                        format!("Completed ok={} aborted={}", res.is_ok(), self.aborted),
+                    );
                     // Esc aborts the request, but the provider task may still
                     // race to deliver a buffered successful completion. Once
                     // abort was requested, that completion is stale and must
@@ -3935,6 +3960,10 @@ impl App {
     /// answer once the live slot fills, leaving stray `✓ subagent-N` lines
     /// under finished turns.
     fn handle_subagent_start(&mut self, id: u64, task: String) {
+        crate::tui::event_log::log(
+            "SUBAGENT",
+            format!("start id={id} task_len={}", task.chars().count()),
+        );
         self.subagents
             .push((id, task.clone(), "running".into(), String::new(), false));
         self.subagent_chats.insert(
@@ -4429,6 +4458,16 @@ impl App {
     /// not replace the session pass false, so a turn that died silently can
     /// never backfill the previous answer into the live slot.
     fn finish_turn_inner(&mut self, res: Result<(), String>, advanced: bool) {
+        crate::tui::event_log::log(
+            "TURN",
+            format!(
+                "finish streaming={} segments={} groups={} result={:?}",
+                self.streaming,
+                self.segments.len(),
+                self.activity_groups.len(),
+                res.as_ref().err()
+            ),
+        );
         self.clear_busy_statuses();
         // an aborted/errored turn can leave a question with nobody waiting
         // for its answer — freeze it instead of leaving a live ghost.

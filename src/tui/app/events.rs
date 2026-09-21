@@ -390,6 +390,14 @@ impl App {
                                 // (empty answer) — never aborts the turn here
                                 self.inline_ask_skip();
                             } else if self.streaming {
+                                crate::tui::event_log::log(
+                                    "ESC",
+                                    format!(
+                                        "streaming tool_running={} cancel_pending={}",
+                                        self.tool_running(),
+                                        self.agent.as_ref().is_some_and(|a| a.cancel_requested())
+                                    ),
+                                );
                                 if self.tool_running() {
                                     // §3.7 / §7 S: a tool is mid-flight —
                                     // cancel that call cooperatively (it gets
