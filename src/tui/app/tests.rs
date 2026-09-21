@@ -571,6 +571,164 @@ mod tests {
         assert!(text.contains("done"), "answer stays visible: {text}");
     }
 
+    /// A compact `Subagent` row is a tool call like any other: it must join
+    /// the turn's activity group instead of breaking the run. Before the fix
+    /// the backward scan stopped dead on it, so the group was never built and
+    /// every row above the child stayed visible as an orphan.
+    #[test]
+    fn subagent_row_joins_the_turn_activity_group() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.push_segment(Segment::User("delegate".into()));
+        for name in ["grep", "read"] {
+            app.push_segment(Segment::Tool {
+                call_id: None,
+                name: name.into(),
+                args: "a.rs".into(),
+                ok: Some(true),
+                output: String::new(),
+                diff: None,
+                preview: Vec::new(),
+                preview_total: 0,
+                expanded: false,
+                flash: None,
+            });
+        }
+        app.push_segment(Segment::Subagent {
+            id: 1,
+            task: "look".into(),
+            status: "completed".into(),
+            output: "found".into(),
+            expanded: false,
+        });
+        app.push_segment(Segment::Assistant {
+            text: "done".into(),
+            live: false,
+        });
+        app.finalize_activity_group();
+
+        assert_eq!(app.activity_groups.len(), 1, "the turn folds into one group");
+        let g = &app.activity_groups[0];
+        assert_eq!((g.seg_start, g.seg_end), (1, 4));
+        assert_eq!(g.calls, 3, "grep + read + subagent are three calls");
+
+        app.rebuild_cache(80);
+        let text = rendered(&app);
+        assert!(text.contains("activity · 3 calls"), "header missing: {text}");
+        assert!(
+            !text.contains("subagent-1"),
+            "the child row folds away with the rest: {text}"
+        );
+        assert!(!text.contains("grep"), "tool rows fold away: {text}");
+        assert!(text.contains("done"), "the answer stays visible: {text}");
+    }
+
+    /// End to end over the real handlers: the event sequence a delegated call
+    /// produces (ToolStart, SubagentStart, ToolNotice) must paint exactly one
+    /// row and fold into the turn's activity group like any other call.
+    #[test]
+    fn delegated_call_paints_one_row_and_folds_with_the_turn() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.startup = false;
+        app.push_segment(Segment::User("go".into()));
+        app.handle_tool_start("subagent".into(), "task: look".into(), Some("c1".into()));
+        app.handle_subagent_start(1, "look".into());
+        app.handle_tool_notice(
+            "subagent".into(),
+            "child done".into(),
+            true,
+            None,
+            Some("c1".into()),
+        );
+        assert!(
+            !app.segments
+                .iter()
+                .any(|s| matches!(s, Segment::Tool { name, .. } if name == "subagent")),
+            "no generic tool row next to the child row: {:?}",
+            app.segments
+        );
+        assert_eq!(app.segments.len(), 2, "user + one child row");
+        app.push_segment(Segment::Assistant {
+            text: "done".into(),
+            live: false,
+        });
+        app.finalize_activity_group();
+
+        assert_eq!(app.activity_groups.len(), 1, "one group for the turn");
+        let g = &app.activity_groups[0];
+        assert_eq!((g.seg_start, g.seg_end), (1, 2), "the run, answer excluded");
+        assert_eq!(g.calls, 1, "one delegated call is one call");
+
+        app.rebuild_cache(80);
+        let text = rendered(&app);
+        assert!(text.contains("activity · 1 calls"), "header: {text}");
+        assert!(!text.contains("subagent-1"), "child row folds away: {text}");
+        assert!(text.contains("done"), "the answer stays visible: {text}");
+    }
+
+    /// Stopping mid-turn drops the subagent rows from *inside* a group: the
+    /// range must pull in by exactly the rows removed, and the recount must
+    /// agree with the builder that produced the header.
+    #[test]
+    fn abort_drops_subagent_rows_inside_a_group() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.push_segment(Segment::User("go".into()));
+        app.push_segment(Segment::Thinking {
+            text: "hmm".into(),
+            expanded: false,
+            started: None,
+            duration_ms: 0,
+            live: false,
+        });
+        app.push_segment(Segment::Tool {
+            call_id: None,
+            name: "read".into(),
+            args: "a.rs".into(),
+            ok: Some(true),
+            output: String::new(),
+            diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
+            expanded: false,
+            flash: None,
+        });
+        app.push_segment(Segment::Subagent {
+            id: 1,
+            task: "look".into(),
+            status: "running".into(),
+            output: String::new(),
+            expanded: false,
+        });
+        app.push_segment(Segment::Assistant {
+            text: "done".into(),
+            live: false,
+        });
+        app.finalize_activity_group();
+        let g = &app.activity_groups[0];
+        assert_eq!((g.seg_start, g.seg_end), (1, 4));
+        assert_eq!(g.calls, 2, "read + the delegated call");
+
+        app.clear_subagent_ui_on_stop();
+        assert_eq!(app.segments.len(), 4, "the child row is gone");
+        let g = &app.activity_groups[0];
+        assert_eq!((g.seg_start, g.seg_end), (1, 3), "end pulled in by it");
+        assert_eq!((g.calls, g.thinking), (1, 1), "recount agrees with builder");
+        // the recount must match a freshly built group over the same slice
+        let rebuilt = App::build_activity_group_in(&app.segments, (g.seg_start, g.seg_end), 0, None);
+        assert_eq!(
+            (g.calls, g.thinking, g.errors),
+            (rebuilt.calls, rebuilt.thinking, rebuilt.errors),
+            "abort recount and group builder must never disagree"
+        );
+
+        app.rebuild_cache(80);
+        let text = rendered(&app);
+        assert!(
+            text.contains("activity · 1 calls · 1 thinking"),
+            "header stays coherent after the abort: {text}"
+        );
+        assert!(!text.contains("subagent"), "no subagent row survives: {text}");
+    }
+
     /// A provider dump must not flood the chat: multi-line errors arrive
     /// collapsed to one width-capped row and unfold on click.
     #[test]
@@ -1281,6 +1439,59 @@ mod tests {
                 ("error: provider offline", StatusKind::Err)
             ]
         );
+    }
+
+    /// A delegated call has no generic tool row live, so a reload must not
+    /// invent one: the child row is rebuilt from the call plus its result,
+    /// keeping live and restored transcripts the same shape.
+    #[test]
+    fn history_restores_a_delegated_call_as_a_child_row() {
+        use crate::providers::{Message, ToolCallReq};
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.session.push(Role::User, "delegate");
+        app.session
+            .messages
+            .push(Message::new(Role::Assistant, "").with_tool_calls(vec![
+                ToolCallReq::new(
+                    "c1",
+                    "subagent",
+                    serde_json::json!({"task": "look around"}),
+                ),
+            ]));
+        app.session
+            .messages
+            .push(Message::tool_result("c1", "found it", false));
+        app.session
+            .messages
+            .push(Message::new(Role::Assistant, "done"));
+        app.clear_segments();
+        app.load_history_segments();
+
+        assert!(
+            !app.segments
+                .iter()
+                .any(|s| matches!(s, Segment::Tool { name, .. } if name == "subagent")),
+            "no generic tool row on reload: {:?}",
+            app.segments
+        );
+        let child = app
+            .segments
+            .iter()
+            .find_map(|s| match s {
+                Segment::Subagent {
+                    id,
+                    status,
+                    output,
+                    ..
+                } => Some((*id, status.clone(), output.clone())),
+                _ => None,
+            })
+            .expect("the child row is rebuilt from history");
+        assert_eq!(child, (1, "completed".to_string(), "found it".to_string()));
+
+        // and the restored group counts the delegation exactly once
+        assert_eq!(app.activity_groups.len(), 1);
+        assert_eq!(app.activity_groups[0].calls, 1);
     }
 
     #[test]
@@ -2801,13 +3012,13 @@ mod tests {
 
     #[test]
     fn tool_notice_matches_call_id_not_position() {
-        // two same-name rows open (parallel subagents): the notice must
+        // two same-name rows open (parallel calls): the notice must
         // close its own row, not the last open one (rposition would)
         let mut app = test_app("http://127.0.0.1:9/v1".into());
-        app.handle_tool_start("subagent".into(), "first".into(), Some("c1".into()));
-        app.handle_tool_start("subagent".into(), "second".into(), Some("c2".into()));
+        app.handle_tool_start("bash".into(), "first".into(), Some("c1".into()));
+        app.handle_tool_start("bash".into(), "second".into(), Some("c2".into()));
         app.handle_tool_notice(
-            "subagent".into(),
+            "bash".into(),
             "one done".into(),
             true,
             None,
@@ -2831,7 +3042,7 @@ mod tests {
             app.segments[1]
         );
         app.handle_tool_notice(
-            "subagent".into(),
+            "bash".into(),
             "two done".into(),
             true,
             None,

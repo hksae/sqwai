@@ -1035,6 +1035,12 @@ impl App {
         // transcript. Keep the rendered row keyed by call id so batched calls
         // and providers that return results out of order are restored safely.
         let mut pending_tools = std::collections::HashMap::<String, usize>::new();
+        // A delegated call has no generic tool row (see handle_tool_start):
+        // its one row is the child-chat row, and the child's transcript is
+        // never persisted. Rebuild that row from the call + its result so a
+        // reloaded session matches what the live path painted.
+        let mut pending_children = std::collections::HashMap::<String, usize>::new();
+        let mut restored_child_id = 0u64;
         // Anchored mode: summaries recorded the user message that started
         // their turn, so each can be re-attached to the right group even when
         // turns were stopped/failed. Legacy saves (all anchors None) fall
@@ -1094,6 +1100,21 @@ impl App {
                         self.push_segment(Segment::Commentary(trimmed.to_string()));
                     }
                     for call in &m.tool_calls {
+                        if call.name == "subagent" {
+                            restored_child_id += 1;
+                            let idx = self.push_segment(Segment::Subagent {
+                                id: restored_child_id,
+                                task: crate::agent::tools::call_summary(&call.name, &call.args),
+                                // refined by the matching tool result below;
+                                // an interrupted delegation keeps the marker
+                                // (its row is the only trace it existed)
+                                status: "running".into(),
+                                output: String::new(),
+                                expanded: false,
+                            });
+                            pending_children.insert(call.id.clone(), idx);
+                            continue;
+                        }
                         let idx = self.push_segment(Segment::Tool {
                             name: call.name.clone(),
                             args: crate::agent::tools::call_summary(&call.name, &call.args),
@@ -1110,6 +1131,17 @@ impl App {
                     }
                 }
                 Role::Tool => {
+                    if let Some(call_id) = m.tool_call_id.as_ref()
+                        && let Some(idx) = pending_children.remove(call_id)
+                    {
+                        if let Some(Segment::Subagent { status, output, .. }) =
+                            self.segments.get_mut(idx)
+                        {
+                            *status = if m.is_error { "failed" } else { "completed" }.into();
+                            *output = m.content.clone();
+                        }
+                        self.touch_segment(idx);
+                    }
                     if let Some(call_id) = m.tool_call_id.as_ref()
                         && let Some(idx) = pending_tools.remove(call_id)
                     {
@@ -3866,7 +3898,10 @@ impl App {
         // parallel Tool row would duplicate it and its expansion used to be
         // empty because `args` here is only a one-line summary, not the JSON.
         // propose_plan is the same: the PlanProposal segment is the surface.
-        if name == "ask_user" || name == "propose_plan" {
+        // subagent is the same again: its `Segment::Subagent` row is the call
+        // row AND the child-chat entry point, so a generic `✓ subagent` row
+        // next to it duplicated the call (and counted it twice).
+        if name == "ask_user" || name == "propose_plan" || name == "subagent" {
             return;
         }
         self.perf.event(&format!("tool_start {name}"));
@@ -3958,6 +3993,12 @@ impl App {
     ) {
         // answered inline above; no Tool row exists for it by design
         if name == "ask_user" || name == "propose_plan" {
+            return;
+        }
+        // subagent has no generic Tool row either (see handle_tool_start).
+        // Without this the "start event was missed" fallback below would
+        // re-create exactly the row that was suppressed, already closed.
+        if name == "subagent" {
             return;
         }
         self.perf.event(&format!("tool_done {name} ok={ok}"));
@@ -4151,27 +4192,12 @@ impl App {
             }
             // Keep summaries in sync with rows removed during abort. This is
             // done after all ranges shift so the slice uses current indices.
+            // The tally is shared with the group builder: a hand-rolled count
+            // here used to disagree with it (questions and plan proposals
+            // were silently dropped).
             for g in &mut self.activity_groups {
-                g.calls = self.segments[g.seg_start..g.seg_end]
-                    .iter()
-                    .filter(|s| matches!(s, Segment::Tool { .. }))
-                    .count();
-                g.thinking = self.segments[g.seg_start..g.seg_end]
-                    .iter()
-                    .filter(|s| matches!(s, Segment::Thinking { .. }))
-                    .count();
-                g.errors = self.segments[g.seg_start..g.seg_end]
-                    .iter()
-                    .filter(|s| {
-                        matches!(
-                            s,
-                            Segment::Tool {
-                                ok: Some(false),
-                                ..
-                            }
-                        )
-                    })
-                    .count();
+                let run = self.segments.get(g.seg_start..g.seg_end).unwrap_or_default();
+                (g.calls, g.thinking, g.errors) = Self::tally_activity(run);
             }
         }
         self.turn_started = None;
@@ -4210,6 +4236,11 @@ impl App {
 
     /// Same scan over any transcript: subagent chats fold with the same
     /// rules as the main one. `floor` is where the previous group ended.
+    ///
+    /// `Segment::Subagent` is transparent to the scan like `Commentary`: it is
+    /// a call row, so it joins the run — but the scan must also *cross* it,
+    /// or every row above a delegated call is stranded outside the group
+    /// (no header, no fold, no click).
     fn trailing_work_run_in(segs: &[Segment], floor: usize) -> Option<(usize, usize)> {
         let floor = floor.min(segs.len());
         let mut end = segs.len();
@@ -4230,6 +4261,7 @@ impl App {
                     | Segment::Commentary(_)
                     | Segment::AskUser { .. }
                     | Segment::PlanProposal { .. }
+                    | Segment::Subagent { .. }
             )
         {
             start -= 1;
@@ -4247,6 +4279,7 @@ impl App {
                     | Segment::Tool { .. }
                     | Segment::AskUser { .. }
                     | Segment::PlanProposal { .. }
+                    | Segment::Subagent { .. }
             )
         });
         if !has_work {
@@ -4271,17 +4304,12 @@ impl App {
         )
     }
 
-    /// Same summary over any transcript (subagent chats carry no turn user).
-    fn build_activity_group_in(
-        segs: &[Segment],
-        (seg_start, seg_end): (usize, usize),
-        duration_ms: u64,
-        turn_user: Option<usize>,
-    ) -> ActivityGroup {
-        let mut calls = 0usize;
-        let mut thinking = 0usize;
-        let mut errors = 0usize;
-        for seg in &segs[seg_start..seg_end] {
+    /// Count calls/thinking/errors over one run of work segments. Shared by
+    /// the group builder and the abort-time recount so the two can never
+    /// disagree on what a group holds.
+    fn tally_activity(segs: &[Segment]) -> (usize, usize, usize) {
+        let (mut calls, mut thinking, mut errors) = (0usize, 0usize, 0usize);
+        for seg in segs {
             match seg {
                 Segment::Tool {
                     ok: Some(false), ..
@@ -4290,11 +4318,12 @@ impl App {
                     errors += 1;
                 }
                 Segment::Tool { .. } => calls += 1,
-                // a question is a tool call awaiting the user; it folds with
-                // the rest of the turn's work
-                Segment::AskUser { .. } => calls += 1,
-                // same for a plan proposal awaiting accept/decline
-                Segment::PlanProposal { .. } => calls += 1,
+                // a question and a plan proposal are tool calls awaiting the
+                // user; a delegated child is a tool call awaiting its answer.
+                // All three fold with the rest of the turn's work.
+                Segment::AskUser { .. }
+                | Segment::PlanProposal { .. }
+                | Segment::Subagent { .. } => calls += 1,
                 Segment::Thinking { .. } => thinking += 1,
                 // Commentary is prose folded into the group for context; it is
                 // always visible and never counts as a tool call.
@@ -4302,6 +4331,17 @@ impl App {
                 _ => {}
             }
         }
+        (calls, thinking, errors)
+    }
+
+    /// Same summary over any transcript (subagent chats carry no turn user).
+    fn build_activity_group_in(
+        segs: &[Segment],
+        (seg_start, seg_end): (usize, usize),
+        duration_ms: u64,
+        turn_user: Option<usize>,
+    ) -> ActivityGroup {
+        let (calls, thinking, errors) = Self::tally_activity(&segs[seg_start..seg_end]);
         ActivityGroup {
             seg_start,
             seg_end,
