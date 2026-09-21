@@ -1967,12 +1967,11 @@ context is a host observation, which fits the integrity model.
   `bash` writes). Mitigations: nudge (§2.1.4), specific hint in rejection,
   both warnings (§2.1.9). This follows the degrade‑don’t‑refuse principle.
 
-- **Approval confirms by mouse click and accepts keys on appearance.**
-  Clicking an option approves immediately, and an Enter pressed while
-  switching windows can land in the dialog (focus steal) — one accidental
-  approval of a destructive command already happened. Planned fix: options
-  chosen by number keys, confirmed by a separate Enter press; ignore Enter
-  for ~500ms after the dialog appears and unless the window has focus.
+- **Approval commit discipline (resolved).** The mouse-click / focus-steal
+  hazard is closed: deny is preselected when the dialog opens, a click only
+  selects an option (never commits), commit is Enter only, and Enter inside
+  a 500 ms grace window after opening is ignored. Covered by
+  `approval_enter_inside_grace_does_not_commit`.
 
 - **Hardcoding detection.** The host flags likely test-shaped hardcodes at
   the write (confession phrases, long compared/returned literals — AF,
