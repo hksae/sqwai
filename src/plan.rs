@@ -1193,6 +1193,16 @@ pub fn open(root: &Path, id: &str) -> Result<Plan> {
     }
 }
 
+/// Preferred plan for the startup screen: the linked plan while it is
+/// still active. A deleted, completed or abandoned id resolves to `None`
+/// so the caller falls back to the global newest active plan instead of
+/// showing a dead plan as active.
+pub fn preferred_active_plan(root: &Path, id: &str) -> Option<Plan> {
+    open(root, id)
+        .ok()
+        .filter(|plan| plan.status == PlanStatus::Active)
+}
+
 /// Rebuild a schema-broken plan file from journaled intents (§2.1.4).
 /// Collects the create intent plus every later op for this plan id across
 /// all session journals — ordered best-effort by (ts, session, seq),
@@ -2782,6 +2792,29 @@ mod tests {
                 .all(|c| "0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(c)),
             "Crockford base32 only: {id}"
         );
+    }
+
+    #[test]
+    fn preferred_active_plan_rejects_dead_ids() {
+        // Regression: the startup screen showed a deleted plan as active
+        // because the linked id was opened without a status check.
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-preferred-{}", new_id()));
+        assert!(preferred_active_plan(&dir, "01DOESNOTEXIST00000000000").is_none());
+        let mut plan = new_plan();
+        store(&dir, &plan).unwrap();
+        assert_eq!(
+            preferred_active_plan(&dir, &plan.id).map(|p| p.id),
+            Some(plan.id.clone())
+        );
+        plan.status = PlanStatus::Completed;
+        store(&dir, &plan).unwrap();
+        assert!(preferred_active_plan(&dir, &plan.id).is_none());
+        plan.status = PlanStatus::Abandoned;
+        store(&dir, &plan).unwrap();
+        assert!(preferred_active_plan(&dir, &plan.id).is_none());
+        std::fs::remove_file(plans_dir(&dir).join(format!("{}.json", plan.id))).unwrap();
+        assert!(preferred_active_plan(&dir, &plan.id).is_none());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

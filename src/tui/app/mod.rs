@@ -3078,6 +3078,12 @@ impl App {
             }
             Some(other) => format!("unknown /plan action '{other}'"),
         };
+        // complete/abandon change the status the startup screen shows,
+        // delete is menu-confirmed elsewhere; waive/confirm touch only
+        // receipts (invisible on the startup screen) and skip the refresh.
+        if matches!(args.first().copied(), Some("complete" | "abandon")) {
+            self.refresh_startup_data();
+        }
         self.status(&result, StatusKind::Info);
     }
 
@@ -3106,7 +3112,11 @@ impl App {
                 });
                 let sid = self.session.id.to_string();
                 match plan::commit(&root, &sid, &mut active, "set_goal", "user", true, args) {
-                    Ok(_) => self.status("goal updated; pending steps are stale", StatusKind::Ok),
+                    Ok(_) => {
+                        // the startup screen quotes the goal verbatim
+                        self.refresh_startup_data();
+                        self.status("goal updated; pending steps are stale", StatusKind::Ok)
+                    }
                     Err(e) => self.status(&format!("goal update failed: {e:#}"), StatusKind::Err),
                 }
             }
@@ -5142,10 +5152,15 @@ impl App {
     /// heavy parts (git subprocesses, session index, plan file) would stall
     /// the UI for seconds when run synchronously inside /new.
     /// Until the result arrives the previous data (if any) keeps rendering.
-    fn refresh_startup_data(&mut self) {
-        if self.startup_data_rx.is_some() {
-            return; // a collection is already running
-        }
+    /// Plan mutations must refresh this too (delete/complete/abandon/waive/
+    /// confirm/goal/constraints) — otherwise the startup screen keeps
+    /// showing the pre-mutation plan.
+    pub(super) fn refresh_startup_data(&mut self) {
+        // Drop any in-flight collection: its result predates this call, and
+        // the orphaned worker's send fails silently once the receiver is
+        // gone. Last refresh wins, so a mutation landing mid-collection
+        // (delete → collect) can never render pre-mutation data.
+        self.startup_data_rx = None;
         let cfg = self.cfg.clone();
         let model_cfg = self.model_cfg.clone();
         let read_only = self.read_only;
@@ -5197,7 +5212,7 @@ impl App {
 
         let active_plan_raw = preferred_plan_id
             .as_deref()
-            .and_then(|id| crate::plan::open(&root, id).ok())
+            .and_then(|id| crate::plan::preferred_active_plan(&root, id))
             .map(|plan| (plan, true))
             .or_else(|| {
                 crate::plan::open_active(&root)

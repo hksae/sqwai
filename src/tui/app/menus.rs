@@ -1595,6 +1595,10 @@ impl App {
                                     };
                                     self.status(&note, StatusKind::Ok);
                                     self.refresh_plan_label();
+                                    // the startup screen caches the plan (see
+                                    // refresh_startup_data): a deleted plan
+                                    // must not keep rendering there
+                                    self.refresh_startup_data();
                                 }
                                 Ok(()) => self.status(
                                     &format!(
@@ -1611,6 +1615,7 @@ impl App {
                             self.session.plan_id = None;
                             self.session.save().ok();
                             self.refresh_plan_label();
+                            self.refresh_startup_data();
                             self.status("no active plan", StatusKind::Info);
                         }
                     }
