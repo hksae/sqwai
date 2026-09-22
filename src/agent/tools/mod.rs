@@ -2751,6 +2751,109 @@ fn freeze_snapshot(
     })
 }
 
+/// Rung 3: freeze one `differential:` item's pre-change output. The same
+/// host-run rules as [`freeze_snapshot`], plus one of its own: the check
+/// runs *twice* and both runs must agree byte for byte. A differential
+/// settles on changed output, so a nondeterministic input would pass
+/// trivially — the double run proves the input is stable enough to compare.
+/// Costs two executions at plan time; that is the rung's price.
+fn freeze_differential(
+    ctx: &mut ToolCtx,
+    paths: &[String],
+    index: usize,
+    command: &str,
+    notes: &mut Vec<String>,
+) -> Frozen {
+    match safety::classify(command) {
+        safety::Verdict::Safe => {}
+        safety::Verdict::Blocked(reason) => {
+            notes.push(format!(
+                "\nacceptance {index}: not run — touches protected path ({reason})"
+            ));
+            return Frozen::Empty;
+        }
+        safety::Verdict::NeedsApproval(reason) => {
+            notes.push(format!(
+                "\nacceptance {index}: not run — would need approval ({reason}); \
+                 acceptance commands run unattended, so they must be safe"
+            ));
+            return Frozen::Empty;
+        }
+    }
+    let state_before = plan::state_digest(&ctx.root, paths, command);
+    let first = exec::bash(ctx, command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
+    if first.cancelled {
+        notes.push(format!("\nacceptance {index}: cancelled"));
+        return Frozen::Cancelled;
+    }
+    let second = exec::bash(ctx, command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
+    if second.cancelled {
+        notes.push(format!("\nacceptance {index}: cancelled"));
+        return Frozen::Cancelled;
+    }
+    let state_after = plan::state_digest(&ctx.root, paths, command);
+    let (Some(exit), Some(second_exit)) = (first.exit_code, second.exit_code) else {
+        notes.push(format!("\nacceptance {index}: could not be run"));
+        return Frozen::Empty;
+    };
+    if check_never_started(exit) || check_never_started(second_exit) {
+        notes.push(format!(
+            "\nacceptance {index}: could not be run (exit {exit}) — check the command text"
+        ));
+        return Frozen::Empty;
+    }
+    if state_before != state_after {
+        notes.push(format!(
+            "\nacceptance {index}: ran while tracked state moved; nothing frozen"
+        ));
+        return Frozen::Empty;
+    }
+    // raw outputs carry the "(exit code N)" footer, so this one comparison
+    // covers stdout, stderr, and the exit code together
+    if first.output != second.output {
+        notes.push(format!(
+            "\nacceptance {index}: output differs run to run — differential needs \
+             a deterministic input; stabilize it or use cmd: for a pass/fail check"
+        ));
+        return Frozen::Empty;
+    }
+    let body: String = first
+        .output
+        .lines()
+        .filter(|line| !line.starts_with("(exit code"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // same vacuity rule as a snapshot: silent output discriminates nothing
+    if body.trim().is_empty() || body.trim() == "no output" {
+        notes.push(format!(
+            "\nacceptance {index}: froze empty output — that discriminates nothing; \
+             use cmd: for a pass/fail check"
+        ));
+        return Frozen::Empty;
+    }
+    let output_hash = blake3::hash(first.output.as_bytes()).to_hex().to_string();
+    let head: String = body.chars().take(BASELINE_HEAD_CHARS).collect();
+    let first_line: String = head
+        .lines()
+        .next()
+        .unwrap_or("no output")
+        .trim()
+        .chars()
+        .take(BASELINE_REASON_CHARS)
+        .collect();
+    notes.push(format!(
+        "\nacceptance {index}: frozen differential, stable across 2 runs (exit {exit}) — {first_line}"
+    ));
+    Frozen::Kept(plan::Snapshot {
+        at: plan::now(),
+        exit: Some(exit),
+        check_definition_hash: plan::check_definition_hash(command),
+        output_hash,
+        head,
+        state_digest: state_after,
+    })
+}
+
 /// §12.12: run every `cmd:` acceptance item once and keep the runs that
 /// failed. Called at plan creation — the only moment the pre-change tree is
 /// still the current one. Once the work starts there is nothing left to prove
@@ -2769,12 +2872,22 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
     };
     let paths = plan::digest_paths(plan);
     for (index, item) in plan.acceptance.iter().enumerate() {
-        // rung 4 freezes beside the baselines: the same moment, the same
-        // host-run rules, the same positional slots.
-        if let plan::AcceptanceKind::Snapshot(command) = item.kind() {
-            let command = command.to_string();
+        // rungs 3 and 4 freeze beside the baselines: the same moment, the
+        // same host-run rules, the same positional slots. Only the verdict
+        // is inverted — and rung 3 proves determinism with a double run.
+        let frozen_command = match item.kind() {
+            plan::AcceptanceKind::Snapshot(command) => Some((false, command.to_string())),
+            plan::AcceptanceKind::Differential(command) => Some((true, command.to_string())),
+            _ => None,
+        };
+        if let Some((is_differential, command)) = frozen_command {
             proof.slots.push(None);
-            match freeze_snapshot(ctx, &paths, index, &command, &mut proof.notes) {
+            let frozen = if is_differential {
+                freeze_differential(ctx, &paths, index, &command, &mut proof.notes)
+            } else {
+                freeze_snapshot(ctx, &paths, index, &command, &mut proof.notes)
+            };
+            match frozen {
                 Frozen::Kept(snapshot) => proof.frozen.push(Some(snapshot)),
                 Frozen::Empty => proof.frozen.push(None),
                 Frozen::Cancelled => {
@@ -3288,6 +3401,101 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                 });
             }
         }
+        plan::AcceptanceKind::Differential(command) => {
+            let command = command.to_string();
+            // rung 3 settles on *changed* output against the same frozen
+            // record rung 4 compares for equality. The freeze gate is the
+            // same shape with the inverted meaning.
+            if !plan::differential_current(item) {
+                let hint = match item.snapshot.as_ref() {
+                    Some(frozen) => format!(
+                        "the check was rewritten after its output was frozen \
+                         (at {}); freeze the new text on the pre-change state, \
+                         or have the user waive the item with /plan waive",
+                        frozen.at
+                    ),
+                    None => "no run of this check was ever frozen here, so no output \
+                             can be compared: freeze the behavior before the work \
+                             starts, or have the user waive the item with \
+                             /plan waive"
+                        .to_string(),
+                };
+                return rejection(plan::Rejection {
+                    code: "no_snapshot",
+                    reason: format!(
+                        "acceptance {index} has no frozen output to compare to: {command}"
+                    ),
+                    hint,
+                });
+            }
+            let frozen = item.snapshot.as_ref().expect("gated above");
+            match safety::classify(&command) {
+                safety::Verdict::Blocked(reason) => {
+                    return rejection(plan::Rejection {
+                        code: "protected_path",
+                        reason: format!(
+                            "acceptance {index} touches protected path ({reason}): {command}"
+                        ),
+                        hint: "acceptance commands must not touch host-owned state".to_string(),
+                    });
+                }
+                safety::Verdict::NeedsApproval(reason) => {
+                    return rejection(plan::Rejection {
+                        code: "unsafe_acceptance",
+                        reason: format!("acceptance {index} would run a {reason} command: {command}"),
+                        hint: "acceptance commands run without asking, so they must be safe;                            rewrite it or have the user waive the item"
+                            .to_string(),
+                    });
+                }
+                safety::Verdict::Safe => {}
+            }
+            let paths = plan::digest_paths(&active);
+            let state_before = plan::state_digest(&ctx.root, &paths, &command);
+            let started_at = plan::now();
+            let run = exec::bash(ctx, &command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
+            let finished_at = plan::now();
+            let state_after = plan::state_digest(&ctx.root, &paths, &command);
+            if state_before != state_after {
+                return rejection(plan::Rejection {
+                    code: "state_changed_during_check",
+                    reason: format!(
+                        "acceptance {index} ran while tracked state moved; no receipt issued"
+                    ),
+                    hint: "run verify again on the settled state".to_string(),
+                });
+            }
+            let output_hash = blake3::hash(run.output.as_bytes()).to_hex().to_string();
+            if output_hash != frozen.output_hash || run.exit_code != frozen.exit {
+                // observably changed through this input: the work moved it
+                let receipt = match issue_exec_receipt(
+                    ctx,
+                    index,
+                    &command,
+                    started_at,
+                    finished_at,
+                    state_before,
+                    state_after,
+                    paths,
+                    run.exit_code,
+                    output_hash,
+                ) {
+                    Ok(receipt) => receipt,
+                    Err(message) => return Outcome::err(message),
+                };
+                (Vec::new(), Some(receipt))
+            } else {
+                return rejection(plan::Rejection {
+                    code: "no_observable_change",
+                    reason: format!(
+                        "acceptance {index} output identical to the pre-change run: {command}"
+                    ),
+                    hint: "the change has no observable effect through this input — pick \
+                           an input the work actually moves, or use snapshot: if the \
+                           behavior must not move"
+                        .to_string(),
+                });
+            }
+        }
         plan::AcceptanceKind::Text(_) => {
             let Some((step_id, evidence)) = unspent_verify_evidence(&ctx.root, &active, index)
             else {
@@ -3296,7 +3504,8 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                     reason: format!("acceptance {index} has no host evidence of its own"),
                     hint: "close a verify step whose evidence is not already spent on \
                            another acceptance item, or prefix the item with cmd: \
-                           (pass/fail) or snapshot: (frozen output) so the host can run it"
+                           (pass/fail), snapshot: (frozen output) or differential: \
+                           (changed output) so the host can run it"
                         .to_string(),
                 });
             };
@@ -3742,6 +3951,46 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
                     "snapshot_changed: acceptance {index} output no longer matches: {command_text} — {}",
                     run.output.lines().take(6).collect::<Vec<_>>().join(" / ")
                 ));
+            }
+            plan::AcceptanceKind::Differential(command) => {
+                // rung 3 re-runs like a snapshot, but passes on changed
+                // output and blocks on identical output
+                if !plan::differential_current(&active.acceptance[index]) {
+                    return Err(format!(
+                        "no_snapshot: acceptance {index} has no frozen output to compare to: {command}"
+                    ));
+                }
+                let frozen_hash = active.acceptance[index]
+                    .snapshot
+                    .as_ref()
+                    .map(|frozen| frozen.output_hash.clone());
+                let frozen_exit = active.acceptance[index]
+                    .snapshot
+                    .as_ref()
+                    .and_then(|frozen| frozen.exit);
+                match safety::classify(command) {
+                    safety::Verdict::Blocked(reason) => {
+                        return Err(format!(
+                            "protected_path: acceptance {index} touches protected path ({reason}) at completion: {command}"
+                        ));
+                    }
+                    safety::Verdict::NeedsApproval(reason) => {
+                        return Err(format!(
+                            "unsafe_acceptance: acceptance {index} would run a {reason} command                          at completion: {command}"
+                        ));
+                    }
+                    safety::Verdict::Safe => {}
+                }
+                let command_text = command.to_string();
+                let run = exec::bash(ctx, command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
+                let output_hash = blake3::hash(run.output.as_bytes()).to_hex().to_string();
+                if frozen_hash.as_deref() == Some(output_hash.as_str())
+                    && frozen_exit == run.exit_code
+                {
+                    return Err(format!(
+                        "no_observable_change: acceptance {index} output identical to the pre-change run: {command_text}"
+                    ));
+                }
             }
             plan::AcceptanceKind::Manual(text) => {
                 // Passed rather than waived: it should not have been possible
@@ -5772,6 +6021,24 @@ mod tests {
         )
     }
 
+    /// A command whose output differs on every run, spelled per platform:
+    /// the shell's own PID where a POSIX shell runs the suite, the clock
+    /// where Cmd does. Used to prove a freeze refuses nondeterministic
+    /// inputs rather than blessing them.
+    #[cfg(unix)]
+    fn clock_command() -> String {
+        "echo $$".to_string()
+    }
+
+    /// Cmd spelling of [`clock_command`]: `%TIME%` ticks in centiseconds,
+    /// and two process spawns never land in the same one. (No PowerShell
+    /// here: its scriptlets trip the safety classifier — `-Format` even
+    /// matches the destructive-disk heuristic.)
+    #[cfg(windows)]
+    fn clock_command() -> String {
+        "echo %TIME%".to_string()
+    }
+
     /// `complete` runs `cmd:` items again instead of trusting the verify that
     /// happened earlier: a criterion that stopped passing must block
     /// completion (§2.1.2).
@@ -6187,6 +6454,179 @@ mod tests {
                 "op": "create",
                 "goal": "sneak a command in",
                 "acceptance": ["snapshot: rm -rf /"],
+                "steps": [{"title": "verify", "kind": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+
+        let out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!out.ok, "{}", out.output);
+        assert!(out.output.contains("no_snapshot"), "{}", out.output);
+
+        let mut plan = plan::open_active(&dir).unwrap().unwrap();
+        plan.acceptance[0].snapshot = Some(plan::Snapshot {
+            at: plan::now(),
+            exit: Some(0),
+            check_definition_hash: plan::check_definition_hash("rm -rf /"),
+            output_hash: "hash".to_string(),
+            head: "boom".to_string(),
+            state_digest: "digest".to_string(),
+        });
+        plan::store(&dir, &plan).unwrap();
+        let unsafe_out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!unsafe_out.ok, "{}", unsafe_out.output);
+        assert!(
+            unsafe_out.output.contains("unsafe_acceptance"),
+            "{}",
+            unsafe_out.output
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rung 3, the green path inverted from rung 4: the host froze `data.txt`
+    /// at "v1"; unchanged content settles nothing (`no_observable_change`),
+    /// and only moved content verifies.
+    #[test]
+    fn differential_freezes_stable_and_passes_on_change() {
+        let (mut ctx, dir) = proj();
+        fs::write(dir.join("data.txt"), "v1").unwrap();
+        let command = dump_command(&dir.join("data.txt"));
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "move the behavior",
+                "acceptance": [format!("differential: {command}")],
+                "steps": [{"title": "verify", "kind": "verify", "refs": ["data.txt"]}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(created.output.contains("stable across 2 runs"), "{}", created.output);
+
+        // unchanged output is not acceptance here
+        let same = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!same.ok, "{}", same.output);
+        assert!(
+            same.output.contains("no_observable_change"),
+            "{}",
+            same.output
+        );
+
+        // moved output settles the item with an exec receipt
+        fs::write(dir.join("data.txt"), "v2").unwrap();
+        let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(verified.ok, "{}", verified.output);
+        let plan = plan::open_active(&dir).unwrap().unwrap();
+        assert_eq!(plan.acceptance[0].status, plan::AcceptanceStatus::Passed);
+        assert_eq!(plan.acceptance[0].validation.receipts.len(), 1);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rung 3 refuses nondeterministic inputs at freeze time: a clock reads
+    /// differently on every run, so comparing against it would pass
+    /// trivially. The double run catches that before anything is frozen.
+    #[test]
+    fn differential_nondeterministic_input_freezes_nothing() {
+        let (mut ctx, dir) = proj();
+        let command = clock_command();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "unstable input",
+                "acceptance": [format!("differential: {command}")],
+                "steps": [{"title": "verify", "kind": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(
+            created.output.contains("differs run to run"),
+            "{}",
+            created.output
+        );
+
+        let out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!out.ok, "{}", out.output);
+        assert!(out.output.contains("no_snapshot"), "{}", out.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rung 3 shares rung 4's vacuity rule: silent output discriminates
+    /// nothing in either direction.
+    #[test]
+    fn differential_empty_output_freezes_nothing() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "vacuous differential",
+                "acceptance": ["differential: exit 0"],
+                "steps": [{"title": "verify", "kind": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(created.output.contains("empty output"), "{}", created.output);
+
+        let out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!out.ok, "{}", out.output);
+        assert!(out.output.contains("no_snapshot"), "{}", out.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rung 3 through `complete`: the re-run sees moved output and the plan
+    /// completes; identical output blocks it.
+    #[test]
+    fn complete_reruns_differential_and_blocks_when_unchanged() {
+        let (mut ctx, dir) = proj();
+        fs::write(dir.join("data.txt"), "v1").unwrap();
+        let command = dump_command(&dir.join("data.txt"));
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "differential at completion",
+                "acceptance": [format!("differential: {command}")],
+                "steps": [{"title": "verify", "kind": "verify", "refs": ["data.txt"]}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+
+        // unchanged: verify refuses, and so would complete
+        let same = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!same.ok, "{}", same.output);
+        assert!(
+            same.output.contains("no_observable_change"),
+            "{}",
+            same.output
+        );
+
+        fs::write(dir.join("data.txt"), "v2").unwrap();
+        assert!(plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0})).ok);
+        assert!(
+            plan_op(
+                &mut ctx,
+                &json!({"op": "cancel", "id": "1", "reason": "done here"})
+            )
+            .ok
+        );
+        let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
+        assert!(completed.ok, "{}", completed.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An unsafe `differential:` check is never run to freeze itself, and a
+    /// smuggled-in frozen output still meets the safety gate.
+    #[test]
+    fn differential_refuses_a_command_that_would_need_approval() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "sneak a command in",
+                "acceptance": ["differential: rm -rf /"],
                 "steps": [{"title": "verify", "kind": "verify"}]
             }),
         );

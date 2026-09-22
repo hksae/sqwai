@@ -245,8 +245,11 @@ context × plan.budget_ratio (default 0.10).
 acceptance[].text may be prefixed `cmd:` (host runs it on `plan verify` and on
 `complete`; the result becomes evidence automatically), `snapshot:` (host
 freezes its output at plan time and settles the item on byte-identical output
-— rung 4 of the judge ladder, §12.12; empty output never freezes), or
-`manual:` (user waives it). Anything else is free text, settled only by unspent
+— rung 4 of the judge ladder, §12.12; empty output never freezes),
+`differential:` (host freezes its output at plan time and settles the item on
+observably *changed* output — rung 3; the freeze runs twice and must agree,
+so nondeterministic inputs never freeze), or `manual:` (user
+waives it). Anything else is free text, settled only by unspent
 host-recorded evidence from a verify step — never by defaulting to `manual:`.
 Unspent means: evidence refs of a verify step that no other passed acceptance
 item has already spent (`evidence_spent` rejects reuse); each ref must satisfy
@@ -1567,7 +1570,7 @@ number; a `partial` one is missing something the design calls for.
 | AE | Core and UI decoupling: headless `serve` (stdio/JSON-RPC) + crates workspace split (`sqwai-core`, `sqwai-tui`, `sqwai-server`) (§5.11) | planned | B |
 | AF | Hardcode linter: scan file_diff for test-shaped literals (warn-layer) | done — confession phrases + long compared/returned string literals over the outcome diff (cap 3, never blocks); numeric magic constants deliberately excluded (ports/timeouts); `bash`-written bytes not scanned | I4 |
 | AG | Safety level presets / refusal override policy for models with strong filters | planned | — |
-| AH | ULTRA-1: executable acceptance as the settling rule (§12.12) — frozen check that fails before the change, judge ladder beyond tests, three states, `verified` required to settle | partial (§12.12) — baseline proof, the settle gate, and the three states shipped for `cmd:` items (host runs every check at plan create, keeps the failing run, `verify` refuses an item without one, `plan show` marks it; a green run and a red run disagreeing on the same digest marks the item flaky/unknown, never retried into `verified`, `complete` stays blocked); rung 4 shipped (`snapshot:` freezes output at plan time, settles on byte-identical output); remaining: the differential/diff-invariant/round-trip rungs and the ladder walk beyond tests | V, V1, F3, H1 |
+| AH | ULTRA-1: executable acceptance as the settling rule (§12.12) — frozen check that fails before the change, judge ladder beyond tests, three states, `verified` required to settle | partial (§12.12) — baseline proof, the settle gate, and the three states shipped for `cmd:` items (host runs every check at plan create, keeps the failing run, `verify` refuses an item without one, `plan show` marks it; a green run and a red run disagreeing on the same digest marks the item flaky/unknown, never retried into `verified`, `complete` stays blocked); rung 4 shipped (`snapshot:` freezes output at plan time, settles on byte-identical output); rung 3 shipped (`differential:` settles on changed output, double-run freeze refuses nondeterministic inputs); remaining: the diff-invariant/round-trip rungs and the ladder walk beyond tests | V, V1, F3, H1 |
 | AI | ULTRA-2/3: conditional escalation under a separate arbiter budget (`N ≤ B/T`); divergence phase gated behind a diversity measurement | planned (§12.12) | AH, M, AC |
 
 
@@ -2090,8 +2093,11 @@ never competing plans.
   `complete` stays blocked, waiver is the way out. *Shipped:* rung 4 —
   `snapshot:` items freeze stdout+exit at plan time and settle on byte-identical
   output (empty output never freezes; same-state disagreement is flaky,
-  moved-state difference is `snapshot_changed`). *Remaining:* rungs 3, 5, 6
-  and the ladder walk below.
+  moved-state difference is `snapshot_changed`). *Shipped:* rung 3 —
+  `differential:` items freeze the same record with the inverted verdict
+  (changed output settles, identical output is `no_observable_change`), and
+  the freeze runs twice so nondeterministic inputs never freeze.
+  *Remaining:* rungs 5, 6 and the ladder walk below.
 - **ULTRA-2 — conditional escalation.** One attempt always; N attempts under a
   separate arbiter budget on acceptance failure, with `N ≤ B/T`.
 - **ULTRA-3 — divergence.** Gated behind a cheap measurement of our own: 5–10

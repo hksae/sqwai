@@ -435,6 +435,11 @@ pub enum AcceptanceKind<'a> {
     /// `snapshot: <command>` — the host froze its output at plan time and
     /// re-runs it; byte-identical output is the verification
     Snapshot(&'a str),
+    /// `differential: <command>` — the host froze its output at plan time
+    /// and re-runs it; observably *changed* output is the verification
+    /// (rung 3 of the judge ladder: the same input through the old and
+    /// new code paths, outputs compared)
+    Differential(&'a str),
     /// `manual: <text>` — no command can settle it; the user waives it
     Manual(&'a str),
     /// free text — settled by host-recorded evidence from a verify step
@@ -449,6 +454,8 @@ impl Acceptance {
             AcceptanceKind::Command(command.trim())
         } else if let Some(command) = text.strip_prefix("snapshot:") {
             AcceptanceKind::Snapshot(command.trim())
+        } else if let Some(command) = text.strip_prefix("differential:") {
+            AcceptanceKind::Differential(command.trim())
         } else if let Some(rest) = text.strip_prefix("manual:") {
             AcceptanceKind::Manual(rest.trim())
         } else {
@@ -2371,6 +2378,19 @@ pub fn snapshot_current(item: &Acceptance) -> bool {
         .is_some_and(|s| s.check_definition_hash == check_definition_hash(command))
 }
 
+/// Rung 3: same frozen-output rule as [`snapshot_current`], for a
+/// `differential:` item. The freeze is shared (one [`Snapshot`] record);
+/// only the verdict is inverted — changed output settles instead of
+/// identical output.
+pub fn differential_current(item: &Acceptance) -> bool {
+    let AcceptanceKind::Differential(command) = item.kind() else {
+        return false;
+    };
+    item.snapshot
+        .as_ref()
+        .is_some_and(|s| s.check_definition_hash == check_definition_hash(command))
+}
+
 /// Host-only: attach the baselines captured at plan time (§12.12). The vector
 /// is positional against the acceptance list; a missing or short vector leaves
 /// the remaining items without a baseline, which is a state they can be shown
@@ -2435,7 +2455,7 @@ pub fn verify_acceptance(
             // (`tools::verify_acceptance`) and not here: replay restores
             // commits that were already accepted, and must not be re-judged.
         }
-        AcceptanceKind::Snapshot(_) => {
+        AcceptanceKind::Snapshot(_) | AcceptanceKind::Differential(_) => {
             // same contract as a command: the host ran it, froze the output
             // before, and compared just now. Whether anything was frozen is
             // judged at the host boundary for the same replay reason.
@@ -2448,8 +2468,8 @@ pub fn verify_acceptance(
                     format!("acceptance {index} has no host evidence of its own"),
                     "close a verify step whose evidence is not already \
                      spent on another acceptance item, or prefix the item \
-                     with cmd: (pass/fail) or snapshot: (frozen output) so \
-                     the host can run it",
+                     with cmd: (pass/fail), snapshot: (frozen output) or \
+                     differential: (changed output) so the host can run it",
                 );
             }
             // Two items cannot lean on the same record: that is the reuse
@@ -2680,6 +2700,14 @@ pub fn confirm(
                 format!("run the check ({cmd}), or waive the item with /plan waive"),
             );
         }
+        AcceptanceKind::Differential(cmd) => {
+            return reject(
+                plan,
+                "not_manual",
+                format!("acceptance {index} compares a command's output old-vs-new; verify it instead"),
+                format!("run the check ({cmd}), or waive the item with /plan waive"),
+            );
+        }
         AcceptanceKind::Text(_) => {
             return reject(
                 plan,
@@ -2892,6 +2920,10 @@ pub fn render(plan: &Plan) -> String {
             // to compare against, so say so here as well
             if matches!(a.kind(), AcceptanceKind::Snapshot(_)) && !snapshot_current(a) {
                 out.push_str(" [no snapshot]");
+            }
+            // rung 3 rides the same frozen record with the inverted verdict
+            if matches!(a.kind(), AcceptanceKind::Differential(_)) && !differential_current(a) {
+                out.push_str(" [no differential]");
             }
             out.push('\n');
         }
@@ -4082,6 +4114,66 @@ mod tests {
         set_snapshots(&mut plan, vec![Some(snapshot_for("cmd: cargo test"))]);
         assert!(!snapshot_current(&plan.acceptance[0]));
         assert!(!proven_failing(&plan.acceptance[0]));
+    }
+
+    #[test]
+    fn acceptance_kinds_parse_by_prefix() {
+        let kinds = [
+            ("cmd: cargo test", "cmd"),
+            ("snapshot: mycli --version", "snapshot"),
+            ("differential: mycli render fix", "differential"),
+            ("manual: eyeball it", "manual"),
+            ("the page renders", "text"),
+        ];
+        for (text, want) in kinds {
+            let item = Acceptance {
+                text: text.to_string(),
+                status: AcceptanceStatus::Pending,
+                evidence: Vec::new(),
+                validation: Validation::default(),
+                baseline: None,
+                snapshot: None,
+                by: None,
+                reason: None,
+            };
+            let got = match item.kind() {
+                AcceptanceKind::Command(_) => "cmd",
+                AcceptanceKind::Snapshot(_) => "snapshot",
+                AcceptanceKind::Differential(_) => "differential",
+                AcceptanceKind::Manual(_) => "manual",
+                AcceptanceKind::Text(_) => "text",
+            };
+            assert_eq!(got, want, "{text}");
+        }
+    }
+
+    #[test]
+    fn differential_shares_the_freeze_with_the_inverted_verdict() {
+        let mut plan = create(
+            "move the output".to_string(),
+            Vec::new(),
+            vec!["differential: mycli render fix".to_string()],
+            vec![NewStep {
+                title: "do the work".to_string(),
+                kind: None,
+                refs: Vec::new(),
+            }],
+            0,
+            &Limits::default(),
+        )
+        .unwrap();
+        assert!(!differential_current(&plan.acceptance[0]));
+        assert!(!snapshot_current(&plan.acceptance[0]));
+        assert!(render(&plan).contains("[no differential]"));
+        // the freeze record is the same shape rung 4 uses
+        set_snapshots(
+            &mut plan,
+            vec![Some(snapshot_for("snapshot: mycli render fix"))],
+        );
+        assert!(differential_current(&plan.acceptance[0]));
+        assert!(!render(&plan).contains("[no differential]"));
+        plan.acceptance[0].text = "differential: mycli render other".to_string();
+        assert!(!differential_current(&plan.acceptance[0]));
     }
 
     #[test]
