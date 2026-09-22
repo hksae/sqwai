@@ -2770,6 +2770,43 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
     proof
 }
 
+/// §12.12 three states: same check, prior green receipt, same digest,
+/// opposite outcome — the runs disagree, so the item is flaky rather than
+/// failed. A red run on moved state is an ordinary regression
+/// (`acceptance_failed`); only an attested state that now answers
+/// differently proves the check itself untrustworthy.
+///
+/// The digest is the host's whole visibility: a change it cannot see (an
+/// untracked file) reads as a flake, honestly — the host truly cannot tell
+/// those apart. Tracking what the check depends on in step refs is what
+/// keeps genuine regressions out of this verdict.
+fn same_state_disagreement(item: &plan::Acceptance, command: &str, state_digest: &str) -> bool {
+    if item.status != plan::AcceptanceStatus::Passed {
+        return false;
+    }
+    let hash = plan::check_definition_hash(command);
+    item.validation
+        .receipts
+        .iter()
+        .rev()
+        .find(|receipt| receipt.check_definition_hash.as_deref() == Some(hash.as_str()))
+        .and_then(|receipt| receipt.state_after.as_deref())
+        == Some(state_digest)
+}
+
+/// Refusal for a flaky item (§12.12): reported as such, never silently
+/// retried into verified. Waiver is the way out.
+fn flaky_rejection(index: usize, command: &str) -> plan::Rejection {
+    plan::Rejection {
+        code: "flaky_check",
+        reason: format!("acceptance {index} runs disagree on the same state: {command}"),
+        hint: "a green run and a red run attested the same digest, so the check \
+               is flaky rather than failed: make it deterministic, or have the user \
+               waive the item with /plan waive"
+            .to_string(),
+    }
+}
+
 /// `plan verify <index>` — the host settles the item, on its own terms.
 ///
 /// A `cmd:` item is run here and now (§2.1.2: "host runs it on `plan verify`
@@ -2822,6 +2859,11 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                     hint,
                 });
             }
+            // §12.12 three states: a flaky item is reported, never silently
+            // retried into verified — no run is spent here.
+            if item.validation.status == plan::ValidationStatus::Unknown {
+                return rejection(flaky_rejection(index, &command));
+            }
             // The acceptance text arrives from the model on `plan create`, so
             // it is model-controlled input that the host is about to execute.
             // It goes through the same classifier as `bash`, and anything that
@@ -2857,6 +2899,31 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
             let run = exec::bash(ctx, &command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
             let finished_at = plan::now();
             if !run.ok {
+                let state_after = plan::state_digest(&ctx.root, &paths, &command);
+                // same attested state, opposite outcome: flaky, not failed
+                if state_before == state_after
+                    && same_state_disagreement(&active.acceptance[index], &command, &state_after)
+                {
+                    if plan::apply_flaky(&mut active, index) {
+                        let args = serde_json::json!({
+                            "index": index,
+                            "command": command,
+                            "state_digest": state_after,
+                        });
+                        if let Err(e) = plan::commit(
+                            &ctx.root,
+                            &ctx.session_id,
+                            &mut active,
+                            "flaky",
+                            "host",
+                            true,
+                            args,
+                        ) {
+                            return Outcome::err(format!("plan write failed: {e:#}"));
+                        }
+                    }
+                    return rejection(flaky_rejection(index, &command));
+                }
                 return rejection(plan::Rejection {
                     code: "acceptance_failed",
                     reason: format!("acceptance {index} command failed: {command}"),
@@ -3232,7 +3299,7 @@ fn validate_evidence(root: &Path, op: &plan::Op, session_id: Option<&str>) -> Re
 /// with. A waived item is the user's call and is left alone.
 fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
     let root = ctx.root.clone();
-    let active = plan::open_active_for_session(&root, Some(&ctx.session_id))
+    let mut active = plan::open_active_for_session(&root, Some(&ctx.session_id))
         .map_err(|e| format!("evidence_unreadable: {e:#}"))?
         .ok_or_else(|| "invalid_evidence: no active plan".to_string())?;
     for step in active
@@ -3242,19 +3309,21 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
     {
         validate_attached_records(&root, &active.id, &step.id, step.kind, &step.evidence)?;
     }
-    for (index, acceptance) in active.acceptance.iter().enumerate() {
-        if acceptance.status != plan::AcceptanceStatus::Passed {
+    // by index: a flaky verdict below mutates the plan, which an
+    // iterator borrow would not allow
+    for index in 0..active.acceptance.len() {
+        if active.acceptance[index].status != plan::AcceptanceStatus::Passed {
             continue;
         }
         // state moved under a recorded check after verification: the pure
         // complete gate rejects this too, but failing here names the fix
         // (re-verify) before the op is even attempted
-        if acceptance.validation.status == plan::ValidationStatus::Stale {
+        if active.acceptance[index].validation.status == plan::ValidationStatus::Stale {
             return Err(format!(
                 "acceptance_stale: acceptance {index} went stale after verification (tracked files changed); re-verify it, then complete"
             ));
         }
-        match acceptance.kind() {
+        match active.acceptance[index].kind() {
             plan::AcceptanceKind::Command(command) => {
                 match safety::classify(command) {
                     safety::Verdict::Blocked(reason) => {
@@ -3269,10 +3338,44 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
                     }
                     safety::Verdict::Safe => {}
                 }
+                // the re-run is the second opinion (§2.1.2): same attested
+                // state answering differently means flaky, not failed
+                let paths = plan::digest_paths(&active);
+                let state_before = plan::state_digest(&root, &paths, command);
                 let run = exec::bash(ctx, command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
+                let state_after = plan::state_digest(&root, &paths, command);
                 if !run.ok {
+                    let command_text = command.to_string();
+                    let flaky = state_before == state_after
+                        && same_state_disagreement(
+                            &active.acceptance[index],
+                            &command_text,
+                            &state_after,
+                        );
+                    if flaky {
+                        if plan::apply_flaky(&mut active, index) {
+                            let args = serde_json::json!({
+                                "index": index,
+                                "command": command_text,
+                                "state_digest": state_after,
+                            });
+                            plan::commit(
+                                &root,
+                                &ctx.session_id,
+                                &mut active,
+                                "flaky",
+                                "host",
+                                true,
+                                args,
+                            )
+                            .map_err(|e| format!("plan write failed: {e:#}"))?;
+                        }
+                        return Err(format!(
+                            "flaky_check: acceptance {index} passed then failed on the same state: {command_text} — fix the flake or have the user waive it"
+                        ));
+                    }
                     return Err(format!(
-                        "acceptance_failed: acceptance {index} no longer passes: {command} — {}",
+                        "acceptance_failed: acceptance {index} no longer passes: {command_text} — {}",
                         run.output.lines().take(6).collect::<Vec<_>>().join(" / ")
                     ));
                 }
@@ -3290,7 +3393,7 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
                     &active.id,
                     "acceptance",
                     plan::StepKind::Verify,
-                    &acceptance.evidence,
+                    &active.acceptance[index].evidence,
                 )
                 .map_err(|message| format!("acceptance {index}: {message}"))?;
             }
@@ -5292,33 +5395,39 @@ mod tests {
     /// happened earlier: a criterion that stopped passing must block
     /// completion (§2.1.2).
     ///
-    /// §12.12: the probe misses before the change (baseline), is fixed,
-    /// verifies green, then breaks again — so `complete` re-runs it
-    /// instead of trusting the earlier receipt.
+    /// §12.12 three states: the probe misses before the change (baseline),
+    /// is fixed, verifies green, then the tracked world visibly moves and
+    /// the check breaks with it — a regression on moved state, so
+    /// `acceptance_failed`, not `flaky_check`. `gate.txt` is tracked
+    /// throughout (the step refs validate); the probe watches a second
+    /// file outside the digest, whose removal is the breakage.
     #[test]
     fn complete_reruns_cmd_acceptance_and_refuses_when_it_now_fails() {
         let (mut ctx, dir) = proj();
-        let flag = dir.join("gate.txt");
-        let command = gate_probe_command(&flag);
+        fs::write(dir.join("gate.txt"), "ok").unwrap();
+        let probe = dir.join("probe.txt");
+        let command = gate_probe_command(&probe);
         let created = plan_op(
             &mut ctx,
             &json!({
                 "op": "create",
                 "goal": "completion re-checks",
                 "acceptance": [format!("cmd: {command}")],
-                "steps": [{"title": "verify", "kind": "verify"}]
+                "steps": [{"title": "verify", "kind": "verify", "refs": ["gate.txt"]}]
             }),
         );
         assert!(created.ok, "{}", created.output);
         // the fix happens after the baseline was taken
-        fs::write(&flag, "ok").unwrap();
+        fs::write(&probe, "ok").unwrap();
         assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
 
         let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
         assert!(verified.ok, "{}", verified.output);
 
-        // the world changed after the verify
-        fs::remove_file(&flag).unwrap();
+        // the world visibly moved (tracked digest) and the check broke with
+        // it — a regression, so the item stays verified-but-broken, not flaky
+        fs::write(dir.join("gate.txt"), "tampered").unwrap();
+        fs::remove_file(&probe).unwrap();
         assert!(
             plan_op(
                 &mut ctx,
@@ -5333,6 +5442,184 @@ mod tests {
             completed.output.contains("acceptance_failed"),
             "{}",
             completed.output
+        );
+        assert_eq!(
+            plan::open_active(&dir)
+                .unwrap()
+                .unwrap()
+                .acceptance[0]
+                .validation
+                .status,
+            plan::ValidationStatus::Passed,
+            "a regression on moved state is not a flake"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// §12.12 three states, verify side: a green run attested the state,
+    /// and now the same state answers red with nothing tracked moving —
+    /// the runs disagree, so the item is flaky rather than failed. A
+    /// further green run must not silently retry it into verified, and
+    /// `complete` stays blocked.
+    #[test]
+    fn verify_disagreeing_rerun_on_same_state_is_flaky() {
+        let (mut ctx, dir) = proj();
+        let flag = dir.join("flag.txt");
+        let command = gate_probe_command(&flag);
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "flaky check",
+                "acceptance": [format!("cmd: {command}")],
+                "steps": [{"title": "verify", "kind": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        // the fix happens after the baseline was taken
+        fs::write(&flag, "ok").unwrap();
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(verified.ok, "{}", verified.output);
+
+        // the flag is gone but no tracked state moved (no refs): the same
+        // attested state now answers differently
+        fs::remove_file(&flag).unwrap();
+        let flaky = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!flaky.ok, "{}", flaky.output);
+        assert!(flaky.output.contains("flaky_check"), "{}", flaky.output);
+        let plan = plan::open_active(&dir).unwrap().unwrap();
+        assert_eq!(plan.acceptance[0].status, plan::AcceptanceStatus::Passed);
+        assert_eq!(
+            plan.acceptance[0].validation.status,
+            plan::ValidationStatus::Unknown
+        );
+        assert_eq!(
+            plan.acceptance[0].validation.receipts.len(),
+            1,
+            "a red run issues no receipt"
+        );
+        assert!(
+            plan::render(&plan).contains("flaky"),
+            "{}",
+            plan::render(&plan)
+        );
+
+        // never silently retried into verified: no run is spent, same refusal
+        let again = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!again.ok, "{}", again.output);
+        assert!(again.output.contains("flaky_check"), "{}", again.output);
+
+        assert!(
+            plan_op(
+                &mut ctx,
+                &json!({"op": "cancel", "id": "1", "reason": "done here"})
+            )
+            .ok
+        );
+        let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
+        assert!(!completed.ok, "{}", completed.output);
+        assert!(
+            completed.output.contains("flaky_check"),
+            "{}",
+            completed.output
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// §12.12 three states, verify side, the other half of the
+    /// distinguisher: the red run lands on visibly moved state, so it is
+    /// a regression (`acceptance_failed`) and the item is not marked flaky.
+    #[test]
+    fn verify_red_on_moved_state_is_regression_not_flake() {
+        let (mut ctx, dir) = proj();
+        fs::write(dir.join("gate.txt"), "ok").unwrap();
+        let probe = dir.join("probe.txt");
+        let command = gate_probe_command(&probe);
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "regression check",
+                "acceptance": [format!("cmd: {command}")],
+                "steps": [{"title": "verify", "kind": "verify", "refs": ["gate.txt"]}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        fs::write(&probe, "ok").unwrap();
+        let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(verified.ok, "{}", verified.output);
+
+        fs::write(dir.join("gate.txt"), "tampered").unwrap();
+        fs::remove_file(&probe).unwrap();
+        let failed = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!failed.ok, "{}", failed.output);
+        assert!(
+            failed.output.contains("acceptance_failed"),
+            "{}",
+            failed.output
+        );
+        assert_eq!(
+            plan::open_active(&dir)
+                .unwrap()
+                .unwrap()
+                .acceptance[0]
+                .validation
+                .status,
+            plan::ValidationStatus::Passed,
+            "a regression on moved state is not a flake"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// §12.12 three states, complete side: the re-run at `complete` is the
+    /// run that disagrees — same attested state, red answer — so the item
+    /// is marked flaky there instead of failing as a regression.
+    #[test]
+    fn complete_disagreeing_rerun_on_same_state_is_flaky() {
+        let (mut ctx, dir) = proj();
+        let flag = dir.join("flag.txt");
+        let command = gate_probe_command(&flag);
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "flaky at completion",
+                "acceptance": [format!("cmd: {command}")],
+                "steps": [{"title": "verify", "kind": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        fs::write(&flag, "ok").unwrap();
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(verified.ok, "{}", verified.output);
+
+        // the flag is gone but no tracked state moved: the complete re-run
+        // disagrees with the verify run on the same state
+        fs::remove_file(&flag).unwrap();
+        assert!(
+            plan_op(
+                &mut ctx,
+                &json!({"op": "cancel", "id": "1", "reason": "done here"})
+            )
+            .ok
+        );
+        let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
+        assert!(!completed.ok, "{}", completed.output);
+        assert!(
+            completed.output.contains("flaky_check"),
+            "{}",
+            completed.output
+        );
+        assert_eq!(
+            plan::open_active(&dir)
+                .unwrap()
+                .unwrap()
+                .acceptance[0]
+                .validation
+                .status,
+            plan::ValidationStatus::Unknown
         );
         fs::remove_dir_all(&dir).ok();
     }

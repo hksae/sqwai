@@ -3471,6 +3471,7 @@ fn plan_rows(
             // not satisfy `complete` until it is re-verified
             let (st, suffix) = match a.validation.status {
                 plan::ValidationStatus::Stale => (Theme::err(), " [stale — re-verify]"),
+                plan::ValidationStatus::Unknown => (Theme::err(), " [flaky — runs disagree]"),
                 plan::ValidationStatus::Passed => (st, " [verified]"),
                 plan::ValidationStatus::Waived => (st, " [waived]"),
                 plan::ValidationStatus::Pending => (st, ""),

@@ -156,6 +156,11 @@ impl AcceptanceStatus {
 /// work was performed (§2.1.2, §2.1.4). `finish` moves a step to `done` and
 /// never touches this; only a host-recorded `verification_receipt` sets
 /// `passed`, and later state changes flip it to `stale`.
+///
+/// `Unknown` is the third ULTRA state (§12.12): repeated runs of the same
+/// check disagreed on the same state, so the item is flaky — neither
+/// verified nor plain failed. It is never retried into `passed` by another
+/// green run; the user waives it or the check is made deterministic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationStatus {
@@ -163,6 +168,7 @@ pub enum ValidationStatus {
     Pending,
     Passed,
     Stale,
+    Unknown,
     Waived,
 }
 
@@ -174,6 +180,7 @@ impl ValidationStatus {
             Self::Pending => "pending",
             Self::Passed => "passed",
             Self::Stale => "stale",
+            Self::Unknown => "unknown",
             Self::Waived => "waived",
         }
     }
@@ -1161,6 +1168,16 @@ fn apply_record(
                 })
                 .unwrap_or_default();
             apply_invalidate(plan, &paths);
+            Ok(true)
+        }
+        Some("flaky") => {
+            let index = fields
+                .get("index")
+                .and_then(|value| value.as_u64())
+                .ok_or_else(|| {
+                    Rejection::new("replay_shape", "flaky intent without index", "")
+                })? as usize;
+            apply_flaky(plan, index);
             Ok(true)
         }
         Some("reopen") => {
@@ -2656,6 +2673,27 @@ pub fn attach_confirmation(
     accept(plan, format!("acceptance {index} confirmed by user"))
 }
 
+/// Host verdict that repeated runs of this check disagreed on the same
+/// state (§12.12 three states): the item is flaky, not verified and not
+/// plain failed. Idempotent so replay converges; only already-verified
+/// (`Passed` status) items can get here — a first red run is
+/// `acceptance_failed`, not a disagreement. Waiver is the way out: no
+/// green run retries an `Unknown` item back into `passed`.
+pub fn apply_flaky(plan: &mut Plan, index: usize) -> bool {
+    let Some(item) = plan.acceptance.get_mut(index) else {
+        return false;
+    };
+    if item.status != AcceptanceStatus::Passed
+        || item.validation.status == ValidationStatus::Unknown
+    {
+        return false;
+    }
+    item.validation.status = ValidationStatus::Unknown;
+    plan.revision += 1;
+    plan.rejections_in_a_row = 0;
+    true
+}
+
 /// Mark passed validations stale whose receipt paths intersect `paths`.
 /// Returns true when anything changed. Waived items are never touched.
 pub fn apply_invalidate(plan: &mut Plan, paths: &[String]) -> bool {
@@ -2757,6 +2795,9 @@ pub fn render(plan: &Plan) -> String {
             // states so a stale check is visible before `complete` rejects it
             match a.validation.status {
                 ValidationStatus::Pending => {}
+                // the third ULTRA state (§12.12): runs disagreed, so the
+                // item reports as flaky rather than as failed-or-verified
+                ValidationStatus::Unknown => out.push_str(" [flaky — runs disagree]"),
                 other => out.push_str(&format!(" [validation: {}]", other.as_str())),
             }
             // §12.12: a cmd: item with no baseline cannot be settled by a
@@ -3996,6 +4037,42 @@ mod tests {
         let mut plan = new_plan();
         close_steps(&mut plan);
         plan.acceptance[0].status = AcceptanceStatus::Passed;
+        assert!(matches!(
+            apply(&mut plan, Op::Complete, &Limits::default(), None),
+            Ok(Applied::Completed)
+        ));
+    }
+
+    #[test]
+    fn apply_flaky_needs_a_pass_and_is_idempotent() {
+        let mut plan = new_plan();
+        // a first red run is a failure, not a disagreement
+        assert!(!apply_flaky(&mut plan, 0));
+        assert_eq!(
+            plan.acceptance[0].validation.status,
+            ValidationStatus::Pending
+        );
+        plan.acceptance[0].status = AcceptanceStatus::Passed;
+        assert!(apply_flaky(&mut plan, 0));
+        assert_eq!(
+            plan.acceptance[0].validation.status,
+            ValidationStatus::Unknown
+        );
+        // replay converges: marking twice changes nothing
+        assert!(!apply_flaky(&mut plan, 0));
+        assert!(!apply_flaky(&mut plan, 9));
+    }
+
+    #[test]
+    fn unknown_validation_blocks_complete_until_waived() {
+        let mut plan = new_plan();
+        close_steps(&mut plan);
+        plan.acceptance[0].status = AcceptanceStatus::Passed;
+        assert!(apply_flaky(&mut plan, 0));
+        let err = apply(&mut plan, Op::Complete, &Limits::default(), None).unwrap_err();
+        assert_eq!(err.code, "acceptance_pending");
+        // waiver is the way out of the third state
+        waive(&mut plan, 0, "flaky upstream, tracked separately").unwrap();
         assert!(matches!(
             apply(&mut plan, Op::Complete, &Limits::default(), None),
             Ok(Applied::Completed)
