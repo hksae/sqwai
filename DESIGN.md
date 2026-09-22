@@ -248,7 +248,9 @@ freezes its output at plan time and settles the item on byte-identical output
 — rung 4 of the judge ladder, §12.12; empty output never freezes),
 `differential:` (host freezes its output at plan time and settles the item on
 observably *changed* output — rung 3; the freeze runs twice and must agree,
-so nondeterministic inputs never freeze), or `manual:` (user
+so nondeterministic inputs never freeze), `signatures:` (host freezes the
+declaration shapes of the named files and settles the item on identical
+shapes — rung 5; bodies move, structure holds), or `manual:` (user
 waives it). Anything else is free text, settled only by unspent
 host-recorded evidence from a verify step — never by defaulting to `manual:`.
 Unspent means: evidence refs of a verify step that no other passed acceptance
@@ -1570,7 +1572,7 @@ number; a `partial` one is missing something the design calls for.
 | AE | Core and UI decoupling: headless `serve` (stdio/JSON-RPC) + crates workspace split (`sqwai-core`, `sqwai-tui`, `sqwai-server`) (§5.11) | planned | B |
 | AF | Hardcode linter: scan file_diff for test-shaped literals (warn-layer) | done — confession phrases + long compared/returned string literals over the outcome diff (cap 3, never blocks); numeric magic constants deliberately excluded (ports/timeouts); `bash`-written bytes not scanned | I4 |
 | AG | Safety level presets / refusal override policy for models with strong filters | planned | — |
-| AH | ULTRA-1: executable acceptance as the settling rule (§12.12) — frozen check that fails before the change, judge ladder beyond tests, three states, `verified` required to settle | partial (§12.12) — baseline proof, the settle gate, and the three states shipped for `cmd:` items (host runs every check at plan create, keeps the failing run, `verify` refuses an item without one, `plan show` marks it; a green run and a red run disagreeing on the same digest marks the item flaky/unknown, never retried into `verified`, `complete` stays blocked); rung 4 shipped (`snapshot:` freezes output at plan time, settles on byte-identical output); rung 3 shipped (`differential:` settles on changed output, double-run freeze refuses nondeterministic inputs); remaining: the diff-invariant/round-trip rungs and the ladder walk beyond tests | V, V1, F3, H1 |
+| AH | ULTRA-1: executable acceptance as the settling rule (§12.12) — frozen check that fails before the change, judge ladder beyond tests, three states, `verified` required to settle | partial (§12.12) — baseline proof, the settle gate, and the three states shipped for `cmd:` items (host runs every check at plan create, keeps the failing run, `verify` refuses an item without one, `plan show` marks it; a green run and a red run disagreeing on the same digest marks the item flaky/unknown, never retried into `verified`, `complete` stays blocked); rung 4 shipped (`snapshot:` freezes output at plan time, settles on byte-identical output); rung 3 shipped (`differential:` settles on changed output, double-run freeze refuses nondeterministic inputs); rung 5 shipped (`signatures:` settles on identical declaration shapes, AST-normalized); remaining: the round-trip rung and the ladder walk beyond tests | V, V1, F3, H1 |
 | AI | ULTRA-2/3: conditional escalation under a separate arbiter budget (`N ≤ B/T`); divergence phase gated behind a diversity measurement | planned (§12.12) | AH, M, AC |
 
 
@@ -2097,7 +2099,11 @@ never competing plans.
   `differential:` items freeze the same record with the inverted verdict
   (changed output settles, identical output is `no_observable_change`), and
   the freeze runs twice so nondeterministic inputs never freeze.
-  *Remaining:* rungs 5, 6 and the ladder walk below.
+  *Shipped:* rung 5 — `signatures:` items freeze normalized declaration
+  shapes (sorted `depth::signature` lines via tree-sitter, 11 languages)
+  and settle on identical shapes; bodies move freely, adding/removing/
+  re-signing breaks the freeze (`signatures_changed`).
+  *Remaining:* rung 6 and the ladder walk below.
 - **ULTRA-2 — conditional escalation.** One attempt always; N attempts under a
   separate arbiter budget on acceptance failure, with `N ≤ B/T`.
 - **ULTRA-3 — divergence.** Gated behind a cheap measurement of our own: 5–10

@@ -374,6 +374,11 @@ pub struct Acceptance {
     /// no run can settle it: unfrozen behavior has nothing to compare to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<Snapshot>,
+    /// Rung 5: the declaration shapes a `signatures:` item named on the
+    /// pre-change tree. A later read settles the item iff every shape is
+    /// identical — bodies may move, the structure may not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<ShapeFreeze>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -404,6 +409,33 @@ pub struct Baseline {
     pub state_digest: String,
 }
 
+/// Frozen declaration shapes for a `signatures:` acceptance item (judge
+/// ladder rung 5, §12.12). One entry per named file: the normalized shape
+/// (sorted `depth::signature` lines, line numbers dropped) hashed, plus
+/// how it was read. Bodies may move freely; adding, removing, or
+/// re-signing a declaration breaks the freeze.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShapeFreeze {
+    pub at: String,
+    /// blake3 of the item text (`signatures: ...` paths). Renaming the
+    /// file set makes a new check, and the old shapes stop applying to it.
+    pub check_definition_hash: String,
+    pub files: Vec<ShapeFile>,
+}
+
+/// One frozen file inside a [`ShapeFreeze`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShapeFile {
+    /// project-relative path as named in the item
+    pub path: String,
+    /// `ts:<lang>` or `fallback` — how the shape was read
+    pub parser: String,
+    /// blake3 of the normalized shape lines joined
+    pub shape_hash: String,
+    /// declaration count, for inspectable notes
+    pub items: usize,
+}
+
 /// Frozen behavior of a `snapshot:` acceptance item (§12.12, judge ladder
 /// rung 4). The host runs the check at plan time and keeps its output: a
 /// later run settles the item iff the output is byte-identical. Unlike a
@@ -428,7 +460,7 @@ pub struct Snapshot {
 }
 
 /// How the host is meant to settle an acceptance item (§2.1.2).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AcceptanceKind<'a> {
     /// `cmd: <command>` — the host runs it and the result is the verification
     Command(&'a str),
@@ -440,6 +472,10 @@ pub enum AcceptanceKind<'a> {
     /// (rung 3 of the judge ladder: the same input through the old and
     /// new code paths, outputs compared)
     Differential(&'a str),
+    /// `signatures: <path>, ...` — the host froze the declaration shapes
+    /// of the named files at plan time and re-reads them; identical shapes
+    /// are the verification (rung 5: structure holds while bodies move)
+    Signatures(Vec<&'a str>),
     /// `manual: <text>` — no command can settle it; the user waives it
     Manual(&'a str),
     /// free text — settled by host-recorded evidence from a verify step
@@ -448,6 +484,7 @@ pub enum AcceptanceKind<'a> {
 
 impl Acceptance {
     /// Classify by prefix. Unprefixed text is `Text`, per §2.1.2.
+    /// `signatures:` paths are comma-separated (`a.rs, b.rs`).
     pub fn kind(&self) -> AcceptanceKind<'_> {
         let text = self.text.trim();
         if let Some(command) = text.strip_prefix("cmd:") {
@@ -456,12 +493,23 @@ impl Acceptance {
             AcceptanceKind::Snapshot(command.trim())
         } else if let Some(command) = text.strip_prefix("differential:") {
             AcceptanceKind::Differential(command.trim())
+        } else if let Some(paths) = text.strip_prefix("signatures:") {
+            AcceptanceKind::Signatures(signature_paths(paths))
         } else if let Some(rest) = text.strip_prefix("manual:") {
             AcceptanceKind::Manual(rest.trim())
         } else {
             AcceptanceKind::Text(text)
         }
     }
+}
+
+/// Split a `signatures:` path list (`a.rs, b.rs`) into trimmed names.
+/// Shared by classification and the host, so both read the same set.
+pub fn signature_paths(list: &str) -> Vec<&str> {
+    list.split(',')
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .collect()
 }
 
 /// Expand `$name` / `${name}` in `cmd:` acceptance items against the
@@ -1051,6 +1099,12 @@ fn rebuild_created(
     {
         set_snapshots(&mut plan, snapshots);
     }
+    // rung 5 rides with them: frozen shapes are restored, never re-read.
+    if let Some(value) = get("shapes")
+        && let Ok(shapes) = serde_json::from_value::<Vec<Option<ShapeFreeze>>>(value.clone())
+    {
+        set_shapes(&mut plan, shapes);
+    }
     plan.id = get("result_id")?.as_str()?.to_string();
     plan.created = get("result_created")?.as_str()?.to_string();
     plan.sessions = get("result_sessions")?
@@ -1082,6 +1136,11 @@ fn rebuild_accepted(
         && let Ok(snapshots) = serde_json::from_value::<Vec<Option<Snapshot>>>(value.clone())
     {
         set_snapshots(&mut fresh, snapshots);
+    }
+    if let Some(value) = fields.get("shapes")
+        && let Ok(shapes) = serde_json::from_value::<Vec<Option<ShapeFreeze>>>(value.clone())
+    {
+        set_shapes(&mut fresh, shapes);
     }
     fresh.id = fields.get("new_id")?.as_str()?.to_string();
     fresh.created = fields.get("new_created")?.as_str()?.to_string();
@@ -1839,6 +1898,7 @@ pub fn create(
                 validation: Validation::default(),
                 baseline: None,
                 snapshot: None,
+                shape: None,
                 by: None,
                 reason: None,
             })
@@ -2391,6 +2451,20 @@ pub fn differential_current(item: &Acceptance) -> bool {
         .is_some_and(|s| s.check_definition_hash == check_definition_hash(command))
 }
 
+/// Rung 5: does this item carry frozen declaration shapes to compare
+/// against? True only for a `signatures:` item whose shapes were frozen
+/// against the file set it still names — renaming the set makes a new
+/// check, and the old shapes stop applying to it.
+pub fn signatures_current(item: &Acceptance) -> bool {
+    let AcceptanceKind::Signatures(paths) = item.kind() else {
+        return false;
+    };
+    let text = paths.join(", ");
+    item.shape
+        .as_ref()
+        .is_some_and(|s| s.check_definition_hash == check_definition_hash(&text))
+}
+
 /// Host-only: attach the baselines captured at plan time (§12.12). The vector
 /// is positional against the acceptance list; a missing or short vector leaves
 /// the remaining items without a baseline, which is a state they can be shown
@@ -2406,6 +2480,14 @@ pub fn set_baselines(plan: &mut Plan, baselines: Vec<Option<Baseline>>) {
 pub fn set_snapshots(plan: &mut Plan, snapshots: Vec<Option<Snapshot>>) {
     for (item, snapshot) in plan.acceptance.iter_mut().zip(snapshots) {
         item.snapshot = snapshot;
+    }
+}
+
+/// Host-only: attach the declaration shapes frozen at plan time (rung 5).
+/// Positional like [`set_baselines`]; items past the vector stay unfrozen.
+pub fn set_shapes(plan: &mut Plan, shapes: Vec<Option<ShapeFreeze>>) {
+    for (item, shape) in plan.acceptance.iter_mut().zip(shapes) {
+        item.shape = shape;
     }
 }
 
@@ -2459,6 +2541,11 @@ pub fn verify_acceptance(
             // same contract as a command: the host ran it, froze the output
             // before, and compared just now. Whether anything was frozen is
             // judged at the host boundary for the same replay reason.
+        }
+        AcceptanceKind::Signatures(_) => {
+            // same contract again: the host read the shapes before and
+            // re-read them just now; the freeze gate lives at the host
+            // boundary so replay never re-judges accepted commits.
         }
         AcceptanceKind::Text(_) => {
             if evidence.is_empty() {
@@ -2708,6 +2795,19 @@ pub fn confirm(
                 format!("run the check ({cmd}), or waive the item with /plan waive"),
             );
         }
+        AcceptanceKind::Signatures(paths) => {
+            return reject(
+                plan,
+                "not_manual",
+                format!(
+                    "acceptance {index} freezes declaration shapes; verify it instead"
+                ),
+                format!(
+                    "re-read the shapes ({}), or waive the item with /plan waive",
+                    paths.join(", ")
+                ),
+            );
+        }
         AcceptanceKind::Text(_) => {
             return reject(
                 plan,
@@ -2924,6 +3024,11 @@ pub fn render(plan: &Plan) -> String {
             // rung 3 rides the same frozen record with the inverted verdict
             if matches!(a.kind(), AcceptanceKind::Differential(_)) && !differential_current(a) {
                 out.push_str(" [no differential]");
+            }
+            // rung 5: a signatures: item with nothing frozen has no shapes
+            // to compare against
+            if matches!(a.kind(), AcceptanceKind::Signatures(_)) && !signatures_current(a) {
+                out.push_str(" [no signatures]");
             }
             out.push('\n');
         }
@@ -4122,6 +4227,7 @@ mod tests {
             ("cmd: cargo test", "cmd"),
             ("snapshot: mycli --version", "snapshot"),
             ("differential: mycli render fix", "differential"),
+            ("signatures: src/a.rs, src/b.rs", "signatures"),
             ("manual: eyeball it", "manual"),
             ("the page renders", "text"),
         ];
@@ -4133,6 +4239,7 @@ mod tests {
                 validation: Validation::default(),
                 baseline: None,
                 snapshot: None,
+                shape: None,
                 by: None,
                 reason: None,
             };
@@ -4140,6 +4247,7 @@ mod tests {
                 AcceptanceKind::Command(_) => "cmd",
                 AcceptanceKind::Snapshot(_) => "snapshot",
                 AcceptanceKind::Differential(_) => "differential",
+                AcceptanceKind::Signatures(_) => "signatures",
                 AcceptanceKind::Manual(_) => "manual",
                 AcceptanceKind::Text(_) => "text",
             };
@@ -4174,6 +4282,44 @@ mod tests {
         assert!(!render(&plan).contains("[no differential]"));
         plan.acceptance[0].text = "differential: mycli render other".to_string();
         assert!(!differential_current(&plan.acceptance[0]));
+    }
+
+    fn shape_for(paths: &str) -> ShapeFreeze {
+        ShapeFreeze {
+            at: now(),
+            check_definition_hash: check_definition_hash(paths),
+            files: vec![ShapeFile {
+                path: "src/a.rs".to_string(),
+                parser: "ts:rust".to_string(),
+                shape_hash: "shapehash".to_string(),
+                items: 2,
+            }],
+        }
+    }
+
+    #[test]
+    fn signatures_freeze_only_against_the_named_file_set() {
+        let mut plan = create(
+            "hold the shape".to_string(),
+            Vec::new(),
+            vec!["signatures: src/a.rs".to_string()],
+            vec![NewStep {
+                title: "do the work".to_string(),
+                kind: None,
+                refs: Vec::new(),
+            }],
+            0,
+            &Limits::default(),
+        )
+        .unwrap();
+        assert!(!signatures_current(&plan.acceptance[0]));
+        assert!(render(&plan).contains("[no signatures]"));
+        set_shapes(&mut plan, vec![Some(shape_for("src/a.rs"))]);
+        assert!(signatures_current(&plan.acceptance[0]));
+        assert!(!render(&plan).contains("[no signatures]"));
+        // renaming the file set makes a new check
+        plan.acceptance[0].text = "signatures: src/b.rs".to_string();
+        assert!(!signatures_current(&plan.acceptance[0]));
     }
 
     #[test]

@@ -92,6 +92,33 @@ pub fn outline(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     Outcome::ok(out.trim_end().to_string())
 }
 
+/// Normalized structural shape of one file's declarations, for rung-5
+/// freezes (§12.12): `depth::signature` lines, sorted, line numbers
+/// dropped. Reordering declarations or editing bodies keeps the shape;
+/// adding, removing, or re-signing a declaration changes it. Returns the
+/// parser used (`ts:<lang>` or `fallback`) alongside, so a freeze records
+/// how it was read. Mirrors the [`outline`] tool's language dispatch.
+pub(crate) fn shape_of(src: &str, ext: &str) -> (String, Vec<String>) {
+    const SHAPE_DEPTH: usize = 10;
+    let (parser, items) = match Lang::from_extension(ext) {
+        Some(lang) => {
+            let ts_items = extract_ts(src, lang, SHAPE_DEPTH);
+            if ts_items.is_empty() && !src.trim().is_empty() {
+                ("fallback".to_string(), extract_fallback(src, SHAPE_DEPTH))
+            } else {
+                (format!("ts:{}", lang.name()), ts_items)
+            }
+        }
+        None => ("fallback".to_string(), extract_fallback(src, SHAPE_DEPTH)),
+    };
+    let mut shape: Vec<String> = items
+        .into_iter()
+        .map(|item| format!("{}::{}", item.depth, item.signature))
+        .collect();
+    shape.sort();
+    (parser, shape)
+}
+
 // ---------------------------------------------------------------------------
 // Tree-sitter extraction
 // ---------------------------------------------------------------------------

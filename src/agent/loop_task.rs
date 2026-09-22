@@ -3971,6 +3971,7 @@ async fn propose_plan(
     let proof = tools::capture_baselines(ctx, &fresh);
     plan::set_baselines(&mut fresh, proof.slots.clone());
     plan::set_snapshots(&mut fresh, proof.frozen.clone());
+    plan::set_shapes(&mut fresh, proof.shapes.clone());
     // Journal-first (§2.1.4): the intent carries the full draft so replay
     // can rebuild the new plan and retire the old one after a crash.
     let new_id = fresh.id.clone();
@@ -3987,6 +3988,7 @@ async fn propose_plan(
                     "draft": draft_args,
                     "baselines": proof.slots,
                     "snapshots": proof.frozen,
+                    "shapes": proof.shapes,
                     "new_id": new_id,
                     "new_created": new_created,
                     "new_sessions": [session_id],

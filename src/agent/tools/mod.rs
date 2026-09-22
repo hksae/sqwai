@@ -2336,6 +2336,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         let proof = capture_baselines(ctx, &created);
                         plan::set_baselines(&mut created, proof.slots.clone());
                         plan::set_snapshots(&mut created, proof.frozen.clone());
+                        plan::set_shapes(&mut created, proof.shapes.clone());
                         let id = created.id.clone();
                         let step_count = created.steps.len();
                         // Journal-first (§2.1.4): the intent carries everything
@@ -2352,6 +2353,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             "budget_limit": created.budget.limit,
                             "baselines": proof.slots,
                             "snapshots": proof.frozen,
+                            "shapes": proof.shapes,
                             "result_id": created.id,
                             "result_created": created.created,
                             "result_sessions": created.sessions,
@@ -2627,6 +2629,9 @@ pub(crate) struct BaselineProof {
     /// Rung 4, positional beside `slots`: the frozen outputs of `snapshot:`
     /// items, taken at the same moment under the same host-run rules.
     pub(crate) frozen: Vec<Option<plan::Snapshot>>,
+    /// Rung 5, positional beside them: the frozen declaration shapes of
+    /// `signatures:` items.
+    pub(crate) shapes: Vec<Option<plan::ShapeFreeze>>,
     /// one line per item, prefixed with `\n` so they can be appended raw
     pub(crate) notes: Vec<String>,
 }
@@ -2854,6 +2859,123 @@ fn freeze_differential(
     })
 }
 
+/// Outcome of freezing one `signatures:` item. No cancellation arm:
+/// reading files is fast and has no user-cancel point, unlike executions.
+enum Shaped {
+    Kept(plan::ShapeFreeze),
+    Empty,
+}
+
+/// Files above this are not shape-read: declaration outlines are for
+/// source, not dumps. Mirrors the `outline` tool's ceiling.
+const SHAPE_MAX_BYTES: u64 = 512_000;
+
+/// Rung 5: freeze the declaration shapes of the named files. No commands
+/// run — the host only reads — so there is no safety classification and
+/// no typo guard; the failure modes are missing/unreadable files instead.
+/// All-or-nothing: one bad path leaves the whole item unfrozen with a note
+/// naming it, so a typo cannot silently narrow the commitment.
+fn freeze_shapes(ctx: &mut ToolCtx, index: usize, paths: &str, notes: &mut Vec<String>) -> Shaped {
+    let names = plan::signature_paths(paths);
+    if names.is_empty() {
+        notes.push(format!(
+            "\nacceptance {index}: names no files — a signatures item without paths settles nothing"
+        ));
+        return Shaped::Empty;
+    }
+    let mut files = Vec::with_capacity(names.len());
+    let mut total_items = 0usize;
+    let mut summary = Vec::with_capacity(names.len());
+    for name in &names {
+        let full = match ctx.resolve(name) {
+            Ok(full) => full,
+            Err(message) => {
+                notes.push(format!("\nacceptance {index}: {message}"));
+                return Shaped::Empty;
+            }
+        };
+        let meta = match std::fs::metadata(&full) {
+            Ok(meta) => meta,
+            Err(_) => {
+                notes.push(format!(
+                    "\nacceptance {index}: '{name}' is missing — freeze the files before the work starts"
+                ));
+                return Shaped::Empty;
+            }
+        };
+        if meta.is_dir() {
+            notes.push(format!(
+                "\nacceptance {index}: '{name}' is a directory — name source files"
+            ));
+            return Shaped::Empty;
+        }
+        if meta.len() > SHAPE_MAX_BYTES {
+            notes.push(format!(
+                "\nacceptance {index}: '{name}' is too large to shape-read"
+            ));
+            return Shaped::Empty;
+        }
+        let bytes = match std::fs::read(&full) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                notes.push(format!("\nacceptance {index}: cannot read '{name}': {e}"));
+                return Shaped::Empty;
+            }
+        };
+        let src = match std::str::from_utf8(&bytes) {
+            Ok(src) => src,
+            Err(_) => {
+                notes.push(format!(
+                    "\nacceptance {index}: '{name}' is binary or not valid UTF-8"
+                ));
+                return Shaped::Empty;
+            }
+        };
+        let ext = full.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let (parser, shape) = crate::agent::tools::outline::shape_of(src, ext);
+        let shape_hash = blake3::hash(shape.join("\n").as_bytes()).to_hex().to_string();
+        total_items += shape.len();
+        summary.push(format!("{name} ({parser}, {})", shape.len()));
+        files.push(plan::ShapeFile {
+            path: name.to_string(),
+            parser,
+            shape_hash,
+            items: shape.len(),
+        });
+    }
+    notes.push(format!(
+        "\nacceptance {index}: froze {} file(s), {total_items} declaration(s) — {}",
+        files.len(),
+        summary.join(", ")
+    ));
+    Shaped::Kept(plan::ShapeFreeze {
+        at: plan::now(),
+        check_definition_hash: plan::check_definition_hash(paths),
+        files,
+    })
+}
+
+/// Re-read the shapes named by a frozen rung-5 record: `(path, hash)` per
+/// file, `None` where the file no longer reads. A deleted file is a
+/// changed shape, not an error — removal breaks a freeze like any edit.
+fn read_shapes(ctx: &ToolCtx, files: &[plan::ShapeFile]) -> Vec<(String, Option<String>)> {
+    files
+        .iter()
+        .map(|file| {
+            let hash = ctx.resolve(&file.path).ok().and_then(|full| {
+                std::fs::read(&full).ok().and_then(|bytes| {
+                    std::str::from_utf8(&bytes).ok().map(|src| {
+                        let ext = full.extension().and_then(|e| e.to_str()).unwrap_or("");
+                        let (_, shape) = crate::agent::tools::outline::shape_of(src, ext);
+                        blake3::hash(shape.join("\n").as_bytes()).to_hex().to_string()
+                    })
+                })
+            });
+            (file.path.clone(), hash)
+        })
+        .collect()
+}
+
 /// §12.12: run every `cmd:` acceptance item once and keep the runs that
 /// failed. Called at plan creation — the only moment the pre-change tree is
 /// still the current one. Once the work starts there is nothing left to prove
@@ -2865,9 +2987,12 @@ fn freeze_differential(
 /// item is shown in that state and can never be settled from it; the refusal
 /// happens at `plan verify`, where the model can do something about it.
 pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> BaselineProof {
+    // pre-sized: every item already has its three slots, so each branch
+    // assigns by index and a cancelled capture just stops.
     let mut proof = BaselineProof {
-        slots: Vec::with_capacity(plan.acceptance.len()),
-        frozen: Vec::with_capacity(plan.acceptance.len()),
+        slots: vec![None; plan.acceptance.len()],
+        frozen: vec![None; plan.acceptance.len()],
+        shapes: vec![None; plan.acceptance.len()],
         notes: Vec::new(),
     };
     let paths = plan::digest_paths(plan);
@@ -2881,30 +3006,30 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
             _ => None,
         };
         if let Some((is_differential, command)) = frozen_command {
-            proof.slots.push(None);
             let frozen = if is_differential {
                 freeze_differential(ctx, &paths, index, &command, &mut proof.notes)
             } else {
                 freeze_snapshot(ctx, &paths, index, &command, &mut proof.notes)
             };
             match frozen {
-                Frozen::Kept(snapshot) => proof.frozen.push(Some(snapshot)),
-                Frozen::Empty => proof.frozen.push(None),
-                Frozen::Cancelled => {
-                    proof.frozen.push(None);
-                    // the user is stopping the turn; do not start more checks
-                    while proof.slots.len() < plan.acceptance.len() {
-                        proof.slots.push(None);
-                        proof.frozen.push(None);
-                    }
-                    break;
-                }
+                Frozen::Kept(snapshot) => proof.frozen[index] = Some(snapshot),
+                Frozen::Empty => {}
+                // the user is stopping the turn; later items keep their
+                // pre-sized empty slots
+                Frozen::Cancelled => break,
+            }
+            continue;
+        }
+        // rung 5 freezes declaration shapes instead of command output.
+        if let plan::AcceptanceKind::Signatures(paths) = item.kind() {
+            let paths = paths.join(", ");
+            match freeze_shapes(ctx, index, &paths, &mut proof.notes) {
+                Shaped::Kept(shape) => proof.shapes[index] = Some(shape),
+                Shaped::Empty => {}
             }
             continue;
         }
         let plan::AcceptanceKind::Command(command) = item.kind() else {
-            proof.slots.push(None);
-            proof.frozen.push(None);
             continue;
         };
         let command = command.to_string();
@@ -2915,16 +3040,12 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
         match safety::classify(&command) {
             safety::Verdict::Safe => {}
             safety::Verdict::Blocked(reason) => {
-                proof.slots.push(None);
-            proof.frozen.push(None);
                 proof.notes.push(format!(
                     "\nacceptance {index}: not run — touches protected path ({reason})"
                 ));
                 continue;
             }
             safety::Verdict::NeedsApproval(reason) => {
-                proof.slots.push(None);
-            proof.frozen.push(None);
                 proof.notes.push(format!(
                     "\nacceptance {index}: not run — would need approval ({reason}); \
                      acceptance commands run unattended, so they must be safe"
@@ -2935,20 +3056,13 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
         let state_before = plan::state_digest(&ctx.root, &paths, &command);
         let run = exec::bash(ctx, &command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
         if run.cancelled {
-            proof.slots.push(None);
-            proof.frozen.push(None);
             proof.notes.push(format!("\nacceptance {index}: cancelled"));
-            // the user is stopping the turn; do not start more checks
-            while proof.slots.len() < plan.acceptance.len() {
-                proof.slots.push(None);
-                proof.frozen.push(None);
-            }
+            // the user is stopping the turn; later items keep their
+            // pre-sized empty slots
             break;
         }
         let state_after = plan::state_digest(&ctx.root, &paths, &command);
         let Some(exit) = run.exit_code else {
-            proof.slots.push(None);
-            proof.frozen.push(None);
             proof.notes.push(format!(
                 "\nacceptance {index}: could not be run — {}",
                 run.output.lines().next().unwrap_or("no result")
@@ -2956,8 +3070,6 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
             continue;
         };
         if exit == 0 {
-            proof.slots.push(None);
-            proof.frozen.push(None);
             proof.notes.push(format!(
                 "\nacceptance {index}: passes already — that makes it a regression \
                  guard, not acceptance, and it will never settle this item"
@@ -2968,16 +3080,12 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
         // failing. Recording one of those as a baseline would make the proof
         // meaningless, so a typo stays a typo instead of becoming evidence.
         if check_never_started(exit) {
-            proof.slots.push(None);
-            proof.frozen.push(None);
             proof.notes.push(format!(
                 "\nacceptance {index}: could not be run (exit {exit}) — check the command text"
             ));
             continue;
         }
         if state_before != state_after {
-            proof.slots.push(None);
-            proof.frozen.push(None);
             proof.notes.push(format!(
                 "\nacceptance {index}: ran while tracked state moved; no baseline taken"
             ));
@@ -3004,15 +3112,14 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
             .chars()
             .take(BASELINE_REASON_CHARS)
             .collect();
-        proof.slots.push(Some(plan::Baseline {
+        proof.slots[index] = Some(plan::Baseline {
             at: plan::now(),
             exit,
             check_definition_hash: plan::check_definition_hash(&command),
             output_hash,
             head,
             state_digest: state_after,
-        }));
-        proof.frozen.push(None);
+        });
         proof.notes.push(format!(
             "\nacceptance {index}: fails before the change (exit {exit}) — {first_line}"
         ));
@@ -3065,6 +3172,7 @@ fn issue_exec_receipt(
     ctx: &mut ToolCtx,
     index: usize,
     command: &str,
+    runner: &str,
     started_at: String,
     finished_at: String,
     state_before: String,
@@ -3075,7 +3183,7 @@ fn issue_exec_receipt(
 ) -> Result<plan::Receipt, String> {
     let receipt_fields = serde_json::json!({
         "check_definition_hash": plan::check_definition_hash(command),
-        "runner": "exec",
+        "runner": runner,
         "command": command,
         "args": serde_json::Value::Null,
         "cwd": ctx.root.display().to_string(),
@@ -3108,7 +3216,7 @@ fn issue_exec_receipt(
         exit: exit_code,
         at: finished_at.clone(),
         check_definition_hash: Some(plan::check_definition_hash(command)),
-        runner: Some("exec".to_string()),
+        runner: Some(runner.to_string()),
         args: None,
         cwd: Some(ctx.root.display().to_string()),
         started_at: Some(started_at),
@@ -3267,6 +3375,7 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                 ctx,
                 index,
                 &command,
+                "exec",
                 started_at,
                 finished_at,
                 state_before,
@@ -3352,6 +3461,7 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                     ctx,
                     index,
                     &command,
+                    "exec",
                     started_at,
                     finished_at,
                     state_before,
@@ -3471,6 +3581,7 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                     ctx,
                     index,
                     &command,
+                    "exec",
                     started_at,
                     finished_at,
                     state_before,
@@ -3492,6 +3603,106 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                     hint: "the change has no observable effect through this input — pick \
                            an input the work actually moves, or use snapshot: if the \
                            behavior must not move"
+                        .to_string(),
+                });
+            }
+        }
+        plan::AcceptanceKind::Signatures(paths) => {
+            let canonical = paths.join(", ");
+            // rung 5 settles on frozen declaration shapes: nothing was
+            // executed, so there is no baseline to demand — only the freeze.
+            // Like the output gates this lives at the host boundary so
+            // replay never re-judges accepted commits.
+            if !plan::signatures_current(item) {
+                let hint = match item.shape.as_ref() {
+                    Some(frozen) => format!(
+                        "the file set was renamed after its shapes were frozen \
+                         (at {}); freeze the new set on the pre-change tree, \
+                         or have the user waive the item with /plan waive",
+                        frozen.at
+                    ),
+                    None => "no shapes were ever frozen here, so nothing can be \
+                             compared: freeze the files before the work starts, \
+                             or have the user waive the item with /plan waive"
+                        .to_string(),
+                };
+                return rejection(plan::Rejection {
+                    code: "no_signatures",
+                    reason: format!(
+                        "acceptance {index} has no frozen shapes to compare to: {canonical}"
+                    ),
+                    hint,
+                });
+            }
+            let frozen = item.shape.as_ref().expect("gated above");
+            // the digest covers the named files plus the plan refs, so a
+            // concurrent edit cannot slip between the re-reads unnoticed
+            let mut shape_paths = plan::digest_paths(&active);
+            for file in &frozen.files {
+                if !shape_paths.contains(&file.path) {
+                    shape_paths.push(file.path.clone());
+                }
+            }
+            let state_before = plan::state_digest(&ctx.root, &shape_paths, &canonical);
+            let started_at = plan::now();
+            let current = read_shapes(ctx, &frozen.files);
+            let finished_at = plan::now();
+            let state_after = plan::state_digest(&ctx.root, &shape_paths, &canonical);
+            if state_before != state_after {
+                return rejection(plan::Rejection {
+                    code: "state_changed_during_check",
+                    reason: format!(
+                        "acceptance {index} ran while tracked state moved; no receipt issued"
+                    ),
+                    hint: "run verify again on the settled state".to_string(),
+                });
+            }
+            let changed: Vec<&str> = frozen
+                .files
+                .iter()
+                .zip(current.iter())
+                .filter(|(frozen_file, (_, hash))| {
+                    hash.as_deref() != Some(frozen_file.shape_hash.as_str())
+                })
+                .map(|(frozen_file, _)| frozen_file.path.as_str())
+                .collect();
+            if changed.is_empty() {
+                let output_hash = blake3::hash(
+                    current
+                        .iter()
+                        .map(|(_, hash)| hash.as_deref().unwrap_or(""))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .as_bytes(),
+                )
+                .to_hex()
+                .to_string();
+                let receipt = match issue_exec_receipt(
+                    ctx,
+                    index,
+                    &canonical,
+                    "ast",
+                    started_at,
+                    finished_at,
+                    state_before,
+                    state_after,
+                    shape_paths,
+                    None,
+                    output_hash,
+                ) {
+                    Ok(receipt) => receipt,
+                    Err(message) => return Outcome::err(message),
+                };
+                (Vec::new(), Some(receipt))
+            } else {
+                return rejection(plan::Rejection {
+                    code: "signatures_changed",
+                    reason: format!(
+                        "acceptance {index} declaration shapes changed: {}",
+                        changed.join(", ")
+                    ),
+                    hint: "restore the declared structure, or have the user waive \
+                           the item with /plan waive"
                         .to_string(),
                 });
             }
@@ -3989,6 +4200,36 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
                 {
                     return Err(format!(
                         "no_observable_change: acceptance {index} output identical to the pre-change run: {command_text}"
+                    ));
+                }
+            }
+            plan::AcceptanceKind::Signatures(paths) => {
+                // rung 5 re-reads like verify does, without executing
+                // anything: identical shapes pass, anything else blocks
+                let canonical = paths.join(", ");
+                if !plan::signatures_current(&active.acceptance[index]) {
+                    return Err(format!(
+                        "no_signatures: acceptance {index} has no frozen shapes to compare to: {canonical}"
+                    ));
+                }
+                let frozen = active.acceptance[index]
+                    .shape
+                    .as_ref()
+                    .expect("gated above");
+                let current = read_shapes(ctx, &frozen.files);
+                let changed: Vec<&str> = frozen
+                    .files
+                    .iter()
+                    .zip(current.iter())
+                    .filter(|(frozen_file, (_, hash))| {
+                        hash.as_deref() != Some(frozen_file.shape_hash.as_str())
+                    })
+                    .map(|(frozen_file, _)| frozen_file.path.as_str())
+                    .collect();
+                if !changed.is_empty() {
+                    return Err(format!(
+                        "signatures_changed: acceptance {index} declaration shapes changed: {}",
+                        changed.join(", ")
                     ));
                 }
             }
@@ -6653,6 +6894,187 @@ mod tests {
             "{}",
             unsafe_out.output
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rung 5, the green path: the host froze `src/main.rs` as one `main`.
+    /// Editing the body keeps the shape and verifies; adding a function
+    /// breaks it.
+    #[test]
+    fn signatures_freeze_and_verify_shape() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "hold the shape",
+                "acceptance": ["signatures: src/main.rs"],
+                "steps": [{"title": "verify", "kind": "verify", "refs": ["src/main.rs"]}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(created.output.contains("froze 1 file(s)"), "{}", created.output);
+
+        let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(verified.ok, "{}", verified.output);
+
+        // bodies move freely: the shape is declarations, not bytes
+        assert!(execute(&mut ctx, "read", &json!({"file_path": "src/main.rs"})).ok);
+        assert!(
+            execute(
+                &mut ctx,
+                "edit",
+                &json!({"file_path": "src/main.rs", "old_string": "TODO", "new_string": "DONE"}),
+            )
+            .ok
+        );
+        let still_green = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(still_green.ok, "{}", still_green.output);
+
+        // a new declaration breaks the freeze
+        assert!(
+            execute(
+                &mut ctx,
+                "edit",
+                &json!({"file_path": "src/main.rs", "old_string": "fn main() {}", "new_string": "fn main() {}\nfn helper() {}"}),
+            )
+            .ok
+        );
+        let failed = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!failed.ok, "{}", failed.output);
+        assert!(
+            failed.output.contains("signatures_changed"),
+            "{}",
+            failed.output
+        );
+        assert!(
+            failed.output.contains("src/main.rs"),
+            "{}",
+            failed.output
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rung 5 freezes nothing without files: a missing path leaves the
+    /// whole item unfrozen (all-or-nothing, so a typo cannot silently
+    /// narrow the commitment), and `verify` says `no_signatures`.
+    #[test]
+    fn signatures_missing_file_freezes_nothing() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "typo in the set",
+                "acceptance": ["signatures: src/main.rs, src/nope.rs"],
+                "steps": [{"title": "verify", "kind": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(created.output.contains("src/nope.rs"), "{}", created.output);
+
+        let out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!out.ok, "{}", out.output);
+        assert!(out.output.contains("no_signatures"), "{}", out.output);
+        let plan = plan::open_active(&dir).unwrap().unwrap();
+        assert!(plan.acceptance[0].shape.is_none());
+        assert!(plan::render(&plan).contains("[no signatures]"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rung 5 never reads through the host boundary: a `.sqwai` path is
+    /// refused at freeze time like in every other file tool.
+    #[test]
+    fn signatures_refuses_host_owned_state() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "peek the journal",
+                "acceptance": ["signatures: .sqwai/plans/x.json"],
+                "steps": [{"title": "verify", "kind": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(created.output.contains("host-owned"), "{}", created.output);
+
+        let out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!out.ok, "{}", out.output);
+        assert!(out.output.contains("no_signatures"), "{}", out.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+        /// Rung 5 through `complete`: the re-read sees a reshaped file and
+    /// blocks completion.
+    #[test]
+    fn complete_reruns_signatures_and_blocks_on_reshape() {        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "shape at completion",
+                "acceptance": ["signatures: src/main.rs"],
+                "steps": [{"title": "verify", "kind": "verify", "refs": ["src/main.rs"]}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        assert!(plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0})).ok);
+
+        // reshape after the verify: the complete re-read must catch it
+        assert!(execute(&mut ctx, "read", &json!({"file_path": "src/main.rs"})).ok);
+        assert!(
+            execute(
+                &mut ctx,
+                "edit",
+                &json!({"file_path": "src/main.rs", "old_string": "fn main() {}", "new_string": "fn main() {}\nfn helper() {}"}),
+            )
+            .ok
+        );
+        assert!(
+            plan_op(
+                &mut ctx,
+                &json!({"op": "cancel", "id": "1", "reason": "done here"})
+            )
+            .ok
+        );
+        let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
+        assert!(!completed.ok, "{}", completed.output);
+        assert!(
+            completed.output.contains("signatures_changed"),
+            "{}",
+            completed.output
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rung 5 through `complete`, the green half: the held shape re-reads
+    /// clean and the plan completes.
+    #[test]
+    fn complete_signatures_pass_on_same_shape() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "held shape at completion",
+                "acceptance": ["signatures: src/main.rs"],
+                "steps": [{"title": "verify", "kind": "verify", "refs": ["src/main.rs"]}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        assert!(plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0})).ok);
+        assert!(
+            plan_op(
+                &mut ctx,
+                &json!({"op": "cancel", "id": "1", "reason": "done here"})
+            )
+            .ok
+        );
+        let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
+        assert!(completed.ok, "{}", completed.output);
         fs::remove_dir_all(&dir).ok();
     }
 
