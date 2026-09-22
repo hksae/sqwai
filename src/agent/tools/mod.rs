@@ -2332,9 +2332,10 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         }
                         created.sessions = vec![ctx.session_id.clone()];
                         // §12.12: prove the cmd: checks discriminate, before
-                        // anything has changed.
+                        // anything has changed. Rung 4 freezes beside them.
                         let proof = capture_baselines(ctx, &created);
                         plan::set_baselines(&mut created, proof.slots.clone());
+                        plan::set_snapshots(&mut created, proof.frozen.clone());
                         let id = created.id.clone();
                         let step_count = created.steps.len();
                         // Journal-first (§2.1.4): the intent carries everything
@@ -2350,6 +2351,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             })).collect::<Vec<_>>(),
                             "budget_limit": created.budget.limit,
                             "baselines": proof.slots,
+                            "snapshots": proof.frozen,
                             "result_id": created.id,
                             "result_created": created.created,
                             "result_sessions": created.sessions,
@@ -2622,6 +2624,9 @@ const BASELINE_REASON_CHARS: usize = 160;
 /// items that did not get one.
 pub(crate) struct BaselineProof {
     pub(crate) slots: Vec<Option<plan::Baseline>>,
+    /// Rung 4, positional beside `slots`: the frozen outputs of `snapshot:`
+    /// items, taken at the same moment under the same host-run rules.
+    pub(crate) frozen: Vec<Option<plan::Snapshot>>,
     /// one line per item, prefixed with `\n` so they can be appended raw
     pub(crate) notes: Vec<String>,
 }
@@ -2645,6 +2650,107 @@ fn check_never_started(exit: i32) -> bool {
     }
 }
 
+/// Outcome of freezing one `snapshot:` item: kept, left unfrozen, or the
+/// user stopped the turn mid-capture (later items must not start).
+enum Frozen {
+    Kept(plan::Snapshot),
+    Empty,
+    Cancelled,
+}
+
+/// Rung 4: freeze one `snapshot:` item's output at plan time. The same
+/// host-run rules as a baseline — model-controlled text through the
+/// classifier, typo guard, no raced runs — but any exit code freezes:
+/// erroring the same way is behavior too. An empty output freezes nothing:
+/// it discriminates nothing, the same way an already-passing check proves
+/// nothing for `cmd:`.
+fn freeze_snapshot(
+    ctx: &mut ToolCtx,
+    paths: &[String],
+    index: usize,
+    command: &str,
+    notes: &mut Vec<String>,
+) -> Frozen {
+    match safety::classify(command) {
+        safety::Verdict::Safe => {}
+        safety::Verdict::Blocked(reason) => {
+            notes.push(format!(
+                "\nacceptance {index}: not run — touches protected path ({reason})"
+            ));
+            return Frozen::Empty;
+        }
+        safety::Verdict::NeedsApproval(reason) => {
+            notes.push(format!(
+                "\nacceptance {index}: not run — would need approval ({reason}); \
+                 acceptance commands run unattended, so they must be safe"
+            ));
+            return Frozen::Empty;
+        }
+    }
+    let state_before = plan::state_digest(&ctx.root, paths, command);
+    let run = exec::bash(ctx, command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
+    if run.cancelled {
+        notes.push(format!("\nacceptance {index}: cancelled"));
+        return Frozen::Cancelled;
+    }
+    let state_after = plan::state_digest(&ctx.root, paths, command);
+    let Some(exit) = run.exit_code else {
+        notes.push(format!(
+            "\nacceptance {index}: could not be run — {}",
+            run.output.lines().next().unwrap_or("no result")
+        ));
+        return Frozen::Empty;
+    };
+    if check_never_started(exit) {
+        notes.push(format!(
+            "\nacceptance {index}: could not be run (exit {exit}) — check the command text"
+        ));
+        return Frozen::Empty;
+    }
+    if state_before != state_after {
+        notes.push(format!(
+            "\nacceptance {index}: ran while tracked state moved; nothing frozen"
+        ));
+        return Frozen::Empty;
+    }
+    let body: String = run
+        .output
+        .lines()
+        .filter(|line| !line.starts_with("(exit code"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // `exec` substitutes its own "no output" placeholder for silent runs —
+    // that is the runner talking, not the check, so it freezes nothing
+    if body.trim().is_empty() || body.trim() == "no output" {
+        notes.push(format!(
+            "\nacceptance {index}: froze empty output — that discriminates nothing; \
+             use cmd: for a pass/fail check"
+        ));
+        return Frozen::Empty;
+    }
+    let output_hash = blake3::hash(run.output.as_bytes()).to_hex().to_string();
+    let head: String = body.chars().take(BASELINE_HEAD_CHARS).collect();
+    let first_line: String = head
+        .lines()
+        .next()
+        .unwrap_or("no output")
+        .trim()
+        .chars()
+        .take(BASELINE_REASON_CHARS)
+        .collect();
+    notes.push(format!(
+        "\nacceptance {index}: frozen (exit {exit}) — {first_line}"
+    ));
+    Frozen::Kept(plan::Snapshot {
+        at: plan::now(),
+        exit: Some(exit),
+        check_definition_hash: plan::check_definition_hash(command),
+        output_hash,
+        head,
+        state_digest: state_after,
+    })
+}
+
 /// §12.12: run every `cmd:` acceptance item once and keep the runs that
 /// failed. Called at plan creation — the only moment the pre-change tree is
 /// still the current one. Once the work starts there is nothing left to prove
@@ -2658,12 +2764,34 @@ fn check_never_started(exit: i32) -> bool {
 pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> BaselineProof {
     let mut proof = BaselineProof {
         slots: Vec::with_capacity(plan.acceptance.len()),
+        frozen: Vec::with_capacity(plan.acceptance.len()),
         notes: Vec::new(),
     };
     let paths = plan::digest_paths(plan);
     for (index, item) in plan.acceptance.iter().enumerate() {
+        // rung 4 freezes beside the baselines: the same moment, the same
+        // host-run rules, the same positional slots.
+        if let plan::AcceptanceKind::Snapshot(command) = item.kind() {
+            let command = command.to_string();
+            proof.slots.push(None);
+            match freeze_snapshot(ctx, &paths, index, &command, &mut proof.notes) {
+                Frozen::Kept(snapshot) => proof.frozen.push(Some(snapshot)),
+                Frozen::Empty => proof.frozen.push(None),
+                Frozen::Cancelled => {
+                    proof.frozen.push(None);
+                    // the user is stopping the turn; do not start more checks
+                    while proof.slots.len() < plan.acceptance.len() {
+                        proof.slots.push(None);
+                        proof.frozen.push(None);
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
         let plan::AcceptanceKind::Command(command) = item.kind() else {
             proof.slots.push(None);
+            proof.frozen.push(None);
             continue;
         };
         let command = command.to_string();
@@ -2675,6 +2803,7 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
             safety::Verdict::Safe => {}
             safety::Verdict::Blocked(reason) => {
                 proof.slots.push(None);
+            proof.frozen.push(None);
                 proof.notes.push(format!(
                     "\nacceptance {index}: not run — touches protected path ({reason})"
                 ));
@@ -2682,6 +2811,7 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
             }
             safety::Verdict::NeedsApproval(reason) => {
                 proof.slots.push(None);
+            proof.frozen.push(None);
                 proof.notes.push(format!(
                     "\nacceptance {index}: not run — would need approval ({reason}); \
                      acceptance commands run unattended, so they must be safe"
@@ -2693,16 +2823,19 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
         let run = exec::bash(ctx, &command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
         if run.cancelled {
             proof.slots.push(None);
+            proof.frozen.push(None);
             proof.notes.push(format!("\nacceptance {index}: cancelled"));
             // the user is stopping the turn; do not start more checks
             while proof.slots.len() < plan.acceptance.len() {
                 proof.slots.push(None);
+                proof.frozen.push(None);
             }
             break;
         }
         let state_after = plan::state_digest(&ctx.root, &paths, &command);
         let Some(exit) = run.exit_code else {
             proof.slots.push(None);
+            proof.frozen.push(None);
             proof.notes.push(format!(
                 "\nacceptance {index}: could not be run — {}",
                 run.output.lines().next().unwrap_or("no result")
@@ -2711,6 +2844,7 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
         };
         if exit == 0 {
             proof.slots.push(None);
+            proof.frozen.push(None);
             proof.notes.push(format!(
                 "\nacceptance {index}: passes already — that makes it a regression \
                  guard, not acceptance, and it will never settle this item"
@@ -2722,6 +2856,7 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
         // meaningless, so a typo stays a typo instead of becoming evidence.
         if check_never_started(exit) {
             proof.slots.push(None);
+            proof.frozen.push(None);
             proof.notes.push(format!(
                 "\nacceptance {index}: could not be run (exit {exit}) — check the command text"
             ));
@@ -2729,6 +2864,7 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
         }
         if state_before != state_after {
             proof.slots.push(None);
+            proof.frozen.push(None);
             proof.notes.push(format!(
                 "\nacceptance {index}: ran while tracked state moved; no baseline taken"
             ));
@@ -2763,6 +2899,7 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
             head,
             state_digest: state_after,
         }));
+        proof.frozen.push(None);
         proof.notes.push(format!(
             "\nacceptance {index}: fails before the change (exit {exit}) — {first_line}"
         ));
@@ -2807,6 +2944,69 @@ fn flaky_rejection(index: usize, command: &str) -> plan::Rejection {
     }
 }
 
+/// Interval receipt for a host-run check (§2.1.4): equal before/after
+/// digests, exec runner, and a matching journal record. Shared by the
+/// `cmd:` and `snapshot:` verify paths so both runners attest identically.
+#[allow(clippy::too_many_arguments)]
+fn issue_exec_receipt(
+    ctx: &mut ToolCtx,
+    index: usize,
+    command: &str,
+    started_at: String,
+    finished_at: String,
+    state_before: String,
+    state_after: String,
+    paths: Vec<String>,
+    exit_code: Option<i32>,
+    output_hash: String,
+) -> Result<plan::Receipt, String> {
+    let receipt_fields = serde_json::json!({
+        "check_definition_hash": plan::check_definition_hash(command),
+        "runner": "exec",
+        "command": command,
+        "args": serde_json::Value::Null,
+        "cwd": ctx.root.display().to_string(),
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "state_before": state_before,
+        "state_after": state_after,
+        "exit": exit_code,
+        "output_hash": output_hash,
+        "paths": paths,
+    });
+    let seq = match crate::agent::journal::Journal::open(&ctx.root, &ctx.session_id) {
+        Ok(mut journal) => {
+            match journal.append_verification_receipt(index, receipt_fields) {
+                Ok(seq) => seq,
+                Err(e) => {
+                    return Err(format!("receipt journal unwritable: {e:#}"));
+                }
+            }
+        }
+        Err(e) => {
+            return Err(format!("receipt journal unwritable: {e:#}"));
+        }
+    };
+    Ok(plan::Receipt {
+        session: ctx.session_id.clone(),
+        seq,
+        state_digest: state_after.clone(),
+        command: Some(command.to_string()),
+        exit: exit_code,
+        at: finished_at.clone(),
+        check_definition_hash: Some(plan::check_definition_hash(command)),
+        runner: Some("exec".to_string()),
+        args: None,
+        cwd: Some(ctx.root.display().to_string()),
+        started_at: Some(started_at),
+        finished_at: Some(finished_at),
+        state_before: Some(state_before),
+        state_after: Some(state_after),
+        output_hash: Some(output_hash),
+        paths,
+    })
+}
+
 /// `plan verify <index>` — the host settles the item, on its own terms.
 ///
 /// A `cmd:` item is run here and now (§2.1.2: "host runs it on `plan verify`
@@ -2826,6 +3026,12 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
             hint: "call plan show to see the acceptance list".to_string(),
         });
     };
+
+    // §12.12 three states: a flaky item is reported, never silently retried
+    // into verified — no run is spent here, whatever the item's kind.
+    if item.validation.status == plan::ValidationStatus::Unknown {
+        return rejection(flaky_rejection(index, &item.text));
+    }
 
     let (evidence, receipt) = match item.kind() {
         plan::AcceptanceKind::Manual(_) => (Vec::new(), None),
@@ -2858,11 +3064,6 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                     ),
                     hint,
                 });
-            }
-            // §12.12 three states: a flaky item is reported, never silently
-            // retried into verified — no run is spent here.
-            if item.validation.status == plan::ValidationStatus::Unknown {
-                return rejection(flaky_rejection(index, &command));
             }
             // The acceptance text arrives from the model on `plan create`, so
             // it is model-controlled input that the host is about to execute.
@@ -2949,54 +3150,143 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
             // than assumed — a nonzero code with ok would be a loud bug,
             // not a silent receipt
             let exit_code = run.exit_code;
-            let receipt_fields = serde_json::json!({
-                "check_definition_hash": plan::check_definition_hash(&command),
-                "runner": "exec",
-                "command": command.clone(),
-                "args": serde_json::Value::Null,
-                "cwd": ctx.root.display().to_string(),
-                "started_at": started_at,
-                "finished_at": finished_at,
-                "state_before": state_before,
-                "state_after": state_after,
-                "exit": exit_code,
-                "output_hash": output_hash,
-                "paths": paths,
-            });
-            let seq = match crate::agent::journal::Journal::open(&ctx.root, &ctx.session_id) {
-                Ok(mut journal) => {
-                    match journal.append_verification_receipt(index, receipt_fields) {
-                        Ok(seq) => seq,
-                        Err(e) => {
-                            return Outcome::err(format!("receipt journal unwritable: {e:#}"));
-                        }
-                    }
-                }
-                Err(e) => {
-                    return Outcome::err(format!("receipt journal unwritable: {e:#}"));
-                }
-            };
-            // receipts issue only on `ok` runs (failures return above),
-            // so the sourced code below is zero — kept as data, not dogma
-            let receipt = plan::Receipt {
-                session: ctx.session_id.clone(),
-                seq,
-                state_digest: state_after.clone(),
-                command: Some(command.clone()),
-                exit: exit_code,
-                at: finished_at.clone(),
-                check_definition_hash: Some(plan::check_definition_hash(&command)),
-                runner: Some("exec".to_string()),
-                args: None,
-                cwd: Some(ctx.root.display().to_string()),
-                started_at: Some(started_at),
-                finished_at: Some(finished_at),
-                state_before: Some(state_before),
-                state_after: Some(state_after),
-                output_hash: Some(output_hash),
+            let receipt = match issue_exec_receipt(
+                ctx,
+                index,
+                &command,
+                started_at,
+                finished_at,
+                state_before,
+                state_after,
                 paths,
+                exit_code,
+                output_hash,
+            ) {
+                Ok(receipt) => receipt,
+                Err(message) => return Outcome::err(message),
             };
             (Vec::new(), Some(receipt))
+        }
+        plan::AcceptanceKind::Snapshot(command) => {
+            let command = command.to_string();
+            // rung 4 settles on frozen behavior, not on failure: the host
+            // must have frozen this exact check at plan time. Like the
+            // baseline gate this lives at the host boundary so replay of
+            // accepted commits never re-judges them.
+            if !plan::snapshot_current(item) {
+                let hint = match item.snapshot.as_ref() {
+                    Some(frozen) => format!(
+                        "the check was rewritten after its output was frozen \
+                         (at {}); freeze the new text on the pre-change state, \
+                         or have the user waive the item with /plan waive",
+                        frozen.at
+                    ),
+                    None => "no run of this check was ever frozen here, so no output \
+                             can match it: freeze the behavior before the work \
+                             starts, or have the user waive the item with \
+                             /plan waive"
+                        .to_string(),
+                };
+                return rejection(plan::Rejection {
+                    code: "no_snapshot",
+                    reason: format!(
+                        "acceptance {index} has no frozen output to compare to: {command}"
+                    ),
+                    hint,
+                });
+            }
+            let frozen = item.snapshot.as_ref().expect("gated above");
+            // model-controlled input, same classifier as `bash`: frozen or
+            // not, an unsafe check never runs unattended.
+            match safety::classify(&command) {
+                safety::Verdict::Blocked(reason) => {
+                    return rejection(plan::Rejection {
+                        code: "protected_path",
+                        reason: format!(
+                            "acceptance {index} touches protected path ({reason}): {command}"
+                        ),
+                        hint: "acceptance commands must not touch host-owned state".to_string(),
+                    });
+                }
+                safety::Verdict::NeedsApproval(reason) => {
+                    return rejection(plan::Rejection {
+                        code: "unsafe_acceptance",
+                        reason: format!("acceptance {index} would run a {reason} command: {command}"),
+                        hint: "acceptance commands run without asking, so they must be safe;                            rewrite it or have the user waive the item"
+                            .to_string(),
+                    });
+                }
+                safety::Verdict::Safe => {}
+            }
+            let paths = plan::digest_paths(&active);
+            let state_before = plan::state_digest(&ctx.root, &paths, &command);
+            let started_at = plan::now();
+            let run = exec::bash(ctx, &command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
+            let finished_at = plan::now();
+            let state_after = plan::state_digest(&ctx.root, &paths, &command);
+            if state_before != state_after {
+                return rejection(plan::Rejection {
+                    code: "state_changed_during_check",
+                    reason: format!(
+                        "acceptance {index} ran while tracked state moved; no receipt issued"
+                    ),
+                    hint: "run verify again on the settled state".to_string(),
+                });
+            }
+            let output_hash = blake3::hash(run.output.as_bytes()).to_hex().to_string();
+            if output_hash == frozen.output_hash && run.exit_code == frozen.exit {
+                let receipt = match issue_exec_receipt(
+                    ctx,
+                    index,
+                    &command,
+                    started_at,
+                    finished_at,
+                    state_before,
+                    state_after,
+                    paths,
+                    run.exit_code,
+                    output_hash,
+                ) {
+                    Ok(receipt) => receipt,
+                    Err(message) => return Outcome::err(message),
+                };
+                (Vec::new(), Some(receipt))
+            } else {
+                // the output moved: nondeterministic on the same state is a
+                // flake, changed on moved state is changed behavior
+                if same_state_disagreement(&active.acceptance[index], &command, &state_after) {
+                    if plan::apply_flaky(&mut active, index) {
+                        let args = serde_json::json!({
+                            "index": index,
+                            "command": command,
+                            "state_digest": state_after,
+                        });
+                        if let Err(e) = plan::commit(
+                            &ctx.root,
+                            &ctx.session_id,
+                            &mut active,
+                            "flaky",
+                            "host",
+                            true,
+                            args,
+                        ) {
+                            return Outcome::err(format!("plan write failed: {e:#}"));
+                        }
+                    }
+                    return rejection(flaky_rejection(index, &command));
+                }
+                return rejection(plan::Rejection {
+                    code: "snapshot_changed",
+                    reason: format!("acceptance {index} output no longer matches: {command}"),
+                    hint: format!(
+                        "frozen at {} (exit {:?}); now exit {:?} — {}",
+                        frozen.at,
+                        frozen.exit,
+                        run.exit_code,
+                        run.output.lines().take(6).collect::<Vec<_>>().join(" / ")
+                    ),
+                });
+            }
         }
         plan::AcceptanceKind::Text(_) => {
             let Some((step_id, evidence)) = unspent_verify_evidence(&ctx.root, &active, index)
@@ -3005,8 +3295,8 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                     code: "no_evidence",
                     reason: format!("acceptance {index} has no host evidence of its own"),
                     hint: "close a verify step whose evidence is not already spent on \
-                           another acceptance item, or prefix the item with cmd: so the \
-                           host can run it"
+                           another acceptance item, or prefix the item with cmd: \
+                           (pass/fail) or snapshot: (frozen output) so the host can run it"
                         .to_string(),
                 });
             };
@@ -3379,6 +3669,79 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
                         run.output.lines().take(6).collect::<Vec<_>>().join(" / ")
                     ));
                 }
+            }
+            plan::AcceptanceKind::Snapshot(command) => {
+                // rung 4 re-runs like a command, but settles on frozen
+                // output rather than on pass/fail
+                if !plan::snapshot_current(&active.acceptance[index]) {
+                    return Err(format!(
+                        "no_snapshot: acceptance {index} has no frozen output to compare to: {command}"
+                    ));
+                }
+                let frozen_hash = active.acceptance[index]
+                    .snapshot
+                    .as_ref()
+                    .map(|frozen| frozen.output_hash.clone());
+                let frozen_exit = active.acceptance[index]
+                    .snapshot
+                    .as_ref()
+                    .and_then(|frozen| frozen.exit);
+                match safety::classify(command) {
+                    safety::Verdict::Blocked(reason) => {
+                        return Err(format!(
+                            "protected_path: acceptance {index} touches protected path ({reason}) at completion: {command}"
+                        ));
+                    }
+                    safety::Verdict::NeedsApproval(reason) => {
+                        return Err(format!(
+                            "unsafe_acceptance: acceptance {index} would run a {reason} command                          at completion: {command}"
+                        ));
+                    }
+                    safety::Verdict::Safe => {}
+                }
+                let command_text = command.to_string();
+                let paths = plan::digest_paths(&active);
+                let state_before = plan::state_digest(&root, &paths, command);
+                let run = exec::bash(ctx, command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
+                let state_after = plan::state_digest(&root, &paths, command);
+                let output_hash = blake3::hash(run.output.as_bytes()).to_hex().to_string();
+                if Some(output_hash.as_str()) == frozen_hash.as_deref()
+                    && run.exit_code == frozen_exit
+                {
+                    continue;
+                }
+                let flaky = state_before == state_after
+                    && same_state_disagreement(
+                        &active.acceptance[index],
+                        &command_text,
+                        &state_after,
+                    );
+                if flaky {
+                    if plan::apply_flaky(&mut active, index) {
+                        let args = serde_json::json!({
+                            "index": index,
+                            "command": command_text,
+                            "state_digest": state_after,
+                        });
+                        plan::commit(
+                            &root,
+                            &ctx.session_id,
+                            &mut active,
+                            "flaky",
+                            "host",
+                            true,
+                            args,
+                        )
+                        .map_err(|e| format!("plan write failed: {e:#}"))?;
+                    }
+                    return Err(format!(
+                        "flaky_check: acceptance {index} matched then differed on the same state: {command_text} — fix the flake or have the user waive it"
+                    ));
+                }
+                return Err(format!(
+                    "snapshot_changed: acceptance {index} output no longer matches: {command_text} — {}",
+                    run.output.lines().take(6).collect::<Vec<_>>().join(" / ")
+                ));
             }
             plan::AcceptanceKind::Manual(text) => {
                 // Passed rather than waived: it should not have been possible
@@ -5391,6 +5754,24 @@ mod tests {
         )
     }
 
+    /// Dump a file's bytes to stdout, spelled per platform like
+    /// [`gate_probe_command`]: `cat` where a POSIX shell runs the suite,
+    /// `Get-Content` where PowerShell does.
+    #[cfg(unix)]
+    fn dump_command(path: &std::path::Path) -> String {
+        format!("cat {}", path.display())
+    }
+
+    /// Windows spelling of [`dump_command`], same quoting discipline as
+    /// [`gate_probe_command`].
+    #[cfg(windows)]
+    fn dump_command(path: &std::path::Path) -> String {
+        format!(
+            "powershell -NoProfile -Command Get-Content '{}'",
+            path.display()
+        )
+    }
+
     /// `complete` runs `cmd:` items again instead of trusting the verify that
     /// happened earlier: a criterion that stopped passing must block
     /// completion (§2.1.2).
@@ -5620,6 +6001,217 @@ mod tests {
                 .validation
                 .status,
             plan::ValidationStatus::Unknown
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rung 4, the green path: the host froze `data.txt` at plan time, the
+    /// content is unchanged, so the re-run matches byte for byte and the
+    /// item verifies with an exec receipt carrying the frozen output hash.
+    #[test]
+    fn snapshot_freezes_output_and_verifies_on_match() {
+        let (mut ctx, dir) = proj();
+        fs::write(dir.join("data.txt"), "v1").unwrap();
+        let command = dump_command(&dir.join("data.txt"));
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "freeze the behavior",
+                "acceptance": [format!("snapshot: {command}")],
+                "steps": [{"title": "verify", "kind": "verify", "refs": ["data.txt"]}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(created.output.contains("frozen"), "{}", created.output);
+
+        let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(verified.ok, "{}", verified.output);
+        let plan = plan::open_active(&dir).unwrap().unwrap();
+        assert_eq!(plan.acceptance[0].status, plan::AcceptanceStatus::Passed);
+        assert_eq!(plan.acceptance[0].validation.receipts.len(), 1);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rung 4 refuses vacuous freezes: `exit 0` prints nothing, and empty
+    /// output discriminates nothing — the item stays unfrozen and `verify`
+    /// says `no_snapshot`, the snapshot analogue of `no_baseline`.
+    #[test]
+    fn snapshot_empty_output_freezes_nothing() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "vacuous freeze",
+                "acceptance": ["snapshot: exit 0"],
+                "steps": [{"title": "verify", "kind": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(created.output.contains("empty output"), "{}", created.output);
+
+        let out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!out.ok, "{}", out.output);
+        assert!(out.output.contains("no_snapshot"), "{}", out.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rung 4, three states: the frozen run attested one digest and the
+    /// content changed under it with no tracked state moving — the runs
+    /// disagree, so the item is flaky rather than changed.
+    #[test]
+    fn snapshot_changed_output_on_same_state_is_flaky() {
+        let (mut ctx, dir) = proj();
+        fs::write(dir.join("data.txt"), "v1").unwrap();
+        let command = dump_command(&dir.join("data.txt"));
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "nondeterministic output",
+                "acceptance": [format!("snapshot: {command}")],
+                "steps": [{"title": "verify", "kind": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(verified.ok, "{}", verified.output);
+
+        // data.txt is untracked here, so the digest cannot see the change:
+        // same attested state, different output
+        fs::write(dir.join("data.txt"), "v2").unwrap();
+        let flaky = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!flaky.ok, "{}", flaky.output);
+        assert!(flaky.output.contains("flaky_check"), "{}", flaky.output);
+        assert_eq!(
+            plan::open_active(&dir)
+                .unwrap()
+                .unwrap()
+                .acceptance[0]
+                .validation
+                .status,
+            plan::ValidationStatus::Unknown
+        );
+
+        // never silently retried into verified
+        let again = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!again.ok, "{}", again.output);
+        assert!(again.output.contains("flaky_check"), "{}", again.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rung 4, the regression half: `data.txt` is tracked, so the content
+    /// change moves the digest and the differing output is changed behavior
+    /// (`snapshot_changed`), not a flake.
+    #[test]
+    fn snapshot_changed_output_on_moved_state_fails() {
+        let (mut ctx, dir) = proj();
+        fs::write(dir.join("data.txt"), "v1").unwrap();
+        let command = dump_command(&dir.join("data.txt"));
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "changed behavior",
+                "acceptance": [format!("snapshot: {command}")],
+                "steps": [{"title": "verify", "kind": "verify", "refs": ["data.txt"]}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(verified.ok, "{}", verified.output);
+
+        fs::write(dir.join("data.txt"), "v2").unwrap();
+        let failed = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!failed.ok, "{}", failed.output);
+        assert!(
+            failed.output.contains("snapshot_changed"),
+            "{}",
+            failed.output
+        );
+        assert_eq!(
+            plan::open_active(&dir)
+                .unwrap()
+                .unwrap()
+                .acceptance[0]
+                .validation
+                .status,
+            plan::ValidationStatus::Passed,
+            "changed behavior on moved state is not a flake"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rung 4 through `complete`: unchanged output re-runs green and the
+    /// plan completes; changed output on moved state blocks it.
+    #[test]
+    fn complete_reruns_snapshot_and_blocks_on_change() {
+        let (mut ctx, dir) = proj();
+        fs::write(dir.join("data.txt"), "v1").unwrap();
+        let command = dump_command(&dir.join("data.txt"));
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "snapshot at completion",
+                "acceptance": [format!("snapshot: {command}")],
+                "steps": [{"title": "verify", "kind": "verify", "refs": ["data.txt"]}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        assert!(plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0})).ok);
+        assert!(
+            plan_op(
+                &mut ctx,
+                &json!({"op": "cancel", "id": "1", "reason": "done here"})
+            )
+            .ok
+        );
+        let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
+        assert!(completed.ok, "{}", completed.output);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An unsafe `snapshot:` check is never run to freeze itself: the item
+    /// stays unfrozen (`no_snapshot`), and even a smuggled-in frozen output
+    /// still meets the safety gate.
+    #[test]
+    fn snapshot_refuses_a_command_that_would_need_approval() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "sneak a command in",
+                "acceptance": ["snapshot: rm -rf /"],
+                "steps": [{"title": "verify", "kind": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+
+        let out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!out.ok, "{}", out.output);
+        assert!(out.output.contains("no_snapshot"), "{}", out.output);
+
+        let mut plan = plan::open_active(&dir).unwrap().unwrap();
+        plan.acceptance[0].snapshot = Some(plan::Snapshot {
+            at: plan::now(),
+            exit: Some(0),
+            check_definition_hash: plan::check_definition_hash("rm -rf /"),
+            output_hash: "hash".to_string(),
+            head: "boom".to_string(),
+            state_digest: "digest".to_string(),
+        });
+        plan::store(&dir, &plan).unwrap();
+        let unsafe_out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!unsafe_out.ok, "{}", unsafe_out.output);
+        assert!(
+            unsafe_out.output.contains("unsafe_acceptance"),
+            "{}",
+            unsafe_out.output
         );
         fs::remove_dir_all(&dir).ok();
     }

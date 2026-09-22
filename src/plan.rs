@@ -368,6 +368,12 @@ pub struct Acceptance {
     /// to change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<Baseline>,
+    /// §12.12, judge ladder rung 4: the output a `snapshot:` check produced
+    /// on the pre-change tree. A later run settles the item iff its output
+    /// is byte-identical. Absent means the item may be read and shown, but
+    /// no run can settle it: unfrozen behavior has nothing to compare to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<Snapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -398,11 +404,37 @@ pub struct Baseline {
     pub state_digest: String,
 }
 
+/// Frozen behavior of a `snapshot:` acceptance item (§12.12, judge ladder
+/// rung 4). The host runs the check at plan time and keeps its output: a
+/// later run settles the item iff the output is byte-identical. Unlike a
+/// [`Baseline`], any exit code freezes — erroring the same way is behavior
+/// too — but an empty output never freezes: it discriminates nothing, the
+/// same way an already-passing check proves nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Snapshot {
+    pub at: String,
+    pub exit: Option<i32>,
+    /// blake3 of the check definition the frozen run used. Rewriting the
+    /// command makes a new check, and the old output stops applying to it.
+    pub check_definition_hash: String,
+    /// blake3 of the frozen output
+    pub output_hash: String,
+    /// first lines of that output, so what was frozen stays inspectable
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub head: String,
+    /// state digest the frozen run observed (before == after: a run that
+    /// raced a mutation freezes nothing and is never recorded)
+    pub state_digest: String,
+}
+
 /// How the host is meant to settle an acceptance item (§2.1.2).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AcceptanceKind<'a> {
     /// `cmd: <command>` — the host runs it and the result is the verification
     Command(&'a str),
+    /// `snapshot: <command>` — the host froze its output at plan time and
+    /// re-runs it; byte-identical output is the verification
+    Snapshot(&'a str),
     /// `manual: <text>` — no command can settle it; the user waives it
     Manual(&'a str),
     /// free text — settled by host-recorded evidence from a verify step
@@ -415,6 +447,8 @@ impl Acceptance {
         let text = self.text.trim();
         if let Some(command) = text.strip_prefix("cmd:") {
             AcceptanceKind::Command(command.trim())
+        } else if let Some(command) = text.strip_prefix("snapshot:") {
+            AcceptanceKind::Snapshot(command.trim())
         } else if let Some(rest) = text.strip_prefix("manual:") {
             AcceptanceKind::Manual(rest.trim())
         } else {
@@ -1004,6 +1038,12 @@ fn rebuild_created(
     {
         set_baselines(&mut plan, baselines);
     }
+    // rung 4 rides the same way: frozen outputs are restored, never re-frozen.
+    if let Some(value) = get("snapshots")
+        && let Ok(snapshots) = serde_json::from_value::<Vec<Option<Snapshot>>>(value.clone())
+    {
+        set_snapshots(&mut plan, snapshots);
+    }
     plan.id = get("result_id")?.as_str()?.to_string();
     plan.created = get("result_created")?.as_str()?.to_string();
     plan.sessions = get("result_sessions")?
@@ -1030,6 +1070,11 @@ fn rebuild_accepted(
         && let Ok(baselines) = serde_json::from_value::<Vec<Option<Baseline>>>(value.clone())
     {
         set_baselines(&mut fresh, baselines);
+    }
+    if let Some(value) = fields.get("snapshots")
+        && let Ok(snapshots) = serde_json::from_value::<Vec<Option<Snapshot>>>(value.clone())
+    {
+        set_snapshots(&mut fresh, snapshots);
     }
     fresh.id = fields.get("new_id")?.as_str()?.to_string();
     fresh.created = fields.get("new_created")?.as_str()?.to_string();
@@ -1786,6 +1831,7 @@ pub fn create(
                 evidence: Vec::new(),
                 validation: Validation::default(),
                 baseline: None,
+                snapshot: None,
                 by: None,
                 reason: None,
             })
@@ -2310,6 +2356,21 @@ pub fn proven_failing(item: &Acceptance) -> bool {
         .is_some_and(|b| b.check_definition_hash == check_definition_hash(command))
 }
 
+/// §12.12, judge ladder rung 4: does this item carry frozen behavior to
+/// compare against?
+///
+/// True only for a `snapshot:` item whose output was frozen against the
+/// check definition it still has — rewriting the command makes a new check,
+/// and the old output stops applying to it.
+pub fn snapshot_current(item: &Acceptance) -> bool {
+    let AcceptanceKind::Snapshot(command) = item.kind() else {
+        return false;
+    };
+    item.snapshot
+        .as_ref()
+        .is_some_and(|s| s.check_definition_hash == check_definition_hash(command))
+}
+
 /// Host-only: attach the baselines captured at plan time (§12.12). The vector
 /// is positional against the acceptance list; a missing or short vector leaves
 /// the remaining items without a baseline, which is a state they can be shown
@@ -2317,6 +2378,14 @@ pub fn proven_failing(item: &Acceptance) -> bool {
 pub fn set_baselines(plan: &mut Plan, baselines: Vec<Option<Baseline>>) {
     for (item, baseline) in plan.acceptance.iter_mut().zip(baselines) {
         item.baseline = baseline;
+    }
+}
+
+/// Host-only: attach the snapshots frozen at plan time (§12.12, rung 4).
+/// Positional like [`set_baselines`]; items past the vector stay unfrozen.
+pub fn set_snapshots(plan: &mut Plan, snapshots: Vec<Option<Snapshot>>) {
+    for (item, snapshot) in plan.acceptance.iter_mut().zip(snapshots) {
+        item.snapshot = snapshot;
     }
 }
 
@@ -2366,6 +2435,11 @@ pub fn verify_acceptance(
             // (`tools::verify_acceptance`) and not here: replay restores
             // commits that were already accepted, and must not be re-judged.
         }
+        AcceptanceKind::Snapshot(_) => {
+            // same contract as a command: the host ran it, froze the output
+            // before, and compared just now. Whether anything was frozen is
+            // judged at the host boundary for the same replay reason.
+        }
         AcceptanceKind::Text(_) => {
             if evidence.is_empty() {
                 return reject(
@@ -2374,7 +2448,8 @@ pub fn verify_acceptance(
                     format!("acceptance {index} has no host evidence of its own"),
                     "close a verify step whose evidence is not already \
                      spent on another acceptance item, or prefix the item \
-                     with cmd: so the host can run it",
+                     with cmd: (pass/fail) or snapshot: (frozen output) so \
+                     the host can run it",
                 );
             }
             // Two items cannot lean on the same record: that is the reuse
@@ -2597,6 +2672,14 @@ pub fn confirm(
                 format!("run the check ({cmd}), or waive the item with /plan waive"),
             );
         }
+        AcceptanceKind::Snapshot(cmd) => {
+            return reject(
+                plan,
+                "not_manual",
+                format!("acceptance {index} freezes a command's output; verify it instead"),
+                format!("run the check ({cmd}), or waive the item with /plan waive"),
+            );
+        }
         AcceptanceKind::Text(_) => {
             return reject(
                 plan,
@@ -2804,6 +2887,11 @@ pub fn render(plan: &Plan) -> String {
             // green run, so say so here rather than at the verify that fails
             if matches!(a.kind(), AcceptanceKind::Command(_)) && !proven_failing(a) {
                 out.push_str(" [no baseline]");
+            }
+            // rung 4: a snapshot: item with nothing frozen has no behavior
+            // to compare against, so say so here as well
+            if matches!(a.kind(), AcceptanceKind::Snapshot(_)) && !snapshot_current(a) {
+                out.push_str(" [no snapshot]");
             }
             out.push('\n');
         }
@@ -3943,6 +4031,57 @@ mod tests {
             head: "error[E0425]: cannot find function `foo`".to_string(),
             state_digest: "digest".to_string(),
         }
+    }
+
+    /// Same stripping rule for `snapshot:` items.
+    fn snapshot_for(item_text: &str) -> Snapshot {
+        let command = item_text
+            .strip_prefix("snapshot:")
+            .unwrap_or(item_text)
+            .trim();
+        Snapshot {
+            at: now(),
+            exit: Some(0),
+            check_definition_hash: check_definition_hash(command),
+            output_hash: "outhash".to_string(),
+            head: "frozen output".to_string(),
+            state_digest: "digest".to_string(),
+        }
+    }
+
+    #[test]
+    fn snapshot_freezes_only_against_the_check_it_was_taken_on() {
+        let mut plan = create(
+            "freeze the output".to_string(),
+            Vec::new(),
+            vec!["snapshot: mycli --version".to_string()],
+            vec![NewStep {
+                title: "do the work".to_string(),
+                kind: None,
+                refs: Vec::new(),
+            }],
+            0,
+            &Limits::default(),
+        )
+        .unwrap();
+        assert!(!snapshot_current(&plan.acceptance[0]), "nothing frozen yet");
+        assert!(render(&plan).contains("[no snapshot]"));
+        set_snapshots(&mut plan, vec![Some(snapshot_for("snapshot: mycli --version"))]);
+        assert!(snapshot_current(&plan.acceptance[0]));
+        assert!(!render(&plan).contains("[no snapshot]"));
+        // rewriting the command makes a new check: the old output stops
+        // applying to it, the same freeze logic as baselines
+        plan.acceptance[0].text = "snapshot: mycli --help".to_string();
+        assert!(!snapshot_current(&plan.acceptance[0]));
+        assert!(render(&plan).contains("[no snapshot]"));
+    }
+
+    #[test]
+    fn snapshot_never_applies_to_other_kinds() {
+        let mut plan = new_plan(); // acceptance[0] is "cmd: cargo test"
+        set_snapshots(&mut plan, vec![Some(snapshot_for("cmd: cargo test"))]);
+        assert!(!snapshot_current(&plan.acceptance[0]));
+        assert!(!proven_failing(&plan.acceptance[0]));
     }
 
     #[test]
