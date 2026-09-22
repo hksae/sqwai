@@ -5017,15 +5017,24 @@ mod tests {
     /// not by pointing at a journal record. This test used to pass a fabricated
     /// `bash` result as evidence for `cmd: cargo test` and see the item
     /// verified — the suite never ran.
+    ///
+    /// §12.12: a check only settles what it could fail. Both probes miss
+    /// before the change (so both take a baseline); one still misses at
+    /// verify and one is fixed first, so the same test covers the red
+    /// and the green path through the real runner.
     #[test]
     fn cmd_acceptance_is_verified_by_running_the_command() {
         let (mut ctx, dir) = proj();
+        let flag_fail = dir.join("fail-gate.txt");
+        let flag_pass = dir.join("pass-gate.txt");
+        let cmd_fail = gate_probe_command(&flag_fail);
+        let cmd_pass = gate_probe_command(&flag_pass);
         let created = plan_op(
             &mut ctx,
             &json!({
                 "op": "create",
                 "goal": "verify acceptance",
-                "acceptance": ["cmd: exit 3", "cmd: exit 0"],
+                "acceptance": [format!("cmd: {cmd_fail}"), format!("cmd: {cmd_pass}")],
                 "steps": [{"title": "verify", "kind": "verify"}]
             }),
         );
@@ -5043,6 +5052,8 @@ mod tests {
             plan::AcceptanceStatus::Pending
         );
 
+        // fix the second check after the baseline was taken: now it passes
+        fs::write(&flag_pass, "ok").unwrap();
         let passed = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 1}));
         assert!(passed.ok, "{}", passed.output);
         assert_eq!(
@@ -5056,6 +5067,11 @@ mod tests {
     /// model-controlled input the host is about to execute. It goes through the
     /// same classifier as `bash`, and anything that would need approval is
     /// refused rather than run without asking.
+    ///
+    /// §12.12: an unsafe command never gets a baseline (it is not run to
+    /// prove itself), so `verify` refuses it as unproven first. With a
+    /// forged-in proof the same item must still be refused as unsafe —
+    /// the safety gate stays behind the baseline gate.
     #[test]
     fn cmd_acceptance_refuses_a_command_that_would_need_approval() {
         let (mut ctx, dir) = proj();
@@ -5072,7 +5088,26 @@ mod tests {
 
         let out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
         assert!(!out.ok, "{}", out.output);
-        assert!(out.output.contains("unsafe_acceptance"), "{}", out.output);
+        assert!(out.output.contains("no_baseline"), "{}", out.output);
+
+        // even with proof smuggled in, the command must not run
+        let mut plan = plan::open_active(&dir).unwrap().unwrap();
+        plan.acceptance[0].baseline = Some(plan::Baseline {
+            at: plan::now(),
+            exit: 1,
+            check_definition_hash: plan::check_definition_hash("rm -rf /"),
+            output_hash: "hash".to_string(),
+            head: "boom".to_string(),
+            state_digest: "digest".to_string(),
+        });
+        plan::store(&dir, &plan).unwrap();
+        let unsafe_out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!unsafe_out.ok, "{}", unsafe_out.output);
+        assert!(
+            unsafe_out.output.contains("unsafe_acceptance"),
+            "{}",
+            unsafe_out.output
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -5256,11 +5291,14 @@ mod tests {
     /// `complete` runs `cmd:` items again instead of trusting the verify that
     /// happened earlier: a criterion that stopped passing must block
     /// completion (§2.1.2).
+    ///
+    /// §12.12: the probe misses before the change (baseline), is fixed,
+    /// verifies green, then breaks again — so `complete` re-runs it
+    /// instead of trusting the earlier receipt.
     #[test]
     fn complete_reruns_cmd_acceptance_and_refuses_when_it_now_fails() {
         let (mut ctx, dir) = proj();
         let flag = dir.join("gate.txt");
-        fs::write(&flag, "ok").unwrap();
         let command = gate_probe_command(&flag);
         let created = plan_op(
             &mut ctx,
@@ -5272,6 +5310,8 @@ mod tests {
             }),
         );
         assert!(created.ok, "{}", created.output);
+        // the fix happens after the baseline was taken
+        fs::write(&flag, "ok").unwrap();
         assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
 
         let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
@@ -5299,12 +5339,17 @@ mod tests {
 
     /// `plan verify` on a `cmd:` item records an interval receipt: equal
     /// before/after digests, exec runner, and a matching journal record.
+    ///
+    /// §12.12: the probe misses before the change (baseline), is fixed,
+    /// then verifies green with a receipt. `gate.txt` exists throughout
+    /// so the step refs validate; the probe watches a second file, which
+    /// is outside the digest — creating it is the fix, not a state move.
     #[test]
     fn verify_cmd_issues_interval_receipt() {
         let (mut ctx, dir) = proj();
-        let flag = dir.join("gate.txt");
-        fs::write(&flag, "ok").unwrap();
-        let command = gate_probe_command(&flag);
+        fs::write(dir.join("gate.txt"), "ok").unwrap();
+        let probe = dir.join("probe-missing.txt");
+        let command = gate_probe_command(&probe);
         let created = plan_op(
             &mut ctx,
             &json!({
@@ -5315,6 +5360,7 @@ mod tests {
             }),
         );
         assert!(created.ok, "{}", created.output);
+        fs::write(&probe, "ok").unwrap();
 
         let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
         assert!(verified.ok, "{}", verified.output);
@@ -5344,6 +5390,10 @@ mod tests {
     /// A check that races a mutation proves nothing: when the command
     /// itself moves tracked state mid-run, verify is rejected and no
     /// receipt is issued.
+    ///
+    /// §12.12: a mutating check can never take a natural baseline (the
+    /// capture sees the state move and records nothing), so the proof is
+    /// attached by hand to reach the runner — which must still refuse.
     #[test]
     fn verify_cmd_rejects_when_state_moves_mid_run() {
         let (mut ctx, dir) = proj();
@@ -5361,6 +5411,21 @@ mod tests {
             }),
         );
         assert!(created.ok, "{}", created.output);
+
+        let mut plan = plan::open_active(&dir).unwrap().unwrap();
+        assert!(
+            !plan::proven_failing(&plan.acceptance[0]),
+            "a mutating check takes no natural baseline"
+        );
+        plan.acceptance[0].baseline = Some(plan::Baseline {
+            at: plan::now(),
+            exit: 1,
+            check_definition_hash: plan::check_definition_hash("echo hi >> gate.txt"),
+            output_hash: "hash".to_string(),
+            head: "boom".to_string(),
+            state_digest: "digest".to_string(),
+        });
+        plan::store(&dir, &plan).unwrap();
 
         let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
         assert!(!verified.ok, "{}", verified.output);
