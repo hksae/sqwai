@@ -3124,6 +3124,10 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
             "\nacceptance {index}: fails before the change (exit {exit}) — {first_line}"
         ));
     }
+    // ladder walk (§12.12): one trailing line saying where on the ladder
+    // this plan stands. Rides every create/accept message for free, since
+    // both append these notes raw.
+    proof.notes.push(plan::ladder_note(plan));
     proof
 }
 
@@ -6217,6 +6221,31 @@ mod tests {
         let out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
         assert!(!out.ok, "{}", out.output);
         assert!(out.output.contains("manual_acceptance"), "{}", out.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Ladder walk surfaces at create time: a manual-only plan engages no
+    /// executable rung, and the create result says so. No shell runs here —
+    /// manual items are never executed — so this also pins the walk as
+    /// shell-free.
+    #[test]
+    fn create_names_the_ladder_rung_or_its_absence() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "eyeball it",
+                "acceptance": ["manual: the panel looks right"],
+                "steps": [{"title": "verify", "kind": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(created.output.contains("no executable rung"), "{}", created.output);
+
+        let plan = plan::open_active(&dir).unwrap().unwrap();
+        assert_eq!(plan::ladder_top(&plan), None);
+        assert!(!plan::render(&plan).contains("[rung"));
         fs::remove_dir_all(&dir).ok();
     }
 

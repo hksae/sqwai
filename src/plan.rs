@@ -2451,6 +2451,104 @@ pub fn differential_current(item: &Acceptance) -> bool {
         .is_some_and(|s| s.check_definition_hash == check_definition_hash(command))
 }
 
+/// Judge ladder rungs (§12.12), ordered by trust per unit of cost — the
+/// declaration order IS the trust order. The host walks down and stops at
+/// the first rung that applies; only classification ships so far (no
+/// synthesis, no gating). Rung 6 (round-trip) has no acceptance kind yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Rung {
+    /// 1–2: an existing test, or a repro written for the change. The host
+    /// cannot tell those apart from text alone, so they share the rung.
+    Test,
+    /// 3: `differential:`
+    Differential,
+    /// 4: `snapshot:`
+    Snapshot,
+    /// 5: `signatures:`
+    Structural,
+    /// 7: builds, type checks, lints, `--dry-run`s
+    Build,
+    /// 8: any other host-run command (a fixture run by another name)
+    Fixture,
+}
+
+impl Rung {
+    pub fn number(self) -> u8 {
+        match self {
+            Self::Test => 1,
+            Self::Differential => 3,
+            Self::Snapshot => 4,
+            Self::Structural => 5,
+            Self::Build => 7,
+            Self::Fixture => 8,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Test => "test",
+            Self::Differential => "differential",
+            Self::Snapshot => "snapshot",
+            Self::Structural => "structural",
+            Self::Build => "build",
+            Self::Fixture => "fixture",
+        }
+    }
+}
+
+/// Which ladder rung an acceptance item engages, if any. Kinds that name
+/// their rung (`differential:`, `snapshot:`, `signatures:`) map exactly;
+/// `cmd:` maps by a text heuristic — informational only, never a gate —
+/// and `manual:`/free text engage no rung at all.
+pub fn ladder_rung(item: &Acceptance) -> Option<Rung> {
+    match item.kind() {
+        AcceptanceKind::Differential(_) => Some(Rung::Differential),
+        AcceptanceKind::Snapshot(_) => Some(Rung::Snapshot),
+        AcceptanceKind::Signatures(_) => Some(Rung::Structural),
+        AcceptanceKind::Command(command) => Some(classify_command_rung(command)),
+        AcceptanceKind::Manual(_) | AcceptanceKind::Text(_) => None,
+    }
+}
+
+/// Heuristic half of [`ladder_rung`]: test-shaped text outranks
+/// build-shaped text, everything else reads as a fixture run. Substring
+/// matching overmatches (`latest` reads as a test) — accepted, because
+/// the rung informs arbitration order instead of deciding anything.
+fn classify_command_rung(command: &str) -> Rung {
+    let lower = command.to_lowercase();
+    if lower.contains("test") || lower.contains("spec") {
+        Rung::Test
+    } else if [
+        "check", "build", "lint", "clippy", "mypy", "pyright", "tsc", "dry-run", "dryrun",
+        "validate", "schema", "compile", "audit",
+    ]
+    .iter()
+    .any(|token| lower.contains(token))
+    {
+        Rung::Build
+    } else {
+        Rung::Fixture
+    }
+}
+
+/// The walk itself: the highest-trust rung the plan engages, if any.
+pub fn ladder_top(plan: &Plan) -> Option<Rung> {
+    plan.acceptance.iter().filter_map(ladder_rung).min()
+}
+
+/// One trailing line for the plan-create/accept result: where on the
+/// ladder this plan stands.
+pub fn ladder_note(plan: &Plan) -> String {
+    match ladder_top(plan) {
+        Some(rung) => format!(
+            "\nladder: rung {} {} — highest-trust executable acceptance",
+            rung.number(),
+            rung.name()
+        ),
+        None => "\nladder: no executable rung — manual/text only".to_string(),
+    }
+}
+
 /// Rung 5: does this item carry frozen declaration shapes to compare
 /// against? True only for a `signatures:` item whose shapes were frozen
 /// against the file set it still names — renaming the set makes a new
@@ -3010,6 +3108,10 @@ pub fn render(plan: &Plan) -> String {
                 // item reports as flaky rather than as failed-or-verified
                 ValidationStatus::Unknown => out.push_str(" [flaky — runs disagree]"),
                 other => out.push_str(&format!(" [validation: {}]", other.as_str())),
+            }
+            // ladder walk (§12.12): which rung this item engages
+            if let Some(rung) = ladder_rung(a) {
+                out.push_str(&format!(" [rung {} {}]", rung.number(), rung.name()));
             }
             // §12.12: a cmd: item with no baseline cannot be settled by a
             // green run, so say so here rather than at the verify that fails
@@ -4320,6 +4422,68 @@ mod tests {
         // renaming the file set makes a new check
         plan.acceptance[0].text = "signatures: src/b.rs".to_string();
         assert!(!signatures_current(&plan.acceptance[0]));
+    }
+
+    fn rung_of(text: &str) -> Option<Rung> {
+        ladder_rung(&Acceptance {
+            text: text.to_string(),
+            status: AcceptanceStatus::Pending,
+            evidence: Vec::new(),
+            validation: Validation::default(),
+            baseline: None,
+            snapshot: None,
+            shape: None,
+            by: None,
+            reason: None,
+        })
+    }
+
+    #[test]
+    fn ladder_classifies_kinds_exactly_and_commands_by_heuristic() {
+        // kinds that name their rung map exactly
+        assert_eq!(rung_of("differential: x"), Some(Rung::Differential));
+        assert_eq!(rung_of("snapshot: x"), Some(Rung::Snapshot));
+        assert_eq!(rung_of("signatures: x"), Some(Rung::Structural));
+        // cmd: reads test-shaped, build-shaped, or fixture-shaped
+        assert_eq!(rung_of("cmd: cargo test"), Some(Rung::Test));
+        assert_eq!(rung_of("cmd: pytest -x"), Some(Rung::Test));
+        assert_eq!(rung_of("cmd: go test ./..."), Some(Rung::Test));
+        assert_eq!(rung_of("cmd: cargo check"), Some(Rung::Build));
+        assert_eq!(rung_of("cmd: tsc --noEmit"), Some(Rung::Build));
+        assert_eq!(rung_of("cmd: npm run build"), Some(Rung::Build));
+        assert_eq!(rung_of("cmd: ./run-fixture.sh"), Some(Rung::Fixture));
+        // manual and free text engage no rung
+        assert_eq!(rung_of("manual: eyeball it"), None);
+        assert_eq!(rung_of("the page renders"), None);
+    }
+
+    #[test]
+    fn ladder_walk_stops_at_the_highest_trust_rung() {
+        let mut plan = create(
+            "walk the ladder".to_string(),
+            Vec::new(),
+            vec![
+                "the suite is green".to_string(),
+                "cmd: ./run-fixture.sh".to_string(),
+                "snapshot: mycli --version".to_string(),
+            ],
+            vec![NewStep {
+                title: "do the work".to_string(),
+                kind: None,
+                refs: Vec::new(),
+            }],
+            0,
+            &Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(ladder_top(&plan), Some(Rung::Snapshot));
+        assert!(ladder_note(&plan).contains("rung 4 snapshot"));
+        assert!(render(&plan).contains("[rung 4 snapshot]"));
+        assert!(render(&plan).contains("[rung 8 fixture]"));
+        // manual/text only: no rung to stand on
+        plan.acceptance.retain(|item| ladder_rung(item).is_none());
+        assert_eq!(ladder_top(&plan), None);
+        assert!(ladder_note(&plan).contains("no executable rung"));
     }
 
     #[test]
