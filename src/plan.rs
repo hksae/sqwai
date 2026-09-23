@@ -491,7 +491,14 @@ impl Acceptance {
     /// Classify by prefix. Unprefixed text is `Text`, per §2.1.2.
     /// `signatures:` paths are comma-separated (`a.rs, b.rs`).
     pub fn kind(&self) -> AcceptanceKind<'_> {
-        let text = self.text.trim();
+        AcceptanceKind::classify(&self.text)
+    }
+}
+
+impl<'a> AcceptanceKind<'a> {
+    /// Classify raw item text without building an [`Acceptance`].
+    pub fn classify(text: &'a str) -> AcceptanceKind<'a> {
+        let text = text.trim();
         if let Some(command) = text.strip_prefix("cmd:") {
             AcceptanceKind::Command(command.trim())
         } else if let Some(command) = text.strip_prefix("snapshot:") {
@@ -1913,6 +1920,21 @@ pub fn create(
             "merge steps, or ask the user to raise it with /plan limit N",
         ));
     }
+    // Untyped acceptance is refused, not settled: free text settles on
+    // whatever evidence happens to exist, which is a claim, not a check.
+    // Every criterion is executable (`cmd:`, `snapshot:`, `differential:`,
+    // `signatures:`) or explicitly human (`manual:`).
+    for text in &acceptance {
+        if matches!(AcceptanceKind::classify(text), AcceptanceKind::Text(_)) {
+            return Err(Rejection::new(
+                "untyped_acceptance",
+                format!("acceptance criterion is free text: {text}"),
+                "rewrite it as cmd: (pass/fail), snapshot: (frozen output), \
+                 differential: (changed output), signatures: (file shapes), \
+                 or manual: (the user checks it by hand)",
+            ));
+        }
+    }
 
     let ts = now();
     let plan = Plan {
@@ -2807,42 +2829,17 @@ pub fn verify_acceptance(
             // re-read them just now; the freeze gate lives at the host
             // boundary so replay never re-judges accepted commits.
         }
-        AcceptanceKind::Text(_) => {
-            if evidence.is_empty() {
-                return reject(
-                    plan,
-                    "no_evidence",
-                    format!("acceptance {index} has no host evidence of its own"),
-                    "close a verify step whose evidence is not already \
-                     spent on another acceptance item, or prefix the item \
-                     with cmd: (pass/fail), snapshot: (frozen output) or \
-                     differential: (changed output) so the host can run it",
-                );
-            }
-            // Two items cannot lean on the same record: that is the reuse
-            // this function exists to prevent.
-            let spent: Vec<&EvidenceRef> = plan
-                .acceptance
-                .iter()
-                .enumerate()
-                .filter(|(other, item)| *other != index && item.status == AcceptanceStatus::Passed)
-                .flat_map(|(_, item)| item.evidence.iter())
-                .collect();
-            if let Some(clash) = evidence.iter().find(|reference| {
-                spent
-                    .iter()
-                    .any(|used| used.session == reference.session && used.seq == reference.seq)
-            }) {
-                return reject(
-                    plan,
-                    "evidence_spent",
-                    format!(
-                        "journal record {}:{} already verifies another acceptance item",
-                        clash.session, clash.seq
-                    ),
-                    "run the check for this item so it has evidence of its own",
-                );
-            }
+        AcceptanceKind::Text(text) => {
+            // Untyped acceptance cannot be created anymore; files written
+            // before the gate still load, but nothing settles them.
+            return reject(
+                plan,
+                "untyped_acceptance",
+                format!("acceptance {index} is free text: {text}"),
+                "rewrite it as cmd: (pass/fail), snapshot: (frozen output), \
+                 differential: (changed output), signatures: (file shapes), \
+                 or manual: (the user checks it by hand)",
+            );
         }
     }
     let item = &mut plan.acceptance[index];
@@ -4215,7 +4212,7 @@ mod tests {
         let mut plan = create(
             "goal".to_string(),
             Vec::new(),
-            vec!["check the docs".to_string()],
+            vec!["cmd: check-docs".to_string()],
             vec![NewStep {
                 title: "verify docs".into(),
                 refs: Vec::new(),
@@ -4643,8 +4640,9 @@ mod tests {
         }
     }
 
-        #[test]
-    fn signatures_freeze_only_against_the_named_file_set() {        let mut plan = create(
+    #[test]
+    fn signatures_freeze_only_against_the_named_file_set() {
+        let mut plan = create(
             "hold the shape".to_string(),
             Vec::new(),
             vec!["signatures: src/a.rs".to_string()],
@@ -4772,7 +4770,7 @@ mod tests {
             "walk the ladder".to_string(),
             Vec::new(),
             vec![
-                "the suite is green".to_string(),
+                "manual: eyeball it".to_string(),
                 "cmd: ./run-fixture.sh".to_string(),
                 "snapshot: mycli --version".to_string(),
             ],
@@ -4788,7 +4786,7 @@ mod tests {
         assert!(ladder_note(&plan).contains("rung 4 snapshot"));
         assert!(render(&plan).contains("[rung 4 snapshot]"));
         assert!(render(&plan).contains("[rung 8 fixture]"));
-        // manual/text only: no rung to stand on
+        // manual only: no rung to stand on
         plan.acceptance.retain(|item| ladder_rung(item).is_none());
         assert_eq!(ladder_top(&plan), None);
         assert!(ladder_note(&plan).contains("no executable rung"));
@@ -4807,13 +4805,12 @@ mod tests {
     }
 
     #[test]
-    fn baseline_never_proves_a_manual_or_text_item() {
-        let mut plan = create(
+    fn baseline_never_proves_a_manual_item() {        let mut plan = create(
             "render the page".to_string(),
             Vec::new(),
             vec![
                 "manual: eyeball it".to_string(),
-                "the page renders".to_string(),
+                "manual: read it aloud".to_string(),
             ],
             vec![NewStep {
                 title: "do the work".to_string(),
@@ -4823,13 +4820,13 @@ mod tests {
             &Limits::default(),
         )
         .unwrap();
-        // even handed the same shape of proof, neither kind can be settled by
-        // a host run: only a command is runnable
+        // even handed the same shape of proof, manual items can never be
+        // settled by a host run: only a command is runnable
         set_baselines(
             &mut plan,
             vec![
                 Some(baseline_for("manual: eyeball it")),
-                Some(baseline_for("the page renders")),
+                Some(baseline_for("manual: read it aloud")),
             ],
         );
         assert!(!proven_failing(&plan.acceptance[0]));

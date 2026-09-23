@@ -57,8 +57,8 @@ that must be solid but is not what the project is about.
    journal: the agent keeps working with reduced guarantees and says so.
 7. **Prefix stability.** The prompt is laid out so that expensive stable
    content is cached and volatile content lives at the tail.
-8. **Deterministic first, model second.** Where a cheap heuristic in code gets
-   80% of the value (plan-first triviality bypass), it runs first;
+8. **Deterministic first, model second.** Where a cheap check in code gets
+   80% of the value (acceptance-bearing plan before first mutation), it runs first;
    model calls are escalation, not default.
 9. **Prompt is third, and it shapes forms, not traits.** Behavior falls into three classes: type-and-checkable (response format, tool annotation rules) — prompt it; global traits (verbosity, sycophancy, thoroughness) — prompt barely helps, expose them instead (claim lint, facts blocks, manual: acceptance); invariants — code. Choose the remedy by the class of the behavior, never by the annoyance it causes. Threat-model limits (§2.0) are invariants, never prompt requests: "do not touch .sqwai via bash" is not enforceable by wording.
 10. **Observations vs claims.** Journal fields are observations written by the host at dispatch;
@@ -258,14 +258,10 @@ observably *changed* output — rung 3; the freeze runs twice and must agree,
 so nondeterministic inputs never freeze), `signatures:` (host freezes the
 declaration shapes of the named files and settles the item on identical
 shapes — rung 5; bodies move, structure holds), or `manual:` (user
-waives it). Anything else is free text, settled only by unspent
-host-recorded evidence from a step — never by defaulting to `manual:`.
-Unspent means: evidence refs of a step that no other passed acceptance
-item has already spent (`evidence_spent` rejects reuse); each ref must attest
-successful work (successful exec, `file_diff`, or zero-error `diagnostics`).
-The host pins an attachment receipt (`runner: "evidence"`, state digest over
-traversed paths) so later moves stale the item like a command check, and
-`complete` re-validates the refs instead of trusting the earlier verify.
+waives it). Anything else is free text, and `plan create` refuses it
+(`untyped_acceptance`): free text settles on whatever evidence happens to
+exist, which is a claim, not a check. Rewrite as one of the typed kinds
+or `manual:`.
 Writes are atomic: temp file + rename. On open, a plan that fails schema
 validation is rebuilt from journaled intents (create + later ops in
 best-effort ts order); only unrebuildable bytes (no intent, diverged op,
@@ -355,8 +351,8 @@ via two host-only operations:
   and sets `validation.status: passed`.
 - `waive`: the user explicitly dismissed the check requirement. Records
   `{acceptance_id, by: "user", reason}` and sets `validation.status: waived`.
-Text acceptances (no prefix) settle via unspent host-recorded evidence from
-any step; `manual:` items settle only by user `confirm` or `waive`.
+Free text is not an acceptance kind: `plan create` refuses it, and `verify`
+answers `untyped_acceptance` for files written before the gate.
 
 Verification receipt: a record of a check run bound to an execution interval:
 `{session, seq, state_digest, command?, runner, args?, cwd?, started_at?,
@@ -487,16 +483,14 @@ or markdown file (fetch → extract → resolve refs → review UI). Specified i
 §12.10. No `plan from` command, `[issue]` config, or draft store exists
 today.
 
-2.1.9 Scope guard and plan-first gate
-Plan-first gate (config `plan_first: soft|off`, default `soft`). In Act mode the
-first mutating tool call with no active plan anywhere in the project is refused
-with `code: plan_required` — unless the user message is heuristic-trivial:
-single line, ≤ 250 chars (≤ 50 for the short path), no task lists, none of the
-complex terms (implement/refactor/feature/architecture/rewrite/redesign/migrate/
-benchmark/…), at most one referenced file, or one of the trivial terms
-(typo/rename/format/whitespace/spelling/comment/lint). Otherwise the model
-must `plan create` first. Without this the model routes around the plan for
-"quick" tasks that grow.
+2.1.9 Scope guard and acceptance gate
+Acceptance gate (config `plan_first: soft|off`, default `soft`). In Act mode
+a mutating tool call is refused with `code: plan_required` unless an active
+plan with acceptance items exists anywhere in the project. The gate asks
+"is there a criterion", not "is there a plan" and not "is the prose
+trivial": before the first mutation an acceptance item must exist —
+executable or human — so there is something to settle against. A plan
+without acceptance settles nothing and blocks like no plan at all.
 Deliberate scope: the gate checks project-global `open_active`, not the
 session's own plan. It asks "is there planning discipline", not "is it
 yours" — one active plan per project is enough to let a session act under
@@ -616,6 +610,11 @@ does not wedge the next `plan start`. Task arguments accept strings or
 objects (`task`|`prompt`); anything else refuses with the expected shape.
 
 Concurrency and writers discipline:
+- Children are read-only by default. A task object with `write: true` and
+  `paths: [...]` declares a writer scoped to those roots (non-empty, and
+  non-overlapping with sibling writers in the same call — overlap refuses
+  before anything spawns). Writes outside the scope refuse with
+  `code: subagent_scope`; the epoch gate below still applies on top.
 - Mutating tools (`write`, `edit`, `patch`, `bash`) invoked by a subagent verify
   that the subagent's `step_epoch` matches the plan's current `step_epoch`; if
   the step was reopened or cancelled while the subagent was running, the
@@ -1569,7 +1568,7 @@ number; a `partial` one is missing something the design calls for.
 | U | Assumption notes: open tracking, finish warning, resolve | done | F3 |
 | V | Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md) | done — cmd:/manual: settling done (#7); `/init` seeds `[verify] commands` (repo probing + MEMORY.md `verify:` lines, hand values win); `cmd: $name` substitutes on `plan create`, unknown names reject with the known list | F3 |
 | V1 | Verification receipts (§2.1.4): execution interval digest, check hash, stale invalidation, manual `confirm` vs `waive` | done — interval digest, check hash, stale invalidation on diff, manual /plan confirm, replay restoration | V, F1b |
-| W | Plan-first gate (Act first-mutate w/o plan → plan_required) | done — `plan_first: soft|off` in PlanConfig; heuristic trivial bypass; gate blocks unprompted mutations in Act mode without an active plan | F3 |
+| W | Acceptance gate (Act mutate w/o acceptance-bearing plan → plan_required) | done — `plan_first: soft|off` in PlanConfig; gate checks project-global acceptance presence, not prose triviality; baseline arm exempt | F3 |
 | X | Tool-output pruning + USER.md split/load | partial — USER.md split/loading and prune (§3.3.1) done; the read guard is a host path→hash map, not context-backed authorization | F1, F5 |
 | Y | Claim lint (post-generation verify against journal/resolve_ref) | done — counts/status/paths/symbols checked against the turn journal window, contradictions marked `[unverified]` + `claim_lint` record, absence never flagged; repetition nudge (3+ fresh flags) rides the turn system block (§12.9) | I4 |
 | Z | Scope guard (step.refs vs file_diff) | done — finish-time misattribution warnings plus write-path scope warnings against the holding step's refs (warn-layer, never blocks; `bash` excluded, no per-file diff) | I4 |
@@ -2111,14 +2110,14 @@ never competing plans.
   moved-state difference is `snapshot_changed`). *Shipped:* rung 3 —
   `differential:` items freeze the same record with the inverted verdict
   (changed output settles, identical output is `no_observable_change`), and
-  the freeze runs twice so nondeterministic inputs never freeze.
-  *Shipped:* rung 5 — `signatures:` items freeze normalized declaration
+  the freeze runs twice so nondeterministic inputs never freeze.  *Shipped:* rung 5 — `signatures:` items freeze normalized declaration
   shapes (sorted `depth::signature` lines via tree-sitter, 11 languages)
   and settle on identical shapes; bodies move freely, adding/removing/
   re-signing breaks the freeze (`signatures_changed`).
   *Shipped:* the ladder walk — the host classifies every acceptance item
   by rung (`differential:`/`snapshot:`/`signatures:` map exactly, `cmd:`
-  by a documented text heuristic, `manual:`/text engage none) and reports
+  by a documented text heuristic, `manual:` engages none and free text is
+  refused at create) and reports
   the highest-trust rung in the create/accept result and per item in
   `/plan` (`[rung 3 differential]`). Informational only: no synthesis,
   no gating.

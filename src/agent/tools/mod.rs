@@ -18,6 +18,7 @@ use crate::plan;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 /// whether a tool may run in parallel with others
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -81,6 +82,11 @@ pub struct ToolCtx {
     /// the main agent. Mutating tools refuse to run when the inherited
     /// epoch no longer matches the plan.
     pub subagent_step: Option<plan::StepContext>,
+    /// Write scope for a writer subagent (`None` = unrestricted): every
+    /// file mutation must sit inside these project-relative roots. Taken
+    /// from the spawn registry at construction; read-only children and
+    /// the main agent never set it.
+    pub subagent_write_paths: Option<Vec<String>>,
     /// H1 reflector executor (§12.7): verify-only context. The dispatcher
     /// refuses every tool outside [`REFLECTOR_TOOLS`] plus mutating `bash`,
     /// with an honest message. Unlike `read_only` (a lock held elsewhere)
@@ -112,6 +118,7 @@ impl ToolCtx {
             shadow_store: crate::config::ShadowStore::Local,
             current_step: None,
             subagent_step: None,
+            subagent_write_paths: None,
             reflector: false,
         }
     }
@@ -719,8 +726,8 @@ tight loop; await its result before dependent changes or reporting success.",
         ToolDef {
             name: "subagent",
             kind: Kind::ReadOnly,
-            description: "Delegate one or more focused tasks to child agents. Children inherit the current Plan/Act mode; up to 8 tasks are accepted, at most 4 run concurrently, and child agents cannot create further subagents. A child that produces nothing for 600s is cancelled and reported as timed out. Separate subagent calls in one turn also run concurrently.",
-            parameters: json!({"type":"object","properties":{"task":{"type":"string","description":"one focused child task"},"tasks":{"type":"array","items":{"anyOf":[{"type":"string"},{"type":"object","properties":{"task":{"type":"string"},"prompt":{"type":"string"},"description":{"type":"string"}},"additionalProperties":true}]},"minItems":1,"maxItems":8,"description":"focused child tasks to run concurrently (strings, or objects with task|prompt)"}},"anyOf":[{"required":["task"]},{"required":["tasks"]}]}),
+            description: "Delegate one or more focused tasks to child agents. Children inherit the current Plan/Act mode; up to 8 tasks are accepted, at most 4 run concurrently, and child agents cannot create further subagents. A child that produces nothing for 600s is cancelled and reported as timed out. Separate subagent calls in one turn also run concurrently. Children are read-only by default; a task object with write:true and paths:[...] declares a writer scoped to those roots (non-empty, non-overlapping with sibling writers) — writes outside the scope are refused.",
+            parameters: json!({"type":"object","properties":{"task":{"type":["string","object"],"description":"one focused child task: a string (read-only), or an object with task|prompt plus write:true and paths:[...] to declare a scoped writer"},"tasks":{"type":"array","items":{"anyOf":[{"type":"string"},{"type":"object","properties":{"task":{"type":"string"},"prompt":{"type":"string"},"description":{"type":"string"},"write":{"type":"boolean","description":"allow file writes, scoped to paths"},"paths":{"type":"array","items":{"type":"string"},"description":"write scope roots, required with write:true"}},"additionalProperties":true}]},"minItems":1,"maxItems":8,"description":"focused child tasks to run concurrently (strings, or objects with task|prompt)"}},"anyOf":[{"required":["task"]},{"required":["tasks"]}]}),
         },
         ToolDef {
             name: "note",
@@ -1363,6 +1370,37 @@ pub(crate) fn bg_running_commands() -> Vec<(u64, String, String)> {
     exec::running_commands()
 }
 
+/// Project-relative, lexically cleaned mutation targets of a file-writing
+/// call: `file_path` for write/edit/multi_edit, `+++` files for patch.
+/// Unresolvable or empty spellings yield nothing — the tool's own
+/// validation reports those, not the scope gates.
+fn mutation_target_paths(ctx: &ToolCtx, name: &str, args: &Value) -> Vec<String> {
+    let raws: Vec<String> = if name == "patch" {
+        let patch = args["patch"].as_str().unwrap_or_default();
+        if patch.trim().is_empty() {
+            return Vec::new();
+        }
+        git::extract_patch_files(&ctx.root, patch)
+    } else {
+        let raw = args["file_path"].as_str().unwrap_or_default();
+        if raw.trim().is_empty() {
+            return Vec::new();
+        }
+        vec![raw.to_string()]
+    };
+    raws
+        .into_iter()
+        .filter_map(|raw| {
+            let resolved = ctx.resolve(&raw).ok()?;
+            let rel = resolved
+                .strip_prefix(&ctx.root)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| raw.clone());
+            Some(lexical_clean(&rel))
+        })
+        .collect()
+}
+
 /// First frozen check input a file mutation would touch, if any. Resolves
 /// for the jail verdict, then compares lexically cleaned relative paths so
 /// `..` spellings cannot dodge the freeze. Fail-open on an unreadable
@@ -1374,28 +1412,9 @@ fn frozen_input_hit(ctx: &ToolCtx, name: &str, args: &Value) -> Option<String> {
     if frozen.is_empty() {
         return None;
     }
-    let targets: Vec<String> = if name == "patch" {
-        let patch = args["patch"].as_str().unwrap_or_default();
-        if patch.trim().is_empty() {
-            return None;
-        }
-        git::extract_patch_files(&ctx.root, patch)
-    } else {
-        let raw = args["file_path"].as_str().unwrap_or_default();
-        if raw.trim().is_empty() {
-            return None;
-        }
-        vec![raw.to_string()]
-    };
-    targets.into_iter().find_map(|raw| {
-        let resolved = ctx.resolve(&raw).ok()?;
-        let rel = resolved
-            .strip_prefix(&ctx.root)
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_else(|_| raw.clone());
-        let clean = lexical_clean(&rel);
-        frozen.iter().any(|f| f == &clean).then(|| clean)
-    })
+    mutation_target_paths(ctx, name, args)
+        .into_iter()
+        .find(|clean| frozen.iter().any(|f| f == clean))
 }
 
 /// Lexically clean a relative path: drop `.`, resolve `..` against the
@@ -1500,6 +1519,37 @@ fn frozen_input_reason(path: &str) -> String {
     )
 }
 
+/// Writer scopes of live subagents, keyed by child session. Written at
+/// spawn (after scope validation), taken once at child-context
+/// construction — single take, so a crashed spawn cannot poison anything
+/// later (session ids are unique per spawn).
+fn subagent_scopes() -> &'static Mutex<HashMap<String, Vec<String>>> {
+    static SCOPES: OnceLock<Mutex<HashMap<String, Vec<String>>>> = OnceLock::new();
+    SCOPES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register a writer child's path scope. Called at spawn, after the
+/// write flag and the sibling-overlap checks passed.
+pub(crate) fn register_subagent_scope(session: &str, paths: Vec<String>) {
+    subagent_scopes()
+        .lock()
+        .unwrap()
+        .insert(session.to_string(), paths);
+}
+
+/// Take a registered scope for child-context construction.
+pub(crate) fn take_subagent_scope(session: &str) -> Option<Vec<String>> {
+    subagent_scopes().lock().unwrap().remove(session)
+}
+
+/// True when `path` (project-relative, forward slashes) sits inside one
+/// of the scope roots: equal, nested under a root, or the whole tree (`.`).
+fn in_write_scope(path: &str, scope: &[String]) -> bool {
+    scope
+        .iter()
+        .any(|root| path == root || path.starts_with(&format!("{root}/")) || root == ".")
+}
+
 /// dispatch one tool call
 pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
     if ctx.read_only
@@ -1600,6 +1650,31 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             })
             .to_string(),
         );
+    }
+    // Writer-subagent scope: a child declared its roots at spawn, and every
+    // file mutation must sit inside them. Read-only children never reach
+    // here (refused above); the main agent carries no scope.
+    if ctx.subagent_step.is_some()
+        && let Some(allowed) = ctx.subagent_write_paths.as_ref()
+        && matches!(name, "write" | "edit" | "multi_edit" | "patch")
+    {
+        let outside = mutation_target_paths(ctx, name, args)
+            .into_iter()
+            .find(|target| !in_write_scope(target, allowed));
+        if let Some(path) = outside {
+            return Outcome::err(
+                serde_json::json!({
+                    "ok": false,
+                    "code": "subagent_scope",
+                    "reason": format!(
+                        "'{path}' is outside this subagent's declared write scope ({})",
+                        allowed.join(", ")
+                    ),
+                    "hint": "stay inside the spawned scope, or spawn with wider paths",
+                })
+                .to_string(),
+            );
+        }
     }
     let mut outcome = match name {
         "read" => fs::read(ctx, args["file_path"].as_str().unwrap_or_default(), args),
@@ -3931,82 +4006,18 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                 });
             }
         }
-        plan::AcceptanceKind::Text(_) => {
-            let Some((step_id, evidence)) = unspent_step_evidence(&ctx.root, &active, index)
-            else {
-                return rejection(plan::Rejection {
-                    code: "no_evidence",
-                    reason: format!("acceptance {index} has no host evidence of its own"),
-                    hint: "close a verify step whose evidence is not already spent on \
-                           another acceptance item, or prefix the item with cmd: \
-                           (pass/fail), snapshot: (frozen output) or differential: \
-                           (changed output) so the host can run it"
-                        .to_string(),
-                });
-            };
-            // The evidence still has to attest successful work: kindless
-            // does not mean contentless. Removing the per-kind gates must
-            // not remove that.
-            if let Err(message) = validate_attached_records(
-                &ctx.root,
-                &active.id,
-                &step_id,
-                &evidence,
-            ) {
-                return Outcome::err(message);
-            }
-            // attachment receipt (§2.1.4): the evidence records are
-            // immutable, but the world they describe is not. Pin a
-            // point-in-time digest over the traversed inputs so a later
-            // file move stales this item through the same machinery as
-            // command checks — instead of letting verified evidence
-            // silently outlive the state it attested.
-            let paths = plan::digest_paths(&active);
-            let digest = plan::state_digest(&ctx.root, &paths, "");
-            let at = plan::now();
-            let receipt_fields = serde_json::json!({
-                "runner": "evidence",
-                "step_id": step_id,
-                "evidence_refs": evidence.clone(),
-                "cwd": ctx.root.display().to_string(),
-                "finished_at": at,
-                "state_before": digest,
-                "state_after": digest,
-                "state_digest": digest,
-                "paths": paths,
+        plan::AcceptanceKind::Text(text) => {
+            // Untyped acceptance cannot be created anymore; files written
+            // before the gate still load, but nothing settles them. The
+            // pure layer repeats this verdict for replayed commits.
+            return rejection(plan::Rejection {
+                code: "untyped_acceptance",
+                reason: format!("acceptance {index} is free text: {text}"),
+                hint: "rewrite it as cmd: (pass/fail), snapshot: (frozen output), \
+                       differential: (changed output), signatures: (file shapes), \
+                       or manual: (the user checks it by hand)"
+                    .to_string(),
             });
-            let seq = match crate::agent::journal::Journal::open(&ctx.root, &ctx.session_id) {
-                Ok(mut journal) => {
-                    match journal.append_verification_receipt(index, receipt_fields) {
-                        Ok(seq) => seq,
-                        Err(e) => {
-                            return Outcome::err(format!("receipt journal unwritable: {e:#}"));
-                        }
-                    }
-                }
-                Err(e) => {
-                    return Outcome::err(format!("receipt journal unwritable: {e:#}"));
-                }
-            };
-            let receipt = plan::Receipt {
-                session: ctx.session_id.clone(),
-                seq,
-                state_digest: digest.clone(),
-                command: None,
-                exit: None,
-                at: at.clone(),
-                check_definition_hash: None,
-                runner: Some("evidence".to_string()),
-                args: None,
-                cwd: Some(ctx.root.display().to_string()),
-                started_at: None,
-                finished_at: Some(at),
-                state_before: Some(digest.clone()),
-                state_after: Some(digest),
-                output_hash: None,
-                paths,
-            };
-            (evidence, Some(receipt))
         }
     };
 
@@ -4125,69 +4136,6 @@ fn with_misattribution_warning(
         return message;
     }
     format!("{message}\nwarning: {}", warns.join("; "))
-}
-
-/// A step whose evidence no acceptance item has spent yet, with that
-/// evidence. `None` when every step's records are already accounted for —
-/// which is the case this whole function exists to catch. Records from a
-/// stale step epoch (subagent work predating a reopen) are excluded: they
-/// belong to the undone attempt, not the current one (§2.2.4).
-///
-/// Kindless: any step's records count, open or closed — verifying against
-/// mid-step evidence is an established flow. What the step was *for* is
-/// the model's business; whether the records attest success is checked at
-/// validation, the same rule for every step.
-fn unspent_step_evidence(
-    root: &Path,
-    active: &plan::Plan,
-    index: usize,
-) -> Option<(String, Vec<plan::EvidenceRef>)> {
-    let spent: Vec<&plan::EvidenceRef> = active
-        .acceptance
-        .iter()
-        .enumerate()
-        .filter(|(other, item)| *other != index && item.status == plan::AcceptanceStatus::Passed)
-        .flat_map(|(_, item)| item.evidence.iter())
-        .collect();
-    active.steps.iter().find_map(|step| {
-            let fresh: Vec<plan::EvidenceRef> = step
-                .evidence
-                .iter()
-                .filter(|reference| {
-                    !spent
-                        .iter()
-                        .any(|used| used.session == reference.session && used.seq == reference.seq)
-                })
-                .filter(|reference| evidence_epoch_current(root, &active.id, step, reference))
-                .cloned()
-                .collect();
-            (!fresh.is_empty()).then(|| (step.id.clone(), fresh))
-        })
-}
-
-/// True unless the referenced record positively belongs to an older step
-/// epoch. Unresolvable references fail open here — resolution problems
-/// surface with their own error at validation.
-fn evidence_epoch_current(
-    root: &Path,
-    plan_id: &str,
-    step: &plan::Step,
-    reference: &plan::EvidenceRef,
-) -> bool {
-    let record = match crate::agent::journal::Journal::evidence(
-        root,
-        plan_id,
-        Some(&step.id),
-        reference,
-        None,
-    ) {
-        Ok(record) => record,
-        Err(_) => return true,
-    };
-    let Some(record) = record else {
-        return true;
-    };
-    crate::agent::journal::epoch_matches(&record, step.step_epoch)
 }
 
 /// The gate on `plan finish`.
@@ -4510,11 +4458,6 @@ fn validate_attached_records(
             "no_evidence: step {step_id} requires journal evidence"
         ));
     }
-    if evidence.is_empty() {
-        return Err(format!(
-            "no_evidence: step {step_id} requires journal evidence"
-        ));
-    }
     let after_seq = if step_id == "acceptance" {
         None
     } else {
@@ -4682,7 +4625,7 @@ mod tests {
             "cmd: exit 3",
             "cmd: exit 0",
             "manual: eyeball it",
-            "the page renders",
+            "snapshot: exit 0",
         ]);
         let proof = capture_baselines(&mut ctx, &plan);
         assert_eq!(proof.slots.len(), 4);
@@ -4698,7 +4641,11 @@ mod tests {
         assert!(!baseline.output_hash.is_empty());
         assert!(proof.slots[1].is_none(), "a check that passes proves nothing");
         assert!(proof.slots[2].is_none(), "manual items are never run");
-        assert!(proof.slots[3].is_none(), "free text has nothing to run");
+        assert!(
+            proof.frozen[3].is_none(),
+            "empty output freezes nothing: {:?}",
+            proof.notes
+        );
         // and the model is told, per item, so it can fix the plan now
         assert!(proof.notes.iter().any(|n| n.contains("fails before")));
         assert!(
@@ -4707,10 +4654,9 @@ mod tests {
             proof.notes
         );
         assert!(
-            proof
-                .notes
-                .iter()
-                .any(|n| n.contains("passes already") || n.contains("could not be run")),
+            proof.notes.iter().any(|n| n.contains("passes already")
+                || n.contains("could not be run")
+                || n.contains("empty output")),
             "the passing check must be named: {:?}",
             proof.notes
         );
@@ -4804,6 +4750,52 @@ mod tests {
         assert!(denied.output.contains("read-only"));
         let allowed = execute(&mut ctx, "read", &json!({"file_path": "README.md"}));
         assert!(allowed.ok);
+    }
+
+    /// A writer subagent stays inside its declared scope: same file and
+    /// nested paths pass, siblings refuse with a structured code. Reads
+    /// are unaffected, and the main agent (no scope) is unaffected too.
+    #[test]
+    fn subagent_write_scope_confines_file_mutations() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "scoped child",
+                "acceptance": ["manual: eyeball it"],
+                "steps": [{"title": "work"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        ctx.subagent_step = Some(plan::StepContext {
+            plan_id: plan_id.clone(),
+            step_id: "1".into(),
+            step_epoch: 0,
+        });
+        ctx.subagent_write_paths = Some(vec!["src".to_string()]);
+
+        let inside = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": "src/child.rs", "content": "fresh\n"}),
+        );
+        assert!(inside.ok, "{}", inside.output);
+
+        let outside = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": "notes.txt", "content": "elsewhere\n"}),
+        );
+        assert!(!outside.ok, "{}", outside.output);
+        assert!(outside.output.contains("subagent_scope"), "{}", outside.output);
+
+        let read = execute(&mut ctx, "read", &json!({"file_path": "README.md"}));
+        assert!(read.ok, "{}", read.output);
+        assert!(!dir.join("notes.txt").exists());
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -6357,136 +6349,8 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// One host record cannot settle two acceptance items. Before this, verify
-    /// took `steps.iter().find(kind == Verify && !evidence.is_empty())` — the
-    /// first verify step with anything attached — so a single successful
-    /// command let every item pass in turn on the same record.
-    #[test]
-    fn text_acceptance_cannot_reuse_another_items_evidence() {
-        let (mut ctx, dir) = proj();
-        let created = plan_op(
-            &mut ctx,
-            &json!({
-                "op": "create",
-                "goal": "two criteria, one check",
-                "acceptance": ["the suite is green", "the linter is clean"],
-                "steps": [{"title": "verify", "kind": "verify"}]
-            }),
-        );
-        assert!(created.ok, "{}", created.output);
-        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
-        journal.set_attribution(Some("1".into()), Some(plan_id), "main");
-        journal
-            .append_evidence("tool_result", json!({"tool": "bash", "ok": true}))
-            .unwrap();
 
-        let first = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
-        assert!(first.ok, "{}", first.output);
 
-        let second = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 1}));
-        assert!(!second.ok, "the same record must not verify both");
-        assert!(
-            second.output.contains("no_evidence") || second.output.contains("evidence_spent"),
-            "{}",
-            second.output
-        );
-        assert_eq!(
-            plan::open_active(&dir).unwrap().unwrap().acceptance[1].status,
-            plan::AcceptanceStatus::Pending
-        );
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    /// A text acceptance verified on step evidence pins an attachment
-    /// receipt, so a later move of the traversed files stales it through
-    /// the same machinery as command checks — instead of letting verified
-    /// evidence silently outlive the state it attested.
-    #[test]
-    fn text_verify_pins_attachment_receipt_and_later_diff_stales_it() {
-        let (mut ctx, dir) = proj();
-        fs::write(dir.join("tracked.rs"), "one").unwrap();
-        let created = plan_op(
-            &mut ctx,
-            &json!({
-                "op": "create",
-                "goal": "evidence with a receipt",
-                "acceptance": ["the code is formatted"],
-                "steps": [{"title": "verify", "kind": "verify", "refs": ["tracked.rs"]}]
-            }),
-        );
-        assert!(created.ok, "{}", created.output);
-        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
-        journal.set_attribution(Some("1".into()), Some(plan_id), "main");
-        journal
-            .append_evidence("tool_result", json!({"tool": "bash", "ok": true}))
-            .unwrap();
-
-        let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
-        assert!(verified.ok, "{}", verified.output);
-        let plan = plan::open_active(&dir).unwrap().unwrap();
-        let item = &plan.acceptance[0];
-        assert_eq!(item.validation.status, plan::ValidationStatus::Passed);
-        assert_eq!(item.validation.receipts.len(), 1);
-        let receipt = &item.validation.receipts[0];
-        assert_eq!(receipt.runner.as_deref(), Some("evidence"));
-        assert_eq!(receipt.state_before, receipt.state_after);
-        assert!(receipt.paths.iter().any(|p| p == "tracked.rs"));
-
-        // close the step so `complete` reaches the acceptance gate; a
-        // later move of the traversed file must then refuse completion
-        // until the item is re-verified
-        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
-        assert!(
-            plan_op(
-                &mut ctx,
-                &json!({"op": "cancel", "id": "1", "reason": "done here"})
-            )
-            .ok
-        );
-        let sid = ctx.session_id.clone();
-        assert!(plan::invalidate_on_diff(&dir, &sid, &["tracked.rs".to_string()]).unwrap());
-        let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
-        assert!(!completed.ok, "{}", completed.output);
-        assert!(
-            completed.output.contains("acceptance_stale"),
-            "{}",
-            completed.output
-        );
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    /// A failed exec is not evidence of anything passing.
-    #[test]
-    fn text_acceptance_rejects_a_failed_exec_record() {
-        let (mut ctx, dir) = proj();
-        let created = plan_op(
-            &mut ctx,
-            &json!({
-                "op": "create",
-                "goal": "verify evidence",
-                "acceptance": ["the suite is green"],
-                "steps": [{"title": "verify", "kind": "verify"}]
-            }),
-        );
-        assert!(created.ok, "{}", created.output);
-        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
-        journal.set_attribution(Some("1".into()), Some(plan_id), "main");
-        journal
-            .append_evidence("tool_result", json!({"tool": "bash", "ok": false}))
-            .unwrap();
-
-        let rejected = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
-        assert!(!rejected.ok);
-        assert!(
-            rejected.output.contains("wrong_evidence"),
-            "{}",
-            rejected.output
-        );
-        fs::remove_dir_all(&dir).ok();
-    }
 
     /// `manual:` items are the user's call. Verify has to refuse them rather
     /// than quietly accept whatever evidence is lying around.
@@ -6507,6 +6371,33 @@ mod tests {
         let out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
         assert!(!out.ok, "{}", out.output);
         assert!(out.output.contains("manual_acceptance"), "{}", out.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Untyped acceptance cannot be created: free text settles on whatever
+    /// evidence happens to exist, which is a claim, not a check. The
+    /// rejection names the typed alternatives.
+    #[test]
+    fn create_refuses_untyped_acceptance() {
+        let (mut ctx, dir) = proj();
+        let rejected = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "vague criteria",
+                "acceptance": ["the suite is green"],
+                "steps": [{"title": "verify"}]
+            }),
+        );
+        assert!(!rejected.ok, "{}", rejected.output);
+        assert!(
+            rejected.output.contains("untyped_acceptance"),
+            "{}",
+            rejected.output
+        );
+        assert!(rejected.output.contains("cmd:"), "{}", rejected.output);
+        // and nothing was stored
+        assert!(plan::open_active(&dir).unwrap().is_none());
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -6545,7 +6436,7 @@ mod tests {
             &json!({
                 "op": "create",
                 "goal": "impossible task",
-                "acceptance": ["the spec holds"],
+                "acceptance": ["manual: spec holds"],
                 "steps": [{"title": "try"}]
             }),
         );
@@ -7359,10 +7250,11 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-        /// Rung 5 through `complete`: the re-read sees a reshaped file and
+    /// Rung 5 through `complete`: the re-read sees a reshaped file and
     /// blocks completion.
     #[test]
-    fn complete_reruns_signatures_and_blocks_on_reshape() {        let (mut ctx, dir) = proj();
+    fn complete_reruns_signatures_and_blocks_on_reshape() {
+        let (mut ctx, dir) = proj();
         let created = plan_op(
             &mut ctx,
             &json!({

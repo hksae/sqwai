@@ -434,17 +434,70 @@ fn subagent_task_text(item: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn subagent_tasks_from_args(args: &serde_json::Value) -> Result<Vec<String>, String> {
-    let mut tasks: Vec<String> = match args.get("tasks") {
+/// One parsed child task. Children are read-only by default; `write` with
+/// `paths` declares a writer scoped to those roots. Paths are normalized
+/// here so spawn-time overlap checks and execute-time enforcement agree.
+#[derive(Debug, PartialEq)]
+struct SubagentTask {
+    label: String,
+    write: bool,
+    paths: Vec<String>,
+}
+
+fn subagent_task_spec(item: &serde_json::Value) -> Option<SubagentTask> {
+    let label = subagent_task_text(item)?;
+    let (write, paths) = match item {
+        serde_json::Value::Object(map) => {
+            let write = map.get("write").and_then(|v| v.as_bool()).unwrap_or(false);
+            let paths = map
+                .get("paths")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|p| {
+                            p.replace('\\', "/")
+                                .trim_start_matches("./")
+                                .trim_end_matches('/')
+                                .to_string()
+                        })
+                        .filter(|p| !p.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (write, paths)
+        }
+        _ => (false, Vec::new()),
+    };
+    Some(SubagentTask {
+        label,
+        write,
+        paths,
+    })
+}
+
+/// Two writer scopes overlap when a path is equal or nested either way.
+/// Sibling writers must not overlap: concurrent writes to one file tangle
+/// attribution and undo beyond what epochs can separate.
+fn scopes_overlap(a: &[String], b: &[String]) -> bool {
+    a.iter().any(|x| {
+        b.iter().any(|y| {
+            x == y || x.starts_with(&format!("{y}/")) || y.starts_with(&format!("{x}/"))
+        })
+    })
+}
+
+fn subagent_tasks_from_args(args: &serde_json::Value) -> Result<Vec<SubagentTask>, String> {
+    let mut tasks: Vec<SubagentTask> = match args.get("tasks") {
         Some(serde_json::Value::Array(items)) => {
-            items.iter().filter_map(subagent_task_text).collect()
+            items.iter().filter_map(subagent_task_spec).collect()
         }
         // a lone string is one task, not a malformed array
-        Some(single) => subagent_task_text(single).into_iter().collect(),
+        Some(single) => subagent_task_spec(single).into_iter().collect(),
         None => Vec::new(),
     };
     if tasks.is_empty()
-        && let Some(task) = args.get("task").and_then(subagent_task_text)
+        && let Some(task) = args.get("task").and_then(subagent_task_spec)
     {
         tasks.push(task);
     }
@@ -458,6 +511,30 @@ fn subagent_tasks_from_args(args: &serde_json::Value) -> Result<Vec<String>, Str
         return Err(format!(
             "too many subagents: maximum is {MAX_SUBAGENTS_PER_CALL}"
         ));
+    }
+    // writers declare their scope up front; overlapping siblings refuse
+    // before anything spawns, naming both sides.
+    for task in &tasks {
+        if task.write && task.paths.is_empty() {
+            return Err(format!(
+                "subagent write needs paths: task '{}' declares write without a scope — name the roots it may touch",
+                task.label.chars().take(80).collect::<String>()
+            ));
+        }
+    }
+    for (i, a) in tasks.iter().enumerate() {
+        if !a.write {
+            continue;
+        }
+        for b in tasks.iter().skip(i + 1) {
+            if b.write && scopes_overlap(&a.paths, &b.paths) {
+                return Err(format!(
+                    "subagent writer scopes overlap: '{}' and '{}' share paths — split the scopes or serialize the work",
+                    a.label.chars().take(60).collect::<String>(),
+                    b.label.chars().take(60).collect::<String>()
+                ));
+            }
+        }
     }
     Ok(tasks)
 }
@@ -727,7 +804,13 @@ async fn run_subagent(
         let outcomes = stream::iter(tasks.into_iter().enumerate())
             .map(|(index, task)| {
                 let mut one = call.clone();
-                one.args = serde_json::json!({"task": task});
+                // re-parseable single: the recursive call re-derives the
+                // same write scope from these flags
+                one.args = serde_json::json!({
+                    "task": task.label,
+                    "write": task.write,
+                    "paths": task.paths,
+                });
                 let system = system.clone();
                 let mcp = mcp.clone();
                 let lsp = lsp.clone();
@@ -790,6 +873,12 @@ async fn run_subagent(
     let task = tasks.into_iter().next().unwrap();
     let id = next_subagent_id();
     let child_session = next_subagent_session();
+    // Read-only by default: a writer child needs the explicit flag (with
+    // paths, validated above) on top of the session lock.
+    let child_read_only = read_only || !task.write;
+    if task.write {
+        tools::register_subagent_scope(&child_session, task.paths.clone());
+    }
     // NOTE (§2.2.4): children always complete inside this tool call — the
     // event loop below is awaited before the outcome returns. There is no
     // fire-and-forget spawn, so `plan finish` can never race still-running
@@ -815,7 +904,7 @@ async fn run_subagent(
     let _ = parent_tx
         .send(AgentEvent::SubagentStart {
             id,
-            task: task.clone(),
+            task: task.label.clone(),
         })
         .await;
     // #171: the child works its parent's step, so it joins the parent plan
@@ -835,7 +924,7 @@ async fn run_subagent(
         effort_support,
         max_tokens,
         system,
-        messages: vec![Message::new(Role::User, task)],
+        messages: vec![Message::new(Role::User, task.label.clone())],
         root: root.to_path_buf(),
         // #190: NOT `sub-{id}` — the numeric counter resets on restart
         // and would append to a previous run's journal file
@@ -844,7 +933,7 @@ async fn run_subagent(
         plan_mode,
         context_limit,
         enable_tools: true,
-        read_only,
+        read_only: child_read_only,
         previous_response_id: None,
         summary: None,
         mcp,
@@ -1107,111 +1196,16 @@ pub fn spawn_agent(input: AgentInput) -> AgentHandle {
 /// a plan first (`plan_required`) unless the prompt is trivial:
 /// e.g. single-file typo fixes, simple renames, comments, whitespace,
 /// or very short, non-complex requests affecting <= 1 file.
-pub fn is_heuristic_trivial(messages: &[Message]) -> bool {
-    let last_user_text = messages
-        .iter()
-        .rev()
-        .find(|m| m.role == Role::User)
-        .map(|m| m.content.trim());
-
-    let text = match last_user_text {
-        Some(t) if !t.is_empty() => t,
-        _ => return false,
-    };
-
-    // If there are task lists / checkboxes or multiple lines
-    if text.contains("- [ ]") || text.contains("- [x]") {
-        return false;
-    }
-    let lines: Vec<&str> = text
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .collect();
-    if lines.len() > 3 || text.len() > 250 {
-        return false;
-    }
-
-    let lower = text.to_lowercase();
-
-    // Complex / high-effort keywords indicating planning is required
-    const COMPLEX_TERMS: &[&str] = &[
-        "implement",
-        "refactor",
-        "feature",
-        "architecture",
-        "rewrite",
-        "redesign",
-        "migrate",
-        "benchmark",
-        "stage ",
-        "add support for",
-        "build a",
-        "create a new",
-    ];
-    for term in COMPLEX_TERMS {
-        if lower.contains(term) {
-            return false;
-        }
-    }
-
-    // Check count of referenced file paths (words ending with known code/config extensions)
-    let mut file_count = 0;
-    for token in lower.split_whitespace() {
-        let clean = token.trim_matches(|c: char| {
-            !c.is_alphanumeric() && c != '.' && c != '_' && c != '/' && c != '\\'
-        });
-        if clean.contains('.')
-            && let Some(ext) = clean.rsplit('.').next()
-            && matches!(
-                ext,
-                "rs" | "py"
-                    | "ts"
-                    | "js"
-                    | "toml"
-                    | "md"
-                    | "json"
-                    | "yaml"
-                    | "yml"
-                    | "html"
-                    | "css"
-                    | "go"
-                    | "c"
-                    | "cpp"
-                    | "h"
-                    | "sh"
-                    | "txt"
-            )
-        {
-            file_count += 1;
-        }
-    }
-    if file_count > 1 {
-        return false;
-    }
-
-    // Trivial keywords: typo, rename, format, whitespace, spelling, comment, lint
-    const TRIVIAL_TERMS: &[&str] = &[
-        "typo",
-        "rename",
-        "format",
-        "whitespace",
-        "spelling",
-        "comment",
-        "lint",
-    ];
-    for term in TRIVIAL_TERMS {
-        if lower.contains(term) {
-            return true;
-        }
-    }
-
-    // Short single-sentence request without complex terms and <= 1 file
-    if lines.len() == 1 && text.len() <= 50 {
-        return true;
-    }
-
-    false
+/// Gate input: an active plan only counts when it carries acceptance.
+/// A plan without criteria settles nothing, so mutating under one is the
+/// same as mutating without a plan. #171 still applies — one active plan
+/// per project (§2.1.1), a global check; session-scoped resolution stays
+/// strict everywhere else.
+fn plan_with_acceptance(root: &Path) -> bool {
+    crate::plan::open_active(root)
+        .ok()
+        .flatten()
+        .is_some_and(|plan| !plan.acceptance.is_empty())
 }
 
 async fn run_agent(
@@ -1439,6 +1433,9 @@ async fn run_agent(
     // Subagents inherit their spawn context (§2.2.4): it stamps their
     // journal records and gates their mutations against reopen races.
     ctx.subagent_step = parent_step.clone();
+    // ...and a writer child's declared scope, if any (read-only children
+    // and the main agent take nothing).
+    ctx.subagent_write_paths = tools::take_subagent_scope(&session_id);
     // ...and their shadow snapshots land on the parent chain, so the
     // parent's `/undo` sees them (ToolCtx::checkpoint_session).
     ctx.checkpoint_session = parent_session.clone();
@@ -2100,19 +2097,18 @@ async fn run_agent(
                 && plan_limits.plan_first == crate::config::PlanFirstMode::Soft
                 && tools::is_mutating_call(&call.name, &call.args)
                 && call.name != "plan"
-                // #171: the gate asks "is there planning discipline", not
-                // "is it yours" — one active plan per project (§2.1.1), so a
-                // global check. Session-scoped resolution stays strict
-                // everywhere else; joining a foreign plan is explicit
-                // (`plan start` records membership).
-                && crate::plan::open_active(&root).ok().flatten().is_none()
-                && !is_heuristic_trivial(&messages)
+                // The gate asks "is there a criterion", not "is there a
+                // plan" and not "is the prose trivial": before the first
+                // mutation an acceptance item must exist — executable or
+                // human — so there is something to settle against. One
+                // active plan per project (§2.1.1).
+                && !plan_with_acceptance(&root)
                 {
                     tools::Outcome::err(
                     serde_json::json!({
                         "ok": false,
                         "code": "plan_required",
-                        "reason": "In ACT mode, mutating tools require an active plan first. Create a plan with 'plan create' before modifying project files.",
+                        "reason": "In ACT mode, mutating tools require an active plan with acceptance criteria first. Create a plan with 'plan create' (typed acceptance: cmd:, snapshot:, differential:, signatures:, or manual:) before modifying project files.",
                         "hint": "Call 'plan create' with your goal, acceptance criteria, and initial steps."
                     })
                     .to_string(),
@@ -4279,14 +4275,26 @@ mod subagent_tests {
 
     #[test]
     fn accepts_one_or_many_subagent_tasks() {
+        let labels = |tasks: Vec<SubagentTask>| {
+            tasks.into_iter().map(|t| t.label).collect::<Vec<_>>()
+        };
         assert_eq!(
-            subagent_tasks_from_args(&serde_json::json!({"task":" inspect "})).unwrap(),
+            labels(
+                subagent_tasks_from_args(&serde_json::json!({"task":" inspect "})).unwrap()
+            ),
             vec!["inspect"]
         );
         assert_eq!(
-            subagent_tasks_from_args(&serde_json::json!({"tasks":["one","two"]})).unwrap(),
+            labels(
+                subagent_tasks_from_args(&serde_json::json!({"tasks":["one","two"]})).unwrap()
+            ),
             vec!["one", "two"]
         );
+        // strings are read-only writers of nothing
+        for task in subagent_tasks_from_args(&serde_json::json!({"tasks":["one"]})).unwrap() {
+            assert!(!task.write);
+            assert!(task.paths.is_empty());
+        }
     }
 
     /// Regression: the model sent three task OBJECTS and the whole batch
@@ -4294,13 +4302,18 @@ mod subagent_tests {
     /// under task|prompt|description, a lone string is one task.
     #[test]
     fn accepts_object_shaped_subagent_tasks() {
+        let labels = |tasks: Vec<SubagentTask>| {
+            tasks.into_iter().map(|t| t.label).collect::<Vec<_>>()
+        };
         assert_eq!(
-            subagent_tasks_from_args(&serde_json::json!({"tasks":[
-                {"prompt": "research articles"},
-                {"task": "check commercial modes"},
-                {"description": "probe internals"},
-            ]}))
-            .unwrap(),
+            labels(
+                subagent_tasks_from_args(&serde_json::json!({"tasks":[
+                    {"prompt": "research articles"},
+                    {"task": "check commercial modes"},
+                    {"description": "probe internals"},
+                ]}))
+                .unwrap()
+            ),
             vec![
                 "research articles",
                 "check commercial modes",
@@ -4308,13 +4321,47 @@ mod subagent_tests {
             ]
         );
         assert_eq!(
-            subagent_tasks_from_args(&serde_json::json!({"tasks": "do it all"})).unwrap(),
+            labels(
+                subagent_tasks_from_args(&serde_json::json!({"tasks": "do it all"})).unwrap()
+            ),
             vec!["do it all"]
         );
         // empties still refuse with the original message intact
         let error =
             subagent_tasks_from_args(&serde_json::json!({"tasks": [{}, "  "]})).unwrap_err();
         assert!(error.contains("subagent task is required"), "{error}");
+    }
+
+    #[test]
+    fn subagent_writer_scope_rules() {
+        // write without paths refuses: a scope must be declared
+        let error = subagent_tasks_from_args(&serde_json::json!({
+            "tasks": [{"task": "fix it", "write": true}]
+        }))
+        .unwrap_err();
+        assert!(error.contains("needs paths"), "{error}");
+
+        // overlapping writer scopes refuse, naming the conflict
+        let error = subagent_tasks_from_args(&serde_json::json!({
+            "tasks": [
+                {"task": "fix a", "write": true, "paths": ["src/a"]},
+                {"task": "fix b", "write": true, "paths": ["src/a/b.rs"]},
+            ]
+        }))
+        .unwrap_err();
+        assert!(error.contains("overlap"), "{error}");
+
+        // disjoint writers pass with normalized scopes
+        let tasks = subagent_tasks_from_args(&serde_json::json!({
+            "tasks": [
+                {"task": "fix a", "write": true, "paths": ["src/a/", "./src/b"]},
+                {"task": "read all"},
+            ]
+        }))
+        .unwrap();
+        assert!(tasks[0].write);
+        assert_eq!(tasks[0].paths, vec!["src/a", "src/b"]);
+        assert!(!tasks[1].write);
     }
 
     #[test]
@@ -4850,54 +4897,47 @@ mod effort_tests {
     }
 
     #[test]
-    fn test_is_heuristic_trivial_rules() {
-        let msg = |text: &str| vec![Message::new(Role::User, text)];
+    fn test_plan_with_acceptance_gate_input() {
+        // the gate asks "is there a criterion", not "is there a plan" and
+        // not "is the prose trivial": an active plan counts only with
+        // acceptance items on it.
+        let dir = std::env::temp_dir().join(format!("sqwai-gate-{}", crate::plan::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!plan_with_acceptance(&dir), "no plan at all");
 
-        // Trivial: single file typo fix, renames, format, comments, etc.
-        assert!(is_heuristic_trivial(&msg("fix typo in src/config/mod.rs")));
-        assert!(is_heuristic_trivial(&msg("fix spelling in README.md")));
-        assert!(is_heuristic_trivial(&msg("rename foo to bar in test.rs")));
-        assert!(is_heuristic_trivial(&msg("format Cargo.toml")));
-        assert!(is_heuristic_trivial(&msg("just fix whitespace in main.rs")));
-        assert!(is_heuristic_trivial(&msg("add comment to lib.rs")));
+        let mut plan = crate::plan::create(
+            "goal".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![crate::plan::NewStep {
+                title: "step".to_string(),
+                refs: Vec::new(),
+            }],
+            0,
+            &crate::plan::Limits::default(),
+        )
+        .unwrap();
+        crate::plan::store(&dir, &plan).unwrap();
+        assert!(
+            !plan_with_acceptance(&dir),
+            "a plan without acceptance settles nothing"
+        );
 
-        // Trivial: short single-sentence request without complex verbs and <= 1 file
-        assert!(is_heuristic_trivial(&msg(
-            "cleanup unused import in main.rs"
-        )));
-
-        // Non-trivial: multi-file mentions
-        assert!(!is_heuristic_trivial(&msg("fix typo in foo.rs and bar.rs")));
-        assert!(!is_heuristic_trivial(&msg(
-            "update src/config/mod.rs and src/agent/loop_task.rs"
-        )));
-
-        // Non-trivial: complex terms
-        assert!(!is_heuristic_trivial(&msg("implement Stage T and Stage W")));
-        assert!(!is_heuristic_trivial(&msg(
-            "refactor provider error handling"
-        )));
-        assert!(!is_heuristic_trivial(&msg(
-            "feature: add fallback support to models"
-        )));
-        assert!(!is_heuristic_trivial(&msg("rewrite the plan loop")));
-        assert!(!is_heuristic_trivial(&msg("build a new benchmark harness")));
-        assert!(!is_heuristic_trivial(&msg("migrate sqlite schema")));
-
-        // Non-trivial: task lists or multi-line checklists
-        assert!(!is_heuristic_trivial(&msg(
-            "Please do:\n- [ ] step 1\n- [ ] step 2"
-        )));
-        assert!(!is_heuristic_trivial(&msg(
-            "Line 1\nLine 2\nLine 3\nLine 4"
-        )));
-
-        // Empty / no user message
-        assert!(!is_heuristic_trivial(&[]));
-        assert!(!is_heuristic_trivial(&[Message::new(
-            Role::Assistant,
-            "hello"
-        )]));
+        plan.acceptance.push(crate::plan::Acceptance {
+            text: "cmd: cargo test".to_string(),
+            status: crate::plan::AcceptanceStatus::Pending,
+            evidence: Vec::new(),
+            validation: Default::default(),
+            baseline: None,
+            snapshot: None,
+            shape: None,
+            inputs: Vec::new(),
+            by: None,
+            reason: None,
+        });
+        crate::plan::store(&dir, &plan).unwrap();
+        assert!(plan_with_acceptance(&dir));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     struct MockTestProvider {
@@ -5644,6 +5684,127 @@ mod effort_tests {
         }
         let _ = std::fs::remove_dir_all(&temp_dir);
         assert!(saw_tool_notice, "should have seen tool notice");
+    }
+
+    /// The gate asks for acceptance, not prose: a plan without criteria
+    /// blocks like no plan at all, while any acceptance item — even
+    /// `manual:` — lets the mutation through.
+    #[tokio::test]
+    async fn test_plan_first_gate_needs_acceptance_not_plans() {
+        async fn run_write(root: &std::path::Path, session: &str) -> bool {
+            let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+                events: std::sync::Mutex::new(vec![
+                    vec![Ok(crate::providers::StreamEvent::ToolCall(
+                        crate::providers::ToolCallReq::new(
+                            "c1",
+                            "write",
+                            serde_json::json!({
+                                "file_path": "gated.rs",
+                                "content": "pub fn hello() {}"
+                            }),
+                        ),
+                    ))],
+                    vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
+                ]),
+            });
+            let temp_dir = root.to_path_buf();
+            let input = AgentInput {
+                provider,
+                model_id: "m".into(),
+                model_key: "primary".into(),
+                effort: None,
+                effort_support: crate::config::EffortSupport::default(),
+                max_tokens: None,
+                system: vec![],
+                messages: vec![Message::new(Role::User, "fix typo")],
+                root: temp_dir.clone(),
+                session_id: session.into(),
+                blocked_patterns: vec![],
+                plan_mode: false,
+                context_limit: 10000,
+                enable_tools: true,
+                read_only: false,
+                previous_response_id: None,
+                summary: None,
+                mcp: Default::default(),
+                lsp: Default::default(),
+                compact_only: false,
+                diary: Default::default(),
+                memory: Default::default(),
+                compaction: Default::default(),
+                plan_limits: crate::config::PlanConfig {
+                    plan_first: crate::config::PlanFirstMode::Soft,
+                    ..Default::default()
+                },
+                shadow_store: crate::config::ShadowStore::Off,
+                subagent_depth: 0,
+                parent_step: None,
+                parent_session: None,
+                fallback_chain: vec![],
+            };
+            let mut handle = spawn_agent(input);
+            let mut wrote = false;
+            while let Some(ev) = handle.rx.recv().await {
+                match ev {
+                    AgentEvent::ToolNotice { name, ok, .. } => {
+                        assert_eq!(name, "write");
+                        wrote = ok;
+                    }
+                    AgentEvent::Completed(Ok(_)) => break,
+                    AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
+                    _ => {}
+                }
+            }
+            wrote
+        }
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("sqwai-test-gate-acc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let _ = std::fs::create_dir_all(&temp_dir);
+        // a trivial one-liner is no excuse anymore: no acceptance, no write
+        assert!(!run_write(&temp_dir, "sess-no-plan").await);
+        assert!(
+            !temp_dir.join("gated.rs").exists(),
+            "gated mutation must not land"
+        );
+
+        // a plan without acceptance settles nothing — same refusal
+        let mut plan = crate::plan::create(
+            "goal".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![crate::plan::NewStep {
+                title: "step".to_string(),
+                refs: Vec::new(),
+            }],
+            0,
+            &crate::plan::Limits::default(),
+        )
+        .unwrap();
+        crate::plan::store(&temp_dir, &plan).unwrap();
+        assert!(!run_write(&temp_dir, "sess-empty-plan").await);
+
+        // any single item opens the gate — even a human one
+        plan.acceptance.push(crate::plan::Acceptance {
+            text: "manual: eyeball it".to_string(),
+            status: crate::plan::AcceptanceStatus::Pending,
+            evidence: Vec::new(),
+            validation: Default::default(),
+            baseline: None,
+            snapshot: None,
+            shape: None,
+            inputs: Vec::new(),
+            by: None,
+            reason: None,
+        });
+        crate::plan::store(&temp_dir, &plan).unwrap();
+        assert!(run_write(&temp_dir, "sess-with-plan").await);
+        assert!(
+            temp_dir.join("gated.rs").exists(),
+            "allowed mutation must land on disk"
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     /// G0 baseline (§8.2): with the durable machinery off, the plan-first
