@@ -1538,7 +1538,7 @@ Dependencies, not chronology. Each item ends in a usable state. **This table is
 the only status in this document** — the sections above describe the design
 regardless of what is built.
 
-Core loop (prioritized for benchmark G0/G1):
+Core loop (prioritized for benchmark G0):
 - F1b (replay reducer) · F7 (checkpoints) · R (untrusted input)
 - V (executable acceptance) · V1 (receipts & invalidation)
 - G0 (minimal retention benchmark) · S1 (epoch lifecycle) · I4 (resolve_ref).
@@ -1570,7 +1570,6 @@ number; a `partial` one is missing something the design calls for.
 | F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, zstd) + layer-2 shadow repo driven by git CLI synchronously; path-scoped restore; `/undo step N` | done | F1 |
 | F7b | Crash-safe mutation protocol | done differently — no `mutation_started/observed` sweep; Layer-1 pre-images + `file_diff` chain cover single-step revert instead | F7 |
 | G0 | Minimal comparative retention benchmark (§8.2): plan + journal + anchor vs baseline | done — harness as ignored tests (minidb T1–T3 + kaiwai T4 matrix), pre-registration, eval files and analyses under bench/ | F1b, F6 |
-| G1 | Full integrity benchmark (§8.2): verification receipts, mutation crash harness, claim lint | planned | G0, V1, F7b, I4 |
 | H0 | L0 fact block + criticism detector | done — detector as learned student (offline LLM-labeled data, char-trigram LR, pure-Rust inference) + artifact signal + strict trigger + block-D injection + `criticism` marker + LLM-confirm for Maybe (§12.7) | F2 |
 | H1 | Reflector: Scope/Neutralizer/Executor/Verdict, /verify | done — full pipeline (Scope, Neutralizer with tone-invariance test, min-loop Executor in reflector ctx with dispatch refusal, host verdict mapping, host-rendered [verified], verdict file, recurrence, diary lesson) + `/verify [--full]` as background task + self-protection (full budgets on 2nd objection, journal-first disable on 3rd); live-model tone + executor tests | H0, D |
 | I1 | Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild | done — rusqlite (bundled) engine with §2.4.2 schema | E |
@@ -1619,8 +1618,9 @@ it, and `brief` is only as useful as the journal is complete.
 ULTRA (§12.12) sits between the benchmark and the infrastructure passes. AH is
 unblocked today and rides in the same pass as M: both are host-side, both serve
 the thesis directly, and AH is the cheapest way to make `complete` mean
-something. AI waits for G1 to supply the measurements and for AC to supply the
-harness that shows whether arbitration pays. Neither displaces K, L or O.
+something. AI is parked with the rest of ULTRA mode; when it unparks it needs
+measurements from the replacement benchmark format and the AC harness showing
+whether arbitration pays. Neither displaces K, L or O.
 
 Rules: no agent-facing graph feature before I3; no reflector before F2. F1 is
 complete except its explicitly deferred evidence/refs rules, which belong to
@@ -1652,7 +1652,6 @@ scenario suite (agent_error, claim_not_confirmed, scope_mismatch, partial,
 undetermined, tone invariance, no-journal degradation).
 8.2 Goal-retention benchmark
 
-Divided into two stages:
 - **G0 (Minimal retention benchmark)**: isolates the core anchor and plan loop
   (plan + evidence + anchor vs baseline summary=short) without depending on
   external graph tools, provider fallbacks, or reflector escalation.
@@ -1660,8 +1659,6 @@ Divided into two stages:
   summary cap are suspect on both arms (volatile tail re-keyed history;
   uncapped baseline summaries) — remeasure on `cache-adjusted cost`,
   not raw token sums.
-- **G1 (Full integrity benchmark)**: evaluates complete execution integrity,
-  including verification receipts, crash recovery, and claim linting.
 
 Fixture: `minidb`, a small file-backed KV store in Rust (~15 files,
 builds in seconds, tests in milliseconds), designed to punish forgetting:
@@ -2155,7 +2152,7 @@ never competing plans.
   the phase is dropped, not tuned.
 
 **Death criteria.** ULTRA-1 is dropped if it does not reduce `not verified`
-acceptance at `complete` on the G1 benchmark, or if its arbitration cost
+acceptance at `complete` on the benchmark, or if its arbitration cost
 exceeds the cost of one extra attempt. ULTRA-3 is dropped on the diversity
 measurement above. Neither outcome is a failure of the mode; both are the
 reason the slices are separate.

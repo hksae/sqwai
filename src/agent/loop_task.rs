@@ -2847,7 +2847,7 @@ fn plan_hint_for_summary(root: &std::path::Path, session_id: &str) -> String {
     hint
 }
 
-/// Journal-first compaction record (G1-prep): tokens and messages
+/// Journal-first compaction record: tokens and messages
 /// before/after, whether a summary was written, and its text
 /// (secret-screened by `append`). The `/compact` path already wrote
 /// begin/end records; the automatic loop cuts wrote nothing — so G0's
