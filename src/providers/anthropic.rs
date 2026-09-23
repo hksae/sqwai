@@ -20,8 +20,24 @@ pub struct AnthropicProvider {
 }
 
 /// content blocks for one message (anthropic wire format)
-fn content_blocks(m: &super::Message) -> Vec<Value> {
-    let mut blocks = Vec::new();
+/// Thinking the model did on an earlier turn, replayed verbatim: the API
+/// demands the exact text+signature back (or the redacted block untouched)
+/// whenever a turn that thought is followed by tool use, and answers 400
+/// without them. Only while thinking is still on for this request — blocks
+/// from an effort that is off now are not legal input.
+fn thinking_blocks(m: &super::Message, thinking_on: bool) -> Vec<Value> {
+    if thinking_on
+        && m.role == Role::Assistant
+        && let Some(state) = &m.provider_state
+        && let Some(saved) = state.get("thinking_blocks").and_then(|v| v.as_array())
+    {
+        return saved.to_vec();
+    }
+    Vec::new()
+}
+
+fn content_blocks(m: &super::Message, thinking_on: bool) -> Vec<Value> {
+    let mut blocks = thinking_blocks(m, thinking_on);
     // a tool result's payload lives inside the tool_result block itself
     if !m.content.is_empty() && m.role != Role::Tool {
         blocks.push(json!({"type": "text", "text": m.content}));
@@ -57,8 +73,7 @@ fn content_blocks(m: &super::Message) -> Vec<Value> {
 /// of the stable system prefix, and the last history message. Volatile parts
 /// travel unmarked after the history, so a changed date or git status costs
 /// only the tail instead of the cached prefix behind it.
-pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints: bool) -> Value {
-    // What the caller asked for, falling back to the provider default. This
+pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints: bool) -> Value {    // What the caller asked for, falling back to the provider default. This
     // used to ignore `req.max_tokens` entirely and always send the default, so
     // a request for a larger answer was silently capped.
     let base_max_tokens = req.max_tokens.unwrap_or(default_max_tokens);
@@ -69,6 +84,19 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
     // turn — so one marker after each region end suffices; per-part markers
     // only made sense while volatile parts rode inside `system`.
     let tools_breakpoint = cache_breakpoints && !req.tools.is_empty();
+
+    // Saved thinking replays only while thinking is on for this request.
+    // Same condition as the `thinking` param below: blocks from an effort
+    // that is off now are not legal input.
+    let thinking_on = req
+        .effort
+        .filter(|l| *l != EffortLevel::Off)
+        .is_some_and(|level| {
+            matches!(
+                super::effort::plan(level, req.effort_support).wire,
+                super::effort::Wire::Budget(_)
+            )
+        });
 
     let stable: Vec<&super::SystemPart> =
         req.system.iter().filter(|part| part.cacheable).collect();
@@ -105,12 +133,15 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
                 .and_then(|p| p.get_mut("content"))
                 .and_then(|c| c.as_array_mut())
         {
-            arr.extend(content_blocks(m));
+            // thinking-first survives the merge: saved thinking goes ahead
+            // of the combined content, the rest extends it as before.
+            arr.splice(..0, thinking_blocks(m, thinking_on));
+            arr.extend(content_blocks(m, false));
             continue;
         }
         msgs.push(json!({
             "role": role,
-            "content": content_blocks(m),
+            "content": content_blocks(m, thinking_on),
         }));
     }
     // breakpoint on the last history message: everything before it —
@@ -269,6 +300,10 @@ impl Provider for AnthropicProvider {
 
             // index -> accumulating tool_use input
             let mut partials: BTreeMap<i64, (String, String, String)> = BTreeMap::new();
+            // index -> accumulating thinking block (text + its signature).
+            // A turn can think several times (e.g. again after tool results),
+            // so each block is kept under its own index, in wire order.
+            let mut thinking: BTreeMap<i64, ThinkingBlock> = BTreeMap::new();
 
             let mut es = resp.bytes_stream().eventsource();
             let mut out_tokens: u64 = 0;
@@ -310,10 +345,30 @@ impl Provider for AnthropicProvider {
                             }
                             "content_block_start" => {
                                 let idx = v.pointer("/index").and_then(|x| x.as_i64()).unwrap_or(0);
-                                if v.pointer("/content_block/type").and_then(|x| x.as_str()) == Some("tool_use") {
-                                    let id = v.pointer("/content_block/id").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                                    let name = v.pointer("/content_block/name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                                    partials.insert(idx, (id, name, String::new()));
+                                match v.pointer("/content_block/type").and_then(|x| x.as_str()) {
+                                    Some("tool_use") => {
+                                        let id = v.pointer("/content_block/id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                                        let name = v.pointer("/content_block/name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                                        partials.insert(idx, (id, name, String::new()));
+                                    }
+                                    // a thinking block opens: its text and
+                                    // signature arrive as deltas below
+                                    Some("thinking") => {
+                                        thinking.entry(idx).or_default();
+                                    }
+                                    // redacted thinking carries no text to
+                                    // accumulate — the opaque payload must go
+                                    // back verbatim, exactly as received
+                                    Some("redacted_thinking") => {
+                                        if let Some(data) = v
+                                            .pointer("/content_block/data")
+                                            .and_then(|x| x.as_str())
+                                        {
+                                            thinking.entry(idx).or_default().redacted =
+                                                Some(data.to_string());
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                             "content_block_delta" => {
@@ -330,7 +385,21 @@ impl Provider for AnthropicProvider {
                                         if let Some(t) = v.pointer("/delta/thinking").and_then(|x| x.as_str())
                                             && !t.is_empty()
                                         {
+                                            let idx = v.pointer("/index").and_then(|x| x.as_i64()).unwrap_or(0);
+                                            thinking.entry(idx).or_default().text.push_str(t);
                                             yield Ok(StreamEvent::Reasoning(t.to_string()));
+                                        }
+                                    }
+                                    // the signature is what makes a replayed
+                                    // thinking block legal: without it the
+                                    // next request with tool use is a 400.
+                                    // It used to fall into the ignore arm.
+                                    "signature_delta" => {
+                                        if let Some(s) = v.pointer("/delta/signature").and_then(|x| x.as_str())
+                                            && !s.is_empty()
+                                        {
+                                            let idx = v.pointer("/index").and_then(|x| x.as_i64()).unwrap_or(0);
+                                            thinking.entry(idx).or_default().signature.push_str(s);
                                         }
                                     }
                                     "input_json_delta" => {
@@ -381,13 +450,59 @@ impl Provider for AnthropicProvider {
                     Err(e) => { yield Err(anyhow!("stream error: {e}")); return; }
                 }
             }
+            // Thinking the turn did travels with it as provider state and is
+            // replayed verbatim ahead of its own assistant message (see
+            // `content_blocks`): the next request replays the exact blocks or
+            // the API refuses it. Same end-of-turn emission as the Responses
+            // wire's reasoning items.
+            let saved: Vec<Value> = thinking
+                .into_values()
+                .filter_map(ThinkingBlock::finish)
+                .collect();
+            if !saved.is_empty() {
+                yield Ok(StreamEvent::ProviderState(json!({"thinking_blocks": saved})));
+            }
         }
         .boxed()
     }
 }
 
-fn short(s: &str) -> String {
-    let mut cut = 500.min(s.len());
+/// One thinking block accumulating in the stream, stored wire-ready: replay
+/// is a verbatim clone (the Responses wire's reasoning-items philosophy —
+/// the host never interprets provider-owned bytes, it just hands them back).
+#[derive(Default)]
+struct ThinkingBlock {
+    text: String,
+    signature: String,
+    redacted: Option<String>,
+}
+
+impl ThinkingBlock {
+    fn finish(self) -> Option<Value> {
+        if let Some(data) = self.redacted {
+            return Some(json!({"type": "redacted_thinking", "data": data}));
+        }
+        if self.text.is_empty() || self.signature.is_empty() {
+            // Half a block is not replayable either way: thinking without a
+            // signature is a 400, and a signature without text matches
+            // nothing. The API always sends both; log and drop the anomaly
+            // instead of poisoning the next request.
+            super::log_http(&format!(
+                "anthropic: dropped incomplete thinking block (text={} signature={} bytes)",
+                self.text.len(),
+                self.signature.len()
+            ));
+            return None;
+        }
+        Some(json!({
+            "type": "thinking",
+            "thinking": self.text,
+            "signature": self.signature,
+        }))
+    }
+}
+
+fn short(s: &str) -> String {    let mut cut = 500.min(s.len());
     while cut > 0 && !s.is_char_boundary(cut) {
         cut -= 1;
     }
@@ -766,5 +881,219 @@ mod tests {
         .unwrap();
         let thinking = v.pointer("/delta/thinking").and_then(|x| x.as_str());
         assert_eq!(thinking, Some("step by step"));
+    }
+
+    /// Serves one canned SSE body and closes. The Messages API uses named
+    /// events, so the helper writes `event:` lines verbatim.
+    fn sse_server(body: String) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let h = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            let mut len = 0usize;
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line
+                    .to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .and_then(|s| s.trim().parse::<usize>().ok())
+                {
+                    len = v;
+                }
+            }
+            // the request body must be drained or the client sees a reset
+            let mut buf = vec![0u8; len];
+            reader.read_exact(&mut buf).ok();
+            let mut out = stream;
+            write!(
+                out,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            let _ = out.flush();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        });
+        (format!("http://{addr}/v1"), h)
+    }
+
+    async fn collect(url: String) -> Vec<StreamEvent> {
+        use futures::StreamExt;
+        let p = AnthropicProvider::new(&crate::config::ResolvedProvider {
+            name: "p".into(),
+            format: crate::config::WireFormat::Anthropic,
+            base_url: url,
+            api_key: Some("k".into()),
+        })
+        .unwrap();
+        let req = ChatRequest {
+            model_id: "m".into(),
+            system: vec![],
+            messages: vec![Message::new(Role::User, "go")],
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        p.stream_chat(req)
+            .filter_map(|e| async move { e.ok() })
+            .collect()
+            .await
+    }
+
+    /// Thinking text and its signature are captured from the stream and
+    /// emitted as provider state at the end of the turn: without both, the
+    /// next request with tool use is a 400.
+    #[tokio::test]
+    async fn streamed_thinking_and_signature_are_captured_as_provider_state() {
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":10}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"let me \"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"check\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"SIG_1\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        )
+        .to_string();
+        let (url, h) = sse_server(body);
+        let events = collect(url).await;
+        h.join().unwrap();
+
+        let thinking: String = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Reasoning(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking, "let me check", "thinking still streams: {events:?}");
+
+        let state = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::ProviderState(s) => Some(s.clone()),
+                _ => None,
+            })
+            .expect("provider state must be emitted");
+        let blocks = state["thinking_blocks"].as_array().expect("blocks present");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "let me check");
+        assert_eq!(blocks[0]["signature"], "SIG_1");
+    }
+
+    /// A redacted block has no text or signature to accumulate: the opaque
+    /// payload goes back exactly as received.
+    #[tokio::test]
+    async fn streamed_redacted_thinking_is_kept_verbatim() {
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":10}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"OPAQUE\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        )
+        .to_string();
+        let (url, h) = sse_server(body);
+        let events = collect(url).await;
+        h.join().unwrap();
+
+        let state = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::ProviderState(s) => Some(s.clone()),
+                _ => None,
+            })
+            .expect("provider state must be emitted");
+        let blocks = state["thinking_blocks"].as_array().expect("blocks present");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "redacted_thinking");
+        assert_eq!(blocks[0]["data"], "OPAQUE");
+    }
+
+    fn thinking_request() -> ChatRequest {
+        ChatRequest {
+            model_id: "m".into(),
+            system: vec![],
+            messages: vec![
+                Message::new(Role::User, "run check"),
+                Message::new(Role::Assistant, "checking now")
+                    .with_provider_state(Some(json!({
+                        "thinking_blocks": [
+                            {"type": "thinking", "thinking": "let me check", "signature": "SIG_1"}
+                        ]
+                    })))
+                    .with_tool_calls(vec![ToolCallReq::new("c1", "check", json!({}))]),
+                Message::tool_result("c1", "all ok", false),
+            ],
+            effort: Some(EffortLevel::Medium),
+            effort_support: budget_support(),
+            max_tokens: None,
+            tools: vec![crate::providers::ToolSpec {
+                name: "check".into(),
+                description: "run checks".into(),
+                parameters: json!({"type": "object"}),
+            }],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        }
+    }
+
+    /// Saved thinking replays first in its own assistant turn, ahead of
+    /// text and tool_use: that order is what the API accepts.
+    #[test]
+    fn saved_thinking_replays_first_with_its_signature() {
+        let b = build_body(&thinking_request(), 8192, true);
+        let msgs = b["messages"].as_array().unwrap();
+        assert_eq!(msgs[1]["role"], "assistant");
+        let content = msgs[1]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3, "thinking, text, tool_use: {content:#?}");
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["thinking"], "let me check");
+        assert_eq!(content[0]["signature"], "SIG_1");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[2]["type"], "tool_use");
+    }
+
+    /// Thinking off means the saved blocks stay home: they are not legal
+    /// input for a request that does not think.
+    #[test]
+    fn saved_thinking_stays_home_when_effort_is_off() {
+        let mut req = thinking_request();
+        req.effort = None;
+        let b = build_body(&req, 8192, true);
+        let msgs = b["messages"].as_array().unwrap();
+        let content = msgs[1]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2, "text, tool_use, no thinking: {content:#?}");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "tool_use");
+        assert!(b.get("thinking").is_none());
     }
 }

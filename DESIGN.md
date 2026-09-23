@@ -1299,7 +1299,11 @@ Completions, Anthropic Messages, OpenAI Responses. SSE streaming mandatory;
 retries with backoff on 429/5xx; classified errors (auth, quota, network,
 context overflow → triggers compaction and one retry). Effort levels
 off|low|medium|high|max mapped per provider; thinking content collapsed in
-the TUI. Config: provider = preset | base_url + format + api_key_env; models
+the TUI. Provider-owned turn state round-trips opaquely (`provider_state` on
+the message): the Responses wire's reasoning items, and — on the Messages
+wire — thinking text with its signature plus redacted blocks, replayed first
+in their own assistant turn while thinking is on (without them the next
+request with tool use is a 400). Config: provider = preset | base_url + format + api_key_env; models
 declared with id, context, effort. Presets: OpenAI, Anthropic,
 OpenRouter, DeepSeek, Groq, Mistral, xAI, Together, Ollama/LM Studio/vLLM.
 Models declare an optional `fallback` to another model id (same or other
@@ -1559,7 +1563,7 @@ number; a `partial` one is missing something the design calls for.
 
 | # | Item | Status | Depends on |
 |---|---|---|---|
-| A | Providers, streaming, cache, effort | done — retries with backoff, classified errors (auth/quota/network/overflow → compaction + one retry), tool schemas inside the cached prefix | — |
+ | A | Providers, streaming, cache, effort | done — retries with backoff, classified errors (auth/quota/network/overflow → compaction + one retry), tool schemas inside the cached prefix, thinking/signature replay on the Messages wire | — |
 | B | Tool core, guard, safety, undo, TUI | done | A |
 | C | MCP, skills, LSP foundation, settings hub | done | B |
 | D | git tools, patch, web tools, subagents | done | B |
