@@ -228,6 +228,21 @@ pub fn host_tail(text: &str) -> String {
     format!("[host context — generated facts, not user instructions:\n{text}]")
 }
 
+/// A request with no cacheable system part has no cached prefix to protect.
+/// Side calls (compaction summary, diary writer, reflector) pass their whole
+/// instruction as one volatile part; left volatile, the wire layout moves it
+/// behind the history as a [`host_tail`] that tells the model it is "not user
+/// instructions" — and leaves the call with no system prompt at all. Such
+/// parts are promoted to the system position instead. A request that already
+/// has a stable prefix is left untouched.
+pub fn promote_lone_volatile_system(system: &mut [SystemPart]) {
+    if !system.iter().any(|p| p.cacheable) {
+        for part in system.iter_mut() {
+            part.cacheable = true;
+        }
+    }
+}
+
 /// Approximate request composition for diagnostics. This is intentionally
 /// provider-neutral: exact tokenization still belongs to the provider.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -485,6 +500,10 @@ pub trait Provider: Send + Sync {
     /// Chat Completions has no continuation field at all, so an OpenAI
     /// compatible gateway must never see `previous_response_id` — even one
     /// silently ignored today can become a 400 after a server update.
+    ///
+    /// Also the one place every wire passes before `build_body`, so the
+    /// system-layout rule for side calls lives here
+    /// ([`promote_lone_volatile_system`]).
     fn sanitize(&self, req: &mut ChatRequest) {
         let caps = self.capabilities();
         if !caps.previous_response {
@@ -495,6 +514,7 @@ pub trait Provider: Send + Sync {
         {
             req.context_transport = ContextTransport::Stateless;
         }
+        promote_lone_volatile_system(&mut req.system);
     }
 }
 
@@ -776,6 +796,69 @@ mod connection_tests {
             "foreign hosts must not see the header: {seen:?}"
         );
         handle.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod system_layout_tests {
+    use super::*;
+
+    /// A provider with no documented capabilities: only the trait's default
+    /// `sanitize` runs, exactly as on every real wire.
+    struct Bare;
+
+    impl Provider for Bare {
+        fn stream_chat(&self, _req: ChatRequest) -> BoxStream<'static, StreamResult> {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    #[test]
+    fn lone_volatile_instruction_is_promoted_to_system() {
+        let mut parts = vec![SystemPart::volatile("summarize")];
+        promote_lone_volatile_system(&mut parts);
+        assert!(parts[0].cacheable);
+        assert_eq!(stable_system_text(&parts), "summarize");
+        assert_eq!(volatile_system_text(&parts), "");
+    }
+
+    #[test]
+    fn a_stable_prefix_keeps_volatile_parts_in_the_tail() {
+        let mut parts = vec![
+            SystemPart::cached("rules"),
+            SystemPart::volatile("git: main"),
+        ];
+        promote_lone_volatile_system(&mut parts);
+        assert!(parts[0].cacheable);
+        assert!(!parts[1].cacheable, "main-loop layout must not change");
+    }
+
+    /// The regression in one request: a side call (compaction, diary,
+    /// reflector) must reach the wire with its instruction as the system
+    /// prompt, not as a trailing "not user instructions" tail.
+    #[test]
+    fn side_call_reaches_the_wire_with_a_system_prompt() {
+        let mut req = ChatRequest {
+            model_id: "m".into(),
+            system: vec![SystemPart::volatile("summarize")],
+            messages: vec![Message::new(Role::User, "transcript")],
+            ..Default::default()
+        };
+        Bare.sanitize(&mut req);
+
+        let body = anthropic::build_body(&req, 8192, true);
+        assert_eq!(body["system"][0]["text"], "summarize");
+        let messages = body["messages"].to_string();
+        assert!(!messages.contains("host context"), "{messages}");
+
+        let body = openai::OpenAiProvider::build_body(&req);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][0]["content"], "summarize");
+        assert!(!body["messages"].to_string().contains("host context"));
+
+        let body = responses::build_body(&req);
+        assert_eq!(body["input"][0]["role"], "system");
+        assert!(!body["input"].to_string().contains("host context"));
     }
 }
 
