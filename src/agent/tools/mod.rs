@@ -2465,6 +2465,106 @@ fn validate_plan_refs(
     Ok(())
 }
 
+/// Create-time validation for typed constraints (§2.1.10): empty payloads
+/// settle or block nothing, `path:` roots must resolve, `ast:` patterns
+/// must compile. Rejects while the model can still rewrite the item.
+fn validate_typed_constraints(
+    ctx: &mut ToolCtx,
+    constraints: &[String],
+) -> Result<(), plan::Rejection> {
+    for text in constraints {
+        match plan::classify_constraint(text) {
+            plan::ConstraintKind::Plain(_) | plan::ConstraintKind::ForbidImport(_) => {}
+            plan::ConstraintKind::ForbidCmd(pattern) => {
+                if pattern.trim().is_empty() {
+                    return Err(plan::Rejection::new(
+                        "empty_constraint",
+                        "forbid-cmd: names no pattern".to_string(),
+                        "name the command shape to forbid, or drop the item".to_string(),
+                    ));
+                }
+            }
+            plan::ConstraintKind::Ast(pattern) => {
+                if pattern.trim().is_empty() {
+                    return Err(plan::Rejection::new(
+                        "empty_constraint",
+                        "ast: names no pattern".to_string(),
+                        "give the tree-sitter pattern, or drop the item".to_string(),
+                    ));
+                }
+                let outcome = astgrep::ast_grep(
+                    ctx,
+                    &serde_json::json!({"pattern": pattern, "path": ".", "max": 1}),
+                );
+                if !outcome.ok {
+                    return Err(plan::Rejection::new(
+                        "bad_constraint_pattern",
+                        format!("ast: pattern does not compile: {pattern}"),
+                        format!("fix the pattern — {}", outcome.output),
+                    ));
+                }
+            }
+            plan::ConstraintKind::Path(roots) => {
+                if roots.is_empty() {
+                    return Err(plan::Rejection::new(
+                        "empty_constraint",
+                        "path: names no roots".to_string(),
+                        "name the roots the change must stay inside, or drop the item".to_string(),
+                    ));
+                }
+                for root in roots {
+                    if let Err(message) = ctx.resolve(root) {
+                        return Err(plan::Rejection::new(
+                            "bad_constraint_path",
+                            format!("path: root '{root}' does not resolve: {message}"),
+                            "name existing project paths (missing files are fine, escapes are not)"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Advisory AGENTS.md mining at create: restriction markers with no typed
+/// constraint covering them earn one note line. Advisory only — never a
+/// gate — and silent once the author formalized anything.
+fn mine_constraint_candidates(root: &Path) -> Vec<String> {
+    const MARKERS: &[&str] = &[
+        "don't use",
+        "do not use",
+        "forbidden",
+        "never use",
+        "deprecated",
+        "avoid using",
+        "do not touch",
+        "don't touch",
+    ];
+    let text = match std::fs::read_to_string(root.join("AGENTS.md")) {
+        Ok(text) => text,
+        Err(_) => return Vec::new(),
+    };
+    text.lines()
+        .map(str::trim)
+        .filter(|line| {
+            let lower = line.to_lowercase();
+            MARKERS.iter().any(|m| lower.contains(m))
+        })
+        .take(5)
+        .map(|line| {
+            line.chars()
+                .take(120)
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
 /// The `plan` tool: one operation per call, validated by the host (§2.1.3).
 fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let op: plan::Op = match serde_json::from_value(args.clone()) {
@@ -2549,6 +2649,14 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                                 return rejection(rej);
                             }
                         }
+                        // typed constraints are validated like refs: an empty
+                        // payload, an unresolvable root, or an uncompilable
+                        // pattern rejects the create while the model can
+                        // still rewrite it — not at `complete`, when the
+                        // work is already done.
+                        if let Err(rej) = validate_typed_constraints(ctx, &created.constraints) {
+                            return rejection(rej);
+                        }
                         created.sessions = vec![ctx.session_id.clone()];
                         // §12.12: prove the cmd: checks discriminate, before
                         // anything has changed. Rung 4 freezes beside them.
@@ -2587,10 +2695,32 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             true,
                             args,
                         ) {
-                            Ok(_) => Outcome::ok(format!(
-                                "plan {id} created with {step_count} steps{}",
-                                proof.notes.join("")
-                            )),
+                            Ok(_) => {
+                                let mut message = format!(
+                                    "plan {id} created with {step_count} steps{}",
+                                    proof.notes.join("")
+                                );
+                                // advisory mining: AGENTS.md restricts
+                                // something no typed constraint covers.
+                                // Silent once the author formalized anything.
+                                let typed = created.constraints.iter().any(|text| {
+                                    !matches!(
+                                        plan::classify_constraint(text),
+                                        plan::ConstraintKind::Plain(_)
+                                    )
+                                });
+                                if !typed {
+                                    let candidates =
+                                        mine_constraint_candidates(&ctx.root);
+                                    if !candidates.is_empty() {
+                                        message.push_str(&format!(
+                                            "\nconstraints: AGENTS.md restricts {} — consider forbid-import:/forbid-cmd:/ast:/path: (advisory; untyped constraints are not enforced)",
+                                            candidates.join(" · ")
+                                        ));
+                                    }
+                                }
+                                Outcome::ok(message)
+                            }
                             Err(e) => Outcome::err(format!("plan write failed: {e:#}")),
                         }
                     }
@@ -4177,8 +4307,233 @@ fn validate_evidence(
     validate_attached_records(root, &active.id, id, &evidence)
 }
 
-/// The gate on `plan complete`.
-///
+/// Source extensions scanned for `forbid-import:` violations. Mirrors
+/// the outline/ast-grep language set.
+const CONSTRAINT_SOURCE_EXTS: &[&str] = &[
+    "rs", "py", "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "go", "sh", "bash", "c",
+    "h", "cpp", "cc", "cxx", "hpp", "hh", "hxx", "cs", "java",
+];
+
+/// Never scanned for constraint evaluation: VCS, host state, build outputs.
+const CONSTRAINT_SKIP_DIRS: &[&str] = &[".git", ".sqwai", "target", "node_modules", "dist", "build"];
+
+/// Caps mirror the `ast_grep` tool's own ceilings.
+const CONSTRAINT_MAX_FILES: usize = 2_000;
+const CONSTRAINT_MAX_BYTES: u64 = 512_000;
+const CONSTRAINT_MAX_HITS: usize = 5;
+
+/// Import-statement keywords across the scanned languages. A line counts
+/// when it opens with one of these (after whitespace) and names the
+/// pattern — plus bare quoted references (`"x/y"` import-block entries),
+/// minus comment lines.
+fn import_line_references(line: &str, pattern: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "use ",
+        "use\t",
+        "import ",
+        "import\t",
+        "from ",
+        "require",
+        "include ",
+        "mod ",
+        "extern crate ",
+    ];
+    let trimmed = line.trim_start();
+    if crate::agent::lint::is_comment(line) {
+        return false;
+    }
+    if KEYWORDS.iter().any(|kw| trimmed.starts_with(kw)) {
+        return trimmed.contains(pattern);
+    }
+    let bare = trimmed.trim_end_matches([',', ';']);
+    bare.len() > 2
+        && (bare.starts_with('"') && bare.ends_with('"')
+            || bare.starts_with('\'') && bare.ends_with('\''))
+        && bare.contains(pattern)
+}
+
+/// `forbid-import:` violations as `path:line: text`, capped. Heuristic by
+/// design (Go block imports without keywords only match as bare quoted
+/// strings); the waiver covers false positives, silence would cover
+/// violations.
+fn forbid_import_violations(root: &Path, pattern: &str) -> Vec<String> {
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        pattern: &str,
+        out: &mut Vec<String>,
+        scanned: &mut usize,
+    ) {
+        if out.len() >= CONSTRAINT_MAX_HITS || *scanned >= CONSTRAINT_MAX_FILES {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= CONSTRAINT_MAX_HITS || *scanned >= CONSTRAINT_MAX_FILES {
+                return;
+            }
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if path.is_dir() {
+                if !CONSTRAINT_SKIP_DIRS.contains(&name.as_str()) {
+                    walk(root, &path, pattern, out, scanned);
+                }
+                continue;
+            }
+            let ext_ok = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| CONSTRAINT_SOURCE_EXTS.contains(&ext));
+            if !ext_ok {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if meta.len() > CONSTRAINT_MAX_BYTES {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            *scanned += 1;
+            let rel = path
+                .strip_prefix(root)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| path.to_string_lossy().to_string());
+            for (n, line) in text.lines().enumerate() {
+                if import_line_references(line, pattern) {
+                    out.push(format!("{}:{}: {}", rel, n + 1, line.trim()));
+                    if out.len() >= CONSTRAINT_MAX_HITS {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut scanned = 0usize;
+    walk(root, root, pattern, &mut out, &mut scanned);
+    out
+}
+
+/// File paths this plan's steps recorded as written: journal `file_diff`
+/// records behind the steps' evidence refs. The same host-recorded source
+/// the scope guard reads — bash-written bytes stay invisible here too.
+fn plan_file_diff_paths(root: &Path, plan: &plan::Plan) -> Vec<String> {
+    let mut out = Vec::new();
+    for step in &plan.steps {
+        for reference in &step.evidence {
+            let record = match crate::agent::journal::Journal::evidence(
+                root,
+                &plan.id,
+                Some(&step.id),
+                reference,
+                None,
+            ) {
+                Ok(Some(record)) => record,
+                _ => continue,
+            };
+            if record.kind == "file_diff"
+                && let Some(path) = record.fields.get("path").and_then(Value::as_str)
+            {
+                let clean = lexical_clean(&path.replace('\\', "/"));
+                if !out.contains(&clean) {
+                    out.push(clean);
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Pure half of the `forbid-cmd:` live gate: first pattern matching the
+/// command (case-insensitive substring), if any. Heuristic like every
+/// text match; the waiver covers overmatches.
+pub(crate) fn forbidden_command(patterns: &[String], command: &str) -> Option<String> {
+    let lower = command.to_lowercase();
+    patterns
+        .iter()
+        .filter(|p| !p.trim().is_empty())
+        .find(|p| lower.contains(&p.to_lowercase()))
+        .cloned()
+}
+
+/// Typed-constraint verdicts at `complete`: every non-waived executable
+/// constraint must hold. `forbid-cmd:` is live-gated in `bash_call` and
+/// has nothing to re-check; unprefixed constraints are advisory.
+fn validate_constraints(ctx: &mut ToolCtx, active: &plan::Plan) -> Result<(), String> {
+    let waived = plan::waived_constraint_indices(active);
+    for (index, text) in active.constraints.iter().enumerate() {
+        if waived.contains(&index) {
+            continue;
+        }
+        let failed: Option<String> = match plan::classify_constraint(text) {
+            plan::ConstraintKind::Plain(_) => None,
+            plan::ConstraintKind::ForbidCmd(_) => None,
+            plan::ConstraintKind::ForbidImport(pattern) => {
+                if pattern.trim().is_empty() {
+                    continue;
+                }
+                let hits = forbid_import_violations(&ctx.root, pattern);
+                (!hits.is_empty()).then(|| {
+                    format!("forbidden import '{pattern}' referenced at {}", hits.join("; "))
+                })
+            }
+            plan::ConstraintKind::Ast(pattern) => {
+                if pattern.trim().is_empty() {
+                    continue;
+                }
+                let outcome = astgrep::ast_grep(
+                    ctx,
+                    &serde_json::json!({"pattern": pattern, "path": ".", "max": 3}),
+                );
+                if !outcome.ok {
+                    Some(format!("ast pattern failed: {}", outcome.output))
+                } else if outcome.output.starts_with("0 matches") {
+                    None
+                } else {
+                    let head: Vec<&str> = outcome.output.lines().skip(1).take(3).collect();
+                    Some(format!(
+                        "ast pattern `{pattern}` matches: {}",
+                        head.join(" / ")
+                    ))
+                }
+            }
+            plan::ConstraintKind::Path(roots) => {
+                if roots.is_empty() {
+                    continue;
+                }
+                let roots: Vec<String> = roots
+                    .iter()
+                    .map(|r| lexical_clean(&r.replace('\\', "/")))
+                    .collect();
+                let outside: Vec<String> = plan_file_diff_paths(&ctx.root, active)
+                    .into_iter()
+                    .filter(|path| !in_write_scope(path, &roots))
+                    .collect();
+                (!outside.is_empty()).then(|| {
+                    format!(
+                        "change escapes the declared roots ({}): {}",
+                        roots.join(", "),
+                        outside.join(", ")
+                    )
+                })
+            }
+        };
+        if let Some(details) = failed {
+            return Err(format!(
+                "constraint_violated: constraint {index} violated: {details} — fix it, or have the user waive it (/plan waive-constraint {index} <reason>)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The gate on `plan complete`.///
 /// Every done step is re-checked against the journal, and every acceptance
 /// item is settled again on its own terms: a `cmd:` item is **re-run** rather
 /// than trusted from an earlier verify (§2.1.2 has the host run it "on `plan
@@ -4203,6 +4558,9 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
         }
         validate_attached_records(&root, &active.id, &step.id, &step.evidence)?;
     }
+    // typed constraints settle like acceptance: a violated executable
+    // constraint blocks completion the same way a red check does.
+    validate_constraints(ctx, &active)?;
     // by index: a flaky verdict below mutates the plan, which an
     // iterator borrow would not allow
     for index in 0..active.acceptance.len() {
@@ -7524,6 +7882,281 @@ mod tests {
         assert!(!hit("cat tests/auth.rs"));
         assert!(!hit("cargo test 2>&1"));
         assert!(!hit("echo hello"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `forbid-cmd:` matching is a pure substring on the lowered command:
+    /// empty patterns never match, casing never matters.
+    #[test]
+    fn forbidden_command_matches_substrings() {
+        let patterns = vec!["rm -rf".to_string(), "DROP TABLE".to_string()];
+        assert_eq!(
+            forbidden_command(&patterns, "rm -rf /tmp/x"),
+            Some("rm -rf".to_string())
+        );
+        assert_eq!(
+            forbidden_command(&patterns, "sudo RM -RF /"),
+            Some("rm -rf".to_string())
+        );
+        assert_eq!(forbidden_command(&patterns, "ls -la"), None);
+        assert_eq!(forbidden_command(&[], "rm -rf /"), None);
+        assert_eq!(
+            forbidden_command(&["  ".to_string()], "rm -rf /"),
+            None,
+            "blank patterns match nothing"
+        );
+    }
+
+    /// Typed constraints validate at create: empty payloads, unresolvable
+    /// roots, and uncompilable patterns reject while the model can rewrite.
+    #[test]
+    fn create_validates_typed_constraints() {
+        let (mut ctx, dir) = proj();
+        for (constraints, code) in [
+            (vec!["ast: "], "empty_constraint"),
+            (vec!["path: "], "empty_constraint"),
+            (vec!["forbid-cmd: "], "empty_constraint"),
+            (vec!["path: ../outside"], "bad_constraint_path"),
+            (vec!["path: .sqwai/nope"], "bad_constraint_path"),
+            (vec!["ast: Ok("], "bad_constraint_pattern"),
+        ] {
+            let rejected = plan_op(
+                &mut ctx,
+                &json!({
+                    "op": "create",
+                    "goal": "bad constraint",
+                    "constraints": constraints,
+                    "acceptance": ["manual: eyeball it"],
+                    "steps": [{"title": "verify"}]
+                }),
+            );
+            assert!(!rejected.ok, "{constraints:?}");
+            assert!(
+                rejected.output.contains(code),
+                "{constraints:?}: {}",
+                rejected.output
+            );
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `forbid-import:` blocks `complete` naming the offending file, and a
+    /// waiver with reason lets it through.
+    #[test]
+    fn complete_blocks_forbidden_imports_until_waived() {
+        let (mut ctx, dir) = proj();
+        fs::write(dir.join("src/user.rs"), "use btree::Map;\n").unwrap();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "no btree",
+                "constraints": ["forbid-import: btree"],
+                "acceptance": ["manual: eyeball it"],
+                "steps": [{"title": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let mut plan = plan::open_active(&dir).unwrap().unwrap();
+        plan::waive(&mut plan, 0, "eyeball done").unwrap();
+        plan::store(&dir, &plan).unwrap();
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        assert!(
+            plan_op(
+                &mut ctx,
+                &json!({"op": "cancel", "id": "1", "reason": "done here"})
+            )
+            .ok
+        );
+
+        let blocked = plan_op(&mut ctx, &json!({"op": "complete"}));
+        assert!(!blocked.ok, "{}", blocked.output);
+        assert!(
+            blocked.output.contains("constraint_violated"),
+            "{}",
+            blocked.output
+        );
+        assert!(blocked.output.contains("src/user.rs"), "{}", blocked.output);
+
+        let mut plan = plan::open_active(&dir).unwrap().unwrap();
+        plan::waive_constraint(&mut plan, 0, "legacy use, tracked").unwrap();
+        plan::store(&dir, &plan).unwrap();
+        let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
+        assert!(completed.ok, "{}", completed.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `path:` confines the outcome diff: a recorded write outside the
+    /// roots blocks completion, while writes inside pass clean.
+    #[test]
+    fn complete_blocks_changes_outside_pathed_roots() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "stay in src",
+                "constraints": ["path: src"],
+                "acceptance": ["manual: eyeball it"],
+                "steps": [{"title": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let mut plan = plan::open_active(&dir).unwrap().unwrap();
+        plan::waive(&mut plan, 0, "eyeball done").unwrap();
+        plan::store(&dir, &plan).unwrap();
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        // attribute writes to the step, like the turn loop does
+        ctx.current_step = Some("1".into());
+
+        // README.md sits outside the declared roots
+        assert!(execute(&mut ctx, "read", &json!({"file_path": "README.md"})).ok);
+        assert!(
+            execute(
+                &mut ctx,
+                "edit",
+                &json!({"file_path": "README.md", "old_string": "# demo", "new_string": "# demo!"}),
+            )
+            .ok
+        );
+        // direct execute() calls do not journal (the turn loop records
+        // outcomes); attach the file_diff the way the loop would
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
+        journal.set_attribution(Some("1".into()), Some(plan_id), "main");
+        journal
+            .append_evidence("file_diff", json!({"path": "README.md"}))
+            .unwrap();
+        assert!(plan_op(&mut ctx, &json!({"op": "finish", "id": "1", "summary": "edited"})).ok);
+        let blocked = plan_op(&mut ctx, &json!({"op": "complete"}));
+        assert!(!blocked.ok, "{}", blocked.output);
+        assert!(
+            blocked.output.contains("constraint_violated"),
+            "{}",
+            blocked.output
+        );
+        assert!(blocked.output.contains("README.md"), "{}", blocked.output);
+
+        // fresh plan, same roots, write inside: completes clean
+        assert!(plan_op(&mut ctx, &json!({"op": "cancel", "reason": "next"})).ok);
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "stay in src cleanly",
+                "constraints": ["path: src"],
+                "acceptance": ["manual: eyeball it"],
+                "steps": [{"title": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let mut plan = plan::open_active(&dir).unwrap().unwrap();
+        plan::waive(&mut plan, 0, "eyeball done").unwrap();
+        plan::store(&dir, &plan).unwrap();
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        ctx.current_step = Some("1".into());
+        assert!(execute(&mut ctx, "read", &json!({"file_path": "src/main.rs"})).ok);
+        assert!(
+            execute(
+                &mut ctx,
+                "edit",
+                &json!({"file_path": "src/main.rs", "old_string": "TODO", "new_string": "DONE"}),
+            )
+            .ok
+        );
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
+        journal.set_attribution(Some("1".into()), Some(plan_id), "main");
+        journal
+            .append_evidence("file_diff", json!({"path": "src/main.rs"}))
+            .unwrap();
+        assert!(plan_op(&mut ctx, &json!({"op": "finish", "id": "1", "summary": "edited"})).ok);
+        let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
+        assert!(completed.ok, "{}", completed.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `ast:` matches structurally: a `todo!()` in new code blocks
+    /// completion until waived.
+    #[test]
+    fn complete_blocks_ast_matches_until_waived() {
+        let (mut ctx, dir) = proj();
+        fs::write(dir.join("src/extra.rs"), "fn f() { todo!() }\n").unwrap();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "no todos",
+                "constraints": ["ast: todo!()"],
+                "acceptance": ["manual: eyeball it"],
+                "steps": [{"title": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let mut plan = plan::open_active(&dir).unwrap().unwrap();
+        plan::waive(&mut plan, 0, "eyeball done").unwrap();
+        plan::store(&dir, &plan).unwrap();
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        assert!(
+            plan_op(
+                &mut ctx,
+                &json!({"op": "cancel", "id": "1", "reason": "done here"})
+            )
+            .ok
+        );
+
+        let blocked = plan_op(&mut ctx, &json!({"op": "complete"}));
+        assert!(!blocked.ok, "{}", blocked.output);
+        assert!(
+            blocked.output.contains("constraint_violated"),
+            "{}",
+            blocked.output
+        );
+
+        let mut plan = plan::open_active(&dir).unwrap().unwrap();
+        plan::waive_constraint(&mut plan, 0, "will fix next").unwrap();
+        plan::store(&dir, &plan).unwrap();
+        assert!(plan_op(&mut ctx, &json!({"op": "complete"})).ok);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// AGENTS.md mining is advisory: restriction markers with no typed
+    /// constraint earn one note line at create.
+    #[test]
+    fn create_notes_unformalized_agents_restrictions() {
+        let (mut ctx, dir) = proj();
+        fs::write(dir.join("AGENTS.md"), "Do not use btree directly.\n").unwrap();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "mined note",
+                "constraints": ["keep the format"],
+                "acceptance": ["manual: eyeball it"],
+                "steps": [{"title": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(created.output.contains("forbid-import:"), "{}", created.output);
+
+        // silent once the author formalized anything
+        let _ = plan_op(&mut ctx, &json!({"op": "cancel", "reason": "next"}));
+        let typed = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "formalized",
+                "constraints": ["forbid-import: btree"],
+                "acceptance": ["manual: eyeball it"],
+                "steps": [{"title": "verify"}]
+            }),
+        );
+        assert!(typed.ok, "{}", typed.output);
+        assert!(
+            !typed.output.contains("AGENTS.md restricts"),
+            "{}",
+            typed.output
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

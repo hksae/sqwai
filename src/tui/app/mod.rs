@@ -3080,6 +3080,40 @@ impl App {
                     _ => "usage: /plan waive <acceptance-index> <reason>".to_string(),
                 }
             }
+            Some("waive-constraint") => {
+                let index = args.get(1).and_then(|s| s.parse::<usize>().ok());
+                let reason = args.get(2..).map(|v| v.join(" ")).unwrap_or_default();
+                match (index, reason.trim()) {
+                    (Some(index), reason) if !reason.is_empty() => match self.workable_plan() {
+                        Ok(mut active) => {
+                            match plan::waive_constraint(&mut active, index, reason) {
+                                Ok(()) => {
+                                    let sid = self.session.id.to_string();
+                                    let args = serde_json::json!({"index": index, "reason": reason});
+                                    match plan::commit(
+                                        &root,
+                                        &sid,
+                                        &mut active,
+                                        "waive_constraint",
+                                        "user",
+                                        true,
+                                        args,
+                                    ) {
+                                        Ok(_) => format!("constraint {index} waived"),
+                                        Err(e) => format!("plan write failed: {e:#}"),
+                                    }
+                                }
+                                Err(e) => format!(
+                                    "plan waive-constraint rejected [{}]: {}",
+                                    e.code, e.reason
+                                ),
+                            }
+                        }
+                        Err(message) => message,
+                    },
+                    _ => "usage: /plan waive-constraint <constraint-index> <reason>".to_string(),
+                }
+            }
             Some("confirm") => {
                 let index = args.get(1).and_then(|s| s.parse::<usize>().ok());
                 let reason = args.get(2..).map(|v| v.join(" ")).unwrap_or_default();

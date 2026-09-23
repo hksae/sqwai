@@ -913,7 +913,8 @@ fn split_cmd_keeps_quoted_segments_whole() {
 }
 
 #[test]
-fn plan_open_steps_counts_only_unfinished() {    let root = std::env::temp_dir().join(format!("sqwai-bench-open-{}", std::process::id()));
+    fn plan_open_steps_counts_only_unfinished() {
+        let root = std::env::temp_dir().join(format!("sqwai-bench-open-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join(".sqwai/plans")).unwrap();
     // no plans at all: nothing open
@@ -935,7 +936,8 @@ fn plan_open_steps_counts_only_unfinished() {    let root = std::env::temp_dir()
 }
 
 #[test]
-fn surrender_quote_reads_the_blocked_plan() {    let root = std::env::temp_dir().join(format!("sqwai-bench-surrender-{}", std::process::id()));
+    fn surrender_quote_reads_the_blocked_plan() {
+        let root = std::env::temp_dir().join(format!("sqwai-bench-surrender-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     // no plans at all: no surrender
     assert_eq!(surrender_quote(&root), None);

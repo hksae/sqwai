@@ -703,6 +703,87 @@ pub struct Plan {
     /// Read by `/plan show` and the bench harness; old files simply lack it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
+    /// Typed-constraint indices the user waived, with reasons. Constraints
+    /// never reorder (only a full replacement resets them), so indices are
+    /// stable for the plan's lifetime.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waived_constraints: Vec<WaivedConstraint>,
+}
+
+/// One user-waived constraint: which, and why.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WaivedConstraint {
+    pub index: usize,
+    pub reason: String,
+}
+
+/// A constraint the host can execute (§2.1.10). Unprefixed constraints
+/// stay advisory (claim-lint territory); only these four settle or block.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstraintKind<'a> {
+    /// `forbid-import: <pattern>` — no source file may import it
+    ForbidImport(&'a str),
+    /// `forbid-cmd: <pattern>` — the agent may not run matching commands
+    ForbidCmd(&'a str),
+    /// `ast: <pattern>` — the tree-sitter pattern must match nowhere
+    Ast(&'a str),
+    /// `path: <roots...>` — the outcome diff touches only these roots
+    Path(Vec<&'a str>),
+    /// anything else: documented intent, enforced by nothing
+    Plain(&'a str),
+}
+
+/// Classify raw constraint text. `path:` roots are comma-separated.
+pub fn classify_constraint(text: &str) -> ConstraintKind<'_> {
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix("forbid-import:") {
+        ConstraintKind::ForbidImport(rest.trim())
+    } else if let Some(rest) = text.strip_prefix("forbid-cmd:") {
+        ConstraintKind::ForbidCmd(rest.trim())
+    } else if let Some(rest) = text.strip_prefix("ast:") {
+        ConstraintKind::Ast(rest.trim())
+    } else if let Some(roots) = text.strip_prefix("path:") {
+        ConstraintKind::Path(
+            roots
+                .split(',')
+                .map(str::trim)
+                .filter(|root| !root.is_empty())
+                .collect(),
+        )
+    } else {
+        ConstraintKind::Plain(text)
+    }
+}
+
+/// User waives a typed constraint (§2.1.10). Host-only, like acceptance
+/// waiver: false-positive patterns must never wedge `complete` shut.
+/// Idempotent — waiving twice keeps the first reason.
+pub fn waive_constraint(plan: &mut Plan, index: usize, reason: &str) -> Result<(), Rejection> {
+    if index >= plan.constraints.len() {
+        return Err(Rejection::new(
+            "unknown_constraint",
+            format!("no constraint {index}"),
+            "call /plan to see the constraints list",
+        ));
+    }
+    if !plan
+        .waived_constraints
+        .iter()
+        .any(|w| w.index == index)
+    {
+        plan.waived_constraints.push(WaivedConstraint {
+            index,
+            reason: reason.to_string(),
+        });
+        plan.waived_constraints.sort_by_key(|w| w.index);
+    }
+    plan.revision += 1;
+    Ok(())
+}
+
+/// Waived constraint indices, for evaluators to skip.
+pub fn waived_constraint_indices(plan: &Plan) -> Vec<usize> {
+    plan.waived_constraints.iter().map(|w| w.index).collect()
 }
 
 impl Plan {
@@ -1231,6 +1312,19 @@ fn apply_record(
                 .and_then(|value| value.as_str())
                 .unwrap_or("");
             waive(plan, index, reason).map(|_| true)
+        }
+        Some("waive_constraint") => {
+            let index = fields
+                .get("index")
+                .and_then(|value| value.as_u64())
+                .ok_or_else(|| {
+                    Rejection::new("replay_shape", "waive_constraint intent without index", "")
+                })? as usize;
+            let reason = fields
+                .get("reason")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            waive_constraint(plan, index, reason).map(|_| true)
         }
         Some("set_goal") => {
             let text = fields
@@ -1993,6 +2087,7 @@ pub fn create(
         revision: 0,
         rejections_in_a_row: 0,
         blocked_reason: None,
+        waived_constraints: Vec::new(),
     };
     Ok(plan)
 }
@@ -2986,8 +3081,7 @@ pub fn set_goal(plan: &mut Plan, text: String, source: &str, reason: Option<Stri
 }
 
 /// User waives an acceptance item (§2.1.7). Host-only.
-pub fn waive(plan: &mut Plan, index: usize, reason: &str) -> Result<(), Rejection> {
-    if index >= plan.acceptance.len() {
+pub fn waive(plan: &mut Plan, index: usize, reason: &str) -> Result<(), Rejection> {    if index >= plan.acceptance.len() {
         return Err(Rejection::new(
             "unknown_acceptance",
             format!("no acceptance item {index}"),
@@ -3256,7 +3350,20 @@ pub fn render(plan: &Plan) -> String {
         out.push_str(&format!("blocked: {reason}\n"));
     }
     if !plan.constraints.is_empty() {
-        out.push_str(&format!("constraints: {}\n", plan.constraints.join(" · ")));
+        let waived = waived_constraint_indices(plan);
+        let rendered: Vec<String> = plan
+            .constraints
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                if waived.contains(&i) {
+                    format!("{c} [waived]")
+                } else {
+                    c.clone()
+                }
+            })
+            .collect();
+        out.push_str(&format!("constraints: {}\n", rendered.join(" · ")));
     }
     if !plan.acceptance.is_empty() {
         out.push_str("acceptance:\n");
@@ -4500,6 +4607,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn constraints_classify_by_prefix() {
+        assert!(matches!(
+            classify_constraint("forbid-import: btree"),
+            ConstraintKind::ForbidImport("btree")
+        ));
+        assert!(matches!(
+            classify_constraint("forbid-cmd: rm -rf"),
+            ConstraintKind::ForbidCmd("rm -rf")
+        ));
+        assert!(matches!(
+            classify_constraint("ast: foo($X)"),
+            ConstraintKind::Ast("foo($X)")
+        ));
+        match classify_constraint("path: src/a, src/b") {
+            ConstraintKind::Path(roots) => assert_eq!(roots, vec!["src/a", "src/b"]),
+            other => panic!("path: must parse roots, got {other:?}"),
+        }
+        assert!(matches!(
+            classify_constraint("keep the format"),
+            ConstraintKind::Plain(_)
+        ));
+        // empty payloads stay classified (evaluators treat them as vacuous)
+        assert!(matches!(
+            classify_constraint("path:   "),
+            ConstraintKind::Path(roots) if roots.is_empty()
+        ));
+    }
+
+    #[test]
+    fn waive_constraint_needs_bounds_and_renders() {
+        let mut plan = new_plan();
+        plan.constraints = vec!["forbid-import: btree".to_string()];
+        let err = waive_constraint(&mut plan, 3, "x").unwrap_err();
+        assert_eq!(err.code, "unknown_constraint");
+        waive_constraint(&mut plan, 0, "legacy use, tracked").unwrap();
+        assert_eq!(
+            waived_constraint_indices(&plan),
+            vec![0],
+            "evaluators skip waived indices"
+        );
+        // idempotent: the first reason stands
+        waive_constraint(&mut plan, 0, "other").unwrap();
+        assert_eq!(plan.waived_constraints.len(), 1);
+        assert!(render(&plan).contains("[waived]"));
+    }
+
     /// Mirrors `Acceptance::kind()`: the hash is taken over the *stripped*
     /// command, which is the text the host actually runs.
     fn baseline_for(item_text: &str) -> Baseline {
@@ -4765,8 +4919,7 @@ mod tests {
     }
 
     #[test]
-    fn ladder_walk_stops_at_the_highest_trust_rung() {
-        let mut plan = create(
+    fn ladder_walk_stops_at_the_highest_trust_rung() {        let mut plan = create(
             "walk the ladder".to_string(),
             Vec::new(),
             vec![

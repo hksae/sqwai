@@ -4147,6 +4147,28 @@ async fn bash_call(
         });
     }
 
+    // 1d. typed constraints, live half: `forbid-cmd:` refuses outright
+    // (no approval dialog — the waiver is the override). Host-run
+    // acceptance commands never pass through here, only model calls.
+    if let Ok(Some(plan)) = plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
+        let waived = plan::waived_constraint_indices(&plan);
+        let patterns: Vec<String> = plan
+            .constraints
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !waived.contains(index))
+            .filter_map(|(_, text)| match plan::classify_constraint(text) {
+                plan::ConstraintKind::ForbidCmd(pattern) => Some(pattern.to_string()),
+                _ => None,
+            })
+            .collect();
+        if let Some(hit) = tools::forbidden_command(&patterns, &command) {
+            return tools::Outcome::err(format!(
+                "constraint_violated: command matches forbidden pattern '{hit}' — have the user waive it (/plan waive-constraint <index> <reason>)"
+            ));
+        }
+    }
+
     if let Some(reason) = &needs_approval {
         if !always_allow.contains(&command) {
             if subagent_depth > 0 {
@@ -5804,6 +5826,104 @@ mod effort_tests {
             temp_dir.join("gated.rs").exists(),
             "allowed mutation must land on disk"
         );
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    /// `forbid-cmd:` refuses live in the turn: a forbidden shell command
+    /// never executes, with a structured code pointing at the waiver.
+    #[tokio::test]
+    async fn test_forbid_cmd_refuses_matching_shell_calls() {
+        let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(vec![
+                vec![Ok(crate::providers::StreamEvent::ToolCall(
+                    crate::providers::ToolCallReq::new(
+                        "c1",
+                        "bash",
+                        serde_json::json!({"command": "rm -rf /tmp/scratch"}),
+                    ),
+                ))],
+                vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
+            ]),
+        });
+        let temp_dir =
+            std::env::temp_dir().join(format!("sqwai-test-forbid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let mut plan = crate::plan::create(
+            "goal".to_string(),
+            vec!["forbid-cmd: rm -rf".to_string()],
+            vec!["manual: eyeball it".to_string()],
+            vec![crate::plan::NewStep {
+                title: "step".to_string(),
+                refs: Vec::new(),
+            }],
+            0,
+            &crate::plan::Limits::default(),
+        )
+        .unwrap();
+        plan.sessions = vec!["sess-forbid".to_string()];
+        crate::plan::store(&temp_dir, &plan).unwrap();
+
+        let input = AgentInput {
+            provider,
+            model_id: "m".into(),
+            model_key: "primary".into(),
+            effort: None,
+            effort_support: crate::config::EffortSupport::default(),
+            max_tokens: None,
+            system: vec![],
+            messages: vec![Message::new(Role::User, "clean up")],
+            root: temp_dir.clone(),
+            session_id: "sess-forbid".into(),
+            blocked_patterns: vec![],
+            plan_mode: false,
+            context_limit: 10000,
+            enable_tools: true,
+            read_only: false,
+            previous_response_id: None,
+            summary: None,
+            mcp: Default::default(),
+            lsp: Default::default(),
+            compact_only: false,
+            diary: Default::default(),
+            memory: Default::default(),
+            compaction: Default::default(),
+            plan_limits: crate::config::PlanConfig {
+                plan_first: crate::config::PlanFirstMode::Soft,
+                ..Default::default()
+            },
+            shadow_store: crate::config::ShadowStore::Off,
+            subagent_depth: 0,
+            parent_step: None,
+            parent_session: None,
+            fallback_chain: vec![],
+        };
+        let mut handle = spawn_agent(input);
+        let mut refused = false;
+        while let Some(ev) = handle.rx.recv().await {
+            match ev {
+                AgentEvent::ToolNotice { name, ok, .. } => {
+                    assert_eq!(name, "bash");
+                    assert!(!ok, "forbidden command must not run");
+                    refused = true;
+                }
+                AgentEvent::Completed(Ok(outcome)) => {
+                    if let Some(tool_msg) =
+                        outcome.messages.iter().find(|m| m.role == Role::Tool)
+                    {
+                        assert!(
+                            tool_msg.content.contains("constraint_violated"),
+                            "outcome message: {}",
+                            tool_msg.content
+                        );
+                    }
+                    break;
+                }
+                AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
+                _ => {}
+            }
+        }
+        assert!(refused, "should have seen the refusal");
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 

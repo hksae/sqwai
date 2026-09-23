@@ -506,6 +506,31 @@ literals compared against or returned — also capped at three. Steps with no
 refs stay silent, and `bash` is excluded from both: shell-written bytes
 leave no per-file diff to attribute or scan. Numeric magic constants are
 deliberately not flagged (ports, timeouts, status codes).
+
+2.1.10 Typed constraints
+A constraint the host can execute carries a prefix; unprefixed constraints
+stay advisory (claim-lint territory, never gates):
+- `forbid-import: <pattern>` — no source file may import it (import-statement
+  lines plus bare quoted references, comments excluded; heuristic, waivable).
+- `forbid-cmd: <pattern>` — the agent may not run matching shell commands.
+  Refused live in `bash` (no approval dialog — the waiver is the override),
+  case-insensitive substring; host-run acceptance commands never pass
+  through that path.
+- `ast: <pattern>` — the tree-sitter pattern must match nowhere (project
+  scope, same engine as the `ast_grep` tool). Uncompilable patterns reject
+  `plan create`.
+- `path: <roots...>` — the outcome diff (host-attributed `file_diff`
+  records of the plan's steps) touches only these roots. Bash-written bytes
+  stay invisible here, same documented hole as the scope guard.
+`path:` roots must resolve at create (missing files are fine, escapes are
+not); empty payloads reject. Violations block `complete` with
+`constraint_violated`, naming the index — like a red check. False positives
+are structural (long literals, generated code, heuristic matches), so every
+typed constraint waives: `/plan waive-constraint <index> <reason>`, recorded
+journal-first like acceptance waiver and shown as `[waived]` in `/plan`.
+At create, AGENTS.md restriction markers with no typed constraint covering
+them earn one advisory note line — mining, never gating.
+
 2.2 Journal
 The journal is the factual record of a session. Written only by the host,
 in the tool dispatch layer and in a few lifecycle points. The model has one
@@ -1581,6 +1606,7 @@ number; a `partial` one is missing something the design calls for.
 | AG | Safety level presets / refusal override policy for models with strong filters | planned | — |
 | AH | ULTRA-1: executable acceptance as the settling rule (§12.12) — frozen check that fails before the change, judge ladder beyond tests, three states, `verified` required to settle | partial (§12.12) — baseline proof, the settle gate, and the three states shipped for `cmd:` items (host runs every check at plan create, keeps the failing run, `verify` refuses an item without one, `plan show` marks it; a green run and a red run disagreeing on the same digest marks the item flaky/unknown, never retried into `verified`, `complete` stays blocked); rung 4 shipped (`snapshot:` freezes output at plan time, settles on byte-identical output); rung 3 shipped (`differential:` settles on changed output, double-run freeze refuses nondeterministic inputs); rung 5 shipped (`signatures:` settles on identical declaration shapes, AST-normalized); the walk shipped (host classifies items by rung, reports the highest in create/accept and per item); remaining: the round-trip rung and rung synthesis | V, V1, F3, H1 |
 | AI | ULTRA-2/3: conditional escalation under a separate arbiter budget (`N ≤ B/T`); divergence phase gated behind a diversity measurement | PARKED — ULTRA mode development paused; the ULTRA-1 substrate above ships and lives on its own, engagement flag / arbitration / divergence untouched (§12.12) | AH, M, AC |
+| AJ | Typed executable constraints (§2.1.10): `forbid-import:`, `forbid-cmd:` (live in bash), `ast:`, `path:` evaluated at `complete`; `/plan waive-constraint`; AGENTS.md advisory mining at create | done — violations block complete like red checks; unprefixed constraints stay advisory | AH |
 
 
 

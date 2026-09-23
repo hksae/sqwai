@@ -103,7 +103,7 @@ fn clean_path(raw: &str) -> String {
         .to_string()
 }
 
-fn is_comment(line: &str) -> bool {
+pub(crate) fn is_comment(line: &str) -> bool {
     let t = line.trim_start();
     t.starts_with("//") || t.starts_with('#') || t.starts_with('*') || t.starts_with("<!--")
 }

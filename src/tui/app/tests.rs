@@ -3305,7 +3305,13 @@ mod tests {
         // filtering by the typed prefix
         app.input = App::fresh_input("/plan w".into());
         assert!(app.popup_visible());
-        assert_eq!(app.popup_items(), vec!["/plan waive".to_string()]);
+        assert_eq!(
+            app.popup_items(),
+            vec![
+                "/plan waive".to_string(),
+                "/plan waive-constraint".to_string()
+            ]
+        );
         // insert replaces only the subcommand word, keeps typed args
         app.input = App::fresh_input("/plan wai".into());
         app.apply_subcommand_insert("/plan", "waive");
@@ -7181,6 +7187,65 @@ mod tests {
             !rendered.contains(&plan_b.id),
             "menu must not show another session's plan"
         );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn plan_waive_constraint_marks_and_renders() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let temp_dir = std::env::temp_dir().join(format!(
+            "sqwai-test-waive-constraint-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        app.project_root = temp_dir.clone();
+        let sid = app.session.id.to_string();
+
+        let limits = plan::Limits { max_steps: 10 };
+        let mut plan = plan::create(
+            "constrained".into(),
+            vec!["forbid-import: btree".into(), "keep the format".into()],
+            vec!["manual: eyeball it".into()],
+            vec![plan::NewStep {
+                title: "step 1".into(),
+                refs: vec![],
+            }],
+            1000,
+            &limits,
+        )
+        .unwrap();
+        plan.sessions = vec![sid.clone()];
+        plan::store(&temp_dir, &plan).unwrap();
+        app.session.plan_id = Some(plan.id.clone());
+
+        // usage without reason
+        app.plan_command("/plan waive-constraint 0");
+        assert!(
+            toast_text(&app).contains("usage"),
+            "needs index and reason: {}",
+            toast_text(&app)
+        );
+        // unknown index
+        app.plan_command("/plan waive-constraint 9 legacy use");
+        assert!(
+            toast_text(&app).contains("unknown_constraint"),
+            "{}",
+            toast_text(&app)
+        );
+        // happy path: marked, rendered, idempotent
+        app.plan_command("/plan waive-constraint 0 legacy use, tracked");
+        assert!(
+            toast_text(&app).contains("constraint 0 waived"),
+            "{}",
+            toast_text(&app)
+        );
+        let after = plan::open(&temp_dir, &plan.id).unwrap();
+        assert_eq!(plan::waived_constraint_indices(&after), vec![0]);
+        assert!(plan::render(&after).contains("[waived]"));
+        app.plan_command("/plan waive-constraint 0 again");
+        let again = plan::open(&temp_dir, &plan.id).unwrap();
+        assert_eq!(again.waived_constraints.len(), 1);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
