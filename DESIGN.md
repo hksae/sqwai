@@ -1631,6 +1631,10 @@ Divided into two stages:
 - **G0 (Minimal retention benchmark)**: isolates the core anchor and plan loop
   (plan + evidence + anchor vs baseline summary=short) without depending on
   external graph tools, provider fallbacks, or reflector escalation.
+  Cost comparisons from runs before the cache-layout fix and the host
+  summary cap are suspect on both arms (volatile tail re-keyed history;
+  uncapped baseline summaries) — remeasure on `cache-adjusted cost`,
+  not raw token sums.
 - **G1 (Full integrity benchmark)**: evaluates complete execution integrity,
   including verification receipts, crash recovery, and claim linting.
 

@@ -620,8 +620,14 @@ pub fn truncate_summary(text: &str) -> String {
 /// what the user explicitly asked, forbade, or stated as fact in the
 /// dropped messages that is NOT already covered by the durable plan.
 /// `plan_hint` is preformatted "Goal: …\nConstraints: …" (possibly empty:
-/// with no plan, every user request counts as uncovered).
-pub fn summary_short_input(older: &[Message], previous: Option<&str>, plan_hint: &str) -> String {
+/// with no plan, every user request counts as uncovered). `retry` appends
+/// the hard-limit line for the second attempt after a blown budget.
+pub fn summary_short_input(
+    older: &[Message],
+    previous: Option<&str>,
+    plan_hint: &str,
+    retry: bool,
+) -> String {
     let mut out = String::from(
         "Summarize ONLY what the user explicitly asked, forbade, or stated \
          as fact in the dropped conversation below — and ONLY what is not \
@@ -648,6 +654,12 @@ pub fn summary_short_input(older: &[Message], previous: Option<&str>, plan_hint:
          to the reader, no invented facts. If something is unknown, say it \
          is unknown.",
     );
+    if retry {
+        out.push_str(&format!(
+            "\n\nHARD LIMIT: the previous answer blew the budget. Answer again \
+             in at most {SUMMARY_SHORT_MAX_CHARS} characters, plain prose."
+        ));
+    }
     out
 }
 
@@ -1195,16 +1207,21 @@ mod tests {
     fn summary_short_input_restricts_to_uncovered_asks() {
         let older = vec![user("do not touch btree"), user("fix the bug")];
         let plan = "Goal: fix the bug\nConstraints:\n- keep API stable";
-        let input = summary_short_input(&older, Some("earlier facts"), plan);
+        let input = summary_short_input(&older, Some("earlier facts"), plan, false);
         // chains, renders the asks, carries the plan for exclusion
         assert!(input.contains("earlier facts"));
         assert!(input.contains("do not touch btree"));
         assert!(input.contains("keep API stable"));
         assert!(input.contains("not already covered"));
+        assert!(!input.contains("HARD LIMIT"));
         // no plan: everything counts as uncovered, said explicitly
-        let noplan = summary_short_input(&older, None, "");
+        let noplan = summary_short_input(&older, None, "", false);
         assert!(noplan.contains("no durable plan"));
         assert!(!noplan.contains("earlier facts"));
+        // retry appends the hard limit and nothing else changes
+        let retry = summary_short_input(&older, Some("earlier facts"), plan, true);
+        assert!(retry.contains("HARD LIMIT"));
+        assert!(retry.contains("do not touch btree"));
     }
 
     #[test]

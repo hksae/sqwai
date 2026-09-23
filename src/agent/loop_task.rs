@@ -2943,7 +2943,7 @@ async fn compact_history(
             system: vec![SystemPart::volatile(context::SUMMARY_SYSTEM)],
             messages: vec![Message::new(
                 Role::User,
-                context::summary_short_input(&older, summary.as_deref(), plan_hint),
+                context::summary_short_input(&older, summary.as_deref(), plan_hint, false),
             )],
             effort: None,
             effort_support: Default::default(),
@@ -2961,9 +2961,33 @@ async fn compact_history(
                 context::local_summary(&older, summary.as_deref())
             }
         };
+        // the wire cap is advisory: a severely over-budget answer gets one
+        // retry with an explicit hard limit before the host truncates.
+        let text = if text.chars().count() > 2 * context::SUMMARY_SHORT_MAX_CHARS {
+            let retry = ChatRequest {
+                messages: vec![Message::new(
+                    Role::User,
+                    context::summary_short_input(&older, summary.as_deref(), plan_hint, true),
+                )],
+                ..request.clone()
+            };
+            match collect_text(provider, &retry).await {
+                Ok(shorter) => shorter,
+                Err(_) => text,
+            }
+        } else {
+            text
+        };
         // host-enforced cap (the wire cap is advisory at best): without it
         // chained summaries balloon every cycle (measured 33K-140K chars)
         // and late compactions free nothing at full call price.
+        if std::env::var("SQWAI_BENCH_DEBUG").is_ok() {
+            eprintln!(
+                "bench-debug: summary {} chars after cap ({} before)",
+                context::truncate_summary(&text).chars().count(),
+                text.chars().count()
+            );
+        }
         let text = context::truncate_summary(&text);
         *messages = context::apply_summary(&text, &keep);
         *summary = Some(text);
@@ -5454,6 +5478,71 @@ mod effort_tests {
                 .contains("## Earlier conversation summary"),
             "unexpected summary: {summary:?}"
         );
+    }
+
+    /// A severely over-budget summary gets one retry with an explicit hard
+    /// limit; the retry answer wins even though the mock serves it second.
+    #[tokio::test]
+    async fn compact_history_retries_a_blown_summary_budget() {
+        let big = "x".repeat(3 * crate::agent::context::SUMMARY_SHORT_MAX_CHARS);
+        let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(vec![
+                vec![Ok(crate::providers::StreamEvent::Text(big))],
+                vec![Ok(crate::providers::StreamEvent::Text("SHORT".into()))],
+            ]),
+        });
+        let policy = summary_policy();
+        let mut messages = three_turns();
+        let mut summary = None;
+        let out = compact_history(
+            &provider,
+            "m",
+            &mut messages,
+            &mut summary,
+            &policy,
+            false,
+            "",
+        )
+        .await
+        .expect("pressure is over: must compact");
+        assert!(out.2);
+        assert_eq!(summary.as_deref(), Some("SHORT"));
+    }
+
+    /// A moderately over-budget summary (under 2× the cap) is truncated
+    /// without spending a retry: the mock has only one answer scripted, so
+    /// a retry would fall back to the local summary instead.
+    #[tokio::test]
+    async fn compact_history_truncates_without_retry_near_the_cap() {
+        let over = "y".repeat(
+            crate::agent::context::SUMMARY_SHORT_MAX_CHARS
+                + crate::agent::context::SUMMARY_SHORT_MAX_CHARS / 2,
+        );
+        let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(vec![vec![Ok(
+                crate::providers::StreamEvent::Text(over),
+            )]]),
+        });
+        let policy = summary_policy();
+        let mut messages = three_turns();
+        let mut summary = None;
+        compact_history(
+            &provider,
+            "m",
+            &mut messages,
+            &mut summary,
+            &policy,
+            false,
+            "",
+        )
+        .await;
+        let kept = summary.expect("a summary must be stored");
+        assert!(
+            kept.chars().count() <= crate::agent::context::SUMMARY_SHORT_MAX_CHARS,
+            "host cap applies: {} chars",
+            kept.chars().count()
+        );
+        assert!(kept.contains("truncated to fit"), "{kept:?}");
     }
 
     #[tokio::test]
