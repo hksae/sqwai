@@ -337,6 +337,7 @@ impl Provider for AnthropicProvider {
                                     prompt_tokens: total_prompt,
                                     completion_tokens: 0,
                                     cached_tokens: cached,
+                                    cache_write_tokens: (created > 0).then_some(created),
                                     // the Messages API bills thinking inside
                                     // output_tokens and reports no separate
                                     // counter, so there is nothing to claim
@@ -433,6 +434,7 @@ impl Provider for AnthropicProvider {
                                         prompt_tokens: 0,
                                         completion_tokens: out_tokens,
                                         cached_tokens: None,
+                                        cache_write_tokens: None,
                                         reasoning_tokens: None,
                                     }));
                                 }

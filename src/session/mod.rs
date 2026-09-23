@@ -279,6 +279,9 @@ impl Session {
                 self.cache_confirmed = true;
             }
         }
+        if let Some(w) = u.cache_write_tokens {
+            *self.usage.cache_write_tokens.get_or_insert(0) += w;
+        }
         // Some providers emit a second usage event for output with zero input:
         // keep the prompt size of the request that actually reported one.
         if u.prompt_tokens > 0 {
@@ -639,6 +642,7 @@ mod tests {
             prompt_tokens: 500,
             completion_tokens: 600,
             cached_tokens: None,
+            cache_write_tokens: None,
             reasoning_tokens: None,
         });
         assert_eq!(s.context_tokens_used(), 500);
@@ -651,6 +655,7 @@ mod tests {
             prompt_tokens: 36_267,
             completion_tokens: 10,
             cached_tokens: None,
+            cache_write_tokens: None,
             reasoning_tokens: None,
         });
         assert_eq!(s.context_tokens_used(), 36_267);
@@ -667,6 +672,7 @@ mod tests {
                 prompt_tokens: 1_000,
                 completion_tokens: 100,
                 cached_tokens: None,
+                cache_write_tokens: None,
                 reasoning_tokens: None,
             });
         }
@@ -682,6 +688,7 @@ mod tests {
             prompt_tokens: 2_000,
             completion_tokens: 0,
             cached_tokens: None,
+            cache_write_tokens: None,
             reasoning_tokens: None,
         });
         // anthropic-style second event: output only, zero input
@@ -689,6 +696,7 @@ mod tests {
             prompt_tokens: 0,
             completion_tokens: 250,
             cached_tokens: None,
+            cache_write_tokens: None,
             reasoning_tokens: None,
         });
         assert_eq!(s.context_tokens_used(), 2_000);
@@ -720,6 +728,7 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 1,
             cached_tokens: Some(0),
+            cache_write_tokens: None,
             reasoning_tokens: None,
         });
         assert!(!s.cache_confirmed, "a zero-cache report proves nothing");
@@ -728,10 +737,35 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 1,
             cached_tokens: Some(7),
+            cache_write_tokens: None,
             reasoning_tokens: None,
         });
         assert!(s.cache_confirmed);
         assert_eq!(s.usage.cached_tokens, Some(7));
+    }
+
+    /// Prefix writes accumulate next to reads: a session that rebuilds its
+    /// prefix every turn must show it in `usage`, not hide it in the prompt
+    /// total.
+    #[test]
+    fn cache_writes_accumulate_in_session_usage() {
+        let mut s = Session::new("m".into(), 1000);
+        s.add_usage(&Usage {
+            prompt_tokens: 100,
+            completion_tokens: 1,
+            cached_tokens: Some(90),
+            cache_write_tokens: Some(10),
+            reasoning_tokens: None,
+        });
+        s.add_usage(&Usage {
+            prompt_tokens: 100,
+            completion_tokens: 1,
+            cached_tokens: Some(90),
+            cache_write_tokens: Some(10),
+            reasoning_tokens: None,
+        });
+        assert_eq!(s.usage.cached_tokens, Some(180));
+        assert_eq!(s.usage.cache_write_tokens, Some(20));
     }
 
     #[test]

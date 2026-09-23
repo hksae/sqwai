@@ -133,6 +133,12 @@ pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cached_tokens: Option<u64>,
+    /// Tokens written to the provider-side prefix cache by this request, when
+    /// reported (Anthropic `cache_creation_input_tokens`). Billed above input
+    /// rate (1.25x for the 5-minute TTL), so folding them into `prompt_tokens`
+    /// silently subsidizes prefix churn: every prefix rebuild pays full price
+    /// plus the write. `None` means the provider said nothing.
+    pub cache_write_tokens: Option<u64>,
     /// Tokens the model spent reasoning, when the provider counts them.
     /// `Some(0)` is the only positive evidence that a request for effort was
     /// not acted on — `None` means the provider said nothing, which is not
@@ -148,7 +154,9 @@ impl Usage {
 
     /// true when the provider told us nothing at all
     pub fn is_empty(&self) -> bool {
-        self.total() == 0 && self.cached_tokens.unwrap_or(0) == 0
+        self.total() == 0
+            && self.cached_tokens.unwrap_or(0) == 0
+            && self.cache_write_tokens.unwrap_or(0) == 0
     }
 }
 

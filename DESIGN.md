@@ -1088,8 +1088,9 @@ text
 
 [A  stable prefix — cache breakpoint after]
  1 system prompt (date to the day; no clock time)
- 2 tool schemas (sorted by name; MCP tools included once connected — connection
-   happens before the first turn so A does not change mid-session)
+  2 tool schemas (sorted by name; MCP tools merged and re-sorted with the
+    built-ins — server order must not leak into the prefix; connection
+    happens before the first turn so A does not change mid-session)
  3 AGENTS.md + MEMORY.md + skills (prompt extensions only; project skills
     override user skills with the same name)
 [B  session prefix — changes on start/compaction — cache breakpoint after]
@@ -1099,7 +1100,9 @@ text
 [C  history]
  6 messages since the anchor (verbatim; oversized tool outputs already spilled)
 [D  turn tail — never cached]
- 7 plan (compact: goal line, current step, next 3, counts) — cheap, always current
+  7 plan status (steps, acceptance validation, counts) — cheap, always current;
+    goal and constraints sit in the cached prefix instead (they change only
+    when the plan is rewritten), so a step that finishes re-keys nothing
  8 graph context block (planned, §12.5 — not injected today)
  9 nudge: when the in_progress step accumulated ≥ plan.nudge_after actions
     since its last plan op — "plan: step N has K actions and no update —
@@ -1108,9 +1111,12 @@ text
 10 triggered skills for this turn
 Anthropic: cache_control after 3 and after 5. OpenAI-compatible/Responses:
 automatic prefix caching benefits from the same layout. Cache-read tokens are
-shown in the status bar.
+shown in the status bar; prefix writes are tracked separately
+(`cache_write_tokens`) and billed at 1.25x in `cache-adjusted cost` — a run
+that rebuilds its prefix pays the churn, not just the fresh input.
 
-Consequence: a plan op changes only block D; the caches for A and B survive.
+Consequence: a step transition changes only block D; the caches for A and B survive.
+A goal/constraint rewrite re-keys the cached plan block — rare and deliberate.
 Skills triggered by keywords do not enter A (they would churn it every
 turn); auto-loaded and user-selected skills do (§5.7).
 

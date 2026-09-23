@@ -784,6 +784,14 @@ impl App {
         if let Some(plan) = crate::prompts::plan_block(&root, Some(&self.session.id.to_string())) {
             parts.push(SystemPart::cached(plan));
         }
+        // Plan step state churns every turn (start/finish/verify), so it
+        // rides the volatile tail: only goal and constraints — which change
+        // when the plan is rewritten — may sit in the cached prefix above.
+        if let Some(status) =
+            crate::prompts::plan_status_block(&root, Some(&self.session.id.to_string()))
+        {
+            parts.push(SystemPart::volatile(status));
+        }
         // The anchor is host-generated from the plan and this session's
         // journal. It is rebuilt every turn so resume/compaction never relies
         // on a model-written summary.

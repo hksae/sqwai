@@ -44,6 +44,8 @@ impl OpenAiProvider {
             cached_tokens: u
                 .pointer("/prompt_tokens_details/cached_tokens")
                 .and_then(|c| c.as_u64()),
+            // Chat Completions reports no cache-creation counter
+            cache_write_tokens: None,
             reasoning_tokens: u
                 .pointer("/completion_tokens_details/reasoning_tokens")
                 .and_then(|c| c.as_u64()),

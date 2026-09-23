@@ -3350,18 +3350,15 @@ pub fn stale_announcements(
 // ---------------------------------------------------------------- rendering
 
 /// The plan document shown by `/plan` (§2.1.7).
-pub fn render(plan: &Plan) -> String {
-    let c = plan.counts();
+/// The immutable half of the plan: id, goal, constraints. Changes only when
+/// the user (or an accepted proposal) rewrites the goal or the constraint
+/// set, so it belongs to the cacheable wire prefix. Waive markers travel
+/// here: a waiver re-keys the prefix, which is correct — the model must see
+/// the waived constraint, not a stale cached one.
+pub fn render_goal(plan: &Plan) -> String {
     let mut out = String::new();
-    out.push_str(&format!(
-        "plan {} · {}\n",
-        plan.id,
-        status_word(plan.status)
-    ));
+    out.push_str(&format!("plan {}\n", plan.id));
     out.push_str(&format!("goal: {}\n", plan.goal.text));
-    if let Some(reason) = &plan.blocked_reason {
-        out.push_str(&format!("blocked: {reason}\n"));
-    }
     if !plan.constraints.is_empty() {
         let waived = waived_constraint_indices(plan);
         let rendered: Vec<String> = plan
@@ -3377,6 +3374,19 @@ pub fn render(plan: &Plan) -> String {
             })
             .collect();
         out.push_str(&format!("constraints: {}\n", rendered.join(" · ")));
+    }
+    out
+}
+
+/// The moving half of the plan: status, acceptance validation, steps and
+/// their summaries. Rebuilt every turn, so it rides the volatile tail —
+/// step transitions must never invalidate the cached prefix.
+pub fn render_status(plan: &Plan) -> String {
+    let c = plan.counts();
+    let mut out = String::new();
+    out.push_str(&format!("status: {}\n", status_word(plan.status)));
+    if let Some(reason) = &plan.blocked_reason {
+        out.push_str(&format!("blocked: {reason}\n"));
     }
     if !plan.acceptance.is_empty() {
         out.push_str("acceptance:\n");
@@ -3451,6 +3461,10 @@ pub fn render(plan: &Plan) -> String {
     out
 }
 
+pub fn render(plan: &Plan) -> String {
+    format!("{}{}", render_goal(plan), render_status(plan))
+}
+
 fn status_word(status: PlanStatus) -> &'static str {
     match status {
         PlanStatus::Active => "active",
@@ -3463,6 +3477,33 @@ fn status_word(status: PlanStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cache split, nailed down: goal + constraints never mention step
+    /// state, and step transitions never touch the goal block. A step that
+    /// finishes must leave `render_goal` byte-identical.
+    #[test]
+    fn render_splits_stable_goal_from_moving_status() {
+        let mut plan = new_plan();
+        let goal_before = render_goal(&plan);
+        assert!(goal_before.contains("persist the plan on disk"), "{goal_before}");
+        assert!(goal_before.contains("no new dependencies"), "{goal_before}");
+        assert!(!goal_before.contains("add the model"), "{goal_before}");
+        assert!(!goal_before.contains("active"), "{goal_before}");
+
+        let status_before = render_status(&plan);
+        assert!(status_before.contains("active"), "{status_before}");
+        assert!(status_before.contains("add the model"), "{status_before}");
+
+        plan.steps[0].status = StepStatus::Done;
+        plan.steps[1].status = StepStatus::InProgress;
+        assert_eq!(render_goal(&plan), goal_before, "step moves re-key nothing cached");
+        assert_ne!(render_status(&plan), status_before, "step moves surface");
+
+        // the full render still carries both halves
+        let full = render(&plan);
+        assert!(full.contains("persist the plan on disk"), "{full}");
+        assert!(full.contains("[x] 1 add the model"), "{full}");
+    }
 
     #[test]
     fn substitute_verify_commands_expands_known() {

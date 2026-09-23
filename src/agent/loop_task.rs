@@ -1304,11 +1304,12 @@ async fn run_agent(
     // Tools are part of the request prefix: sorted for stability, narrowed in
     // PLAN mode, and omitted entirely for requests that cannot call them.
     let tools: Vec<crate::providers::ToolSpec> = if enable_tools {
-        let mut specs = tools::tool_specs(plan_mode);
+        let base = tools::tool_specs(plan_mode);
         if let Some(registry) = &mcp_registry {
-            specs.extend_from_slice(registry.specs());
+            tools::merge_specs(base, registry.specs())
+        } else {
+            base
         }
-        specs
     } else {
         Vec::new()
     };
@@ -3215,8 +3216,12 @@ async fn run_turn(
                     // no-op unless the http log is on; this is the line that
                     // makes an inconsistent gateway diagnosable at all
                     crate::providers::log_http(&format!(
-                        "usage event: prompt={} completion={} cached={:?} reasoning={:?}",
-                        u.prompt_tokens, u.completion_tokens, u.cached_tokens, u.reasoning_tokens
+                        "usage event: prompt={} completion={} cached={:?} written={:?} reasoning={:?}",
+                        u.prompt_tokens,
+                        u.completion_tokens,
+                        u.cached_tokens,
+                        u.cache_write_tokens,
+                        u.reasoning_tokens
                     ));
                     if tx.send(AgentEvent::Usage(u)).await.is_err() {
                         return Err(TurnFailure::new("tui closed", None, attempt));

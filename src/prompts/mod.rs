@@ -106,15 +106,29 @@ pub fn runtime_context() -> String {
     env::runtime_context()
 }
 
-/// The durable plan, when the project has one. It changes only when the agent
-/// rewrites it, so it belongs to the cacheable prefix.
+/// The durable plan goal, when the project has one. Goal and constraints
+/// change only when the agent rewrites them, so this belongs to the
+/// cacheable prefix. Step state lives separately (see `plan_status_block`):
+/// a step that finishes must not re-key the cached prefix.
 pub fn plan_block(root: &std::path::Path, session_id: Option<&str>) -> Option<String> {
     let plan = crate::plan::open_active_for_session(root, session_id)
         .ok()
         .flatten()?;
     Some(format!(
         "<durable_plan>\n{}\n</durable_plan>",
-        crate::plan::render(&plan)
+        crate::plan::render_goal(&plan)
+    ))
+}
+
+/// The moving half of the plan: status, acceptance validation, steps.
+/// Rebuilt every turn — a volatile tail part, never the cached prefix.
+pub fn plan_status_block(root: &std::path::Path, session_id: Option<&str>) -> Option<String> {
+    let plan = crate::plan::open_active_for_session(root, session_id)
+        .ok()
+        .flatten()?;
+    Some(format!(
+        "<plan_status>\n{}\n</plan_status>",
+        crate::plan::render_status(&plan)
     ))
 }
 

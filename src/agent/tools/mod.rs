@@ -1296,8 +1296,7 @@ pub fn reflector_specs() -> Vec<crate::providers::ToolSpec> {
     specs
 }
 
-pub fn tool_specs(_plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
-    // One schema set in every mode. The tool block is part of the request
+pub fn tool_specs(_plan_mode: bool) -> Vec<crate::providers::ToolSpec> {    // One schema set in every mode. The tool block is part of the request
     // prefix, so a mode-dependent set re-keys the cache on every Plan/Act
     // toggle; masking (Manus-style) would cost the same. Plan mode is
     // enforced by the dispatcher instead (`is_mutating_call` at dispatch
@@ -1323,6 +1322,19 @@ pub fn tool_specs(_plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
         .collect();
     specs.sort_by(|a, b| a.name.cmp(&b.name));
     specs
+}
+
+/// Merge external (MCP) schemas into the built-in set. The merged set is
+/// re-sorted as a whole: MCP order follows server registration and server
+/// responses, so appending them after the sorted built-ins would re-key the
+/// tool prefix (and the cache behind it) whenever servers flake or reorder.
+pub fn merge_specs(
+    mut base: Vec<crate::providers::ToolSpec>,
+    extra: &[crate::providers::ToolSpec],
+) -> Vec<crate::providers::ToolSpec> {
+    base.extend(extra.iter().cloned());
+    base.sort_by(|a, b| a.name.cmp(&b.name));
+    base
 }
 
 const READ_MAX_BYTES: usize = 400_000;
@@ -5587,6 +5599,25 @@ mod tests {
         assert_eq!(names, sorted, "tool order must not depend on registration");
         let again: Vec<String> = tool_specs(false).iter().map(|t| t.name.clone()).collect();
         assert_eq!(names, again, "the schema block must be byte-stable");
+    }
+
+    /// MCP servers answer in their own order: merging must re-sort the whole
+    /// set, or the tool prefix (and the cache behind it) re-keys whenever a
+    /// server flakes or reorders.
+    #[test]
+    fn merge_specs_sorts_external_tools_with_builtin_ones() {
+        let spec = |name: &str| crate::providers::ToolSpec {
+            name: name.into(),
+            description: "d".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        };
+        let merged = merge_specs(vec![spec("read"), spec("write")], &[spec("zzz"), spec("aaa")]);
+        let names: Vec<String> = merged.iter().map(|t| t.name.clone()).collect();
+        assert_eq!(names, vec!["aaa", "read", "write", "zzz"]);
+        // server order must not leak through: reversed input, same output
+        let merged = merge_specs(vec![spec("read"), spec("write")], &[spec("aaa"), spec("zzz")]);
+        let names: Vec<String> = merged.iter().map(|t| t.name.clone()).collect();
+        assert_eq!(names, vec!["aaa", "read", "write", "zzz"]);
     }
 
     /// G0 baseline (§8.2): the durable machinery is invisible to the model.

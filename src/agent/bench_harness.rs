@@ -231,6 +231,7 @@ pub struct RunReport {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cached_tokens: u64,
+    pub cache_write_tokens: u64,
     /// gaps (secs) between a tool result landing and the next assistant
     /// text: proxy for post-compaction slowdown
     pub latencies: Vec<u64>,
@@ -360,6 +361,7 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
                 }
                 report.completion_tokens += u.completion_tokens;
                 report.cached_tokens += u.cached_tokens.unwrap_or(0);
+                report.cache_write_tokens += u.cache_write_tokens.unwrap_or(0);
             }
             AgentEvent::Compaction { .. } => {
                 report.compactions += 1;
@@ -568,11 +570,21 @@ fn split_cmd(cmd: &str) -> Option<(String, Vec<String>)> {
 /// Cache-adjusted cost for cross-arm comparison: cached input tokens ride
 /// at a tenth of the price (the Manus ratio the analysis uses), so a run
 /// with a stable prefix is not billed as if it re-sent it every turn.
-/// Raw token sums punish mechanism caching instead of rewarding it — this
-/// is the metric the cache fix must move, not the totals.
-pub fn cache_adjusted_cost(prompt_tokens: u64, cached_tokens: u64, completion_tokens: u64) -> f64 {
-    let fresh_input = prompt_tokens.saturating_sub(cached_tokens.min(prompt_tokens)) as f64;
-    fresh_input + cached_tokens as f64 / 10.0 + completion_tokens as f64
+/// Written prefix tokens cost 1.25x (the 5-minute TTL price — the TTL of a
+/// given write is not reported, so the cheaper documented rate applies), so
+/// a run that rebuilds its prefix every turn pays the churn twice: the fresh
+/// input plus the write. Raw token sums punish mechanism caching instead of
+/// rewarding it — this is the metric the cache fix must move, not the totals.
+pub fn cache_adjusted_cost(
+    prompt_tokens: u64,
+    cached_tokens: u64,
+    written_tokens: u64,
+    completion_tokens: u64,
+) -> f64 {
+    let reused = cached_tokens.min(prompt_tokens) + written_tokens.min(prompt_tokens);
+    let fresh_input = prompt_tokens.saturating_sub(reused.min(prompt_tokens)) as f64;
+    fresh_input + cached_tokens as f64 / 10.0 + written_tokens as f64 * 1.25
+        + completion_tokens as f64
 }
 
 /// Score a finished run. Acceptance + traps are automatic; goal fidelity
@@ -694,14 +706,18 @@ pub fn print_report(report: &RunReport, score: &Score) {
         report.wall_secs, report.tool_calls, report.compactions
     );
     println!(
-        "tokens: in={} out={} cached={}",
-        report.prompt_tokens, report.completion_tokens, report.cached_tokens
+        "tokens: in={} out={} cached={} written={}",
+        report.prompt_tokens,
+        report.completion_tokens,
+        report.cached_tokens,
+        report.cache_write_tokens
     );
     println!(
         "cache-adjusted cost: {:.0}",
         cache_adjusted_cost(
             report.prompt_tokens,
             report.cached_tokens,
+            report.cache_write_tokens,
             report.completion_tokens
         )
     );
@@ -756,9 +772,11 @@ pub fn write_eval(report: &RunReport, score: &Score) {
         "prompt_tokens": report.prompt_tokens,
         "completion_tokens": report.completion_tokens,
         "cached_tokens": report.cached_tokens,
+        "cache_write_tokens": report.cache_write_tokens,
         "cache_adjusted_cost": cache_adjusted_cost(
             report.prompt_tokens,
             report.cached_tokens,
+            report.cache_write_tokens,
             report.completion_tokens
         ),
         "plan_finished": report.plan_finished,
@@ -961,11 +979,13 @@ fn split_cmd_keeps_quoted_segments_whole() {
 #[test]
 fn cache_adjusted_cost_rewards_stable_prefixes() {
     // all fresh: billed whole
-    assert_eq!(cache_adjusted_cost(1000, 0, 500), 1500.0);
+    assert_eq!(cache_adjusted_cost(1000, 0, 0, 500), 1500.0);
     // fully cached input rides at a tenth
-    assert_eq!(cache_adjusted_cost(1000, 1000, 500), 600.0);
+    assert_eq!(cache_adjusted_cost(1000, 1000, 0, 500), 600.0);
     // cached never exceeds prompt (defensive against skewed usage reports)
-    assert_eq!(cache_adjusted_cost(100, 1000, 0), 100.0);
+    assert_eq!(cache_adjusted_cost(100, 1000, 0, 0), 100.0);
+    // a rebuilt prefix pays the write at 1.25x instead of riding at a tenth
+    assert_eq!(cache_adjusted_cost(1000, 0, 1000, 0), 1250.0);
 }
 
 #[test]
