@@ -392,7 +392,7 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     }
 }
 
-fn extract_patch_files(root: &std::path::Path, patch: &str) -> Vec<String> {
+pub(super) fn extract_patch_files(root: &std::path::Path, patch: &str) -> Vec<String> {
     use std::io::Write;
     let mut cmd = match Command::new("git")
         .current_dir(root)

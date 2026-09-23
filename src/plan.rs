@@ -362,13 +362,32 @@ pub struct Acceptance {
     pub snapshot: Option<Snapshot>,
     /// Rung 5: the declaration shapes a `signatures:` item named on the
     /// pre-change tree. A later read settles the item iff every shape is
-    /// identical — bodies may move, the structure may not.
+    /// identical — bodies may move, the structure must not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<ShapeFreeze>,
+    /// Frozen check inputs for `cmd:`/`snapshot:`/`differential:` items:
+    /// test and fixture files hashed at plan time. Editing a listed file
+    /// invalidates later verdicts (write-time refusal, receipt-time
+    /// comparison); waiving the item unfreezes its inputs. Empty for kinds
+    /// without commands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<CheckInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// One frozen check input: a test/fixture file hashed at plan time, so
+/// editing the check itself (rather than the code under it) invalidates
+/// every later verdict. Only files that existed at capture are listed —
+/// new test files are always allowed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CheckInput {
+    /// project-relative, forward slashes
+    pub path: String,
+    /// blake3 of the file bytes at capture
+    pub hash: String,
 }
 
 /// One host run of a `cmd:` acceptance item that failed, kept as the item's
@@ -1083,6 +1102,13 @@ fn rebuild_created(
     {
         set_snapshots(&mut plan, snapshots);
     }
+    // check inputs ride with them: re-hashed at every verdict, never
+    // re-frozen after the work starts.
+    if let Some(value) = get("inputs")
+        && let Ok(inputs) = serde_json::from_value::<Vec<Vec<CheckInput>>>(value.clone())
+    {
+        set_inputs(&mut plan, inputs);
+    }
     // rung 5 rides with them: frozen shapes are restored, never re-read.
     if let Some(value) = get("shapes")
         && let Ok(shapes) = serde_json::from_value::<Vec<Option<ShapeFreeze>>>(value.clone())
@@ -1120,6 +1146,11 @@ fn rebuild_accepted(
         && let Ok(snapshots) = serde_json::from_value::<Vec<Option<Snapshot>>>(value.clone())
     {
         set_snapshots(&mut fresh, snapshots);
+    }
+    if let Some(value) = fields.get("inputs")
+        && let Ok(inputs) = serde_json::from_value::<Vec<Vec<CheckInput>>>(value.clone())
+    {
+        set_inputs(&mut fresh, inputs);
     }
     if let Some(value) = fields.get("shapes")
         && let Ok(shapes) = serde_json::from_value::<Vec<Option<ShapeFreeze>>>(value.clone())
@@ -1909,6 +1940,7 @@ pub fn create(
                 baseline: None,
                 snapshot: None,
                 shape: None,
+                inputs: Vec::new(),
                 by: None,
                 reason: None,
             })
@@ -2386,7 +2418,7 @@ const STATE_MANIFESTS: &[&str] = &[
 
 /// Canonical path form for digest inputs and receipt invalidation. Refs are
 /// declared with forward slashes; diffs may arrive OS-native.
-fn norm_path(path: &str) -> String {
+pub(crate) fn norm_path(path: &str) -> String {
     path.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
@@ -2615,6 +2647,108 @@ pub fn set_shapes(plan: &mut Plan, shapes: Vec<Option<ShapeFreeze>>) {
     for (item, shape) in plan.acceptance.iter_mut().zip(shapes) {
         item.shape = shape;
     }
+}
+
+/// Host-only: attach frozen check inputs, positional like [`set_baselines`].
+pub fn set_inputs(plan: &mut Plan, inputs: Vec<Vec<CheckInput>>) {
+    for (item, item_inputs) in plan.acceptance.iter_mut().zip(inputs) {
+        item.inputs = item_inputs;
+    }
+}
+
+/// Directories whose whole subtrees are check inputs by convention.
+const CHECK_INPUT_DIRS: &[&str] = &["tests", "test", "spec", "specs", "fixtures", "snapshots"];
+
+/// Walked but never frozen (or even descended into): VCS, host state,
+/// build outputs.
+const CHECK_INPUT_SKIPS: &[&str] = &[".git", ".sqwai", "target", "node_modules"];
+
+/// Caps: freezing is plan-time overhead on every create.
+const CHECK_INPUT_MAX_FILES: usize = 500;
+const CHECK_INPUT_MAX_BYTES: u64 = 2_000_000;
+
+/// Hash the check inputs that exist right now: test and fixture files by
+/// conventional layout. Sorted for determinism. Only pre-existing files
+/// are listed — new test files are always allowed (rung 2 lives on that).
+///
+/// Known gap, documented not hidden: Rust unit tests live inside `src/`
+/// (`#[cfg(test)]`), which no glob can isolate from the code under test.
+/// Those are covered by the confirm-gate on write, not by this freeze.
+pub fn freeze_check_inputs(root: &Path) -> Vec<CheckInput> {
+    let mut paths = Vec::new();
+    collect_check_inputs(root, root, &mut paths);
+    paths.sort();
+    paths
+        .into_iter()
+        .take(CHECK_INPUT_MAX_FILES)
+        .filter_map(|path| {
+            let bytes = std::fs::read(root.join(&path)).ok()?;
+            if bytes.len() as u64 > CHECK_INPUT_MAX_BYTES {
+                return None;
+            }
+            Some(CheckInput {
+                path,
+                hash: blake3::hash(&bytes).to_hex().to_string(),
+            })
+        })
+        .collect()
+}
+
+fn collect_check_inputs(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if path.is_dir() {
+            if CHECK_INPUT_SKIPS.contains(&name.as_str()) {
+                continue;
+            }
+            collect_check_inputs(root, &path, out);
+            continue;
+        }
+        let rel = match path.strip_prefix(root) {
+            Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+            Err(_) => continue,
+        };
+        if is_check_input(&rel, &name) {
+            out.push(rel);
+        }
+    }
+}
+
+fn is_check_input(rel: &str, name: &str) -> bool {
+    if rel.split('/').any(|comp| CHECK_INPUT_DIRS.contains(&comp)) {
+        return true;
+    }
+    let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name);
+    stem.starts_with("test_") || stem.ends_with("_test") || name.ends_with(".snap")
+}
+
+/// Re-hash frozen inputs; returns the paths that changed or vanished.
+/// Empty means the check still runs against what was frozen.
+pub fn changed_check_inputs(root: &Path, inputs: &[CheckInput]) -> Vec<String> {
+    inputs
+        .iter()
+        .filter(|input| {
+            match std::fs::read(root.join(&input.path)) {
+                Ok(bytes) => blake3::hash(&bytes).to_hex().to_string() != input.hash,
+                Err(_) => true,
+            }
+        })
+        .map(|input| input.path.clone())
+        .collect()
+}
+
+/// Paths no model write may touch without the user taking responsibility:
+/// frozen inputs of every non-waived acceptance item. Waiving unfreezes.
+pub fn frozen_input_paths(plan: &Plan) -> Vec<String> {
+    plan.acceptance
+        .iter()
+        .filter(|item| item.status != AcceptanceStatus::Waived)
+        .flat_map(|item| item.inputs.iter().map(|input| input.path.clone()))
+        .collect()
 }
 
 /// Mark an acceptance item verified on the host's terms.
@@ -3162,6 +3296,9 @@ pub fn render(plan: &Plan) -> String {
             // to compare against
             if matches!(a.kind(), AcceptanceKind::Signatures(_)) && !signatures_current(a) {
                 out.push_str(" [no signatures]");
+            }
+            if !a.inputs.is_empty() {
+                out.push_str(&format!(" [inputs: {}]", a.inputs.len()));
             }
             out.push('\n');
         }
@@ -4449,6 +4586,7 @@ mod tests {
                 baseline: None,
                 snapshot: None,
                 shape: None,
+                inputs: Vec::new(),
                 by: None,
                 reason: None,
             };
@@ -4505,9 +4643,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn signatures_freeze_only_against_the_named_file_set() {
-        let mut plan = create(
+        #[test]
+    fn signatures_freeze_only_against_the_named_file_set() {        let mut plan = create(
             "hold the shape".to_string(),
             Vec::new(),
             vec!["signatures: src/a.rs".to_string()],
@@ -4529,6 +4666,72 @@ mod tests {
         assert!(!signatures_current(&plan.acceptance[0]));
     }
 
+    fn frozen_tree() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("sqwai-freeze-{}", new_id()));
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::write(dir.join("tests/auth.rs"), "fn t() {}\n").unwrap();
+        std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.join("target/cached.rlib"), "blob").unwrap();
+        dir
+    }
+
+    #[test]
+    fn freeze_check_inputs_covers_test_layout_not_build_outputs() {
+        let dir = frozen_tree();
+        let inputs = freeze_check_inputs(&dir);
+        assert_eq!(
+            inputs.iter().map(|i| i.path.clone()).collect::<Vec<_>>(),
+            vec!["tests/auth.rs".to_string()],
+            "conventional test layout in, src/ and target/ out: {inputs:?}"
+        );
+        // sorted and hashed
+        assert!(!inputs[0].hash.is_empty());
+        assert!(changed_check_inputs(&dir, &inputs).is_empty());
+
+        // edit and deletion both read as changed
+        std::fs::write(dir.join("tests/auth.rs"), "fn t() {}\nfn u() {}\n").unwrap();
+        assert_eq!(
+            changed_check_inputs(&dir, &inputs),
+            vec!["tests/auth.rs".to_string()]
+        );
+        std::fs::remove_file(dir.join("tests/auth.rs")).unwrap();
+        assert_eq!(
+            changed_check_inputs(&dir, &inputs),
+            vec!["tests/auth.rs".to_string()]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn frozen_input_paths_skip_waived_items() {
+        let mut plan = create(
+            "frozen".to_string(),
+            Vec::new(),
+            vec!["cmd: cargo test".to_string(), "cmd: cargo clippy".to_string()],
+            vec![NewStep {
+                title: "do the work".to_string(),
+                refs: Vec::new(),
+            }],
+            0,
+            &Limits::default(),
+        )
+        .unwrap();
+        let inputs = vec![CheckInput {
+            path: "tests/a.rs".to_string(),
+            hash: "h".to_string(),
+        }];
+        set_inputs(&mut plan, vec![inputs.clone(), inputs]);
+        assert_eq!(frozen_input_paths(&plan).len(), 2);
+        plan.acceptance[0].status = AcceptanceStatus::Waived;
+        // waiving takes responsibility: the item's inputs unfreeze
+        assert_eq!(
+            frozen_input_paths(&plan),
+            vec!["tests/a.rs".to_string()]
+        );
+    }
+
     fn rung_of(text: &str) -> Option<Rung> {
         ladder_rung(&Acceptance {
             text: text.to_string(),
@@ -4538,6 +4741,7 @@ mod tests {
             baseline: None,
             snapshot: None,
             shape: None,
+            inputs: Vec::new(),
             by: None,
             reason: None,
         })

@@ -1363,6 +1363,143 @@ pub(crate) fn bg_running_commands() -> Vec<(u64, String, String)> {
     exec::running_commands()
 }
 
+/// First frozen check input a file mutation would touch, if any. Resolves
+/// for the jail verdict, then compares lexically cleaned relative paths so
+/// `..` spellings cannot dodge the freeze. Fail-open on an unreadable
+/// store: the journal heals the plan, and an infra hiccup must not brick
+/// writes.
+fn frozen_input_hit(ctx: &ToolCtx, name: &str, args: &Value) -> Option<String> {
+    let plan = plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)).ok()??;
+    let frozen = plan::frozen_input_paths(&plan);
+    if frozen.is_empty() {
+        return None;
+    }
+    let targets: Vec<String> = if name == "patch" {
+        let patch = args["patch"].as_str().unwrap_or_default();
+        if patch.trim().is_empty() {
+            return None;
+        }
+        git::extract_patch_files(&ctx.root, patch)
+    } else {
+        let raw = args["file_path"].as_str().unwrap_or_default();
+        if raw.trim().is_empty() {
+            return None;
+        }
+        vec![raw.to_string()]
+    };
+    targets.into_iter().find_map(|raw| {
+        let resolved = ctx.resolve(&raw).ok()?;
+        let rel = resolved
+            .strip_prefix(&ctx.root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| raw.clone());
+        let clean = lexical_clean(&rel);
+        frozen.iter().any(|f| f == &clean).then(|| clean)
+    })
+}
+
+/// Lexically clean a relative path: drop `.`, resolve `..` against the
+/// stack. No filesystem access — the jail verdict already came from
+/// `resolve`.
+fn lexical_clean(path: &str) -> String {
+    let mut stack: Vec<&str> = Vec::new();
+    for comp in path.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                if stack.last().is_some_and(|top| *top != "..") {
+                    stack.pop();
+                } else {
+                    stack.push("..");
+                }
+            }
+            _ => stack.push(comp),
+        }
+    }
+    stack.join("/")
+}
+
+/// Frozen input a shell command would write, if any. Best-effort heuristic,
+/// documented as such: a frozen path token plus a write shape (redirect,
+/// `tee`, in-place `sed`, copy/move onto it, patch application). Reading a
+/// frozen file never matches. What slips past still meets the receipt-time
+/// hash comparison — this gate steers early, that one judges.
+pub(crate) fn frozen_input_command_hit(
+    root: &Path,
+    session_id: &str,
+    command: &str,
+) -> Option<String> {
+    let plan = plan::open_active_for_session(root, Some(session_id)).ok()??;
+    let frozen = plan::frozen_input_paths(&plan);
+    if frozen.is_empty() {
+        return None;
+    }
+    // path-ish tokens, quotes stripped, lexically cleaned
+    let tokens: Vec<String> = command
+        .split(|c: char| {
+            c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '$' | '`' | '\'' | '"')
+        })
+        .filter(|t| t.contains('/'))
+        .map(|t| lexical_clean(t.trim_matches(|c| c == '\'' || c == '"')))
+        .collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    let frozen_token = || {
+        tokens
+            .iter()
+            .find(|t| frozen.iter().any(|f| f == *t))
+            .cloned()
+    };
+    // `> file`, `>> file`, `2>file`: the token after a redirect operator
+    // (`2>&1` merges streams — no file — so `>` before `&` never counts)
+    let mut words = command.split_whitespace().peekable();
+    while let Some(word) = words.next() {
+        let op = word.trim_matches(|c| c == '\'' || c == '"');
+        let redirect = op == ">"
+            || op == ">>"
+            || (op.ends_with('>')
+                && op[..op.len() - 1].chars().all(|c| c.is_ascii_digit()));
+        if !redirect {
+            continue;
+        }
+        if let Some(dest) = words.peek() {
+            let clean = lexical_clean(dest.trim_matches(|c| c == '\'' || c == '"'));
+            if clean.starts_with('&') {
+                continue;
+            }
+            if frozen.iter().any(|f| f == &clean) {
+                return Some(frozen_input_reason(&clean));
+            }
+        }
+    }
+    // `tee` writes every file arg; `patch`/`git apply` scatter writes the
+    // tokens cannot resolve — any frozen token in such a command asks first
+    let lower = command.to_lowercase();
+    if lower.contains("tee") || lower.contains("git apply") || lower.contains("patch ") {
+        if let Some(hit) = frozen_token() {
+            return Some(frozen_input_reason(&hit));
+        }
+    }
+    // in-place editors and copy/move: a frozen token beside the shape asks
+    if (lower.contains("sed") && lower.contains("-i"))
+        || ["cp", "mv", "install", "rsync", "dd", "truncate"]
+            .iter()
+            .any(|w| lower.split_whitespace().any(|t| t == *w))
+    {
+        if let Some(hit) = frozen_token() {
+            return Some(frozen_input_reason(&hit));
+        }
+    }
+    None
+}
+
+fn frozen_input_reason(path: &str) -> String {
+    format!(
+        "edits frozen check input '{path}': the test/fixture was hashed at plan time, approve to change the check itself"
+    )
+}
+
 /// dispatch one tool call
 pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
     if ctx.read_only
@@ -1440,6 +1577,26 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
                     inherited.step_id, inherited.step_epoch,
                 ),
                 "hint": "stop working on this step; report what was done before the reopen",
+            })
+            .to_string(),
+        );
+    }
+    // Frozen check inputs: editing a test/fixture the active plan froze at
+    // create changes the check, not the code. Refuse; the user takes
+    // responsibility by waiving the item (/plan waive) or surrendering a
+    // contradictory spec (block_plan). New files stay writable — rung 2
+    // lives on that.
+    if matches!(name, "write" | "edit" | "multi_edit" | "patch")
+        && let Some(path) = frozen_input_hit(ctx, name, args)
+    {
+        return Outcome::err(
+            serde_json::json!({
+                "ok": false,
+                "code": "frozen_input",
+                "reason": format!(
+                    "'{path}' is a frozen check input: editing it changes the check, not the code under test"
+                ),
+                "hint": "restore the file, have the user waive the acceptance item (/plan waive), or surrender a contradictory spec with block_plan",
             })
             .to_string(),
         );
@@ -2324,6 +2481,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         plan::set_baselines(&mut created, proof.slots.clone());
                         plan::set_snapshots(&mut created, proof.frozen.clone());
                         plan::set_shapes(&mut created, proof.shapes.clone());
+                        plan::set_inputs(&mut created, proof.inputs.clone());
                         let id = created.id.clone();
                         let step_count = created.steps.len();
                         // Journal-first (§2.1.4): the intent carries everything
@@ -2340,6 +2498,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             "baselines": proof.slots,
                             "snapshots": proof.frozen,
                             "shapes": proof.shapes,
+                            "inputs": proof.inputs,
                             "result_id": created.id,
                             "result_created": created.created,
                             "result_sessions": created.sessions,
@@ -2618,6 +2777,10 @@ pub(crate) struct BaselineProof {
     /// Rung 5, positional beside them: the frozen declaration shapes of
     /// `signatures:` items.
     pub(crate) shapes: Vec<Option<plan::ShapeFreeze>>,
+    /// Frozen check inputs, positional: test/fixture hashes for every
+    /// `cmd:`/`snapshot:`/`differential:` item. Frozen once, before any
+    /// check runs — the only moment the pre-change tree is still current.
+    pub(crate) inputs: Vec<Vec<plan::CheckInput>>,
     /// one line per item, prefixed with `\n` so they can be appended raw
     pub(crate) notes: Vec<String>,
 }
@@ -2979,10 +3142,23 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
         slots: vec![None; plan.acceptance.len()],
         frozen: vec![None; plan.acceptance.len()],
         shapes: vec![None; plan.acceptance.len()],
+        inputs: vec![Vec::new(); plan.acceptance.len()],
         notes: Vec::new(),
     };
+    // check inputs freeze once, before any check runs: hashing is
+    // read-only, identical for every item, and the tree is pre-change
+    // only at this moment.
+    let frozen_inputs = plan::freeze_check_inputs(&ctx.root);
     let paths = plan::digest_paths(plan);
     for (index, item) in plan.acceptance.iter().enumerate() {
+        if matches!(
+            item.kind(),
+            plan::AcceptanceKind::Command(_)
+                | plan::AcceptanceKind::Snapshot(_)
+                | plan::AcceptanceKind::Differential(_)
+        ) {
+            proof.inputs[index] = frozen_inputs.clone();
+        }
         // rungs 3 and 4 freeze beside the baselines: the same moment, the
         // same host-run rules, the same positional slots. Only the verdict
         // is inverted — and rung 3 proves determinism with a double run.
@@ -3141,10 +3317,51 @@ fn same_state_disagreement(item: &plan::Acceptance, command: &str, state_digest:
         == Some(state_digest)
 }
 
+/// Receipt-time check-inputs verdict, shared by every host-run acceptance
+/// path (`cmd:`, `snapshot:`, `differential:`, at `verify` and at
+/// `complete`). Re-hashes the inputs frozen at plan time: a changed or
+/// vanished file means the check no longer runs against what was frozen —
+/// usually edited tests — so no verdict may issue. Records the event in
+/// the journal and returns the rejection message; `None` means clean.
+/// Waived items skip: the user took responsibility with the waiver.
+fn inputs_verdict(
+    ctx: &mut ToolCtx,
+    item: &plan::Acceptance,
+    index: usize,
+) -> Result<Option<String>, String> {
+    if item.status == plan::AcceptanceStatus::Waived {
+        return Ok(None);
+    }
+    let changed = plan::changed_check_inputs(&ctx.root, &item.inputs);
+    if changed.is_empty() {
+        return Ok(None);
+    }
+    let text = format!(
+        "acceptance {index} check inputs changed since plan time: {}",
+        changed.join(", ")
+    );
+    match crate::agent::journal::Journal::open(&ctx.root, &ctx.session_id) {
+        Ok(mut journal) => {
+            let _ = journal.append(
+                "note",
+                serde_json::json!({
+                    "by": "host",
+                    "note": "blocker",
+                    "text": text,
+                }),
+            );
+        }
+        Err(e) => return Err(format!("receipt journal unwritable: {e:#}")),
+    }
+    Ok(Some(format!(
+        "inputs_changed: {text} — restore the frozen files, or have the user \
+         waive the item with /plan waive"
+    )))
+}
+
 /// Refusal for a flaky item (§12.12): reported as such, never silently
 /// retried into verified. Waiver is the way out.
-fn flaky_rejection(index: usize, command: &str) -> plan::Rejection {
-    plan::Rejection {
+fn flaky_rejection(index: usize, command: &str) -> plan::Rejection {    plan::Rejection {
         code: "flaky_check",
         reason: format!("acceptance {index} runs disagree on the same state: {command}"),
         hint: "a green run and a red run attested the same digest, so the check \
@@ -3275,6 +3492,13 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                     ),
                     hint,
                 });
+            }
+            // frozen check inputs first: a verdict on edited tests settles
+            // nothing, whichever way the run goes.
+            match inputs_verdict(ctx, item, index) {
+                Err(message) => return Outcome::err(message),
+                Ok(Some(message)) => return Outcome::err(message),
+                Ok(None) => {}
             }
             // The acceptance text arrives from the model on `plan create`, so
             // it is model-controlled input that the host is about to execute.
@@ -3407,6 +3631,11 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                     hint,
                 });
             }
+            match inputs_verdict(ctx, item, index) {
+                Err(message) => return Outcome::err(message),
+                Ok(Some(message)) => return Outcome::err(message),
+                Ok(None) => {}
+            }
             let frozen = item.snapshot.as_ref().expect("gated above");
             // model-controlled input, same classifier as `bash`: frozen or
             // not, an unsafe check never runs unattended.
@@ -3527,6 +3756,11 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                     ),
                     hint,
                 });
+            }
+            match inputs_verdict(ctx, item, index) {
+                Err(message) => return Outcome::err(message),
+                Ok(Some(message)) => return Outcome::err(message),
+                Ok(None) => {}
             }
             let frozen = item.snapshot.as_ref().expect("gated above");
             match safety::classify(&command) {
@@ -4037,6 +4271,9 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
         }
         match active.acceptance[index].kind() {
             plan::AcceptanceKind::Command(command) => {
+                if let Some(message) = inputs_verdict(ctx, &active.acceptance[index], index)? {
+                    return Err(message);
+                }
                 match safety::classify(command) {
                     safety::Verdict::Blocked(reason) => {
                         return Err(format!(
@@ -4099,6 +4336,9 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
                     return Err(format!(
                         "no_snapshot: acceptance {index} has no frozen output to compare to: {command}"
                     ));
+                }
+                if let Some(message) = inputs_verdict(ctx, &active.acceptance[index], index)? {
+                    return Err(message);
                 }
                 let frozen_hash = active.acceptance[index]
                     .snapshot
@@ -4172,6 +4412,9 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
                     return Err(format!(
                         "no_snapshot: acceptance {index} has no frozen output to compare to: {command}"
                     ));
+                }
+                if let Some(message) = inputs_verdict(ctx, &active.acceptance[index], index)? {
+                    return Err(message);
                 }
                 let frozen_hash = active.acceptance[index]
                     .snapshot
@@ -7186,6 +7429,209 @@ mod tests {
         );
         let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
         assert!(completed.ok, "{}", completed.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Check inputs freeze at create: a `tests/` file present lands in the
+    /// item's inputs and shows in render; `src/` files do not (the known
+    /// Rust-unit-test gap — globs cannot isolate them).
+    #[test]
+    fn create_freezes_check_inputs() {
+        let (mut ctx, dir) = proj();
+        fs::create_dir_all(dir.join("tests")).unwrap();
+        fs::write(dir.join("tests/auth.rs"), "fn t() {}\n").unwrap();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "frozen inputs",
+                "acceptance": ["cmd: exit 3"],
+                "steps": [{"title": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan = plan::open_active(&dir).unwrap().unwrap();
+        assert_eq!(
+            plan.acceptance[0]
+                .inputs
+                .iter()
+                .map(|i| i.path.clone())
+                .collect::<Vec<_>>(),
+            vec!["tests/auth.rs".to_string()]
+        );
+        assert!(plan::render(&plan).contains("[inputs: 1]"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Writing a frozen input is refused with a structured code; waiving
+    /// the item unfreezes it. New files under `tests/` stay writable.
+    #[test]
+    fn write_to_frozen_input_is_refused_until_waived() {
+        let (mut ctx, dir) = proj();
+        fs::create_dir_all(dir.join("tests")).unwrap();
+        fs::write(dir.join("tests/auth.rs"), "fn t() {}\n").unwrap();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "frozen write",
+                "acceptance": ["cmd: exit 3", "manual: eyeball it"],
+                "steps": [{"title": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+
+        // read first: the refusal must be the freeze, not the read guard
+        assert!(execute(&mut ctx, "read", &json!({"file_path": "tests/auth.rs"})).ok);
+        let refused = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "tests/auth.rs", "old_string": "fn t() {}", "new_string": "fn t() { assert!(true) }"}),
+        );
+        assert!(!refused.ok, "{}", refused.output);
+        assert!(refused.output.contains("frozen_input"), "{}", refused.output);
+
+        // `..` spellings do not dodge the freeze
+        let dodged = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "src/../tests/auth.rs", "old_string": "fn t() {}", "new_string": "fn t() { assert!(true) }"}),
+        );
+        assert!(!dodged.ok, "{}", dodged.output);
+        assert!(dodged.output.contains("frozen_input"), "{}", dodged.output);
+
+        // new test files are always allowed (rung 2)
+        let fresh = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": "tests/repro.rs", "content": "fn r() {}\n"}),
+        );
+        assert!(fresh.ok, "{}", fresh.output);
+
+        // waiving the item takes responsibility and unfreezes its inputs
+        let mut plan = plan::open_active(&dir).unwrap().unwrap();
+        plan::waive(&mut plan, 0, "spec changed").unwrap();
+        plan::store(&dir, &plan).unwrap();
+        let allowed = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "tests/auth.rs", "old_string": "fn t() {}", "new_string": "fn t() { assert!(true) }"}),
+        );
+        assert!(allowed.ok, "{}", allowed.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Receipt-time guard: editing a frozen input outside the file tools
+    /// (or before the guard existed) still meets the hash comparison at
+    /// `verify` — plus a journal event, so the attempt is auditable.
+    #[test]
+    fn verify_refuses_edited_check_inputs_and_journals_it() {
+        let (mut ctx, dir) = proj();
+        fs::create_dir_all(dir.join("tests")).unwrap();
+        fs::write(dir.join("tests/auth.rs"), "fn t() {}\n").unwrap();
+        let flag = dir.join("flag.txt");
+        let command = gate_probe_command(&flag);
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "edited inputs",
+                "acceptance": [format!("cmd: {command}")],
+                "steps": [{"title": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        // the fix happens after the baseline was taken
+        fs::write(&flag, "ok").unwrap();
+
+        // bypass the file tools straight through the filesystem
+        fs::write(dir.join("tests/auth.rs"), "fn t() { assert!(false) }\n").unwrap();
+        let out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(!out.ok, "{}", out.output);
+        assert!(out.output.contains("inputs_changed"), "{}", out.output);
+        assert!(out.output.contains("tests/auth.rs"), "{}", out.output);
+
+        let records = crate::agent::journal::Journal::records(&dir).unwrap();
+        assert!(
+            records.iter().any(|r| {
+                r.kind == "note"
+                    && r.fields.get("note").and_then(|v| v.as_str()) == Some("blocker")
+                    && r.fields
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|t| t.contains("tests/auth.rs"))
+            }),
+            "inputs-changed journal event missing"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Same guard at `complete`: the re-run never happens on edited inputs.
+    #[test]
+    fn complete_refuses_edited_check_inputs() {
+        let (mut ctx, dir) = proj();
+        fs::create_dir_all(dir.join("tests")).unwrap();
+        fs::write(dir.join("tests/auth.rs"), "fn t() {}\n").unwrap();
+        let flag = dir.join("flag.txt");
+        let command = gate_probe_command(&flag);
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "edited inputs at completion",
+                "acceptance": [format!("cmd: {command}")],
+                "steps": [{"title": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        fs::write(&flag, "ok").unwrap();
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        assert!(plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0})).ok);
+
+        fs::write(dir.join("tests/auth.rs"), "fn t() { assert!(false) }\n").unwrap();
+        assert!(
+            plan_op(
+                &mut ctx,
+                &json!({"op": "cancel", "id": "1", "reason": "done here"})
+            )
+            .ok
+        );
+        let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
+        assert!(!completed.ok, "{}", completed.output);
+        assert!(
+            completed.output.contains("inputs_changed"),
+            "{}",
+            completed.output
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The shell matcher is best-effort and documented as such: redirects
+    /// onto frozen files ask first, reads and stream-merges never do.
+    #[test]
+    fn frozen_input_command_matcher() {
+        let (mut ctx, dir) = proj();
+        fs::create_dir_all(dir.join("tests")).unwrap();
+        fs::write(dir.join("tests/auth.rs"), "fn t() {}\n").unwrap();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "matcher",
+                "acceptance": ["cmd: exit 3"],
+                "steps": [{"title": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let hit = |command: &str| {
+            frozen_input_command_hit(&ctx.root, &ctx.session_id, command).is_some()
+        };
+        assert!(hit("echo x > tests/auth.rs"));
+        assert!(hit("echo x >> tests/auth.rs"));
+        assert!(hit("cat src/main.rs | tee tests/auth.rs"));
+        assert!(!hit("cat tests/auth.rs"));
+        assert!(!hit("cargo test 2>&1"));
+        assert!(!hit("echo hello"));
         fs::remove_dir_all(&dir).ok();
     }
 

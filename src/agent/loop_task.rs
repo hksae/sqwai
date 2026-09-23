@@ -3996,6 +3996,7 @@ async fn propose_plan(
     plan::set_baselines(&mut fresh, proof.slots.clone());
     plan::set_snapshots(&mut fresh, proof.frozen.clone());
     plan::set_shapes(&mut fresh, proof.shapes.clone());
+    plan::set_inputs(&mut fresh, proof.inputs.clone());
     // Journal-first (§2.1.4): the intent carries the full draft so replay
     // can rebuild the new plan and retire the old one after a crash.
     let new_id = fresh.id.clone();
@@ -4013,6 +4014,7 @@ async fn propose_plan(
                     "baselines": proof.slots,
                     "snapshots": proof.frozen,
                     "shapes": proof.shapes,
+                    "inputs": proof.inputs,
                     "new_id": new_id,
                     "new_created": new_created,
                     "new_sessions": [session_id],
@@ -4136,6 +4138,17 @@ async fn bash_call(
                 None => reason,
             });
         }
+    }
+
+    // 1c. frozen check inputs: a shell write to a test/fixture the plan
+    // froze needs the same approval; headless contexts deny instead.
+    // Best-effort token matching — what slips past still meets the
+    // receipt-time hash comparison.
+    if let Some(hit) = tools::frozen_input_command_hit(&ctx.root, &ctx.session_id, &command) {
+        needs_approval = Some(match needs_approval {
+            Some(prior) => format!("{prior}; {hit}"),
+            None => hit,
+        });
     }
 
     if let Some(reason) = &needs_approval {
