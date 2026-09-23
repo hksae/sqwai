@@ -565,6 +565,16 @@ fn split_cmd(cmd: &str) -> Option<(String, Vec<String>)> {
     Some((it.next()?, it.collect()))
 }
 
+/// Cache-adjusted cost for cross-arm comparison: cached input tokens ride
+/// at a tenth of the price (the Manus ratio the analysis uses), so a run
+/// with a stable prefix is not billed as if it re-sent it every turn.
+/// Raw token sums punish mechanism caching instead of rewarding it — this
+/// is the metric the cache fix must move, not the totals.
+pub fn cache_adjusted_cost(prompt_tokens: u64, cached_tokens: u64, completion_tokens: u64) -> f64 {
+    let fresh_input = prompt_tokens.saturating_sub(cached_tokens.min(prompt_tokens)) as f64;
+    fresh_input + cached_tokens as f64 / 10.0 + completion_tokens as f64
+}
+
 /// Score a finished run. Acceptance + traps are automatic; goal fidelity
 /// and constraint retention are judged by a human from the report.
 pub fn score_run(report: &RunReport, task: &TaskSpec, fixture_src: &Path) -> Score {
@@ -688,6 +698,14 @@ pub fn print_report(report: &RunReport, score: &Score) {
         report.prompt_tokens, report.completion_tokens, report.cached_tokens
     );
     println!(
+        "cache-adjusted cost: {:.0}",
+        cache_adjusted_cost(
+            report.prompt_tokens,
+            report.cached_tokens,
+            report.completion_tokens
+        )
+    );
+    println!(
         "finish: plan={} claimed={} timeout={} error={:?}",
         report.plan_finished, report.claimed_done, report.timed_out, report.error
     );
@@ -738,6 +756,11 @@ pub fn write_eval(report: &RunReport, score: &Score) {
         "prompt_tokens": report.prompt_tokens,
         "completion_tokens": report.completion_tokens,
         "cached_tokens": report.cached_tokens,
+        "cache_adjusted_cost": cache_adjusted_cost(
+            report.prompt_tokens,
+            report.cached_tokens,
+            report.completion_tokens
+        ),
         "plan_finished": report.plan_finished,
         "claimed_done": report.claimed_done,
         "timed_out": report.timed_out,
@@ -912,8 +935,7 @@ fn plan_open_steps_counts_only_unfinished() {    let root = std::env::temp_dir()
 }
 
 #[test]
-fn surrender_quote_reads_the_blocked_plan() {
-    let root = std::env::temp_dir().join(format!("sqwai-bench-surrender-{}", std::process::id()));
+fn surrender_quote_reads_the_blocked_plan() {    let root = std::env::temp_dir().join(format!("sqwai-bench-surrender-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     // no plans at all: no surrender
     assert_eq!(surrender_quote(&root), None);
@@ -932,6 +954,16 @@ fn surrender_quote_reads_the_blocked_plan() {
         Some("spec says 404, test expects 200")
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn cache_adjusted_cost_rewards_stable_prefixes() {
+    // all fresh: billed whole
+    assert_eq!(cache_adjusted_cost(1000, 0, 500), 1500.0);
+    // fully cached input rides at a tenth
+    assert_eq!(cache_adjusted_cost(1000, 1000, 500), 600.0);
+    // cached never exceeds prompt (defensive against skewed usage reports)
+    assert_eq!(cache_adjusted_cost(100, 1000, 0), 100.0);
 }
 
 #[test]

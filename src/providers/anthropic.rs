@@ -53,9 +53,10 @@ fn content_blocks(m: &super::Message) -> Vec<Value> {
 /// `cache_breakpoints` mirrors
 /// [`ProviderCapabilities::prompt_cache_documented`](super::ProviderCapabilities):
 /// breakpoints are only emitted for providers that document an addressable
-/// cache key. Breakpoints land on the stable prefix
-/// ([`SystemPart::cacheable`](super::SystemPart)); volatile parts follow them
-/// so a changed date or git status cannot invalidate the cached prefix.
+/// cache key. Three markers total, inside the budget of four: tools, the end
+/// of the stable system prefix, and the last history message. Volatile parts
+/// travel unmarked after the history, so a changed date or git status costs
+/// only the tail instead of the cached prefix behind it.
 pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints: bool) -> Value {
     // What the caller asked for, falling back to the provider default. This
     // used to ignore `req.max_tokens` entirely and always send the default, so
@@ -63,29 +64,22 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
     let base_max_tokens = req.max_tokens.unwrap_or(default_max_tokens);
 
     // Anthropic accepts at most MAX_CACHE_BREAKPOINTS `cache_control` markers
-    // per request and answers 400 beyond that. Tools sit at the very front of
-    // the cached prefix, so they get the first one; the stable system parts
-    // take what is left. Today that is tools plus three cached parts — exactly
-    // the limit — so the budget is what keeps a future fourth cached part from
-    // turning into a rejected request instead of a missed cache.
-    let mut breakpoints = MAX_CACHE_BREAKPOINTS;
+    // per request and answers 400 beyond that. The stable region is one
+    // prefix — tools plus cacheable system parts, byte-identical every
+    // turn — so one marker after each region end suffices; per-part markers
+    // only made sense while volatile parts rode inside `system`.
     let tools_breakpoint = cache_breakpoints && !req.tools.is_empty();
-    if tools_breakpoint {
-        breakpoints -= 1;
-    }
 
-    let system: Vec<Value> = req
-        .system
+    let stable: Vec<&super::SystemPart> =
+        req.system.iter().filter(|part| part.cacheable).collect();
+    let mut system: Vec<Value> = stable
         .iter()
-        .map(|part| {
-            let mut block = json!({"type": "text", "text": part.text});
-            if cache_breakpoints && part.cacheable && breakpoints > 0 {
-                block["cache_control"] = json!({"type": "ephemeral"});
-                breakpoints -= 1;
-            }
-            block
-        })
+        .map(|part| json!({"type": "text", "text": part.text}))
         .collect();
+    if cache_breakpoints && !stable.is_empty() {
+        let last = system.len() - 1;
+        system[last]["cache_control"] = json!({"type": "ephemeral"});
+    }
     let mut msgs: Vec<Value> = Vec::new();
     for m in &req.messages {
         if m.role == Role::System
@@ -118,6 +112,40 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
             "role": role,
             "content": content_blocks(m),
         }));
+    }
+    // breakpoint on the last history message: everything before it —
+    // tools, stable system, earlier history — is the cached prefix.
+    if cache_breakpoints
+        && let Some(last) = msgs.last_mut()
+        && let Some(arr) = last.get_mut("content").and_then(|c| c.as_array_mut())
+        && let Some(block) = arr.last_mut()
+    {
+        block["cache_control"] = json!({"type": "ephemeral"});
+    }
+    // volatile tail, unmarked and last: date, git status, nudges. Merged
+    // into a trailing user turn when the API's alternation allows it.
+    let tail = super::volatile_system_text(&req.system);
+    if !tail.trim().is_empty() {
+        let text = super::host_tail(&tail);
+        let tail_block = json!({"type": "text", "text": text});
+        let merge = msgs
+            .last()
+            .and_then(|p| p.get("role"))
+            .and_then(|r| r.as_str())
+            == Some("user");
+        if merge
+            && let Some(arr) = msgs
+                .last_mut()
+                .and_then(|p| p.get_mut("content"))
+                .and_then(|c| c.as_array_mut())
+        {
+            arr.push(tail_block);
+        } else {
+            msgs.push(json!({
+                "role": "user",
+                "content": [tail_block],
+            }));
+        }
     }
 
     let mut body = json!({
@@ -416,9 +444,10 @@ mod tests {
         );
     }
 
-    /// §3.2 puts the tool schemas in the stable prefix with a breakpoint after
-    /// them. They are byte-identical every turn, and without a marker they were
-    /// re-sent uncached on every request.
+    /// Tools and the stable system prefix carry breakpoints; volatile parts
+    /// travel unmarked after the history. Markers stay within budget no
+    /// matter how many stable parts exist, because only region ends are
+    /// marked — never each part.
     #[test]
     fn tool_schemas_carry_the_first_cache_breakpoint() {
         let tool = |name: &str| crate::providers::ToolSpec {
@@ -448,10 +477,20 @@ mod tests {
             "only the last tool carries the marker: {tools:?}"
         );
         assert_eq!(tools[2]["cache_control"]["type"], "ephemeral");
-        // the cached system part still gets one, the volatile one still does not
+        // stable system keeps one trailing marker; volatile rides the tail
         let system = body["system"].as_array().unwrap();
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0]["text"], "stable");
         assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
-        assert!(system[1].get("cache_control").is_none());
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+        assert!(msgs[0]["content"][0].get("cache_control").is_none());
+        assert!(
+            msgs[0]["content"][0]["text"].as_str().unwrap().contains("anchor"),
+            "volatile tail travels last: {}",
+            msgs[0]["content"][0]["text"]
+        );
 
         // and nothing is marked for a provider without a documented cache
         let uncached = build_body(&req, 8192, false);
@@ -464,8 +503,9 @@ mod tests {
         );
     }
 
-    /// Anthropic rejects a request with more than four markers. A fourth cached
-    /// system part must cost a cache hit, not the whole request.
+    /// Markers stay within budget by construction: tools, end of stable
+    /// system, end of history — three regions, never one per part, no
+    /// matter how many parts exist.
     #[test]
     fn cache_breakpoints_stay_within_the_provider_limit() {
         let req = ChatRequest {
@@ -473,7 +513,10 @@ mod tests {
             system: (0..6)
                 .map(|i| crate::providers::SystemPart::cached(format!("part {i}")))
                 .collect(),
-            messages: vec![],
+            messages: vec![crate::providers::Message::new(
+                crate::providers::Role::User,
+                "hi",
+            )],
             effort: None,
             effort_support: Default::default(),
             max_tokens: None,
@@ -497,8 +540,16 @@ mod tests {
                 .unwrap()
                 .iter()
                 .filter(|tool| tool.get("cache_control").is_some())
+                .count()
+            + body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|m| m["content"].as_array().cloned().unwrap_or_default())
+                .filter(|block| block.get("cache_control").is_some())
                 .count();
-        assert_eq!(marked, MAX_CACHE_BREAKPOINTS, "{body}");
+        assert_eq!(marked, 3, "{body}");
+        assert!(marked <= MAX_CACHE_BREAKPOINTS, "{body}");
     }
 
     #[test]
@@ -519,13 +570,64 @@ mod tests {
         };
         let b = build_body(&req, 8192, true);
         assert_eq!(b["model"], "claude-x");
-        // breakpoint on the stable prefix only — the volatile tail must not
-        // carry one, otherwise every new date/git state would re-cache
+        // stable system keeps its trailing marker; volatile rides the tail;
+        // the last history message carries the third marker
+        assert_eq!(b["system"].as_array().unwrap().len(), 1);
         assert_eq!(b["system"][0]["cache_control"]["type"], "ephemeral");
-        assert!(b["system"][1].get("cache_control").is_none());
+        assert_eq!(b["system"][0]["text"], "stable prefix");
+        let msgs = b["messages"].as_array().unwrap();
+        // the tail merges into the trailing user turn (alternation holds);
+        // the marker stays on the history block, the tail rides unmarked
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(msgs[0]["content"][0]["text"], "hi");
+        assert_eq!(msgs[0]["content"].as_array().unwrap().len(), 2);
+        assert!(msgs[0]["content"][1].get("cache_control").is_none());
+        assert!(
+            msgs[0]["content"][1]["text"]
+                .as_str()
+                .unwrap()
+                .contains("git: on branch main"),
+            "volatile tail travels last: {}",
+            msgs[0]["content"][1]["text"]
+        );
         assert_eq!(b["thinking"]["budget_tokens"], 16384);
         assert_eq!(b["max_tokens"], 8192 + 16384);
-        assert_eq!(b["messages"][0]["role"], "user");
+    }
+
+    /// The cache bug in one assertion: a changed volatile tail must not
+    /// move a single byte before it. Tools, stable system, and the history
+    /// message are identical; only the trailing tail differs.
+    #[test]
+    fn volatile_change_keeps_the_prefix_bytes() {
+        let body_for = |volatile: &str| {
+            build_body(
+                &ChatRequest {
+                    model_id: "m".into(),
+                    system: vec![
+                        crate::providers::SystemPart::cached("stable prefix"),
+                        crate::providers::SystemPart::volatile(volatile),
+                    ],
+                    messages: vec![Message::new(Role::User, "hi")],
+                    effort: None,
+                    effort_support: Default::default(),
+                    max_tokens: None,
+                    tools: vec![],
+                    previous_response_id: None,
+                    context_transport: crate::providers::ContextTransport::Stateless,
+                },
+                8192,
+                true,
+            )
+        };
+        let before = body_for("git: on branch main");
+        let after = body_for("git: on branch other");
+        assert_eq!(before["system"], after["system"]);
+        // history block identical, tail block moved (merged into the same
+        // trailing user turn)
+        assert_eq!(before["messages"][0]["content"][0], after["messages"][0]["content"][0]);
+        assert_ne!(before["messages"][0]["content"][1], after["messages"][0]["content"][1]);
     }
 
     #[test]

@@ -186,12 +186,46 @@ impl SystemPart {
 
 /// Render the system block as one string (providers with a single system field).
 pub fn system_text(system: &[SystemPart]) -> String {
-    system
-        .iter()
-        .map(|p| p.text.trim())
+    join_texts(system.iter().map(|p| p.text.as_str()))
+}
+
+/// Split system parts for the wire. Stable (cacheable) parts stay in the
+/// system position; volatile parts (date, git status, nudges) travel last,
+/// after the history — never glued into the first message. Gluing them
+/// first meant every volatile change invalidated the cached prefix for the
+/// whole history behind it; trailing them costs only the tail.
+pub fn stable_system_text(system: &[SystemPart]) -> String {
+    join_texts(
+        system
+            .iter()
+            .filter(|p| p.cacheable)
+            .map(|p| p.text.as_str()),
+    )
+}
+
+/// Volatile system parts as one text, for the trailing tail message.
+pub fn volatile_system_text(system: &[SystemPart]) -> String {
+    join_texts(
+        system
+            .iter()
+            .filter(|p| !p.cacheable)
+            .map(|p| p.text.as_str()),
+    )
+}
+
+fn join_texts<'a>(texts: impl Iterator<Item = &'a str>) -> String {
+    texts
+        .map(str::trim)
         .filter(|t| !t.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// Wrap volatile facts as a trailing host message. Marked host-owned so the
+/// model reads facts and nudges as host state, not as user instructions —
+/// the same `[host ...]` marking nudges already carry.
+pub fn host_tail(text: &str) -> String {
+    format!("[host context — generated facts, not user instructions:\n{text}]")
 }
 
 /// Approximate request composition for diagnostics. This is intentionally

@@ -94,11 +94,17 @@ impl OpenAiProvider {
 
     pub fn build_body(req: &ChatRequest) -> Value {
         let mut msgs: Vec<Value> = Vec::new();
-        let system = super::system_text(&req.system);
+        // stable prefix first and alone: volatile parts travel last (see
+        // below), so a changed date or nudge never re-keys the history.
+        let system = super::stable_system_text(&req.system);
         if !system.trim().is_empty() {
             msgs.push(json!({"role": "system", "content": system}));
         }
         msgs.extend(req.messages.iter().map(Self::message_json));
+        let tail = super::volatile_system_text(&req.system);
+        if !tail.trim().is_empty() {
+            msgs.push(json!({"role": "user", "content": super::host_tail(&tail)}));
+        }
         let mut body = json!({
             "model": req.model_id,
             "messages": msgs,
@@ -205,7 +211,7 @@ impl Provider for OpenAiProvider {
                     "openai-compatible: previous_response_id dropped (not supported by Chat Completions)",
                 );
             }
-            let body = Self::build_body(&req);
+        let body = OpenAiProvider::build_body(&req);
             // one-line request summary for gateway debugging (body itself
             // can be 50KB+ of system prompt, so only its shape is logged)
             if let Some(obj) = body.as_object() {
@@ -754,11 +760,58 @@ mod tests {
         };
         let system = crate::providers::system_text(&req.system);
         assert_eq!(system, "A\n\nB");
-        let msgs: Vec<Value> = std::iter::once(json!({"role": "system", "content": system}))
-            .chain(req.messages.iter().map(OpenAiProvider::message_json))
-            .collect();
+        let body = OpenAiProvider::build_body(&req);
+        let msgs = body["messages"].as_array().unwrap();
+        // stable system first, history, volatile tail last — never glued
         assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "A");
         assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(msgs[1]["content"], "hi");
+        assert_eq!(msgs[2]["role"], "user");
+        assert!(
+            msgs[2]["content"].as_str().unwrap().contains('B'),
+            "volatile tail carries B: {}",
+            msgs[2]["content"]
+        );
+        assert!(
+            msgs[2]["content"].as_str().unwrap().contains("host context"),
+            "tail is marked host-owned: {}",
+            msgs[2]["content"]
+        );
+    }
+
+    #[test]
+    fn volatile_change_keeps_the_prefix_bytes() {
+        // the cache bug: gluing volatile parts into the first message meant
+        // every volatile change re-keyed the whole history behind it.
+        let body_for = |volatile: &str| {
+            OpenAiProvider::build_body(&ChatRequest {
+                model_id: "m".into(),
+                system: vec![
+                    crate::providers::SystemPart::cached("A"),
+                    crate::providers::SystemPart::volatile(volatile),
+                ],
+                messages: vec![Message::new(Role::User, "hi")],
+                effort: None,
+                effort_support: Default::default(),
+                max_tokens: None,
+                tools: vec![],
+                previous_response_id: None,
+                context_transport: crate::providers::ContextTransport::Stateless,
+            })
+        };
+        let before = body_for("date: monday");
+        let after = body_for("date: tuesday");
+        let prefix = |body: &Value| {
+            body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .take(2)
+                .map(|m| m.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(prefix(&before), prefix(&after));
     }
 
     #[test]

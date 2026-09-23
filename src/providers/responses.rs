@@ -22,11 +22,13 @@ pub struct ResponsesProvider {
 /// same id. Before this, results rode as ordinary user turns, so the model had
 /// nothing to match them against.
 fn input_items(req: &ChatRequest) -> Vec<Value> {
-    // the system block leads the input; it is rebuilt per request and never
-    // stored in the transcript
+    // the stable system block leads the input; it is rebuilt per request
+    // and never stored in the transcript. Volatile parts travel last (see
+    // below), so they cannot invalidate the cached history prefix.
     let mut input: Vec<Value> = req
         .system
         .iter()
+        .filter(|part| part.cacheable)
         .map(|part| json!({"role": "system", "content": part.text}))
         .collect();
 
@@ -75,6 +77,13 @@ fn input_items(req: &ChatRequest) -> Vec<Value> {
                 "output": m.content,
             })),
         }
+    }
+    let tail = crate::providers::volatile_system_text(&req.system);
+    if !tail.trim().is_empty() {
+        input.push(json!({
+            "role": "user",
+            "content": crate::providers::host_tail(&tail),
+        }));
     }
     input
 }
@@ -536,6 +545,38 @@ mod tests {
         // such trap.
         assert_eq!(b["input"][0]["content"], "s");
         assert_eq!(b["input"][1]["content"], "hi");
+    }
+
+    /// Volatile system parts travel last as a marked user entry, never
+    /// glued into the leading system block.
+    #[test]
+    fn volatile_tail_travels_last() {
+        let req = ChatRequest {
+            model_id: "gpt-x".into(),
+            system: vec![
+                crate::providers::SystemPart::cached("s"),
+                crate::providers::SystemPart::volatile("v"),
+            ],
+            messages: vec![Message::new(Role::User, "hi")],
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        let b = build_body(&req);
+        let input = b["input"].as_array().unwrap();
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["role"], "system");
+        assert_eq!(input[0]["content"], "s");
+        assert_eq!(input[1]["content"], "hi");
+        assert_eq!(input[2]["role"], "user");
+        assert!(
+            input[2]["content"].as_str().unwrap().contains('v'),
+            "tail carries the volatile part: {}",
+            input[2]["content"]
+        );
     }
 
     /// The round trip that #47 was about: a call the model made and the result

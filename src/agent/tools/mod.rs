@@ -1242,11 +1242,8 @@ pub fn call_summary(name: &str, args: &Value) -> String {
 ///
 /// Sorted by name, never by registration order: the tool block is part of the
 /// request prefix, so it must be byte-identical between requests for a
-/// prefix cache to hit.
-///
-/// `plan_mode` narrows the set to read-only tools plus `plan`, so a request
-/// that cannot mutate the project still lets the model build and refine the
-/// plan (§5.3) without paying for the mutating schemas.
+/// prefix cache to hit. The set is mode-independent for the same reason;
+/// Plan mode refuses mutating calls at dispatch instead of hiding them.
 pub fn tool_names() -> Vec<String> {
     let mut names: Vec<String> = defs().into_iter().map(|d| d.name.to_string()).collect();
     names.sort();
@@ -1292,13 +1289,18 @@ pub fn reflector_specs() -> Vec<crate::providers::ToolSpec> {
     specs
 }
 
-pub fn tool_specs(plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
+pub fn tool_specs(_plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
+    // One schema set in every mode. The tool block is part of the request
+    // prefix, so a mode-dependent set re-keys the cache on every Plan/Act
+    // toggle; masking (Manus-style) would cost the same. Plan mode is
+    // enforced by the dispatcher instead (`is_mutating_call` at dispatch
+    // refuses mutating calls with an honest message, `git_branch` actions
+    // included) — which is where the authority already lived.
     // G0 baseline (§8.2): the durable machinery is invisible — no plan,
     // notes, journal projection, or durable memory tools.
     let baseline = crate::bench::baseline();
     let mut specs: Vec<crate::providers::ToolSpec> = defs()
         .into_iter()
-        .filter(|d| !plan_mode || d.kind == Kind::ReadOnly || d.name == "plan")
         .filter(|d| {
             !baseline
                 || !matches!(
@@ -1306,24 +1308,10 @@ pub fn tool_specs(plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
                     "plan" | "propose_plan" | "note" | "journal" | "memory_propose" | "memory_read"
                 )
         })
-        .map(|d| {
-            let mut spec = crate::providers::ToolSpec {
-                name: d.name.to_string(),
-                description: d.description.to_string(),
-                parameters: d.parameters,
-            };
-            // `git_branch` is read-only as a tool but its `create` and
-            // `switch` actions are not, and the dispatcher refuses them in
-            // PLAN mode. Advertising them anyway costs a turn to find that
-            // out, so the schema says what the mode allows.
-            if plan_mode && spec.name == "git_branch" {
-                spec.parameters["properties"]["action"]["enum"] = json!(["list", "current"]);
-                spec.description =
-                    "List local branches, or show the current one. Creating and switching \
-                     branches is an ACT-mode action."
-                        .to_string();
-            }
-            spec
+        .map(|d| crate::providers::ToolSpec {
+            name: d.name.to_string(),
+            description: d.description.to_string(),
+            parameters: d.parameters,
         })
         .collect();
     specs.sort_by(|a, b| a.name.cmp(&b.name));
@@ -5028,18 +5016,32 @@ mod tests {
         }
     }
 
+    /// One schema set in every mode: the tool block is part of the request
+    /// prefix, so a mode-dependent set re-keys the cache on every Plan/Act
+    /// toggle. Plan mode refuses mutating calls at dispatch instead
+    /// (`is_mutating_call`); the schemas stay identical so the prefix does.
     #[test]
-    fn plan_mode_drops_mutating_schemas() {
-        let names: Vec<String> = tool_specs(true).iter().map(|t| t.name.clone()).collect();
-        assert!(names.contains(&"read".to_string()));
-        assert!(names.contains(&"grep".to_string()));
-        assert!(
-            names.contains(&"plan".to_string()),
-            "the plan has to stay writable in PLAN mode"
-        );
-        assert!(!names.contains(&"write".to_string()));
-        assert!(!names.contains(&"edit".to_string()));
-        assert!(!names.contains(&"bash".to_string()));
+    fn tool_schemas_are_mode_independent() {
+        let names = |plan_mode: bool| {
+            let mut names: Vec<String> =
+                tool_specs(plan_mode).iter().map(|t| t.name.clone()).collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(true), names(false));
+        let specs = tool_specs(true);
+        for name in ["read", "plan", "write", "edit", "bash"] {
+            assert!(
+                specs.iter().any(|t| t.name == name),
+                "{name} is advertised in PLAN mode too"
+            );
+        }
+        // the refusal lives at dispatch, not in the schemas
+        assert!(is_mutating_call(
+            "write",
+            &json!({"file_path": "src/a.rs", "content": "x"})
+        ));
+        assert!(!is_mutating_call("read", &json!({"file_path": "src/a.rs"})));
     }
 
     /// §2.1.2 makes the plan budget a host value: model context times
@@ -5135,10 +5137,11 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// PLAN mode refuses `git_branch create|switch` at dispatch already; the
-    /// schema should not invite the model to spend a turn discovering that.
+    /// `git_branch` advertises every action in every mode; mutating ones
+    /// are refused at dispatch. Cache-stable schemas beat saving the model
+    /// a refusal turn.
     #[test]
-    fn plan_mode_advertises_git_branch_without_its_mutating_actions() {
+    fn git_branch_actions_are_identical_across_modes() {
         let actions = |plan_mode: bool| {
             tool_specs(plan_mode)
                 .into_iter()
@@ -5147,44 +5150,16 @@ mod tests {
                 .parameters["properties"]["action"]["enum"]
                 .clone()
         };
-        assert_eq!(actions(true), json!(["list", "current"]));
+        assert_eq!(
+            actions(true),
+            json!(["list", "current", "create", "switch"])
+        );
         assert_eq!(
             actions(false),
             json!(["list", "current", "create", "switch"])
         );
-    }
-
-    /// #14: a label must never advertise what the gate would refuse. The
-    /// dispatcher decides by action (`is_mutating_call`), so a `ReadOnly`
-    /// label on a mixed tool cannot execute — but the PLAN-mode schema is
-    /// built from the label, and a tool that outgrows it would silently
-    /// offer mutations. This walks every advertised `(tool, action)` pair
-    /// and requires the advertised surface to agree with the gate.
-    /// Tools without an `action` enum have nothing to cross-check.
-    #[test]
-    fn plan_mode_never_advertises_a_mutating_action() {
-        for plan_mode in [false, true] {
-            for spec in tool_specs(plan_mode) {
-                let actions: Vec<String> = spec
-                    .parameters
-                    .pointer("/properties/action/enum")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                for action in actions {
-                    let args = json!({"action": action});
-                    assert!(
-                        !plan_mode || !is_mutating_call(&spec.name, &args),
-                        "PLAN mode advertises {} with mutating action {action:?}",
-                        spec.name
-                    );
-                }
-            }
-        }
+        assert!(is_mutating_call("git_branch", &json!({"action": "create"})));
+        assert!(!is_mutating_call("git_branch", &json!({"action": "list"})));
     }
 
     /// §4: the guard is hash-tracked, so a file changed by `bash` since the
