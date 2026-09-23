@@ -2734,61 +2734,35 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             evidence,
         } => verify_acceptance(ctx, acceptance, !evidence.is_empty()),
         plan::Op::Cancel { id, reason } => {
-            let active_plans = plan::list_active(&ctx.root);
             match id {
-                None => {
-                    if active_plans.is_empty() {
-                        return Outcome::err("no active plan: create one with op=create first");
-                    }
-                    if active_plans.len() > 1 {
-                        let list = active_plans
-                            .iter()
-                            .map(|p| format!("{} · {}", p.id, p.goal.text))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        return Outcome::err(format!(
-                            "multiple active plans found ({}), specify id:\n{list}",
-                            active_plans.len()
-                        ));
-                    }
-                    let mut target_plan = active_plans.into_iter().next().unwrap();
-                    let pid = target_plan.id.clone();
-                    target_plan.status = plan::PlanStatus::Abandoned;
-                    target_plan.revision += 1;
-                    let args = serde_json::json!({"id": pid});
-                    match plan::commit(
-                        &ctx.root,
-                        &ctx.session_id,
-                        &mut target_plan,
-                        "cancel",
-                        "model",
-                        true,
-                        args,
-                    ) {
-                        Ok(_) => Outcome::ok(format!("plan {pid} cancelled")),
-                        Err(e) => Outcome::err(format!("plan write failed: {e:#}")),
-                    }
-                }
+                // No silent whole-plan kill here either: the dispatcher used
+                // to abandon directly, bypassing the pure guard below.
+                None => Outcome::err(
+                    serde_json::json!({
+                        "ok": false,
+                        "code": "need_step_id",
+                        "reason": "cancel needs a step id",
+                        "hint": "cancel a step that will not happen, or ask the user to abandon the whole plan (/plan abandon)",
+                    })
+                    .to_string(),
+                ),
                 Some(target_id) => {
-                    if let Some(mut target_plan) =
-                        active_plans.into_iter().find(|p| p.id == target_id)
+                    // Whole-plan abandon is the user's call even with the id
+                    // spelled out — route it through the pure guard so the
+                    // refusal (not a direct status flip) is what lands.
+                    if plan::list_active(&ctx.root)
+                        .iter()
+                        .any(|p| p.id == target_id)
                     {
-                        target_plan.status = plan::PlanStatus::Abandoned;
-                        target_plan.revision += 1;
-                        let pid = target_plan.id.clone();
-                        let args = serde_json::json!({"id": pid});
-                        match plan::commit(
-                            &ctx.root,
-                            &ctx.session_id,
-                            &mut target_plan,
-                            "cancel",
-                            "model",
-                            true,
-                            args,
-                        ) {
-                            Ok(_) => return Outcome::ok(format!("plan {pid} cancelled")),
-                            Err(e) => return Outcome::err(format!("plan write failed: {e:#}")),
-                        }
+                        return Outcome::err(
+                            serde_json::json!({
+                                "ok": false,
+                                "code": "abandon_user_only",
+                                "reason": format!("plan {target_id} can only be abandoned by the user"),
+                                "hint": "surrender a contradiction with block_plan (quote it), or ask the user to abandon it",
+                            })
+                            .to_string(),
+                        );
                     }
                     let mut active =
                         match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
@@ -4004,26 +3978,7 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                 });
             }
             let output_hash = blake3::hash(run.output.as_bytes()).to_hex().to_string();
-            if output_hash != frozen.output_hash || run.exit_code != frozen.exit {
-                // observably changed through this input: the work moved it
-                let receipt = match issue_exec_receipt(
-                    ctx,
-                    index,
-                    &command,
-                    "exec",
-                    started_at,
-                    finished_at,
-                    state_before,
-                    state_after,
-                    paths,
-                    run.exit_code,
-                    output_hash,
-                ) {
-                    Ok(receipt) => receipt,
-                    Err(message) => return Outcome::err(message),
-                };
-                (Vec::new(), Some(receipt))
-            } else {
+            if output_hash == frozen.output_hash && run.exit_code == frozen.exit {
                 return rejection(plan::Rejection {
                     code: "no_observable_change",
                     reason: format!(
@@ -4035,6 +3990,40 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                         .to_string(),
                 });
             }
+            // changed output settles only a working change: a command that
+            // now exits non-zero broke the input, it did not move it.
+            if run.exit_code != Some(0) {
+                return rejection(plan::Rejection {
+                    code: "broken_change",
+                    reason: format!(
+                        "acceptance {index} output changed but exits {:?}: {command}",
+                        run.exit_code
+                    ),
+                    hint: "differential settles behavior that changed and works — fix \
+                           the breakage, or have the user waive the item with \
+                           /plan waive"
+                        .to_string(),
+                });
+            }
+            // observably changed through this input, and working: the
+            // work moved the behavior without breaking the check
+            let receipt = match issue_exec_receipt(
+                ctx,
+                index,
+                &command,
+                "exec",
+                started_at,
+                finished_at,
+                state_before,
+                state_after,
+                paths,
+                run.exit_code,
+                output_hash,
+            ) {
+                Ok(receipt) => receipt,
+                Err(message) => return Outcome::err(message),
+            };
+            (Vec::new(), Some(receipt))
         }
         plan::AcceptanceKind::Signatures(paths) => {
             let canonical = paths.join(", ");
@@ -4753,6 +4742,13 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
                         "no_observable_change: acceptance {index} output identical to the pre-change run: {command_text}"
                     ));
                 }
+                // changed output settles only a working change here too
+                if run.exit_code != Some(0) {
+                    return Err(format!(
+                        "broken_change: acceptance {index} output changed but exits {:?}: {command_text}",
+                        run.exit_code
+                    ));
+                }
             }
             plan::AcceptanceKind::Signatures(paths) => {
                 // rung 5 re-reads like verify does, without executing
@@ -4961,8 +4957,25 @@ mod tests {
         (ctx, dir)
     }
 
-    fn plan_with(acceptance: Vec<&str>) -> plan::Plan {
-        plan::create(
+    /// Whole-plan abandon is the user's call (`/plan abandon`): the tool
+    /// refuses it for the model, so tests retire plans this way directly.
+    fn abandon_as_user(ctx: &ToolCtx, dir: &std::path::Path) {
+        let mut active = plan::open_active(dir).unwrap().unwrap();
+        let id = active.id.clone();
+        plan::abandon(&mut active);
+        plan::commit(
+            dir,
+            &ctx.session_id,
+            &mut active,
+            "cancel",
+            "user",
+            true,
+            serde_json::json!({"id": id}),
+        )
+        .unwrap();
+    }
+
+    fn plan_with(acceptance: Vec<&str>) -> plan::Plan {        plan::create(
             "prove the checks".to_string(),
             Vec::new(),
             acceptance.into_iter().map(str::to_string).collect(),
@@ -7366,6 +7379,49 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// Rung 3 settles working changes: changed output with a non-zero exit
+    /// is breakage (`broken_change`), not movement. Fixing an error
+    /// (non-zero frozen, zero now) still passes.
+    #[test]
+    fn differential_broken_output_does_not_verify() {
+        let (mut ctx, dir) = proj();
+        let missing = dir.join("gone.txt");
+        let present = dir.join("here.txt");
+        fs::write(&present, "v1").unwrap();
+        let fix_command = dump_command(&missing);
+        let break_command = dump_command(&present);
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "working changes only",
+                "acceptance": [format!("differential: {fix_command}"), format!("differential: {break_command}")],
+                "steps": [{"title": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+
+        // fixing an error: frozen missing (exit non-zero), now present
+        fs::write(&missing, "v1").unwrap();
+        let fixed = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        assert!(fixed.ok, "{}", fixed.output);
+
+        // breaking a working check: frozen present (exit zero), now missing
+        fs::remove_file(&present).unwrap();
+        let broken = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 1}));
+        assert!(!broken.ok, "{}", broken.output);
+        assert!(
+            broken.output.contains("broken_change"),
+            "{}",
+            broken.output
+        );
+        assert_eq!(
+            plan::open_active(&dir).unwrap().unwrap().acceptance[1].status,
+            plan::AcceptanceStatus::Pending
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// Rung 3 refuses nondeterministic inputs at freeze time: a clock reads
     /// differently on every run, so comparing against it would pass
     /// trivially. The double run catches that before anything is frozen.
@@ -7421,8 +7477,7 @@ mod tests {
     /// Rung 3 through `complete`: the re-run sees moved output and the plan
     /// completes; identical output blocks it.
     #[test]
-    fn complete_reruns_differential_and_blocks_when_unchanged() {
-        let (mut ctx, dir) = proj();
+    fn complete_reruns_differential_and_blocks_when_unchanged() {        let (mut ctx, dir) = proj();
         fs::write(dir.join("data.txt"), "v1").unwrap();
         let command = dump_command(&dir.join("data.txt"));
         let created = plan_op(
@@ -8037,8 +8092,10 @@ mod tests {
         );
         assert!(blocked.output.contains("README.md"), "{}", blocked.output);
 
-        // fresh plan, same roots, write inside: completes clean
-        assert!(plan_op(&mut ctx, &json!({"op": "cancel", "reason": "next"})).ok);
+        // fresh plan, same roots, write inside: completes clean.
+        // (whole-plan abandon is the user's call — the tool refuses it
+        // for the model — so the test takes the user path directly)
+        abandon_as_user(&ctx, &dir);
         let created = plan_op(
             &mut ctx,
             &json!({
@@ -8140,7 +8197,7 @@ mod tests {
         assert!(created.output.contains("forbid-import:"), "{}", created.output);
 
         // silent once the author formalized anything
-        let _ = plan_op(&mut ctx, &json!({"op": "cancel", "reason": "next"}));
+        abandon_as_user(&ctx, &dir);
         let typed = plan_op(
             &mut ctx,
             &json!({
@@ -9038,7 +9095,7 @@ end
     }
 
     #[test]
-    fn plan_cancel_auto_selects_single_active_plan() {
+    fn plan_cancel_without_id_is_refused() {
         let (mut ctx, dir) = proj();
         let created = plan_op(
             &mut ctx,
@@ -9050,24 +9107,28 @@ end
         );
         assert!(created.ok, "{}", created.output);
 
-        // Cancel with op: "cancel" and missing id when 1 active plan exists
-        let cancelled = plan_op(&mut ctx, &json!({"op": "cancel"}));
-        assert!(cancelled.ok, "{}", cancelled.output);
+        // Cancel with missing id: no silent whole-plan kill, even with a
+        // single active plan — a forgotten id must not destroy the plan.
+        let refused = plan_op(&mut ctx, &json!({"op": "cancel"}));
+        assert!(!refused.ok, "{}", refused.output);
         assert!(
-            cancelled.output.contains("cancelled"),
+            refused.output.contains("need_step_id"),
             "{}",
-            cancelled.output
+            refused.output
         );
 
-        // The active plan is now abandoned
-        assert!(plan::open_active(&dir).unwrap().is_none());
+        // The plan is untouched and still active.
+        assert!(plan::open_active(&dir).unwrap().is_some());
+
+        // Cancelling a real step id still works.
+        let cancelled = plan_op(&mut ctx, &json!({"op": "cancel", "id": "1", "reason": "skip"}));
+        assert!(cancelled.ok, "{}", cancelled.output);
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn plan_cancel_demands_id_when_multiple_active_plans() {
+    fn plan_cancel_with_plan_id_is_user_only() {
         let (mut ctx, dir) = proj();
-        // Create first active plan
         let p1 = plan_op(
             &mut ctx,
             &json!({
@@ -9077,39 +9138,70 @@ end
             }),
         );
         assert!(p1.ok);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
 
-        // Manually create a second active plan on disk
-        let mut second = plan::open_active(&dir).unwrap().unwrap();
-        second.id = plan::new_id();
-        second.goal.text = "second plan".to_string();
-        plan::store(&dir, &second).unwrap();
+        // Even spelled out, whole-plan abandon is the user's call.
+        let refused = plan_op(&mut ctx, &json!({"op": "cancel", "id": plan_id}));
+        assert!(!refused.ok, "{}", refused.output);
+        assert!(
+            refused.output.contains("abandon_user_only"),
+            "{}",
+            refused.output
+        );
+        assert!(plan::open_active(&dir).unwrap().is_some());
+        fs::remove_dir_all(&dir).ok();
+    }
 
-        assert_eq!(plan::list_active(&dir).len(), 2);
+    /// The goal-ownership attack: cancel (no id) → create with a new goal
+    /// and weaker constraints. Both halves must refuse; the original goal
+    /// and constraints survive byte-for-byte.
+    #[test]
+    fn cancel_create_cannot_rewrite_the_goal() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "original goal",
+                "constraints": ["keep the format"],
+                "acceptance": ["manual: eyeball it"],
+                "steps": [{"title": "step 1"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
 
-        // Cancel without id should fail and list active plans
+        // half 1: silent abandon refuses
         let cancelled = plan_op(&mut ctx, &json!({"op": "cancel"}));
-        assert!(!cancelled.ok);
-        assert!(
-            cancelled.output.contains("multiple active plans"),
-            "{}",
-            cancelled.output
+        assert!(!cancelled.ok, "{}", cancelled.output);
+
+        // half 2: spelled-out abandon refuses too
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        let abandoned = plan_op(&mut ctx, &json!({"op": "cancel", "id": plan_id}));
+        assert!(!abandoned.ok, "{}", abandoned.output);
+
+        // so the replacement create is refused: a plan is still active
+        let replaced = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "weaker goal",
+                "constraints": [],
+                "acceptance": ["manual: eyeball it"],
+                "steps": [{"title": "step 1"}]
+            }),
         );
+        assert!(!replaced.ok, "{}", replaced.output);
         assert!(
-            cancelled.output.contains("first plan"),
+            replaced.output.contains("plan_exists"),
             "{}",
-            cancelled.output
-        );
-        assert!(
-            cancelled.output.contains("second plan"),
-            "{}",
-            cancelled.output
+            replaced.output
         );
 
-        // Cancel with explicit id succeeds
-        let cancel_second = plan_op(&mut ctx, &json!({"op": "cancel", "id": second.id}));
-        assert!(cancel_second.ok, "{}", cancel_second.output);
-        assert!(cancel_second.output.contains(&second.id));
-
+        // original goal and constraints untouched
+        let after = plan::open_active(&dir).unwrap().unwrap();
+        assert_eq!(after.goal.text, "original goal");
+        assert_eq!(after.constraints, vec!["keep the format".to_string()]);
+        assert_eq!(after.status, plan::PlanStatus::Active);
         fs::remove_dir_all(&dir).ok();
     }
 

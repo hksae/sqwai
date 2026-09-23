@@ -523,8 +523,6 @@ fn default_true() -> bool {
 pub struct MemoryConfig {
     #[serde(default = "default_memory_load_budget_ratio")]
     pub load_budget_ratio: f64,
-    #[serde(default = "default_memory_heading_days")]
-    pub heading_days: u8,
     #[serde(default = "default_memory_max_tokens")]
     pub max_tokens: u32,
     #[serde(default = "default_memory_max_proposals")]
@@ -535,7 +533,6 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             load_budget_ratio: default_memory_load_budget_ratio(),
-            heading_days: default_memory_heading_days(),
             max_tokens: default_memory_max_tokens(),
             max_proposals_per_turn: default_memory_max_proposals(),
         }
@@ -555,10 +552,6 @@ pub struct DiaryConfig {
     pub effort: EffortLevel,
     #[serde(default = "default_diary_timeout_secs")]
     pub timeout_secs: u64,
-    #[serde(default = "default_diary_batch_steps")]
-    pub batch_steps: u8,
-    #[serde(default = "default_diary_batch_minutes")]
-    pub batch_minutes: u16,
 }
 
 /// `[undo]` — retention and storage for the two checkpoint layers (§2.5).
@@ -567,10 +560,6 @@ pub struct UndoConfig {
     /// commits of a session's shadow chain to keep
     #[serde(default = "default_undo_keep_per_session")]
     pub keep_per_session: u32,
-    /// above this many files, a pre-snapshot runs only for commands the
-    /// classifier calls mutating
-    #[serde(default = "default_undo_max_tree_files")]
-    pub max_tree_files: u64,
     /// how long a layer-1 blob outlives the journal that references it
     #[serde(default = "default_undo_blob_grace_secs")]
     pub blob_grace_secs: u64,
@@ -597,9 +586,6 @@ pub enum ShadowStore {
 fn default_undo_keep_per_session() -> u32 {
     50
 }
-fn default_undo_max_tree_files() -> u64 {
-    100_000
-}
 fn default_undo_blob_grace_secs() -> u64 {
     86_400
 }
@@ -614,7 +600,6 @@ impl Default for UndoConfig {
     fn default() -> Self {
         Self {
             keep_per_session: default_undo_keep_per_session(),
-            max_tree_files: default_undo_max_tree_files(),
             blob_grace_secs: default_undo_blob_grace_secs(),
             shadow: default_undo_shadow(),
             shadow_max_bytes: default_undo_shadow_max_bytes(),
@@ -767,8 +752,6 @@ impl Default for DiaryConfig {
             token_budget: default_diary_token_budget(),
             effort: EffortLevel::Off,
             timeout_secs: default_diary_timeout_secs(),
-            batch_steps: default_diary_batch_steps(),
-            batch_minutes: default_diary_batch_minutes(),
         }
     }
 }
@@ -804,8 +787,6 @@ struct DiaryOverride {
     token_budget: Option<u32>,
     effort: Option<EffortLevel>,
     timeout_secs: Option<u64>,
-    batch_steps: Option<u8>,
-    batch_minutes: Option<u16>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -859,8 +840,6 @@ const PROJECT_ALLOWLIST: &[(&str, &[&str])] = &[
             "token_budget",
             "effort",
             "timeout_secs",
-            "batch_steps",
-            "batch_minutes",
         ],
     ),
     ("ui", &["typewriter", "http_log", "experimental_test"]),
@@ -909,9 +888,6 @@ impl ShadowStore {
 fn default_memory_load_budget_ratio() -> f64 {
     0.06
 }
-fn default_memory_heading_days() -> u8 {
-    7
-}
 fn default_memory_max_tokens() -> u32 {
     3000
 }
@@ -923,12 +899,6 @@ fn default_diary_token_budget() -> u32 {
 }
 fn default_diary_timeout_secs() -> u64 {
     30
-}
-fn default_diary_batch_steps() -> u8 {
-    3
-}
-fn default_diary_batch_minutes() -> u16 {
-    20
 }
 fn default_compaction_threshold() -> f64 {
     0.80
@@ -1229,12 +1199,6 @@ impl Config {
         }
         if let Some(v) = o.timeout_secs {
             diary.timeout_secs = v;
-        }
-        if let Some(v) = o.batch_steps {
-            diary.batch_steps = v;
-        }
-        if let Some(v) = o.batch_minutes {
-            diary.batch_minutes = v;
         }
         let ui = &mut self.ui;
         let o = &overrides.ui;

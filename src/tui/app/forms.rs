@@ -645,7 +645,6 @@ impl App {
                 self.status(&message, StatusKind::Ok);
                 self.open_menu_replace(match setting {
                     super::menus::ScalarSetting::UndoKeepPerSession
-                    | super::menus::ScalarSetting::UndoMaxTreeFiles
                     | super::menus::ScalarSetting::UndoBlobGraceSecs
                     | super::menus::ScalarSetting::UndoShadowMaxBytes => Menu::Undo,
                     _ => Menu::Agent,

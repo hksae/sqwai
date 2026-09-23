@@ -3437,6 +3437,15 @@ fn lint_answer(
             push_span(&mut spans, kind, span);
         }
     }
+    // sized claims near result words verify the same way: a number the
+    // journal never reported beside tests/build/exit is a claim, whatever
+    // language it wears.
+    for (kind, span) in extract_sized_claims(&visible) {
+        let verified = summaries.contains(span);
+        if !verified && any_fail {
+            push_span(&mut spans, kind, span);
+        }
+    }
     for (_, span) in extract_status_words(&visible) {
         if exec_ok {
             continue;
@@ -3558,9 +3567,82 @@ fn extract_counts(text: &str) -> Vec<(&'static str, &str)> {
     out
 }
 
-/// status phrases that assert success without numbers.
-fn extract_status_words(text: &str) -> Vec<(&'static str, &str)> {
-    const PHRASES: &[&str] = &[
+/// Sized claims near result words: "12 tests", "tests: 12", "exit 0",
+/// "exit code 0", "0 errors", "12 ошибок" — English and Russian. A bare
+/// number elsewhere ("3 files") is not a result claim. Spans run across
+/// the number and the word (either order), allowing whitespace and
+/// `:`, `#`, `,` between them. Verified against tool summaries exactly
+/// like `extract_counts`.
+fn extract_sized_claims(text: &str) -> Vec<(&'static str, &str)> {
+    const WORDS: &[&str] = &[
+        "test", "tests", "build", "exit", "error", "errors", "тест", "тесты", "тестов",
+        "сборка", "сборки", "ошибка", "ошибки", "ошибок",
+    ];
+    // alphanumeric tokens with byte spans; every index below stays a char
+    // boundary by construction (byte-walking multibyte text panics).
+    let mut toks: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < text.len() {
+        let c = text[i..].chars().next().unwrap();
+        if c.is_alphanumeric() {
+            let start = i;
+            while i < text.len()
+                && text[i..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphanumeric())
+            {
+                i += text[i..].chars().next().unwrap().len_utf8();
+            }
+            toks.push((start, i));
+        } else {
+            i += c.len_utf8();
+        }
+    }
+    let word_at = |k: usize| toks.get(k).map(|(s, e)| &text[*s..*e]);
+    let is_num =
+        |k: usize| word_at(k).is_some_and(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_digit()));
+    let is_word =
+        |k: usize| word_at(k).is_some_and(|w| WORDS.contains(&w.to_lowercase().as_str()));
+    let gap_ok = |a_end: usize, b_start: usize| {
+        text[a_end..b_start]
+            .chars()
+            .all(|c| c.is_whitespace() || ":,#№".contains(c))
+    };
+    let mut out = Vec::new();
+    let mut k = 0;
+    while k < toks.len() {
+        // "exit code N" triple
+        if k + 2 < toks.len()
+            && word_at(k).is_some_and(|w| w.to_lowercase() == "exit")
+            && word_at(k + 1).is_some_and(|w| w.to_lowercase() == "code")
+            && is_num(k + 2)
+            && gap_ok(toks[k].1, toks[k + 1].0)
+            && gap_ok(toks[k + 1].1, toks[k + 2].0)
+        {
+            out.push(("count", &text[toks[k].0..toks[k + 2].1]));
+            k += 3;
+            continue;
+        }
+        // "N word" and "word N" pairs
+        if k + 1 < toks.len()
+            && gap_ok(toks[k].1, toks[k + 1].0)
+            && ((is_num(k) && is_word(k + 1)) || (is_word(k) && is_num(k + 1)))
+        {
+            out.push(("count", &text[toks[k].0..toks[k + 1].1]));
+            k += 2;
+            continue;
+        }
+        k += 1;
+    }
+    out
+}
+
+/// status phrases that assert success without numbers. English plus
+/// Russian: the model often answers in Russian, and a warn-layer that
+/// only reads English is blind to half the claims. Conservative list —
+/// success-asserting phrases only, since every hit marks text.
+fn extract_status_words(text: &str) -> Vec<(&'static str, &str)> {    const PHRASES: &[&str] = &[
         "build succeeded",
         "builds succeeded",
         "all green",
@@ -3571,6 +3653,23 @@ fn extract_status_words(text: &str) -> Vec<(&'static str, &str)> {
         "suite green",
         "all tests pass",
         "everything passes",
+        "тесты прошли",
+        "тест прошел",
+        "тест прошёл",
+        "все тесты прошли",
+        "тесты зеленые",
+        "тесты зелёные",
+        "все зеленые",
+        "все зелёные",
+        "всё зелёное",
+        "все зелено",
+        "сборка прошла",
+        "сборка успешна",
+        "успешно собралось",
+        "собралось",
+        "исправлено",
+        "баг исправлен",
+        "ошибка исправлена",
     ];
     let lower = text.to_lowercase();
     let mut out = Vec::new();
@@ -5435,6 +5534,49 @@ mod effort_tests {
         // (A path claim without file evidence WOULD mark — that is the
         // lint working, not a bug — so the probe carries none.)
         let out = lint_answer("Готово: 12 passed. Ты что сделал?", &root, "sess", &mut jh);
+        assert!(!out.contains("[unverified]"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Russian success phrases and sized claims mark exactly like English
+    /// ones — under the same gates: status words only with no successful
+    /// bash in the window, everything only beside a failure.
+    #[test]
+    fn lint_answer_marks_russian_status_and_sized_claims() {
+        let root = std::env::temp_dir().join(format!("sqwai-lint-ru2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // fail-only window: nothing backs anything
+        let mut journal = crate::agent::journal::Journal::open(&root, "sess").expect("open");
+        journal.append("user_msg", serde_json::json!({})).unwrap();
+        journal
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "bash", "ok": false, "summary": "бум"}),
+            )
+            .unwrap();
+        let mut jh = Some(journal);
+        let out = lint_answer("Готово: тесты прошли, 12 тестов.", &root, "sess", &mut jh);
+        assert!(out.contains("тесты прошли [unverified]"), "{out}");
+        assert!(out.contains("12 тестов [unverified]"), "{out}");
+
+        // backed Russian count: journal summary carries it verbatim
+        let mut journal2 = crate::agent::journal::Journal::open(&root, "sess2").expect("open");
+        journal2.append("user_msg", serde_json::json!({})).unwrap();
+        journal2
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "bash", "ok": true, "summary": "12 тестов прогнал"}),
+            )
+            .unwrap();
+        journal2
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "bash", "ok": false, "summary": "бум"}),
+            )
+            .unwrap();
+        let mut jh2 = Some(journal2);
+        let out = lint_answer("Готово: 12 тестов прогнал.", &root, "sess2", &mut jh2);
         assert!(!out.contains("[unverified]"), "{out}");
         let _ = std::fs::remove_dir_all(&root);
     }

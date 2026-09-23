@@ -2342,15 +2342,28 @@ fn unblock(plan: &mut Plan, id: &str) -> Result<Applied, Rejection> {
 }
 
 fn cancel(plan: &mut Plan, id: Option<&str>, reason: String) -> Result<Applied, Rejection> {
+    // No silent whole-plan kill: a missing id used to abandon the entire
+    // plan, so a model that forgot the id destroyed it by accident — and a
+    // model that remembered it could abandon + recreate around every
+    // goal/constraint guard in two calls.
     let Some(id) = id else {
-        plan.status = PlanStatus::Abandoned;
-        plan.revision += 1;
-        return accept(plan, format!("plan {} cancelled", plan.id));
+        return reject(
+            plan,
+            "need_step_id",
+            "cancel needs a step id".to_string(),
+            "cancel a step that will not happen, or ask the user to abandon the whole plan (/plan abandon)".to_string(),
+        );
     };
+    // Abandoning the whole plan is the user's call (TUI `/plan abandon`,
+    // journaled with by: user). The model surrenders contradictions with
+    // `block_plan` (quoted) instead of walking around the goal.
     if id == plan.id {
-        plan.status = PlanStatus::Abandoned;
-        plan.revision += 1;
-        return accept(plan, format!("plan {} cancelled", plan.id));
+        return reject(
+            plan,
+            "abandon_user_only",
+            format!("plan {} can only be abandoned by the user", plan.id),
+            "surrender a contradiction with block_plan (quote it), or ask the user to abandon it".to_string(),
+        );
     }
     let Some((status, _)) = step_status(plan, id) else {
         return unknown_step(plan, id);
@@ -3713,6 +3726,37 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, "plan_closed");
+    }
+
+    #[test]
+    fn cancel_needs_a_step_id_and_never_abandons() {
+        let mut plan = new_plan();
+        let err = apply(
+            &mut plan,
+            Op::Cancel {
+                id: None,
+                reason: String::new(),
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "need_step_id");
+        assert_eq!(plan.status, PlanStatus::Active);
+
+        let id = plan.id.clone();
+        let err = apply(
+            &mut plan,
+            Op::Cancel {
+                id: Some(id),
+                reason: String::new(),
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "abandon_user_only");
+        assert_eq!(plan.status, PlanStatus::Active);
     }
 
     #[test]

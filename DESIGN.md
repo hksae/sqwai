@@ -26,8 +26,8 @@ drift and keep progress checkable:
 
 | Failure | Mechanism | Section |
 |---|---|---|
-| Goal drifts or is rewritten | Goal and constraints are host-owned; the model can only propose changes | §2.1 |
-| Steps closed by assertion | A step cannot be finished without evidence recorded by the host | §2.1, §2.2 |
+| Goal drifts or is rewritten | Goal and constraints are host-owned; the model can only propose changes — abandon + recreate routes around nothing (whole-plan abandon is user-only) | §2.1 |
+| Steps closed by assertion | A closed step reads honestly as done, not verified: `done` means "work performed", only host receipts and confirmations flip validation to `passed` | §2.1, §2.2 |
 | Compaction loses the thread | The post-compaction anchor is assembled from structured state, not from a summary | §3.3 |
 | Memory contains fabricated facts | Facts in memory are inserted by the host from the journal; the model adds meaning | §2.3 |
 | References to non-existent code | A project graph answers "does this symbol exist" deterministically | §2.4 |
@@ -43,9 +43,10 @@ that must be solid but is not what the project is about.
 1. **Code is the source of truth.** Whatever can be decided by code is decided
    by code: plan validity, evidence, timestamps, file facts, symbol existence.
    The model is never asked to verify its own claims.
-2. **Evidence required.** No state transition that asserts work was done
-   (`finish`, `verify`, `complete`) succeeds without journal records produced
-   by the host.
+2. **Evidence required.** No state transition that settles work as checked
+   (`verify`, `complete`, and — in strict mode — `finish`) succeeds without
+   journal records produced by the host. A soft `finish` closes a step on a
+   summary alone and reads honestly as done-but-unverified.
 3. **Memory is files; the graph is an index.** Anything that must survive lives
    in plain files under `.sqwai/`. The graph is a rebuildable cache over those
    files and the repository. Deleting `.sqwai/graph/` loses nothing.
@@ -274,8 +275,11 @@ cancel, add, split, verify, complete, show, block_plan (plus create, handled
 separately). The model has no operation that writes goal, constraints,
 acceptance[].status, acceptance[].validation, steps[].validation, evidence,
 applied_event, folded, or step_epoch. There is no `fold` op, no
-`goal_revision` op (`set_goal` is host-only), and no `restore`/`abandon` op
-(`cancel` with no id, or with the plan's own id, abandons the whole plan).
+`goal_revision` op (`set_goal` is host-only), and no `restore` op.
+Whole-plan abandon is user-only (TUI `/plan abandon`): `cancel` without an
+id is refused (`need_step_id`), and `cancel` with the plan's own id is
+refused (`abandon_user_only`) — a forgotten id must not destroy the plan,
+and abandon + recreate must not route around the goal.
 
 Host-only operations (never exposed as tool ops, recorded in the journal as
 plan events with by: host|user): reopen (after undo), waive and confirm
@@ -308,7 +312,7 @@ start	step not `pending|reopened` · `step_busy`: the session holds another step
 finish	step not in_progress · summary empty · strict mode: host evidence rule fails (below)
 block	step not `in_progress` · reason empty
 unblock	step not blocked
-cancel	step done · empty reason defaults to `"cancelled"`; no id (or the plan's own id) abandons the whole plan
+cancel	a step id is required (`need_step_id`) · step done · whole-plan abandon is user-only (`abandon_user_only`: TUI `/plan abandon`; the model surrenders contradictions with `block_plan`) · empty reason defaults to `"cancelled"`
 add / split	resulting step count > plan.max_steps (no runtime override exists) · after/id unknown · split only `pending|reopened` steps without evidence, at most 8 parts
 verify	acceptance index unknown · host evidence rule fails (below)
 complete	any step `pending|in_progress|blocked|reopened` · any acceptance `validation.status` not `passed|waived` · any `passed` receipt is `stale`; pre-receipt `Passed` items (written before validation existed) still complete
@@ -726,9 +730,7 @@ The host decides when an entry is written; the model is never relied upon to
 remember.
 
 Before compaction (§3.3) — mandatory.
-On step finish|block|cancel — every one (a `step_lifecycle` entry); the
-`batch_steps`/`batch_minutes` knobs exist in config and menus but no writer
-reads them.
+On step finish|block|cancel — every one (a `step_lifecycle` entry).
 On session end (/exit, /new, process exit via hook) — if any journal
 events since the last entry.
 Manual: /diary writes an entry now.
@@ -774,8 +776,7 @@ MEMORY.md (stable prefix).
 Active plan, if any, with a one-line prompt to the model: continue,
 propose completion, or ask the user.
 Diary: today and yesterday in full; then headings only for the last 7 days
-(hardcoded; `memory.heading_days` is accepted by config and menus but
-currently unread by the loader); the model calls memory_read(date) for detail.
+(hardcoded); the model calls memory_read(date) for detail.
 2.4 Graph
 Engine decision: the first prototype ran on CozoDB with generic + Markdown
 indexing behind /graph-rebuild; replace that engine with SQLite (rusqlite,
@@ -1030,7 +1031,7 @@ touched, and no path outside the target list is read or written.
 | Situation | Behavior |
 | --- | --- |
 | git binary missing | Layer 1 works fully; bash checkpoints are disabled; bash runs uninsured and says so |
-| project > `undo.max_tree_files` (e.g. 100k) | accepted by config and menus but currently unread by the host |
+| very large project tree | no file-count guard: the shadow walk covers the tree (gitignored excluded); snapshots just get slower |
 | nested `.git` (submodules, vendored repos) | excluded in `info/exclude`; warning logged to journal |
 
 **Maintenance.**
@@ -1110,7 +1111,8 @@ automatic prefix caching benefits from the same layout. Cache-read tokens are
 shown in the status bar.
 
 Consequence: a plan op changes only block D; the caches for A and B survive.
-Skills triggered by keywords do not enter A.
+Skills triggered by keywords do not enter A (they would churn it every
+turn); auto-loaded and user-selected skills do (§5.7).
 
 3.3 Compaction
 3.3.1 Trigger
@@ -1193,10 +1195,10 @@ Resume is the only multi-session path. Fork is deleted: no `/fork` command,
 no plan copy, no journal fork record.
 
 3.5 Criticism → Reflector
-Planned, partially implemented: a three-level criticism pipeline (L0 fact block,
+Implemented: a three-level criticism pipeline (L0 fact block,
 L1 blinded reflector, L2 /verify) for "you broke it" moments. Specified in
 §12.7. L0 (learned detector + artifact signal + fact block + `criticism`
-marker) exists; no neutralizer, executor, or verdict machinery exists yet (H1).
+marker), neutralizer, blinded executor and host verdict mapping all exist (H1).
 3.6 Undo
 /undo [n] attempts to restore sqwai-recorded changes from the n-th previous
 checkpoint (default 1) — not a guaranteed full-tree rollback. `/undo step N`
@@ -1247,10 +1249,14 @@ without a TUI and without a human, plus `sqwai brief` / `/review` morning
 reporting. Specified in §12.8. No headless-run CLI exists today.
 
 3.9 Claim lint
-Planned, not implemented: a host pattern pass over response text marking
+Implemented: a host pattern pass over response text marking
 result claims unverified against the journal (`[unverified]` spans + a
-`claim_lint` record). Specified in §12.9. (The diary writer already strips
-unverified claims from prose host-side — §2.3.4 — but that covers diary
+`claim_lint` record). Counts, status phrases, and sized claims in English
+and Russian; paths/symbols via resolve_ref; gates (contradictions only,
+each span once, status words only without a successful `bash` in the window,
+everything only beside a failure in the window); repetition (3+ fresh flags)
+nudges via the turn system block. Specified in §12.9. (The diary writer already strips
+unverified claims from prose host-side — §2.3.2 — but that covers diary
 entries only, not chat text.)
 
 4. Tools
@@ -1391,9 +1397,9 @@ mcp__<server>__<tool>; per-server env/args/headers; safety policy per §5.2.
 Foundation: JSON-RPC framing, initialize, didOpen/didChange/didSave, queued
 publishDiagnostics (configured servers in `[lsp]`). Wiring on top of it: after each file mutation the host
 drains queued diagnostics plus a short bounded wait, writes a diagnostics
-journal record, and appends an error summary to the tool result. A verify
-step closes on any `diagnostics` record — severity is currently unchecked
-(§2.1.4); error diagnostics count the same as clean ones. See §13.
+journal record, and appends an error summary to the tool result. Only
+zero-error diagnostics count as evidence (§2.1.4); error diagnostics count
+the same as clean ones nowhere. See §13.
 Navigation tools (definition, references) feed
 the graph as semantic capabilities later.
 
@@ -1402,7 +1408,9 @@ SKILL.md with name, description, triggers frontmatter; directories:
 config paths, ~/.config/sqwai/skills, .sqwai/skills; project overrides
 earlier definitions. Skills are prompt extensions only (never execute code):
 auto-loaded skills plus user-selected ones (`/skill`, kept in
-`active_skills`) enter the stable prefix (§3.2 block A).
+`active_skills`) enter the stable prefix (§3.2 block A). Selecting a skill
+mid-session changes block A and re-keys the prefix cache — accepted cost,
+not a bug; keyword-triggered skills stay out of A for exactly this reason.
 
 5.8 Sessions
 `<data-dir>/sessions/<uuid>.json`: messages, tool calls, usage,
@@ -1428,7 +1436,6 @@ plan_first = "soft"           # soft | off — Act first-mutate w/o plan → pla
 
 [memory]
 load_budget_ratio = 0.06
-heading_days = 7              # accepted but currently unread (loader uses a fixed 7)
 max_tokens = 3000          # MEMORY.md cap
 max_proposals_per_turn = 2
 
@@ -1441,8 +1448,6 @@ continuation = true           # continue from the provider's own copy of the
 token_budget = 1500
 effort = "off"                 # effort for the diary's own model call
 timeout_secs = 30
-batch_steps = 3
-batch_minutes = 20
 
 [compaction]
 threshold = 0.80
@@ -1452,7 +1457,6 @@ summary = "off"            # off | short
 
 [undo]
 keep_per_session = 50
-max_tree_files = 100000       # accepted but currently unread
 blob_grace_secs = 86400
 shadow = "local"             # local (.sqwai/checkpoints/git) | user | off
 shadow_max_bytes = 1073741824
@@ -1469,7 +1473,7 @@ Project overrides (`.sqwai/config.toml`, optional, committed or not at the
 user's discretion) merge over the user config, per key. Allowlist —
 display- and budget-class keys only:
 
-- `[diary]`: token_budget, effort, timeout_secs, batch_steps, batch_minutes
+- `[diary]`: token_budget, effort, timeout_secs
 - `[ui]`: typewriter, http_log, experimental_test
 - `[compaction]`: threshold, keep_turns, anchor_ratio, summary
 - `[undo]`: keep_per_session, blob_grace_secs, shadow, shadow_max_bytes
@@ -1594,7 +1598,7 @@ number; a `partial` one is missing something the design calls for.
 | V1 | Verification receipts (§2.1.4): execution interval digest, check hash, stale invalidation, manual `confirm` vs `waive` | done — interval digest, check hash, stale invalidation on diff, manual /plan confirm, replay restoration | V, F1b |
 | W | Acceptance gate (Act mutate w/o acceptance-bearing plan → plan_required) | done — `plan_first: soft|off` in PlanConfig; gate checks project-global acceptance presence, not prose triviality; baseline arm exempt | F3 |
 | X | Tool-output pruning + USER.md split/load | partial — USER.md split/loading and prune (§3.3.1) done; the read guard is a host path→hash map, not context-backed authorization | F1, F5 |
-| Y | Claim lint (post-generation verify against journal/resolve_ref) | done — counts/status/paths/symbols checked against the turn journal window, contradictions marked `[unverified]` + `claim_lint` record, absence never flagged; repetition nudge (3+ fresh flags) rides the turn system block (§12.9) | I4 |
+ | Y | Claim lint (post-generation verify against journal/resolve_ref) | done — counts/status/sized-claims/paths/symbols in English and Russian checked against the turn journal window, contradictions marked `[unverified]` + `claim_lint` record, gated (status only without a successful bash, everything only beside a failure, each span once), absence never flagged; repetition nudge (3+ fresh flags) rides the turn system block (§12.9) | I4 |
 | Z | Scope guard (step.refs vs file_diff) | done — finish-time misattribution warnings plus write-path scope warnings against the holding step's refs (warn-layer, never blocks; `bash` excluded, no per-file diff) | I4 |
 | AA | Lessons tied to files (note kind + context-block rule) | partial — `lesson` note kind done; automatic file-tied injection planned with the context block (§12.5) | I5 |
 | AB | /why provenance, step diff + /undo step, /export | done — step diff + `/undo step` done; `/why <free text>` (host digs journal+plan, model narrates, background task) and `/export` (markdown + JSON into `.sqwai/exports/`, screened, capped) done | J |
@@ -1603,7 +1607,7 @@ number; a `partial` one is missing something the design calls for.
 | AE | Core and UI decoupling: headless `serve` (stdio/JSON-RPC) + crates workspace split (`sqwai-core`, `sqwai-tui`, `sqwai-server`) (§5.11) | planned | B |
 | AF | Hardcode linter: scan file_diff for test-shaped literals (warn-layer) | done — confession phrases + long compared/returned string literals over the outcome diff (cap 3, never blocks); numeric magic constants deliberately excluded (ports/timeouts); `bash`-written bytes not scanned | I4 |
 | AG | Safety level presets / refusal override policy for models with strong filters | planned | — |
-| AH | ULTRA-1: executable acceptance as the settling rule (§12.12) — frozen check that fails before the change, judge ladder beyond tests, three states, `verified` required to settle | partial (§12.12) — baseline proof, the settle gate, and the three states shipped for `cmd:` items (host runs every check at plan create, keeps the failing run, `verify` refuses an item without one, `plan show` marks it; a green run and a red run disagreeing on the same digest marks the item flaky/unknown, never retried into `verified`, `complete` stays blocked); rung 4 shipped (`snapshot:` freezes output at plan time, settles on byte-identical output); rung 3 shipped (`differential:` settles on changed output, double-run freeze refuses nondeterministic inputs); rung 5 shipped (`signatures:` settles on identical declaration shapes, AST-normalized); the walk shipped (host classifies items by rung, reports the highest in create/accept and per item); remaining: the round-trip rung and rung synthesis | V, V1, F3, H1 |
+| AH | ULTRA-1: executable acceptance as the settling rule (§12.12) — frozen check that fails before the change, judge ladder beyond tests, three states, `verified` required to settle | partial (§12.12) — baseline proof, the settle gate, and the three states shipped for `cmd:` items (host runs every check at plan create, keeps the failing run, `verify` refuses an item without one, `plan show` marks it; a green run and a red run disagreeing on the same digest marks the item flaky/unknown, never retried into `verified`, `complete` stays blocked); rung 4 shipped (`snapshot:` freezes output at plan time, settles on byte-identical output); rung 3 shipped (   `differential:` settles on changed output, double-run freeze refuses nondeterministic inputs); rung 5 shipped (`signatures:` settles on identical declaration shapes, AST-normalized); the walk shipped (host classifies items by rung, reports the highest in create/accept and per item); differential hardening: a nonzero exit with changed output is `broken_change` (never verified — change without breakage is the whole point of the rung), `complete` re-runs and blocks on `unchanged`; remaining: the round-trip rung and rung synthesis | V, V1, F3, H1 |
 | AI | ULTRA-2/3: conditional escalation under a separate arbiter budget (`N ≤ B/T`); divergence phase gated behind a diversity measurement | PARKED — ULTRA mode development paused; the ULTRA-1 substrate above ships and lives on its own, engagement flag / arbitration / divergence untouched (§12.12) | AH, M, AC |
 | AJ | Typed executable constraints (§2.1.10): `forbid-import:`, `forbid-cmd:` (live in bash), `ast:`, `path:` evaluated at `complete`; `/plan waive-constraint`; AGENTS.md advisory mining at create | done — violations block complete like red checks; unprefixed constraints stay advisory | AH |
 
@@ -1962,13 +1966,17 @@ unattended mode adds policy on top, not new trust. Key points:
   Nothing merged/committed/pushed unless `unattended.allow_commit`; push
   never allowed.
 
-### 12.9 Claim lint (planned)
-Moved here from §3.9: specified, not implemented. After the model's response
-text is generated, the host runs a cheap pattern pass over it: result claims
-(`\d+ passed`, `build succeeded`, named paths/symbols) are checked against
+### 12.9 Claim lint (shipped)
+After the model's response text is generated, the host runs a cheap pattern
+pass over it: result claims (counts, status phrases in English and Russian,
+sized claims like `12 тестов`, named paths/symbols) are checked against
 journal records since the start of the turn and via resolve_ref. On mismatch
 the span is marked `[unverified]` in the streamed text and a `claim_lint`
-record is written; on repetition a nudge fires. It does not block generation.
+record is written; on repetition (3+ fresh flags) a nudge rides the turn
+system block. It does not block generation. Gates, not bugs: status words
+mark only with no successful `bash` in the window, every span only beside a
+failure in the window, and each distinct span marks once. Absence is never
+flagged.
 
 ### 12.10 Plan from issue (planned)
 Moved here from §2.1.8: specified, not implemented. `sqwai plan from
@@ -2131,9 +2139,10 @@ never competing plans.
   `snapshot:` items freeze stdout+exit at plan time and settle on byte-identical
   output (empty output never freezes; same-state disagreement is flaky,
   moved-state difference is `snapshot_changed`). *Shipped:* rung 3 —
-  `differential:` items freeze the same record with the inverted verdict
-  (changed output settles, identical output is `no_observable_change`), and
-  the freeze runs twice so nondeterministic inputs never freeze.  *Shipped:* rung 5 — `signatures:` items freeze normalized declaration
+   `differential:` items freeze the same record with the inverted verdict
+   (changed output settles, identical output is `no_observable_change`,
+   a nonzero exit with changed output is `broken_change` and never verifies),
+   and the freeze runs twice so nondeterministic inputs never freeze.  *Shipped:* rung 5 — `signatures:` items freeze normalized declaration
   shapes (sorted `depth::signature` lines via tree-sitter, 11 languages)
   and settle on identical shapes; bodies move freely, adding/removing/
   re-signing breaks the freeze (`signatures_changed`).
@@ -2194,13 +2203,11 @@ the checkpoints.
   and store left ops where replay never looked. Now a per-session cursor
   map; the total-order counter stays deliberately unbuilt (see §2.1.4).
 
-- **Loose text acceptance and diagnostics severity.** A free-text acceptance
-  item settles on any unspent verify-step evidence, and any `diagnostics`
-  record — errors included — satisfies the verify gate. Formally valid but
-  meaningless receipts are possible (e.g. an unrelated error dump verifying
-  an unrelated text item). For benchmark scoring, `cmd:` items with re-run
-  receipts are the trustworthy subset. Tightening (zero-error diagnostics,
-  rejecting untyped items on create) is a code change, not a doc change.
+- **Loose text acceptance and diagnostics severity (resolved).** A free-text
+  acceptance item used to settle on any unspent verify-step evidence, and any
+  `diagnostics` record — errors included — satisfied the verify gate. Both
+  tightened in code: `plan create` refuses untyped acceptance, and only
+  zero-error diagnostics count as evidence.
 
 - **Acceptance proves only what was checked.** An executable acceptance gate is
   the strongest cheap signal we have, but it is a lower bound on correctness,

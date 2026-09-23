@@ -332,18 +332,14 @@ pub(super) enum ScalarSetting {
     PlanMaxSteps,
     PlanNudgeAfter,
     MemoryLoadBudgetRatio,
-    MemoryHeadingDays,
     MemoryMaxTokens,
     MemoryMaxProposals,
     DiaryTokenBudget,
     DiaryTimeoutSecs,
-    DiaryBatchSteps,
-    DiaryBatchMinutes,
     CompactionThreshold,
     CompactionKeepTurns,
     CompactionAnchorRatio,
     UndoKeepPerSession,
-    UndoMaxTreeFiles,
     UndoBlobGraceSecs,
     UndoShadowMaxBytes,
 }
@@ -372,18 +368,14 @@ impl ScalarSetting {
             Self::PlanMaxSteps => "max steps",
             Self::PlanNudgeAfter => "nudge after",
             Self::MemoryLoadBudgetRatio => "load budget ratio",
-            Self::MemoryHeadingDays => "heading days",
             Self::MemoryMaxTokens => "max tokens",
             Self::MemoryMaxProposals => "max proposals",
             Self::DiaryTokenBudget => "token budget",
             Self::DiaryTimeoutSecs => "timeout secs",
-            Self::DiaryBatchSteps => "batch steps",
-            Self::DiaryBatchMinutes => "batch minutes",
             Self::CompactionThreshold => "threshold",
             Self::CompactionKeepTurns => "keep turns",
             Self::CompactionAnchorRatio => "anchor ratio",
             Self::UndoKeepPerSession => "keep per session",
-            Self::UndoMaxTreeFiles => "max tree files",
             Self::UndoBlobGraceSecs => "blob grace secs",
             Self::UndoShadowMaxBytes => "shadow max bytes",
         }
@@ -395,18 +387,14 @@ impl ScalarSetting {
             Self::PlanMaxSteps => cfg.plan.max_steps.to_string(),
             Self::PlanNudgeAfter => cfg.plan.nudge_after.to_string(),
             Self::MemoryLoadBudgetRatio => cfg.memory.load_budget_ratio.to_string(),
-            Self::MemoryHeadingDays => cfg.memory.heading_days.to_string(),
             Self::MemoryMaxTokens => cfg.memory.max_tokens.to_string(),
             Self::MemoryMaxProposals => cfg.memory.max_proposals_per_turn.to_string(),
             Self::DiaryTokenBudget => cfg.diary.token_budget.to_string(),
             Self::DiaryTimeoutSecs => cfg.diary.timeout_secs.to_string(),
-            Self::DiaryBatchSteps => cfg.diary.batch_steps.to_string(),
-            Self::DiaryBatchMinutes => cfg.diary.batch_minutes.to_string(),
             Self::CompactionThreshold => cfg.compaction.threshold.to_string(),
             Self::CompactionKeepTurns => cfg.compaction.keep_turns.to_string(),
             Self::CompactionAnchorRatio => cfg.compaction.anchor_ratio.to_string(),
             Self::UndoKeepPerSession => cfg.undo.keep_per_session.to_string(),
-            Self::UndoMaxTreeFiles => cfg.undo.max_tree_files.to_string(),
             Self::UndoBlobGraceSecs => cfg.undo.blob_grace_secs.to_string(),
             Self::UndoShadowMaxBytes => cfg.undo.shadow_max_bytes.to_string(),
         }
@@ -434,12 +422,6 @@ impl ScalarSetting {
                 &mut cfg.memory.load_budget_ratio,
                 def.memory.load_budget_ratio,
             ),
-            Self::MemoryHeadingDays => apply_num(
-                label,
-                raw,
-                &mut cfg.memory.heading_days,
-                def.memory.heading_days,
-            ),
             Self::MemoryMaxTokens => apply_num(
                 label,
                 raw,
@@ -464,18 +446,6 @@ impl ScalarSetting {
                 &mut cfg.diary.timeout_secs,
                 def.diary.timeout_secs,
             ),
-            Self::DiaryBatchSteps => apply_num(
-                label,
-                raw,
-                &mut cfg.diary.batch_steps,
-                def.diary.batch_steps,
-            ),
-            Self::DiaryBatchMinutes => apply_num(
-                label,
-                raw,
-                &mut cfg.diary.batch_minutes,
-                def.diary.batch_minutes,
-            ),
             Self::CompactionThreshold => apply_num(
                 label,
                 raw,
@@ -499,12 +469,6 @@ impl ScalarSetting {
                 raw,
                 &mut cfg.undo.keep_per_session,
                 def.undo.keep_per_session,
-            ),
-            Self::UndoMaxTreeFiles => apply_num(
-                label,
-                raw,
-                &mut cfg.undo.max_tree_files,
-                def.undo.max_tree_files,
             ),
             Self::UndoBlobGraceSecs => apply_num(
                 label,
@@ -2228,11 +2192,6 @@ impl App {
                     ScalarSetting::MemoryLoadBudgetRatio,
                 ));
                 self.menu_rows.push(scalar(
-                    "heading days",
-                    ScalarSetting::MemoryHeadingDays.current(&self.cfg),
-                    ScalarSetting::MemoryHeadingDays,
-                ));
-                self.menu_rows.push(scalar(
                     "max tokens",
                     ScalarSetting::MemoryMaxTokens.current(&self.cfg),
                     ScalarSetting::MemoryMaxTokens,
@@ -2259,16 +2218,6 @@ impl App {
                     "timeout secs",
                     ScalarSetting::DiaryTimeoutSecs.current(&self.cfg),
                     ScalarSetting::DiaryTimeoutSecs,
-                ));
-                self.menu_rows.push(scalar(
-                    "batch steps",
-                    ScalarSetting::DiaryBatchSteps.current(&self.cfg),
-                    ScalarSetting::DiaryBatchSteps,
-                ));
-                self.menu_rows.push(scalar(
-                    "batch minutes",
-                    ScalarSetting::DiaryBatchMinutes.current(&self.cfg),
-                    ScalarSetting::DiaryBatchMinutes,
                 ));
                 self.menu_rows.push(header("compaction"));
                 self.menu_rows.push(scalar(
@@ -2344,11 +2293,6 @@ impl App {
                     "keep per session",
                     ScalarSetting::UndoKeepPerSession.current(&self.cfg),
                     ScalarSetting::UndoKeepPerSession,
-                ));
-                self.menu_rows.push(scalar(
-                    "max tree files",
-                    ScalarSetting::UndoMaxTreeFiles.current(&self.cfg),
-                    ScalarSetting::UndoMaxTreeFiles,
                 ));
                 self.menu_rows.push(scalar(
                     "blob grace secs",

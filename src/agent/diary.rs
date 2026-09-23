@@ -76,6 +76,14 @@ fn claim_patterns() -> &'static [Regex] {
             r"(?i)\d+\s+warnings?",
             r"(?i)exit\s+code\s+\d+",
             r"(?i)exit\s+\d+",
+            // Russian result claims: the writer often answers in Russian,
+            // and patterns above are blind to it.
+            r"(?i)тесты?\s+(прошли|прошёл|прошел)",
+            r"(?i)(тесты?|всё|все)\s+зел[её]н(ые|ое|о)",
+            r"(?i)сборка\s+(прошла|успешна)",
+            r"(?i)собралось",
+            r"(?i)исправлено",
+            r"(?i)\d+\s+(тестов|тесты|ошибок|ошибки|ошибка)",
         ]
         .into_iter()
         .map(|source| Regex::new(source).unwrap())
@@ -507,11 +515,37 @@ mod tests {
         assert!(kept.contains("[host: removed unverified claim]"));
     }
 
+    /// Russian result claims strip the same way: what the host block does
+    /// not contain goes, what it contains stays — in either language.
+    /// Stripping is per line: a line with any unbacked claim goes whole.
+    #[test]
+    fn russian_result_claims_strip_like_english_ones() {
+        let host = "<!-- host -->\ncommands: bash ✓ (12 тестов прогнал, exit 0)\n";
+        let prose = "### Done\n\
+                     - 12 тестов прогнал.\n\
+                     - Всё зелёное.\n\
+                     - 253 passed.\n";
+        let (kept, removed) = strip_unverified_claims(prose, host);
+        assert!(removed);
+        assert!(
+            kept.contains("12 тестов прогнал"),
+            "a backed Russian count stays: {kept}"
+        );
+        assert!(
+            !kept.contains("Всё зелёное"),
+            "an unbacked Russian status goes: {kept}"
+        );
+        assert!(
+            !kept.contains("253 passed"),
+            "an unbacked English count goes: {kept}"
+        );
+        assert!(kept.contains("[host: removed unverified claim]"));
+    }
+
     /// Nothing to remove means nothing is marked: the marker has to mean
     /// something when it shows up.
     #[test]
-    fn an_entry_within_the_host_block_is_left_alone() {
-        let host = "commands: bash ✓ ((exit code 0) 253 passed)\n";
+    fn an_entry_within_the_host_block_is_left_alone() {        let host = "commands: bash ✓ ((exit code 0) 253 passed)\n";
         let prose = "### Done\n- 253 passed after the change.\n";
         let (kept, removed) = strip_unverified_claims(prose, host);
         assert!(!removed);
