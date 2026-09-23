@@ -622,15 +622,14 @@ pub fn truncate_summary(text: &str) -> String {
 /// `plan_hint` is preformatted "Goal: …\nConstraints: …" (possibly empty:
 /// with no plan, every user request counts as uncovered). `retry` appends
 /// the hard-limit line for the second attempt after a blown budget.
-pub fn summary_short_input(
-    older: &[Message],
-    previous: Option<&str>,
-    plan_hint: &str,
-    retry: bool,
-) -> String {
-    let mut out = String::from(
+/// Shared head: what to summarize and the plan to exclude. `setting` names
+/// where the conversation lives — rendered inline below (standalone
+/// request) or travelling as the request's own messages above (cache-aware
+/// request, where repeating it would pay twice).
+fn summary_head(previous: Option<&str>, plan_hint: &str, setting: &str) -> String {
+    let mut out = format!(
         "Summarize ONLY what the user explicitly asked, forbade, or stated \
-         as fact in the dropped conversation below — and ONLY what is not \
+         as fact {setting} — and ONLY what is not \
          already covered by the durable plan. The plan owns goals, \
          constraints, and decisions; re-listing them wastes the budget this \
          summary exists to save.\n\n<durable-plan>\n",
@@ -647,11 +646,17 @@ pub fn summary_short_input(
         out.push_str(prev.trim());
         out.push_str("\n</previous-summary>\n");
     }
-    out.push_str("\n<conversation>\n");
-    out.push_str(&transcript(older));
-    out.push_str(
-        "</conversation>\n\nRules: no preamble, no questions, no instructions \
-         to the reader, no invented facts. If something is unknown, say it \
+    out
+}
+
+/// Shared rules tail. The no-tools line matters wherever schemas travel
+/// with the request: the cache-aware variant carries the parent's tools to
+/// keep the prefix byte-identical, and the model must still answer in text.
+fn summary_tail(retry: bool) -> String {
+    let mut out = String::from(
+        "Rules: no preamble, no questions, no instructions \
+         to the reader, no invented facts, no tool calls — respond with text \
+         only. If something is unknown, say it \
          is unknown.",
     );
     if retry {
@@ -660,6 +665,33 @@ pub fn summary_short_input(
              in at most {SUMMARY_SHORT_MAX_CHARS} characters, plain prose."
         ));
     }
+    out
+}
+
+pub fn summary_short_input(
+    older: &[Message],
+    previous: Option<&str>,
+    plan_hint: &str,
+    retry: bool,
+) -> String {
+    let mut out = summary_head(previous, plan_hint, "in the dropped conversation below");
+    out.push_str("\n<conversation>\n");
+    out.push_str(&transcript(older));
+    out.push_str("</conversation>\n\n");
+    out.push_str(&summary_tail(retry));
+    out
+}
+
+/// The summarization prompt without the transcript: for the cache-aware
+/// request, where the conversation travels as the request's own messages
+/// and the prompt is appended last. Same head, same rules, nothing repeated.
+pub fn summary_short_prompt(previous: Option<&str>, plan_hint: &str, retry: bool) -> String {
+    let mut out = summary_head(previous, plan_hint, "in the conversation above");
+    out.push_str(
+        "\nThat conversation is the messages of this request, above this \
+         prompt. Do not repeat any of it; summarize only.\n\n",
+    );
+    out.push_str(&summary_tail(retry));
     out
 }
 
@@ -1201,6 +1233,25 @@ mod tests {
         let cut_emoji = truncate_summary(&emoji);
         assert!(cut_emoji.chars().count() <= SUMMARY_SHORT_MAX_CHARS);
         assert!(cut_emoji.contains("truncated to fit"));
+    }
+
+    /// The cache-aware prompt carries no transcript: the conversation
+    /// travels as the request's own messages above it. Same head, same
+    /// rules — and an explicit no-tools line, because the parent's schemas
+    /// travel with that request to hold the prefix.
+    #[test]
+    fn summary_short_prompt_points_at_messages_above() {
+        let plan = "Goal: fix the bug\nConstraints:\n- keep API stable";
+        let prompt = summary_short_prompt(Some("earlier facts"), plan, false);
+        assert!(prompt.contains("earlier facts"));
+        assert!(prompt.contains("keep API stable"));
+        assert!(prompt.contains("no tool calls"));
+        assert!(prompt.contains("above"));
+        assert!(!prompt.contains("<conversation>"), "{prompt}");
+        assert!(!prompt.contains("HARD LIMIT"));
+        let retry = summary_short_prompt(None, "", true);
+        assert!(retry.contains("HARD LIMIT"));
+        assert!(retry.contains("no durable plan"));
     }
 
     #[test]

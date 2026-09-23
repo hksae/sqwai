@@ -1365,6 +1365,10 @@ async fn run_agent(
         }
         let message_count_before = messages.len();
         let plan_hint = plan_hint_for_summary(&root, &session_id);
+        let prefix = CompactionPrefix {
+            system: &system,
+            tools: &tools,
+        };
         let outcome = compact_history(
             &provider,
             &model_id,
@@ -1373,6 +1377,7 @@ async fn run_agent(
             &policy,
             true,
             &plan_hint,
+            Some(&prefix),
         )
         .await;
         if let Some((before, after, summarized)) = outcome.as_ref()
@@ -1669,6 +1674,10 @@ async fn run_agent(
         }
         let msgs_before = messages.len();
         let plan_hint = plan_hint_for_summary(&root, &session_id);
+        let prefix = CompactionPrefix {
+            system: &system,
+            tools: &tools,
+        };
         if let Some((before, after, summarized)) = compact_history(
             &provider,
             &model_id,
@@ -1677,6 +1686,7 @@ async fn run_agent(
             &policy,
             false,
             &plan_hint,
+            Some(&prefix),
         )
         .await
         {
@@ -1868,6 +1878,10 @@ async fn run_agent(
                     compacted_for_overflow = true;
                     let overflow_msgs_before = messages.len();
                     let overflow_plan_hint = plan_hint_for_summary(&root, &session_id);
+                    let prefix = CompactionPrefix {
+                        system: &system,
+                        tools: &tools,
+                    };
                     if let Some((before, after, summarized)) = compact_history(
                         &provider,
                         &model_id,
@@ -1876,6 +1890,7 @@ async fn run_agent(
                         &policy,
                         true,
                         &overflow_plan_hint,
+                        Some(&prefix),
                     )
                     .await
                     {
@@ -2879,6 +2894,93 @@ fn record_compaction(
     );
 }
 
+/// Parent prefix handed to compaction so the summary request can reuse it:
+/// system parts and tool schemas go on the wire byte-identical, and the old
+/// history reads at cache-read price instead of full price.
+pub struct CompactionPrefix<'a> {
+    pub system: &'a [crate::providers::SystemPart],
+    pub tools: &'a [crate::providers::ToolSpec],
+}
+
+/// Saved thinking blocks replay only while thinking is on for the request.
+/// The summary request thinks nothing (effort off, tiny budget), so a
+/// history that carries thinking blocks cannot travel as structured
+/// messages — the API would refuse the tool_use blocks without their
+/// thinking. Such histories compact through the standalone request, whose
+/// transcript is text.
+fn history_has_thinking(messages: &[Message]) -> bool {
+    messages.iter().any(|m| {
+        m.provider_state
+            .as_ref()
+            .and_then(|s| s.get("thinking_blocks"))
+            .and_then(|v| v.as_array())
+            .is_some_and(|blocks| !blocks.is_empty())
+    })
+}
+
+/// Build the summary request. Cache-aware when the parent prefix is handed
+/// over and the history carries no thinking: parent system, schemas and the
+/// full history go on the wire unchanged, the summarization prompt is
+/// appended as the last user message. Otherwise the compact standalone
+/// request: tiny system, transcript rendered as text, no schemas.
+fn compaction_request(
+    prefix: Option<&CompactionPrefix<'_>>,
+    older: &[Message],
+    history: &[Message],
+    previous: Option<&str>,
+    plan_hint: &str,
+    model_id: &str,
+    retry: bool,
+) -> (ChatRequest, bool) {
+    // a summarization request needs no tools of its own — but the
+    // cache-aware variant carries the parent's schemas to keep the prefix
+    // byte-identical (the prompt answers in text regardless; see rules)
+    let standalone = || {
+        (
+            ChatRequest {
+                model_id: model_id.to_string(),
+                system: vec![SystemPart::volatile(context::SUMMARY_SYSTEM)],
+                messages: vec![Message::new(
+                    Role::User,
+                    context::summary_short_input(older, previous, plan_hint, retry),
+                )],
+                effort: None,
+                effort_support: Default::default(),
+                max_tokens: Some(context::SUMMARY_SHORT_MAX_TOKENS),
+                tools: Vec::new(),
+                previous_response_id: None,
+                context_transport: ContextTransport::Stateless,
+            },
+            false,
+        )
+    };
+    let Some(prefix) = prefix else {
+        return standalone();
+    };
+    if history_has_thinking(history) {
+        return standalone();
+    }
+    let mut messages = history.to_vec();
+    messages.push(Message::new(
+        Role::User,
+        context::summary_short_prompt(previous, plan_hint, retry),
+    ));
+    (
+        ChatRequest {
+            model_id: model_id.to_string(),
+            system: prefix.system.to_vec(),
+            messages,
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: Some(context::SUMMARY_SHORT_MAX_TOKENS),
+            tools: prefix.tools.to_vec(),
+            previous_response_id: None,
+            context_transport: ContextTransport::Stateless,
+        },
+        true,
+    )
+}
+
 async fn compact_history(
     provider: &SharedProvider,
     model_id: &str,
@@ -2887,6 +2989,7 @@ async fn compact_history(
     policy: &context::Policy,
     force: bool,
     plan_hint: &str,
+    prefix: Option<&CompactionPrefix<'_>>,
 ) -> Option<(u64, u64, bool)> {
     let measured = |m: &[Message]| context::estimated_tokens(m);
     let before = measured(messages);
@@ -2935,21 +3038,18 @@ async fn compact_history(
         );
     }
     if !older.is_empty() && policy.summary_enabled {
-        let request = ChatRequest {
-            model_id: model_id.to_string(),
-            system: vec![SystemPart::volatile(context::SUMMARY_SYSTEM)],
-            messages: vec![Message::new(
-                Role::User,
-                context::summary_short_input(&older, summary.as_deref(), plan_hint, false),
-            )],
-            effort: None,
-            effort_support: Default::default(),
-            max_tokens: Some(context::SUMMARY_SHORT_MAX_TOKENS),
-            // a summarization request needs no tools
-            tools: Vec::new(),
-            previous_response_id: None,
-            context_transport: ContextTransport::Stateless,
-        };
+        let (request, cache_aware) = compaction_request(
+            prefix,
+            &older,
+            messages,
+            summary.as_deref(),
+            plan_hint,
+            model_id,
+            false,
+        );
+        if cache_aware {
+            crate::providers::log_http("compaction: summary reuses the parent prefix");
+        }
         let text = match collect_text(provider, &request).await {
             Ok(text) => text,
             Err(e) => {
@@ -2960,15 +3060,19 @@ async fn compact_history(
         };
         // the wire cap is advisory: a severely over-budget answer gets one
         // retry with an explicit hard limit before the host truncates.
+        // The retry keeps the request shape (cache-aware or standalone) and
+        // only rewords the prompt.
         let text = if text.chars().count() > 2 * context::SUMMARY_SHORT_MAX_CHARS {
-            let retry = ChatRequest {
-                messages: vec![Message::new(
-                    Role::User,
-                    context::summary_short_input(&older, summary.as_deref(), plan_hint, true),
-                )],
-                ..request.clone()
-            };
-            match collect_text(provider, &retry).await {
+            let (retry_request, _) = compaction_request(
+                prefix,
+                &older,
+                messages,
+                summary.as_deref(),
+                plan_hint,
+                model_id,
+                true,
+            );
+            match collect_text(provider, &retry_request).await {
                 Ok(shorter) => shorter,
                 Err(_) => text,
             }
@@ -5204,9 +5308,101 @@ mod effort_tests {
         context::Policy::with_compaction(16_000, 0.08, 2, 0.80, true)
     }
 
+    fn parent_prefix<'a>(
+        system: &'a [crate::providers::SystemPart],
+        tools: &'a [crate::providers::ToolSpec],
+    ) -> CompactionPrefix<'a> {
+        CompactionPrefix { system, tools }
+    }
+
+    /// Cache-aware layout: parent system and schemas go on the wire
+    /// byte-identical, the full history stays in order, the prompt is the
+    /// last message. That is the whole trick — everything the provider
+    /// already holds reads at cache price.
+    #[test]
+    fn compaction_request_reuses_the_parent_prefix() {
+        let system = vec![
+            crate::providers::SystemPart::cached("rules"),
+            crate::providers::SystemPart::volatile("today"),
+        ];
+        let tools = vec![crate::providers::ToolSpec {
+            name: "read".into(),
+            description: "d".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let history = vec![
+            Message::new(Role::User, "do it"),
+            Message::new(Role::Assistant, "done"),
+        ];
+        let prefix = parent_prefix(&system, &tools);
+        let (req, cache_aware) =
+            compaction_request(Some(&prefix), &history[..1], &history, None, "", "m", false);
+        assert!(cache_aware);
+        assert_eq!(req.system, system, "prefix must be byte-identical");
+        let req_tools: Vec<&str> = req.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(req_tools, vec!["read"], "schemas travel to hold the prefix");
+        assert_eq!(req.messages.len(), history.len() + 1);
+        for (got, want) in req.messages.iter().zip(history.iter()) {
+            assert_eq!(got.role, want.role);
+            assert_eq!(got.content, want.content, "history intact and in order");
+        }
+        let prompt = req.messages.last().unwrap();
+        assert_eq!(prompt.role, Role::User);
+        assert!(prompt.content.contains("Rules:"), "{}", prompt.content);
+        assert!(
+            !prompt.content.contains("do it"),
+            "the transcript must not ride twice: {}",
+            prompt.content
+        );
+        assert_eq!(req.effort, None, "the summarizer thinks nothing");
+    }
+
+    /// No prefix handed over (tests, side calls): the compact standalone
+    /// request — tiny system, transcript as text, no schemas.
+    #[test]
+    fn compaction_request_falls_back_to_standalone_without_a_prefix() {
+        let older = vec![Message::new(Role::User, "do it")];
+        let (req, cache_aware) = compaction_request(None, &older, &older, None, "", "m", false);
+        assert!(!cache_aware);
+        assert!(req.tools.is_empty());
+        assert_eq!(req.messages.len(), 1);
+        assert!(req.messages[0].content.contains("do it"));
+    }
+
+    /// A history with thinking blocks cannot travel as structured messages
+    /// on an effort-off request: the tool_use blocks would arrive without
+    /// their thinking and the API refuses them. Such histories compact
+    /// through the standalone text transcript instead.
+    #[test]
+    fn compaction_request_dodges_thinking_histories() {
+        let history = vec![
+            Message::new(Role::Assistant, "checking")
+                .with_provider_state(Some(serde_json::json!({
+                    "thinking_blocks": [
+                        {"type": "thinking", "thinking": "hmm", "signature": "SIG"}
+                    ]
+                })))
+                .with_tool_calls(vec![crate::providers::ToolCallReq::new(
+                    "c1",
+                    "check",
+                    serde_json::json!({}),
+                )]),
+            Message::tool_result("c1", "ok", false),
+        ];
+        let system = vec![crate::providers::SystemPart::cached("rules")];
+        let tools = vec![];
+        let prefix = parent_prefix(&system, &tools);
+        let (req, cache_aware) =
+            compaction_request(Some(&prefix), &history, &history, None, "", "m", false);
+        assert!(!cache_aware, "thinking histories take the text path");
+        assert!(req.tools.is_empty());
+        assert_eq!(req.messages.len(), 1);
+    }
+
     /// Prod-shape replication: 95 mixed messages (~46k tokens, like the
     /// T1 shakedown transcript), 1M limit, 0.01 threshold, summary off.
     /// compact_history must shrink and report — not silently pass through.
+
     #[tokio::test]
     async fn compact_history_trims_a_long_plain_transcript() {
         let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
@@ -5243,6 +5439,7 @@ mod effort_tests {
             &policy,
             false,
             "",
+            None,
         )
         .await
         .expect("must compact a 4x-over-budget transcript");
@@ -5283,6 +5480,7 @@ mod effort_tests {
                 &policy,
                 false,
                 "",
+                None,
             )
             .await
             .is_some()
@@ -5340,6 +5538,7 @@ mod effort_tests {
                 &policy,
                 false,
                 "",
+                None,
             )
             .await
             .is_some()
@@ -5613,6 +5812,7 @@ mod effort_tests {
             &policy,
             false,
             "",
+            None,
         )
         .await
         .expect("pressure is over: must compact");
@@ -5648,6 +5848,7 @@ mod effort_tests {
             &policy,
             false,
             "",
+            None,
         )
         .await;
         // force again: history is small now, but the old summary message
@@ -5660,6 +5861,7 @@ mod effort_tests {
             &policy,
             true,
             "",
+            None,
         )
         .await;
         assert_eq!(
@@ -5688,6 +5890,7 @@ mod effort_tests {
             &policy,
             false,
             "",
+            None,
         )
         .await
         .expect("pressure is over: must compact");
@@ -5724,6 +5927,7 @@ mod effort_tests {
             &policy,
             false,
             "",
+            None,
         )
         .await
         .expect("pressure is over: must compact");
@@ -5756,6 +5960,7 @@ mod effort_tests {
             &policy,
             false,
             "",
+            None,
         )
         .await;
         let kept = summary.expect("a summary must be stored");

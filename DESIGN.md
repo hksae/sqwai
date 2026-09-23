@@ -1155,7 +1155,14 @@ in such loops — before an assistant step whose kept tool results all belong
 to kept calls, so a trim never orphans a tool result.
 Optional short summary (compaction.summary: off|short, default off):
 one model call, ≤ 300 tokens, restricted to "what the user asked in the
-dropped messages that is not in the plan". Placed after the anchor.
+dropped messages that is not in the plan". The request is cache-aware: the
+parent's system parts, tool schemas and full history go on the wire
+byte-identical, the summarization prompt is appended as the last user
+message — the old history reads at cache-read price. Fallback to the
+standalone request (tiny system, transcript rendered as text, no schemas)
+when no parent prefix is handed over or the history carries thinking blocks
+(an effort-off request cannot replay them, so structured history would be
+refused). Placed after the anchor.
 Replace history; rebuild block B; journal compaction with counts and
 diary_written.
 Status bar: compacted: kept N turns · anchor 1.8k.
