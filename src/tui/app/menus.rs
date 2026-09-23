@@ -259,6 +259,7 @@ pub(super) enum MenuAction {
     ToggleHttpLog,
     ToggleExperimentalTest,
     TogglePerfLog,
+    TogglePlanStrict,
     CycleModelEffort,
     CycleDefaultEffort,
     /// cycle what the current model is declared to do with the slider
@@ -1363,6 +1364,13 @@ impl App {
                 self.status(&format!("http debug log: {}", on_off(on)), StatusKind::Ok);
                 self.build_menu_rows();
             }
+            MenuAction::TogglePlanStrict => {
+                self.cfg.plan.strict = !self.cfg.plan.strict;
+                self.cfg.save().ok();
+                let on = self.cfg.plan.strict;
+                self.status(&format!("strict steps: {}", on_off(on)), StatusKind::Ok);
+                self.build_menu_rows();
+            }
             MenuAction::ToggleExperimentalTest => {
                 self.cfg.ui.experimental_test = !self.cfg.ui.experimental_test;
                 self.cfg.save().ok();
@@ -2204,6 +2212,13 @@ impl App {
                     "nudge after",
                     ScalarSetting::PlanNudgeAfter.current(&self.cfg),
                     ScalarSetting::PlanNudgeAfter,
+                ));
+                self.menu_rows.push(row(
+                    Line::from(vec![
+                        Span::styled(format!("  {:<18}", "strict steps"), Theme::FG()),
+                        Span::styled(on_off(self.cfg.plan.strict), Theme::dim()),
+                    ]),
+                    MenuAction::TogglePlanStrict,
                 ));
                 self.menu_rows.push(header("memory"));
                 self.menu_rows.push(scalar(
@@ -3504,7 +3519,7 @@ fn plan_rows(
             plan::StepStatus::Cancelled => ("[-]", Theme::dim()),
             plan::StepStatus::Pending | plan::StepStatus::Reopened => ("[ ]", Theme::dim()),
         };
-        let prefix = format!("  {marker} {} ({}) ", s.id, s.kind.as_str());
+        let prefix = format!("  {marker} {} ", s.id);
         let mut title = s.title.clone();
         if s.stale_goal == Some(true) {
             title.push_str("  [stale goal]");

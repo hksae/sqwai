@@ -4046,12 +4046,10 @@ mod tests {
             vec![
                 crate::plan::NewStep {
                     title: "changed file".into(),
-                    kind: Some(crate::plan::StepKind::Change),
                     refs: Vec::new(),
                 },
                 crate::plan::NewStep {
                     title: "unrelated file".into(),
-                    kind: Some(crate::plan::StepKind::Change),
                     refs: Vec::new(),
                 },
             ],
@@ -4097,7 +4095,6 @@ mod tests {
             Vec::new(),
             vec![crate::plan::NewStep {
                 title: "two files".into(),
-                kind: Some(crate::plan::StepKind::Change),
                 refs: Vec::new(),
             }],
             1000,
@@ -4144,7 +4141,6 @@ mod tests {
             Vec::new(),
             vec![crate::plan::NewStep {
                 title: "changed file".into(),
-                kind: Some(crate::plan::StepKind::Change),
                 refs: Vec::new(),
             }],
             1000,
@@ -6786,7 +6782,6 @@ mod tests {
             vec![],
             vec![plan::NewStep {
                 title: "step 1".into(),
-                kind: None,
                 refs: vec![],
             }],
             1000,
@@ -6852,7 +6847,6 @@ mod tests {
             vec!["manual: eyeball it".into()],
             vec![plan::NewStep {
                 title: "step 1".into(),
-                kind: None,
                 refs: vec![],
             }],
             1000,
@@ -6899,7 +6893,6 @@ mod tests {
                 vec![],
                 vec![plan::NewStep {
                     title: "step 1".into(),
-                    kind: None,
                     refs: vec![],
                 }],
                 1000,
@@ -6950,7 +6943,6 @@ mod tests {
             vec!["manual: eyeball it".into()],
             vec![plan::NewStep {
                 title: "step 1".into(),
-                kind: None,
                 refs: vec![],
             }],
             1000,
@@ -7029,7 +7021,6 @@ mod tests {
                 vec![],
                 vec![plan::NewStep {
                     title: "step 1".into(),
-                    kind: None,
                     refs: vec![],
                 }],
                 1000,
@@ -7122,7 +7113,6 @@ mod tests {
                 vec!["manual: eyeball it".into()],
                 vec![plan::NewStep {
                     title: "step 1".into(),
-                    kind: None,
                     refs: vec![],
                 }],
                 1000,

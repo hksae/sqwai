@@ -651,6 +651,12 @@ pub struct PlanConfig {
     /// requires a plan first unless user message is heuristic-trivial
     #[serde(default)]
     pub plan_first: PlanFirstMode,
+    /// strict steps: `plan finish` additionally demands host-recorded
+    /// evidence of successful work on the step. Off by default — soft
+    /// steps close on a summary alone, and progress is read from receipts.
+    /// For weak models, small windows, and unattended work.
+    #[serde(default)]
+    pub strict: bool,
 }
 
 impl Default for PlanConfig {
@@ -660,6 +666,7 @@ impl Default for PlanConfig {
             max_steps: default_plan_max_steps(),
             nudge_after: default_plan_nudge_after(),
             plan_first: PlanFirstMode::default(),
+            strict: false,
         }
     }
 }

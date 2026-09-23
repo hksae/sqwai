@@ -1706,7 +1706,6 @@ mod tests {
             Vec::new(),
             vec![crate::plan::NewStep {
                 title: "step".into(),
-                kind: Some(crate::plan::StepKind::Change),
                 refs: Vec::new(),
             }],
             1000,
@@ -1804,12 +1803,10 @@ mod tests {
             vec![
                 crate::plan::NewStep {
                     title: "step 1".into(),
-                    kind: Some(crate::plan::StepKind::Change),
                     refs: Vec::new(),
                 },
                 crate::plan::NewStep {
                     title: "auth step".into(),
-                    kind: Some(crate::plan::StepKind::Change),
                     refs: vec!["src/auth.rs::fn::login".into()],
                 },
             ],
@@ -1895,7 +1892,6 @@ mod tests {
             Vec::new(),
             vec![crate::plan::NewStep {
                 title: "step 1".into(),
-                kind: Some(crate::plan::StepKind::Research),
                 refs: Vec::new(),
             }],
             1000,

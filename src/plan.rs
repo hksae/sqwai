@@ -115,24 +115,6 @@ impl StepStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum StepKind {
-    Research,
-    Change,
-    Verify,
-}
-
-impl StepKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Research => "research",
-            Self::Change => "change",
-            Self::Verify => "verify",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum AcceptanceStatus {
     Pending,
     /// A host-run check passed for this item (§2.1.4). Old files say
@@ -611,8 +593,6 @@ fn expand_refs(
 pub struct Step {
     pub id: String,
     pub title: String,
-    #[serde(default = "default_kind")]
-    pub kind: StepKind,
     pub status: StepStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started: Option<String>,
@@ -640,10 +620,6 @@ pub struct Step {
     /// Set on pending steps after a goal revision (§2.1.6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_goal: Option<bool>,
-}
-
-fn default_kind() -> StepKind {
-    StepKind::Change
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1601,8 +1577,6 @@ pub fn list_active(root: &Path) -> Vec<Plan> {
 pub struct NewStep {
     pub title: String,
     #[serde(default)]
-    pub kind: Option<StepKind>,
-    #[serde(default)]
     pub refs: Vec<StepRef>,
 }
 
@@ -1650,8 +1624,6 @@ pub enum Op {
         #[serde(default)]
         after: Option<String>,
         title: String,
-        #[serde(default)]
-        kind: Option<StepKind>,
         #[serde(default)]
         refs: Vec<StepRef>,
     },
@@ -1909,7 +1881,6 @@ pub fn create(
             .map(|(i, s)| Step {
                 id: (i + 1).to_string(),
                 title: s.title,
-                kind: s.kind.unwrap_or(StepKind::Change),
                 status: StepStatus::Pending,
                 started: None,
                 finished: None,
@@ -1941,6 +1912,25 @@ pub fn apply(
     limits: &Limits,
     current_step: Option<&str>,
 ) -> Result<Applied, Rejection> {
+    // Closed plans are read-only: Show inspects, everything else belongs
+    // to an active plan. Without this the model path could keep mutating
+    // completed or abandoned plans (defect A).
+    if plan.status != PlanStatus::Active && !matches!(op, Op::Show) {
+        return reject(
+            plan,
+            "plan_closed",
+            format!(
+                "plan {} is {}",
+                plan.id,
+                match plan.status {
+                    PlanStatus::Completed => "completed",
+                    PlanStatus::Abandoned => "abandoned",
+                    PlanStatus::Active => "active",
+                }
+            ),
+            "completed and abandoned plans are read-only; start a new plan with /plan",
+        );
+    }
     match op {
         Op::Create { .. } => reject(
             plan,
@@ -1964,9 +1954,8 @@ pub fn apply(
         Op::Add {
             after,
             title,
-            kind,
             refs,
-        } => add(plan, after.as_deref(), title, kind, refs, limits),
+        } => add(plan, after.as_deref(), title, refs, limits),
         Op::Split { id, into } => split(plan, &id, into, limits),
         // The host prepares the evidence (and runs `cmd:` items) before
         // applying a verify; reaching it through `apply` alone means there is
@@ -2103,8 +2092,9 @@ fn finish(
             "one line: what changed and where",
         );
     }
-    // Evidence presence and kind are validated by the host tool dispatcher,
-    // after host journal records have been attached to this step.
+    // Evidence presence is validated by the host tool dispatcher (strict
+    // mode only), after host journal records have been attached to this step.
+    // Soft steps close on the summary above; progress reads from receipts.
     let step = plan.step_mut(id).expect("checked above");
     step.status = StepStatus::Done;
     step.finished = Some(now());
@@ -2198,7 +2188,6 @@ fn add(
     plan: &mut Plan,
     after: Option<&str>,
     title: String,
-    kind: Option<StepKind>,
     refs: Vec<StepRef>,
     limits: &Limits,
 ) -> Result<Applied, Rejection> {
@@ -2241,7 +2230,6 @@ fn add(
     let step = Step {
         id: next_id(plan),
         title,
-        kind: kind.unwrap_or(StepKind::Change),
         status: StepStatus::Pending,
         started: None,
         finished: None,
@@ -2328,7 +2316,6 @@ fn split(
         .map(|(i, s)| Step {
             id: format!("{id}{}", suffixes[i]),
             title: s.title,
-            kind: s.kind.unwrap_or(StepKind::Change),
             status: StepStatus::Pending,
             started: None,
             finished: None,
@@ -2772,7 +2759,7 @@ fn complete(plan: &mut Plan) -> Result<Applied, Rejection> {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            "verify them, or have the user waive them with /plan waive. Pending acceptance items without cmd: prefix require user waiver (/plan waive <index>) or conversion to verify steps.",
+            "verify them, or have the user waive them with /plan waive. Pending acceptance items without cmd:/snapshot:/differential:/signatures: prefix require user waiver (/plan waive <index>) or conversion to steps with host evidence.",
         );
     }
     if !stale.is_empty() {
@@ -3150,7 +3137,7 @@ pub fn render(plan: &Plan) -> String {
             StepStatus::Cancelled => "[-]",
             StepStatus::Pending | StepStatus::Reopened => "[ ]",
         };
-        let mut line = format!("  {} {} ({}) {}", marker, s.id, s.kind.as_str(), s.title);
+        let mut line = format!("  {} {} {}", marker, s.id, s.title);
         if s.stale_goal == Some(true) {
             line.push_str("  [stale goal]");
         }
@@ -3221,12 +3208,10 @@ mod tests {
             vec![
                 NewStep {
                     title: "add the model".to_string(),
-                    kind: None,
                     refs: Vec::new(),
                 },
                 NewStep {
                     title: "add the validator".to_string(),
-                    kind: None,
                     refs: Vec::new(),
                 },
             ],
@@ -3409,6 +3394,40 @@ mod tests {
     }
 
     #[test]
+    fn closed_plans_are_read_only_except_show() {
+        // defect A: the model path could keep mutating completed or
+        // abandoned plans; only the TUI refused them.
+        let mut plan = new_plan();
+        plan.status = PlanStatus::Completed;
+        let err = apply(
+            &mut plan,
+            Op::Start {
+                id: "1".into(),
+                confirm: None,
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "plan_closed");
+        assert!(matches!(
+            apply(&mut plan, Op::Show, &Limits::default(), None),
+            Ok(Applied::Shown { .. })
+        ));
+        plan.status = PlanStatus::Abandoned;
+        let err = apply(
+            &mut plan,
+            Op::Finish {
+                id: "1".into(),
+                summary: "x".into(),
+                evidence: vec![],
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "plan_closed");
+    }    #[test]
     fn complete_requires_acceptance() {
         let mut plan = new_plan();
         for id in ["1", "2"] {
@@ -3437,7 +3456,7 @@ mod tests {
         let err = apply(&mut plan, Op::Complete, &Limits::default(), None).unwrap_err();
         assert_eq!(err.code, "acceptance_pending");
         assert!(
-            err.hint.contains("Pending acceptance items without cmd: prefix require user waiver (/plan waive <index>) or conversion to verify steps."),
+            err.hint.contains("Pending acceptance items without cmd:/snapshot:/differential:/signatures: prefix require user waiver (/plan waive <index>) or conversion to steps with host evidence."),
             "{}",
             err.hint
         );
@@ -3508,7 +3527,6 @@ mod tests {
             Op::Add {
                 after: Some("1".into()),
                 title: "extra".into(),
-                kind: None,
                 refs: Vec::new(),
             },
             &limits,
@@ -3521,7 +3539,6 @@ mod tests {
             Op::Add {
                 after: None,
                 title: "one too many".into(),
-                kind: None,
                 refs: Vec::new(),
             },
             &limits,
@@ -3566,7 +3583,6 @@ mod tests {
             acceptance: vec!["cmd: cargo test".into()],
             steps: vec![NewStep {
                 title: "step 1".into(),
-                kind: None,
                 refs: vec![],
             }],
         };
@@ -3972,7 +3988,6 @@ mod tests {
             vec!["check the docs".to_string()],
             vec![NewStep {
                 title: "verify docs".into(),
-                kind: Some(StepKind::Verify),
                 refs: Vec::new(),
             }],
             1000,
@@ -4296,7 +4311,6 @@ mod tests {
             vec!["snapshot: mycli --version".to_string()],
             vec![NewStep {
                 title: "do the work".to_string(),
-                kind: None,
                 refs: Vec::new(),
             }],
             0,
@@ -4365,7 +4379,6 @@ mod tests {
             vec!["differential: mycli render fix".to_string()],
             vec![NewStep {
                 title: "do the work".to_string(),
-                kind: None,
                 refs: Vec::new(),
             }],
             0,
@@ -4407,7 +4420,6 @@ mod tests {
             vec!["signatures: src/a.rs".to_string()],
             vec![NewStep {
                 title: "do the work".to_string(),
-                kind: None,
                 refs: Vec::new(),
             }],
             0,
@@ -4469,7 +4481,6 @@ mod tests {
             ],
             vec![NewStep {
                 title: "do the work".to_string(),
-                kind: None,
                 refs: Vec::new(),
             }],
             0,
@@ -4509,7 +4520,6 @@ mod tests {
             ],
             vec![NewStep {
                 title: "do the work".to_string(),
-                kind: None,
                 refs: Vec::new(),
             }],
             0,
@@ -4537,7 +4547,6 @@ mod tests {
             vec!["cmd: cargo test".to_string(), "cmd: cargo clippy".to_string()],
             vec![NewStep {
                 title: "do the work".to_string(),
-                kind: None,
                 refs: Vec::new(),
             }],
             0,
@@ -4629,7 +4638,6 @@ mod tests {
             vec!["manual: eyeball it".to_string()],
             vec![NewStep {
                 title: "t".to_string(),
-                kind: None,
                 refs: Vec::new(),
             }],
             20000,
@@ -4981,12 +4989,10 @@ mod tests {
         let parts = vec![
             NewStep {
                 title: "part a".into(),
-                kind: None,
                 refs: vec![],
             },
             NewStep {
                 title: "part b".into(),
-                kind: None,
                 refs: vec![],
             },
         ];
@@ -5030,12 +5036,10 @@ mod tests {
         let parts = vec![
             NewStep {
                 title: "part a".into(),
-                kind: None,
                 refs: vec![],
             },
             NewStep {
                 title: "part b".into(),
-                kind: None,
                 refs: vec![],
             },
         ];

@@ -886,7 +886,6 @@ Returns connected nodes, incident edges, and explicit truncation status.",
                             "type": "object",
                             "properties": {
                                 "title": {"type": "string"},
-                                "kind": {"type": "string", "enum": ["research", "change", "verify"]},
                                 "refs": {"type": "array", "items": {"type": ["string", "object"]}, "description": "what the step touches: plain \"path[::symbol]\" means modify, or {\"path\", \"symbol\", \"intent\": \"modify|create|remove\"}"}
                             },
                             "required": ["title"]
@@ -905,8 +904,8 @@ show first if you are unsure of the current step ids. The host owns the goal, th
 acceptance status, validation and evidence; to change the goal, propose the full updated plan with \
 propose_plan instead. finish records completion of the step's work with a summary and does not \
 by itself establish that acceptance criteria passed; it requires host-recorded evidence since \
-start (research: a tool_result, change: a file_diff, verify: successful observed execution or \
-clean diagnostics) and rejections return a code and hint to follow. A manual: acceptance can be \
+start only in strict mode ([plan] strict), and rejections return a code and hint to follow. \
+A manual: acceptance can be \
 waived only by the user, never verified by the model. complete requires every step closed and \
 every acceptance validation passed or waived with fresh receipts. Never invent evidence identifiers.",
             parameters: json!({
@@ -931,7 +930,6 @@ every acceptance validation passed or waived with fresh receipts. Never invent e
                             "type": "object",
                             "properties": {
                                 "title": {"type": "string"},
-                                "kind": {"type": "string", "enum": ["research", "change", "verify"]},
                                 "refs": {"type": "array", "items": {"type": ["string", "object"]}, "description": "what the step touches: plain \"path[::symbol]\" means modify, or {\"path\", \"symbol\", \"intent\": \"modify|create|remove\"}"}
                             },
                             "required": ["title"]
@@ -944,7 +942,6 @@ every acceptance validation passed or waived with fresh receipts. Never invent e
                             "type": "object",
                             "properties": {
                                 "title": {"type": "string"},
-                                "kind": {"type": "string", "enum": ["research", "change", "verify"]},
                                 "refs": {"type": "array", "items": {"type": ["string", "object"]}, "description": "what the step touches: plain \"path[::symbol]\" means modify, or {\"path\", \"symbol\", \"intent\": \"modify|create|remove\"}"}
                             },
                             "required": ["title"]
@@ -952,7 +949,6 @@ every acceptance validation passed or waived with fresh receipts. Never invent e
                     },
                     "after": {"type": "string", "description": "add: insert after this step id"},
                     "title": {"type": "string", "description": "add: new step title"},
-                    "kind": {"type": "string", "enum": ["research", "change", "verify"]},
                     "refs": {"type": "array", "items": {"type": ["string", "object"]}, "description": "what the step touches: plain \"path[::symbol]\" means modify, or {\"path\", \"symbol\", \"intent\": \"modify|create|remove\"}"},
                     "summary": {"type": "string", "description": "finish: what was done, where, and any remaining limitations"},
                     "reason": {"type": "string", "description": "block / cancel"},
@@ -2270,7 +2266,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let gate = if matches!(op, plan::Op::Complete) {
         validate_complete(ctx)
     } else {
-        validate_evidence(&ctx.root, &op, Some(&ctx.session_id))
+        validate_evidence(&ctx.root, &op, Some(&ctx.session_id), ctx.plan_limits.strict)
     };
     if let Err(message) = gate {
         return Outcome::err(message);
@@ -2347,7 +2343,6 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             "acceptance": created.acceptance.iter().map(|a| a.text.clone()).collect::<Vec<_>>(),
                             "steps": created.steps.iter().map(|s| serde_json::json!({
                                 "title": s.title,
-                                "kind": s.kind.as_str(),
                                 "refs": s.refs,
                             })).collect::<Vec<_>>(),
                             "budget_limit": created.budget.limit,
@@ -3712,7 +3707,7 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
             }
         }
         plan::AcceptanceKind::Text(_) => {
-            let Some((step_id, evidence)) = unspent_verify_evidence(&ctx.root, &active, index)
+            let Some((step_id, evidence)) = unspent_step_evidence(&ctx.root, &active, index)
             else {
                 return rejection(plan::Rejection {
                     code: "no_evidence",
@@ -3724,14 +3719,13 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                         .to_string(),
                 });
             };
-            // The evidence still has to be what a verify step needs: a
-            // successful exec or clean diagnostics. Removing the plan-wide
-            // gate must not remove that.
+            // The evidence still has to attest successful work: kindless
+            // does not mean contentless. Removing the per-kind gates must
+            // not remove that.
             if let Err(message) = validate_attached_records(
                 &ctx.root,
                 &active.id,
                 &step_id,
-                plan::StepKind::Verify,
                 &evidence,
             ) {
                 return Outcome::err(message);
@@ -3908,12 +3902,17 @@ fn with_misattribution_warning(
     format!("{message}\nwarning: {}", warns.join("; "))
 }
 
-/// A verify step whose evidence no acceptance item has spent yet, with that
-/// evidence. `None` when every verify step's records are already accounted
-/// for — which is the case this whole function exists to catch.
-/// Records from a stale step epoch (subagent work predating a reopen) are
-/// excluded: they belong to the undone attempt, not the current one (§2.2.4).
-fn unspent_verify_evidence(
+/// A step whose evidence no acceptance item has spent yet, with that
+/// evidence. `None` when every step's records are already accounted for —
+/// which is the case this whole function exists to catch. Records from a
+/// stale step epoch (subagent work predating a reopen) are excluded: they
+/// belong to the undone attempt, not the current one (§2.2.4).
+///
+/// Kindless: any step's records count, open or closed — verifying against
+/// mid-step evidence is an established flow. What the step was *for* is
+/// the model's business; whether the records attest success is checked at
+/// validation, the same rule for every step.
+fn unspent_step_evidence(
     root: &Path,
     active: &plan::Plan,
     index: usize,
@@ -3925,11 +3924,7 @@ fn unspent_verify_evidence(
         .filter(|(other, item)| *other != index && item.status == plan::AcceptanceStatus::Passed)
         .flat_map(|(_, item)| item.evidence.iter())
         .collect();
-    active
-        .steps
-        .iter()
-        .filter(|step| step.kind == plan::StepKind::Verify)
-        .find_map(|step| {
+    active.steps.iter().find_map(|step| {
             let fresh: Vec<plan::EvidenceRef> = step
                 .evidence
                 .iter()
@@ -3970,14 +3965,24 @@ fn evidence_epoch_current(
     crate::agent::journal::epoch_matches(&record, step.step_epoch)
 }
 
-/// The gate on `plan finish`: the step must have host-recorded evidence of the
-/// right kind since it started.
+/// The gate on `plan finish`.
 ///
-/// `verify` is not handled here — `verify_acceptance` settles an acceptance
-/// item on its own terms, per item, and this function used to short-circuit
-/// that with a plan-wide "is there any verify evidence anywhere" check.
-fn validate_evidence(root: &Path, op: &plan::Op, session_id: Option<&str>) -> Result<(), String> {
+/// Soft steps (the default) close on a summary alone: the pure finish
+/// validator already demands it, and progress is read from receipts, not
+/// from gates. Strict mode additionally demands host-recorded evidence of
+/// successful work on the step — the same content rule acceptance
+/// evidence follows, so a research step can no longer close on a bare
+/// failed call, and no step closes on errored diagnostics.
+fn validate_evidence(
+    root: &Path,
+    op: &plan::Op,
+    session_id: Option<&str>,
+    strict: bool,
+) -> Result<(), String> {
     let plan::Op::Finish { id, .. } = op else {
+        return Ok(());
+    };
+    if !strict {
         return Ok(());
     };
     let status = plan::open_active_for_session(root, session_id)
@@ -3992,15 +3997,11 @@ fn validate_evidence(root: &Path, op: &plan::Op, session_id: Option<&str>) -> Re
     let active = plan::open_active_for_session(root, session_id)
         .map_err(|e| format!("evidence_unreadable: {e:#}"))?
         .ok_or_else(|| "invalid_evidence: no active plan".to_string())?;
-    let required_kind = active
-        .step(id)
-        .map(|step| step.kind)
-        .ok_or_else(|| format!("unknown_step: no step {id}"))?;
     let evidence = active
         .step(id)
         .map(|step| step.evidence.clone())
         .unwrap_or_default();
-    validate_attached_records(root, &active.id, id, required_kind, &evidence)
+    validate_attached_records(root, &active.id, id, &evidence)
 }
 
 /// The gate on `plan complete`.
@@ -4021,7 +4022,13 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
         .iter()
         .filter(|step| step.status == plan::StepStatus::Done)
     {
-        validate_attached_records(&root, &active.id, &step.id, step.kind, &step.evidence)?;
+        // soft steps may close on a summary alone: nothing recorded means
+        // nothing to re-check. Strict mode never gets here without evidence,
+        // because its finish gate already demanded it.
+        if step.evidence.is_empty() {
+            continue;
+        }
+        validate_attached_records(&root, &active.id, &step.id, &step.evidence)?;
     }
     // by index: a flaky verdict below mutates the plan, which an
     // iterator borrow would not allow
@@ -4249,7 +4256,6 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
                     &root,
                     &active.id,
                     "acceptance",
-                    plan::StepKind::Verify,
                     &active.acceptance[index].evidence,
                 )
                 .map_err(|message| format!("acceptance {index}: {message}"))?;
@@ -4263,9 +4269,13 @@ fn validate_attached_records(
     root: &Path,
     plan_id: &str,
     step_id: &str,
-    required_kind: plan::StepKind,
     evidence: &[plan::EvidenceRef],
 ) -> Result<(), String> {
+    if evidence.is_empty() {
+        return Err(format!(
+            "no_evidence: step {step_id} requires journal evidence"
+        ));
+    }
     if evidence.is_empty() {
         return Err(format!(
             "no_evidence: step {step_id} requires journal evidence"
@@ -4318,25 +4328,15 @@ fn validate_attached_records(
             stale_epoch += 1;
             continue;
         }
-        let allowed = match required_kind {
-            // #198: research that only failed proves nothing — at least one
-            // successful call is the minimum bar for "done"
-            plan::StepKind::Research => {
-                record.kind == "tool_result"
-                    && record.fields.get("ok").and_then(Value::as_bool) == Some(true)
-            }
-            plan::StepKind::Change => record.kind == "file_diff",
-            plan::StepKind::Verify => {
-                record.kind == "diagnostics"
-                    || (record.kind == "tool_result"
-                        && record.fields.get("ok").and_then(Value::as_bool) == Some(true)
-                        && record
-                            .fields
-                            .get("tool")
-                            .and_then(Value::as_str)
-                            .is_some_and(|tool| tool == "bash" || tool.starts_with("git_")))
-            }
-        };
+        // Kindless: what the step was *for* is the model's business. What
+        // counts is that the records attest successful work — a failed exec
+        // or errored diagnostics proves nothing (#198, §2.1.4). Diagnostics
+        // count only with zero errors: the endpoint does not enforce that.
+        let allowed = record.kind == "file_diff"
+            || (record.kind == "tool_result"
+                && record.fields.get("ok").and_then(Value::as_bool) == Some(true))
+            || (record.kind == "diagnostics"
+                && record.fields.get("errors").and_then(Value::as_u64) == Some(0));
         if allowed {
             valid += 1;
         }
@@ -4348,8 +4348,7 @@ fn validate_attached_records(
             ));
         }
         return Err(format!(
-            "wrong_evidence: evidence does not satisfy {} step requirements",
-            required_kind.as_str()
+            "wrong_evidence: evidence attests no successful work for step {step_id} — attach a successful exec, a file_diff, or zero-error diagnostics"
         ));
     }
     Ok(())
@@ -4434,7 +4433,6 @@ mod tests {
             acceptance.into_iter().map(str::to_string).collect(),
             vec![plan::NewStep {
                 title: "do the work".to_string(),
-                kind: None,
                 refs: Vec::new(),
             }],
             0,
@@ -5236,7 +5234,7 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// §2.1.4 lets a verify step close on "diagnostics with zero errors". The
+    /// §2.1.4 lets a step close on "diagnostics with zero errors". The
     /// record was defined in §2.2.2 and never written, so that branch was
     /// unreachable — this is the evidence path, now that it exists.
     #[test]
@@ -5539,7 +5537,7 @@ mod tests {
             session: "epoch-test".into(),
             seq: stale_seq,
         }];
-        let err = validate_attached_records(&dir, &plan_id, "1", plan::StepKind::Change, &stale)
+        let err = validate_attached_records(&dir, &plan_id, "1", &stale)
             .unwrap_err();
         assert!(err.contains("stale_epoch"), "{err}");
 
@@ -5547,7 +5545,7 @@ mod tests {
             session: "epoch-test".into(),
             seq: fresh_seq,
         }];
-        validate_attached_records(&dir, &plan_id, "1", plan::StepKind::Change, &fresh)
+        validate_attached_records(&dir, &plan_id, "1", &fresh)
             .expect("unstamped evidence counts");
         fs::remove_dir_all(&dir).ok();
     }
@@ -5746,7 +5744,7 @@ mod tests {
                 json!({"by": "model", "note": "assumption", "text": "the config key is stable"}),
             )
             .unwrap();
-        // evidence for the change step, so `finish` is not rejected for that
+        // evidence for the step, so `finish` is not rejected for that
         journal
             .append_evidence("file_diff", json!({"path": "src/main.rs"}))
             .unwrap();
@@ -5813,16 +5811,21 @@ mod tests {
     }
 
     #[test]
-    fn evidence_must_match_step_kind_and_start_boundary() {
+    fn evidence_content_rule_is_kindless() {
+        // strict mode: what counts is that the records attest successful
+        // work — any step, same rule. Failed execs and errored diagnostics
+        // prove nothing, whatever the step was for.
         let (mut ctx, dir) = proj();
+        ctx.plan_limits.strict = true;
         let created = plan_op(
             &mut ctx,
             &json!({
                 "op": "create",
                 "goal": "validate evidence",
                 "steps": [
-                    {"title": "research", "kind": "research"},
-                    {"title": "change", "kind": "change"}
+                    {"title": "look around"},
+                    {"title": "measure twice"},
+                    {"title": "cut once"}
                 ]
             }),
         );
@@ -5830,27 +5833,16 @@ mod tests {
         let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
         let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
 
+        // failed-only exec evidence settles nothing
         assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
         journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
         journal.append("plan", json!({"op": "start"})).unwrap();
         journal
-            .append_evidence("tool_result", json!({"tool": "read", "ok": true}))
-            .unwrap();
-        let research = plan_op(
-            &mut ctx,
-            &json!({"op": "finish", "id": "1", "summary": "researched", "evidence": [2]}),
-        );
-        assert!(research.ok, "{}", research.output);
-
-        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "2"})).ok);
-        journal.set_attribution(Some("2".into()), Some(plan_id.clone()), "main");
-        journal.append("plan", json!({"op": "start"})).unwrap();
-        let wrong_type = journal
-            .append_evidence("tool_result", json!({"tool": "read", "ok": true}))
+            .append_evidence("tool_result", json!({"tool": "read", "ok": false}))
             .unwrap();
         let rejected = plan_op(
             &mut ctx,
-            &json!({"op": "finish", "id": "2", "summary": "changed", "evidence": [wrong_type]}),
+            &json!({"op": "finish", "id": "1", "summary": "looked"}),
         );
         assert!(!rejected.ok);
         assert!(
@@ -5858,20 +5850,64 @@ mod tests {
             "{}",
             rejected.output
         );
+        // a refused finish leaves the step open; cancel it to move on
+        assert!(
+            plan_op(&mut ctx, &json!({"op": "cancel", "id": "1", "reason": "no evidence"}))
+                .ok
+        );
+
+        // errored diagnostics settle nothing either
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "2"})).ok);
+        journal.set_attribution(Some("2".into()), Some(plan_id.clone()), "main");
+        journal.append("plan", json!({"op": "start"})).unwrap();
+        journal
+            .append_evidence(
+                "diagnostics",
+                json!({"path": "src/main.rs", "errors": 2, "warnings": 0}),
+            )
+            .unwrap();
+        let rejected = plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "2", "summary": "measured"}),
+        );
+        assert!(!rejected.ok);
+        assert!(
+            rejected.output.contains("wrong_evidence"),
+            "{}",
+            rejected.output
+        );
+        assert!(
+            plan_op(&mut ctx, &json!({"op": "cancel", "id": "2", "reason": "no evidence"}))
+                .ok
+        );
+
+        // a recorded write settles any step
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "3"})).ok);
+        journal.set_attribution(Some("3".into()), Some(plan_id.clone()), "main");
+        journal.append("plan", json!({"op": "start"})).unwrap();
+        journal
+            .append_evidence("file_diff", json!({"path": "src/main.rs"}))
+            .unwrap();
+        let done = plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "3", "summary": "cut"}),
+        );
+        assert!(done.ok, "{}", done.output);
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// #198: a research step whose every call failed has no evidence of
-    /// done work — finish must refuse, not accept the failures.
+    /// Strict mode keeps the #198 bar — failed calls are not evidence —
+    /// while soft steps close on a summary alone. Same journal, two gates.
     #[test]
-    fn research_finish_rejects_only_failed_calls() {
+    fn strict_finish_demands_successful_evidence() {
         let (mut ctx, dir) = proj();
+        ctx.plan_limits.strict = true;
         let created = plan_op(
             &mut ctx,
             &json!({
                 "op": "create",
                 "goal": "validate research",
-                "steps": [{"title": "research", "kind": "research"}]
+                "steps": [{"title": "look around"}]
             }),
         );
         assert!(created.ok, "{}", created.output);
@@ -5886,7 +5922,7 @@ mod tests {
             .unwrap();
         let rejected = plan_op(
             &mut ctx,
-            &json!({"op": "finish", "id": "1", "summary": "looked", "evidence": [2]}),
+            &json!({"op": "finish", "id": "1", "summary": "looked"}),
         );
         assert!(
             !rejected.ok,
@@ -5905,9 +5941,38 @@ mod tests {
             .unwrap();
         let done = plan_op(
             &mut ctx,
-            &json!({"op": "finish", "id": "1", "summary": "found", "evidence": [3]}),
+            &json!({"op": "finish", "id": "1", "summary": "found"}),
         );
         assert!(done.ok, "{}", done.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Soft steps (the default) close on a summary alone — no journal
+    /// evidence needed. Progress is read from receipts, not from gates.
+    #[test]
+    fn soft_finish_closes_on_summary_alone() {
+        let (mut ctx, dir) = proj();
+        assert!(!ctx.plan_limits.strict, "soft is the default");
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "soft close",
+                "steps": [{"title": "think"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        // no tool calls, no journal evidence at all
+        let done = plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "1", "summary": "thought about it"}),
+        );
+        assert!(done.ok, "{}", done.output);
+        assert_eq!(
+            plan::open_active(&dir).unwrap().unwrap().steps[0].status,
+            plan::StepStatus::Done
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -7247,7 +7312,7 @@ mod tests {
             complete.output
         );
         assert!(
-            complete.output.contains("Pending acceptance items without cmd: prefix require user waiver (/plan waive <index>) or conversion to verify steps."),
+            complete.output.contains("Pending acceptance items without cmd:/snapshot:/differential:/signatures: prefix require user waiver (/plan waive <index>) or conversion to steps with host evidence."),
             "{}",
             complete.output
         );

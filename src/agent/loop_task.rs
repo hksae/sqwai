@@ -5756,7 +5756,6 @@ mod effort_tests {
             Vec::new(),
             vec![plan::NewStep {
                 title: "step".into(),
-                kind: None,
                 refs: Vec::new(),
             }],
             20_000,
@@ -5847,7 +5846,6 @@ mod effort_tests {
             Vec::new(),
             vec![plan::NewStep {
                 title: "step".into(),
-                kind: None,
                 refs: Vec::new(),
             }],
             20_000,
@@ -5890,7 +5888,6 @@ mod effort_tests {
             Vec::new(),
             vec![plan::NewStep {
                 title: "step".into(),
-                kind: None,
                 refs: Vec::new(),
             }],
             20_000,

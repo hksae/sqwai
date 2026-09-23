@@ -180,21 +180,21 @@ multi-session path.
      "validation": {"status": "waived", "receipts": []}}
   ],
   "steps": [
-    {"id": "1", "kind": "research", "title": "Find where sessions are saved",
-     "status": "done", "started": "...", "finished": "...",
-     "summary": "session/mod.rs save()/load()", "evidence": [{"session": "a8f2", "seq": 3}],
-     "refs": [{"path": "src/session/mod.rs", "intent": "modify"}],
-     "validation": {"status": "pending", "receipts": []}, "step_epoch": 0},
-    {"id": "2", "kind": "change", "title": "Add todos field with serde default",
-     "status": "in_progress", "started": "...",
-     "refs": [{"path": "src/session/mod.rs", "symbol": "Session", "intent": "modify"},
-              {"path": "src/session/mod.rs", "symbol": "save_todos", "intent": "create"}],
-     "validation": {"status": "pending", "receipts": []}, "step_epoch": 0},
-    {"id": "3", "kind": "verify", "title": "Run tests", "status": "pending",
-     "validation": {"status": "pending", "receipts": []}, "step_epoch": 0},
-    {"id": "4", "kind": "change", "title": "Todo panel on Ctrl+T", "status": "blocked",
-     "reason": "waiting for user: keybinding conflicts with existing Ctrl+T",
-     "validation": {"status": "pending", "receipts": []}, "step_epoch": 0}
+    {"id": "1", "title": "Find where sessions are saved",
+      "status": "done", "started": "...", "finished": "...",
+      "summary": "session/mod.rs save()/load()", "evidence": [{"session": "a8f2", "seq": 3}],
+      "refs": [{"path": "src/session/mod.rs", "intent": "modify"}],
+      "validation": {"status": "pending", "receipts": []}, "step_epoch": 0},
+    {"id": "2", "title": "Add todos field with serde default",
+      "status": "in_progress", "started": "...",
+      "refs": [{"path": "src/session/mod.rs", "symbol": "Session", "intent": "modify"},
+               {"path": "src/session/mod.rs", "symbol": "save_todos", "intent": "create"}],
+      "validation": {"status": "pending", "receipts": []}, "step_epoch": 0},
+    {"id": "3", "title": "Run tests", "status": "pending",
+      "validation": {"status": "pending", "receipts": []}, "step_epoch": 0},
+    {"id": "4", "title": "Todo panel on Ctrl+T", "status": "blocked",
+      "reason": "waiting for user: keybinding conflicts with existing Ctrl+T",
+      "validation": {"status": "pending", "receipts": []}, "step_epoch": 0}
   ],
   "folded": [],
   "budget": {"tokens": 1840, "limit": 20000},
@@ -215,8 +215,13 @@ Source of truth: `validation`, not `status`. Every new `verify` sets both
 the authority); `complete` reads `validation.status` (with `legacy_passed`
 — status passed but validation empty — accepted only for plan files that
 predate receipts). `status` alone never satisfies `complete` for new files.
-steps[].kind ∈ research | change | verify (default change). Determines
-what counts as evidence (§2.1.4).
+steps[] have no kind. What a step was *for* is the model's business;
+what counts as evidence is one content rule for every step (§2.1.4).
+Steps are boundaries (order, attribution, undo), not gates: soft steps
+(the default) close on a summary alone, and progress reads from receipts.
+Strict steps (`[plan] strict = true`, for weak models, small windows, and
+unattended work) additionally demand host-recorded evidence of successful
+work at `finish`.
 steps[].refs — optional list of `{path, symbol?, intent}` objects where
 intent ∈ modify | create | remove (default modify). `modify` and `remove`
 refer to existing code; `create` declares a new file/symbol that must not
@@ -252,10 +257,10 @@ so nondeterministic inputs never freeze), `signatures:` (host freezes the
 declaration shapes of the named files and settles the item on identical
 shapes — rung 5; bodies move, structure holds), or `manual:` (user
 waives it). Anything else is free text, settled only by unspent
-host-recorded evidence from a verify step — never by defaulting to `manual:`.
-Unspent means: evidence refs of a verify step that no other passed acceptance
-item has already spent (`evidence_spent` rejects reuse); each ref must satisfy
-the verify gate (successful `bash`/`git_*` exec, or any `diagnostics` record).
+host-recorded evidence from a step — never by defaulting to `manual:`.
+Unspent means: evidence refs of a step that no other passed acceptance
+item has already spent (`evidence_spent` rejects reuse); each ref must attest
+successful work (successful exec, `file_diff`, or zero-error `diagnostics`).
 The host pins an attachment receipt (`runner: "evidence"`, state digest over
 traversed paths) so later moves stale the item like a command check, and
 `complete` re-validates the refs instead of trusting the earlier verify.
@@ -282,34 +287,32 @@ session membership), replay/repair.
 JSON
 
 {"op":"create","goal":"...","constraints":["..."],"acceptance":["..."],
- "steps":[{"title":"...","kind":"research"},{"title":"..."}]}
+ "steps":[{"title":"..."},{"title":"..."}]}
 {"op":"start","id":"2"}
 {"op":"start","id":"5","confirm":true}          // required when stale_goal
 {"op":"finish","id":"2","summary":"..."}
 {"op":"block","id":"4","reason":"..."}
 {"op":"unblock","id":"4"}
 {"op":"cancel","id":"6","reason":"..."}
-{"op":"add","after":"3","title":"...","kind":"verify","refs":[{"path":"src/x.rs","symbol":"foo","intent":"modify"}]}
+{"op":"add","after":"3","title":"...","refs":[{"path":"src/x.rs","symbol":"foo","intent":"modify"}]}
 {"op":"split","id":"3","into":[{"title":"..."},{"title":"..."}]}
 {"op":"verify","acceptance":0}
 {"op":"complete"}
 {"op":"show"}
-create is the only op allowed to create steps with kinds in bulk; the model
-should keep initial plans small (guideline in prompt: 3–12 steps) and split
-later.
+The model should keep initial plans small (guideline in prompt: 3–12 steps)
+and split later.
 
 2.1.4 Validator (host code only)
 Op	Rejected when
 create	own session already has an active plan (rejected with its id) · goal empty · zero steps · more than plan.max_steps (24) steps
 start	step not `pending|reopened` · `step_busy`: the session holds another step, or another step is already `in_progress` in the plan (finish/block/cancel it first — a second one would make attribution ambiguous) · stale_goal without `confirm: true`
-finish	step not in_progress · host evidence rule fails (below) · summary empty
+finish	step not in_progress · summary empty · strict mode: host evidence rule fails (below)
 block	step not `in_progress` · reason empty
 unblock	step not blocked
 cancel	step done · empty reason defaults to `"cancelled"`; no id (or the plan's own id) abandons the whole plan
 add / split	resulting step count > plan.max_steps (no runtime override exists) · after/id unknown · split only `pending|reopened` steps without evidence, at most 8 parts
 verify	acceptance index unknown · host evidence rule fails (below)
 complete	any step `pending|in_progress|blocked|reopened` · any acceptance `validation.status` not `passed|waived` · any `passed` receipt is `stale`; pre-receipt `Passed` items (written before validation existed) still complete
-any	known defect (A): `plan::apply` itself has no completed|abandoned guard — only the TUI refuses such plans (`workable_plan`); the model path must gain the same guard
 Evidence is owned by the host. The model never supplies journal sequence
 numbers to `finish` or `verify` (the fields exist for wire compatibility and
 are ignored with a note). Whenever the host writes a `tool_result`,
@@ -331,10 +334,11 @@ general correctness.
 - `passed` = the configured check succeeded on the recorded state interval, or the user manually confirmed.
 - `waived` = the user explicitly chose not to require that check.
 
-kind	Requires
-research	≥ 1 host-attached tool_result with ok:true since start
-change	≥ 1 host-attached file_diff since start
-verify	≥ 1 host-attached successful exec result (bash, git_* with ok:true) or diagnostics (any severity — no zero-errors check)
+Soft steps close on a summary alone; strict steps (`[plan] strict = true)
+additionally demand host-attached evidence of successful work:
+- counts: successful `tool_result` (any tool), `file_diff`,
+  `diagnostics` with zero errors;
+- does not count: failed execs, errored diagnostics, notes, stale-epoch records.
 Evidence produced by subagents counts on epoch match (§2.2.4), with no
 Act-mode check. Rejections carry codes (`no_evidence`, `wrong_evidence`,
 `stale_epoch`) with a hint, not counts.
@@ -347,8 +351,8 @@ via two host-only operations:
   and sets `validation.status: passed`.
 - `waive`: the user explicitly dismissed the check requirement. Records
   `{acceptance_id, by: "user", reason}` and sets `validation.status: waived`.
-Text acceptances (no prefix) settle via host-recorded evidence from a
-verify step; `manual:` items settle only by user `confirm` or `waive`.
+Text acceptances (no prefix) settle via unspent host-recorded evidence from
+any step; `manual:` items settle only by user `confirm` or `waive`.
 
 Verification receipt: a record of a check run bound to an execution interval:
 `{session, seq, state_digest, command?, runner, args?, cwd?, started_at?,
@@ -1600,7 +1604,8 @@ real tasks to learn which accessibility-tree format models read well.
 8. Definition of done and metrics
 8.1 Core DoD
 A plan's goal cannot be changed by any model action (test: fuzz plan ops).
-finish without host evidence is impossible (test per step kind).
+finish without host evidence is impossible in strict mode (test: strict
+finish with failed-only evidence); soft steps close on a summary alone.
 After 3 forced compactions in a 150+ tool-call task, the anchor matches
 the original goal/constraints under semantic (normalized) equality and the
 model's restated goal matches
