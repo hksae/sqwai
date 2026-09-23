@@ -134,7 +134,9 @@ ULID. A session stores `plan_id`; a plan stores `sessions` (joined on
 active in one project at once. Plan status:
 active → completed all steps done, all acceptance validation passed|waived
 active → abandoned user: /plan abandon, or `plan cancel` with no id
-completed|abandoned → (read-only in the TUI; the model has no mutating op)
+active → blocked model: `plan block_plan` with the quoted spec conflict —
+an honest terminal state, never a failure (the quote rides `blocked_reason`)
+completed|abandoned|blocked → (read-only; the model has no mutating op)
 
 A session resolves strictly: `open_active_for_session` returns the
 session's own active plan or `None` — never another session's plan (#171).
@@ -272,7 +274,7 @@ loading fails.
 
 2.1.3 Operations
 Tool plan accepts one operation per call: start, finish, block, unblock,
-cancel, add, split, verify, complete, show (plus create, handled
+cancel, add, split, verify, complete, show, block_plan (plus create, handled
 separately). The model has no operation that writes goal, constraints,
 acceptance[].status, acceptance[].validation, steps[].validation, evidence,
 applied_event, folded, or step_epoch. There is no `fold` op, no
@@ -299,6 +301,7 @@ JSON
 {"op":"verify","acceptance":0}
 {"op":"complete"}
 {"op":"show"}
+{"op":"block_plan","reason":"spec says 404, test expects 200"}
 The model should keep initial plans small (guideline in prompt: 3–12 steps)
 and split later.
 
@@ -313,6 +316,7 @@ cancel	step done · empty reason defaults to `"cancelled"`; no id (or the plan's
 add / split	resulting step count > plan.max_steps (no runtime override exists) · after/id unknown · split only `pending|reopened` steps without evidence, at most 8 parts
 verify	acceptance index unknown · host evidence rule fails (below)
 complete	any step `pending|in_progress|blocked|reopened` · any acceptance `validation.status` not `passed|waived` · any `passed` receipt is `stale`; pre-receipt `Passed` items (written before validation existed) still complete
+block_plan	empty reason (the conflict quote is the artifact)
 Evidence is owned by the host. The model never supplies journal sequence
 numbers to `finish` or `verify` (the fields exist for wire compatibility and
 are ignored with a note). Whenever the host writes a `tool_result`,
@@ -462,11 +466,11 @@ change. In both cases, the user sees a diff and must explicitly accept.
 
 2.1.7 User surface
 /plan — full plan document (goal, constraints, acceptance, steps, folded).
-/plan history — completed/abandoned plans.
+/plan history — completed/abandoned/blocked plans.
 /plan complete | abandon | waive <acceptance-index> "reason" | confirm <acceptance-index> "reason".
 /plan delete — user-only: removes the session's plan file after confirmation,
 unlinks the session (`plan_id: None`), journals `plan_deleted`. A linked
-completed/abandoned plan is shown as read-only history with an explicit
+completed/abandoned/blocked plan is shown as read-only history with an explicit
 "create a new plan" prompt, never as the work plan. Deleting the plan does
 not attach the session anywhere else: with no own active plan the session
 simply has none (strict resolution, §2.1.1) — a deleted plan never silently

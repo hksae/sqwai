@@ -76,6 +76,10 @@ pub enum PlanStatus {
     Active,
     Completed,
     Abandoned,
+    /// Honest terminal state: the task is impossible as specified (spec
+    /// conflict, quoted in `blocked_reason`), not failed work. Closed like
+    /// every non-active status — read-only except `show`.
+    Blocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -669,6 +673,10 @@ pub struct Plan {
     pub revision: u64,
     #[serde(default)]
     pub rejections_in_a_row: u32,
+    /// The quoted conflict that blocked this plan (`BlockPlan`), if any.
+    /// Read by `/plan show` and the bench harness; old files simply lack it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
 }
 
 impl Plan {
@@ -1291,7 +1299,7 @@ fn apply_record(
         }
         Some(
             "start" | "finish" | "block" | "unblock" | "cancel" | "add" | "split" | "complete"
-            | "join",
+            | "join" | "block_plan",
         ) => {
             let op: Op = serde_json::from_value(serde_json::Value::Object(fields.clone()))
                 .map_err(|_| Rejection::new("replay_shape", "unparsable op intent", ""))?;
@@ -1620,6 +1628,15 @@ pub enum Op {
         #[serde(default)]
         reason: String,
     },
+    /// Honest surrender: the task is impossible as specified. `reason`
+    /// must quote the conflict (spec vs test, contradictory requirements);
+    /// empty reasons are refused. Sets status `Blocked` — terminal and
+    /// read-only like every closed plan, but reported as an honest result,
+    /// never as failed work.
+    BlockPlan {
+        #[serde(default)]
+        reason: String,
+    },
     Add {
         #[serde(default)]
         after: Option<String>,
@@ -1718,6 +1735,27 @@ impl PlanDraftArgs {
 pub fn abandon(plan: &mut Plan) {
     plan.status = PlanStatus::Abandoned;
     plan.revision += 1;
+}
+
+/// Honest surrender (`BlockPlan`): the task cannot be done as specified.
+/// The quoted conflict is stored on the plan file itself — it is the
+/// artifact future readers and the bench harness judge, not the journal.
+fn block_plan(plan: &mut Plan, reason: String) -> Result<Applied, Rejection> {
+    if reason.trim().is_empty() {
+        return reject(
+            plan,
+            "empty_reason",
+            "blocking a plan needs the quoted conflict".to_string(),
+            "cite what contradicts what: the spec line against the test or requirement".to_string(),
+        );
+    }
+    plan.status = PlanStatus::Blocked;
+    plan.blocked_reason = Some(reason.trim().to_string());
+    plan.revision += 1;
+    accept(
+        plan,
+        format!("plan {} blocked: spec conflict recorded", plan.id),
+    )
 }
 
 /// Host-side validation of a proposed plan draft against the current active plan (§2.1.6).
@@ -1900,6 +1938,7 @@ pub fn create(
         },
         revision: 0,
         rejections_in_a_row: 0,
+        blocked_reason: None,
     };
     Ok(plan)
 }
@@ -1925,10 +1964,11 @@ pub fn apply(
                 match plan.status {
                     PlanStatus::Completed => "completed",
                     PlanStatus::Abandoned => "abandoned",
+                    PlanStatus::Blocked => "blocked",
                     PlanStatus::Active => "active",
                 }
             ),
-            "completed and abandoned plans are read-only; start a new plan with /plan",
+            "closed plans are read-only; start a new plan with /plan",
         );
     }
     match op {
@@ -1951,6 +1991,7 @@ pub fn apply(
         Op::Block { id, reason } => block(plan, &id, reason),
         Op::Unblock { id } => unblock(plan, &id),
         Op::Cancel { id, reason } => cancel(plan, id.as_deref(), reason),
+        Op::BlockPlan { reason } => block_plan(plan, reason),
         Op::Add {
             after,
             title,
@@ -3080,6 +3121,9 @@ pub fn render(plan: &Plan) -> String {
         status_word(plan.status)
     ));
     out.push_str(&format!("goal: {}\n", plan.goal.text));
+    if let Some(reason) = &plan.blocked_reason {
+        out.push_str(&format!("blocked: {reason}\n"));
+    }
     if !plan.constraints.is_empty() {
         out.push_str(&format!("constraints: {}\n", plan.constraints.join(" · ")));
     }
@@ -3158,6 +3202,7 @@ fn status_word(status: PlanStatus) -> &'static str {
         PlanStatus::Active => "active",
         PlanStatus::Completed => "completed",
         PlanStatus::Abandoned => "abandoned",
+        PlanStatus::Blocked => "blocked",
     }
 }
 
@@ -3427,6 +3472,54 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, "plan_closed");
+    }
+
+    #[test]
+    fn block_plan_records_the_quoted_conflict_and_closes() {
+        let mut plan = new_plan();
+        let err = apply(
+            &mut plan,
+            Op::BlockPlan {
+                reason: "   ".to_string(),
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "empty_reason");
+
+        let quote = "spec says 404, test test_missing expects 200";
+        assert!(matches!(
+            apply(
+                &mut plan,
+                Op::BlockPlan {
+                    reason: quote.to_string(),
+                },
+                &Limits::default(),
+                None,
+            ),
+            Ok(Applied::Updated { .. })
+        ));
+        assert_eq!(plan.status, PlanStatus::Blocked);
+        assert_eq!(plan.blocked_reason.as_deref(), Some(quote));
+        assert!(render(&plan).contains("blocked: spec says 404"));
+
+        // terminal like every closed plan: read-only except show
+        let err = apply(
+            &mut plan,
+            Op::Start {
+                id: "1".into(),
+                confirm: None,
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "plan_closed");
+        assert!(matches!(
+            apply(&mut plan, Op::Show, &Limits::default(), None),
+            Ok(Applied::Shown { .. })
+        ));
     }    #[test]
     fn complete_requires_acceptance() {
         let mut plan = new_plan();

@@ -3097,6 +3097,7 @@ impl App {
                     plan::PlanStatus::Active => "active",
                     plan::PlanStatus::Completed => "completed",
                     plan::PlanStatus::Abandoned => "abandoned",
+                    plan::PlanStatus::Blocked => "blocked",
                 };
                 self.menu_rows.extend(plan_rows(
                     &plan,

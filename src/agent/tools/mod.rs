@@ -899,7 +899,7 @@ Returns connected nodes, incident edges, and explicit truncation status.",
             name: "plan",
             kind: Kind::Mutating,
             description: "Work the structured plan, one operation per call. Ops: create, start, \
-finish, block, unblock, cancel, add, split, verify, complete, show. Call \
+finish, block, unblock, cancel, add, split, verify, complete, show, block_plan. Call \
 show first if you are unsure of the current step ids. The host owns the goal, the constraints, \
 acceptance status, validation and evidence; to change the goal, propose the full updated plan with \
 propose_plan instead. finish records completion of the step's work with a summary and does not \
@@ -907,13 +907,16 @@ by itself establish that acceptance criteria passed; it requires host-recorded e
 start only in strict mode ([plan] strict), and rejections return a code and hint to follow. \
 A manual: acceptance can be \
 waived only by the user, never verified by the model. complete requires every step closed and \
-every acceptance validation passed or waived with fresh receipts. Never invent evidence identifiers.",
+every acceptance validation passed or waived with fresh receipts. block_plan surrenders \
+an impossible task: use it when the spec contradicts the tests (or itself) instead of gaming \
+either side — quote the conflict in reason. A blocked plan is an honest result, never a failure. \
+Never invent evidence identifiers.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "op": {"type": "string", "enum": [
                         "create", "start", "finish", "block", "unblock", "cancel",
-                        "add", "split", "verify", "complete", "show"
+                        "add", "split", "verify", "complete", "show", "block_plan"
                     ]},
                     "id": {"type": "string", "description": "step id"},
                     "goal": {"type": "string", "description": "create"},
@@ -951,7 +954,7 @@ every acceptance validation passed or waived with fresh receipts. Never invent e
                     "title": {"type": "string", "description": "add: new step title"},
                     "refs": {"type": "array", "items": {"type": ["string", "object"]}, "description": "what the step touches: plain \"path[::symbol]\" means modify, or {\"path\", \"symbol\", \"intent\": \"modify|create|remove\"}"},
                     "summary": {"type": "string", "description": "finish: what was done, where, and any remaining limitations"},
-                    "reason": {"type": "string", "description": "block / cancel"},
+                    "reason": {"type": "string", "description": "block / cancel / block_plan: the quoted conflict for block_plan"},
                     "confirm": {"type": "boolean", "description": "start: re-read a stale step"},
                     "evidence": {"type": "array", "items": {"type": "integer"}, "description": "deprecated informational field; host ignores it"}
                 },
@@ -6311,6 +6314,45 @@ mod tests {
         let plan = plan::open_active(&dir).unwrap().unwrap();
         assert_eq!(plan::ladder_top(&plan), None);
         assert!(!plan::render(&plan).contains("[rung"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Surrender through the dispatcher: journal-first, terminal, quoted.
+    /// A blocked plan refuses further work like every closed plan.
+    #[test]
+    fn block_plan_surrenders_with_a_quote() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "impossible task",
+                "acceptance": ["the spec holds"],
+                "steps": [{"title": "try"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+
+        let blocked = plan_op(
+            &mut ctx,
+            &json!({"op": "block_plan", "reason": "spec says 404, test expects 200"}),
+        );
+        assert!(blocked.ok, "{}", blocked.output);
+        let plan = plan::read_plan_file(&dir, &plan_id).expect("blocked plan reads back");
+        assert_eq!(plan.status, plan::PlanStatus::Blocked);
+        assert_eq!(
+            plan.blocked_reason.as_deref(),
+            Some("spec says 404, test expects 200")
+        );
+        assert!(plan::render(&plan).contains("spec says 404"));
+
+        // terminal: nothing resolves as active anymore, so the dispatcher
+        // guides toward a new plan (the plan_closed guard below it covers
+        // direct apply callers)
+        let start = plan_op(&mut ctx, &json!({"op": "start", "id": "1"}));
+        assert!(!start.ok, "{}", start.output);
+        assert!(start.output.contains("no active plan"), "{}", start.output);
         fs::remove_dir_all(&dir).ok();
     }
 

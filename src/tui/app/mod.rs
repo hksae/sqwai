@@ -2944,6 +2944,7 @@ impl App {
                 match plan.status {
                     plan::PlanStatus::Completed => "completed",
                     plan::PlanStatus::Abandoned => "abandoned",
+                    plan::PlanStatus::Blocked => "blocked",
                     plan::PlanStatus::Active => "active",
                 }
             )),
