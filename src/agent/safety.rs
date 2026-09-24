@@ -128,7 +128,16 @@ pub fn classify_for(shell: ShellKind, cmd: &str) -> Verdict {
 }
 
 fn check_protected_path(cmd: &str) -> Verdict {
-    let lower = cmd.to_lowercase();
+    // Shells concatenate adjacent quoted/unquoted fragments before opening
+    // the file (`".sq"wai/x` === `.sqwai/x`), so strip quotes first: matching
+    // the raw text lets fragmented paths dodge the substring gate below.
+    // Over-blocking quoted prose that merely mentions .sqwai matches the
+    // existing behavior for unquoted text (fail closed on host state).
+    let dequoted: String = cmd
+        .chars()
+        .filter(|c| *c != '"' && *c != '\'' && *c != '`')
+        .collect();
+    let lower = dequoted.to_lowercase();
     if !lower.contains(".sqwai") {
         return Verdict::Safe;
     }
@@ -1074,6 +1083,34 @@ mod tests {
                     classify_for(shell, cmd),
                     Verdict::Blocked("protected_path"),
                     "expected blocked for shell {shell:?}: {cmd}"
+                );
+            }
+        }
+    }
+
+    /// Quote-fragmentation bypass (Phase 1.1 PoC): splitting `.sqwai`
+    /// across quotes (`".sq"wai/...`) must not dodge the protected-path
+    /// block — the shell concatenates them back before opening the file.
+    #[test]
+    fn sqwai_quote_fragmentation_is_blocked() {
+        let fragmented = [
+            "printf pwned > \".sq\"wai/plans/x.json",
+            "echo test > '.sq'wai/memory/MEMORY.md",
+            "cat .sqwai/jour\"nal\"/live.jsonl",
+            "rm -rf .sqwai/pl\"ans\"",
+            "type \".sqwai\\pla\"ns\\1.json",
+        ];
+        for cmd in fragmented {
+            for shell in [
+                ShellKind::Bash,
+                ShellKind::Sh,
+                ShellKind::Cmd,
+                ShellKind::PowerShell,
+            ] {
+                assert_eq!(
+                    classify_for(shell, cmd),
+                    Verdict::Blocked("protected_path"),
+                    "fragmentation bypass for shell {shell:?}: {cmd}"
                 );
             }
         }
