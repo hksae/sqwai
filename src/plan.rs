@@ -1506,7 +1506,7 @@ fn apply_record(
         }
         Some(
             "start" | "finish" | "block" | "unblock" | "cancel" | "add" | "split" | "complete"
-            | "join" | "block_plan" | "add_acceptance" | "propose_reset",
+            | "join" | "block_plan" | "propose_reset",
         ) => {
             let op: Op = serde_json::from_value(serde_json::Value::Object(fields.clone()))
                 .map_err(|_| Rejection::new("replay_shape", "unparsable op intent", ""))?;

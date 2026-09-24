@@ -675,4 +675,28 @@ mod tests {
         let res_lf = apply_one(lf_content, "line2\r\n", "modified\r\n", false).unwrap();
         assert_eq!(res_lf, "line1\nmodified\nline3\n");
     }
+
+    /// Audit verification (Phase 0): each replacement applies exactly once.
+    /// An overlapping `a → ba` on content `a` must yield `ba`, not `bba` —
+    /// the validation pass result is discarded, only the second call writes.
+    #[test]
+    fn multi_edit_applies_each_replacement_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("t.txt"), "a").unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        assert!(read(&mut ctx, "t.txt", &json!({})).ok);
+        let out = multi_edit(&mut ctx, "t.txt", &[("a".into(), "ba".into(), false)]);
+        assert!(out.ok, "{}", out.output);
+        assert_eq!(std::fs::read_to_string(dir.path().join("t.txt")).unwrap(), "ba");
+        // chained edits see each other's results, still once each
+        std::fs::write(dir.path().join("u.txt"), "a").unwrap();
+        assert!(read(&mut ctx, "u.txt", &json!({})).ok);
+        let out = multi_edit(
+            &mut ctx,
+            "u.txt",
+            &[("a".into(), "ba".into(), false), ("ba".into(), "cba".into(), false)],
+        );
+        assert!(out.ok, "{}", out.output);
+        assert_eq!(std::fs::read_to_string(dir.path().join("u.txt")).unwrap(), "cba");
+    }
 }
