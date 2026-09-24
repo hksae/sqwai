@@ -499,12 +499,6 @@ Mode switching is Tab or /mode plan|act. /plan no longer
 switches mode. Acceptance rows carry their validation state
 so a check that will not satisfy `complete` is visible before it is attempted.
 
-#### 2.1.8 Plan from issue
-Planned, not implemented: building a plan draft from a GitHub/GitLab issue
-or markdown file (fetch → extract → resolve refs → review UI). Specified in
-§12.10. No `plan from` command, `[issue]` config, or draft store exists
-today.
-
 2.1.9 Scope guard and acceptance gate
 Acceptance gate (config `plan_first: soft|off`, default `soft`). In Act mode
 a mutating tool call without an acceptance-bearing plan anywhere in the
@@ -710,6 +704,7 @@ read-only. Each entry:
 
 Markdown
 
+```markdown
 ## 18:47 · session a8f2 · trigger compaction
 
 <!-- host -->
@@ -737,7 +732,8 @@ trigger: compaction
 - Step 4 (`Ctrl+T` panel) blocked: keybinding already used by the terminal in some setups; waiting for user.
 
 ### Corrections
-- Earlier entry assumed `git log` showed this repo's history; it was a different repository. History is not recoverable.
+- Earlier entry assumed `git log` showed this repo's history; it was a different repository. History
+```
 Conventions: j#N references journal seq; headings are fixed (Done,
 Decisions, Rejected, Open, Corrections); empty sections are omitted;
 paths and symbols in backticks (the graph adapter relies on this). The example
@@ -1088,9 +1084,8 @@ Configured via `[undo].shadow` (local | user | off), default local.
 - The constraint "undo unavailable outside git repositories" is lifted: only bash reverts require git.
 
 ### 2.6 Browser
-Planned, not implemented: a CDP browser driver for verifying the project's
-own frontend on localhost. Specified in §12.6. No `browser_*` tools exist
-today.
+Dropped: no CDP driver, no `browser_*` tools, no such acceptance kind —
+a frontend check is a `cmd:` that drives whatever the project uses.
 
 3. Cycles
 3.1 Agent turn
@@ -1581,19 +1576,6 @@ between host core and UI is strictly message-driven across Tokio MPSC channels:
 `AgentEvent` for outbound telemetry, progress, tool output, and stream deltas;
 `ControlMsg` / `ApprovalDecision` for inbound control.
 
-Decoupling roadmap:
-1. **Server / Headless mode (`sqwai serve`)**:
-   Headless entry point supporting stdio or streamable HTTP/JSON-RPC (or NDJSON)
-   transport. IDE extensions (VS Code, Zed, Neovim, JetBrains) or automated pipelines
-   interact with sqwai as an external daemon process without terminal emulation.
-2. **Workspace split (`crates/`)**:
-   Modular cargo workspace partition:
-   - `sqwai-core`: library crate providing agent loop, session persistence, memory,
-     graph indexing, tools, and provider clients.
-   - `sqwai-tui`: standalone interactive terminal client using `sqwai-core`.
-   - `sqwai-server`: protocol bridge (JSON-RPC/ACP/SSE) exposing `sqwai-core` to IDEs
-     and third-party GUI clients.
-
 
 6. System prompt composition
 Content	Lives in	Notes
@@ -1622,7 +1604,7 @@ Core loop (prioritized for benchmark G0):
 - V (executable acceptance) · V1 (receipts & invalidation)
 - G0 (minimal retention benchmark) · S1 (epoch lifecycle) · I4 (resolve_ref).
 
-Infrastructure features (J helpers, K canvas/watcher/LSP-4, L browser, O unattended,
+Infrastructure features (J helpers, K canvas/watcher/LSP-4, O unattended,
 AE server split) are deferred until the core integrity loop is proven by the
 benchmark — they must not starve the core integrity mechanism.
 
@@ -1657,10 +1639,8 @@ number; a `partial` one is missing something the design calls for.
 | I4 | resolve_ref; validator refs; pre-edit warning; stale markers; reflector executor tool | done — resolve_ref, validator refs, pre-edit warning, rich provenance and freshness done; stale markers done (newly-stale acceptance gets one durable chat row per turn, deduped, re-armed on re-verify); the reflector executor is H1 work (done, §12.7) | I2, I3, F1 |
 | I5 | Memory adapter; recall/graph_query exposed; context block | partial — memory adapter, recall, graph_query done; context block planned (§12.5) | I4, F4 |
 | J | Python references; LSP diagnostics → journal; graph-view list MVP; checkpoint before/after bash | partial — graph-view list MVP done (with aggregation/multi-hop navigation), step-boundary + pre-bash checkpoints and LSP diagnostics → journal done; Python semantic references done (decorators, base classes, submodule from-imports, assigned lambdas, call-name order fix; adapter v2) | I5, C |
-| K | Canvas graph-view, watcher, LSP semantic capabilities, blast radius, path view | planned | J |
-| L | Browser: CDP driver, tree pipeline, tools, safety, trust, acceptance runner, artifacts | planned | K, F3, H0 |
+ | K | Canvas graph-view, watcher, LSP semantic capabilities, blast radius, path view | planned | J |
 | M | Test impact: `test` nodes in Rust/Python adapters, reverse traversal, command synthesis, runner integration | planned (§12.5) | I5, acceptance runners |
-| N | Plan from issue: fetch, extract, resolve, review UI, drafts | planned | I4, F1, secrets/trust |
 | O | Unattended mode: policy layer, stop conditions, `brief`, `/review`, pending memory | planned (§12.8) | F6, H0, M, Q, T |
 | P | Windows/PowerShell shell-aware safety layer (§5.2) | done | §5.2 |
 | Q | Single-instance lock + read-only fallback for plan/journal/memory/graph | done | F1 |
@@ -1689,9 +1669,8 @@ number; a `partial` one is missing something the design calls for.
 
 
 Ordering beyond the dependency column: core loop first (F7 → R → T → V → I4),
-then benchmark G, then infrastructure. K, L and O are the last passes — the
-canvas graph view, the browser and unattended mode. Order among M, N, O is
-M → N → O. Unattended is last because it is only as safe as everything under
+then benchmark G, then infrastructure. K and O are the last passes — the
+canvas graph view and unattended mode. Unattended is last because it is only as safe as everything under
 it, and `brief` is only as useful as the journal is complete.
 
 ULTRA (§12.12) sits between the benchmark and the infrastructure passes. AH is
@@ -1838,12 +1817,6 @@ Should unattended mode stop at the first blocked step, or continue with
 non-overlapping pending steps? Current policy: continue.
 Should impact analysis gate `finish` of `change` steps when impacted tests are
 red? Current policy: no — the verify step handles it.
-Should issue extraction use a cheaper model or the main model?
-Name inference for unlabeled controls: should `title`, `svg <title>`, or nearby
-text be allowed with an `(inferred)` marker, or should the browser refuse the
-control?
-Should the `vision` role read screenshot artifacts on demand, or only when the
-browser result is `undetermined`?
 
 10. Rejected decisions
 Rejected	Why
@@ -1887,28 +1860,7 @@ policy, not merely deferred:
 
 The following capabilities are specified as future evolutions, maintaining the core thesis of execution integrity and determinism:
 
-### 12.1 Standardized IDE Protocol (ACP / Agent Client Protocol)
-To allow seamless integration into external IDEs and editors (VS Code, Zed, Neovim, JetBrains) without bespoke adapters:
-- `sqwai serve` implements the emerging **Agent Client Protocol (ACP)** JSON-RPC specification over stdio and WebSocket.
-- Exposes structured session endpoints (`initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/status`).
-- Streams tool execution, diff previews, model reasoning deltas, and structured approval requests (`approval/request` -> `approval/respond`).
-
-### 12.2 Semantic Diff & Syntax-Aware Patching (Tree-sitter Lint on Write)
-To catch structural and syntax mistakes before invoking heavy compiler toolchains:
-- **Pre-mutation Syntax Guard**: File write and edit operations (`write`, `edit`, `multi_edit`, `patch`) run an in-process Tree-sitter syntax validation on modified buffers prior to disk flush.
-- If the mutated syntax tree contains `ERROR` or `MISSING` nodes (such as unmatched brackets, unclosed strings, or broken syntax delimiters), the tool call immediately fails back to the model with an exact structural error description: `Syntax error at line L, col C: unmatched token`.
-- Prevents syntax corruptions from polluting the journal or requiring a full `cargo check` / test escalation cycle.
-
-### 12.3 Smart Context Pruning & Relevance Ranking (BM25 + AST Outline)
-To preserve token context windows on massive codebases:
-- **Outline / Skeleton Mode**: High-level semantic file skeleton extractor providing `pub fn`, `struct`, `enum`, `trait`, and type signatures with bodies trimmed. The agent inspects file topology at 5-10% of the token cost before deciding to fetch full function implementations.
-- **Lexical BM25 ranking**: Hybrid deterministic retrieval over graph node keys, symbol docstrings, and recent journal entries, ranking the most relevant context blocks for injection into turn tail buffers.
-
-### 12.4 Multi-Session Worktrees / Git Isolation
-To enable parallel agent execution without interrupting the developer's working copy:
-- **Isolated task workspaces**: Long-running or unattended agent operations spawn within isolated git worktrees (`.sqwai/worktrees/<task-id>`) branched off the current HEAD.
-- Compiles, tests, and file edits occur in the isolated worktree without touching the user's primary working tree or holding a blocking filesystem lock.
-- Upon plan completion and verification, changes are offered as an atomic squashed branch or clean fast-forward merge into the user's working branch.
+### 12.3 Smart Context Pruning — done: outline tool; planned: BM25 relevance ranking.
 
 ### 12.5 Graph consumers (planned)
 Moved here from §2.4.9/§2.4.11: specified, not implemented. No graph facts
@@ -1926,36 +1878,6 @@ are injected into prompts today.
   non-blocking warning, never proof of no coverage.
 - **Blast radius.** At the finish of a change step the host lists nodes with
   `references` edges into the changed symbols.
-
-### 12.6 Browser (planned)
-Moved here from §2.6: specified, not implemented. A CDP driver for verifying
-the project's own frontend on localhost; control and observation through the
-accessibility tree (three CDP sources merged by `backendNodeId`), screenshots
-as artifacts for the user/evidence, never shown to the model until a `vision`
-role exists. Own driver, not an MCP server (stable refs, diffs, token budget,
-journal/safety integration live in the tree representation); MCP browsers stay
-a fallback behind the `Browser` trait.
-
-- **Tree.** Deterministic filtering (drop hidden/zero-size, collapse unnamed
-  wrappers, lists > 5 fold); content-addressed refs surviving re-renders;
-  stale ref → `stale_ref` + fresh snapshot; actions return a diff, wait for
-  stability (network idle + no DOM mutations 300ms, bounded by
-  `browser.action_timeout_ms`).
-- **Tools.** `browser_open/snapshot/find/text/table/form/expand/click/type/
-  select/scroll/wait_for/back/tabs/switch_tab/dialog/upload/screenshot/
-  style/bbox/console/network`; `browser_evaluate(js)` disabled by default.
-- **Safety.** Isolated profile in `.sqwai/browser/profile/`; host allowlist
-  (`localhost`, `127.0.0.1`, approval otherwise); `dangerous` class
-  (new-host nav, password/payment typing, off-localhost submit, upload,
-  evaluate, confirm accept); page content is `trust: low`; POST/PUT/DELETE →
-  `irreversible: true`, `/undo` does not apply.
-- **Journal/evidence.** `browser_action {op, ref, url_host, outcome,
-  network_errors, console_errors, irreversible, artifact}`; acceptance items
-  `browser: <url> find(<role>, "<name>") visible|absent` and
-  `browser: <url> console_errors == 0` executed host-side like `cmd:`.
-- **Blind spots.** Canvas/WebGL/SVG without ARIA, images, layout quality,
-  captchas, unlabeled widgets, visual drag targets, in-browser PDFs — reported
-  honestly so the model marks the step `blocked` instead of guessing.
 
 ### 12.7 Criticism → Reflector (PARKED — auto path)
 Moved here from §3.5; implemented, then parked: auto-detection proved too
@@ -2030,7 +1952,7 @@ classifier, and checkpoints already do not depend on a human watching;
 unattended mode adds policy on top, not new trust. Key points:
 
 - **Preconditions:** an `active` plan with ≥ 1 auto-checkable acceptance item
-  (`cmd:`/`browser:`/`ci:`); isolated execution (or explicit
+  (`cmd:`/`ci:`); isolated execution (or explicit
   `--no-isolation`, journaled as reduced guarantees); git or `--no-undo-ack`;
   `act` mode; budgets set; project lock free.
 - **Policy:** `ask_user` → step `blocked` with the question as reason;
@@ -2056,15 +1978,6 @@ system block. It does not block generation. Gates, not bugs: status words
 mark only with no successful `bash` in the window, every span only beside a
 failure in the window, and each distinct span marks once. Absence is never
 flagged.
-
-### 12.10 Plan from issue (planned)
-Moved here from §2.1.8: specified, not implemented. `sqwai plan from
-<github-url | gitlab-url | file.md | ->` builds a plan draft from an issue
-(fetch → schema-bound extract → resolve_ref per ref → review UI); nothing
-becomes the active plan without confirmation. Rules: steps proposed, not
-final; issue constraints shown separately and droppable; non-author comments
-used for refs only; upstream changes surface as `issue updated` + diff, goal
-never changed automatically. Journal `plan_draft`; config `[issue]`.
 
 ### 12.11 @-mentions (planned)
 Carried over from the pre-rewrite design ("при `@упоминании` файла или
@@ -2119,7 +2032,7 @@ changes the plan.
 machine-readably. Three requirements, all mandatory:
 
 1. **Executable.** The host runs it; the model's claim about it is not a
-   receipt. `cmd:` items (§2.1.4) and `browser:` items (§12.6) qualify.
+   receipt. `cmd:` items (§2.1.4) qualify.
 2. **Fails before.** It must fail on the pre-change tree. A check that already
    passes is not acceptance, it is a smoke test.
 3. **Frozen.** It is hashed before the first attempt; a change to the check
