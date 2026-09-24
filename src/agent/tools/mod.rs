@@ -1674,6 +1674,13 @@ pub(crate) fn bg_running_commands() -> Vec<(u64, String, String)> {
     exec::running_commands()
 }
 
+/// End every still-running background job. Called once on app shutdown so
+/// detached jobs cannot outlive the UI (and keep mutating the project).
+/// Returns how many were killed.
+pub(crate) fn kill_remaining_jobs() -> usize {
+    exec::kill_remaining_jobs()
+}
+
 /// Project-relative, lexically cleaned mutation targets of a file-writing
 /// call: `file_path` for write/edit/multi_edit, `+++` files for patch.
 /// Unresolvable or empty spellings yield nothing — the tool's own

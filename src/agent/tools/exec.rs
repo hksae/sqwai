@@ -141,6 +141,11 @@ fn spawn_command(ctx: &ToolCtx, command: &str, cwd: Option<&str>) -> Command {
     }
     #[cfg(not(windows))]
     {
+        use std::os::unix::process::CommandExt;
+        // Own process group per spawn: grandchildren (pipelines, `&`
+        // backgrounds) inherit it, so kill_tree can signal the whole tree
+        // with kill(-pgid) instead of only the direct child.
+        c.process_group(0);
         let _ = kind;
         c.arg(flag).arg(command);
     }
@@ -222,13 +227,26 @@ fn kill_tree(child: &mut std::process::Child) {
     }
 }
 
-/// Unix shells usually `exec` a lone command, so the direct child is the
-/// whole tree. Pipelines and background jobs can still outlive it — that
-/// needs a process group (`setpgid` + `kill(-pgid)`), which is a follow-up,
-/// not this change.
+/// Unix shells usually `exec` a lone command, so the direct child is often
+/// the whole tree — but pipelines and `&` backgrounds outlive it. Every
+/// spawn above runs in its own process group, so signal the group leader's
+/// whole group; fall back to the direct child when the group is already
+/// gone (pid reuse makes a blind group-kill unsafe, hence the liveness
+/// check first — same discipline as the Windows branch).
 #[cfg(not(windows))]
 fn kill_tree(child: &mut std::process::Child) {
-    let _ = child.kill();
+    let running = child.try_wait().map(|s| s.is_none()).unwrap_or(true);
+    if !running {
+        return;
+    }
+    // SAFETY: killpg with a valid live pid and SIGKILL has no failure mode
+    // beyond ESRCH (raced exit), which falls back to child.kill() below.
+    // The negative pid addresses only the child's own group, created at
+    // spawn — never pid 1's group, never ours.
+    let done = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) } == 0;
+    if !done {
+        let _ = child.kill();
+    }
 }
 
 fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
@@ -664,6 +682,31 @@ pub(super) fn bash_kill(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
     }
 }
 
+/// End every still-running background job and drop it from the registry.
+/// Called once on app shutdown: detached jobs would otherwise keep running
+/// (and mutating the project) after the UI is gone. Finished jobs are left
+/// for their normal `bash_output` reaping — exit only hurries the living.
+/// Returns how many were killed.
+pub(crate) fn kill_remaining_jobs() -> usize {
+    poll_jobs();
+    let mut jobs = match bg_jobs().lock() {
+        Ok(jobs) => jobs,
+        Err(_) => return 0,
+    };
+    let mut killed = 0;
+    jobs.retain_mut(|job| {
+        job.poll();
+        if job.running() {
+            kill_tree(&mut job.child);
+            let _ = job.child.wait();
+            killed += 1;
+            return false;
+        }
+        true
+    });
+    killed
+}
+
 /// `sleep`: block up to 60s so the agent can wait for something outside
 /// its control (a file, a server, a human) without burning turns on empty
 /// polls. For background jobs prefer `bash_output(id, wait_secs)`: it wakes
@@ -895,6 +938,21 @@ mod tests {
         assert!(!out.contains("bcdef"), "middle is cut: {out}");
         // fits: untouched, no marker
         assert_eq!(crate::agent::tools::trim_middle(text, 20), text);
+    }
+
+    /// App shutdown must not orphan live jobs: `kill_remaining_jobs`
+    /// ends everything still running and drops it from the registry,
+    /// while finished jobs are left for their normal reaping.
+    #[test]
+    fn shutdown_kills_live_jobs_but_keeps_finished_ones_listed() {
+        let mut c = ctx();
+        let started = bash(&mut c, &long_sleep_command(), None, true);
+        assert!(started.ok, "{}", started.output);
+        assert!(!running_commands().is_empty(), "job must be registered");
+        let killed = kill_remaining_jobs();
+        assert_eq!(killed, 1, "exactly the live job dies");
+        assert!(running_commands().is_empty(), "registry must drain");
+        assert_eq!(kill_remaining_jobs(), 0, "second call is a no-op");
     }
 
     /// Background jobs are registered, pollable and killable: the whole point

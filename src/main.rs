@@ -121,11 +121,18 @@ async fn run(cfg: config::Config, resume_id: Option<String>, read_only: bool) ->
     let res = app
         .run(pres.tx.clone(), pres.stats_rx, pres.alive, pres.size)
         .await;
+    // background jobs are detached by design (survive Esc); they must not
+    // survive the app — kill the living first, report after the terminal
+    // is back so the line is actually visible
+    let killed = agent::tools::kill_remaining_jobs();
     // Sequenced shutdown: no frame can interleave the restore below,
     // because the presenter has exited before it runs.
     pres.tx.shutdown();
     let _ = pres.join.join();
     restore_terminal()?;
+    if killed > 0 {
+        eprintln!("stopped {killed} background job(s) on exit");
+    }
     res
 }
 

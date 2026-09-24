@@ -1324,7 +1324,7 @@ The tool reference: what each tool touches and what the host records for it.
 | `grep` `ast_grep` | files | no | tool_call/result |
 | `write` `edit` `multi_edit` `patch` | files | yes | + file_diff, checkpoint; pre-edit graph warning per §2.4.8 |
  | `bash` | exec | yes | + checkpoint (pre/step-boundary), file_diff on tree change, approval; console output decoded as UTF-8 else cp866 (no more ����); identical re-runs get one advisory host note, not a second turn |
-| `bash_output` `bash_kill` | exec | no | tool_call/result; background jobs are registered, reaped on completion |
+ | `bash_output` `bash_kill` | exec | no | tool_call/result; background jobs are registered, reaped on completion; kills end the whole process tree (taskkill /T on Windows, own process group + killpg on Unix); live jobs die on app exit |
 | `think` | reasoning | no | tool_call/result |
 | `git_status` `git_diff` `git_log` `git_show` `git_branch` | git | no for status/diff/log/show; `git_branch` create/switch are mutating and refused in PLAN mode | tool_call/result |
 | `git_stage` `git_commit` | git | yes — plain `git` in the project root (the user's repo, not the shadow); `git_commit` takes a pre-mutation shadow snapshot | + checkpoint |
