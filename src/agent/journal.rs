@@ -580,6 +580,29 @@ impl Journal {
             .collect()
     }
 
+    /// Decision-like notes for the anchor: `decision` (why this way),
+    /// `lesson` (learned the hard way), `rejected` (considered and dropped).
+    /// Newest last — the anchor takes the tail. Same record shape as
+    /// assumptions: kind `note`, the note kind in `fields.note`, content in
+    /// `fields.text`.
+    pub fn decision_notes_in(root: &Path, session_id: &str) -> Result<Vec<String>> {
+        Ok(Self::records_for(root, session_id)?
+            .iter()
+            .filter(|record| {
+                record.kind == "note"
+                    && record
+                        .fields
+                        .get("note")
+                        .and_then(Value::as_str)
+                        .is_some_and(|kind| {
+                            matches!(kind, "decision" | "lesson" | "rejected")
+                        })
+            })
+            .filter_map(|record| record.fields.get("text").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect())
+    }
+
     /// Which of `checkpoints` have at least one recorded write.
     ///
     /// The complement is what `/undo` cannot account for: a `bash` checkpoint

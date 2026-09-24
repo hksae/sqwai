@@ -544,12 +544,26 @@ pub fn set_conversation_id(id: &str) {
 
 /// value for `x-opencode-session`, if this base URL belongs to the OpenCode
 /// gateway and a conversation id is known. Deliberately scoped by host:
-/// other providers must never see this header.
+/// other providers must never see this header. Empty ids count as unknown:
+/// a header (or key) with an empty value routes nowhere and only adds noise.
 pub fn opencode_session_value(base_url: &str) -> Option<String> {
     if !base_url.contains("opencode.ai") {
         return None;
     }
-    CONVERSATION_ID.read().ok().and_then(|g| g.clone())
+    CONVERSATION_ID
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+        .filter(|id| !id.is_empty())
+}
+
+/// Stable per-session cache-routing key for wires that document one
+/// (OpenAI `prompt_cache_key`; Codex sends the session id, subagents
+/// `{source}:{parent}`). Same value and host scoping as the gateway session
+/// header above: a stable key routes repeated prefixes at the same worker.
+/// Unknown fields are ignored where unsupported, so sending it is safe.
+pub fn prompt_cache_key(base_url: &str) -> Option<String> {
+    opencode_session_value(base_url)
 }
 
 /// attach `x-opencode-session` to a request builder when applicable
@@ -790,6 +804,21 @@ mod connection_tests {
         );
         assert_eq!(opencode_session_value("https://api.openai.com/v1"), None);
         assert_eq!(opencode_session_value("http://127.0.0.1:11434/v1"), None);
+    }
+
+    /// The routing key is the same stable value with the same host scoping;
+    /// an empty id counts as unknown rather than routing nowhere.
+    #[test]
+    fn prompt_cache_key_tracks_the_session_id() {
+        set_conversation_id("sess-7");
+        assert_eq!(
+            prompt_cache_key("https://opencode.ai/zen/go/v1"),
+            Some("sess-7".to_string())
+        );
+        assert_eq!(prompt_cache_key("https://api.openai.com/v1"), None);
+        set_conversation_id("");
+        assert_eq!(prompt_cache_key("https://opencode.ai/zen/go/v1"), None);
+        assert_eq!(opencode_session_value("https://opencode.ai/zen/go/v1"), None);
     }
 
     #[tokio::test]

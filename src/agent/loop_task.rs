@@ -5537,9 +5537,11 @@ mod effort_tests {
         assert_eq!(policy.budget(), 10_000);
         let mut messages = Vec::new();
         for i in 0..30 {
+            // user prose dominates: masking the tool results must NOT
+            // resolve pressure alone, or stage 4 never fires below
             messages.push(Message::new(
                 Role::User,
-                format!("task {i} {}", "q".repeat(500)),
+                format!("task {i} {}", "q".repeat(2000)),
             ));
             messages.push(Message::new(Role::Assistant, format!("work {i}")));
             messages.push(Message::tool_result(
@@ -5642,6 +5644,12 @@ mod effort_tests {
         let mut trims = 0;
         let mut peak_len = 0;
         for i in 0..40 {
+            // user prose per cycle: masking tool results must NOT resolve
+            // pressure alone, or no trim is ever reported below
+            messages.push(Message::new(
+                Role::User,
+                format!("task {i} {}", "q".repeat(2000)),
+            ));
             messages.push(Message::new(Role::Assistant, "").with_tool_calls(vec![
                 crate::providers::ToolCallReq::new(
                     format!("c{i}"),

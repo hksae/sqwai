@@ -10,6 +10,9 @@ use super::{ChatRequest, Provider, Role, StreamEvent, StreamResult, ToolCallReq}
 /// Anthropic accepts at most four `cache_control` markers in one request and
 /// rejects the request beyond that.
 const MAX_CACHE_BREAKPOINTS: usize = 4;
+/// History length from which the middle anchor marker pays off: below this
+/// the end marker's ~20-block lookback already covers the whole history.
+const MID_HISTORY_MARKER_MSGS: usize = 10;
 use crate::config::{EffortLevel, ResolvedProvider};
 
 #[derive(Clone)]
@@ -69,8 +72,9 @@ fn content_blocks(m: &super::Message, thinking_on: bool) -> Vec<Value> {
 /// `cache_breakpoints` mirrors
 /// [`ProviderCapabilities::prompt_cache_documented`](super::ProviderCapabilities):
 /// breakpoints are only emitted for providers that document an addressable
-/// cache key. Three markers total, inside the budget of four: tools, the end
-/// of the stable system prefix, and the last history message. Volatile parts
+/// cache key. Up to four markers, inside the budget: tools, the end
+/// of the stable system prefix, the last history message — plus a middle
+/// history anchor on long histories (see below). Volatile parts
 /// travel unmarked after the history, so a changed date or git status costs
 /// only the tail instead of the cached prefix behind it.
 pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints: bool) -> Value {    // What the caller asked for, falling back to the provider default. This
@@ -152,6 +156,21 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
         && let Some(block) = arr.last_mut()
     {
         block["cache_control"] = json!({"type": "ephemeral"});
+    }
+    // fourth marker, mid-history: a breakpoint reaches ~20 blocks back, so
+    // one huge parallel tool batch between the stable prefix and the end
+    // marker would orphan everything before it. A middle anchor keeps the
+    // first half hittable. Only on long histories — adjacent markers buy
+    // nothing, and every marker is a potential cache write.
+    if cache_breakpoints && msgs.len() >= MID_HISTORY_MARKER_MSGS {
+        let mid = msgs.len() / 2;
+        if let Some(arr) = msgs[mid]
+            .get_mut("content")
+            .and_then(|c| c.as_array_mut())
+            && let Some(block) = arr.last_mut()
+        {
+            block["cache_control"] = json!({"type": "ephemeral"});
+        }
     }
     // volatile tail, unmarked and last: date, git status, nudges. Merged
     // into a trailing user turn when the API's alternation allows it.
@@ -667,6 +686,81 @@ mod tests {
                 .count();
         assert_eq!(marked, 3, "{body}");
         assert!(marked <= MAX_CACHE_BREAKPOINTS, "{body}");
+    }
+
+    /// Long histories earn the middle anchor: a breakpoint reaches ~20
+    /// blocks back, so one huge tool batch would otherwise orphan the first
+    /// half. Short histories stay at three markers.
+    #[test]
+    fn long_histories_carry_a_middle_anchor_marker() {
+        fn count_marked(body: &serde_json::Value) -> usize {
+            body["system"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|part| part.get("cache_control").is_some())
+                .count()
+                + body["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|tool| tool.get("cache_control").is_some())
+                    .count()
+                + body["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|m| m["content"].as_array().cloned().unwrap_or_default())
+                    .filter(|block| block.get("cache_control").is_some())
+                    .count()
+        }
+        fn history_req(n: usize) -> ChatRequest {
+            ChatRequest {
+                model_id: "m".into(),
+                system: vec![crate::providers::SystemPart::cached("stable")],
+                messages: (0..n)
+                    .map(|i| {
+                        // alternating roles: same-role turns merge, which
+                        // would collapse the history under test
+                        let role = if i % 2 == 0 {
+                            crate::providers::Role::User
+                        } else {
+                            crate::providers::Role::Assistant
+                        };
+                        crate::providers::Message::new(role, format!("turn {i}"))
+                    })
+                    .collect(),
+                effort: None,
+                effort_support: Default::default(),
+                max_tokens: None,
+                tools: vec![crate::providers::ToolSpec {
+                    name: "read".into(),
+                    description: "d".into(),
+                    parameters: json!({"type": "object"}),
+                }],
+                previous_response_id: None,
+                context_transport: crate::providers::ContextTransport::Stateless,
+            }
+        }
+        // short history: tools + system + end, no middle anchor
+        let short = build_body(&history_req(4), 8192, true);
+        assert_eq!(count_marked(&short), 3, "{short}");
+        // long history: the middle message carries the fourth marker
+        let long = build_body(&history_req(12), 8192, true);
+        assert_eq!(count_marked(&long), 4, "{long}");
+        let msgs = long["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 12);
+        // consecutive user turns merge (alternation), so count distinct
+        // marked messages rather than positions: exactly two of them
+        let marked_msgs = msgs
+            .iter()
+            .filter(|m| {
+                m["content"]
+                    .as_array()
+                    .is_some_and(|arr| arr.iter().any(|b| b.get("cache_control").is_some()))
+            })
+            .count();
+        assert_eq!(marked_msgs, 2, "middle anchor plus end marker: {long}");
     }
 
     #[test]

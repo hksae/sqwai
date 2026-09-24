@@ -1091,8 +1091,10 @@ text
   2 tool schemas (sorted by name; MCP tools merged and re-sorted with the
     built-ins — server order must not leak into the prefix; connection
     happens before the first turn so A does not change mid-session)
- 3 AGENTS.md + MEMORY.md + skills (prompt extensions only; project skills
-    override user skills with the same name)
+  3 AGENTS.md + MEMORY.md + skills (prompt extensions only; project skills
+     override user skills with the same name) — re-read from disk every
+     turn, so mid-session edits (including across a compaction) land on the
+     next request; identical bytes keep the same cache key
 [B  session prefix — changes on start/compaction — cache breakpoint after]
  4 environment (OS, shell, cwd, toolchains, HEAD at session start, tree ≤ N levels)
  5 anchor (§3.3.3): goal, constraints, acceptance, plan snapshot, host facts,
@@ -1134,7 +1136,10 @@ Tool-output pruning. Every compaction pass first prunes old tool-result
 history (no separate stage, no ratio knob):
 tool outputs older than the last 6 messages are cut to 2000 chars (outputs
 over 20000 chars to an 800-char head) plus the note "…(old tool output
-compacted; rerun the tool to see the full result again)". User
+compacted; rerun the tool to see the full result again)". Successful results
+older than 24 messages are masked to a stub instead — at ~10 past turns the
+output was used or superseded; error results never mask (a masked error
+invites retrying a dead end). User
 messages and assistant prose are kept verbatim. This is cheap, preserves the
 anchor, and delays a full compaction by several turns. Summarization and
 hard-trim (below) still trigger at the threshold. A forced /compact that
@@ -1182,10 +1187,13 @@ plan 01J… rev 7: 1 done · 1 in_progress · 0 blocked · 2 pending · 0 cancel
 files changed this session: src/session/mod.rs · src/tui/app/mod.rs
 last verification: successful exec j#15
 open assumptions: step 2 assumes `timeout` not already used (j#19)
+decisions: chose btree over lsm · flush before read
+recent failures: bash j#12: boom: segfault
 Full file lists, full journal, and full receipts live in host-state
 (journal + plan file); the anchor keeps only what the next turns need to
 act (each field length-bounded; at most 8 open steps, 24 files, 6
-assumptions). Goal, constraints, acceptance validation, the current step,
+assumptions, 4 decisions, 2 recent failures — cancelled runs excluded).
+Goal, constraints, acceptance validation, the current step,
 and the assumption list are always present when the data exists.
 
 3.4 Resume (fork deleted)
@@ -1300,7 +1308,10 @@ The tool reference: what each tool touches and what the host records for it.
 | MCP tools `mcp__<server>__<tool>` | ext | per server | tool_call/result + approval via safety |
 
 Every tool: JSON schema, strict argument validation, normalized result
-{ok, output, exit_code?, diff?, file_diff?, cancelled?}. Read-before-edit guard: edit|multi_edit|patch
+{ok, output, exit_code?, diff?, file_diff?, cancelled?}. Long output is
+mid-trimmed to a shared budget (head + tail, middle cut — head carries the
+echo, tail the errors): exec/bash spills the full log to a file and returns
+head+tail plus the path; git/webfetch return head+tail in place. Read-before-edit guard: edit|multi_edit|patch
 refuse files not read in this session — the host keeps a path→hash map of
 reads (`files_read`, merged back across tool threads); a file whose disk hash
 no longer matches what was read must be re-read.
@@ -1316,7 +1327,13 @@ the TUI. Provider-owned turn state round-trips opaquely (`provider_state` on
 the message): the Responses wire's reasoning items, and — on the Messages
 wire — thinking text with its signature plus redacted blocks, replayed first
 in their own assistant turn while thinking is on (without them the next
-request with tool use is a 400). Config: provider = preset | base_url + format + api_key_env; models
+request with tool use is a 400). OpenAI-compatible wires send a stable
+`prompt_cache_key` (the session id, host-scoped like the gateway session
+header) so repeated prefixes route at the same worker. The Messages wire
+marks tools, stable-system end, last history message — plus a middle history
+anchor on histories of 10+ messages, because a breakpoint reaches ~20 blocks
+back and one huge tool batch would otherwise orphan the first half; four
+markers max, hard API budget. Config: provider = preset | base_url + format + api_key_env; models
 declared with id, context, effort. Presets: OpenAI, Anthropic,
 OpenRouter, DeepSeek, Groq, Mistral, xAI, Together, Ollama/LM Studio/vLLM.
 Models declare an optional `fallback` to another model id (same or other

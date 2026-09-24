@@ -336,7 +336,7 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
         } else {
             format!("full output written to {}", spill(&combined).display())
         };
-        format!("{note}\n{}", tail_of(&combined, MAX_RETURNED))
+        format!("{note}\n{}", super::trim_middle(&combined, MAX_RETURNED))
     } else {
         combined
     };
@@ -716,18 +716,6 @@ fn tail_of_file(path: &PathBuf, max: usize) -> Option<String> {
     })
 }
 
-fn tail_of(text: &str, wanted: usize) -> String {
-    if text.len() <= wanted {
-        text.to_string()
-    } else {
-        let mut cut = text.len().saturating_sub(wanted);
-        while cut < text.len() && !text.is_char_boundary(cut) {
-            cut += 1;
-        }
-        format!("…(output truncated, showing tail)\n{}", &text[cut..])
-    }
-}
-
 fn spill(contents: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("sqwai-cmd");
     let _ = std::fs::create_dir_all(&dir);
@@ -896,11 +884,15 @@ mod tests {
     }
 
     #[test]
-    fn tail_of_returns_requested_number_of_trailing_bytes() {
+    fn oversized_output_keeps_head_and_tail_with_a_marker() {
         let text = "0123456789abcdefghij";
-        let tail = tail_of(text, 5);
-        assert!(tail.ends_with("fghij"));
-        assert!(tail.contains("output truncated"));
+        let out = crate::agent::tools::trim_middle(text, 5);
+        assert!(out.starts_with("0"), "head survives: {out}");
+        assert!(out.ends_with("ghij"), "tail survives: {out}");
+        assert!(out.contains("output truncated"), "{out}");
+        assert!(!out.contains("bcdef"), "middle is cut: {out}");
+        // fits: untouched, no marker
+        assert_eq!(crate::agent::tools::trim_middle(text, 20), text);
     }
 
     /// Background jobs are registered, pollable and killable: the whole point

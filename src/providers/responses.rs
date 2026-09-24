@@ -199,7 +199,11 @@ impl Provider for ResponsesProvider {
         stream! {
             let mut req = req;
             this.sanitize(&mut req);
-            let body = build_body(&req);
+            let mut body = build_body(&req);
+            // stable routing key, same convention as the OpenAI wire above
+            if let Some(key) = super::prompt_cache_key(&this.url) {
+                body["prompt_cache_key"] = serde_json::json!(key);
+            }
             let mut r = this.http.post(&this.url);
             if let Some(k) = &this.api_key { r = r.bearer_auth(k); }
             r = super::with_opencode_session(r, &this.url);

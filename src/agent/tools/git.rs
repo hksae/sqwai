@@ -8,7 +8,8 @@ use super::{Outcome, ToolCtx};
 use serde_json::Value;
 use std::process::{Command, Stdio};
 
-const MAX_OUTPUT: usize = 40_000;
+/// output cap in chars: head+tail mid-trim, same budget as exec/webfetch
+const MAX_OUTPUT: usize = 30_000;
 
 fn arg<'a>(args: &'a Value, key: &str) -> &'a str {
     args.get(key).and_then(Value::as_str).unwrap_or_default()
@@ -53,14 +54,7 @@ fn run_git(ctx: &ToolCtx, args: &[&str]) -> Outcome {
 }
 
 fn truncate(text: &str) -> String {
-    if text.len() <= MAX_OUTPUT {
-        return text.to_string();
-    }
-    let mut start = text.len() - MAX_OUTPUT;
-    while !text.is_char_boundary(start) {
-        start += 1;
-    }
-    format!("[output truncated]\n{}", &text[start..])
+    super::trim_middle(text, MAX_OUTPUT)
 }
 
 pub fn status(ctx: &ToolCtx, args: &Value) -> Outcome {

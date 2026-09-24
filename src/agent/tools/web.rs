@@ -6,7 +6,8 @@ use serde_json::Value;
 use std::time::Duration;
 
 const MAX_BODY_BYTES: usize = 1_000_000;
-const MAX_OUTPUT_CHARS: usize = 40_000;
+/// output cap in chars: head+tail mid-trim, same budget as exec/git
+const MAX_OUTPUT_CHARS: usize = 30_000;
 
 fn url_arg(args: &Value) -> Result<Url, String> {
     let raw = args
@@ -267,16 +268,7 @@ fn decode_entities(text: &str) -> String {
 }
 
 fn truncate(text: &str) -> String {
-    if text.chars().count() <= MAX_OUTPUT_CHARS {
-        return text.trim().to_string();
-    }
-    format!(
-        "{}\n[webfetch output truncated]",
-        text.chars()
-            .take(MAX_OUTPUT_CHARS)
-            .collect::<String>()
-            .trim_end()
-    )
+    super::trim_middle(text.trim(), MAX_OUTPUT_CHARS)
 }
 
 #[cfg(test)]
@@ -345,8 +337,14 @@ mod tests {
     #[test]
     fn truncates_by_unicode_character_count_and_marks_output() {
         let output = truncate(&"€".repeat(MAX_OUTPUT_CHARS + 10));
-        assert!(output.ends_with("[webfetch output truncated]"));
-        assert!(output.chars().count() <= MAX_OUTPUT_CHARS + 30);
+        assert!(output.contains("output truncated"), "{output}");
+        assert!(output.starts_with("€"), "head survives: {output}");
+        assert!(output.ends_with("€"), "tail survives: {output}");
+        assert!(output.chars().count() <= MAX_OUTPUT_CHARS + 60, "{output}");
+    }
+
+    #[test]
+    fn decode_entities_handles_named_and_numeric_refs() {
         assert_eq!(
             decode_entities("&lt;x&gt; &quot;y&quot; &#39;z&#39;"),
             "<x> \"y\" 'z'"

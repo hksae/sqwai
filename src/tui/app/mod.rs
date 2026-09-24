@@ -2171,6 +2171,11 @@ impl App {
         self.startup = false;
         // pick up any provider/key change made since the last turn
         self.rebuild_provider();
+        // AGENTS.md, MEMORY.md and skills are re-read every turn: a file the
+        // user (or the agent) changed mid-session — including across a
+        // compaction — reaches the model on the next request. Identical bytes
+        // keep the same cache key, so the rebuild costs disk reads, not cache.
+        self.stable_prefix = self.stable_prefix();
         // session-aware gateways (OpenCode Go) route on this per conversation
         crate::providers::set_conversation_id(&self.session.id.to_string());
         self.push_segment(Segment::User(text.clone()));

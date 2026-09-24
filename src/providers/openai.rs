@@ -213,7 +213,13 @@ impl Provider for OpenAiProvider {
                     "openai-compatible: previous_response_id dropped (not supported by Chat Completions)",
                 );
             }
-        let body = OpenAiProvider::build_body(&req);
+        let mut body = OpenAiProvider::build_body(&req);
+            // stable routing key: repeated prefixes of this session land on
+            // the same worker (Codex convention). Host-scoped, ignored where
+            // unsupported.
+            if let Some(key) = super::prompt_cache_key(&this.base_url) {
+                body["prompt_cache_key"] = serde_json::json!(key);
+            }
             // one-line request summary for gateway debugging (body itself
             // can be 50KB+ of system prompt, so only its shape is logged)
             if let Some(obj) = body.as_object() {

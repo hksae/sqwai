@@ -178,6 +178,60 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
                 .join(" · ")
         ));
     }
+    // decisions, lessons and rejected approaches survive for the same
+    // reason: post-compaction "why did we do it this way" is otherwise
+    // answered from model memory rather than from facts.
+    let decisions =
+        crate::agent::journal::Journal::decision_notes_in(root, session_id).unwrap_or_default();
+    if decisions.is_empty() {
+        out.push_str("decisions: none\n");
+    } else {
+        let start = decisions.len().saturating_sub(4);
+        out.push_str(&format!(
+            "decisions: {}\n",
+            decisions[start..]
+                .iter()
+                .map(|text| bounded(text, 160))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        ));
+    }
+    // recent failures with their own words: exact error texts the next turn
+    // needs, without re-running the command. Cancelled runs are the user's
+    // doing, not failures, and stay out.
+    let mut failures = Vec::new();
+    if let Ok(records) = crate::agent::journal::Journal::records_for(root, session_id) {
+        for record in records.iter().rev() {
+            if failures.len() >= 2 {
+                break;
+            }
+            if record.kind != "tool_result" {
+                continue;
+            }
+            if record.fields.get("ok").and_then(|value| value.as_bool()) != Some(false) {
+                continue;
+            }
+            if record.fields.get("code").and_then(|value| value.as_str()) == Some("cancelled") {
+                continue;
+            }
+            let tool = record
+                .fields
+                .get("tool")
+                .and_then(|value| value.as_str())
+                .unwrap_or("?");
+            let summary = record
+                .fields
+                .get("summary")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            failures.push(format!("{tool} j#{}: {}", record.seq, bounded(summary, 200)));
+        }
+    }
+    if failures.is_empty() {
+        out.push_str("recent failures: none\n");
+    } else {
+        out.push_str(&format!("recent failures: {}\n", failures.join(" · ")));
+    }
     out
 }
 
@@ -265,15 +319,25 @@ const PRUNE_TOOL_CHARS: usize = 2_000;
 /// older tool results larger than this are reduced to a short head
 const PRUNE_DROP_CHARS: usize = 20_000;
 const PRUNE_HEAD_CHARS: usize = 800;
+/// successful tool results older than this many messages are masked to a
+/// stub: at ~10 past turns the output has either been used or superseded.
+/// Error results stay at the prune tier — a masked error invites retrying a
+/// dead end (Manus: errors are not deleted).
+const MASK_KEEP_RECENT: usize = 24;
+
+pub const PRUNE_NOTE: &str =
+    "…(old tool output compacted; rerun the tool to see the full result again)";
+
+/// Stub replacing a masked tool result. Starts with the marker so a second
+/// pass is a no-op and the cache is not re-keyed by re-masking.
+pub const MASK_STUB: &str =
+    "…(output masked at compaction; rerun the tool to see the full result again)";
 /// messages kept verbatim after a summarization
 const SUMMARY_KEEP_RECENT: usize = 6;
 /// share of the context kept free for the answer
 const RESERVE_RATIO: f64 = 0.2;
 const RESERVE_MIN: u64 = 8_000;
 const RESERVE_MAX: u64 = 32_000;
-
-pub const PRUNE_NOTE: &str =
-    "…(old tool output compacted; rerun the tool to see the full result again)";
 
 /// System block for the summarization request. Deliberately tiny: this request
 /// competes for the same context it is trying to free.
@@ -426,30 +490,39 @@ pub fn estimated_tokens(messages: &[Message]) -> u64 {
 }
 
 /// Stage 1: shrink tool output that has aged out of the working set.
-/// Returns the messages plus whether anything actually changed.
+/// Two tiers: recent-old results are cut to a head (prune), long-past
+/// successful results are masked to a stub. Error results never mask.
+/// Returns the messages plus whether anything actually changed; both tiers
+/// converge, so repeated passes are no-ops.
 pub fn prune(messages: &[Message]) -> (Vec<Message>, bool) {
     let keep_from = messages.len().saturating_sub(PRUNE_KEEP_RECENT);
+    let mask_from = messages.len().saturating_sub(MASK_KEEP_RECENT);
     let mut out = Vec::with_capacity(messages.len());
     let mut changed = false;
     for (idx, message) in messages.iter().enumerate() {
         let mut copy = message.clone();
-        if idx < keep_from && message.role == Role::Tool {
-            let chars = message.content.chars().count();
-            let replacement = if chars > PRUNE_DROP_CHARS {
-                let head: String = message.content.chars().take(PRUNE_HEAD_CHARS).collect();
-                Some(format!("{head}\n{PRUNE_NOTE}"))
-            } else if chars > PRUNE_TOOL_CHARS {
-                let head: String = message.content.chars().take(PRUNE_TOOL_CHARS).collect();
-                Some(format!("{head}\n{PRUNE_NOTE}"))
-            } else {
-                None
-            };
-            if let Some(next) = replacement {
-                // only flag a change when the content truly differs, so a second
-                // pass over already-pruned history is a no-op
-                if next != message.content {
-                    copy.content = next;
-                    changed = true;
+        if message.role == Role::Tool && !message.content.starts_with(MASK_STUB) {
+            if idx < mask_from && !message.is_error {
+                copy.content = MASK_STUB.to_string();
+                changed = true;
+            } else if idx < keep_from {
+                let chars = message.content.chars().count();
+                let replacement = if chars > PRUNE_DROP_CHARS {
+                    let head: String = message.content.chars().take(PRUNE_HEAD_CHARS).collect();
+                    Some(format!("{head}\n{PRUNE_NOTE}"))
+                } else if chars > PRUNE_TOOL_CHARS {
+                    let head: String = message.content.chars().take(PRUNE_TOOL_CHARS).collect();
+                    Some(format!("{head}\n{PRUNE_NOTE}"))
+                } else {
+                    None
+                };
+                if let Some(next) = replacement {
+                    // only flag a change when the content truly differs, so a second
+                    // pass over already-pruned history is a no-op
+                    if next != message.content {
+                        copy.content = next;
+                        changed = true;
+                    }
                 }
             }
         }
@@ -894,6 +967,59 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    /// Decisions, lessons and recent failures survive in the anchor: after a
+    /// compaction "why this way" and "what broke" must come from host state,
+    /// not from model memory. Cancelled runs are the user's doing, not
+    /// failures, and stay out.
+    #[test]
+    fn anchor_surfaces_decisions_and_recent_failures() {
+        let root = temp_root("anchor-decisions");
+        let mut journal = crate::agent::journal::Journal::open(&root, "s").unwrap();
+        journal
+            .append(
+                "note",
+                serde_json::json!({"note": "decision", "text": "chose btree over lsm"}),
+            )
+            .unwrap();
+        journal
+            .append(
+                "note",
+                serde_json::json!({"note": "lesson", "text": "flush before read"}),
+            )
+            .unwrap();
+        journal
+            .append(
+                "note",
+                serde_json::json!({"note": "assumption", "text": "disk is fast"}),
+            )
+            .unwrap();
+        journal
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "bash", "ok": false, "summary": "boom: segfault"}),
+            )
+            .unwrap();
+        journal
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "bash", "ok": false, "code": "cancelled"}),
+            )
+            .unwrap();
+
+        let rendered = anchor(&root, "s");
+        assert!(rendered.contains("chose btree over lsm"), "{rendered}");
+        assert!(rendered.contains("flush before read"), "{rendered}");
+        let decisions = rendered
+            .lines()
+            .find(|line| line.starts_with("decisions:"))
+            .unwrap_or("");
+        assert!(!decisions.contains("disk is fast"), "assumptions have their own line: {decisions}");
+        assert!(rendered.contains("open assumptions: j#3: disk is fast"), "{rendered}");
+        assert!(rendered.contains("boom: segfault"), "{rendered}");
+        assert!(!rendered.contains("cancelled"), "user-cancelled runs are not failures: {rendered}");
+        std::fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn anchor_prefers_session_plan_over_newer_global_plan() {
         let root = temp_root("anchor-session-scope");
@@ -1149,6 +1275,43 @@ mod tests {
         let (again, changed_again) = prune(&pruned);
         assert!(!changed_again);
         assert_eq!(again.len(), pruned.len());
+    }
+
+    /// Long-past successful results mask to a stub; errors stay readable
+    /// (a masked error invites retrying a dead end); masking converges.
+    #[test]
+    fn prune_masks_aged_out_successes_but_not_errors() {
+        let mut messages: Vec<Message> = Vec::new();
+        for i in 0..15 {
+            messages.push(user(&format!("turn {i}")));
+            let mut result =
+                Message::tool_result(format!("call{i}"), "y".repeat(6_000), false);
+            if i == 2 {
+                result.is_error = true;
+            }
+            messages.push(result);
+        }
+        assert_eq!(messages.len(), 30);
+        let (pruned, changed) = prune(&messages);
+        assert!(changed);
+        assert_eq!(pruned.len(), 30, "masking drops no message");
+        // idx 1 (turn 0): past the mask window → stub
+        assert_eq!(pruned[1].content, MASK_STUB, "{}", pruned[1].content);
+        // idx 5 (turn 2): error → prune tier, never the stub
+        assert!(pruned[5].content.contains(PRUNE_NOTE), "{}", pruned[5].content);
+        assert!(!pruned[5].content.contains("masked"), "{}", pruned[5].content);
+        // newest results keep their full payload
+        assert!(pruned[29].content.contains(&"y".repeat(6_000)));
+        // pairs stay paired: masking touches results, never calls
+        for pair in pruned.chunks(2) {
+            assert_eq!(pair[0].role, Role::User);
+            assert_eq!(pair[1].role, Role::Tool);
+        }
+        // masking is idempotent
+        let (again, changed_again) = prune(&pruned);
+        assert!(!changed_again);
+        assert_eq!(again.len(), pruned.len());
+        assert_eq!(again[1].content, MASK_STUB);
     }
 
     #[test]

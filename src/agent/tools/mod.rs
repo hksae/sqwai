@@ -1337,6 +1337,28 @@ pub fn merge_specs(
     base
 }
 
+/// Mid-trim for tool output: keep a third of the budget at the head and the
+/// rest at the tail, cut the middle. The head carries the command echo and
+/// first lines, the tail the errors and the result; the middle is the least
+/// informative slice (lost-in-the-middle). Char-boundary safe; text that
+/// fits passes through untouched, with no marker.
+pub fn trim_middle(text: &str, max_chars: usize) -> String {
+    let total = text.chars().count();
+    if total <= max_chars {
+        return text.to_string();
+    }
+    let head_len = max_chars / 3;
+    let tail_len = max_chars - head_len;
+    let head: String = text.chars().take(head_len).collect();
+    let tail: String = text.chars().skip(total - tail_len).collect();
+    format!(
+        "{}\n…(output truncated: {} chars omitted)\n{}",
+        head.trim_end(),
+        total - head_len - tail_len,
+        tail.trim_start()
+    )
+}
+
 const READ_MAX_BYTES: usize = 400_000;
 
 /// True when the step a subagent was spawned for still exists in the named
@@ -5618,6 +5640,18 @@ mod tests {
         let merged = merge_specs(vec![spec("read"), spec("write")], &[spec("aaa"), spec("zzz")]);
         let names: Vec<String> = merged.iter().map(|t| t.name.clone()).collect();
         assert_eq!(names, vec!["aaa", "read", "write", "zzz"]);
+    }
+
+    /// Mid-trim keeps head+tail around the marker, never splits a codepoint,
+    /// and leaves fitting text untouched.
+    #[test]
+    fn trim_middle_keeps_head_and_tail() {
+        assert_eq!(trim_middle("short", 10), "short");
+        let out = trim_middle(&"€".repeat(100), 9);
+        assert!(out.contains("output truncated"), "{out}");
+        assert!(out.starts_with("€€€"), "head: {out}");
+        assert!(out.ends_with("€€€€€€"), "tail: {out}");
+        assert!(out.chars().count() <= 9 + 60, "{out}");
     }
 
     /// G0 baseline (§8.2): the durable machinery is invisible to the model.
