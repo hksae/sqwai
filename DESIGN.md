@@ -1224,10 +1224,13 @@ Resume is the only multi-session path. Fork is deleted: no `/fork` command,
 no plan copy, no journal fork record.
 
 3.5 Criticism → Reflector
-Implemented: a three-level criticism pipeline (L0 fact block,
-L1 blinded reflector, L2 /verify) for "you broke it" moments. Specified in
-§12.7. L0 (learned detector + artifact signal + fact block + `criticism`
-marker), neutralizer, blinded executor and host verdict mapping all exist (H1).
+PARKED (auto path): auto-detection proved too imprecise, so nothing invokes
+the pipeline automatically anymore — re-enable only via SQWAI_AUTO_REFLECTOR=1
+for experiments. The mechanism stays in code and manual /verify drives it on
+request: a three-level pipeline (L0 fact block, L1 blinded reflector,
+L2 /verify) for "you broke it" moments. Specified in §12.7. L0 (learned
+detector + artifact signal + fact block + `criticism` marker), neutralizer,
+blinded executor and host verdict mapping all exist (H1).
 3.6 Undo
 /undo [n] attempts to restore sqwai-recorded changes from the n-th previous
 checkpoint (default 1) — not a guaranteed full-tree rollback. `/undo step N`
@@ -1622,8 +1625,8 @@ number; a `partial` one is missing something the design calls for.
 | F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, zstd) + layer-2 shadow repo driven by git CLI synchronously; path-scoped restore; `/undo step N` | done | F1 |
 | F7b | Crash-safe mutation protocol | done differently — no `mutation_started/observed` sweep; Layer-1 pre-images + `file_diff` chain cover single-step revert instead | F7 |
 | G0 | Minimal comparative retention benchmark (§8.2): plan + journal + anchor vs baseline | done — harness as ignored tests (minidb T1–T3 + kaiwai T4 matrix), pre-registration, eval files and analyses under bench/ | F1b, F6 |
-| H0 | L0 fact block + criticism detector | done — detector as learned student (offline LLM-labeled data, char-trigram LR, pure-Rust inference) + artifact signal + strict trigger + block-D injection + `criticism` marker + LLM-confirm for Maybe (§12.7) | F2 |
-| H1 | Reflector: Scope/Neutralizer/Executor/Verdict, /verify | done — full pipeline (Scope, Neutralizer with tone-invariance test, min-loop Executor in reflector ctx with dispatch refusal, host verdict mapping, host-rendered [verified], verdict file, recurrence, diary lesson) + `/verify [--full]` as background task + self-protection (full budgets on 2nd objection, journal-first disable on 3rd); live-model tone + executor tests | H0, D |
+ | H0 | L0 fact block + criticism detector | PARKED (auto path) — detector as learned student (offline LLM-labeled data, char-trigram LR, pure-Rust inference) + artifact signal + strict trigger + block-D injection + `criticism` marker + LLM-confirm for Maybe (§12.7); mechanism kept for manual /verify | F2 |
+ | H1 | Reflector: Scope/Neutralizer/Executor/Verdict, /verify | PARKED (auto path) — full pipeline kept for manual /verify: Scope, Neutralizer with tone-invariance test, min-loop Executor in reflector ctx with dispatch refusal, host verdict mapping, host-rendered [verified], verdict file, recurrence, diary lesson + `/verify [--full]` as background task + self-protection (full budgets on 2nd objection, journal-first disable on 3rd); live-model tone + executor tests | H0, D |
 | I1 | Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild | done — rusqlite (bundled) engine with §2.4.2 schema | E |
 | I2 | Rust + Python + TypeScript adapters (tree-sitter, minimal: declarations) | done — tree-sitter declarations and lexical imports for Rust, Python, TypeScript | I1 |
 | I3 | Freshness: edit/bash/undo/head triggers; status semantics; out-of-order protection (mandatory) | done — generation stamps, replace_file_subgraph_stamped, out-of-order protection, disk-hash freshness | I1 |
@@ -1930,8 +1933,12 @@ a fallback behind the `Browser` trait.
   captchas, unlabeled widgets, visual drag targets, in-browser PDFs — reported
   honestly so the model marks the step `blocked` instead of guessing.
 
-### 12.7 Criticism → Reflector (planned)
-Moved here from §3.5: specified, not implemented. Three levels for "you broke
+### 12.7 Criticism → Reflector (PARKED — auto path)
+Moved here from §3.5; implemented, then parked: auto-detection proved too
+imprecise, so nothing invokes the pipeline automatically anymore
+(re-enable only via SQWAI_AUTO_REFLECTOR=1 for experiments). Manual /verify
+drives the kept mechanism on request. Original spec below, kept for the
+record. Three levels for "you broke
 it" moments — cheap always, expensive by escalation:
 
 - **L0 fact block.** A criticism detector injects journal facts into block D

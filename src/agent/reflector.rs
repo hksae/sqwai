@@ -1,5 +1,18 @@
 //! H1 reflector, slice 1: Scope + Neutralizer (§12.7).
 //!
+//! PARKED (auto path — same as H0): nothing invokes the pipeline
+//! automatically anymore; manual /verify drives it on request. Mechanism
+//! stays intact for that path and future experiments.
+//!
+//! The neutralizer turns user criticism into neutral, verifiable checks.
+//! It sees the criticism (de-framing is its job); the executor (slice 2)
+//! will be blinded — checks with `expects` stripped, never the complaint.
+//! Slice 1 runs the neutralizer synchronously on Fire+artifact turns and
+//! records the checks in a journal `reflect` record. Nothing is shown yet:
+//! the visible `[verified]` block waits for Executor+Verdict (slice 2).
+//! Running now still pays off: real checks in production validate the
+//! schema and the prompt before anything depends on them.
+//!
 //! The neutralizer turns user criticism into neutral, verifiable checks.
 //! It sees the criticism (de-framing is its job); the executor (slice 2)
 //! will be blinded — checks with `expects` stripped, never the complaint.

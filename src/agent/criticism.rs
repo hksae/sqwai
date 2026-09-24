@@ -1,5 +1,10 @@
 //! H0 criticism detector: pure-Rust inference for the learned student.
 //!
+//! PARKED: auto-detection fires too imprecisely, so nothing calls this
+//! automatically anymore (see `auto_reflector_enabled` in loop_task — the
+//! auto path runs only with SQWAI_AUTO_REFLECTOR=1). The detector and the
+//! weights stay for manual /verify and future experiments.
+//!
 //! The model is a logistic regression on hashed char-trigrams, trained
 //! offline by `bench/criticism/train.py` from LLM-labeled examples.
 //! Weights ship as `criticism_weights.json` (sparse, versioned) and are

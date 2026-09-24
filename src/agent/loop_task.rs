@@ -1254,6 +1254,13 @@ fn repeat_bash_note(messages: &[Message], call: &ToolCallReq, output: &str) -> O
     }
 }
 
+/// Auto-reflector kill switch (PARKED — see the H0 block in run_agent).
+/// The mechanism stays callable (manual /verify); the auto path runs only
+/// with SQWAI_AUTO_REFLECTOR=1 in the environment.
+fn auto_reflector_enabled() -> bool {
+    std::env::var("SQWAI_AUTO_REFLECTOR").is_ok()
+}
+
 /// Sessions this process already opened an agent run for. `run_agent` is
 /// spawned per turn, but `session_start` plus the resume record describe a
 /// run's beginning: writing them every turn journaled a phantom "Session
@@ -1526,8 +1533,9 @@ async fn run_agent(
     } else {
         None
     };
-    // H0 (§12.7): filled once below when the fresh user message reads as
-    // criticism of prior work; pushed as a volatile block-D part per request.
+    // H0 (§12.7, PARKED — auto path off, see auto_reflector_enabled):
+    // when armed by a fired criticism check, the fact block rides as a
+    // volatile block-D part per request. Stays None while parked.
     let mut criticism_block: Option<String> = None;
     if let Some(writer) = journal.as_mut() {
         if let Some(inherited) = parent_step.as_ref() {
@@ -1561,10 +1569,17 @@ async fn run_agent(
                 "chars": user_message.content.chars().count(),
                 "goal_like": user_message.content.starts_with("goal:") || user_message.content.starts_with("/goal"),
             }));
-            // H0 criticism detector (§12.7): main sessions only — a child's
-            // task prompt is a directive, not user criticism — and never on
-            // the G0 baseline (mechanism features stay out of it, §8.2).
-            if parent_step.is_none() && !crate::bench::baseline() {
+            // H0 criticism detector (§12.7): PARKED — auto-detection (learned
+            // + artifact) fires too imprecisely, so the whole auto path is
+            // off. The mechanism stays in code (manual /verify); set
+            // SQWAI_AUTO_REFLECTOR=1 to re-enable for experiments.
+            // Main sessions only — a child's task prompt is a directive, not
+            // user criticism — and never on the G0 baseline (mechanism
+            // features stay out of it, §8.2).
+            if auto_reflector_enabled()
+                && parent_step.is_none()
+                && !crate::bench::baseline()
+            {
                 // H1 slice 3 self-protection: objections since the last
                 // verify pick the budget; the third disables the reflector
                 // for the session (journal-first, not a hidden switch).
@@ -5469,6 +5484,17 @@ mod effort_tests {
         assert!(repeat_bash_note(&messages, &other, "TCP 1.2.3.4:443").is_none());
         // first run ever: no note
         assert!(repeat_bash_note(&[], &again, "TCP 1.2.3.4:443").is_none());
+    }
+
+    /// Auto-reflector is parked: the auto path runs only with explicit
+    /// opt-in. Anyone exporting SQWAI_AUTO_REFLECTOR changes product
+    /// behavior, so the suite assumes a clean environment here.
+    #[test]
+    fn auto_reflector_stays_parked_without_opt_in() {
+        assert!(
+            !auto_reflector_enabled(),
+            "auto path needs SQWAI_AUTO_REFLECTOR=1"
+        );
     }
 
     fn parent_prefix<'a>(
