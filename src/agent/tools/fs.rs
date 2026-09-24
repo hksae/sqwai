@@ -478,6 +478,10 @@ pub(super) fn glob(ctx: &mut ToolCtx, pattern: &str, base: Option<&str>) -> Outc
         Err(e) => return Outcome::err(format!("bad glob pattern: {e}")),
     };
     let mut hits: Vec<String> = Vec::new();
+    // host-owned state is never listed, whatever the walker thinks about
+    // hidden files: on Windows `hidden(true)` checks attributes, not dots,
+    // so `.sqwai/` would leak without this explicit skip
+    let host_owned = ctx.host_state_dir();
     for entry in WalkBuilder::new(&base_dir).hidden(true).build().flatten() {
         if hits.len() >= 300 {
             hits.push("…(more results truncated)".into());
@@ -485,6 +489,9 @@ pub(super) fn glob(ctx: &mut ToolCtx, pattern: &str, base: Option<&str>) -> Outc
         }
         let path = entry.path();
         if !path.is_file() {
+            continue;
+        }
+        if path == host_owned || path.starts_with(&host_owned) {
             continue;
         }
         let rel = path.strip_prefix(&base_dir).unwrap_or(path);
@@ -529,9 +536,14 @@ pub(super) fn grep(
 
     let mut out = String::new();
     let mut matches = 0usize;
+    // same host-owned skip as glob above (see comment there)
+    let host_owned = ctx.root.join(".sqwai");
     'outer: for entry in WalkBuilder::new(&base_dir).hidden(true).build().flatten() {
         let path = entry.path();
         if !path.is_file() {
+            continue;
+        }
+        if path == host_owned || path.starts_with(&host_owned) {
             continue;
         }
         if let Some(f) = &inc {
@@ -657,6 +669,46 @@ mod tests {
         assert!(outcome.ok);
         assert!(outcome.output.contains("…(line truncated)"));
         assert!(outcome.output.len() < 2000);
+    }
+
+    #[test]
+    fn host_owned_state_is_invisible_to_grep_and_glob() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".sqwai").join("plans")).unwrap();
+        std::fs::write(
+            dir.path().join(".sqwai").join("plans").join("secret.json"),
+            "host_secret_marker_xyz",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("visible.txt"), "plain content").unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        // grep must not match inside host-owned state (pre-fix: leaked on
+        // Windows where hidden(true) checks attributes, not dotfiles)
+        let outcome = grep(&mut ctx, "host_secret_marker_xyz", None, None);
+        assert!(outcome.ok);
+        assert!(
+            !outcome.output.contains(".sqwai"),
+            "{}",
+            outcome.output
+        );
+        // glob must not list host-owned files either
+        let listed = glob(&mut ctx, "**/*", None);
+        assert!(listed.ok);
+        assert!(!listed.output.contains(".sqwai"), "{}", listed.output);
+        assert!(listed.output.contains("visible.txt"), "{}", listed.output);
+    }
+
+    #[test]
+    fn host_state_dir_is_canonical() {
+        // the walk yields canonical paths while the root may sit behind a
+        // symlink (macOS `/var` -> `/private/var`): a raw-root prefix check
+        // would silently never fire
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::new(dir.path());
+        assert_eq!(
+            ctx.host_state_dir(),
+            dir.path().canonicalize().unwrap().join(".sqwai")
+        );
     }
 
     #[test]

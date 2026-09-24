@@ -123,6 +123,14 @@ impl ToolCtx {
         }
     }
 
+    /// Canonical path of the host-owned state dir (`.sqwai/`). Walks must
+    /// skip it explicitly: `hidden(true)` checks attributes on Windows, not
+    /// dotfiles, and the comparison has to run on canonical paths because
+    /// the root itself may sit behind a symlink (macOS `/var`).
+    pub fn host_state_dir(&self) -> PathBuf {
+        self.root_canon.join(".sqwai")
+    }
+
     pub fn with_shadow_store(mut self, shadow_store: crate::config::ShadowStore) -> Self {
         self.shadow_store = shadow_store;
         self
