@@ -2259,6 +2259,20 @@ async fn run_agent(
                             )
                             .await
                         }
+                        "propose_reset" if subagent_depth > 0 => tools::Outcome::err(
+                            "subagents cannot reset plans; plans belong to the primary session",
+                        ),
+                        "propose_reset" => {
+                            propose_reset(
+                                call,
+                                &mut ctx,
+                                read_only,
+                                &tx,
+                                &mut ctl,
+                                &mut next_id,
+                            )
+                            .await
+                        }
                         "bash" => {
                             bash_call(
                                 call,
@@ -4240,6 +4254,128 @@ async fn ask_user(
     }
 }
 
+/// `propose_reset`: the agent claims the plan itself is wrong and asks the
+/// user to abandon it — through the same approval dialog as dangerous
+/// commands (deny preselected), never a text "yes". The quoted plan defect
+/// is validated before the dialog opens, so the user never confirms a blank
+/// surrender; the old plan stays on disk as Abandoned and the evidence stays
+/// journaled. A replacement, if any, goes through a fresh `plan create`
+/// with all its gates — reset alone cannot smuggle one in.
+#[allow(clippy::too_many_arguments)]
+async fn propose_reset(
+    call: &ToolCallReq,
+    ctx: &mut tools::ToolCtx,
+    read_only: bool,
+    tx: &mpsc::Sender<AgentEvent>,
+    ctl: &mut mpsc::Receiver<ControlMsg>,
+    next_id: &mut u64,
+) -> tools::Outcome {
+    let root = ctx.root.clone();
+    let root = root.as_path();
+    // the call itself writes nothing, but an approved reset is stored by
+    // the host — which a read-only session must never do (same rule as
+    // propose_plan: present the problem in the answer instead)
+    if read_only {
+        return tools::Outcome::err(
+            "project is read-only because another sqwai instance owns the lock; \
+             plan reset cannot be stored — describe the plan defect in your answer instead",
+        );
+    }
+    let session_id = ctx.session_id.clone();
+    let reason = call
+        .args
+        .get("reason")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let mut active = match plan::open_active_for_session(root, Some(&session_id)) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => {
+            return tools::Outcome::err("no active plan: nothing to reset".to_string());
+        }
+        Err(error) => {
+            return tools::Outcome::err(format!("active plan unreadable: {error:#}"));
+        }
+    };
+    if let Err(rejection) = plan::validate_surrender_reason(reason, "proposing a reset") {
+        return tools::Outcome::err(format!(
+            "plan reset rejected [{}]: {} — {}",
+            rejection.code, rejection.reason, rejection.hint
+        ));
+    }
+    let plan_id = active.id.clone();
+    let discards = plan::reset_discards(&active);
+    let aid = *next_id;
+    *next_id += 1;
+    if tx
+        .send(AgentEvent::Approval {
+            id: aid,
+            command: format!("abandon plan {plan_id}"),
+            reason: format!(
+                "quoted plan defect: {reason}\nDiscards: {discards}.\nHistory stays on disk as Abandoned; evidence stays journaled."
+            ),
+        })
+        .await
+        .is_err()
+    {
+        return tools::Outcome::err("tui closed awaiting reset confirm");
+    }
+    let decision = loop {
+        match ctl.recv().await {
+            Some(ControlMsg::ApprovalAnswer { id, decision }) if id == aid => break decision,
+            Some(_) => continue,
+            None => return tools::Outcome::err("agent cancelled awaiting reset confirm"),
+        }
+    };
+    // blanket pre-approval is never honored for abandonment: a deliberate
+    // "always" click still approves only this reset, said out loud
+    let downgraded = decision == ApprovalDecision::AlwaysSession;
+    if decision == ApprovalDecision::Deny {
+        return tools::Outcome::err(
+            "plan reset denied by user — keep working the active plan, or block it with a quoted conflict",
+        );
+    }
+    match plan::apply(
+        &mut active,
+        plan::Op::ProposeReset {
+            reason: reason.to_string(),
+        },
+        &plan::Limits::default(),
+        ctx.current_step.as_deref(),
+    ) {
+        Ok(_) => {
+            if let Err(error) = plan::store(&ctx.root, &active) {
+                return tools::Outcome::err(format!("plan write failed: {error:#}"));
+            }
+            if let Err(error) = plan::commit(
+                &ctx.root,
+                &ctx.session_id,
+                &mut active,
+                "propose_reset",
+                "user",
+                true,
+                serde_json::json!({"reason": reason, "plan_id": plan_id}),
+            ) {
+                return tools::Outcome::err(format!("plan write failed: {error:#}"));
+            }
+            // the session held a step of a dead plan
+            ctx.current_step = None;
+            let _ = tx.send(AgentEvent::StepCurrent { step: None }).await;
+            tools::Outcome::ok(format!(
+                "plan {plan_id} abandoned by user approval{}; start over with plan create",
+                if downgraded {
+                    " (always-allow treated as one-time: abandonment is never pre-approved)"
+                } else {
+                    ""
+                }
+            ))
+        }
+        Err(rejection) => tools::Outcome::err(format!(
+            "plan reset rejected [{}]: {} — {}",
+            rejection.code, rejection.reason, rejection.hint
+        )),
+    }
+}
+
 /// `propose_plan`: the agent proposes a full plan draft but writes nothing.
 /// Two-stage host gate: the draft is validated before the user sees it (a
 /// malformed draft rejects this call), then the user accepts or declines.
@@ -5525,6 +5661,102 @@ mod effort_tests {
             !auto_reflector_enabled(),
             "auto path needs SQWAI_AUTO_REFLECTOR=1"
         );
+    }
+
+    /// `propose_reset` through the approval dialog: RunOnce abandons (plan
+    /// stays on disk as Abandoned, session hold cleared), Deny keeps the
+    /// plan working with a pointer to block_plan.
+    #[tokio::test]
+    async fn propose_reset_abandons_on_approval_and_keeps_on_deny() {
+        use tokio::sync::mpsc;
+        async fn run_reset(
+            dir: &std::path::Path,
+            session: &str,
+            decision: ApprovalDecision,
+        ) -> tools::Outcome {
+            let call = ToolCallReq::new(
+                "c1",
+                "propose_reset",
+                serde_json::json!({
+                    "reason": "goal targets removed feature X, steps assume the deleted API",
+                }),
+            );
+            let mut ctx = tools::ToolCtx::new(dir).in_session(session.to_string());
+            let (tx_agent, mut rx_ui) = mpsc::channel::<AgentEvent>(8);
+            let (tx_ui, mut rx_agent) = mpsc::channel::<ControlMsg>(8);
+            let mut next_id = 0u64;
+            let future = propose_reset(&call, &mut ctx, false, &tx_agent, &mut rx_agent, &mut next_id);
+            tokio::pin!(future);
+            loop {
+                tokio::select! {
+                    out = &mut future => break out,
+                    ev = rx_ui.recv() => {
+                        match ev {
+                            Some(AgentEvent::Approval { id, command, reason }) => {
+                                assert!(command.contains("abandon plan"), "{command}");
+                                assert!(reason.contains("removed feature"), "{reason}");
+                                tx_ui
+                                    .send(ControlMsg::ApprovalAnswer { id, decision })
+                                    .await
+                                    .unwrap();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("sqwai-reset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = "reset-sess";
+        let mut plan = plan::create(
+            "goal".to_string(),
+            Vec::new(),
+            vec!["manual: eyeball it".to_string()],
+            vec![plan::NewStep {
+                title: "work".into(),
+                refs: Vec::new(),
+            }],
+            1000,
+            &plan::Limits::default(),
+        )
+        .unwrap();
+        plan.sessions = vec![session.to_string()];
+        plan::store(&dir, &plan).unwrap();
+        let plan_id = plan.id.clone();
+
+        let outcome = run_reset(&dir, session, ApprovalDecision::RunOnce).await;
+        assert!(outcome.ok, "{}", outcome.output);
+        assert!(outcome.output.contains("abandoned by user approval"), "{}", outcome.output);
+        let after = plan::open(&dir, &plan_id).unwrap();
+        assert_eq!(after.status, plan::PlanStatus::Abandoned);
+
+        // deny: a fresh active plan stays active
+        let mut plan2 = plan::create(
+            "goal2".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![plan::NewStep {
+                title: "work".into(),
+                refs: Vec::new(),
+            }],
+            1000,
+            &plan::Limits::default(),
+        )
+        .unwrap();
+        plan2.sessions = vec![session.to_string()];
+        plan::store(&dir, &plan2).unwrap();
+        let denied = run_reset(&dir, session, ApprovalDecision::Deny).await;
+        assert!(!denied.ok, "{}", denied.output);
+        assert!(denied.output.contains("denied by user"), "{}", denied.output);
+        // the first plan stays abandoned; the second stays active
+        assert_eq!(plan::open(&dir, &plan_id).unwrap().status, plan::PlanStatus::Abandoned);
+        assert_eq!(
+            plan::open(&dir, &plan2.id).unwrap().status,
+            plan::PlanStatus::Active
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn parent_prefix<'a>(

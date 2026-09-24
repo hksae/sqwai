@@ -1506,7 +1506,7 @@ fn apply_record(
         }
         Some(
             "start" | "finish" | "block" | "unblock" | "cancel" | "add" | "split" | "complete"
-            | "join" | "block_plan",
+            | "join" | "block_plan" | "add_acceptance" | "propose_reset",
         ) => {
             let op: Op = serde_json::from_value(serde_json::Value::Object(fields.clone()))
                 .map_err(|_| Rejection::new("replay_shape", "unparsable op intent", ""))?;
@@ -1848,6 +1848,17 @@ pub enum Op {
         #[serde(default)]
         reason: String,
     },
+    /// Reset proposal: the plan itself is wrong (not the work). `reason`
+    /// must quote the plan defect; empty reasons are refused. Never applied
+    /// directly — the dispatcher routes it to the agent loop, which asks
+    /// the user through the approval dialog and only then abandons. The
+    /// old plan stays on disk as `Abandoned` (history is never rewritten);
+    /// a replacement, if any, goes through a fresh `create` with all its
+    /// gates. Replayable like every op (see apply_record).
+    ProposeReset {
+        #[serde(default)]
+        reason: String,
+    },
     Add {
         #[serde(default)]
         after: Option<String>,
@@ -1961,20 +1972,79 @@ pub fn abandon(plan: &mut Plan) {
     plan.revision += 1;
 }
 
+/// What a reset would throw away, for the confirm dialog. Evidence stays
+/// journaled either way — this lists what leaves the active surface.
+pub fn reset_discards(plan: &Plan) -> String {
+    let done = plan
+        .steps
+        .iter()
+        .filter(|step| step.status == StepStatus::Done)
+        .count();
+    let open: Vec<&str> = plan
+        .steps
+        .iter()
+        .filter(|step| {
+            matches!(
+                step.status,
+                StepStatus::Pending | StepStatus::InProgress | StepStatus::Blocked
+            )
+        })
+        .map(|step| step.id.as_str())
+        .collect();
+    let unsettled = plan
+        .acceptance
+        .iter()
+        .filter(|item| {
+            !matches!(
+                item.validation.status,
+                ValidationStatus::Passed | ValidationStatus::Waived
+            )
+        })
+        .count();
+    format!(
+        "{} steps done, {} open ({}), {} acceptance unsettled",
+        done,
+        open.len(),
+        open.join(", "),
+        unsettled
+    )
+}
+
+/// Reason gate shared by BlockPlan and ProposeReset: the surrender must
+/// quote what is wrong (conflict or plan defect), not gesture at effort.
+/// Empty reasons are refused; one-word reasons are refused with guidance.
+pub fn validate_surrender_reason(reason: &str, what: &str) -> Result<String, Rejection> {
+    let quoted = reason.trim().to_string();
+    if quoted.is_empty() {
+        return Err(Rejection::new(
+            "empty_reason",
+            format!("{what} needs the quoted conflict"),
+            "cite what contradicts what: the spec line against the test or requirement".to_string(),
+        ));
+    }
+    if quoted.split_whitespace().count() < 3 {
+        return Err(Rejection::new(
+            "thin_reason",
+            format!("{what} reason is too thin to judge: {quoted}"),
+            "quote the defect itself — which requirement, step, or criterion is wrong and why".to_string(),
+        ));
+    }
+    Ok(quoted)
+}
+
 /// Honest surrender (`BlockPlan`): the task cannot be done as specified.
 /// The quoted conflict is stored on the plan file itself — it is the
 /// artifact future readers and the bench harness judge, not the journal.
 fn block_plan(plan: &mut Plan, reason: String) -> Result<Applied, Rejection> {
-    if reason.trim().is_empty() {
-        return reject(
-            plan,
-            "empty_reason",
-            "blocking a plan needs the quoted conflict".to_string(),
-            "cite what contradicts what: the spec line against the test or requirement".to_string(),
-        );
-    }
+    let quoted = match validate_surrender_reason(&reason, "blocking a plan") {
+        Ok(quoted) => quoted,
+        Err(rejection) => {
+            plan.rejections_in_a_row += 1;
+            return Err(rejection);
+        }
+    };
     plan.status = PlanStatus::Blocked;
-    plan.blocked_reason = Some(reason.trim().to_string());
+    plan.blocked_reason = Some(quoted);
     plan.revision += 1;
     accept(
         plan,
@@ -2245,6 +2315,20 @@ pub fn apply(
         Op::Unblock { id } => unblock(plan, &id),
         Op::Cancel { id, reason } => cancel(plan, id.as_deref(), reason),
         Op::BlockPlan { reason } => block_plan(plan, reason),
+        Op::ProposeReset { reason } => {
+            let quoted = match validate_surrender_reason(&reason, "proposing a reset") {
+                Ok(quoted) => quoted,
+                Err(rejection) => {
+                    plan.rejections_in_a_row += 1;
+                    return Err(rejection);
+                }
+            };
+            abandon(plan);
+            accept(
+                plan,
+                format!("plan {} abandoned on approved reset: {quoted}", plan.id),
+            )
+        }
         Op::Add {
             after,
             title,
@@ -3946,6 +4030,29 @@ mod tests {
     #[test]
     fn block_plan_records_the_quoted_conflict_and_closes() {
         let mut plan = new_plan();
+        // reset refusals first (empty and thin reasons change nothing);
+        // the successful abandon path is covered by the approval-flow test
+        let err = apply(
+            &mut plan,
+            Op::ProposeReset {
+                reason: "   ".to_string(),
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "empty_reason");
+        let err = apply(
+            &mut plan,
+            Op::ProposeReset {
+                reason: "nope".to_string(),
+            },
+            &Limits::default(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "thin_reason");
+        assert_eq!(plan.status, PlanStatus::Active, "refusals change nothing");
         let err = apply(
             &mut plan,
             Op::BlockPlan {
@@ -3989,7 +4096,35 @@ mod tests {
             apply(&mut plan, Op::Show, &Limits::default(), None),
             Ok(Applied::Shown { .. })
         ));
-    }    #[test]
+    }
+
+    /// A quoted reset abandons (history kept as Abandoned, never deleted);
+    /// the discard summary counts what leaves the active surface.
+    #[test]
+    fn propose_reset_abandons_on_a_quoted_defect() {
+        let mut plan = new_plan();
+        let out = reset_discards(&plan);
+        assert!(out.contains("0 steps done"), "{out}");
+        assert!(matches!(
+            apply(
+                &mut plan,
+                Op::ProposeReset {
+                    reason: "goal targets removed feature X, steps assume the deleted API".to_string(),
+                },
+                &Limits::default(),
+                None,
+            ),
+            Ok(Applied::Updated { .. })
+        ));
+        assert_eq!(plan.status, PlanStatus::Abandoned);
+        // closed plans stay read-only except show — same as blocked
+        assert!(matches!(
+            apply(&mut plan, Op::Show, &Limits::default(), None),
+            Ok(Applied::Shown { .. })
+        ));
+    }
+
+    #[test]
     fn complete_requires_acceptance() {
         let mut plan = new_plan();
         for id in ["1", "2"] {

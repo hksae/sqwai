@@ -903,10 +903,29 @@ Returns connected nodes, incident edges, and explicit truncation status.",
             }),
         },
         ToolDef {
+            name: "propose_reset",
+            kind: Kind::ReadOnly,
+            description: "Propose abandoning the active plan when the plan itself is wrong \
+             (not the work): the reason must quote the plan defect, and the user confirms \
+             through a dialog showing what gets discarded — nothing is written until then. \
+             The old plan stays on disk as abandoned (history is never rewritten); a \
+             replacement, if any, goes through a fresh plan create with all its gates. \
+             For a bad direction with a salvageable structure use propose_plan instead; \
+             for an impossible task use plan block_plan.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "reason": {"type": "string", "description": "quoted plan defect: which goal, constraint, or acceptance item is wrong and why"}
+                },
+                "required": ["reason"]
+            }),
+        },
+        ToolDef {
             name: "plan",
             kind: Kind::Mutating,
             description: "Work the structured plan, one operation per call. Ops: create, start, \
-finish, block, unblock, cancel, add, split, verify, complete, show, block_plan. Plans are for \
+finish, block, unblock, cancel, add, split, verify, complete, show, block_plan. To abandon \
+a wrong plan, use propose_reset (user-confirmed), never cancel-and-recreate around it. Plans are for \
 work that changes things: read-only inspection needs no plan and no acceptance — just look. \
 For a write, create with goal + steps; acceptance is optional at create (trivial writes can \
 complete on closed steps alone) and required only as executable or human-settled criteria for \
@@ -3139,6 +3158,15 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     }
                 }
             }
+        }
+        // reset needs a user confirm through the approval dialog, which only
+        // the agent loop can ask for — direct application here would abandon
+        // silently, which is exactly the rewrite-history hole this op closes
+        plan::Op::ProposeReset { .. } => {
+            return Outcome::err(
+                "propose_reset is served by the agent loop, not by the dispatcher: \
+                 call the propose_reset tool so the user confirms the abandon",
+            )
         }
         other => {
             let mut active = match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
@@ -6658,6 +6686,20 @@ mod tests {
         }];
         validate_attached_records(&dir, &plan_id, "1", &fresh)
             .expect("unstamped evidence counts");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `propose_reset` never applies silently: the dispatcher refuses the
+    /// op outright and points at the loop-served tool (approval dialog).
+    #[test]
+    fn plan_propose_reset_refuses_direct_application() {
+        let (mut ctx, dir) = proj();
+        let out = plan_op(
+            &mut ctx,
+            &json!({"op": "propose_reset", "reason": "goal targets removed feature X, steps assume the deleted API"}),
+        );
+        assert!(!out.ok, "{}", out.output);
+        assert!(out.output.contains("agent loop"), "{}", out.output);
         fs::remove_dir_all(&dir).ok();
     }
 

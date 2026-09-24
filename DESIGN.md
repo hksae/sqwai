@@ -284,7 +284,13 @@ Tool plan accepts one operation per call: start, finish, block, unblock,
 cancel, add, split, verify, complete, show, block_plan, add_acceptance
 (append criteria to a plan born without — same typing gate as create,
 baselines captured for exactly the new positions), plus create, handled
-separately). The model has no operation that writes goal, constraints,
+separately). A separate `propose_reset` tool (not a plan op) asks the user
+to abandon a wrong plan: the reason must quote the plan defect (empty and
+thin reasons refuse like `block_plan`), the approval dialog shows what gets
+discarded, and only an explicit confirm abandons — the old plan stays on
+disk as Abandoned, evidence stays journaled, and a replacement goes through
+a fresh `create` with all its gates. Blanket pre-approval is downgraded to
+one-time: abandonment is never pre-approved. The model has no operation that writes goal, constraints,
 acceptance[].status, acceptance[].validation, steps[].validation, evidence,
 applied_event, folded, or step_epoch. There is no `fold` op, no
 `goal_revision` op (`set_goal` is host-only), and no `restore` op.
