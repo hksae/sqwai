@@ -983,7 +983,12 @@ pub fn replay(root: &Path) -> Result<ReplayReport> {
                 Err(_) => continue,
             };
             records.sort_by_key(|record| record.seq);
-            for record in records.iter().filter(|record| record.seq > *cursor) {
+            // The cursor gates plan ops only. Evidence moves no cursor and
+            // is idempotent (deduped by session+seq below), so it re-attaches
+            // from anywhere in the stream — even journaled before a crash and
+            // overtaken by a later finish. Gating it on the cursor lost the
+            // receipt forever whenever the file missed the live attach.
+            for record in records.iter() {
                 if record.kind == "plan"
                     && record
                         .fields
@@ -991,6 +996,9 @@ pub fn replay(root: &Path) -> Result<ReplayReport> {
                         .and_then(|value| value.as_str())
                         == Some(plan.id.as_str())
                 {
+                    if record.seq <= *cursor {
+                        continue;
+                    }
                     match apply_record(&mut plan, record) {
                         Ok(true) => {
                             plan.applied_event = Some(scoped(sess, record.seq));

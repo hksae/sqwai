@@ -9826,6 +9826,52 @@ end
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// Evidence journaled but lost from the file (crash between the journal
+    /// write and the plan store) must still re-attach on replay even when a
+    /// later finish already moved the cursor past it. Pre-fix: the evidence
+    /// branch only saw records with `seq > cursor`, so the step finished
+    /// with no evidence and the receipt was lost forever.
+    #[test]
+    fn plan_replay_reattaches_evidence_behind_the_cursor() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "evidence recovery",
+                "steps": [{"title": "step 1"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        let started = plan_op(&mut ctx, &json!({"op": "start", "id": "1"}));
+        assert!(started.ok, "{}", started.output);
+        // tool evidence lands in the journal (live path attaches it too)
+        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
+        journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
+        let evidence_seq = journal
+            .append("file_diff", json!({"path": "src/x.rs", "ok": true}))
+            .unwrap();
+        // crash: journal has it, the plan file does not
+        let mut plan = plan::open(&dir, &plan_id).unwrap();
+        plan.step_mut("1").unwrap().evidence.clear();
+        plan::store(&dir, &plan).unwrap();
+        // a later finish moves the cursor past the evidence seq
+        let finished = plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "1", "summary": "done"}),
+        );
+        assert!(finished.ok, "{}", finished.output);
+        let report = plan::replay(&dir).unwrap();
+        let healed = plan::open(&dir, &plan_id).unwrap();
+        let step = healed.step("1").expect("step must survive");
+        assert!(
+            step.evidence.iter().any(|reference| reference.seq == evidence_seq),
+            "replay must re-attach evidence seq {evidence_seq} (report: {report:?})"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// Journal-first for step cancel: the dispatcher must commit (not bare
     /// store), or crash recovery never sees the cancellation. First asserts
     /// the commit record exists; then simulates the crash between commit
