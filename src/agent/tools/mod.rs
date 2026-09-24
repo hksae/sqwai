@@ -1056,6 +1056,33 @@ pub fn is_mutating(name: &str) -> bool {
     matches!(kind_of(name), Some(Kind::Mutating))
 }
 
+/// Multi-file (or opaque-target) mutation for the plan gate's hard path.
+/// Single-file file-tool writes proceed with an advisory nudge instead of
+/// the plan_required refusal; anything whose blast radius is unknown or
+/// spans files stays gated. Only consulted when `is_mutating_call` already
+/// fired, so read-only tools never reach here.
+pub fn is_multi_file_mutation(name: &str, args: &Value) -> bool {
+    match name {
+        // one file_path each — bounded blast radius
+        "write" | "edit" | "multi_edit" => false,
+        // unified diff: count files, unknown or multi → hard
+        "patch" => {
+            let files = args
+                .get("patch")
+                .and_then(|value| value.as_str())
+                .map(|text| {
+                    text.lines()
+                        .filter(|line| line.starts_with("diff --git "))
+                        .count()
+                });
+            files != Some(1)
+        }
+        // bash is opaque, git_stage/commit span the index, MCP unknown:
+        // fail closed into the hard path
+        _ => true,
+    }
+}
+
 /// Whether this particular call mutates state. `git_branch` contains both
 /// read-only inspection and Act-only branch changes, so its action matters.
 pub fn is_mutating_call(name: &str, args: &Value) -> bool {
@@ -6085,6 +6112,31 @@ mod tests {
         assert!(!is_mutating_call("read", &json!({"file_path": "src/a.rs"})));
     }
 
+    /// Gate blast-radius classes: single-file writes go soft (nudge),
+    /// everything unknown or multi-file stays hard (refusal).
+    #[test]
+    fn multi_file_mutation_splits_soft_from_hard() {
+        use serde_json::json;
+        assert!(!is_multi_file_mutation("write", &json!({"file_path": "a.rs"})));
+        assert!(!is_multi_file_mutation("edit", &json!({"file_path": "a.rs"})));
+        assert!(!is_multi_file_mutation(
+            "multi_edit",
+            &json!({"file_path": "a.rs", "edits": []})
+        ));
+        assert!(!is_multi_file_mutation(
+            "patch",
+            &json!({"patch": "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n"})
+        ));
+        assert!(is_multi_file_mutation(
+            "patch",
+            &json!({"patch": "diff --git a/a.rs b/a.rs\n--- x\ndiff --git a/b.rs b/b.rs\n--- y\n"})
+        ));
+        assert!(is_multi_file_mutation("patch", &json!({})));
+        assert!(is_multi_file_mutation("patch", &json!({"patch": "garbage"})));
+        assert!(is_multi_file_mutation("bash", &json!({"command": "rm -rf x"})));
+        assert!(is_multi_file_mutation("git_commit", &json!({"message": "x"})));
+    }
+
     /// Read-only bash classification: the observed inspection shapes pass,
     /// anything that could write fails closed. Advisory only — the plan
     /// gate consults it, approvals do not.
@@ -8937,7 +8989,7 @@ mod tests {
             complete.output
         );
         assert!(
-            complete.output.contains("Pending acceptance items without cmd:/snapshot:/differential:/signatures: prefix require user waiver (/plan waive <index>) or conversion to steps with host evidence."),
+            complete.output.contains("Pending acceptance items without cmd:/manual: prefix require user waiver (/plan waive <index>) or conversion to steps with host evidence."),
             "{}",
             complete.output
         );

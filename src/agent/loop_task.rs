@@ -2176,6 +2176,19 @@ async fn run_agent(
                     })
                     .await;
 
+                // Soft plan discipline (§2.1.9): a single-file mutation
+                // without an acceptance-bearing plan proceeds — the advisory
+                // nudge attaches to a successful outcome below. Multi-file
+                // and opaque mutations take the hard refusal above instead.
+                let plan_nudge = !plan_mode
+                    && subagent_depth == 0
+                    && !crate::bench::baseline()
+                    && plan_limits.plan_first == crate::config::PlanFirstMode::Soft
+                    && tools::is_mutating_call(&call.name, &call.args)
+                    && call.name != "plan"
+                    && !tools::is_readonly_bash(&call.name, &call.args)
+                    && !tools::is_multi_file_mutation(&call.name, &call.args)
+                    && !plan_with_acceptance(&root);
                 let mut outcome = if pre_cancelled {
                     tools::Outcome::cancelled()
                 } else if read_only && tools::is_mutating_call(&call.name, &call.args) {
@@ -2201,6 +2214,11 @@ async fn run_agent(
                 // style diagnostics run free (advisory classification —
                 // approvals still guard real damage, see is_readonly_bash)
                 && !tools::is_readonly_bash(&call.name, &call.args)
+                // Hard path: multi-file or opaque-target mutations are still
+                // refused without an acceptance-bearing plan. Single-file
+                // writes fall through to dispatch with an advisory nudge
+                // attached below (soft discipline, §2.1.9).
+                && tools::is_multi_file_mutation(&call.name, &call.args)
                 // The gate asks "is there a criterion", not "is there a
                 // plan" and not "is the prose trivial": before the first
                 // mutation an acceptance item must exist — executable or
@@ -2446,6 +2464,18 @@ async fn run_agent(
                 // "only if the tree changed since the previous snapshot" — that
                 // is exactly the condition §3.7 asks for, so it is read from
                 // there rather than reimplemented.
+                // Soft discipline, kept visible: the mutation went through
+                // without acceptance criteria backing it. First line, so it
+                // lands in the journal summary and the model reads it before
+                // the output. Failed calls mutated nothing — no nudge.
+                if plan_nudge && outcome.ok {
+                    outcome.output = format!(
+                        "[host nudge: single-file mutation without an acceptance-bearing plan — \
+                         create one with plan create (goal, steps, optional acceptance) so the \
+                         work settles against criteria. Proceeding anyway.]\n{}",
+                        outcome.output
+                    );
+                }
                 if outcome.cancelled
                     && call.name == "bash"
                     && let Ok(Some(sha)) = checkpoints::snapshot_session(
@@ -6369,7 +6399,8 @@ mod effort_tests {
 
     #[tokio::test]
     async fn test_plan_first_gate_blocks_and_allows_mutations() {
-        // 1. Blocked when non-trivial prompt and no plan in Act mode
+        // 1. Single-file write without a plan: proceeds with an advisory
+        // nudge (soft discipline) instead of the old refusal
         let blocked_provider = std::sync::Arc::new(MockTestProvider {
             events: std::sync::Mutex::new(vec![
                 vec![Ok(crate::providers::StreamEvent::ToolCall(
@@ -6434,14 +6465,14 @@ mod effort_tests {
             match ev {
                 AgentEvent::ToolNotice { name, ok, .. } => {
                     assert_eq!(name, "write");
-                    assert!(!ok, "plan-first gate should have rejected the mutation");
+                    assert!(ok, "single-file write proceeds with a nudge, not a refusal");
                     saw_tool_notice = true;
                 }
                 AgentEvent::Completed(Ok(outcome)) => {
                     if let Some(tool_msg) = outcome.messages.iter().find(|m| m.role == Role::Tool) {
                         assert!(
-                            tool_msg.content.contains("plan_required"),
-                            "outcome message: {}",
+                            tool_msg.content.contains("host nudge"),
+                            "advisory must ride the result: {}",
                             tool_msg.content
                         );
                     }
@@ -6455,12 +6486,17 @@ mod effort_tests {
         assert!(saw_tool_notice, "should have seen tool notice");
     }
 
-    /// The gate asks for acceptance, not prose: a plan without criteria
-    /// blocks like no plan at all, while any acceptance item — even
-    /// `manual:` — lets the mutation through.
+    /// Soft discipline: single-file writes proceed with a nudge whether or
+    /// not an acceptance-bearing plan exists. The hard refusal survives
+    /// only for multi-file/opaque mutations (covered by
+    /// `is_multi_file_mutation` unit tests and the patch refusal below).
     #[tokio::test]
-    async fn test_plan_first_gate_needs_acceptance_not_plans() {
+    async fn test_plan_first_gate_nudges_single_file_writes() {
+        // fresh filename per session: the read-before-edit guard would
+        // otherwise refuse the second write (file exists, never read here)
+        // and mask the plan-gate verdict under test
         async fn run_write(root: &std::path::Path, session: &str) -> bool {
+            let file = format!("gated-{session}.rs");
             let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
                 events: std::sync::Mutex::new(vec![
                     vec![Ok(crate::providers::StreamEvent::ToolCall(
@@ -6468,7 +6504,7 @@ mod effort_tests {
                             "c1",
                             "write",
                             serde_json::json!({
-                                "file_path": "gated.rs",
+                                "file_path": file,
                                 "content": "pub fn hello() {}"
                             }),
                         ),
@@ -6531,14 +6567,16 @@ mod effort_tests {
             std::env::temp_dir().join(format!("sqwai-test-gate-acc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         let _ = std::fs::create_dir_all(&temp_dir);
-        // a trivial one-liner is no excuse anymore: no acceptance, no write
-        assert!(!run_write(&temp_dir, "sess-no-plan").await);
+        // soft discipline: a single-file write without any plan proceeds
+        // (with a nudge) instead of refusing
+        assert!(run_write(&temp_dir, "sess-no-plan").await);
         assert!(
-            !temp_dir.join("gated.rs").exists(),
-            "gated mutation must not land"
+            temp_dir.join("gated-sess-no-plan.rs").exists(),
+            "nudged mutation still lands"
         );
 
-        // a plan without acceptance settles nothing — same refusal
+        // a plan without acceptance settles nothing — but the write is
+        // single-file, so it still proceeds (nudge, not refusal)
         let mut plan = crate::plan::create(
             "goal".to_string(),
             Vec::new(),
@@ -6552,7 +6590,7 @@ mod effort_tests {
         )
         .unwrap();
         crate::plan::store(&temp_dir, &plan).unwrap();
-        assert!(!run_write(&temp_dir, "sess-empty-plan").await);
+        assert!(run_write(&temp_dir, "sess-empty-plan").await);
 
         // any single item opens the gate — even a human one
         plan.acceptance.push(crate::plan::Acceptance {
@@ -6570,10 +6608,93 @@ mod effort_tests {
         crate::plan::store(&temp_dir, &plan).unwrap();
         assert!(run_write(&temp_dir, "sess-with-plan").await);
         assert!(
-            temp_dir.join("gated.rs").exists(),
+            temp_dir.join("gated-sess-with-plan.rs").exists(),
             "allowed mutation must land on disk"
         );
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    /// Hard path survives: a two-file patch without any plan is still
+    /// refused with plan_required (the gate fires before git ever runs,
+    /// so the fixture needs no real repo state).
+    #[tokio::test]
+    async fn test_plan_first_gate_still_refuses_multi_file_patch() {
+        let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(vec![
+                vec![Ok(crate::providers::StreamEvent::ToolCall(
+                    crate::providers::ToolCallReq::new(
+                        "c1",
+                        "patch",
+                        serde_json::json!({
+                            "patch": "diff --git a/one.rs b/one.rs\n--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/two.rs b/two.rs\n--- a/two.rs\n+++ b/two.rs\n@@ -1 +1 @@\n-a\n+b\n"
+                        }),
+                    ),
+                ))],
+                vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
+            ]),
+        });
+        let temp_dir =
+            std::env::temp_dir().join(format!("sqwai-test-gate-patch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let input = AgentInput {
+            provider,
+            model_id: "m".into(),
+            model_key: "primary".into(),
+            effort: None,
+            effort_support: crate::config::EffortSupport::default(),
+            max_tokens: None,
+            system: vec![],
+            messages: vec![Message::new(Role::User, "patch two files")],
+            root: temp_dir.clone(),
+            session_id: "sess-patch-gate".into(),
+            blocked_patterns: vec![],
+            plan_mode: false,
+            context_limit: 10000,
+            enable_tools: true,
+            read_only: false,
+            previous_response_id: None,
+            summary: None,
+            mcp: Default::default(),
+            lsp: Default::default(),
+            compact_only: false,
+            diary: Default::default(),
+            memory: Default::default(),
+            compaction: Default::default(),
+            plan_limits: crate::config::PlanConfig {
+                plan_first: crate::config::PlanFirstMode::Soft,
+                ..Default::default()
+            },
+            shadow_store: crate::config::ShadowStore::Off,
+            subagent_depth: 0,
+            parent_step: None,
+            parent_session: None,
+            fallback_chain: vec![],
+        };
+        let mut handle = spawn_agent(input);
+        let mut refused = false;
+        while let Some(ev) = handle.rx.recv().await {
+            match ev {
+                AgentEvent::ToolNotice { name, ok, .. } => {
+                    assert_eq!(name, "patch");
+                    refused = !ok;
+                }
+                AgentEvent::Completed(Ok(outcome)) => {
+                    if let Some(tool_msg) = outcome.messages.iter().find(|m| m.role == Role::Tool) {
+                        assert!(
+                            tool_msg.content.contains("plan_required"),
+                            "hard refusal keeps its code: {}",
+                            tool_msg.content
+                        );
+                    }
+                    break;
+                }
+                AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
+                _ => {}
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        assert!(refused, "multi-file patch without a plan must refuse");
     }
 
     /// `forbid-cmd:` refuses live in the turn: a forbidden shell command

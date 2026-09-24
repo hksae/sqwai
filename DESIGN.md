@@ -501,12 +501,18 @@ today.
 
 2.1.9 Scope guard and acceptance gate
 Acceptance gate (config `plan_first: soft|off`, default `soft`). In Act mode
-a mutating tool call is refused with `code: plan_required` unless an active
-plan with acceptance items exists anywhere in the project. The gate asks
+a mutating tool call without an acceptance-bearing plan anywhere in the
+project earns an advisory host nudge on its (successful) result instead of
+a refusal — soft discipline: proceed, but visibly unbacked. The hard
+`plan_required` refusal survives only for multi-file or opaque-target
+mutations (multi-file `patch`, non-read-only `bash`, index-wide git ops):
+bounded single-file writes (`write`/`edit`/`multi_edit`, single-file
+`patch`) are not worth stopping. The gate asks
 "is there a criterion", not "is there a plan" and not "is the prose
 trivial": before the first mutation an acceptance item must exist —
 executable or human — so there is something to settle against. A plan
-without acceptance settles nothing and blocks like no plan at all.
+without acceptance settles nothing (`complete` still needs criteria or an
+empty list); single-file writes under it proceed with the nudge.
 Deliberate scope: the gate checks project-global `open_active`, not the
 session's own plan. It asks "is there planning discipline", not "is it
 yours" — one active plan per project is enough to let a session act under
