@@ -1208,6 +1208,71 @@ fn plan_with_acceptance(root: &Path) -> bool {
         .is_some_and(|plan| !plan.acceptance.is_empty())
 }
 
+/// Advisory repeat note for a bash outcome: when the same command already
+/// ran earlier in this session with byte-identical output, re-running
+/// learned nothing — say so once, attached to this result, instead of
+/// burning another turn on the same bytes. Advisory only: polled state
+/// legitimately changes, and the note says to ignore it then. Compares full
+/// outputs, not journal summaries (truncated to 200 chars), so same-headed
+/// but different-tailed outputs never match.
+fn repeat_bash_note(messages: &[Message], call: &ToolCallReq, output: &str) -> Option<String> {
+    let command = call.args.get("command")?.as_str()?;
+    if command.trim().is_empty() {
+        return None;
+    }
+    // (command, output) pairs in order; the current call has no result yet,
+    // so everything collected here is older
+    let mut pairs: Vec<(&str, &str)> = Vec::new();
+    for message in messages {
+        if message.role != Role::Assistant {
+            continue;
+        }
+        for tc in &message.tool_calls {
+            if tc.name != "bash" {
+                continue;
+            }
+            let Some(cmd) = tc.args.get("command").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let out = messages
+                .iter()
+                .find(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some(&tc.id))
+                .map(|m| m.content.as_str())
+                .unwrap_or("");
+            pairs.push((cmd, out));
+        }
+    }
+    if pairs
+        .iter()
+        .any(|(cmd, out)| *cmd == command && *out == output)
+    {
+        Some(format!(
+            "\n[host: you already ran this exact command earlier in this session with byte-identical output — reuse that observation instead of re-running it. If the underlying state may have changed since, ignore this note.]"
+        ))
+    } else {
+        None
+    }
+}
+
+/// Sessions this process already opened an agent run for. `run_agent` is
+/// spawned per turn, but `session_start` plus the resume record describe a
+/// run's beginning: writing them every turn journaled a phantom "Session
+/// resumed" while any step was merely open — and the model, reading it in
+/// the tail and via `journal`, concluded context is restored constantly and
+/// re-verified the plan before each step. A fresh process (restart/crash)
+/// starts empty, so genuine restores still record.
+static AGENT_RUNS_STARTED: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
+
+fn mark_agent_run_started(session_id: &str) -> bool {
+    AGENT_RUNS_STARTED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(session_id.to_string())
+}
+
 async fn run_agent(
     input: AgentInput,
     tx: mpsc::Sender<AgentEvent>,
@@ -1475,16 +1540,20 @@ async fn run_agent(
             .flatten()
             .map(|p| p.id);
         writer.set_attribution(None, plan_id, "main");
-        let resumed_from = context::resume_notice(&root, &session_id).map(|_| "journal");
-        let _ = writer.session_start(
-            &model_id,
-            if plan_mode { "plan" } else { "act" },
-            None,
-            "unknown",
-            resumed_from,
-        );
-        if let Some(notice) = context::resume_notice(&root, &session_id) {
-            let _ = writer.append("resume", serde_json::json!({"notice": notice}));
+        // once per process+session: run_agent is spawned per turn, so an
+        // unguarded write here journaled session_start + resume every turn
+        if mark_agent_run_started(&session_id) {
+            let resumed_from = context::resume_notice(&root, &session_id).map(|_| "journal");
+            let _ = writer.session_start(
+                &model_id,
+                if plan_mode { "plan" } else { "act" },
+                None,
+                "unknown",
+                resumed_from,
+            );
+            if let Some(notice) = context::resume_notice(&root, &session_id) {
+                let _ = writer.append("resume", serde_json::json!({"notice": notice}));
+            }
         }
         if let Some(user_message) = messages.iter().rev().find(|m| m.role == Role::User) {
             let _ = writer.append("user_msg", serde_json::json!({
@@ -2113,6 +2182,10 @@ async fn run_agent(
                 && plan_limits.plan_first == crate::config::PlanFirstMode::Soft
                 && tools::is_mutating_call(&call.name, &call.args)
                 && call.name != "plan"
+                // read-only inspection needs no plan: Get-Process/netstat
+                // style diagnostics run free (advisory classification —
+                // approvals still guard real damage, see is_readonly_bash)
+                && !tools::is_readonly_bash(&call.name, &call.args)
                 // The gate asks "is there a criterion", not "is there a
                 // plan" and not "is the prose trivial": before the first
                 // mutation an acceptance item must exist — executable or
@@ -2723,6 +2796,15 @@ async fn run_agent(
                 }
                 if outcome.cancelled {
                     interrupted = true;
+                }
+                // repeat nudge (§7 W): an identical re-run learned nothing.
+                // Advisory and single-shot — attached to this result only, so
+                // it never nags twice about the same bytes.
+                if call.name == "bash"
+                    && outcome.ok
+                    && let Some(note) = repeat_bash_note(&messages, call, &outcome.output)
+                {
+                    outcome.output.push_str(&note);
                 }
                 messages.push(Message::tool_result(&call.id, outcome.output, !outcome.ok));
                 if interrupted {
@@ -3541,7 +3623,10 @@ fn lint_answer(
     // candidate spans in first-seen order; each distinct span is marked once
     let mut spans: Vec<(&str, &str)> = Vec::new(); // (kind, span)
     for (kind, span) in extract_counts(&visible) {
-        let verified = summaries.contains(span);
+        // an x/y shorthand ("10808/10809") is verified when both halves
+        // were reported separately: the journal carries facts, not the
+        // model's punctuation
+        let verified = summaries.contains(span) || count_parts_verified(&summaries, span);
         if !verified && any_fail {
             push_span(&mut spans, kind, span);
         }
@@ -3565,6 +3650,12 @@ fn lint_answer(
     }
     for span in extract_paths(&visible) {
         if path_deleted_nearby(&visible, span) {
+            continue;
+        }
+        // a path followed by an arrow ("services.msc -> its publisher") is
+        // a usage pointer — advice to open something — not an existence
+        // claim about the project tree
+        if path_arrow_after(&visible, span) {
             continue;
         }
         if !path_exists(root, span) {
@@ -3626,6 +3717,17 @@ fn push_span<'x>(spans: &mut Vec<(&'static str, &'x str)>, kind: &'static str, s
     }
 }
 
+/// True when the byte before `pos` continues the same token: a digit span
+/// starting right after a letter, dot, colon or slash is the tail of an
+/// address, version or path ("127.0.0.1:10808", "v2.1"), not a count of
+/// its own. Callers pass token starts, which are char boundaries.
+fn token_char_before(text: &str, pos: usize) -> bool {
+    text[..pos]
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_alphanumeric() || ".:/".contains(c))
+}
+
 /// `12 passed`, `3 failed`, `280/280` — byte spans into `text`.
 /// Char-walked: every index below is a char boundary by construction
 /// (byte-walking multibyte text panicked here on Cyrillic input).
@@ -3646,8 +3748,11 @@ fn extract_counts(text: &str) -> Vec<(&'static str, &str)> {
         while j < text.len() && text[j..].chars().next().is_some_and(|c| c.is_whitespace()) {
             j += text[j..].chars().next().unwrap().len_utf8();
         }
-        // x/y form
-        if text[j..].starts_with('/') {
+        // x/y form — but only standalone: "280/280" is a count, while
+        // "127.0.0.1:10808/10809" is an address and "v2.1/3" a version.
+        // A token char immediately before the first digit means the span is
+        // the tail of something bigger, not a claim of its own.
+        if text[j..].starts_with('/') && !token_char_before(text, start) {
             let mut k = j + 1;
             while k < text.len() && text[k..].chars().next().is_some_and(|c| c.is_ascii_digit()) {
                 k += 1;
@@ -3884,6 +3989,37 @@ fn path_deleted_nearby(text: &str, span: &str) -> bool {
     }
     let before = text[from..pos].to_lowercase();
     VERBS.iter().any(|v| before.contains(v))
+}
+
+/// An x/y count ("10808/10809") is verified when both halves were reported
+/// separately: the journal carries facts, not the model's punctuation.
+/// Plain numbers only — anything else falls back to exact matching.
+fn count_parts_verified(summaries: &str, span: &str) -> bool {
+    let mut halves = span.split('/');
+    let (Some(a), Some(b), None) = (halves.next(), halves.next(), halves.next()) else {
+        return false;
+    };
+    let (a, b) = (a.trim(), b.trim());
+    !a.is_empty()
+        && !b.is_empty()
+        && a.chars().all(|c| c.is_ascii_digit())
+        && b.chars().all(|c| c.is_ascii_digit())
+        && summaries.contains(a)
+        && summaries.contains(b)
+}
+
+/// A path followed by an arrow ("services.msc -> its publisher") is a usage
+/// pointer, not an existence claim. Checks the text right after the span's
+/// first occurrence (past a closing backtick, if the span was quoted).
+fn path_arrow_after(text: &str, span: &str) -> bool {
+    let Some(pos) = text.find(span) else {
+        return false;
+    };
+    let rest = text[pos + span.len()..]
+        .trim_start()
+        .trim_start_matches(['`', '"', '\''])
+        .trim_start();
+    rest.starts_with("->") || rest.starts_with('→')
 }
 
 fn path_exists(root: &std::path::Path, span: &str) -> bool {
@@ -5308,6 +5444,33 @@ mod effort_tests {
         context::Policy::with_compaction(16_000, 0.08, 2, 0.80, true)
     }
 
+    /// An identical re-run is caught: same command plus byte-identical
+    /// output fires the advisory note; a changed output, a different
+    /// command, or a first run stays silent.
+    #[test]
+    fn repeat_bash_note_fires_only_on_identical_reruns() {
+        use crate::providers::ToolCallReq;
+        let bash_call = |id: &str, command: &str| {
+            ToolCallReq::new(id, "bash", serde_json::json!({"command": command}))
+        };
+        let messages = vec![
+            Message::new(Role::User, "check"),
+            Message::new(Role::Assistant, "").with_tool_calls(vec![bash_call("c1", "netstat")]),
+            Message::tool_result("c1", "TCP 1.2.3.4:443", false),
+            Message::new(Role::User, "and?"),
+        ];
+        let again = bash_call("c2", "netstat");
+        let note = repeat_bash_note(&messages, &again, "TCP 1.2.3.4:443");
+        assert!(note.clone().is_some_and(|n| n.contains("already ran")), "{note:?}");
+        // changed output: fresh state, no note
+        assert!(repeat_bash_note(&messages, &again, "TCP 9.9.9.9:80").is_none());
+        // different command: no note
+        let other = bash_call("c3", "Get-Process");
+        assert!(repeat_bash_note(&messages, &other, "TCP 1.2.3.4:443").is_none());
+        // first run ever: no note
+        assert!(repeat_bash_note(&[], &again, "TCP 1.2.3.4:443").is_none());
+    }
+
     fn parent_prefix<'a>(
         system: &'a [crate::providers::SystemPart],
         tools: &'a [crate::providers::ToolSpec],
@@ -5915,6 +6078,79 @@ mod effort_tests {
         let mut jh2 = Some(journal2);
         let out = lint_answer("Готово: 12 тестов прогнал.", &root, "sess2", &mut jh2);
         assert!(!out.contains("[unverified]"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Observed false positives from a real report: "10808/10809" is a
+    /// shorthand for two separately reported ports (boundary + parts
+    /// rules), and "services.msc -> ..." is advice to open something, not
+    /// a claim that it exists in the project (arrow rule).
+    #[test]
+    fn lint_answer_skips_shorthand_counts_and_usage_pointers() {
+        let root = std::env::temp_dir().join(format!("sqwai-lint-fp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&root, "sess").expect("open");
+        journal.append("user_msg", serde_json::json!({})).unwrap();
+        journal
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "bash", "ok": true, "summary": "TCP 127.0.0.1:10808 xray\nTCP 127.0.0.1:10809 xray"}),
+            )
+            .unwrap();
+        journal
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "bash", "ok": false, "summary": "бум"}),
+            )
+            .unwrap();
+        let mut jh = Some(journal);
+        // extractor level: the port pair is an address tail, not a count
+        assert!(
+            extract_counts("слушает 127.0.0.1:10808/10809").is_empty(),
+            "address tail must not extract"
+        );
+        // answer level: shorthand verified by parts, pointer skipped
+        let out = lint_answer(
+            "Локальный прокси 127.0.0.1:10808/10809, нормально. Узнать владельцев: `services.msc` -> пути и издатель.",
+            &root,
+            "sess",
+            &mut jh,
+        );
+        assert!(!out.contains("[unverified]"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The guards above must not swallow real lies: an unbacked x/y count
+    /// and a missing project file still mark.
+    #[test]
+    fn lint_answer_still_marks_unbacked_counts_and_paths() {
+        let root = std::env::temp_dir().join(format!("sqwai-lint-tp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&root, "sess").expect("open");
+        journal.append("user_msg", serde_json::json!({})).unwrap();
+        journal
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "bash", "ok": true, "summary": "пил кофе"}),
+            )
+            .unwrap();
+        journal
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "bash", "ok": false, "summary": "бум"}),
+            )
+            .unwrap();
+        let mut jh = Some(journal);
+        let out = lint_answer(
+            "Упало 7/9 тестов. Подробности в src/missing.rs.",
+            &root,
+            "sess",
+            &mut jh,
+        );
+        assert!(out.contains("7/9 [unverified]"), "{out}");
+        assert!(out.contains("src/missing.rs [unverified]"), "{out}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

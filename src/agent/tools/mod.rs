@@ -1048,6 +1048,134 @@ pub fn is_mutating_call(name: &str, args: &Value) -> bool {
     is_mutating(name)
 }
 
+/// A bash call that only inspects: every pipeline/chain segment starts with
+/// a known read-only verb and nothing redirects into a file. Advisory
+/// classification for plan discipline ONLY — never a safety boundary (a
+/// hostile command line can spell reads that write; approvals still guard
+/// real damage). Fail-closed: anything unrecognized stays mutating.
+pub fn is_readonly_bash(name: &str, args: &Value) -> bool {
+    if name != "bash" {
+        return false;
+    }
+    let Some(command) = args.get("command").and_then(|value| value.as_str()) else {
+        return false;
+    };
+    readonly_command(command.trim())
+}
+
+/// PowerShell read-only verb prefixes (`Get-Process`, `Where-Object`, bare
+/// `select`/`sort` aliases included by prefix).
+const READONLY_PS_VERBS: &[&str] = &[
+    "get-", "select-", "where-", "sort-", "format-", "measure-", "compare-", "test-",
+    "resolve-", "group-",
+];
+
+/// cmd read-only heads. The query-capable ones (`schtasks`, `reg`, `sc`)
+/// additionally require a `query` subcommand (see below).
+const READONLY_CMD_HEADS: &[&str] = &[
+    "netstat",
+    "tasklist",
+    "schtasks",
+    "reg",
+    "sc",
+    "driverquery",
+    "systeminfo",
+    "ipconfig",
+    "hostname",
+    "ver",
+    "whoami",
+    "echo",
+    "dir",
+    "type",
+    "find",
+    "findstr",
+    "more",
+    "tree",
+];
+
+fn readonly_command(command: &str) -> bool {
+    if command.is_empty() {
+        return false;
+    }
+    // wrapper shells carry the real command in a quoted -Command/-c string;
+    // anything else in wrapper position is unrecognized by construction
+    let inner = match shell_wrapper_inner(command) {
+        Some(inner) => inner,
+        None => return false,
+    };
+    let inner = inner.trim();
+    if inner.is_empty() || inner.contains("$(") {
+        return false;
+    }
+    // stderr merge is hygiene, not a write; any other redirect is
+    let unredirected = inner.replace("2>&1", "");
+    if unredirected.contains('>') {
+        return false;
+    }
+    split_shell_segments(&unredirected)
+        .iter()
+        .all(|segment| readonly_segment(segment))
+}
+
+/// `powershell -Command "..."` / `pwsh -c '...'` / `cmd /c "..."` yield the
+/// inner command line; a bare (non-wrapper) command yields itself; anything
+/// unrecognized yields `None` (fail closed).
+fn shell_wrapper_inner(command: &str) -> Option<&str> {
+    let head = command
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    let bare = head
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .trim_matches('"');
+    if !matches!(bare, "powershell" | "pwsh" | "cmd") {
+        return Some(command);
+    }
+    let quote = command.find('"').or_else(|| command.find('\''))?;
+    let inner = command[quote + 1..].trim_end();
+    let inner = inner
+        .strip_suffix('"')
+        .or_else(|| inner.strip_suffix('\''))
+        .unwrap_or(inner);
+    Some(inner)
+}
+
+/// Split a command line on pipeline and chain operators. Quotes are NOT
+/// tracked: a `|` inside quotes splits wrongly and fails closed downstream,
+/// which is the safe direction.
+fn split_shell_segments(command: &str) -> Vec<&str> {
+    command
+        .split(['|', '&', ';'])
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+
+fn readonly_segment(segment: &str) -> bool {
+    let head = segment
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    if head.is_empty() {
+        return false;
+    }
+    if READONLY_PS_VERBS.iter().any(|verb| head.starts_with(verb)) {
+        return true;
+    }
+    if READONLY_CMD_HEADS.contains(&head.as_str()) {
+        // query-capable tools read only with the query subcommand
+        if matches!(head.as_str(), "schtasks" | "reg" | "sc") {
+            return segment.to_lowercase().contains("query");
+        }
+        return true;
+    }
+    false
+}
+
 /// File path a call targets, if any — recorded on the journal `tool_call`
 /// record so re-reads (same path read twice: context-loss symptom) can be
 /// told apart from plan discipline. Raw value, no normalization; analysis
@@ -1357,6 +1485,85 @@ pub fn trim_middle(text: &str, max_chars: usize) -> String {
         total - head_len - tail_len,
         tail.trim_start()
     )
+}
+
+/// Decode child-process output. UTF-8 when valid; otherwise the Windows
+/// console codepage (cp866 on RU Windows — cmd/powershell system messages).
+/// Plain `from_utf8_lossy` turned those into ����, poisoning baselines and
+/// reports. Line-wise, so a UTF-8 program line next to a cp866 system error
+/// line each decodes correctly. File content never comes here (source files
+/// are UTF-8 by contract; lossy is right for them).
+pub fn decode_child_output(bytes: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for line in bytes.split(|b| *b == b'\n') {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        match std::str::from_utf8(line) {
+            Ok(text) => out.push_str(text),
+            Err(_) => {
+                for b in line {
+                    out.push(cp866_char(*b));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// One cp866 byte to char. Cyrillic ranges first (the observed mojibake),
+/// then box drawing and symbols; ASCII passes through.
+fn cp866_char(byte: u8) -> char {
+    match byte {
+        0x00..=0x7F => byte as char,
+        0x80..=0x9F => char::from_u32(0x0410 + (byte - 0x80) as u32).unwrap_or('�'),
+        0xA0..=0xAF => char::from_u32(0x0430 + (byte - 0xA0) as u32).unwrap_or('�'),
+        0xB0..=0xBF => [
+            '░', '▒', '▓', '│', '┤', '╡', '╢', '╖', '╕', '╣', '║', '╗', '╝', '╜',
+            '╛', '┐',
+        ][(byte - 0xB0) as usize],
+        0xC0..=0xCF => [
+            '└', '┴', '┬', '├', '─', '┼', '╞', '╟', '╚', '╔', '╩', '╦', '╠', '═',
+            '╬', '╧',
+        ][(byte - 0xC0) as usize],
+        0xD0..=0xDF => [
+            '╨', '╤', '╥', '╙', '╘', '╒', '╓', '╫', '╪', '┘', '┌', '█', '▄', '▌',
+            '▐', '■',
+        ][(byte - 0xD0) as usize],
+        0xE0..=0xEF => char::from_u32(0x0440 + (byte - 0xE0) as u32).unwrap_or('�'),
+        0xF0 => 'Ё',
+        0xF1 => 'ё',
+        0xF2 => 'Є',
+        0xF3 => 'є',
+        0xF4 => 'Ї',
+        0xF5 => 'ї',
+        0xF6 => 'Ў',
+        0xF7 => 'ў',
+        0xF8 => '°',
+        0xF9 => '∙',
+        0xFA => '·',
+        0xFB => '√',
+        0xFC => '№',
+        0xFD => '¤',
+        0xFE => '■',
+        0xFF => '\u{a0}',
+    }
+}
+
+/// Decode check: cp866 "Привет" (П=0x8F, р=0xE0, и=0xA8, в=0xA2,
+/// е=0xA5, т=0xE2) must round-trip, valid UTF-8 (emoji included) passes
+/// through untouched, and mixed lines decode each in its own encoding.
+#[test]
+fn decode_child_output_handles_console_codepage() {
+    assert_eq!(decode_child_output(&[0x8F, 0xE0, 0xA8, 0xA2, 0xA5, 0xE2]), "Привет");
+    assert_eq!(decode_child_output("ok 🔥 ЕС".as_bytes()), "ok 🔥 ЕС");
+    let mut mixed = b"done\n".to_vec();
+    mixed.extend_from_slice(&[0x8E, 0xE8, 0xA8, 0xA1, 0xAA, 0xA0]); // "Ошибка" in cp866
+    assert_eq!(decode_child_output(&mixed), "done\nОшибка");
+    assert_eq!(decode_child_output(&[0xB3]), "│");
 }
 
 const READ_MAX_BYTES: usize = 400_000;
@@ -5713,6 +5920,46 @@ mod tests {
             &json!({"file_path": "src/a.rs", "content": "x"})
         ));
         assert!(!is_mutating_call("read", &json!({"file_path": "src/a.rs"})));
+    }
+
+    /// Read-only bash classification: the observed inspection shapes pass,
+    /// anything that could write fails closed. Advisory only — the plan
+    /// gate consults it, approvals do not.
+    #[test]
+    fn readonly_bash_covers_inspection_but_nothing_else() {
+        let bash = |command: &str| {
+            is_readonly_bash("bash", &serde_json::json!({"command": command}))
+        };
+        // observed read-only shapes from a real inspection session
+        assert!(bash(
+            "powershell -NoProfile -Command \"Get-Process | Sort-Object CPU -Descending | Select-Object -First 25 Name, Id\""
+        ));
+        assert!(bash(
+            "powershell -NoProfile -Command \"Get-Process | Where-Object { $_.Path } | Select-Object Name\""
+        ));
+        assert!(bash("netstat -ano | findstr LISTENING"));
+        assert!(bash("netstat -ano | findstr ESTABLISHED"));
+        assert!(bash("schtasks /query /FO TABLE | more"));
+        assert!(bash("reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"));
+        assert!(bash("tasklist /FI \"PID eq 20912\" /FO TABLE"));
+        assert!(bash(
+            "powershell -NoProfile -Command \"Get-MpComputerStatus | Select-Object AntivirusEnabled\""
+        ));
+        // writes, chains into writes, redirect, subexpressions: all mutating
+        assert!(!bash("Get-Process; Remove-Item C:\\temp\\x"));
+        assert!(!bash("echo hi > out.txt"));
+        assert!(!bash("powershell -NoProfile -Command \"Get-Process\" | Out-File x.txt"));
+        assert!(!bash("powershell -c \"rm foo\""));
+        assert!(!bash("netstat -ano & del C:\\t"));
+        assert!(!bash("powershell -Command \"$(rm foo)\""));
+        assert!(!bash("schtasks /delete /TN x /F"));
+        assert!(!bash("reg add HKCU\\x /v y"));
+        assert!(!bash("date 01-01-25"));
+        assert!(!bash(""));
+        assert!(!bash("   "));
+        // not bash at all
+        assert!(!is_readonly_bash("read", &serde_json::json!({"file_path": "a"})));
+        assert!(!is_readonly_bash("bash", &serde_json::json!({})));
     }
 
     /// §2.1.2 makes the plan budget a host value: model context times

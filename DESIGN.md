@@ -500,6 +500,11 @@ session's own plan. It asks "is there planning discipline", not "is it
 yours" — one active plan per project is enough to let a session act under
 it (joining stays explicit via `plan start`). Strict session resolution
 (§2.1.1) still governs which plan a session reads and mutates.
+Read-only inspection is exempt: a bash call whose every pipeline segment
+starts with a known read-only verb (`Get-*`, `netstat`, `reg query`, …)
+and nothing redirects runs without a plan. Advisory classification for
+discipline only — approvals still guard real damage; anything unrecognized
+fails closed back into the gate.
 Write-path gates (Z, AF, warn-layer only — they steer, never block). After
 a successful `write`/`edit`/`multi_edit`/`patch`, the dispatcher checks the
 touched paths against the holding step's refs (the child's inherited step,
@@ -1178,7 +1183,7 @@ The anchor is a working memo, not a database. Fixed order:
 
 text
 
-ANCHOR (host-generated; source of truth after compaction)
+ANCHOR (host-generated working memo; current host state, not a summary)
 goal: …
 constraints: …
 acceptance: [0] pending · [1] passed j#a8f2:41
@@ -1206,8 +1211,11 @@ plan journal record is start without a matching finish|block|cancel
 gains resumed: step 2 was in progress; last events: j#40 edit src/x.rs, j#41 cargo test exit 1.
 Graph: head compare → mtime scan (§2.4.7).
 Memory load (§2.3.7).
-First injected instruction: "Session resumed. Continue step 2, or block it
-with a reason, or ask the user." No summary of the old chat is generated;
+First injected instruction (one-shot, first request only): "Session resumed. Continue step 2, or block it
+with a reason, or ask the user." A notice on every turn taught the model that
+context is restored constantly, so it re-verified the plan before each step —
+the flag arms only on session load with history or a compaction that changed
+something. No summary of the old chat is generated;
 the kept history (last compaction.keep_turns turns) is loaded verbatim.
 /new with an active plan: ask_user — continue in the new session (plan
 attached), complete, abandon, or leave it (new session without plan; the
@@ -1275,7 +1283,11 @@ result claims unverified against the journal (`[unverified]` spans + a
 `claim_lint` record). Counts, status phrases, and sized claims in English
 and Russian; paths/symbols via resolve_ref; gates (contradictions only,
 each span once, status words only without a successful `bash` in the window,
-everything only beside a failure in the window); repetition (3+ fresh flags)
+everything only beside a failure in the window); precision rules: an `N/M`
+count fires only standalone (address tails like `:10808/10809` are not
+counts) and verifies when both halves were reported separately; a path
+followed by an arrow (`services.msc -> …`) is a usage pointer, not an
+existence claim; repetition (3+ fresh flags)
 nudges via the turn system block. Specified in §12.9. (The diary writer already strips
 unverified claims from prose host-side — §2.3.2 — but that covers diary
 entries only, not chat text.)
@@ -1289,7 +1301,7 @@ The tool reference: what each tool touches and what the host records for it.
 | `read` `ls` `glob` | files | no | tool_call/result |
 | `grep` `ast_grep` | files | no | tool_call/result |
 | `write` `edit` `multi_edit` `patch` | files | yes | + file_diff, checkpoint; pre-edit graph warning per §2.4.8 |
-| `bash` | exec | yes | + checkpoint (pre/step-boundary), file_diff on tree change, approval |
+ | `bash` | exec | yes | + checkpoint (pre/step-boundary), file_diff on tree change, approval; console output decoded as UTF-8 else cp866 (no more ����); identical re-runs get one advisory host note, not a second turn |
 | `bash_output` `bash_kill` | exec | no | tool_call/result; background jobs are registered, reaped on completion |
 | `think` | reasoning | no | tool_call/result |
 | `git_status` `git_diff` `git_log` `git_show` `git_branch` | git | no for status/diff/log/show; `git_branch` create/switch are mutating and refused in PLAN mode | tool_call/result |
@@ -1405,7 +1417,9 @@ ratatui + crossterm; ASCII/box-drawing only, no emoji; English UI strings
 centralized. Header: model, mode, tokens and context %, cache reads.
 Streaming markdown with syntect highlighting; tool calls collapse on
 completion (Enter expands); diffs shown post hoc; thinking collapsed.
-Indicators: compacting…, checkpoint hint, background jobs, retries. Panic hook restores the terminal.
+Indicators: compacting…, checkpoint hint, background jobs, retries. A retry
+notice is transient: it stands while the turn is unresolved and is retracted
+when the retry recovers — a terminal failure keeps its explanation. Panic hook restores the terminal.
 
 Popups: models (Ctrl+P), sessions (Ctrl+S), subagents (Ctrl+B, read-only
 child chat), help (?), graph-view (Ctrl+G), undo (Ctrl+U), todo panel
@@ -1630,7 +1644,7 @@ number; a `partial` one is missing something the design calls for.
 | U | Assumption notes: open tracking, finish warning, resolve | done | F3 |
 | V | Executable acceptance (cmd:/manual: runners; /init seeds from MEMORY.md) | done — cmd:/manual: settling done (#7); `/init` seeds `[verify] commands` (repo probing + MEMORY.md `verify:` lines, hand values win); `cmd: $name` substitutes on `plan create`, unknown names reject with the known list | F3 |
 | V1 | Verification receipts (§2.1.4): execution interval digest, check hash, stale invalidation, manual `confirm` vs `waive` | done — interval digest, check hash, stale invalidation on diff, manual /plan confirm, replay restoration | V, F1b |
-| W | Acceptance gate (Act mutate w/o acceptance-bearing plan → plan_required) | done — `plan_first: soft|off` in PlanConfig; gate checks project-global acceptance presence, not prose triviality; baseline arm exempt | F3 |
+ | W | Acceptance gate (Act mutate w/o acceptance-bearing plan → plan_required) | done — `plan_first: soft|off` in PlanConfig; gate checks project-global acceptance presence, not prose triviality; baseline arm exempt; read-only bash exempt (advisory verb match, fail-closed) | F3 |
 | X | Tool-output pruning + USER.md split/load | partial — USER.md split/loading and prune (§3.3.1) done; the read guard is a host path→hash map, not context-backed authorization | F1, F5 |
  | Y | Claim lint (post-generation verify against journal/resolve_ref) | done — counts/status/sized-claims/paths/symbols in English and Russian checked against the turn journal window, contradictions marked `[unverified]` + `claim_lint` record, gated (status only without a successful bash, everything only beside a failure, each span once), absence never flagged; repetition nudge (3+ fresh flags) rides the turn system block (§12.9) | I4 |
 | Z | Scope guard (step.refs vs file_diff) | done — finish-time misattribution warnings plus write-path scope warnings against the holding step's refs (warn-layer, never blocks; `bash` excluded, no per-file diff) | I4 |

@@ -239,6 +239,9 @@ pub(super) enum Segment {
         /// error rows arrive collapsed (a provider dump must not flood the
         /// chat) and unfold on click; other kinds always show fully
         expanded: bool,
+        /// transient rows (retry notices) are retracted when the turn they
+        /// belong to completes successfully; terminal failures stay
+        transient: bool,
     },
 }
 
@@ -1293,6 +1296,7 @@ impl App {
                 text,
                 kind,
                 expanded,
+                ..
             } => {
                 // content identity is (id, rev) — statuses are always pushed
                 // with a fresh id — but the key must still see text and kind,
@@ -1903,6 +1907,7 @@ impl App {
                 text,
                 kind,
                 expanded,
+                ..
             } => {
                 let st = match kind {
                     StatusKind::Info => Theme::dim(),

@@ -410,6 +410,10 @@ pub struct App {
     retry_notified: bool,
     /// live retry indicator rendered in the status bar (single updating line)
     retry_line: Option<String>,
+    /// the next request may carry the resume notice once, then it disarms:
+    /// armed when a session with history is loaded or a compaction changed
+    /// something — the only genuine restores
+    resume_notice_armed: bool,
     /// label of the last shadow checkpoint (design §10 indicator)
     last_checkpoint: Option<String>,
     /// user message index pushed for the active turn, if any
@@ -713,6 +717,20 @@ impl App {
         self.seg_meta = kept_meta;
     }
 
+    /// Drop transient retry notices. Called when a turn completes
+    /// successfully: a recovered retry leaves no scar in the chat. Must run
+    /// before `finalize_activity_group`, which would otherwise fold the
+    /// notice into the turn's range. Terminal failures keep theirs.
+    fn retract_transient_status(&mut self) {
+        let before = self.segments.len();
+        self.retain_segments(|seg| {
+            !matches!(seg, Segment::Status { transient: true, .. })
+        });
+        if self.segments.len() != before {
+            self.dirty = true;
+        }
+    }
+
     /// Bump the revision of one subagent-chat row (see `touch_segment`).
     fn sub_touch(&mut self, id: u64, pos: usize) {
         if let Some(meta) = self
@@ -769,7 +787,7 @@ impl App {
     /// Order matters: the stable prefix comes first, the durable plan next
     /// (it only changes when the agent rewrites it), and everything that moves
     /// while the agent works goes last so it cannot invalidate the prefix.
-    fn system_block(&self) -> Vec<crate::providers::SystemPart> {
+    fn system_block(&mut self) -> Vec<crate::providers::SystemPart> {
         use crate::providers::SystemPart;
         let mut parts = vec![SystemPart::cached(self.stable_prefix.clone())];
         if !self.session_environment.is_empty() {
@@ -799,11 +817,19 @@ impl App {
             &root,
             &self.session.id.to_string(),
         )));
-        if !self.session.messages.is_empty()
-            && let Some(notice) =
-                crate::agent::context::resume_notice(&root, &self.session.id.to_string())
-        {
-            parts.push(SystemPart::volatile(notice));
+        // One-shot resume notice: only the first request after a genuine
+        // restore (session loaded with history, or a compaction that changed
+        // something) may claim anything was resumed. Injecting it every turn
+        // while a step is merely open taught the model that context is
+        // restored constantly — and it re-verified the plan before each step.
+        if self.resume_notice_armed {
+            self.resume_notice_armed = false;
+            if !self.session.messages.is_empty()
+                && let Some(notice) =
+                    crate::agent::context::resume_notice(&root, &self.session.id.to_string())
+            {
+                parts.push(SystemPart::volatile(notice));
+            }
         }
         let runtime = crate::prompts::runtime_context();
         if !runtime.is_empty() {
@@ -924,6 +950,7 @@ impl App {
             prev_turn_ok: false,
             retry_notified: true, // no toast for the very first turn
             retry_line: None,
+            resume_notice_armed: false,
             last_checkpoint: None,
             turn_user_index: None,
             lsp_diagnostics: 0,
@@ -1229,6 +1256,9 @@ impl App {
                     StatusKind::Info
                 },
                 expanded: false,
+                // restored notes are history, never transient: a retried turn
+                // that later succeeded left no retry segment behind
+                transient: false,
             });
         }
     }
@@ -1999,6 +2029,9 @@ impl App {
             return;
         }
         let verb = if summarized { "summarized" } else { "trimmed" };
+        // the transcript was just replaced: the next request may orient the
+        // model once (open step, if any), then the notice disarms
+        self.resume_notice_armed = true;
         // before/after are the HISTORY estimate, not the status-bar context
         // (which adds system + tool schemas) — label them so the numbers
         // match something the user can verify
@@ -2379,6 +2412,9 @@ impl App {
         }
         self.context_bootstrap_pending = true;
         self.session = s;
+        // a session arriving with history is a genuine restore: the next
+        // request may orient the model once, then the notice disarms
+        self.resume_notice_armed = !self.session.messages.is_empty();
         crate::providers::set_conversation_id(&self.session.id.to_string());
         // queued follow-ups belong to the old conversation
         self.pending_queue.clear();
@@ -3807,6 +3843,9 @@ impl App {
                             text: format!("request failed — retrying with backoff: {error}"),
                             kind: StatusKind::Err,
                             expanded: false,
+                            // retracted when the turn completes successfully;
+                            // a terminal failure keeps it (see finish_turn_inner)
+                            transient: true,
                         });
                         if self.prev_turn_ok {
                             crate::agent::notify::windows_toast(
@@ -3826,6 +3865,7 @@ impl App {
                         text: format!("primary model '{from}' failed; switched to fallback '{to}'"),
                         kind: StatusKind::Warn,
                         expanded: false,
+                        transient: false,
                     });
                     self.session.model_key = to.clone();
                     if let Some(mc) = self.cfg.models.get(&to) {
@@ -4496,6 +4536,7 @@ impl App {
                 text: format!("acceptance {i} went stale — re-verify"),
                 kind: StatusKind::Err,
                 expanded: false,
+                transient: false,
             });
         }
     }
@@ -4643,7 +4684,16 @@ impl App {
                 text: note.clone(),
                 kind,
                 expanded: false,
+                transient: false,
             });
+        }
+        if res.is_ok() {
+            // a retry that recovered leaves no scar: the transient notice
+            // pushed on the first failure is retracted now that the answer
+            // exists. Terminal failures keep theirs (pushed above or on the
+            // retry path) — an unfinished answer must stay explained.
+            self.retract_transient_status();
+            self.retry_notified = false;
         }
         // Segment indices are stable from here on: the empty-thinking cleanup
         // and the answer backfill above have all run.

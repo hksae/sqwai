@@ -315,8 +315,10 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
     }
     join_readers(readers);
 
-    let stdout = String::from_utf8_lossy(&out_buf.lock().unwrap()).into_owned();
-    let stderr = String::from_utf8_lossy(&err_buf.lock().unwrap()).into_owned();
+    // console codepage, not UTF-8: plain lossy decoding turned RU
+    // system messages into ���� (baselines and reports carried them)
+    let stdout = super::decode_child_output(&out_buf.lock().unwrap());
+    let stderr = super::decode_child_output(&err_buf.lock().unwrap());
     let code = status.and_then(|s| s.code());
     let code_str = code.map(|c| c.to_string()).unwrap_or_else(|| "?".into());
 

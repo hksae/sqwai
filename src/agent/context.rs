@@ -23,7 +23,7 @@ use crate::providers::{Message, Role};
 /// It contains only durable plan data and bounded journal-derived facts; the
 /// model never writes or rewrites this block.
 pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
-    let mut out = String::from("ANCHOR (host-generated; source of truth after compaction)\n");
+    let mut out = String::from("ANCHOR (host-generated working memo; current host state, not a summary)\n");
     // Finished work must stay visible: when no plan is active, fall back to
     // the session's latest completed plan — "none" would lie about done work
     // (every G0 matrix anchor printed empty for exactly this reason).

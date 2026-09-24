@@ -25,8 +25,8 @@ fn run_git(ctx: &ToolCtx, args: &[&str]) -> Outcome {
         Ok(output) => output,
         Err(error) => return Outcome::err(format!("git could not start: {error}")),
     };
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = super::decode_child_output(&output.stdout);
+    let stderr = super::decode_child_output(&output.stderr);
     let text = if stdout.trim().is_empty() {
         stderr.trim().to_string()
     } else if stderr.trim().is_empty() {
@@ -316,7 +316,7 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         Err(error) => return Outcome::err(format!("patch check failed: {error}")),
     };
     if !checked.status.success() {
-        let error = String::from_utf8_lossy(&checked.stderr);
+        let error = super::decode_child_output(&checked.stderr);
         return Outcome::err(format!("patch rejected: {}", truncate(error.trim())));
     }
 
@@ -380,7 +380,7 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         }
         Ok(output) => Outcome::err(format!(
             "patch failed: {}",
-            truncate(String::from_utf8_lossy(&output.stderr).trim())
+            truncate(super::decode_child_output(&output.stderr).trim())
         )),
         Err(error) => Outcome::err(format!("patch failed: {error}")),
     }

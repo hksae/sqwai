@@ -740,6 +740,7 @@ mod tests {
             text: "first\nsecond\nthird".into(),
             kind: StatusKind::Err,
             expanded: false,
+            transient: false,
         });
         let idx = app.segments.len() - 1;
 
@@ -765,6 +766,7 @@ mod tests {
             text: "x".repeat(200),
             kind: StatusKind::Err,
             expanded: false,
+            transient: false,
         });
         let wide = app.render_segment(&app.segments, app.segments.len() - 1, 100, true);
         assert_eq!(wide.len(), 1, "wide single line capped: {wide:?}");
@@ -1876,6 +1878,94 @@ mod tests {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         assert!(app.start_new_session());
         assert_eq!(app.session.project, Some(app.project_root.clone()));
+    }
+
+    /// The resume notice is one-shot: armed by a genuine restore (session
+    /// with history, real compaction), consumed by the first request. An
+    /// always-on notice taught the model that context is restored every
+    /// turn, and it re-verified the plan before each step.
+    #[test]
+    fn resume_notice_arms_once_and_disarms_on_use() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        assert!(!app.resume_notice_armed);
+        // empty session: nothing to resume from
+        let empty = Session::new("m".into(), 1000);
+        app.apply_session(empty);
+        assert!(!app.resume_notice_armed);
+        // session with history: genuine restore, arm once
+        let mut loaded = Session::new("m".into(), 1000);
+        loaded.push(crate::providers::Role::User, "earlier work");
+        app.apply_session(loaded);
+        assert!(app.resume_notice_armed);
+        // no open step on disk: nothing to say, but the flag still consumes
+        app.system_block();
+        assert!(!app.resume_notice_armed, "one-shot means one-shot");
+        app.system_block();
+        assert!(!app.resume_notice_armed);
+    }
+
+    #[test]
+    fn compaction_arms_resume_notice_only_on_real_change() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.note_compaction(false, 500, 500);
+        assert!(!app.resume_notice_armed, "a no-op compact restores nothing");
+        app.note_compaction(true, 9000, 1000);
+        assert!(app.resume_notice_armed, "a real compaction is a restore");
+    }
+
+    /// A retry that recovered leaves no scar: the transient notice is
+    /// retracted on success. A terminal failure keeps its explanation.
+    #[test]
+    fn successful_finish_retracts_transient_retry_notice() {
+        fn statuses(app: &App) -> Vec<String> {
+            app.segments
+                .iter()
+                .filter_map(|s| match s {
+                    Segment::Status { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.push_segment(Segment::Status {
+            text: "request failed — retrying with backoff: boom".into(),
+            kind: StatusKind::Err,
+            expanded: false,
+            transient: true,
+        });
+        app.push_segment(Segment::Status {
+            text: "error: earlier".into(),
+            kind: StatusKind::Err,
+            expanded: false,
+            transient: false,
+        });
+        app.retry_notified = true;
+        app.finish_turn_inner(Ok(()), false);
+        let texts = statuses(&app);
+        assert!(
+            !texts.iter().any(|t| t.contains("retrying")),
+            "transient notice must go: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("earlier")),
+            "durable notes stay: {texts:?}"
+        );
+        assert!(!app.retry_notified, "next turn must notify again");
+
+        // terminal failure: the explanation stays
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.push_segment(Segment::Status {
+            text: "request failed — retrying with backoff: boom".into(),
+            kind: StatusKind::Err,
+            expanded: false,
+            transient: true,
+        });
+        app.finish_turn_inner(Err("boom".into()), false);
+        let texts = statuses(&app);
+        assert!(
+            texts.iter().any(|t| t.contains("retrying")),
+            "unfinished answer stays explained: {texts:?}"
+        );
     }
 
     #[test]
@@ -7385,6 +7475,7 @@ mod tests {
             text: "done".into(),
             kind: StatusKind::Info,
             expanded: false,
+            transient: false,
         });
         terminal.draw(|frame| app.draw(frame)).unwrap();
         assert_eq!(app.test_renders, 1, "append re-rendered old segments");
