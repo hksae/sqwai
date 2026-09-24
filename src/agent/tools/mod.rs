@@ -906,7 +906,13 @@ Returns connected nodes, incident edges, and explicit truncation status.",
             name: "plan",
             kind: Kind::Mutating,
             description: "Work the structured plan, one operation per call. Ops: create, start, \
-finish, block, unblock, cancel, add, split, verify, complete, show, block_plan. Call \
+finish, block, unblock, cancel, add, split, verify, complete, show, block_plan. Plans are for \
+work that changes things: read-only inspection needs no plan and no acceptance — just look. \
+For a write, create with goal + steps; acceptance is optional at create (trivial writes can \
+complete on closed steps alone) and required only as executable or human-settled criteria for \
+real mutations: cmd: for a check that fails before the change and passes after, manual: for \
+anything a human eyeballs. Advanced rung kinds (snapshot:/differential:/signatures:) are \
+host-suggested after the first run, never written by hand. Call \
 show first if you are unsure of the current step ids. The host owns the goal, the constraints, \
 acceptance status, validation and evidence; to change the goal, propose the full updated plan with \
 propose_plan instead. finish records completion of the step's work with a summary and does not \
@@ -923,7 +929,8 @@ Never invent evidence identifiers.",
                 "properties": {
                     "op": {"type": "string", "enum": [
                         "create", "start", "finish", "block", "unblock", "cancel",
-                        "add", "split", "verify", "complete", "show", "block_plan"
+                        "add", "split", "verify", "complete", "show", "block_plan",
+                        "add_acceptance"
                     ]},
                     "id": {"type": "string", "description": "step id"},
                     "goal": {"type": "string", "description": "create"},
@@ -932,6 +939,11 @@ Never invent evidence identifiers.",
                         "type": ["array", "integer"],
                         "items": {"type": "string"},
                         "description": "create: criteria; verify: index"
+                    },
+                    "items": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "add_acceptance: criteria to append (cmd:/manual:; free text refused like at create)"
                     },
                     "steps": {
                         "type": "array",
@@ -2960,6 +2972,28 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                                         ));
                                     }
                                 }
+                                // acceptance suggestion: a plan born without
+                                // criteria plus detected check commands gets a
+                                // pointer, not a mandate — the model decides
+                                // with op add_acceptance. (Read-only work
+                                // rightly has none of either.)
+                                if created.acceptance.is_empty() {
+                                    let detected =
+                                        crate::config::Config::detect_verify_commands(&ctx.root);
+                                    if !detected.is_empty() {
+                                        let offered: Vec<String> = detected
+                                            .iter()
+                                            .take(3)
+                                            .map(|(name, command, _)| {
+                                                format!("cmd: {command} ({name})")
+                                            })
+                                            .collect();
+                                        message.push_str(&format!(
+                                            "\nacceptance: none yet — detected checks you can adopt with {{\"op\": \"add_acceptance\", \"items\": [...]}} (or write manual:): {}",
+                                            offered.join(" · ")
+                                        ));
+                                    }
+                                }
                                 Outcome::ok(message)
                             }
                             Err(e) => Outcome::err(format!("plan write failed: {e:#}")),
@@ -3077,13 +3111,47 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             // Journal-first (§2.1.4): the intent is recorded ahead of the
             // store, carrying the full op for replay. `show` is read-only
             // and keeps the old plain store with no cursor advance.
-            let op_value = serde_json::to_value(&other).unwrap_or(serde_json::Value::Null);
+            let mut other = other;
+            // $named expansion for added criteria, same as create: unknown
+            // names reject here, not at verify time on a command that never
+            // existed.
+            if let plan::Op::AddAcceptance { ref mut items } = other {
+                match plan::substitute_verify_commands(
+                    items.clone(),
+                    &crate::config::Config::project_verify_commands(&ctx.root),
+                ) {
+                    Ok(expanded) => *items = expanded,
+                    Err(unknown) => {
+                        let hint = if unknown.known.is_empty() {
+                            "no verify commands seeded — run /init or write the command out"
+                                .to_string()
+                        } else {
+                            format!("known: {}", unknown.known.join(", "))
+                        };
+                        return rejection(plan::Rejection::new(
+                            "unknown_verify",
+                            format!(
+                                "acceptance refers to unknown verify command(s): ${}",
+                                unknown.names.join(", $")
+                            ),
+                            hint,
+                        ));
+                    }
+                }
+            }
+            let mut op_value = serde_json::to_value(&other).unwrap_or(serde_json::Value::Null);
             let op_name = op_value
                 .get("op")
                 .and_then(|value| value.as_str())
                 .unwrap_or("unknown")
                 .to_string();
             let readonly_show = op_name == "show";
+            // late-added criteria need baselines for exactly their new
+            // positions (existing ones belong to the pre-change tree and are
+            // never re-run); recorded before apply so the fill below knows
+            // where the plan ended
+            let prev_acceptance_len = active.acceptance.len();
+            let adding_acceptance = matches!(&other, plan::Op::AddAcceptance { .. });
             if let plan::Op::Start { ref id, .. } = other
                 && let Some(step) = active.step(id)
             {
@@ -3099,6 +3167,55 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             }
             match plan::apply(&mut active, other, &limits, ctx.current_step.as_deref()) {
                 Ok(applied) => {
+                    // baselines for late-added criteria ride the same intent
+                    // (replay restores them instead of re-running checks).
+                    // Captured against a plan trimmed to the new items only:
+                    // re-running the old checks would waste turns and pin
+                    // notes to stale indices. A check that already passes
+                    // stays unproven — correctly, the host never saw it fail.
+                    let mut proof_notes = String::new();
+                    if adding_acceptance && active.acceptance.len() > prev_acceptance_len {
+                        let mut probe = active.clone();
+                        probe.acceptance = probe.acceptance.split_off(prev_acceptance_len);
+                        let proof = capture_baselines(ctx, &probe);
+                        let proven = proof.slots.iter().filter(|slot| slot.is_some()).count();
+                        let added = active.acceptance.len() - prev_acceptance_len;
+                        for (offset, item) in active
+                            .acceptance
+                            .iter_mut()
+                            .enumerate()
+                            .skip(prev_acceptance_len)
+                        {
+                            let slot = offset - prev_acceptance_len;
+                            item.baseline = proof.slots.get(slot).cloned().flatten();
+                            item.snapshot = proof.frozen.get(slot).cloned().flatten();
+                            item.shape = proof.shapes.get(slot).cloned().flatten();
+                            item.inputs =
+                                proof.inputs.get(slot).cloned().unwrap_or_default();
+                        }
+                        if let Some(record) = op_value.as_object_mut() {
+                            record.insert(
+                                "new_baselines".to_string(),
+                                serde_json::to_value(&proof.slots).unwrap_or_default(),
+                            );
+                            record.insert(
+                                "new_snapshots".to_string(),
+                                serde_json::to_value(&proof.frozen).unwrap_or_default(),
+                            );
+                            record.insert(
+                                "new_shapes".to_string(),
+                                serde_json::to_value(&proof.shapes).unwrap_or_default(),
+                            );
+                            record.insert(
+                                "new_inputs".to_string(),
+                                serde_json::to_value(&proof.inputs).unwrap_or_default(),
+                            );
+                        }
+                        proof_notes.push_str(&format!(
+                            "\nbaselines: {proven}/{added} new items fail pre-change and can settle; \
+                             the rest already pass and stay unproven (waivable)"
+                        ));
+                    }
                     if readonly_show {
                         if let Err(e) = plan::store(&ctx.root, &active) {
                             return Outcome::err(format!("plan write failed: {e:#}"));
@@ -3146,6 +3263,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                                 &active,
                                 msg,
                             );
+                            let msg = format!("{msg}{proof_notes}");
                             Outcome::ok(msg)
                         }
                         plan::Applied::Shown { text } => Outcome::ok(text),
@@ -6443,6 +6561,54 @@ mod tests {
         }];
         validate_attached_records(&dir, &plan_id, "1", &fresh)
             .expect("unstamped evidence counts");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Plan-lite grows teeth: criteria appended after create land pending,
+    /// baselines are captured for exactly the new positions, empty and
+    /// free-text additions refuse like at create.
+    #[test]
+    fn plan_add_acceptance_appends_with_baselines() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "lite plan",
+                "constraints": [],
+                "acceptance": [],
+                "steps": [{"title": "s"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        // empty additions refuse
+        let empty = plan_op(&mut ctx, &json!({"op": "add_acceptance", "items": []}));
+        assert!(!empty.ok, "{}", empty.output);
+        assert!(empty.output.contains("empty_acceptance"), "{}", empty.output);
+        // free text refuses like at create
+        let prose = plan_op(
+            &mut ctx,
+            &json!({"op": "add_acceptance", "items": ["looks good"]}),
+        );
+        assert!(!prose.ok, "{}", prose.output);
+        assert!(prose.output.contains("untyped_acceptance"), "{}", prose.output);
+        // a failing check plus a human checkpoint: both land pending
+        let added = plan_op(
+            &mut ctx,
+            &json!({"op": "add_acceptance", "items": ["cmd: exit 3", "manual: eyeball it"]}),
+        );
+        assert!(added.ok, "{}", added.output);
+        assert!(added.output.contains("acceptance +2"), "{}", added.output);
+        let plan = plan::open_active(&dir).unwrap().unwrap();
+        assert_eq!(plan.acceptance.len(), 2);
+        assert!(
+            plan.acceptance[0].baseline.is_some(),
+            "a check that fails pre-change gets its proof"
+        );
+        assert!(
+            plan.acceptance[1].baseline.is_none(),
+            "manual items prove nothing"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

@@ -1429,6 +1429,68 @@ fn apply_record(
             }
             Ok(true)
         }
+        Some("add_acceptance") => {
+            // items re-append (cursor discipline prevents double-apply, same
+            // as Add); the proof captured at dispatch rides the record, so
+            // replay restores it instead of re-running checks mid-work
+            let items: Vec<String> = fields
+                .get("items")
+                .and_then(|value| value.as_array())
+                .map(|array| {
+                    array
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            add_acceptance(plan, items).map_err(|_| {
+                Rejection::new("replay_diverged", "cannot re-add acceptance", "")
+            })?;
+            // proof vectors are probe-relative (new items only): they map
+            // onto the last N acceptance items, which are exactly the ones
+            // this intent appended (nothing ever removes acceptance items)
+            if let Some(value) = fields.get("new_baselines")
+                && let Ok(slots) = serde_json::from_value::<Vec<Option<Baseline>>>(value.clone())
+            {
+                let start = plan.acceptance.len().saturating_sub(slots.len());
+                for (item, slot) in plan.acceptance.iter_mut().skip(start).zip(slots) {
+                    if let Some(baseline) = slot {
+                        item.baseline = Some(baseline);
+                    }
+                }
+            }
+            if let Some(value) = fields.get("new_snapshots")
+                && let Ok(slots) = serde_json::from_value::<Vec<Option<Snapshot>>>(value.clone())
+            {
+                let start = plan.acceptance.len().saturating_sub(slots.len());
+                for (item, slot) in plan.acceptance.iter_mut().skip(start).zip(slots) {
+                    if let Some(snapshot) = slot {
+                        item.snapshot = Some(snapshot);
+                    }
+                }
+            }
+            if let Some(value) = fields.get("new_shapes")
+                && let Ok(slots) = serde_json::from_value::<Vec<Option<ShapeFreeze>>>(value.clone())
+            {
+                let start = plan.acceptance.len().saturating_sub(slots.len());
+                for (item, slot) in plan.acceptance.iter_mut().skip(start).zip(slots) {
+                    if let Some(shape) = slot {
+                        item.shape = Some(shape);
+                    }
+                }
+            }
+            if let Some(value) = fields.get("new_inputs")
+                && let Ok(slots) = serde_json::from_value::<Vec<Vec<CheckInput>>>(value.clone())
+            {
+                let start = plan.acceptance.len().saturating_sub(slots.len());
+                for (item, slot) in plan.acceptance.iter_mut().skip(start).zip(slots) {
+                    if !slot.is_empty() {
+                        item.inputs = slot;
+                    }
+                }
+            }
+            Ok(true)
+        }
         Some(
             "start" | "finish" | "block" | "unblock" | "cancel" | "add" | "split" | "complete"
             | "join" | "block_plan",
@@ -1776,6 +1838,15 @@ pub enum Op {
         #[serde(default)]
         refs: Vec<StepRef>,
     },
+    /// Append acceptance criteria to a plan born without (or with fewer
+    /// than needed): plan-lite grows teeth when the work turns out real.
+    /// Same typing gate as create; baselines are captured by the dispatcher
+    /// for the new items (best effort — a check that already passes stays
+    /// unproven, correctly: the host never saw it fail).
+    AddAcceptance {
+        #[serde(default)]
+        items: Vec<String>,
+    },
     Split {
         id: String,
         into: Vec<NewStep>,
@@ -1980,6 +2051,24 @@ impl Default for Limits {
     }
 }
 
+/// Shared typing gate for create and add-acceptance: every criterion is
+/// executable or explicitly human; free text settles on whatever evidence
+/// happens to exist, which is a claim, not a check.
+fn check_typed_acceptance(acceptance: &[String]) -> Result<(), Rejection> {
+    for text in acceptance {
+        if matches!(AcceptanceKind::classify(text), AcceptanceKind::Text(_)) {
+            return Err(Rejection::new(
+                "untyped_acceptance",
+                format!("acceptance criterion is free text: {text}"),
+                "rewrite it as cmd: (pass/fail), snapshot: (frozen output), \
+                 differential: (changed output), signatures: (file shapes), \
+                 or manual: (the user checks it by hand)",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Build a new plan. Rejects an empty goal, zero steps and over-long plans.
 pub fn create(
     goal: String,
@@ -2018,17 +2107,7 @@ pub fn create(
     // whatever evidence happens to exist, which is a claim, not a check.
     // Every criterion is executable (`cmd:`, `snapshot:`, `differential:`,
     // `signatures:`) or explicitly human (`manual:`).
-    for text in &acceptance {
-        if matches!(AcceptanceKind::classify(text), AcceptanceKind::Text(_)) {
-            return Err(Rejection::new(
-                "untyped_acceptance",
-                format!("acceptance criterion is free text: {text}"),
-                "rewrite it as cmd: (pass/fail), snapshot: (frozen output), \
-                 differential: (changed output), signatures: (file shapes), \
-                 or manual: (the user checks it by hand)",
-            ));
-        }
-    }
+    check_typed_acceptance(&acceptance)?;
 
     let ts = now();
     let plan = Plan {
@@ -2146,6 +2225,7 @@ pub fn apply(
             title,
             refs,
         } => add(plan, after.as_deref(), title, refs, limits),
+        Op::AddAcceptance { items } => add_acceptance(plan, items),
         Op::Split { id, into } => split(plan, &id, into, limits),
         // The host prepares the evidence (and runs `cmd:` items) before
         // applying a verify; reaching it through `apply` alone means there is
@@ -2447,6 +2527,41 @@ fn add(
     let id = step.id.clone();
     plan.steps.insert(index, step);
     accept(plan, format!("step {id} added"))
+}
+
+/// Append acceptance criteria. Empty additions and free text are refused;
+/// items land pending with no baseline — the dispatcher captures baselines
+/// for exactly these positions (see plan_op), so replay needs no proof data.
+fn add_acceptance(plan: &mut Plan, items: Vec<String>) -> Result<Applied, Rejection> {
+    if items.iter().all(|text| text.trim().is_empty()) {
+        return reject(
+            plan,
+            "empty_acceptance",
+            "no acceptance criteria given",
+            "name a check (cmd:) or a human checkpoint (manual:)",
+        );
+    }
+    check_typed_acceptance(&items)?;
+    let mut added = 0;
+    for text in items {
+        if text.trim().is_empty() {
+            continue;
+        }
+        plan.acceptance.push(Acceptance {
+            text,
+            status: AcceptanceStatus::Pending,
+            evidence: Vec::new(),
+            validation: Validation::default(),
+            baseline: None,
+            snapshot: None,
+            shape: None,
+            inputs: Vec::new(),
+            by: None,
+            reason: None,
+        });
+        added += 1;
+    }
+    accept(plan, format!("acceptance +{added}"))
 }
 
 fn split(
@@ -4369,6 +4484,58 @@ mod tests {
         let report = replay(&dir).unwrap();
         assert!(report.orphans_rebuilt.is_empty());
         assert!(open(&dir, "01J000ORPHAN00000000000001").is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Late-added criteria survive a crash rebuild with their proof: items
+    /// re-append from the intent, baselines restore from the riding vectors
+    /// instead of re-running checks mid-work.
+    #[test]
+    fn replay_restores_added_acceptance_with_proof() {
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-repadd-{}", new_id()));
+        let mut plan = create(
+            "goal".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![NewStep {
+                title: "work".into(),
+                refs: Vec::new(),
+            }],
+            1000,
+            &Limits::default(),
+        )
+        .unwrap();
+        plan.applied_event = Some("ra:0".to_string());
+        store(&dir, &plan).unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&dir, "ra").unwrap();
+        journal
+            .append(
+                "plan",
+                serde_json::json!({
+                    "op": "add_acceptance",
+                    "items": ["cmd: exit 3", "manual: eyeball it"],
+                    "plan_id": plan.id, "by": "model", "ok": true,
+                    "new_baselines": [
+                        {"at": "t", "exit": 3, "check_definition_hash": "h",
+                         "output_hash": "o", "head": "", "state_digest": "s"},
+                        null
+                    ],
+                    "new_snapshots": [null, null],
+                    "new_shapes": [null, null],
+                    "new_inputs": [[], []],
+                }),
+            )
+            .unwrap();
+        // the stored file predates the intent (cursor ra:0, intent at seq
+        // 1): replay must append the items AND restore the riding proof
+        let report = replay(&dir).unwrap();
+        assert!(report.ops_applied >= 1, "{report:?}");
+        let rebuilt = open(&dir, &plan.id).unwrap();
+        assert_eq!(rebuilt.acceptance.len(), 2);
+        assert_eq!(rebuilt.acceptance[0].text, "cmd: exit 3");
+        let baseline = rebuilt.acceptance[0].baseline.as_ref().expect("proof restored");
+        assert_eq!(baseline.exit, 3);
+        assert!(rebuilt.acceptance[1].baseline.is_none(), "manual proves nothing");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -258,8 +258,12 @@ freezes its output at plan time and settles the item on byte-identical output
 observably *changed* output — rung 3; the freeze runs twice and must agree,
 so nondeterministic inputs never freeze), `signatures:` (host freezes the
 declaration shapes of the named files and settles the item on identical
-shapes — rung 5; bodies move, structure holds), or `manual:` (user
-waives it). Anything else is free text, and `plan create` refuses it
+shapes — rung 5; bodies move, structure holds), or `manual:` (the user
+checks it by hand). Acceptance is optional at create:
+read-only work rightly has none (no plan needed either — plans are for work
+that changes things); a plan born empty completes on closed steps alone, and
+`add_acceptance` grows teeth later when the work turns out real. Anything else
+is free text, and `plan create` refuses it
 (`untyped_acceptance`): free text settles on whatever evidence happens to
 exist, which is a claim, not a check. Rewrite as one of the typed kinds
 or `manual:`.
@@ -271,7 +275,9 @@ loading fails.
 
 2.1.3 Operations
 Tool plan accepts one operation per call: start, finish, block, unblock,
-cancel, add, split, verify, complete, show, block_plan (plus create, handled
+cancel, add, split, verify, complete, show, block_plan, add_acceptance
+(append criteria to a plan born without — same typing gate as create,
+baselines captured for exactly the new positions), plus create, handled
 separately). The model has no operation that writes goal, constraints,
 acceptance[].status, acceptance[].validation, steps[].validation, evidence,
 applied_event, folded, or step_epoch. There is no `fold` op, no
