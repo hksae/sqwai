@@ -1245,36 +1245,17 @@ fn rebuild_created(
     Some(plan)
 }
 
-fn rebuild_accepted(
-    root: &Path,
-    sess: &str,
-    seq: u64,
+/// Build the replacement plan an `accept_proposal` intent carries, without
+/// touching the store or siblings. Shared by the orphan path and the
+/// corrupt-file path so both construct the identical base.
+fn build_fresh_from_accept(
     fields: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<Plan> {
     let draft: PlanDraftArgs = serde_json::from_value(fields.get("draft")?.clone()).ok()?;
     let mut fresh = draft.build(u64::MAX, &Limits::default()).ok()?;
     // §12.12: same as create — the baselines captured on accept ride the
     // record, so replay never re-runs a check that has since changed.
-    if let Some(value) = fields.get("baselines")
-        && let Ok(baselines) = serde_json::from_value::<Vec<Option<Baseline>>>(value.clone())
-    {
-        set_baselines(&mut fresh, baselines);
-    }
-    if let Some(value) = fields.get("snapshots")
-        && let Ok(snapshots) = serde_json::from_value::<Vec<Option<Snapshot>>>(value.clone())
-    {
-        set_snapshots(&mut fresh, snapshots);
-    }
-    if let Some(value) = fields.get("inputs")
-        && let Ok(inputs) = serde_json::from_value::<Vec<Vec<CheckInput>>>(value.clone())
-    {
-        set_inputs(&mut fresh, inputs);
-    }
-    if let Some(value) = fields.get("shapes")
-        && let Ok(shapes) = serde_json::from_value::<Vec<Option<ShapeFreeze>>>(value.clone())
-    {
-        set_shapes(&mut fresh, shapes);
-    }
+    restore_create_riders(&mut fresh, fields);
     fresh.id = fields.get("new_id")?.as_str()?.to_string();
     fresh.created = fields.get("new_created")?.as_str()?.to_string();
     fresh.sessions = fields
@@ -1283,14 +1264,32 @@ fn rebuild_accepted(
         .iter()
         .filter_map(|value| value.as_str().map(str::to_string))
         .collect();
-    if let Some(abandoned) = fields.get("abandoned").and_then(|value| value.as_str())
-        && let Some(mut old) = read_plan_file(root, abandoned)
+    Some(fresh)
+}
+
+/// Retire the plan an accept replaced — but only if it is still active.
+/// Re-running abandonment is safe under this guard: an already-abandoned
+/// sibling is left alone, so a rebuild can never resurrect or double-kill.
+fn abandon_if_active(root: &Path, sess: &str, seq: u64, abandoned: &str) {
+    if let Some(mut old) = read_plan_file(root, abandoned)
         && old.status == PlanStatus::Active
     {
         old.status = PlanStatus::Abandoned;
         old.revision = old.revision.saturating_add(1);
         old.applied_event = Some(scoped(sess, seq));
-        store(root, &old).ok()?;
+        let _ = store(root, &old);
+    }
+}
+
+fn rebuild_accepted(
+    root: &Path,
+    sess: &str,
+    seq: u64,
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Plan> {
+    let mut fresh = build_fresh_from_accept(fields)?;
+    if let Some(abandoned) = fields.get("abandoned").and_then(|value| value.as_str()) {
+        abandon_if_active(root, sess, seq, abandoned);
     }
     fresh.applied_event = Some(scoped(sess, seq));
     store(root, &fresh).ok()?;
@@ -1590,13 +1589,14 @@ pub fn preferred_active_plan(root: &Path, id: &str) -> Option<Plan> {
 }
 
 /// Rebuild a schema-broken plan file from journaled intents (§2.1.4).
-/// Collects the create intent plus every later op for this plan id across
-/// all session journals — ordered best-effort by (ts, session, seq),
-/// because there is no total-order counter — and re-applies them onto a
-/// fresh base. Any Rejection, a missing create intent, or a deliberate
-/// `plan_deleted` aborts to `None` and the caller quarantines the bytes.
-/// `accept_proposal`-born plans are NOT rebuilt (re-running abandonment
-/// has side effects on sibling plans); they quarantine as before.
+/// Collects the birth intent (create, or accept_proposal for replacement
+/// plans) plus every later op for this plan id across all session journals —
+/// ordered best-effort by (ts, session, seq), because there is no
+/// total-order counter — and re-applies them onto a fresh base. Any
+/// Rejection, a missing birth intent, or a deliberate `plan_deleted` aborts
+/// to `None` and the caller quarantines the bytes. Sibling retirement on the
+/// accept path reuses the orphan guard (only a still-active sibling moves),
+/// so a rebuild can neither resurrect nor double-kill.
 fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
     // (ts, session, seq, fields) over every session journal
     let mut records: Vec<(
@@ -1650,64 +1650,102 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
         return None;
     }
     records.sort_by(|a, b| (&a.0, &a.1, a.2).cmp(&(&b.0, &b.1, b.2)));
-    // the create intent this file was born from (mirrors rebuild_created's
-    // field parsing; kept local so orphan handling stays untouched)
-    let create_idx = records.iter().position(|(_, _, _, fields)| {
-        fields.get("op").and_then(|o| o.as_str()) == Some("create")
-            && fields.get("result_id").and_then(|r| r.as_str()) == Some(id)
-    })?;
-    let (_, create_sess, create_seq, create_fields) = records[create_idx].clone();
-    let mut plan = create(
-        create_fields.get("goal")?.as_str()?.to_string(),
-        create_fields
-            .get("constraints")?
-            .as_array()?
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect(),
-        create_fields
-            .get("acceptance")?
-            .as_array()?
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect(),
-        serde_json::from_value(create_fields.get("steps")?.clone()).ok()?,
-        create_fields
-            .get("budget_limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
-        &Limits::default(),
-    )
-    .ok()?;
-    plan.id = id.to_string();
-    plan.created = create_fields.get("result_created")?.as_str()?.to_string();
-    plan.sessions = create_fields
-        .get("result_sessions")?
-        .as_array()?
+    // the birth intent this file was born from: a create (mirrors
+    // rebuild_created's field parsing), or an accept_proposal whose new_id
+    // is this plan (mirrors rebuild_accepted). Kept local so orphan
+    // handling stays untouched.
+    enum Birth {
+        Created(usize),
+        Accepted(usize),
+    }
+    let birth = records
         .iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect();
-    plan.applied_event = Some(scoped(&create_sess, create_seq));
-    plan.applied_events.insert(create_sess.clone(), create_seq);
-    // the frozen riders ride the create intent here exactly like on the
-    // orphan path — without them the rebuilt plan re-runs proven checks
-    restore_create_riders(&mut plan, &create_fields);
+        .position(|(_, _, _, fields)| {
+            fields.get("op").and_then(|o| o.as_str()) == Some("create")
+                && fields.get("result_id").and_then(|r| r.as_str()) == Some(id)
+        })
+        .map(Birth::Created)
+        .or_else(|| {
+            records
+                .iter()
+                .position(|(_, _, _, fields)| {
+                    fields.get("op").and_then(|o| o.as_str()) == Some("accept_proposal")
+                        && fields.get("new_id").and_then(|r| r.as_str()) == Some(id)
+                })
+                .map(Birth::Accepted)
+        })?;
+    let (birth_idx, mut plan) = match birth {
+        Birth::Created(create_idx) => {
+            let (_, create_sess, create_seq, create_fields) = records[create_idx].clone();
+            let mut plan = create(
+                create_fields.get("goal")?.as_str()?.to_string(),
+                create_fields
+                    .get("constraints")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect(),
+                create_fields
+                    .get("acceptance")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect(),
+                serde_json::from_value(create_fields.get("steps")?.clone()).ok()?,
+                create_fields
+                    .get("budget_limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                &Limits::default(),
+            )
+            .ok()?;
+            plan.id = id.to_string();
+            plan.created = create_fields.get("result_created")?.as_str()?.to_string();
+            plan.sessions = create_fields
+                .get("result_sessions")?
+                .as_array()?
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            plan.applied_event = Some(scoped(&create_sess, create_seq));
+            plan.applied_events.insert(create_sess.clone(), create_seq);
+            // the frozen riders ride the create intent here exactly like on
+            // the orphan path — without them the rebuilt plan re-runs
+            // proven checks
+            restore_create_riders(&mut plan, &create_fields);
+            (create_idx, plan)
+        }
+        Birth::Accepted(accept_idx) => {
+            let (_, accept_sess, accept_seq, accept_fields) = records[accept_idx].clone();
+            let mut plan = build_fresh_from_accept(&accept_fields)?;
+            if let Some(abandoned) = accept_fields
+                .get("abandoned")
+                .and_then(|value| value.as_str())
+            {
+                abandon_if_active(root, &accept_sess, accept_seq, abandoned);
+            }
+            plan.applied_event = Some(scoped(&accept_sess, accept_seq));
+            plan.applied_events
+                .insert(accept_sess.clone(), accept_seq);
+            (accept_idx, plan)
+        }
+    };
     // every later op for this plan, in best-effort global order
     for (idx, (ts, sess, seq, fields)) in records.iter().enumerate() {
-        if idx == create_idx {
+        if idx == birth_idx {
             continue;
         }
         let mine = fields.get("plan_id").and_then(|p| p.as_str()) == Some(id);
         if !mine {
             continue;
         }
-        let after_create = (ts.as_str(), sess.as_str(), *seq)
+        let after_birth = (ts.as_str(), sess.as_str(), *seq)
             > (
-                records[create_idx].0.as_str(),
-                records[create_idx].1.as_str(),
-                records[create_idx].2,
+                records[birth_idx].0.as_str(),
+                records[birth_idx].1.as_str(),
+                records[birth_idx].2,
             );
-        if !after_create {
+        if !after_birth {
             continue;
         }
         let record = crate::agent::journal::Record {

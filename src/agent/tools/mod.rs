@@ -9931,6 +9931,82 @@ end
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// An accept_proposal-born plan whose file tears must rebuild from the
+    /// journaled accept intent — not quarantine. Pre-fix: rebuild_corrupt
+    /// refused accept-born plans outright (fear of re-running sibling
+    /// abandonment), so the new plan and all its later ops were lost even
+    /// though the journal held everything.
+    #[test]
+    fn plan_corrupt_accept_born_plan_rebuilds() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "old plan",
+                "steps": [{"title": "old step"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let old_id = plan::open_active(&dir).unwrap().unwrap().id;
+        // the replacement, built the way the accept flow builds it
+        let draft = plan::PlanDraftArgs {
+            goal: "new plan".into(),
+            constraints: vec![],
+            acceptance: vec![],
+            steps: vec![plan::NewStep {
+                title: "new step".into(),
+                refs: vec![],
+            }],
+            checklist: vec![],
+        };
+        let mut fresh = draft.build(u64::MAX, &plan::Limits::default()).unwrap();
+        let new_id = fresh.id.clone();
+        let new_created = fresh.created.clone();
+        fresh.sessions = vec![ctx.session_id.clone()];
+        // the accept intent, journaled the way loop_task journals it
+        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
+        let accept_seq = journal
+            .append(
+                "plan",
+                json!({
+                    "op": "accept_proposal", "by": "user", "ok": true,
+                    "plan_id": new_id,
+                    "draft": serde_json::to_value(&draft).unwrap(),
+                    "baselines": [], "snapshots": [], "shapes": [], "inputs": [],
+                    "new_id": new_id, "new_created": new_created,
+                    "new_sessions": [ctx.session_id.clone()], "abandoned": old_id,
+                }),
+            )
+            .unwrap();
+        // the live flow stores both sides after journaling
+        fresh.applied_event = Some(format!("{}:{accept_seq}", ctx.session_id));
+        plan::store(&dir, &fresh).unwrap();
+        let mut old = plan::open(&dir, &old_id).unwrap();
+        plan::abandon(&mut old);
+        plan::store(&dir, &old).unwrap();
+        // a later op on the new plan (it is the only active one)
+        let started = plan_op(&mut ctx, &json!({"op": "start", "id": "1"}));
+        assert!(started.ok, "{}", started.output);
+        // torn write on the new plan's file, journal intact
+        std::fs::write(
+            plan::plans_dir(&dir).join(format!("{new_id}.json")),
+            "{torn",
+        )
+        .unwrap();
+        let rebuilt = plan::open(&dir, &new_id).expect("accept-born plan must rebuild");
+        assert_eq!(rebuilt.goal.text, "new plan");
+        assert_eq!(
+            rebuilt.step("1").unwrap().status,
+            plan::StepStatus::InProgress,
+            "later ops must survive the rebuild"
+        );
+        // the sibling stays abandoned — the rebuild must not resurrect it
+        let sibling = plan::open(&dir, &old_id).unwrap();
+        assert_eq!(sibling.status, plan::PlanStatus::Abandoned);
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// Journal-first for step cancel: the dispatcher must commit (not bare
     /// store), or crash recovery never sees the cancellation. First asserts
     /// the commit record exists; then simulates the crash between commit
