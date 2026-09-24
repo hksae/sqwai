@@ -1691,7 +1691,7 @@ fn mutation_target_paths(ctx: &ToolCtx, name: &str, args: &Value) -> Vec<String>
         if patch.trim().is_empty() {
             return Vec::new();
         }
-        git::extract_patch_files(&ctx.root, patch)
+        git::extract_patch_files(ctx, patch)
     } else {
         let raw = args["file_path"].as_str().unwrap_or_default();
         if raw.trim().is_empty() {

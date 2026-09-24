@@ -208,8 +208,9 @@ fn join_readers(readers: Vec<std::thread::JoinHandle<()>>) {
 /// `ping`, `cargo`, compilers — that inherit the pipes and keep mutating the
 /// project after the shell is gone, and keep our own pipe-reader join blocked
 /// waiting on them. `taskkill /T` ends the whole tree instead.
+/// Shared with git.rs: hung hooks get the same tree-kill, not a bare kill.
 #[cfg(windows)]
-fn kill_tree(child: &mut std::process::Child) {
+pub(crate) fn kill_tree(child: &mut std::process::Child) {
     // Only when it is still running: the pid could otherwise be recycled for
     // an unrelated process between the check and the kill.
     let running = child.try_wait().map(|s| s.is_none()).unwrap_or(true);
@@ -234,7 +235,7 @@ fn kill_tree(child: &mut std::process::Child) {
 /// gone (pid reuse makes a blind group-kill unsafe, hence the liveness
 /// check first — same discipline as the Windows branch).
 #[cfg(not(windows))]
-fn kill_tree(child: &mut std::process::Child) {
+pub(crate) fn kill_tree(child: &mut std::process::Child) {
     let running = child.try_wait().map(|s| s.is_none()).unwrap_or(true);
     if !running {
         return;

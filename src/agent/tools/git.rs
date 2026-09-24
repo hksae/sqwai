@@ -11,19 +11,103 @@ use std::process::{Command, Stdio};
 /// output cap in chars: head+tail mid-trim, same budget as exec/webfetch
 const MAX_OUTPUT: usize = 30_000;
 
+/// Drain one pipe into the shared buffer until EOF or error.
+fn drain_into(stream: impl std::io::Read, buf: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
+    use std::io::Read;
+    let mut handle = std::io::BufReader::new(stream);
+    let mut chunk = [0u8; 8192];
+    loop {
+        match handle.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                buf.lock().map(|mut b| b.extend_from_slice(&chunk[..n])).ok();
+            }
+        }
+    }
+}
+
+/// Wall-clock bound for one git invocation: hooks and network remotes can
+/// hang forever, and a blocking wait wedges the agent (Esc never lands).
+/// Generous — hooks legitimately take minutes — but finite.
+const GIT_TIMEOUT_SECS: u64 = 300;
+
+/// Wait for an already-spawned git child (stdin written and closed by the
+/// caller): drain pipes concurrently so chatty output cannot deadlock the
+/// poll loop, kill the whole tree on timeout or Esc.
+fn wait_git(
+    ctx: &ToolCtx,
+    child: &mut std::process::Child,
+    what: &str,
+    timeout_secs: u64,
+) -> Result<std::process::Output, String> {
+    use std::sync::{Arc, Mutex};
+    let out_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let err_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut readers = Vec::new();
+    // stdout and stderr have different pipe types: drain each in turn
+    if let Some(stream) = child.stdout.take() {
+        let buf = Arc::clone(&out_buf);
+        readers.push(std::thread::spawn(move || {
+            drain_into(stream, &buf);
+        }));
+    }
+    if let Some(stream) = child.stderr.take() {
+        let buf = Arc::clone(&err_buf);
+        readers.push(std::thread::spawn(move || {
+            drain_into(stream, &buf);
+        }));
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while readers.iter().any(|h: &std::thread::JoinHandle<()>| !h.is_finished())
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let stdout = out_buf.lock().map(|b| b.clone()).unwrap_or_default();
+            let stderr = err_buf.lock().map(|b| b.clone()).unwrap_or_default();
+            return Ok(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            });
+        }
+        if ctx.cancel_requested() {
+            super::exec::kill_tree(child);
+            let _ = child.wait();
+            return Err("cancelled by user".to_string());
+        }
+        if std::time::Instant::now() >= deadline {
+            super::exec::kill_tree(child);
+            let _ = child.wait();
+            return Err(format!("git {what} timed out after {timeout_secs}s"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 fn arg<'a>(args: &'a Value, key: &str) -> &'a str {
     args.get(key).and_then(Value::as_str).unwrap_or_default()
 }
 
 fn run_git(ctx: &ToolCtx, args: &[&str]) -> Outcome {
-    let output = Command::new("git")
+    let mut child = match Command::new("git")
         .current_dir(&ctx.root)
         .args(args)
         .stdin(Stdio::null())
-        .output();
-    let output = match output {
-        Ok(output) => output,
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
         Err(error) => return Outcome::err(format!("git could not start: {error}")),
+    };
+    let output = match wait_git(ctx, &mut child, args.first().unwrap_or(&"?"), GIT_TIMEOUT_SECS) {
+        Ok(output) => output,
+        Err(message) => return Outcome::err(message),
     };
     let stdout = super::decode_child_output(&output.stdout);
     let stderr = super::decode_child_output(&output.stderr);
@@ -279,7 +363,7 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         return Outcome::err("patch is too large (maximum 2 MB)");
     }
     // Inspect files touched by the patch and ensure none escape or touch host-owned state (.sqwai/)
-    let touched_files = extract_patch_files(&ctx.root, patch);
+    let touched_files = extract_patch_files(ctx, patch);
     let mut resolved_paths = Vec::new();
     for f in &touched_files {
         match ctx.resolve(f) {
@@ -311,9 +395,11 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             return Outcome::err(format!("could not send patch to git: {error}"));
         }
     }
-    let checked = match check.wait_with_output() {
+    // stdin written: drop our handle so EOF reaches git, then bounded wait
+    drop(check.stdin.take());
+    let checked = match wait_git(ctx, &mut check, "apply --check", GIT_TIMEOUT_SECS) {
         Ok(output) => output,
-        Err(error) => return Outcome::err(format!("patch check failed: {error}")),
+        Err(message) => return Outcome::err(format!("patch check failed: {message}")),
     };
     if !checked.status.success() {
         let error = super::decode_child_output(&checked.stderr);
@@ -349,7 +435,8 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             return Outcome::err(format!("could not send patch to git: {error}"));
         }
     }
-    match apply.wait_with_output() {
+    drop(apply.stdin.take());
+    match wait_git(ctx, &mut apply, "apply", GIT_TIMEOUT_SECS) {
         Ok(output) if output.status.success() => {
             let mut file_diffs = Vec::new();
             for (path, before) in pre_images {
@@ -386,10 +473,10 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     }
 }
 
-pub(super) fn extract_patch_files(root: &std::path::Path, patch: &str) -> Vec<String> {
+pub(super) fn extract_patch_files(ctx: &ToolCtx, patch: &str) -> Vec<String> {
     use std::io::Write;
     let mut cmd = match Command::new("git")
-        .current_dir(root)
+        .current_dir(&ctx.root)
         .args(["apply", "--numstat", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -402,7 +489,8 @@ pub(super) fn extract_patch_files(root: &std::path::Path, patch: &str) -> Vec<St
     if let Some(stdin) = cmd.stdin.as_mut() {
         let _ = stdin.write_all(patch.as_bytes());
     }
-    let output = match cmd.wait_with_output() {
+    drop(cmd.stdin.take());
+    let output = match wait_git(ctx, &mut cmd, "apply --numstat", GIT_TIMEOUT_SECS) {
         Ok(o) if o.status.success() => o,
         _ => return Vec::new(),
     };
@@ -567,6 +655,56 @@ mod tests {
         let outcome = patch(&mut ctx, &json!({"patch": forbidden_patch}));
         assert!(!outcome.ok);
         assert!(outcome.output.contains("forbidden path"));
+    }
+
+    /// A hung git child (sleep-like stand-in: hooks and network remotes hang
+    /// the same way) must time out instead of wedging the agent, and Esc
+    /// must cancel it mid-wait — both kill the tree first.
+    #[test]
+    fn wait_git_times_out_and_honors_cancel() {
+        use std::sync::{Arc, atomic::AtomicBool};
+        // long sleeper, cross-platform: ping with a high count ends only
+        // when killed (mirrors the exec background-job tests)
+        #[cfg(windows)]
+        fn sleeper() -> std::process::Command {
+            let mut cmd = std::process::Command::new("ping");
+            cmd.args(["-n", "300", "127.0.0.1"]);
+            cmd
+        }
+        #[cfg(not(windows))]
+        fn sleeper() -> std::process::Command {
+            let mut cmd = std::process::Command::new("sleep");
+            cmd.arg("300");
+            cmd
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // timeout: 1s bound on a 300s sleeper
+        let ctx = ToolCtx::new(dir.path());
+        let mut child = sleeper()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("sleeper must spawn");
+        let err = wait_git(&ctx, &mut child, "test", 1).unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(
+            child.try_wait().ok().flatten().is_some(),
+            "timed-out child must be reaped dead, not left running"
+        );
+        // cancel: pre-armed flag aborts the wait immediately
+        let flag = Arc::new(AtomicBool::new(true));
+        let ctx = ToolCtx::new(dir.path()).with_cancel(flag);
+        let mut child = sleeper()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("sleeper must spawn");
+        let err = wait_git(&ctx, &mut child, "test", 300).unwrap_err();
+        assert!(err.contains("cancelled"), "{err}");
+        assert!(
+            child.try_wait().ok().flatten().is_some(),
+            "cancelled child must be reaped dead, not left running"
+        );
     }
 
     #[test]
