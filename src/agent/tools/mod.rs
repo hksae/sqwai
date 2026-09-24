@@ -9872,6 +9872,65 @@ end
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// A torn plan file rebuilds from the journaled create intent — with the
+    /// frozen riders intact. Pre-fix: rebuild_corrupt restored goal/steps
+    /// but dropped baselines/snapshots/inputs/shapes/checklist, so later
+    /// verdicts re-ran (or misjudged) already-proven checks.
+    #[test]
+    fn plan_corrupt_rebuild_restores_frozen_riders() {
+        let (mut ctx, dir) = proj();
+        // missing flag: the probe fails pre-change, so create captures a
+        // baseline (a passing check would leave the slot empty by design)
+        let flag = dir.join("proof-gate.txt");
+        let probe = gate_probe_command(&flag);
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "corrupt recovery",
+                "acceptance": [format!("cmd: {probe}")],
+                "checklist": ["eyeball the diff"],
+                "steps": [{"title": "step 1"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        let before = plan::open(&dir, &plan_id).unwrap();
+        assert!(!before.acceptance.is_empty(), "test needs proven checks");
+        assert!(
+            before.acceptance.iter().any(|item| item.baseline.is_some()),
+            "test needs a captured baseline: {}",
+            created.output
+        );
+        // torn write: schema-broken bytes on disk, journal intact
+        std::fs::write(
+            plan::plans_dir(&dir).join(format!("{plan_id}.json")),
+            "{torn",
+        )
+        .unwrap();
+        let rebuilt = plan::open(&dir, &plan_id).expect("rebuild must succeed");
+        for (index, item) in rebuilt.acceptance.iter().enumerate() {
+            assert_eq!(
+                item.baseline, before.acceptance[index].baseline,
+                "baseline {index} lost in rebuild"
+            );
+            assert_eq!(
+                item.snapshot, before.acceptance[index].snapshot,
+                "snapshot {index} lost in rebuild"
+            );
+            assert_eq!(
+                item.shape, before.acceptance[index].shape,
+                "shape {index} lost in rebuild"
+            );
+            assert_eq!(
+                item.inputs, before.acceptance[index].inputs,
+                "inputs {index} lost in rebuild"
+            );
+        }
+        assert_eq!(rebuilt.checklist, before.checklist, "checklist lost in rebuild");
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// Journal-first for step cancel: the dispatcher must commit (not bare
     /// store), or crash recovery never sees the cancellation. First asserts
     /// the commit record exists; then simulates the crash between commit

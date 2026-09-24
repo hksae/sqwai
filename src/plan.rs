@@ -1160,6 +1160,47 @@ fn replay_orphans(root: &Path, ops_applied: &mut usize) -> Vec<String> {
     rebuilt
 }
 
+/// Frozen proof riders on a create intent: baselines (§12.12), rung-4
+/// snapshots, check inputs, rung-5 shapes, and the non-blocking checklist.
+/// Restored, never re-run or re-frozen. Shared by the orphan path and the
+/// corrupt-file path so both rebuilds heal identically — a rebuild that
+/// drops them silently turns proven checks back into smoke tests.
+fn restore_create_riders(plan: &mut Plan, fields: &serde_json::Map<String, serde_json::Value>) {
+    // §12.12: the baselines captured at create ride the intent, so replay
+    // restores the proof instead of re-running the checks.
+    if let Some(value) = fields.get("baselines")
+        && let Ok(baselines) = serde_json::from_value::<Vec<Option<Baseline>>>(value.clone())
+    {
+        set_baselines(plan, baselines);
+    }
+    // rung 4 rides the same way: frozen outputs are restored, never re-frozen.
+    if let Some(value) = fields.get("snapshots")
+        && let Ok(snapshots) = serde_json::from_value::<Vec<Option<Snapshot>>>(value.clone())
+    {
+        set_snapshots(plan, snapshots);
+    }
+    // check inputs ride with them: re-hashed at every verdict, never
+    // re-frozen after the work starts.
+    if let Some(value) = fields.get("inputs")
+        && let Ok(inputs) = serde_json::from_value::<Vec<Vec<CheckInput>>>(value.clone())
+    {
+        set_inputs(plan, inputs);
+    }
+    // rung 5 rides with them: frozen shapes are restored, never re-read.
+    if let Some(value) = fields.get("shapes")
+        && let Ok(shapes) = serde_json::from_value::<Vec<Option<ShapeFreeze>>>(value.clone())
+    {
+        set_shapes(plan, shapes);
+    }
+    // the non-blocking checklist rides the create intent; the dispatcher
+    // sets it post-create, so rebuild assigns it directly the same way
+    if let Some(value) = fields.get("checklist")
+        && let Ok(checklist) = serde_json::from_value::<Vec<String>>(value.clone())
+    {
+        plan.checklist = checklist;
+    }
+}
+
 fn rebuild_created(
     root: &Path,
     sess: &str,
@@ -1191,39 +1232,7 @@ fn rebuild_created(
         &Limits::default(),
     )
     .ok()?;
-    // §12.12: the baselines captured at create ride the intent, so replay
-    // restores the proof instead of re-running the checks.
-    if let Some(value) = get("baselines")
-        && let Ok(baselines) = serde_json::from_value::<Vec<Option<Baseline>>>(value.clone())
-    {
-        set_baselines(&mut plan, baselines);
-    }
-    // rung 4 rides the same way: frozen outputs are restored, never re-frozen.
-    if let Some(value) = get("snapshots")
-        && let Ok(snapshots) = serde_json::from_value::<Vec<Option<Snapshot>>>(value.clone())
-    {
-        set_snapshots(&mut plan, snapshots);
-    }
-    // check inputs ride with them: re-hashed at every verdict, never
-    // re-frozen after the work starts.
-    if let Some(value) = get("inputs")
-        && let Ok(inputs) = serde_json::from_value::<Vec<Vec<CheckInput>>>(value.clone())
-    {
-        set_inputs(&mut plan, inputs);
-    }
-    // rung 5 rides with them: frozen shapes are restored, never re-read.
-    if let Some(value) = get("shapes")
-        && let Ok(shapes) = serde_json::from_value::<Vec<Option<ShapeFreeze>>>(value.clone())
-    {
-        set_shapes(&mut plan, shapes);
-    }
-    // the non-blocking checklist rides the create intent; the dispatcher
-    // sets it post-create, so rebuild assigns it directly the same way
-    if let Some(value) = get("checklist")
-        && let Ok(checklist) = serde_json::from_value::<Vec<String>>(value.clone())
-    {
-        plan.checklist = checklist;
-    }
+    restore_create_riders(&mut plan, fields);
     plan.id = get("result_id")?.as_str()?.to_string();
     plan.created = get("result_created")?.as_str()?.to_string();
     plan.sessions = get("result_sessions")?
@@ -1680,6 +1689,9 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
         .collect();
     plan.applied_event = Some(scoped(&create_sess, create_seq));
     plan.applied_events.insert(create_sess.clone(), create_seq);
+    // the frozen riders ride the create intent here exactly like on the
+    // orphan path — without them the rebuilt plan re-runs proven checks
+    restore_create_riders(&mut plan, &create_fields);
     // every later op for this plan, in best-effort global order
     for (idx, (ts, sess, seq, fields)) in records.iter().enumerate() {
         if idx == create_idx {
