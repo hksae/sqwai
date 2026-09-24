@@ -1,5 +1,9 @@
 # T4 retention analysis (2026-09-18, 4/4 cells: T4 x mech/base x 1.3/1.2, n=1)
 
+> Scope: same as G0 — soak-test data, not a product verdict (n=1 per
+> cell on top of the ceiling problem). Do not evaluate sqwai by this
+> file; see DESIGN §8.2.
+
 Regime: 256K simulated, threshold 0.15 (~40K budget), restricted-short
 summaries (intended ≤300 tok), fixture kaiwai-frozen.
 

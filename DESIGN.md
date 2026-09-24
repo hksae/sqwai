@@ -1630,7 +1630,7 @@ number; a `partial` one is missing something the design calls for.
 | F6 | Compaction anchor; summary=off default; resume per §3.4 (fork deleted); undo→reopen | done | F1–F5 |
 | F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, zstd) + layer-2 shadow repo driven by git CLI synchronously; path-scoped restore; `/undo step N` | done | F1 |
 | F7b | Crash-safe mutation protocol | done differently — no `mutation_started/observed` sweep; Layer-1 pre-images + `file_diff` chain cover single-step revert instead | F7 |
-| G0 | Minimal comparative retention benchmark (§8.2): plan + journal + anchor vs baseline | done — harness as ignored tests (minidb T1–T3 + kaiwai T4 matrix), pre-registration, eval files and analyses under bench/ | F1b, F6 |
+ | G0 | Minimal comparative retention benchmark (§8.2): plan + journal + anchor vs baseline | done as engineering soak-test — harness as ignored tests (minidb T1–T3 + kaiwai T4 matrix), pre-registration, eval files and analyses under bench/ | F1b, F6 |
  | H0 | L0 fact block + criticism detector | PARKED (auto path) — detector as learned student (offline LLM-labeled data, char-trigram LR, pure-Rust inference) + artifact signal + strict trigger + block-D injection + `criticism` marker + LLM-confirm for Maybe (§12.7); mechanism kept for manual /verify | F2 |
  | H1 | Reflector: Scope/Neutralizer/Executor/Verdict, /verify | PARKED (auto path) — full pipeline kept for manual /verify: Scope, Neutralizer with tone-invariance test, min-loop Executor in reflector ctx with dispatch refusal, host verdict mapping, host-rendered [verified], verdict file, recurrence, diary lesson + `/verify [--full]` as background task + self-protection (full budgets on 2nd objection, journal-first disable on 3rd); live-model tone + executor tests | H0, D |
 | I1 | Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild | done — rusqlite (bundled) engine with §2.4.2 schema | E |
@@ -1717,6 +1717,14 @@ undetermined, tone invariance, no-journal degradation).
   summary cap are suspect on both arms (volatile tail re-keyed history;
   uncapped baseline summaries) — remeasure on `cache-adjusted cost`,
   not raw token sums.
+- **G0 verdict scope (do not evaluate the product by G0):** G0 recorded as
+  an engineering soak-test — it shook out races, prompt skew, compaction,
+  cache and replay bugs, which was its value. Effectiveness was NOT MET on
+  ceiling (baseline solved everything too), which refutes the task set, not
+  the mechanism. Product effectiveness needs Series A (internal ablation:
+  full mechanism vs stripped, same harness/model, discriminating long tasks)
+  before any head-to-head Series B (vs Claude Code and peers, pre-registered
+  protocol). See bench/analysis.md.
 
 Fixture: `minidb`, a small file-backed KV store in Rust (~15 files,
 builds in seconds, tests in milliseconds), designed to punish forgetting:
@@ -1774,6 +1782,8 @@ Evaluation starts at 2 repeated runs per task per arm. Success requires
 superiority on goal fidelity (≥ 0.90 vs baseline < 0.60),
 constraint retention (≥ 0.95 vs baseline < 0.50), and redundant work reduction,
 with non-inferiority on reference validity.
+(Retired with the G0 verdict above: these thresholds assumed a discriminating
+task set that G0 did not have. Series A defines its own.)
 
 How to run (dogfooding checklist):
 

@@ -1,5 +1,12 @@
 # G0 analysis (2026-09-15, 12/12 runs)
 
+> Scope: engineering soak-test, NOT a product-effectiveness verdict. G0
+> shook out races, prompt skew, compaction, cache and replay bugs — that
+> was its value. NOT MET on ceiling (baseline solved everything too)
+> refutes the task set, not the mechanism. Do not evaluate sqwai by this
+> file; effectiveness needs Series A (internal ablation) first, then a
+> pre-registered head-to-head Series B. See DESIGN §8.2.
+
 ## Mechanical table
 
 task/arm: wall(s) tools comp | in/out tokens | finish | acc traps | notes
