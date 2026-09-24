@@ -3417,6 +3417,15 @@ fn plan_rows(
             Theme::dim(),
         );
     }
+    if !plan.checklist.is_empty() {
+        push_wrapped(
+            &mut rows,
+            "  checklist: ",
+            &plan.checklist.join(" · "),
+            Theme::dim(),
+            Theme::dim(),
+        );
+    }
     if !plan.acceptance.is_empty() {
         rows.push(row(
             Line::from(vec![Span::styled("  acceptance:", Theme::accent())]),

@@ -251,22 +251,15 @@ folded — legacy, always empty (see §2.1.5).
 budget — token estimate of the plan as injected; limit derived from model
 context × plan.budget_ratio (default 0.10).
 acceptance[].text may be prefixed `cmd:` (host runs it on `plan verify` and on
-`complete`; the result becomes evidence automatically), `snapshot:` (host
-freezes its output at plan time and settles the item on byte-identical output
-— rung 4 of the judge ladder, §12.12; empty output never freezes),
-`differential:` (host freezes its output at plan time and settles the item on
-observably *changed* output — rung 3; the freeze runs twice and must agree,
-so nondeterministic inputs never freeze), `signatures:` (host freezes the
-declaration shapes of the named files and settles the item on identical
-shapes — rung 5; bodies move, structure holds), or `manual:` (the user
-checks it by hand). Acceptance is optional at create:
-read-only work rightly has none (no plan needed either — plans are for work
-that changes things); a plan born empty completes on closed steps alone, and
-`add_acceptance` grows teeth later when the work turns out real. Anything else
-is free text, and `plan create` refuses it
-(`untyped_acceptance`): free text settles on whatever evidence happens to
-exist, which is a claim, not a check. Rewrite as one of the typed kinds
-or `manual:`.
+`complete`; the result becomes evidence automatically) or `manual:` (the user
+checks it by hand). Advanced rungs (`snapshot:`, `differential:`,
+`signatures:` — §12.12) are host-suggested, never hand-written: a `cmd:` that
+already passes pre-change proves nothing, so create points at the freeze
+variant and `add_acceptance` adopts it (frozen at adopt time). Free text is
+not acceptance — it goes to `checklist`, a non-blocking plan-lite note shown
+in `show` that never gates `complete`. `plan create` refuses untyped
+acceptance (`untyped_acceptance`): free text settles on whatever evidence
+happens to exist, which is a claim, not a check.
 Writes are atomic: temp file + rename. On open, a plan that fails schema
 validation is rebuilt from journaled intents (create + later ops in
 best-effort ts order); only unrebuildable bytes (no intent, diverged op,

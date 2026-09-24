@@ -691,6 +691,12 @@ pub struct Plan {
     pub constraints: Vec<String>,
     #[serde(default)]
     pub acceptance: Vec<Acceptance>,
+    /// Non-blocking checklist: free-text notes from create (plan-lite).
+    /// Visible in show and the panel, never gates complete — walked past,
+    /// never settled. Immutable after create (no op touches it), so it
+    /// rides the cached plan block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checklist: Vec<String>,
     #[serde(default)]
     pub steps: Vec<Step>,
     #[serde(default)]
@@ -1202,6 +1208,13 @@ fn rebuild_created(
         && let Ok(shapes) = serde_json::from_value::<Vec<Option<ShapeFreeze>>>(value.clone())
     {
         set_shapes(&mut plan, shapes);
+    }
+    // the non-blocking checklist rides the create intent; the dispatcher
+    // sets it post-create, so rebuild assigns it directly the same way
+    if let Some(value) = get("checklist")
+        && let Ok(checklist) = serde_json::from_value::<Vec<String>>(value.clone())
+    {
+        plan.checklist = checklist;
     }
     plan.id = get("result_id")?.as_str()?.to_string();
     plan.created = get("result_created")?.as_str()?.to_string();
@@ -1796,6 +1809,10 @@ pub enum Op {
         acceptance: Vec<String>,
         #[serde(default)]
         steps: Vec<NewStep>,
+        /// Non-blocking free-text checklist (plan-lite). Never gates
+        /// complete; walked past, never settled.
+        #[serde(default)]
+        checklist: Vec<String>,
     },
     Start {
         id: String,
@@ -1917,18 +1934,22 @@ pub struct PlanDraftArgs {
     pub acceptance: Vec<String>,
     #[serde(default)]
     pub steps: Vec<NewStep>,
+    #[serde(default)]
+    pub checklist: Vec<String>,
 }
 
 impl PlanDraftArgs {
     pub fn build(&self, budget_limit: u64, limits: &Limits) -> Result<Plan, Rejection> {
-        create(
+        let mut plan = create(
             self.goal.clone(),
             self.constraints.clone(),
             self.acceptance.clone(),
             self.steps.clone(),
             budget_limit,
             limits,
-        )
+        )?;
+        plan.checklist = self.checklist.clone();
+        Ok(plan)
     }
 }
 
@@ -2060,9 +2081,9 @@ fn check_typed_acceptance(acceptance: &[String]) -> Result<(), Rejection> {
             return Err(Rejection::new(
                 "untyped_acceptance",
                 format!("acceptance criterion is free text: {text}"),
-                "rewrite it as cmd: (pass/fail), snapshot: (frozen output), \
-                 differential: (changed output), signatures: (file shapes), \
-                 or manual: (the user checks it by hand)",
+                "rewrite it as cmd: (a check that fails before and passes after) \
+                 or manual: (a human checks it by hand); plain notes go to \
+                 checklist, which never gates anything",
             ));
         }
     }
@@ -2166,6 +2187,10 @@ pub fn create(
         revision: 0,
         rejections_in_a_row: 0,
         blocked_reason: None,
+        // the non-blocking checklist rides the create intent (dispatcher
+        // sets it post-create, like sessions); create() itself stays
+        // checklist-free so its 26 callers do not churn
+        checklist: Vec::new(),
         waived_constraints: Vec::new(),
     };
     Ok(plan)
@@ -3154,7 +3179,7 @@ fn complete(plan: &mut Plan) -> Result<Applied, Rejection> {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            "verify them, or have the user waive them with /plan waive. Pending acceptance items without cmd:/snapshot:/differential:/signatures: prefix require user waiver (/plan waive <index>) or conversion to steps with host evidence.",
+            "verify them, or have the user waive them with /plan waive. Pending acceptance items without cmd:/manual: prefix require user waiver (/plan waive <index>) or conversion to steps with host evidence.",
         );
     }
     if !stale.is_empty() {
@@ -3489,6 +3514,9 @@ pub fn render_goal(plan: &Plan) -> String {
             })
             .collect();
         out.push_str(&format!("constraints: {}\n", rendered.join(" · ")));
+    }
+    if !plan.checklist.is_empty() {
+        out.push_str(&format!("checklist (non-blocking): {}\n", plan.checklist.join(" · ")));
     }
     out
 }
@@ -3990,7 +4018,7 @@ mod tests {
         let err = apply(&mut plan, Op::Complete, &Limits::default(), None).unwrap_err();
         assert_eq!(err.code, "acceptance_pending");
         assert!(
-            err.hint.contains("Pending acceptance items without cmd:/snapshot:/differential:/signatures: prefix require user waiver (/plan waive <index>) or conversion to steps with host evidence."),
+            err.hint.contains("Pending acceptance items without cmd:/manual: prefix require user waiver (/plan waive <index>) or conversion to steps with host evidence."),
             "{}",
             err.hint
         );
@@ -4115,6 +4143,7 @@ mod tests {
             goal: active.goal.text.clone(),
             constraints: vec![], // dropped!
             acceptance: vec!["cmd: cargo test".into()],
+            checklist: vec![],
             steps: vec![NewStep {
                 title: "step 1".into(),
                 refs: vec![],

@@ -938,7 +938,12 @@ Never invent evidence identifiers.",
                     "acceptance": {
                         "type": ["array", "integer"],
                         "items": {"type": "string"},
-                        "description": "create: criteria; verify: index"
+                        "description": "create: criteria (cmd:/manual:); verify: index"
+                    },
+                    "checklist": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "create: non-blocking free-text notes (never gate complete)"
                     },
                     "items": {
                         "type": "array",
@@ -2854,6 +2859,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             constraints,
             acceptance,
             steps,
+            checklist,
         } => match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
             Ok(Some(existing)) => rejection(plan::Rejection {
                 code: "plan_exists",
@@ -2911,6 +2917,8 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             return rejection(rej);
                         }
                         created.sessions = vec![ctx.session_id.clone()];
+                        // non-blocking checklist rides along (never gates)
+                        created.checklist = checklist;
                         // §12.12: prove the cmd: checks discriminate, before
                         // anything has changed. Rung 4 freezes beside them.
                         let proof = capture_baselines(ctx, &created);
@@ -2926,6 +2934,7 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             "goal": created.goal.text,
                             "constraints": created.constraints,
                             "acceptance": created.acceptance.iter().map(|a| a.text.clone()).collect::<Vec<_>>(),
+                            "checklist": created.checklist,
                             "steps": created.steps.iter().map(|s| serde_json::json!({
                                 "title": s.title,
                                 "refs": s.refs,
@@ -2992,6 +3001,42 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                                             "\nacceptance: none yet — detected checks you can adopt with {{\"op\": \"add_acceptance\", \"items\": [...]}} (or write manual:): {}",
                                             offered.join(" · ")
                                         ));
+                                    }
+                                }
+                                // rung suggestions: a cmd: that already passes
+                                // pre-change proves nothing as cmd: — offer the
+                                // freeze rungs transparently; adoption goes
+                                // through add_acceptance (frozen at adopt
+                                // time). Capped: more than three is a lecture.
+                                {
+                                    let mut offered = 0;
+                                    for (index, item) in created.acceptance.iter().enumerate() {
+                                        if offered >= 3 {
+                                            break;
+                                        }
+                                        let plan::AcceptanceKind::Command(command) =
+                                            item.kind()
+                                        else {
+                                            continue;
+                                        };
+                                        if proof.slots.get(index).is_some_and(|slot| slot.is_some()) {
+                                            continue;
+                                        }
+                                        // not run (unsafe/needs-approval) or
+                                        // cancelled: no outcome to judge —
+                                        // but a run that passed is exactly
+                                        // the suggest case ("passes already")
+                                        if proof.notes.iter().any(|note| {
+                                            note.starts_with(&format!("\nacceptance {index}:"))
+                                                && (note.contains("not run")
+                                                    || note.contains("cancelled"))
+                                        }) {
+                                            continue;
+                                        }
+                                        message.push_str(&format!(
+                                            "\nacceptance {index} (`cmd: {command}`) already passes pre-change, so cmd: proves nothing — to freeze this output say {{\"op\": \"add_acceptance\", \"items\": [\"snapshot: {command}\"]}} (byte-identical) or [\"differential: {command}\"] (must change)"
+                                        ));
+                                        offered += 1;
                                     }
                                 }
                                 Outcome::ok(message)
@@ -6608,6 +6653,63 @@ mod tests {
         assert!(
             plan.acceptance[1].baseline.is_none(),
             "manual items prove nothing"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Free-text checklist rides create, shows in show, and never gates
+    /// complete: walked past, never settled.
+    #[test]
+    fn plan_checklist_is_visible_and_non_blocking() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "lite",
+                "constraints": [],
+                "acceptance": [],
+                "checklist": ["eyeball the diff", "ask Anna about scope"],
+                "steps": [{"title": "s"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let shown = plan_op(&mut ctx, &json!({"op": "show"}));
+        assert!(shown.output.contains("checklist (non-blocking)"), "{}", shown.output);
+        assert!(shown.output.contains("ask Anna about scope"), "{}", shown.output);
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        assert!(plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "1", "summary": "did it"})
+        )
+        .ok);
+        let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
+        assert!(completed.ok, "checklist must not block: {}", completed.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A cmd: that already passes pre-change proves nothing — the host
+    /// suggests the freeze rungs transparently instead of letting the item
+    /// sit unprovable.
+    #[test]
+    fn plan_create_suggests_freeze_rungs_for_passing_checks() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "frozen",
+                "constraints": [],
+                "acceptance": ["cmd: exit 0"],
+                "steps": [{"title": "s"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        eprintln!("DBG frozen create output: {}", created.output);
+        assert!(
+            created.output.contains("snapshot: exit 0"),
+            "passing cmd: earns a freeze suggestion: {}",
+            created.output
         );
         fs::remove_dir_all(&dir).ok();
     }

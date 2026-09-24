@@ -2212,7 +2212,7 @@ async fn run_agent(
                     serde_json::json!({
                         "ok": false,
                         "code": "plan_required",
-                        "reason": "In ACT mode, mutating tools require an active plan with acceptance criteria first. Create a plan with 'plan create' (typed acceptance: cmd:, snapshot:, differential:, signatures:, or manual:) before modifying project files.",
+                        "reason": "In ACT mode, mutating tools require an active plan with acceptance criteria first. Create a plan with 'plan create' (acceptance: cmd: for executable checks, manual: for human checks, free-text notes go to checklist) before modifying project files.",
                         "hint": "Call 'plan create' with your goal, acceptance criteria, and initial steps."
                     })
                     .to_string(),
