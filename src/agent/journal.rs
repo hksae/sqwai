@@ -4,9 +4,30 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Process-global per-file append locks. Several handles append to one
+/// journal file (loop writer, plan commits, receipts, undo), each with its
+/// own counter — without serialization two handles read the same tail and
+/// write the same seq twice. The tail check inside `append` is not enough;
+/// the check AND the write must hold this lock.
+fn file_locks() -> &'static Mutex<HashMap<PathBuf, Arc<Mutex<()>>>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    LOCKS.get_or_init(Default::default)
+}
+
+fn lock_for(path: &Path) -> Arc<Mutex<()>> {
+    file_locks()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(path.to_path_buf())
+        .or_default()
+        .clone()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
@@ -883,6 +904,12 @@ impl Journal {
 
     /// Append one host-owned record and flush it before returning.
     pub fn append(&mut self, kind: &str, fields: Value) -> Result<u64> {
+        // Serialize with every other handle on this file: the tail check
+        // below races without it (same tail read twice → duplicate seq).
+        let file_lock = lock_for(&self.path);
+        let _guard = file_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !fields.is_object() {
             bail!("journal fields must be a JSON object");
         }
@@ -1986,5 +2013,39 @@ mod tests {
         assert!(!epoch_matches(&records[1], 4));
         assert!(epoch_matches(&records[0], 99));
         fs::remove_dir_all(root).ok();
+    }
+
+    /// Concurrent handles on one journal file must never duplicate a seq:
+    /// without the per-file append lock two handles read the same tail and
+    /// write the same number twice, poisoning replay cursors downstream.
+    #[test]
+    fn concurrent_handles_never_duplicate_seq() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join(".sqwai/journal")).unwrap();
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let root = root.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut journal = Journal::open(&root, "race").expect("open");
+                let mut seqs = Vec::new();
+                for i in 0..25 {
+                    seqs.push(
+                        journal
+                            .append("note", serde_json::json!({"text": i}))
+                            .expect("append"),
+                    );
+                }
+                seqs
+            }));
+        }
+        let mut all = Vec::new();
+        for handle in handles {
+            all.extend(handle.join().expect("thread"));
+        }
+        assert_eq!(all.len(), 200);
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), 200, "duplicate seq numbers were written");
     }
 }
