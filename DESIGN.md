@@ -246,6 +246,19 @@ acceptance[].validation — same shape as steps[].validation. `complete`
 requires every acceptance item to have `validation.status` of `passed` or
 `waived`; non-stale receipts required (§2.1.4). Pre-receipt `Passed` items
 (written before validation existed) still complete without re-verification.
+Verification protocol (single; merged from ULTRA-1, §12.12): an executable
+check settles an item only if it (1) fails before the change — the host runs
+every `cmd:` once at `plan create` and keeps non-zero exits as the item's
+`baseline`; a check that already passes, cannot run, or is unsafe stays
+unproven, never settled; (2) is frozen — check inputs hashed at create,
+`snapshots:`/`signatures:` outputs and shapes frozen beside the baseline,
+`differential:` double-run for determinism; a rewritten check invalidates
+its receipts; (3) reports three states — `passed`, pending, and `unknown`
+(flaky: green and red runs attesting the same digest; never retried into
+`passed`, `complete` stays blocked, waiver is the way out). Item kinds
+(`cmd:`, `snapshot:`, `differential:`, `signatures:`, `manual:`) are just
+which proof the host takes; the rung table in §12.12 orders them by trust
+per cost.
 stale_goal: true appears on pending steps after a goal revision (§2.1.6).
 folded — legacy, always empty (see §2.1.5).
 budget — token estimate of the plan as injected; limit derived from model
@@ -1657,7 +1670,7 @@ number; a `partial` one is missing something the design calls for.
 | AE | Core and UI decoupling: headless `serve` (stdio/JSON-RPC) + crates workspace split (`sqwai-core`, `sqwai-tui`, `sqwai-server`) (§5.11) | planned | B |
 | AF | Hardcode linter: scan file_diff for test-shaped literals (warn-layer) | done — confession phrases + long compared/returned string literals over the outcome diff (cap 3, never blocks); numeric magic constants deliberately excluded (ports/timeouts); `bash`-written bytes not scanned | I4 |
 | AG | Safety level presets / refusal override policy for models with strong filters | planned | — |
-| AH | ULTRA-1: executable acceptance as the settling rule (§12.12) — frozen check that fails before the change, judge ladder beyond tests, three states, `verified` required to settle | partial (§12.12) — baseline proof, the settle gate, and the three states shipped for `cmd:` items (host runs every check at plan create, keeps the failing run, `verify` refuses an item without one, `plan show` marks it; a green run and a red run disagreeing on the same digest marks the item flaky/unknown, never retried into `verified`, `complete` stays blocked); rung 4 shipped (`snapshot:` freezes output at plan time, settles on byte-identical output); rung 3 shipped (   `differential:` settles on changed output, double-run freeze refuses nondeterministic inputs); rung 5 shipped (`signatures:` settles on identical declaration shapes, AST-normalized); the walk shipped (host classifies items by rung, reports the highest in create/accept and per item); differential hardening: a nonzero exit with changed output is `broken_change` (never verified — change without breakage is the whole point of the rung), `complete` re-runs and blocks on `unchanged`; remaining: the round-trip rung and rung synthesis | V, V1, F3, H1 |
+ | AH | Verification protocol: executable acceptance as the settling rule (merged from ULTRA-1 into §2.1) — frozen check that fails before the change, rungs beyond tests, three states, `passed` required to settle | done (§2.1) — baseline proof, the settle gate, and the three states shipped for `cmd:` items (host runs every check at plan create, keeps the failing run, `verify` refuses an item without one, `plan show` marks it; a green run and a red run disagreeing on the same digest marks the item flaky/unknown, never retried into `passed`, `complete` stays blocked); rung 4 shipped (`snapshot:` freezes output at plan time, settles on byte-identical output); rung 3 shipped (   `differential:` settles on changed output, double-run freeze refuses nondeterministic inputs); rung 5 shipped (`signatures:` settles on identical declaration shapes, AST-normalized); the walk shipped (host classifies items by rung, reports the highest in create/accept and per item); differential hardening: a nonzero exit with changed output is `broken_change` (never verified — change without breakage is the whole point of the rung), `complete` re-runs and blocks on `unchanged`; remaining: the round-trip rung and rung synthesis; ULTRA-2/3 parked | V, V1, F3, H1 |
 | AI | ULTRA-2/3: conditional escalation under a separate arbiter budget (`N ≤ B/T`); divergence phase gated behind a diversity measurement | PARKED — ULTRA mode development paused; the ULTRA-1 substrate above ships and lives on its own, engagement flag / arbitration / divergence untouched (§12.12) | AH, M, AC |
 | AJ | Typed executable constraints (§2.1.10): `forbid-import:`, `forbid-cmd:` (live in bash), `ast:`, `path:` evaluated at `complete`; `/plan waive-constraint`; AGENTS.md advisory mining at create | done — violations block complete like red checks; unprefixed constraints stay advisory | AH |
 
@@ -2069,7 +2082,14 @@ context is a host observation, which fits the integrity model.
 - **Not** the automatic neighbor pull from the original sketch — that stays
   with the context block (§12.5). The value of `@` is precision.
 
-### 12.12 ULTRA mode (planned)
+### 12.12 Verification rungs + parked ULTRA phases (merged)
+
+**Merged:** the ULTRA-1 substrate (fail-before baselines, frozen checks,
+three states, the rung table below, the ladder walk) IS the §2.1
+verification protocol above — one protocol, not two. What remains ULTRA
+proper (per-turn flag, arbiter budgets, escalation, diversity) is parked
+(ULTRA-2/3) except manual /verify. The spec below stays as the rung
+reference and the parked-phase design.
 
 **Thesis.** Selection, not generation, is the bottleneck. A strong model's
 first attempt is usually good; what is missing is a cheap, trustworthy way to
