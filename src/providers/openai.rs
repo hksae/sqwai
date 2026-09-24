@@ -909,4 +909,277 @@ mod tests {
         assert_eq!(body["max_completion_tokens"], 1024);
         assert!(body.get("max_tokens").is_none());
     }
+
+    /// Live cache probes against the real wire. Measurements, not behavior
+    /// assertions: they print per-turn usage so prefix stability can be read
+    /// off. The provider comes from the user config (same path as the bench),
+    /// never env. Run with:
+    /// `cargo test --bin sqwai live_ -- --ignored --nocapture`
+    mod live_cache {
+        use super::*;
+        use futures::StreamExt;
+
+        struct Live {
+            provider: crate::providers::SharedProvider,
+            model_id: String,
+        }
+
+        /// Same credential path as the G0 bench: the provider comes from the
+        /// user's config file (`last_model`, or `SQWAI_BENCH_MODEL`), never
+        /// from env. The env key has no Go rights, which is why a hardcoded
+        /// probe 402/403s while the TUI and the bench work.
+        fn live_provider() -> Live {
+            // the Go gateway routes on x-opencode-session; without it every
+            // request 400s with MissingSessionID
+            crate::providers::set_conversation_id("cache-probe");
+            let bench = crate::agent::bench_harness::bench_model()
+                .expect("bench_model must resolve: check config + SQWAI_BENCH_MODEL");
+            Live {
+                provider: bench.provider,
+                model_id: bench.model_id,
+            }
+        }
+
+        /// Stable prefix big enough to clear the ~1024-token cache floor.
+        fn stable_prefix() -> Vec<crate::providers::SystemPart> {
+            let rules = format!(
+                "You are a coding agent. Rules of engagement:\n{}\n",
+                "Obey the project instructions. Confirm before mutating. ".repeat(120)
+            );
+            let project = format!(
+                "AGENTS.md (project instructions):\n{}\n",
+                "Use rustfmt. No unwrap in production paths. ".repeat(120)
+            );
+            vec![
+                crate::providers::SystemPart::cached(rules),
+                crate::providers::SystemPart::cached(project),
+            ]
+        }
+
+        fn probe_tools() -> Vec<crate::providers::ToolSpec> {
+            vec![
+                crate::providers::ToolSpec {
+                    name: "read".into(),
+                    description: "read a file".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+                crate::providers::ToolSpec {
+                    name: "bash".into(),
+                    description: "run a shell command".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+            ]
+        }
+
+        fn base_request(live: &Live) -> ChatRequest {
+            ChatRequest {
+                model_id: live.model_id.clone(),
+                system: vec![],
+                messages: vec![],
+                effort: None,
+                effort_support: Default::default(),
+                max_tokens: Some(64),
+                tools: vec![],
+                previous_response_id: None,
+                context_transport: crate::providers::ContextTransport::Stateless,
+            }
+        }
+
+        async fn run(live: &Live, req: ChatRequest) -> crate::providers::Usage {
+            // live gateway rate-limits: back off and retry, otherwise one
+            // 429 kills a four-request A/B halfway through
+            let mut wait_secs = 5u64;
+            for _ in 0..6 {
+                let mut usage = crate::providers::Usage::default();
+                let mut text = String::new();
+                let mut rate_limited = false;
+                let mut stream = live.provider.stream_chat(req.clone());
+                while let Some(ev) = stream.next().await {
+                    match ev {
+                        Ok(crate::providers::StreamEvent::Text(t)) => text.push_str(&t),
+                        Ok(crate::providers::StreamEvent::Usage(u)) => {
+                            if u.prompt_tokens > 0 {
+                                usage = u;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            let msg = format!("{e:#}");
+                            if msg.contains("429") || msg.contains("rate_limit") {
+                                rate_limited = true;
+                                break;
+                            }
+                            panic!("stream failed: {msg}");
+                        }
+                    }
+                }
+                if !rate_limited {
+                    eprintln!("  answer: {}", text.chars().take(80).collect::<String>());
+                    // gentle pacing: the gateway 429s back-to-back probes
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    return usage;
+                }
+                eprintln!("  429: waiting {wait_secs}s");
+                tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+                wait_secs = (wait_secs * 2).min(60);
+            }
+            panic!("still rate-limited after retries");
+        }
+
+        fn report(turn: &str, u: &crate::providers::Usage) {
+            let cached = u.cached_tokens.unwrap_or(0);
+            let frac = if u.prompt_tokens > 0 {
+                cached as f64 / u.prompt_tokens as f64
+            } else {
+                0.0
+            };
+            println!(
+                "{turn}: prompt={} cached={} completion={} cached_frac={:.2}",
+                u.prompt_tokens, cached, u.completion_tokens, frac
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "live wire; requires configured provider"]
+        async fn live_key_answers() {
+            let live = live_provider();
+            let mut req = base_request(&live);
+            req.messages = vec![Message::new(Role::User, "say hi in 3 words")];
+            let u = run(&live, req).await;
+            report("alive", &u);
+            assert!(u.prompt_tokens > 0);
+        }
+
+        /// A/B the plan split: full render cached (old) vs goal cached +
+        /// status volatile (new), with a step finishing between turns.
+        /// Old should re-key the prefix on turn 2; new should stay ~1.0.
+        #[tokio::test]
+        #[ignore = "live wire; requires configured provider"]
+        async fn live_plan_split() {
+            use crate::plan::{self, NewStep, StepStatus};
+            let live = live_provider();
+            let tool_specs = probe_tools();
+            let mut plan = plan::create(
+                "ship the widget".into(),
+                vec!["keep API stable".into()],
+                vec!["manual: eyeball it".into()],
+                vec![
+                    NewStep {
+                        title: "write it".into(),
+                        refs: vec![],
+                    },
+                    NewStep {
+                        title: "test it".into(),
+                        refs: vec![],
+                    },
+                ],
+                20_000,
+                &plan::Limits::default(),
+            )
+            .unwrap();
+
+            // OLD: whole render in the cached prefix
+            let mut history: Vec<Message> = vec![];
+            for turn in 1..=2 {
+                if turn == 2 {
+                    plan.steps[0].status = StepStatus::Done;
+                }
+                history.push(Message::new(
+                    Role::User,
+                    format!("old-layout turn {turn}: reply with the word ok"),
+                ));
+                let mut req = base_request(&live);
+                let mut system = stable_prefix();
+                system.push(crate::providers::SystemPart::cached(plan::render(&plan)));
+                req.system = system;
+                req.tools = tool_specs.clone();
+                req.messages = history.clone();
+                let u = run(&live, req).await;
+                report(&format!("old{turn}"), &u);
+                history.push(Message::new(Role::Assistant, "ok"));
+            }
+
+            // NEW: goal cached, status volatile
+            plan.steps[0].status = crate::plan::StepStatus::Pending;
+            let mut history: Vec<Message> = vec![];
+            for turn in 1..=2 {
+                if turn == 2 {
+                    plan.steps[0].status = StepStatus::Done;
+                }
+                history.push(Message::new(
+                    Role::User,
+                    format!("new-layout turn {turn}: reply with the word ok"),
+                ));
+                let mut req = base_request(&live);
+                let mut system = stable_prefix();
+                system.push(crate::providers::SystemPart::cached(plan::render_goal(&plan)));
+                system.push(crate::providers::SystemPart::volatile(plan::render_status(
+                    &plan,
+                )));
+                req.system = system;
+                req.tools = tool_specs.clone();
+                req.messages = history.clone();
+                let u = run(&live, req).await;
+                report(&format!("new{turn}"), &u);
+                history.push(Message::new(Role::Assistant, "ok"));
+            }
+        }
+
+        /// Sharp divergence: completely different system block mid-history.
+        /// Strict-prefix caching collapses cached to ~0; block/global
+        /// caching keeps serving the unchanged blocks.
+        #[tokio::test]
+        #[ignore = "live wire; requires configured provider"]
+        async fn live_system_divergence() {
+            let live = live_provider();
+            let tool_specs = probe_tools();
+            let history = vec![
+                Message::new(Role::User, "remember the word sparrow"),
+                Message::new(Role::Assistant, "ok"),
+                Message::new(Role::User, "reply with the word ok"),
+            ];
+            for (label, system) in [
+                ("same1", stable_prefix()),
+                ("same2", stable_prefix()),
+                (
+                    "diverged",
+                    vec![crate::providers::SystemPart::cached(
+                        "Completely different instructions. ".repeat(300),
+                    )],
+                ),
+                ("same3", stable_prefix()),
+            ] {
+                let mut req = base_request(&live);
+                req.system = system;
+                req.tools = tool_specs.clone();
+                req.messages = history.clone();
+                let u = run(&live, req).await;
+                report(label, &u);
+            }
+        }
+
+        /// Same prefix three turns in a row: turn 1 pays full price, turns
+        /// 2-3 should read mostly from cache.
+        #[tokio::test]
+        #[ignore = "live wire; requires configured provider"]
+        async fn live_prefix_stability() {
+            let live = live_provider();
+            let system = stable_prefix();
+            let tool_specs = probe_tools();
+            let mut history: Vec<Message> = vec![];
+            for turn in 1..=3 {
+                history.push(Message::new(
+                    Role::User,
+                    format!("turn {turn}: reply with the word ok"),
+                ));
+                let mut req = base_request(&live);
+                req.system = system.clone();
+                req.tools = tool_specs.clone();
+                req.messages = history.clone();
+                let u = run(&live, req).await;
+                report(&format!("turn{turn}"), &u);
+                history.push(Message::new(Role::Assistant, "ok"));
+            }
+        }
+    }
 }

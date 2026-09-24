@@ -5399,6 +5399,131 @@ mod effort_tests {
         assert_eq!(req.messages.len(), 1);
     }
 
+    /// Live A/B of the compaction request shape: prime the cache with a
+    /// regular turn, then send the cache-aware summary request (parent
+    /// prefix + history + prompt) and the standalone one (tiny system +
+    /// transcript). The aware request should read the history at cache
+    /// price; the standalone one pays full price for the transcript.
+    /// Unique padding per run so older probes cannot warm this prefix.
+    #[tokio::test]
+    #[ignore = "live wire; requires configured provider"]
+    async fn live_compaction_request_reuses_prefix() {
+        use futures::StreamExt;
+        crate::providers::set_conversation_id("cache-probe-compact");
+        let bench = crate::agent::bench_harness::bench_model()
+            .expect("bench_model must resolve: check config + SQWAI_BENCH_MODEL");
+
+        async fn send(
+            bench: &crate::agent::bench_harness::BenchModel,
+            req: ChatRequest,
+        ) -> crate::providers::Usage {
+            let mut wait_secs = 5u64;
+            for _ in 0..6 {
+                let mut usage = crate::providers::Usage::default();
+                let mut rate_limited = false;
+                let mut stream = bench.provider.stream_chat(req.clone());
+                while let Some(ev) = stream.next().await {
+                    match ev {
+                        Ok(StreamEvent::Text(_)) => {}
+                        Ok(StreamEvent::Usage(u)) => {
+                            if u.prompt_tokens > 0 {
+                                usage = u;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            let msg = format!("{e:#}");
+                            if msg.contains("429") || msg.contains("rate_limit") {
+                                rate_limited = true;
+                                break;
+                            }
+                            panic!("stream failed: {msg}");
+                        }
+                    }
+                }
+                if !rate_limited {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    return usage;
+                }
+                eprintln!("  429: waiting {wait_secs}s");
+                tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+                wait_secs = (wait_secs * 2).min(60);
+            }
+            panic!("still rate-limited after retries");
+        }
+
+        fn report(turn: &str, u: &crate::providers::Usage) {
+            let cached = u.cached_tokens.unwrap_or(0);
+            let frac = if u.prompt_tokens > 0 {
+                cached as f64 / u.prompt_tokens as f64
+            } else {
+                0.0
+            };
+            println!(
+                "{turn}: prompt={} cached={} completion={} cached_frac={:.2}",
+                u.prompt_tokens, cached, u.completion_tokens, frac
+            );
+        }
+
+        let nonce: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0) as u64;
+        let system = vec![
+            crate::providers::SystemPart::cached(format!(
+                "Probe rules {nonce}. {}",
+                "Obey the project instructions. ".repeat(30)
+            )),
+            crate::providers::SystemPart::cached(format!(
+                "Probe AGENTS.md {nonce}. {}",
+                "Use rustfmt. ".repeat(30)
+            )),
+        ];
+        let tools = vec![crate::providers::ToolSpec {
+            name: "read".into(),
+            description: "read a file".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let history = three_turns();
+        let older = &history[..4];
+
+        // prime: a regular turn on the same prefix + history
+        let mut prime_msgs = history.clone();
+        prime_msgs.push(Message::new(Role::User, "go on"));
+        let prime = ChatRequest {
+            model_id: bench.model_id.clone(),
+            system: system.clone(),
+            messages: prime_msgs,
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: Some(64),
+            tools: tools.clone(),
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        // keep the prime small enough to leave room: reuse three_turns as-is
+        let u = send(&bench, prime).await;
+        report("prime", &u);
+
+        // cache-aware: same prefix + history, prompt appended
+        let prefix = CompactionPrefix {
+            system: &system,
+            tools: &tools,
+        };
+        let (aware, is_aware) =
+            compaction_request(Some(&prefix), older, &history, None, "", &bench.model_id, false);
+        assert!(is_aware);
+        let u = send(&bench, aware).await;
+        report("aware", &u);
+
+        // standalone: tiny system + rendered transcript
+        let (alone, is_aware) =
+            compaction_request(None, older, &history, None, "", &bench.model_id, false);
+        assert!(!is_aware);
+        let u = send(&bench, alone).await;
+        report("alone", &u);
+    }
+
     /// Prod-shape replication: 95 mixed messages (~46k tokens, like the
     /// T1 shakedown transcript), 1M limit, 0.01 threshold, summary off.
     /// compact_history must shrink and report — not silently pass through.
