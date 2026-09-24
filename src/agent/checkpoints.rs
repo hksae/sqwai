@@ -260,6 +260,14 @@ pub fn restore_from_blobs(
             report.skipped.push(item.path.clone());
             continue;
         }
+        // Absent file the agent left content behind on: someone else deleted
+        // it after the agent wrote it. Resurrecting the blob would destroy
+        // the user's own action — report, do not restore. (Absent with no
+        // agent hash means the agent itself deleted it: that restores below.)
+        if current.is_none() && item.agent_hash.is_some() {
+            report.skipped.push(item.path.clone());
+            continue;
+        }
         match &item.blob_before {
             _ if item.blob_before.is_none() && item.existed_before => {
                 // The file was edited, not created, and its pre-image is not
@@ -325,6 +333,14 @@ pub fn restore_paths_in(
         if let (Some(expected), Some(live)) = (&target.agent_hash, &live)
             && expected != live
         {
+            report.skipped.push(target.path.clone());
+            continue;
+        }
+        // Absent file the agent left content behind on: the user deleted it
+        // after the agent wrote it — resurrecting would destroy their action.
+        // (Absent with no agent hash means the agent itself deleted it:
+        // that restores from the snapshot below.)
+        if live.is_none() && target.agent_hash.is_some() {
             report.skipped.push(target.path.clone());
             continue;
         }
@@ -530,6 +546,47 @@ mod tests {
             fs::read(&path).unwrap(),
             b"# notes, by me\n",
             "the user's edit survives"
+        );
+    }
+
+    /// Phase 1.4 PoC: the agent edits a file, the USER deletes it, undo runs.
+    /// Resurrecting the blob would destroy the user's own action — an absent
+    /// file the agent left content behind on stays absent (reported, not
+    /// restored). Contrast the agent-deleted case, which must come back.
+    #[test]
+    fn a_file_the_user_deleted_stays_deleted() {
+        use crate::agent::journal::PreImage;
+        let dir = tempfile::Builder::new()
+            .prefix("sqwai-blob-userdel")
+            .tempdir()
+            .unwrap();
+        let root = dir.path();
+        let path = root.join("notes.md");
+
+        let original = b"# notes\n";
+        let blob = crate::agent::blobs::put(root, original).unwrap();
+        // what the host left, recorded in the journal
+        fs::write(&path, b"# notes, by the agent\n").unwrap();
+        let agent_hash = current_hash(&path);
+        // ...and then the user deleted it themselves
+        fs::remove_file(&path).unwrap();
+
+        let report = restore_from_blobs(
+            root,
+            &[PreImage {
+                path: "notes.md".into(),
+                blob_before: Some(blob),
+                existed_before: true,
+                agent_hash,
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(report.skipped, vec!["notes.md".to_string()]);
+        assert!(report.restored.is_empty());
+        assert!(
+            !path.exists(),
+            "the user's deletion survives: undo must not resurrect it"
         );
     }
 
