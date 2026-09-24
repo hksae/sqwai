@@ -3149,11 +3149,22 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         };
                     let op = plan::Op::Cancel {
                         id: Some(target_id.clone()),
-                        reason,
+                        reason: reason.clone(),
                     };
                     match plan::apply(&mut active, op, &limits, ctx.current_step.as_deref()) {
                         Ok(applied) => {
-                            if let Err(e) = plan::store(&ctx.root, &active) {
+                            // journal-first like every other mutating op: a
+                            // bare store leaves crash recovery blind to the
+                            // cancellation (file moved, journal did not)
+                            if let Err(e) = plan::commit(
+                                &ctx.root,
+                                &ctx.session_id,
+                                &mut active,
+                                "cancel",
+                                "model",
+                                true,
+                                serde_json::json!({"id": target_id, "reason": reason}),
+                            ) {
                                 return Outcome::err(format!("plan write failed: {e:#}"));
                             }
                             match applied {
@@ -9804,6 +9815,60 @@ end
         // Cancelling a real step id still works.
         let cancelled = plan_op(&mut ctx, &json!({"op": "cancel", "id": "1", "reason": "skip"}));
         assert!(cancelled.ok, "{}", cancelled.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Journal-first for step cancel: the dispatcher must commit (not bare
+    /// store), or crash recovery never sees the cancellation. First asserts
+    /// the commit record exists; then simulates the crash between commit
+    /// and store (intent journaled, file untouched) and requires replay to
+    /// land the cancellation instead of reopening the step.
+    #[test]
+    fn plan_cancel_is_journaled_for_crash_recovery() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "cancel recovery",
+                "steps": [{"title": "step 1"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        let cancelled = plan_op(&mut ctx, &json!({"op": "cancel", "id": "1", "reason": "skip"}));
+        assert!(cancelled.ok, "{}", cancelled.output);
+        // the commit record must exist (pre-fix: bare store wrote nothing)
+        let records = crate::agent::journal::Journal::records_for(&dir, &ctx.session_id).unwrap();
+        assert!(
+            records.iter().any(|record| {
+                record.kind == "plan"
+                    && record.fields.get("op").and_then(|value| value.as_str()) == Some("cancel")
+                    && record.fields.get("id").and_then(|value| value.as_str()) == Some("1")
+            }),
+            "cancel intent must be journaled"
+        );
+        // the cancel intent, journaled the way plan::commit journals it,
+        // with no store after it (the crash)
+        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
+        journal
+            .append(
+                "plan",
+                serde_json::json!({
+                    "op": "cancel", "id": "1", "reason": "skip",
+                    "plan_id": plan_id, "by": "model", "ok": true,
+                }),
+            )
+            .unwrap();
+        let report = plan::replay(&dir).unwrap();
+        assert!(report.ops_applied >= 1, "{report:?}");
+        let rebuilt = plan::open(&dir, &plan_id).unwrap();
+        let step = rebuilt.step("1").expect("step must survive");
+        assert_eq!(
+            step.status,
+            plan::StepStatus::Cancelled,
+            "replay must restore the cancellation, not reopen the step"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
