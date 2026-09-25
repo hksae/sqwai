@@ -1503,6 +1503,7 @@ async fn run_agent(
         .in_session(&session_id)
         .with_shadow_store(shadow_store)
         .with_plan_limits(plan_limits, context_limit)
+        .with_blocked_patterns(blocked_patterns.clone())
         .with_cancel(cancel_tool);
     // A child's shadow snapshots belong on the parent chain (§2.2.4), so the
     // parent's `/undo` sees step boundaries and bash mutations; the journal,

