@@ -1267,13 +1267,12 @@ Resume is the only multi-session path. Fork is deleted: no `/fork` command,
 no plan copy, no journal fork record.
 
 3.5 Criticism → Reflector
-PARKED (auto path): auto-detection proved too imprecise, so nothing invokes
-the pipeline automatically anymore — re-enable only via SQWAI_AUTO_REFLECTOR=1
-for experiments. The mechanism stays in code and manual /verify drives it on
-request: a three-level pipeline (L0 fact block, L1 blinded reflector,
-L2 /verify) for "you broke it" moments. Specified in §12.7. L0 (learned
-detector + artifact signal + fact block + `criticism` marker), neutralizer,
-blinded executor and host verdict mapping all exist (H1).
+DROPPED (auto path): auto-detection fired too imprecisely and no idea ever
+replaced it — nothing invokes the pipeline automatically, and the detector
+(classifier, weights, Maybe-confirm) is deleted, not parked. Manual
+/verify drives the kept pipeline on request: scope + neutralizer +
+blinded executor + host verdict over journal-grounded artifacts.
+Specified in §12.7.
 3.6 Undo
 /undo [n] attempts to restore sqwai-recorded changes from the n-th previous
 checkpoint (default 1) — not a guaranteed full-tree rollback. `/undo step N`
@@ -1655,8 +1654,8 @@ number; a `partial` one is missing something the design calls for.
 | F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, zstd) + layer-2 shadow repo driven by git CLI synchronously; path-scoped restore; `/undo step N` | done | F1 |
 | F7b | Crash-safe mutation protocol | done differently — no `mutation_started/observed` sweep; Layer-1 pre-images + `file_diff` chain cover single-step revert instead | F7 |
  | G0 | Minimal comparative retention benchmark (§8.2): plan + journal + anchor vs baseline | done as engineering soak-test — harness as ignored tests (minidb T1–T3 + kaiwai T4 matrix), pre-registration, eval files and analyses under bench/ | F1b, F6 |
- | H0 | L0 fact block + criticism detector | PARKED (auto path) — detector as learned student (offline LLM-labeled data, char-trigram LR, pure-Rust inference) + artifact signal + strict trigger + block-D injection + `criticism` marker + LLM-confirm for Maybe (§12.7); mechanism kept for manual /verify | F2 |
- | H1 | Reflector: Scope/Neutralizer/Executor/Verdict, /verify | PARKED (auto path) — full pipeline kept for manual /verify: Scope, Neutralizer with tone-invariance test, min-loop Executor in reflector ctx with dispatch refusal, host verdict mapping, host-rendered [verified], verdict file, recurrence, diary lesson + `/verify [--full]` as background task + self-protection (full budgets on 2nd objection, journal-first disable on 3rd); live-model tone + executor tests | H0, D |
+ | H0 | L0 fact block + criticism detector | DROPPED (auto path) — detector as learned student deleted with its weights, tests and training assets after the drop decision; journal grounding helpers (touches, artifacts) kept for manual /verify | F2 |
+ | H1 | Reflector: Scope/Neutralizer/Executor/Verdict, /verify | manual only — full pipeline kept for manual /verify (Scope, Neutralizer with tone-invariance test, min-loop Executor in reflector ctx with dispatch refusal, host verdict mapping, host-rendered [verified], verdict file, recurrence, diary lesson + `/verify [--full]` as background task); auto Maybe-confirm and H1 self-protection (objection counting) deleted with the auto path; live-model tone + executor tests | H0, D |
 | I1 | Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild | done — rusqlite (bundled) engine with §2.4.2 schema | E |
 | I2 | Rust + Python + TypeScript adapters (tree-sitter, minimal: declarations) | done — tree-sitter declarations and lexical imports for Rust, Python, TypeScript | I1 |
 | I3 | Freshness: edit/bash/undo/head triggers; status semantics; out-of-order protection (mandatory) | done — generation stamps, replace_file_subgraph_stamped, out-of-order protection, disk-hash freshness | I1 |
@@ -1686,8 +1685,8 @@ number; a `partial` one is missing something the design calls for.
 | AE | Core and UI decoupling: headless `serve` (stdio/JSON-RPC) + crates workspace split (`sqwai-core`, `sqwai-tui`, `sqwai-server`) (§5.11) | planned | B |
 | AF | Hardcode linter: scan file_diff for test-shaped literals (warn-layer) | done — confession phrases + long compared/returned string literals over the outcome diff (cap 3, never blocks); numeric magic constants deliberately excluded (ports/timeouts); `bash`-written bytes not scanned | I4 |
 | AG | Safety level presets / refusal override policy for models with strong filters | planned | — |
- | AH | Verification protocol: executable acceptance as the settling rule (merged from ULTRA-1 into §2.1) — frozen check that fails before the change, rungs beyond tests, three states, `passed` required to settle | done (§2.1) — baseline proof, the settle gate, and the three states shipped for `cmd:` items (host runs every check at plan create, keeps the failing run, `verify` refuses an item without one, `plan show` marks it; a green run and a red run disagreeing on the same digest marks the item flaky/unknown, never retried into `passed`, `complete` stays blocked); rung 4 shipped (`snapshot:` freezes output at plan time, settles on byte-identical output); rung 3 shipped (   `differential:` settles on changed output, double-run freeze refuses nondeterministic inputs); rung 5 shipped (`signatures:` settles on identical declaration shapes, AST-normalized); the walk shipped (host classifies items by rung, reports the highest in create/accept and per item); differential hardening: a nonzero exit with changed output is `broken_change` (never verified — change without breakage is the whole point of the rung), `complete` re-runs and blocks on `unchanged`; remaining: the round-trip rung and rung synthesis; ULTRA-2/3 parked | V, V1, F3, H1 |
-| AI | ULTRA-2/3: conditional escalation under a separate arbiter budget (`N ≤ B/T`); divergence phase gated behind a diversity measurement | PARKED — ULTRA mode development paused; the ULTRA-1 substrate above ships and lives on its own, engagement flag / arbitration / divergence untouched (§12.12) | AH, M, AC |
+ | AH | Verification protocol: executable acceptance as the settling rule (merged from ULTRA-1 into §2.1) — frozen check that fails before the change, rungs beyond tests, three states, `passed` required to settle | done (§2.1) — baseline proof, the settle gate, and the three states shipped for `cmd:` items (host runs every check at plan create, keeps the failing run, `verify` refuses an item without one, `plan show` marks it; a green run and a red run disagreeing on the same digest marks the item flaky/unknown, never retried into `passed`, `complete` stays blocked); rung 4 shipped (`snapshot:` freezes output at plan time, settles on byte-identical output); rung 3 shipped (   `differential:` settles on changed output, double-run freeze refuses nondeterministic inputs); rung 5 shipped (`signatures:` settles on identical declaration shapes, AST-normalized); the walk shipped (host classifies items by rung, reports the highest in create/accept and per item); differential hardening: a nonzero exit with changed output is `broken_change` (never verified — change without breakage is the whole point of the rung), `complete` re-runs and blocks on `unchanged`; dropped: the round-trip rung (no acceptance kind was ever defined) and rung synthesis (no spec was ever written); ULTRA-2 parked, ULTRA-3 dropped | V, V1, F3, H1 |
+| AI | ULTRA-2: conditional escalation under a separate arbiter budget (`N ≤ B/T`) | PARKED — ULTRA mode development paused; the ULTRA-1 substrate above ships and lives on its own; ULTRA-3 (divergence) dropped outright: its own death criterion plus the cost thesis kill divergence-for-divergence (§12.12) | AH, M, AC |
 | AJ | Typed executable constraints (§2.1.10): `forbid-import:`, `forbid-cmd:` (live in bash), `ast:`, `path:` evaluated at `complete`; `/plan waive-constraint`; AGENTS.md advisory mining at create | done — violations block complete like red checks; unprefixed constraints stay advisory | AH |
 
 
@@ -1906,12 +1905,14 @@ depresses precision); on-demand traversal (recall/graph_query) and
 explicit pins (@-mentions) do the work instead. No automatic injection
 is planned.
 
-### 12.7 Criticism → Reflector (PARKED — auto path)
-Moved here from §3.5; implemented, then parked: auto-detection proved too
-imprecise, so nothing invokes the pipeline automatically anymore
-(re-enable only via SQWAI_AUTO_REFLECTOR=1 for experiments). Manual /verify
-drives the kept mechanism on request. Original spec below, kept for the
-record. Three levels for "you broke
+### 12.7 Criticism → Reflector (auto path DROPPED, manual kept)
+Moved here from §3.5; implemented, then parked, then dropped outright:
+auto-detection fired too imprecisely and no idea ever replaced it. The
+auto trigger, the Maybe-confirm step and the whole H0 inference stack
+(classifier, weights, training assets) are deleted; manual /verify drives
+the kept pipeline (scope → neutralizer → blinded executor → host verdict
+over journal-grounded artifacts) on request. Original spec below, kept
+for the record. Three levels for "you broke
 it" moments — cheap always, expensive by escalation:
 
 - **L0 fact block.** A criticism detector injects journal facts into block D
@@ -2032,9 +2033,9 @@ context is a host observation, which fits the integrity model.
 **Merged:** the ULTRA-1 substrate (fail-before baselines, frozen checks,
 three states, the rung table below, the ladder walk) IS the §2.1
 verification protocol above — one protocol, not two. What remains ULTRA
-proper (per-turn flag, arbiter budgets, escalation, diversity) is parked
-(ULTRA-2/3) except manual /verify. The spec below stays as the rung
-reference and the parked-phase design.
+proper (per-turn flag, arbiter budgets, escalation) is parked (ULTRA-2;
+ULTRA-3 divergence dropped) except manual /verify. The spec below stays
+as the rung reference and the parked-phase design.
 
 **Thesis.** Selection, not generation, is the bottleneck. A strong model's
 first attempt is usually good; what is missing is a cheap, trustworthy way to
@@ -2170,20 +2171,19 @@ never competing plans.
   by a documented text heuristic, `manual:` engages none and free text is
   refused at create) and reports
   the highest-trust rung in the create/accept result and per item in
-  `/plan` (`[rung 3 differential]`). Informational only: no synthesis,
-  no gating.
-  *Remaining:* rung 6 and synthesis below.
+  `/plan` (`[rung 3 differential]`). Informational only: no synthesis
+  (never specified — dropped), no gating. No rung 6: no acceptance kind
+  was ever defined for round-trip.
 - **ULTRA-2 — conditional escalation.** One attempt always; N attempts under a
-  separate arbiter budget on acceptance failure, with `N ≤ B/T`.
-- **ULTRA-3 — divergence.** Gated behind a cheap measurement of our own: 5–10
-  tasks × N runs, count unique diffs after AST normalization. Median ≈ 1 means
-  the phase is dropped, not tuned.
+  separate arbiter budget on acceptance failure, with `N ≤ B/T`. Parked.
+- **ULTRA-3 — divergence.** DROPPED outright: its own death criterion
+  plus the cost thesis kill divergence-for-divergence — no measurement
+  run needed to see it.
 
 **Death criteria.** ULTRA-1 is dropped if it does not reduce `not verified`
 acceptance at `complete` on the benchmark, or if its arbitration cost
-exceeds the cost of one extra attempt. ULTRA-3 is dropped on the diversity
-measurement above. Neither outcome is a failure of the mode; both are the
-reason the slices are separate.
+exceeds the cost of one extra attempt. Neither outcome is a failure of
+the mode; both are the reason the slices are separate.
 
 **What ULTRA is not.** Not a second opinion on every turn (human approval
 accuracy is measured at ~66% — more confirmations make it worse, not better).

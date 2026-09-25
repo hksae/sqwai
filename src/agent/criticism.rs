@@ -1,136 +1,20 @@
-//! H0 criticism detector: pure-Rust inference for the learned student.
+//! Grounding helpers for manual /verify: journal touches, artifact
+//! matching, execution budgets.
 //!
-//! PARKED: auto-detection fires too imprecisely, so nothing calls this
-//! automatically anymore (see `auto_reflector_enabled` in loop_task — the
-//! auto path runs only with SQWAI_AUTO_REFLECTOR=1). The detector and the
-//! weights stay for manual /verify and future experiments.
-//!
-//! The model is a logistic regression on hashed char-trigrams, trained
-//! offline by `bench/criticism/train.py` from LLM-labeled examples.
-//! Weights ship as `criticism_weights.json` (sparse, versioned) and are
-//! embedded at compile time — inference is microseconds, $0, offline.
-//!
-//! Normalization, trigram windows and the FNV-1a hash below MUST stay
-//! byte-identical to train.py (each mirrored spot is marked). Change one
-//! side, change both, retrain, re-embed.
-//!
-//! Output is a three-way verdict per user message: `Fire` (confident
-//! criticism), `Maybe` (gray zone — the strict trigger and the artifact
-//! signal decide at the call site), `Silent`. Thresholds ride with the
-//! weights file so a retrain can move them without touching this code.
+//! DROPPED: the H0 auto-detector (learned verdicts, weights,
+//! Maybe-confirm) fired too imprecisely and nothing else used it — only
+//! manual /verify drives the reflector pipeline now. The detector code,
+//! its tests and its training assets are deleted; the design record of
+//! the experiment lives in DESIGN §12.7.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-const WEIGHTS_JSON: &str = include_str!("criticism_weights.json");
 
-/// Per-message verdict. `Maybe` is not indecision to hide — it is the
-/// documented handoff to the strict trigger (fire needs ≥2 signal groups
-/// plus prior-turn mutations; the artifact signal breaks the tie).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Verdict {
-    Fire,
-    Maybe,
-    Silent,
-}
+// --- Turn wiring: artifact signal for manual /verify -----------------
 
-struct Model {
-    dim: u64,
-    bias: f64,
-    weights: HashMap<u64, f64>,
-    threshold_fire: f64,
-    threshold_maybe: f64,
-}
-
-fn model() -> &'static Model {
-    static MODEL: OnceLock<Model> = OnceLock::new();
-    MODEL.get_or_init(|| {
-        let v: serde_json::Value =
-            serde_json::from_str(WEIGHTS_JSON).expect("criticism_weights.json parses");
-        let weights = v["weights"]
-            .as_object()
-            .expect("weights is a map")
-            .iter()
-            .map(|(k, val)| {
-                (
-                    k.parse::<u64>().expect("weight key is an index"),
-                    val.as_f64().expect("weight is a number"),
-                )
-            })
-            .collect();
-        Model {
-            dim: v["dim"].as_u64().expect("dim"),
-            bias: v["bias"].as_f64().expect("bias"),
-            weights,
-            threshold_fire: v["threshold_fire"].as_f64().expect("threshold_fire"),
-            threshold_maybe: v["threshold_maybe"].as_f64().expect("threshold_maybe"),
-        }
-    })
-}
-
-/// Lowercase (full Unicode mapping, like Python's str.lower), ё→е, and
-/// the elongation cap: runs longer than 2 collapse to 2.
-/// MIRRORED in train.py::normalize.
-fn normalize(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut run_char: Option<char> = None;
-    let mut run_len = 0usize;
-    for ch in text.chars().flat_map(|c| c.to_lowercase()) {
-        let ch = if ch == 'ё' { 'е' } else { ch };
-        if Some(ch) == run_char {
-            run_len += 1;
-        } else {
-            run_char = Some(ch);
-            run_len = 1;
-        }
-        if run_len <= 2 {
-            out.push(ch);
-        }
-    }
-    out
-}
-
-fn fnv1a64(data: &[u8]) -> u64 {
-    // MIRRORED in train.py::fnv1a64
-    let mut h: u64 = 14695981039346656037;
-    for &b in data {
-        h ^= b as u64;
-        h = h.wrapping_mul(1099511628211);
-    }
-    h
-}
-
-/// Raw criticism score in [0, 1]. Deterministic for a fixed weights file.
-pub fn score(text: &str) -> f64 {
-    let m = model();
-    let norm = normalize(text);
-    let padded = format!(" {norm} ");
-    let chars: Vec<char> = padded.chars().collect();
-    let mut sum = m.bias;
-    for window in chars.windows(3) {
-        let tri: String = window.iter().collect();
-        let idx = fnv1a64(tri.as_bytes()) % m.dim;
-        if let Some(w) = m.weights.get(&idx) {
-            sum += w;
-        }
-    }
-    1.0 / (1.0 + (-sum).exp())
-}
-
-/// Three-way verdict using the weights file's own thresholds.
-pub fn classify(text: &str) -> Verdict {
-    let m = model();
-    let p = score(text);
-    if p >= m.threshold_fire {
-        Verdict::Fire
-    } else if p >= m.threshold_maybe {
-        Verdict::Maybe
-    } else {
-        Verdict::Silent
-    }
-}
-
-// --- Turn wiring: artifact signal, strict trigger, fact block ---------
+// (No verdict type remains: manual /verify asserts criticism by typing
+// the command, so every Check it builds fires by construction.)
 
 /// One named artifact the criticism points at, grounded in last-turn facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,36 +27,27 @@ pub struct ArtifactFact {
     pub step: Option<String>,
 }
 
-/// Everything the turn hook needs: verdict, grounding, strict decision.
+/// Everything manual /verify needs: grounding artifacts plus failures.
 #[derive(Debug)]
 pub struct Check {
-    pub verdict: Verdict,
-    pub score: f64,
     pub artifacts: Vec<ArtifactFact>,
     pub touched: Vec<ArtifactFact>,
     pub failures: Vec<String>,
-    /// Strict trigger: Fire plus prior-turn mutations, or Maybe carried
-    /// by a resolved artifact plus mutations. Silent never fires, and
-    /// nothing fires when the last turn touched nothing — there is
-    /// nothing to check the criticism against.
+    /// Manual /verify always fires by construction — the user asserted
+    /// criticism by typing the command.
     pub fire: bool,
 }
 
-/// How far back "the last turn" reaches in journal records. A turn is a
-/// handful of tool calls; the auto window comfortably covers one and
-/// rarely two. Wider windows belong to `/verify` (budgets below).
-pub const AUTO_WINDOW: usize = 80;
 /// Budgets for the fact block: named artifacts, recent touches, failures.
 const MAX_ARTIFACTS: usize = 5;
-const MAX_TOUCHED: usize = 5;
 const MAX_FAILURES: usize = 3;
 /// Symbol-resolution attempts per message (graph lookups are the only
-/// non-trivial cost here, and only on Fire/Maybe).
+/// non-trivial cost here).
 const MAX_SYMBOLS: usize = 8;
 
-/// Execution budgets per trigger level (H1 slice 3). Auto is the in-turn
-/// pass; `/verify` widens it on request; `--full` is the escalation and
-/// the second-objection answer. The window rides here because it sizes
+/// Execution budgets per trigger level (H1 slice 3). `/verify` widens
+/// the window on request; `--full` is the escalation and the
+/// second-objection answer. The window rides here because it sizes
 /// the check itself, not just the executor.
 #[derive(Debug, Clone, Copy)]
 pub struct Budget {
@@ -185,13 +60,6 @@ pub struct Budget {
 }
 
 impl Budget {
-    pub fn auto() -> Self {
-        Self {
-            window: AUTO_WINDOW,
-            calls: 24,
-            wall_secs: 600,
-        }
-    }
     pub fn verify() -> Self {
         Self {
             window: 200,
@@ -208,36 +76,6 @@ impl Budget {
     }
 }
 
-/// Same, with an explicit journal window (`/verify` widens it).
-pub fn check_with_window(
-    root: &std::path::Path,
-    session: &str,
-    text: &str,
-    window: usize,
-) -> Check {
-    let verdict = classify(text);
-    let score = score(text);
-    let mut out = Check {
-        verdict,
-        score,
-        artifacts: Vec::new(),
-        touched: Vec::new(),
-        failures: Vec::new(),
-        fire: false,
-    };
-    if verdict == Verdict::Silent {
-        return out;
-    }
-    let (touched, failures) = gather(root, session, window);
-    out.touched = touched;
-    out.failures = failures;
-    if out.touched.is_empty() {
-        return out;
-    }
-    out.artifacts = match_artifacts(root, text, &out.touched);
-    out.fire = verdict == Verdict::Fire || (verdict == Verdict::Maybe && !out.artifacts.is_empty());
-    out
-}
 
 /// Recent touches (last write wins per path) plus recent tool failures.
 /// Shared by the auto check and the manual `/verify` (which skips the
@@ -427,273 +265,6 @@ fn symbol_key_path(key: &str) -> Option<String> {
     (!path.is_empty()).then(|| path.to_string())
 }
 
-/// The volatile block-D part. `None` when the strict trigger held back —
-/// the caller pushes nothing and writes no marker.
-pub fn block_text(check: &Check, quote: &str) -> Option<String> {
-    if !check.fire {
-        return None;
-    }
-    let mut out = String::from("<criticism-check>\nThe user criticizes prior work (\"");
-    out.push_str(&truncate(quote.trim(), 120));
-    out.push_str(
-        "\"). Answer from these host facts; check with a tool before asserting anything missing:\n",
-    );
-    if check.artifacts.is_empty() {
-        out.push_str("touched last turn:\n");
-        for fact in check.touched.iter().take(MAX_TOUCHED) {
-            out.push_str(&format!("- {}\n", describe(fact)));
-        }
-    } else {
-        for fact in &check.artifacts {
-            out.push_str(&format!("- {}\n", describe(fact)));
-        }
-    }
-    for failure in &check.failures {
-        out.push_str(&format!("recent failure: {failure}\n"));
-    }
-    out.push_str("</criticism-check>");
-    Some(out)
-}
 
-fn describe(fact: &ArtifactFact) -> String {
-    let mut s = fact.path.clone();
-    match (fact.added, fact.removed) {
-        (Some(a), Some(r)) => s.push_str(&format!(" (+{a}/-{r})")),
-        (Some(a), None) => s.push_str(&format!(" (+{a})")),
-        _ => {}
-    }
-    if let Some(step) = fact.step.as_deref() {
-        s.push_str(&format!(" [step {step}]"));
-    }
-    s
-}
 
-/// Journal marker fields for a fired check. The `text` value is screened
-/// for secrets by the journal append itself.
-pub fn marker_fields(check: &Check, text: &str) -> serde_json::Value {
-    serde_json::json!({
-        "text": text,
-        "verdict": match check.verdict {
-            Verdict::Fire => "fire",
-            Verdict::Maybe => "maybe",
-            Verdict::Silent => "silent",
-        },
-        "score": (check.score * 10000.0).round() / 10000.0,
-        "artifacts": check.artifacts.iter().map(|a| &a.path).collect::<Vec<_>>(),
-        "fired": check.fire,
-    })
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strong_criticism_fires_both_languages() {
-        for text in [
-            "ты сломал сборку",
-            "ничего не работает после тебя",
-            "ты всё испортил",
-            "you broke the build",
-            "nothing works after your change",
-            "you broke auth again",
-        ] {
-            assert_eq!(classify(text), Verdict::Fire, "{text}");
-        }
-    }
-
-    #[test]
-    fn typo_tolerance_survives_single_typos() {
-        for text in [
-            "ты сламал сборку",
-            "не рабоатет",
-            "you broke teh build",
-            "it doesnt work",
-        ] {
-            assert_ne!(classify(text), Verdict::Silent, "{text}");
-        }
-    }
-
-    #[test]
-    fn requests_praise_and_chatter_stay_silent() {
-        for text in [
-            "сделай вот так",
-            "ты можешь проверить?",
-            "покажи дифф",
-            "спасибо, работает",
-            "что дальше делаем",
-            "can you refactor this?",
-            "thanks, nice work",
-            "show me the diff",
-            " ты не поверишь, но всё завелось ",
-        ] {
-            assert_eq!(classify(text), Verdict::Silent, "{text}");
-        }
-    }
-
-    #[test]
-    fn normalization_mirrors_training() {
-        // ё folds, elongation caps at 2, case folds
-        assert_eq!(normalize("СЛОМАААЛ"), normalize("сломаал"));
-        assert_eq!(normalize("её"), "ее");
-        assert!(normalize("ТЫ СЛОМАЛ").contains("ты сломал"));
-    }
-
-    #[test]
-    fn mirror_matches_python_bit_for_bit() {
-        // pinned against bench/criticism/train.py output:
-        // normalize('Ты СЛОМАААЛ ёж') == 'ты сломаал еж'
-        assert_eq!(normalize("Ты СЛОМАААЛ ёж"), "ты сломаал еж");
-        // fnv1a64('сло') == 0x6fa517ad5f825a50
-        assert_eq!(fnv1a64("сло".as_bytes()), 0x6fa517ad5f825a50);
-        // full-train scores: fire vs silent with margin
-        assert!(score("ты сломал сборку") > 0.99);
-        assert!(score("can you refactor this?") < 0.01);
-    }
-
-    #[test]
-    fn scoring_is_deterministic() {
-        let text = "ты сломал сборку опять";
-        assert_eq!(score(text).to_bits(), score(text).to_bits());
-    }
-
-    fn journal_with_diff(dir: &std::path::Path, session: &str, path: &str) {
-        let mut journal =
-            crate::agent::journal::Journal::open(dir, session).expect("journal opens");
-        journal.set_attribution(Some("2".into()), Some("plan".into()), "main");
-        journal
-            .append(
-                "file_diff",
-                serde_json::json!({"path": path, "added": 3, "removed": 1}),
-            )
-            .expect("file_diff appends");
-    }
-
-    #[test]
-    fn check_fires_on_named_touched_file() {
-        let dir = std::env::temp_dir().join(format!("sqwai-critic-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        journal_with_diff(&dir, "sess", "src/a.rs");
-        let check = check_with_window(&dir, "sess", "ты сломал src/a.rs", Budget::auto().window);
-        assert!(check.fire, "{check:?}");
-        assert_eq!(check.artifacts.len(), 1);
-        assert_eq!(check.artifacts[0].path, "src/a.rs");
-        assert_eq!(check.artifacts[0].step.as_deref(), Some("2"));
-        let block = block_text(&check, "ты сломал src/a.rs").expect("block");
-        assert!(block.contains("src/a.rs"), "{block}");
-        assert!(block.contains("check with a tool"), "{block}");
-        assert!(block.contains("[step 2]"), "{block}");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn check_holds_back_without_mutations() {
-        let dir = std::env::temp_dir().join(format!("sqwai-critic-nomut-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let _journal = crate::agent::journal::Journal::open(&dir, "sess").expect("journal opens");
-        let check = check_with_window(&dir, "sess", "ты всё сломал", Budget::auto().window);
-        assert_eq!(check.verdict, Verdict::Fire);
-        assert!(!check.fire, "nothing to check against");
-        assert!(block_text(&check, "ты всё сломал").is_none());
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn check_maybe_carried_by_artifact_only() {
-        let dir = std::env::temp_dir().join(format!("sqwai-critic-maybe-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        journal_with_diff(&dir, "sess", "src/parser.py");
-        let carried = check_with_window(
-            &dir,
-            "sess",
-            "в parser.py теперь исключение",
-            Budget::auto().window,
-        );
-        assert_eq!(carried.verdict, Verdict::Maybe);
-        assert!(carried.fire, "{carried:?}");
-        assert_eq!(carried.artifacts.len(), 1);
-
-        let dir2 = std::env::temp_dir().join(format!("sqwai-critic-maybe2-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir2);
-        std::fs::create_dir_all(&dir2).unwrap();
-        journal_with_diff(&dir2, "sess", "src/other.py");
-        let dropped = check_with_window(
-            &dir2,
-            "sess",
-            "в parser.py теперь исключение",
-            Budget::auto().window,
-        );
-        assert!(!dropped.fire, "maybe without a name stays out");
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&dir2).ok();
-    }
-
-    #[test]
-    fn check_silent_short_circuits_despite_mutations() {
-        let dir = std::env::temp_dir().join(format!("sqwai-critic-sil-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        journal_with_diff(&dir, "sess", "src/a.rs");
-        let check = check_with_window(&dir, "sess", "сделай вот так", Budget::auto().window);
-        assert_eq!(check.verdict, Verdict::Silent);
-        assert!(!check.fire);
-        assert!(check.artifacts.is_empty());
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn check_resolves_symbol_to_touched_file() {
-        let dir = std::env::temp_dir().join(format!("sqwai-critic-sym-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("src")).unwrap();
-        std::fs::write(
-            dir.join("src/lib.rs"),
-            "pub fn calculate(x: i32) -> i32 {\n    x + 1\n}\n",
-        )
-        .unwrap();
-        let mut store = crate::agent::graph::SqliteGraphStore::open(&dir).expect("graph opens");
-        crate::agent::graph_index::index_project(&mut store, &dir).expect("indexed");
-        journal_with_diff(&dir, "sess", "src/lib.rs");
-        let check = check_with_window(&dir, "sess", "ты сломал calculate", Budget::auto().window);
-        assert!(check.fire, "{check:?}");
-        assert!(
-            check.artifacts.iter().any(|a| a.path == "src/lib.rs"),
-            "{check:?}"
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn marker_fields_carry_verdict_and_names() {
-        let dir = std::env::temp_dir().join(format!("sqwai-critic-mk-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        journal_with_diff(&dir, "sess", "src/a.rs");
-        let check = check_with_window(&dir, "sess", "ты сломал src/a.rs", Budget::auto().window);
-        let marker = marker_fields(&check, "ты сломал src/a.rs");
-        assert_eq!(marker["verdict"], serde_json::json!("fire"));
-        assert_eq!(marker["fired"], serde_json::json!(true));
-        assert_eq!(marker["text"], serde_json::json!("ты сломал src/a.rs"));
-        assert!(marker["score"].as_f64().unwrap() > 0.9);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Dev probe, not an assertion test: scores arbitrary phrases so a
-    /// human can spot-check the detector without wiring the turn loop.
-    /// Usage (PowerShell):
-    ///   $env:SQWAI_CRITIC_PROBE = "ты сломал всё|сделай вот так|you broke it";
-    ///   cargo test critic_probe -- --nocapture
-    /// Unset → no-op pass.
-    #[test]
-    fn critic_probe_prints_scores() {
-        let Ok(raw) = std::env::var("SQWAI_CRITIC_PROBE") else {
-            return;
-        };
-        for text in raw.split('|').map(str::trim).filter(|t| !t.is_empty()) {
-            println!("p={:.4} {:?}  {text}", score(text), classify(text));
-        }
-    }
-}

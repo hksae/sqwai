@@ -2938,7 +2938,8 @@ pub fn differential_current(item: &Acceptance) -> bool {
 /// Judge ladder rungs (§12.12), ordered by trust per unit of cost — the
 /// declaration order IS the trust order. The host walks down and stops at
 /// the first rung that applies; only classification ships so far (no
-/// synthesis, no gating). Rung 6 (round-trip) has no acceptance kind yet.
+/// synthesis, no gating). No rung 6: no acceptance kind was ever defined
+/// for round-trip, and rung synthesis was never specified — both dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rung {
     /// 1–2: an existing test, or a repro written for the change. The host

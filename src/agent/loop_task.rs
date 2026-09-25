@@ -1285,12 +1285,6 @@ fn repeat_bash_note(messages: &[Message], call: &ToolCallReq, output: &str) -> O
     }
 }
 
-/// Auto-reflector kill switch (PARKED — see the H0 block in run_agent).
-/// The mechanism stays callable (manual /verify); the auto path runs only
-/// with SQWAI_AUTO_REFLECTOR=1 in the environment.
-fn auto_reflector_enabled() -> bool {
-    std::env::var("SQWAI_AUTO_REFLECTOR").is_ok()
-}
 
 /// Sessions this process already opened an agent run for. `run_agent` is
 /// spawned per turn, but `session_start` plus the resume record describe a
@@ -1571,10 +1565,6 @@ async fn run_agent(
     } else {
         None
     };
-    // H0 (§12.7, PARKED — auto path off, see auto_reflector_enabled):
-    // when armed by a fired criticism check, the fact block rides as a
-    // volatile block-D part per request. Stays None while parked.
-    let mut criticism_block: Option<String> = None;
     if let Some(writer) = journal.as_mut() {
         if let Some(inherited) = parent_step.as_ref() {
             // Stamp the inherited epoch on every record this writer produces
@@ -1607,122 +1597,6 @@ async fn run_agent(
                 "chars": user_message.content.chars().count(),
                 "goal_like": user_message.content.starts_with("goal:") || user_message.content.starts_with("/goal"),
             }));
-            // H0 criticism detector (§12.7): PARKED — auto-detection (learned
-            // + artifact) fires too imprecisely, so the whole auto path is
-            // off. The mechanism stays in code (manual /verify); set
-            // SQWAI_AUTO_REFLECTOR=1 to re-enable for experiments.
-            // Main sessions only — a child's task prompt is a directive, not
-            // user criticism — and never on the G0 baseline (mechanism
-            // features stay out of it, §8.2).
-            if auto_reflector_enabled()
-                && parent_step.is_none()
-                && !crate::bench::baseline()
-            {
-                // H1 slice 3 self-protection: objections since the last
-                // verify pick the budget; the third disables the reflector
-                // for the session (journal-first, not a hidden switch).
-                if crate::agent::reflector::reflector_disabled(&root, &session_id) {
-                    crate::providers::log_http("reflector: disabled for this session");
-                } else {
-                    let objections =
-                        crate::agent::reflector::objections_after_last_verify(&root, &session_id);
-                    if objections >= 2 {
-                        let _ = writer.append(
-                            "reflector_disabled",
-                            serde_json::json!({"objections": objections}),
-                        );
-                        crate::providers::log_http(
-                            "reflector: disabled for the session after repeated objections",
-                        );
-                    } else {
-                        let budget = if objections >= 1 {
-                            crate::agent::criticism::Budget::full()
-                        } else {
-                            crate::agent::criticism::Budget::auto()
-                        };
-                        let mut check = crate::agent::criticism::check_with_window(
-                            &root,
-                            &session_id,
-                            &user_message.content,
-                            budget.window,
-                        );
-                        // H0-maybe confirm (§12.7): a held-back Maybe gets one
-                        // cheap model question; a confirmed target grounds the
-                        // fire. Silent and already-fired checks pass through
-                        // untouched (no I/O inside).
-                        if !check.fire
-                            && let Some(upgraded) = crate::agent::reflector::confirm_maybe(
-                                &provider,
-                                &model_id,
-                                &root,
-                                &check,
-                                &user_message.content,
-                            )
-                            .await
-                        {
-                            check = upgraded;
-                        }
-                        if check.fire {
-                            let _ = writer.append(
-                                "criticism",
-                                crate::agent::criticism::marker_fields(
-                                    &check,
-                                    &user_message.content,
-                                ),
-                            );
-                            criticism_block =
-                                crate::agent::criticism::block_text(&check, &user_message.content);
-                            // H1 (§12.7): Scope + Neutralizer + Executor + Verdict,
-                            // synchronous. Trigger is Fire+artifact (decided):
-                            // generic fires keep the L0 block only. A failed stage
-                            // degrades to what came before — the L0 block already
-                            // carries the turn, so silence here never loses anything.
-                            if !check.artifacts.is_empty()
-                                && let Some(rctx) = crate::agent::reflector::scope(
-                                    &root,
-                                    &session_id,
-                                    &check,
-                                    &user_message.content,
-                                )
-                            {
-                                match crate::agent::reflector::neutralize(
-                                    &provider, &model_id, &rctx,
-                                )
-                                .await
-                                {
-                                    Ok(checks) => {
-                                        let report = crate::agent::reflector::verify(
-                                            &root,
-                                            &session_id,
-                                            &model_id,
-                                            &provider,
-                                            writer,
-                                            &rctx,
-                                            &checks,
-                                            &budget,
-                                        )
-                                        .await;
-                                        messages.push(crate::providers::Message::new(
-                                            crate::providers::Role::Assistant,
-                                            report.block,
-                                        ));
-                                        // the transcript the host owns now differs
-                                        // from the provider's copy (same rule as
-                                        // compaction/undo: send ours, not a
-                                        // continuation).
-                                        previous_response_id = None;
-                                    }
-                                    Err(error) => {
-                                        crate::providers::log_http(&format!(
-                                            "reflector: neutralize failed: {error:#}"
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
     let todos: Vec<String> = Vec::new();
@@ -1846,11 +1720,6 @@ async fn run_agent(
             crate::agent::journal::Journal::claim_nudge(&root, Some(&session_id))
         {
             turn_system.push(crate::providers::SystemPart::volatile(nudge));
-        }
-        // H0 fact block (§12.7): computed once above, visible to every
-        // request of this turn while the caches for A and B survive.
-        if let Some(block) = criticism_block.as_deref() {
-            turn_system.push(crate::providers::SystemPart::volatile(block));
         }
         // Decided per request, not once per turn: a request that carries tool
         // results must never rely on the provider holding the calls they
@@ -5703,16 +5572,6 @@ mod effort_tests {
         assert!(repeat_bash_note(&[], &again, "TCP 1.2.3.4:443").is_none());
     }
 
-    /// Auto-reflector is parked: the auto path runs only with explicit
-    /// opt-in. Anyone exporting SQWAI_AUTO_REFLECTOR changes product
-    /// behavior, so the suite assumes a clean environment here.
-    #[test]
-    fn auto_reflector_stays_parked_without_opt_in() {
-        assert!(
-            !auto_reflector_enabled(),
-            "auto path needs SQWAI_AUTO_REFLECTOR=1"
-        );
-    }
 
     /// `propose_reset` through the approval dialog: RunOnce abandons (plan
     /// stays on disk as Abandoned, session hold cleared), Deny keeps the
