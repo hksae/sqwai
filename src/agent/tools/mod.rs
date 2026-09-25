@@ -1098,10 +1098,13 @@ pub fn is_mutating(name: &str) -> bool {
 }
 
 /// Multi-file (or opaque-target) mutation for the plan gate's hard path.
-/// Single-file file-tool writes proceed with an advisory nudge instead of
-/// the plan_required refusal; anything whose blast radius is unknown or
-/// spans files stays gated. Only consulted when `is_mutating_call` already
-/// fired, so read-only tools never reach here.
+/// Single-file file-tool writes and bounded index ops proceed with an
+/// advisory nudge instead of the plan_required refusal; anything whose
+/// blast radius is unknown or spans files stays gated. Only consulted
+/// when `is_mutating_call` already fired, so read-only tools never
+/// reach here. Deliberately not prose-based: a short request can still
+/// name a catastrophic command, so the split follows knowable blast
+/// radius, never request length.
 pub fn is_multi_file_mutation(name: &str, args: &Value) -> bool {
     match name {
         // one file_path each — bounded blast radius
@@ -1117,6 +1120,13 @@ pub fn is_multi_file_mutation(name: &str, args: &Value) -> bool {
                         .count()
                 });
             files != Some(1)
+        }
+        // bounded index ops go soft with a nudge, like a file write: an
+        // explicit path list is enumerable, and a plain commit only seals
+        // what is already staged (both reversible). The `all: true`
+        // variants stage the whole tree — unbounded, hard.
+        "git_stage" | "git_commit" => {
+            args.get("all").and_then(Value::as_bool).unwrap_or(false)
         }
         // bash is opaque, git_stage/commit span the index, MCP unknown:
         // fail closed into the hard path
@@ -6647,7 +6657,17 @@ mod tests {
         assert!(is_multi_file_mutation("patch", &json!({})));
         assert!(is_multi_file_mutation("patch", &json!({"patch": "garbage"})));
         assert!(is_multi_file_mutation("bash", &json!({"command": "rm -rf x"})));
-        assert!(is_multi_file_mutation("git_commit", &json!({"message": "x"})));
+        // bounded index ops go soft; the all:true variants stage the tree
+        assert!(!is_multi_file_mutation(
+            "git_stage",
+            &json!({"paths": ["src/a.rs"]})
+        ));
+        assert!(is_multi_file_mutation("git_stage", &json!({"all": true})));
+        assert!(!is_multi_file_mutation("git_commit", &json!({"message": "x"})));
+        assert!(is_multi_file_mutation(
+            "git_commit",
+            &json!({"message": "x", "all": true})
+        ));
     }
 
     /// Read-only bash classification: the observed inspection shapes pass,

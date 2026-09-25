@@ -505,9 +505,12 @@ a mutating tool call without an acceptance-bearing plan anywhere in the
 project earns an advisory host nudge on its (successful) result instead of
 a refusal — soft discipline: proceed, but visibly unbacked. The hard
 `plan_required` refusal survives only for multi-file or opaque-target
-mutations (multi-file `patch`, non-read-only `bash`, index-wide git ops):
-bounded single-file writes (`write`/`edit`/`multi_edit`, single-file
-`patch`) are not worth stopping. The gate asks
+mutations (multi-file `patch`, non-read-only `bash`, index-wide git ops
+— the `all: true` variants): bounded single-file writes (`write`/`edit`/
+`multi_edit`, single-file `patch`) and bounded index ops (explicit-path
+`git_stage`, plain `git_commit`) are not worth stopping. The split
+follows knowable blast radius, never request length: a short request can
+still name a catastrophic command. The gate asks
 "is there a criterion", not "is there a plan" and not "is the prose
 trivial": before the first mutation an acceptance item must exist —
 executable or human — so there is something to settle against. A plan
