@@ -422,6 +422,12 @@ file_diff evidence whose paths overlap with `refs` of another pending or in_prog
 the host attaches a warning to the `finish` result. The user may `/undo step N` to revert
 and reopen the step if the warning indicates a misattribution.
 
+**Blast radius (informational, one line).** Finishing a step appends the
+files it wrote (`blast radius: step 2 touched 4 files (…)`), read from the
+journal `file_diff` chain across sessions. Silent when the step wrote
+nothing. Not a refusal — it makes the scope visible before `complete`,
+where the full suite still has to pass.
+
 
 **Open assumptions.** A `note` with `note: assumption` records a model
 assumption; a later `note` with `note: assumption, resolves: <seq>` closes it.

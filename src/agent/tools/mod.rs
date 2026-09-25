@@ -3679,6 +3679,12 @@ fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                                 &active,
                                 msg,
                             );
+                            let msg = with_blast_radius(
+                                ctx,
+                                finishing.as_deref(),
+                                &active,
+                                msg,
+                            );
                             let msg = format!("{msg}{proof_notes}");
                             Outcome::ok(msg)
                         }
@@ -5159,6 +5165,49 @@ fn with_misattribution_warning(
         return message;
     }
     format!("{message}\nwarning: {}", warns.join("; "))
+}
+
+/// One-line blast radius on `finish`: the files this step wrote, from the
+/// journal's `file_diff` chain (all sessions — subagent writes count).
+/// Silent when the step wrote nothing (research steps). Informational,
+/// not a refusal: it makes the scope visible before `complete`, where
+/// the full suite still has to pass.
+fn with_blast_radius(
+    ctx: &ToolCtx,
+    finished_step: Option<&str>,
+    active: &plan::Plan,
+    message: String,
+) -> String {
+    let Some(step) = finished_step else {
+        return message;
+    };
+    let revert = crate::agent::journal::Journal::step_pre_images_in(
+        &ctx.root,
+        Some(&active.id),
+        step,
+    )
+    .unwrap_or_default();
+    let mut paths: Vec<String> = revert
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .chain(revert.written_since.iter().cloned())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    if paths.is_empty() {
+        return message;
+    }
+    const SHOW: usize = 6;
+    let list = if paths.len() <= SHOW {
+        paths.join(", ")
+    } else {
+        format!("{}, … (+{} more)", paths[..SHOW].join(", "), paths.len() - SHOW)
+    };
+    format!(
+        "{message}\nblast radius: step {step} touched {} file(s) ({list})",
+        paths.len()
+    )
 }
 
 /// The gate on `plan finish`.
@@ -10601,6 +10650,58 @@ end
             created.output.contains("blocked_patterns"),
             "blocked check must be refused, not run: {}",
             created.output
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Finishing a step reports its blast radius in one line: the files
+    /// the step wrote (journal file_diff chain, subagent sessions
+    /// included). A step that wrote nothing stays silent.
+    #[test]
+    fn plan_finish_reports_blast_radius() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "blast radius",
+                "acceptance": ["manual: eyeball it"],
+                "steps": [{"title": "work"}, {"title": "look"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        // the step wrote two files (one from a subagent session)
+        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
+        journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
+        journal
+            .append("file_diff", json!({"path": "src/a.rs"}))
+            .unwrap();
+        let mut sub = crate::agent::journal::Journal::open(&dir, "sub-1").unwrap();
+        sub.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
+        sub.append("file_diff", json!({"path": "src/b.rs"})).unwrap();
+        let finished = plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "1", "summary": "done"}),
+        );
+        assert!(finished.ok, "{}", finished.output);
+        assert!(
+            finished.output.contains("blast radius: step 1 touched 2 file(s) (src/a.rs, src/b.rs)"),
+            "{}",
+            finished.output
+        );
+        // a step that wrote nothing reports nothing
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "2"})).ok);
+        let finished = plan_op(
+            &mut ctx,
+            &json!({"op": "finish", "id": "2", "summary": "looked"}),
+        );
+        assert!(finished.ok, "{}", finished.output);
+        assert!(
+            !finished.output.contains("blast radius"),
+            "{}",
+            finished.output
         );
         fs::remove_dir_all(&dir).ok();
     }
