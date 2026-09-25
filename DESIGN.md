@@ -825,9 +825,7 @@ Ordered by importance:
 Verifier — resolve_ref answers "does this file/symbol exist, where,
 with what signature" deterministically. Consumers: plan validator
 (start with refs), pre-edit warning.
-Context selector — planned (§12.5), not a current role: no graph facts are
-injected into prompts today.
-Navigation — recall, graph_query, graph-view for the user.
+Navigation — recall, graph_query, @-mention completion for the user.
 Anything the graph returns from an exact lookup is an index observation
 over parsed AST files; anything from ranked search is advisory. An exact lookup
 reflects parser precision and indexed scope at that adapter's capability level,
@@ -963,10 +961,9 @@ Where	Behavior
 plan start/add with refs	each ref resolved per intent: `modify`/`remove` require `found` where the file's capabilities include declarations (syntactic or better) (`not_found` rejects with candidates); `create` requires the path/symbol to be absent on declaration (`add`/`create`) and initial `start` from `Pending` (if a step is resumed after partial work, symbols created by this step's earlier actions are not treated as collisions); `unknown` passes for all intents
 edit/multi_edit pre-check	if old_string is a single identifier-like token and the file's capabilities include declarations and resolve_ref is not_found → tool still runs (the string may legitimately be non-symbol text) but the result carries warning: symbol 'foo' not in index for this file
 2.4.9 Context block
-Planned, not implemented: injecting a deterministic per-step graph summary
-into the turn tail, with file-tied `lesson` notes appended automatically.
-Specified in §12.5. No graph facts are injected into prompts today; the model
-uses recall/graph_query tools on demand.
+No graph facts are injected into prompts automatically, by decision
+(see §12.5): the model uses recall/graph_query tools and @-mentions on
+demand.
 
 2.4.10 Graph-view
 REMOVED: the in-process neighborhood screen (Ctrl+G) is gone — browsing
@@ -1157,12 +1154,11 @@ text
   7 plan status (steps, acceptance validation, counts) — cheap, always current;
     goal and constraints sit in the cached prefix instead (they change only
     when the plan is rewritten), so a step that finishes re-keys nothing
- 8 graph context block (planned, §12.5 — not injected today)
- 9 nudge: when the in_progress step accumulated ≥ plan.nudge_after actions
+ 8 nudge: when the in_progress step accumulated ≥ plan.nudge_after actions
     since its last plan op — "plan: step N has K actions and no update —
     finish, split or block it" (session-scoped); finish-time misattribution
     warnings via refs (§2.1.4)
-10 triggered skills for this turn
+ 9 triggered skills for this turn
 Anthropic: cache_control after 3 and after 5. OpenAI-compatible/Responses:
 automatic prefix caching benefits from the same layout. Cache-read tokens are
 shown in the status bar; prefix writes are tracked separately
@@ -1665,10 +1661,10 @@ number; a `partial` one is missing something the design calls for.
 | I2 | Rust + Python + TypeScript adapters (tree-sitter, minimal: declarations) | done — tree-sitter declarations and lexical imports for Rust, Python, TypeScript | I1 |
 | I3 | Freshness: edit/bash/undo/head triggers; status semantics; out-of-order protection (mandatory) | done — generation stamps, replace_file_subgraph_stamped, out-of-order protection, disk-hash freshness | I1 |
 | I4 | resolve_ref; validator refs; pre-edit warning; stale markers; reflector executor tool | done — resolve_ref, validator refs, pre-edit warning, rich provenance and freshness done; stale markers done (newly-stale acceptance gets one durable chat row per turn, deduped, re-armed on re-verify); the reflector executor is H1 work (done, §12.7) | I2, I3, F1 |
-| I5 | Memory adapter; recall/graph_query exposed; context block | partial — memory adapter, recall, graph_query done; context block planned (§12.5) | I4, F4 |
-| J | Python references; LSP diagnostics → journal; graph-view list MVP; checkpoint before/after bash | partial — graph-view list MVP done (with aggregation/multi-hop navigation), step-boundary + pre-bash checkpoints and LSP diagnostics → journal done; Python semantic references done (decorators, base classes, submodule from-imports, assigned lambdas, call-name order fix; adapter v2) | I5, C |
- | K | Canvas graph-view, watcher, LSP semantic capabilities, blast radius, path view | planned | J |
-| M | Test impact: `test` nodes in Rust/Python adapters, reverse traversal, command synthesis, runner integration | planned (§12.5) | I5, acceptance runners |
+| I5 | Memory adapter; recall/graph_query exposed | done — memory adapter, recall, graph_query done | I4, F4 |
+| J | Python references; LSP diagnostics → journal; checkpoint before/after bash | partial — graph-view list MVP done then removed (§2.4.10) in favor of @-mentions; step-boundary + pre-bash checkpoints and LSP diagnostics → journal done; Python semantic references done (decorators, base classes, submodule from-imports, assigned lambdas, call-name order fix; adapter v2) | I5, C |
+| K | Canvas graph-view, watcher, LSP semantic capabilities, path view | planned | J |
+| M | Test impact: reverse traversal, command synthesis, runner integration | done — reverse imports closure + same-dir, exact mapping for bare pytest/go/cargo, full suite still required at complete (§2.4.11) | I5, acceptance runners |
 | O | Unattended mode: policy layer, stop conditions, `brief`, `/review`, pending memory | planned (§12.8) | F6, H0, M, Q, T |
 | P | Windows/PowerShell shell-aware safety layer (§5.2) | done | §5.2 |
 | Q | Single-instance lock + read-only fallback for plan/journal/memory/graph | done | F1 |
@@ -1683,7 +1679,7 @@ number; a `partial` one is missing something the design calls for.
 | X | Tool-output pruning + USER.md split/load | partial — USER.md split/loading and prune (§3.3.1) done; the read guard is a host path→hash map, not context-backed authorization | F1, F5 |
  | Y | Claim lint (post-generation verify against journal/resolve_ref) | done — counts/status/sized-claims/paths/symbols in English and Russian checked against the turn journal window, contradictions marked `[unverified]` + `claim_lint` record, gated (status only without a successful bash, everything only beside a failure, each span once), absence never flagged; repetition nudge (3+ fresh flags) rides the turn system block (§12.9) | I4 |
 | Z | Scope guard (step.refs vs file_diff) | done — finish-time misattribution warnings plus write-path scope warnings against the holding step's refs (warn-layer, never blocks; `bash` excluded, no per-file diff) | I4 |
-| AA | Lessons tied to files (note kind + context-block rule) | partial — `lesson` note kind done; automatic file-tied injection planned with the context block (§12.5) | I5 |
+| AA | Lessons tied to files (note kind) | done — `lesson` note kind done; automatic file-tied injection rejected with the context block (§12.5) | I5 |
 | AB | /why provenance, step diff + /undo step, /export | done — step diff + `/undo step` done; `/why <free text>` (host digs journal+plan, model narrates, background task) and `/export` (markdown + JSON into `.sqwai/exports/`, screened, capped) done | J |
 | AC | bench command (user-facing wrapper over §8.2 regression harness) | planned | G0 |
 | AD | Bash isolation/sandbox (container/bwrap/WSL) | open question | — |
@@ -1733,9 +1729,8 @@ results for memory nodes.
 Incremental projection == full rebuild: reindexing files one by one yields
 the same normalized projection as a full rebuild (mandatory test).
 /undo reopens exactly the steps whose evidence was reverted.
-Planned (see §12.5/§12.7/§12.9): impact selection matching the graph
-contract with `complete` always running the full suite; the reflector
-scenario suite (agent_error, claim_not_confirmed, scope_mismatch, partial,
+Done (see §2.4.11): impact selection with the full suite always running
+at `complete`; the reflector scenario suite (agent_error, claim_not_confirmed, scope_mismatch, partial,
 undetermined, tone invariance, no-journal degradation).
 8.2 Goal-retention benchmark
 
@@ -1901,22 +1896,15 @@ The following capabilities are specified as future evolutions, maintaining the c
 
 ### 12.3 Smart Context Pruning — done: outline tool; planned: BM25 relevance ranking.
 
-### 12.5 Graph consumers (planned)
-Moved here from §2.4.9/§2.4.11: specified, not implemented. No graph facts
-are injected into prompts today.
-
-- **Context block.** At most 1200 tokens per turn, in the tail, only when an
-  active plan has an in_progress step with refs or evidence paths;
-  deterministic ordering (path, line); file-tied `lesson` memory nodes
-  appended automatically so lessons fire at the moment they matter.
-- **Test impact.** Adapters emit `test` nodes and `calls|uses|references`
-  edges from tests to code; reverse traversal from changed symbols (depth ≤
-  3, stop at `test` nodes) selects the set a `verify` step runs first; the
-  full suite is still always required at `complete` (impact is a lower
-  bound — see §10). Empty impact for a file with references capability is a
-  non-blocking warning, never proof of no coverage.
-- **Blast radius.** At the finish of a change step the host lists nodes with
-  `references` edges into the changed symbols.
+### 12.5 Graph consumers (decided)
+Test impact and blast radius are implemented (§2.4.11, finish warnings).
+The third consumer on the original list — the automatic context block
+(≤1200 precomputed graph tokens in the turn tail) — was evaluated
+against the literature and rejected outright: passive bulk injection
+does not move task success rate (it adds noise, and noisy context
+depresses precision); on-demand traversal (recall/graph_query) and
+explicit pins (@-mentions) do the work instead. No automatic injection
+is planned.
 
 ### 12.7 Criticism → Reflector (PARKED — auto path)
 Moved here from §3.5; implemented, then parked: auto-detection proved too
@@ -2018,33 +2006,26 @@ mark only with no successful `bash` in the window, every span only beside a
 failure in the window, and each distinct span marks once. Absence is never
 flagged.
 
-### 12.11 @-mentions (planned)
-Carried over from the pre-rewrite design ("при `@упоминании` файла или
-заметки в чате в контекст автоматически подтягиваются близкие узлы
-графа"); never implemented. Manual counterpart to the automatic context
+### 12.11 @-mentions (done)
+Implemented as the manual counterpart to the rejected automatic context
 block (§12.5): the user pins exact context instead of quoting paths in
 prose, so the model guesses less and burns fewer `read` calls. Pinned
 context is a host observation, which fits the integrity model.
 
-- **Picker (TUI).** `@` in the input opens the existing completion popup.
-  Files first (glob by prefix — cheap, synchronous); symbols second (via
-  `recall`, debounced — it has latency).
+- **Picker (TUI).** A single smart `@` opens the completion popup: files
+  (scored walk) and symbols (via `recall`), capped, badges by kind.
 - **Resolution at send time, not in the UI.** The host resolves each `@`
-  to a canonical key (`resolve_ref` for symbols, path resolution for
-  files). Unresolved refs warn and stay literal (degrade-don't-refuse),
-  never silently pass.
-- **Injection as a separate volatile block** (`<pinned>`), budgeted and
-  truncated: file content up to the `read` limit plus graph neighbors.
-  One `@` on a huge file must not eat the context.
-- **Read-guard boundary (decision required).** If the host inserted the
-  bytes itself, the consistent choice is to treat the file as read
-  (hash-pinned, normal Stale rules after) — otherwise the model sees code
-  it may not edit. This changes the guard invariant and must be specified
-  explicitly when built.
-- **No auto-linking to the plan.** `@`-files are not step `refs`; at most
-  the host may suggest them.
-- **Not** the automatic neighbor pull from the original sketch — that stays
-  with the context block (§12.5). The value of `@` is precision.
+  to a canonical key (`file:`/`sym:`, ranges honored) against current
+  disk bytes, so stale content cannot be injected. Unresolved refs warn
+  and stay literal (degrade-don't-refuse), never silently pass.
+- **Injection as fenced blocks**, hash-pinned (sha256 of exactly the
+  injected bytes), whole files capped with a truncation marker.
+- **Read-guard boundary (decided yes).** The host-inserted bytes seed the
+  guard with the same hash a `read` records — otherwise the model sees
+  code it may not edit. Normal Stale rules apply after.
+- **No auto-linking to the plan.** `@`-files are not step `refs`.
+- **Not** the automatic neighbor pull from the original sketch — that
+  died with the context block (§12.5). The value of `@` is precision.
 
 ### 12.12 Verification rungs + parked ULTRA phases (merged)
 
