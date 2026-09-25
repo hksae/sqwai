@@ -4497,6 +4497,9 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
         return rejection(flaky_rejection(index, &item.text));
     }
 
+    // transparency for the impact fast path in the Command arm: what
+    // ran instead of the authored command, if anything
+    let mut impact_note: Option<String> = None;
     let (evidence, receipt) = match item.kind() {
         plan::AcceptanceKind::Manual(_) => (Vec::new(), None),
         plan::AcceptanceKind::Command(command) => {
@@ -4574,20 +4577,37 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
             // job, concurrent subagent) means the check proved nothing —
             // no receipt is issued and the item stays unverified.
             let paths = plan::digest_paths(&active);
-            let state_before = plan::state_digest(&ctx.root, &paths, &command);
+            // Test-impact fast path (§2.4.11): a bare test-runner
+            // invocation runs the tests covering the changed files
+            // first. The receipt records what actually ran, and
+            // `complete` still runs the full suite — so a green verify
+            // means the covering tests passed, while the suite-wide
+            // verdict stays with `complete`. Anything unrecognized
+            // runs the authored command unchanged.
+            let impact = crate::agent::test_impact::select_command(
+                &ctx.root,
+                &active.id,
+                &command,
+            );
+            let run_command = impact
+                .as_ref()
+                .map(|selected| selected.command.clone())
+                .unwrap_or_else(|| command.clone());
+            impact_note = impact.as_ref().map(|selected| selected.note.clone());
+            let state_before = plan::state_digest(&ctx.root, &paths, &run_command);
             let started_at = plan::now();
-            let run = exec::bash(ctx, &command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
+            let run = exec::bash(ctx, &run_command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
             let finished_at = plan::now();
             if !run.ok {
-                let state_after = plan::state_digest(&ctx.root, &paths, &command);
+                let state_after = plan::state_digest(&ctx.root, &paths, &run_command);
                 // same attested state, opposite outcome: flaky, not failed
                 if state_before == state_after
-                    && same_state_disagreement(&active.acceptance[index], &command, &state_after)
+                    && same_state_disagreement(&active.acceptance[index], &run_command, &state_after)
                 {
                     if plan::apply_flaky(&mut active, index) {
                         let args = serde_json::json!({
                             "index": index,
-                            "command": command,
+                            "command": run_command,
                             "state_digest": state_after,
                         });
                         if let Err(e) = plan::commit(
@@ -4602,18 +4622,18 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                             return Outcome::err(format!("plan write failed: {e:#}"));
                         }
                     }
-                    return rejection(flaky_rejection(index, &command));
+                    return rejection(flaky_rejection(index, &run_command));
                 }
                 return rejection(plan::Rejection {
                     code: "acceptance_failed",
-                    reason: format!("acceptance {index} command failed: {command}"),
+                    reason: format!("acceptance {index} command failed: {run_command}"),
                     hint: format!(
                         "fix what it reports, then verify again — {}",
                         run.output.lines().take(6).collect::<Vec<_>>().join(" / ")
                     ),
                 });
             }
-            let state_after = plan::state_digest(&ctx.root, &paths, &command);
+            let state_after = plan::state_digest(&ctx.root, &paths, &run_command);
             if state_before != state_after {
                 return rejection(plan::Rejection {
                     code: "state_changed_during_check",
@@ -4632,7 +4652,7 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
             let receipt = match issue_exec_receipt(
                 ctx,
                 index,
-                &command,
+                &run_command,
                 "exec",
                 started_at,
                 finished_at,
@@ -5049,7 +5069,10 @@ fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool) -> Outcome
                 return Outcome::err(format!("plan write failed: {e:#}"));
             }
             match applied {
-                plan::Applied::Updated { message } => Outcome::ok(message),
+                plan::Applied::Updated { message } => Outcome::ok(match impact_note {
+                    Some(note) => format!("{message}\n{note}"),
+                    None => message,
+                }),
                 _ => Outcome::ok(format!("acceptance {index} verified")),
             }
         }

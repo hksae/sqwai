@@ -984,9 +984,19 @@ NO auto-binding to plan refs: only what the user named travels. Bytes
 are read at send, so stale content cannot be injected.
 
 #### 2.4.11 Test impact
-Planned, not implemented: using reverse traversal from changed symbols to
-select the tests a `verify` step runs first (full suite still required at
-`complete`). Specified in §12.5.
+Live: reverse traversal from the plan's changed files (journal
+`file_diff` chain) through incoming `imports` edges selects the tests a
+`verify` step runs first — same-directory test files (same-package tests
+never import their target) plus importers, test files only. Only bare
+runner invocations qualify (`cargo test`, `pytest`, `go test`; user
+selections and other runners run as authored), and only when the mapping
+is exact (pytest files, go packages with `-run` narrowing, cargo
+`--test` integration targets — src/ unit tests have no file address and
+run full). The receipt records what actually ran, the outcome says
+covering-tests-first, and `complete` still runs the full suite: a green
+verify means the covering tests passed, the suite-wide verdict stays
+with `complete`. No impact data (no graph, no diffs, over-large set) —
+the authored command runs unchanged.
 
 ### 2.5 Checkpoints and undo
 Architecture: two layers instead of one. Layer 1 is mandatory and completely
