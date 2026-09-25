@@ -7926,6 +7926,93 @@ mod trust_gate_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Phase 0 probe — safe-bash checkpoint gap: a Safe-classified
+    /// mutating command on a clean tree. The hash-gate
+    /// (`needs_approval || tree_changed`) skips the pre-snapshot; the
+    /// probe pins that AND checks the other half — whether the mutation
+    /// stays revertible through the chain head (full-undo path). If both
+    /// hold, the gap is benign by design (the head predates the mutation,
+    /// so nothing is lost); if the revert fails, the gap is a hole.
+    #[tokio::test]
+    async fn safe_mutating_bash_on_clean_tree_skips_snapshot_but_stays_revertible() {
+        use crate::config::ShadowStore;
+        let dir = std::env::temp_dir().join(format!(
+            "sqwai-probe-gap-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = "probe-gap";
+        // clean tree, established head
+        let head = crate::agent::checkpoints::snapshot_session(
+            &dir,
+            ShadowStore::Local,
+            session,
+            "probe base",
+        )
+        .unwrap()
+        .expect("first snapshot commits");
+        assert!(
+            !crate::agent::checkpoints::tree_changed(&dir, ShadowStore::Local, session),
+            "tree is clean against its head"
+        );
+        // Safe-classified, but mutates (verified Safe above this test)
+        assert!(matches!(
+            crate::agent::safety::classify("echo x > probe.txt"),
+            crate::agent::safety::Verdict::Safe
+        ));
+        let call = crate::providers::ToolCallReq::new(
+            "c1",
+            "bash",
+            serde_json::json!({"command": "echo x > probe.txt"}),
+        );
+        let (tx_agent, _rx_ui) = tokio::sync::mpsc::channel(8);
+        let (_tx_ui, mut rx_agent) = tokio::sync::mpsc::channel(8);
+        let mut ctx = tools::ToolCtx::new(&dir).in_session(session.to_string());
+        let mut always_allow = Vec::new();
+        let mut next_id = 0u64;
+        let outcome = bash_call(
+            &call,
+            &mut ctx,
+            &tx_agent,
+            &mut rx_agent,
+            &mut always_allow,
+            &[],
+            &mut next_id,
+            0,
+        )
+        .await;
+        assert!(outcome.ok, "{}", outcome.output);
+        assert!(dir.join("probe.txt").exists(), "command mutated");
+        // the gate skipped: no pre_bash snapshot journaled…
+        assert!(
+            !ctx.journal.iter().any(|(_, label)| label.starts_with("bash ")),
+            "no snapshot must be journaled for Safe-on-clean: {:?}",
+            ctx.journal
+        );
+        // …but the mutation stays revertible through the head, which is
+        // exactly what full /undo diffs against (unscoped fallback)
+        let diff =
+            crate::agent::checkpoints::changed_files(&dir, ShadowStore::Local, &head).unwrap();
+        assert!(diff.iter().any(|p| p == "probe.txt"), "{diff:?}");
+        let report = crate::agent::checkpoints::restore_paths_in(
+            &dir,
+            ShadowStore::Local,
+            &head,
+            &[crate::agent::checkpoints::Target {
+                path: "probe.txt".to_string(),
+                agent_hash: None,
+            }],
+        )
+        .unwrap();
+        assert!(!dir.join("probe.txt").exists(), "{report:?}");
+        assert_eq!(report.deleted, vec!["probe.txt".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Same command, clean session: no gate involved (git push then fails
     /// on its own — no remote — proving the gate let it through).
     #[tokio::test]
