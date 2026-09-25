@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use async_stream::stream;
 use eventsource_stream::Eventsource;
 use futures::{StreamExt, stream::BoxStream};
@@ -348,7 +348,12 @@ impl Provider for OpenAiProvider {
                             }
                         }
                     }
-                    Err(e) => { yield Err(anyhow!("stream error: {e}")); return; }
+                    Err(e) => {
+                        // headers were fine and the body stopped: same
+                        // verdict as a request that never completed at all
+                        yield Err(super::network_error(e));
+                        return;
+                    }
                 }
             }
             // safety net: some servers never send finish_reason=tool_calls

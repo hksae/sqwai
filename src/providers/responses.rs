@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use async_stream::stream;
 use eventsource_stream::Eventsource;
 use futures::{StreamExt, stream::BoxStream};
@@ -378,7 +378,7 @@ impl Provider for ResponsesProvider {
                             "error" => {
                                 let msg = v.get("message").and_then(|x| x.as_str()).unwrap_or("unknown");
                                 super::log_http(&format!("POST {} stream error: {msg}", this.url));
-                                yield Err(anyhow!("provider error: {msg}"));
+                                yield Err(super::event_error(msg));
                                 return;
                             }
                             "response.failed" => {
@@ -392,13 +392,19 @@ impl Provider for ResponsesProvider {
                                     })
                                     .unwrap_or("response.failed");
                                 super::log_http(&format!("POST {} response failed: {msg}", this.url));
-                                yield Err(anyhow!("provider error: {msg}"));
+                                yield Err(super::event_error(msg));
                                 return;
                             }
                             _ => {}
                         }
                     }
-                    Err(e) => { yield Err(anyhow!("stream error: {e}")); return; }
+                    Err(e) => {
+                        // the headers were fine and the body stopped: the
+                        // request never got a complete answer, same verdict
+                        // as a request that never completed at all
+                        yield Err(super::network_error(e));
+                        return;
+                    }
                 }
             }
             if !reasoning_items.is_empty() || phase.is_some() {
@@ -844,7 +850,62 @@ mod tests {
         h.join().unwrap();
         assert!(first.is_some());
         let err = first.unwrap().unwrap_err();
-        assert!(err.to_string().contains("server overloaded"), "{err}");
+        assert!(format!("{err:#}").contains("server overloaded"), "{err:#}");
+    }
+
+    /// Mid-stream failures classify like finished responses: a quota event
+    /// must fail fast (never retried), a transient one stays retryable so
+    /// the turn loop and the fallback chain decide instead of substring
+    /// matching. Pre-fix both arrived class-less and retried for an hour.
+    #[tokio::test]
+    async fn response_failed_event_carries_its_class() {
+        use futures::StreamExt;
+        async fn first_err(payload: &str) -> anyhow::Error {
+            let body = format!("event: response.failed\ndata: {payload}\n\n");
+            let (url, h) = sse_server(body);
+            let p = ResponsesProvider::new(&ResolvedProvider {
+                name: "p".into(),
+                format: crate::config::WireFormat::Responses,
+                base_url: url,
+                api_key: Some("k".into()),
+            })
+            .unwrap();
+            let req = ChatRequest {
+                model_id: "gpt-x".into(),
+                system: vec![],
+                messages: vec![Message::new(Role::User, "go")],
+                effort: None,
+                effort_support: Default::default(),
+                max_tokens: None,
+                tools: vec![],
+                previous_response_id: None,
+                context_transport: crate::providers::ContextTransport::Stateless,
+            };
+            let mut stream = p.stream_chat(req);
+            let first = stream.next().await;
+            h.join().unwrap();
+            first.unwrap().unwrap_err()
+        }
+
+        let quota = first_err(
+            r#"{"response":{"error":{"message":"insufficient_quota: out of credit"}}}"#,
+        )
+        .await;
+        assert_eq!(
+            crate::providers::class_of(&quota),
+            Some(crate::providers::ErrorClass::Quota)
+        );
+        assert!(!crate::providers::class_of(&quota).unwrap().retryable());
+
+        let overload = first_err(
+            r#"{"response":{"error":{"message":"server overloaded, try again"}}}"#,
+        )
+        .await;
+        assert_eq!(
+            crate::providers::class_of(&overload),
+            Some(crate::providers::ErrorClass::Server)
+        );
+        assert!(crate::providers::class_of(&overload).unwrap().retryable());
     }
 
     /// Reasoning items (with encrypted_content) and phase are captured from

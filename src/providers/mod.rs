@@ -450,6 +450,88 @@ pub fn classify_response(status: u16, body: &str) -> ErrorClass {
     }
 }
 
+/// Classify a mid-stream provider error from its message alone. Stream
+/// events (`error`, `response.failed`) arrive with no HTTP status, so the
+/// status-first `classify_response` cannot run — and without a class the
+/// turn loop retries everything for an hour, including expired keys and
+/// exhausted quotas. Only specific typed codes and phrases classify;
+/// vague prose stays `None` (current retry behavior) because guessing a
+/// deterministic failure from prose is exactly the error this module
+/// exists to avoid.
+pub fn classify_body(body: &str) -> Option<ErrorClass> {
+    let lower = body.to_ascii_lowercase();
+    let hits = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
+    // the proven lists first: typed codes and phrases already trusted
+    // for finished responses
+    if hits(&[
+        "insufficient_quota",
+        "insufficient credit",
+        "credit balance",
+        "billing",
+        "exceeded your current quota",
+    ]) {
+        return Some(ErrorClass::Quota);
+    }
+    if hits(&[
+        "context_length_exceeded",
+        "context length",
+        "maximum context",
+        "prompt is too long",
+        "too many tokens",
+        "reduce the length",
+        "exceed context limit",
+    ]) {
+        return Some(ErrorClass::ContextOverflow);
+    }
+    if hits(&[
+        "invalid api key",
+        "invalid_api_key",
+        "incorrect api key",
+        "invalid authentication",
+        "authentication failed",
+        "unauthorized",
+    ]) {
+        return Some(ErrorClass::Auth);
+    }
+    if hits(&[
+        "rate_limit",
+        "rate limit",
+        "rate-limit",
+        "too many requests",
+        "too_many_requests",
+    ]) {
+        return Some(ErrorClass::RateLimit);
+    }
+    if hits(&["invalid_request_error"]) {
+        return Some(ErrorClass::BadRequest);
+    }
+    if hits(&[
+        "server overloaded",
+        "overloaded",
+        "internal server error",
+        "service unavailable",
+        "temporarily unavailable",
+        "bad gateway",
+        "gateway timeout",
+        "internal error",
+    ]) {
+        return Some(ErrorClass::Server);
+    }
+    None
+}
+
+/// Build a classified provider error for a mid-stream event (`error`,
+/// `response.failed`). Same message as before, plus the class when the
+/// prose earns one — so retry, fallback and compaction see a decision,
+/// not a substring to re-match.
+pub fn event_error(message: &str) -> anyhow::Error {
+    let error = anyhow::anyhow!("provider error: {message}");
+    match classify_body(message) {
+        Some(class) => error.context(class),
+        None => error,
+    }
+}
+
 /// The class attached to a provider error, when there is one.
 pub fn class_of(error: &anyhow::Error) -> Option<ErrorClass> {
     // anyhow keeps context objects downcastable, which is the point of
@@ -988,5 +1070,32 @@ mod error_class_tests {
 
         // an error with no class attached must not be mistaken for one
         assert_eq!(class_of(&anyhow::anyhow!("something else")), None);
+    }
+
+    /// Stream events carry prose, not a status. Confident phrases classify
+    /// (fail fast on quota/auth, retry on transient); vague prose stays
+    /// unclassified rather than guessed.
+    #[test]
+    fn stream_prose_classifies_only_when_confident() {
+        for (body, expected) in [
+            ("insufficient_quota: you exceeded it", Some(ErrorClass::Quota)),
+            ("maximum context length exceeded", Some(ErrorClass::ContextOverflow)),
+            ("invalid api key provided", Some(ErrorClass::Auth)),
+            ("rate_limit_exceeded: slow down", Some(ErrorClass::RateLimit)),
+            ("invalid_request_error: bad field", Some(ErrorClass::BadRequest)),
+            ("server overloaded, try later", Some(ErrorClass::Server)),
+            ("something strange happened", None),
+            ("error 4290 in module x", None),
+        ] {
+            assert_eq!(classify_body(body), expected, "body {body:?}");
+        }
+        // the event constructor keeps the provider's message and attaches
+        // the class for the retry policy to decide on
+        let quota = event_error("insufficient_quota: broke");
+        assert_eq!(class_of(&quota), Some(ErrorClass::Quota));
+        assert!(format!("{quota:#}").contains("insufficient_quota"));
+        assert!(!class_of(&quota).unwrap().retryable());
+        let vague = event_error("something strange happened");
+        assert_eq!(class_of(&vague), None);
     }
 }

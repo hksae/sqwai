@@ -462,13 +462,18 @@ impl Provider for AnthropicProvider {
                             "error" => {
                                 let msg = v.pointer("/error/message").and_then(|x| x.as_str()).unwrap_or("unknown");
                                 super::log_http(&format!("POST {} stream error: {msg}", this.url));
-                                yield Err(anyhow!("provider error: {msg}"));
+                                yield Err(super::event_error(msg));
                                 return;
                             }
                             _ => {}
                         }
                     }
-                    Err(e) => { yield Err(anyhow!("stream error: {e}")); return; }
+                    Err(e) => {
+                        // headers were fine and the body stopped: same
+                        // verdict as a request that never completed at all
+                        yield Err(super::network_error(e));
+                        return;
+                    }
                 }
             }
             // Thinking the turn did travels with it as provider state and is
