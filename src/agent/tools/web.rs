@@ -25,84 +25,14 @@ fn url_arg(args: &Value) -> Result<Url, String> {
     if url.host_str().is_none_or(str::is_empty) {
         return Err("webfetch URL must include a host".into());
     }
+    // shared SSRF gate (see crate::config): initial URL and redirects
     host_allowed(&url)?;
     Ok(url)
 }
 
-/// SSRF gate: the model chooses the URL, so literal non-public IPs and
-/// local metadata names never leave the box. Runs on the initial URL and
-/// on every redirect hop (a 302 to 127.0.0.1 is the classic bypass).
-/// DNS names are NOT resolved here: resolution races the connect
-/// (rebinding), so a hostile-DNS residual remains — documented, not fixed.
+/// Thin webfetch spelling over the shared gate: same rules, our prefix.
 fn host_allowed(url: &Url) -> Result<(), String> {
-    let host = url.host_str().unwrap_or_default();
-    // host_str keeps IPv6 brackets; strip them before parsing
-    let host = host
-        .strip_prefix('[')
-        .and_then(|inner| inner.strip_suffix(']'))
-        .unwrap_or(host);
-    // the url crate normalizes WHATWG numeric forms (2130706433,
-    // 0x7f.0.0.1) to dotted quads before we ever see them, so parsing
-    // the normalized host catches the obfuscated literals too
-    if let Ok(addr) = host.parse::<std::net::IpAddr>() {
-        if ip_blocked(&addr) {
-            return Err(format!("webfetch refuses non-public IP literal {host}"));
-        }
-        return Ok(());
-    }
-    let name = host.trim_end_matches('.').to_ascii_lowercase();
-    if name == "localhost"
-        || name.ends_with(".localhost")
-        || name == "metadata.google.internal"
-        || name == "metadata.google"
-    {
-        return Err(format!("webfetch refuses local/metadata host {host}"));
-    }
-    Ok(())
-}
-
-/// True for every IPv4/IPv6 range that is not public unicast: loopback,
-/// unspecified, private, link-local (cloud metadata lives at
-/// 169.254.169.254), multicast, reserved, documentation, and the v6
-/// wrappers that embed a v4 address (mapped/compat/6to4).
-fn ip_blocked(addr: &std::net::IpAddr) -> bool {
-    match addr {
-        std::net::IpAddr::V4(v4) => {
-            let o = v4.octets();
-            o[0] == 0
-                || o[0] == 10
-                || (o[0] == 100 && (64..128).contains(&o[1]))
-                || o[0] == 127
-                || (o[0] == 169 && o[1] == 254)
-                || (o[0] == 172 && (16..32).contains(&o[1]))
-                || (o[0] == 192 && o[1] == 168)
-                || (o[0] == 192 && o[1] == 0 && (o[2] == 0 || o[2] == 2))
-                || (o[0] == 192 && o[1] == 88 && o[2] == 99)
-                || (o[0] == 198 && (18..20).contains(&o[1]))
-                || (o[0] == 198 && o[1] == 51 && o[2] == 100)
-                || (o[0] == 203 && o[1] == 0 && o[2] == 113)
-                || o[0] >= 224
-        }
-        std::net::IpAddr::V6(v6) => {
-            let s = v6.segments();
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || (s[0] & 0xffc0) == 0xfe80
-                || (s[0] & 0xfe00) == 0xfc00
-                || (s[0] & 0xff00) == 0xff00
-                || s[0] == 0x2001 && (s[1] == 0xdb8 || s[1] == 0)
-                || s[0] == 0x2002
-                || s[0] == 0x0064 && s[1] == 0xff9b
-                || (s[0] == 0x0100 && s[1] == 0 && s[2] == 0 && s[3] == 0)
-                || (s[0..5] == [0, 0, 0, 0, 0] || (s[0..5] == [0, 0, 0, 0, 0xffff]))
-                    && ip_blocked(&std::net::IpAddr::V4(std::net::Ipv4Addr::new(
-                        (s[6] >> 8) as u8,
-                        (s[6] & 0xff) as u8,
-                        (s[7] >> 8) as u8,
-                        (s[7] & 0xff) as u8,
-                    )))
-        }
-    }
+    crate::config::url_host_allowed(url).map_err(|detail| format!("webfetch {detail}"))
 }
 
 fn client(timeout: u64, agent: &'static str) -> Result<Client, String> {

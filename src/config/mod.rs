@@ -299,6 +299,83 @@ pub const BUILTIN_PROVIDERS_FALLBACK: &str = include_str!("../../builtin_provide
 pub const BUILTIN_PROVIDERS_URL: &str =
     "https://raw.githubusercontent.com/hksae/sqwai/master/builtin_providers.toml";
 
+/// SSRF gate shared by webfetch and the catalog check: literal non-public
+/// IPs and local metadata names never become request targets. The model
+/// chooses webfetch URLs outright, and the catalog can re-point provider
+/// base_urls (with the user's key following them), so both entries run
+/// this. DNS names are NOT resolved here: resolution races the connect
+/// (rebinding) — a hostile-DNS residual remains, documented not fixed.
+pub(crate) fn url_host_allowed(url: &reqwest::Url) -> Result<(), String> {
+    let host = url.host_str().unwrap_or_default();
+    // host_str keeps IPv6 brackets; strip them before parsing
+    let host = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host);
+    // the url crate normalizes WHATWG numeric forms (2130706433,
+    // 0x7f.0.0.1) to dotted quads before we ever see them, so parsing
+    // the normalized host catches the obfuscated literals too
+    if let Ok(addr) = host.parse::<std::net::IpAddr>() {
+        if ip_blocked(&addr) {
+            return Err(format!("refuses non-public IP literal {host}"));
+        }
+        return Ok(());
+    }
+    let name = host.trim_end_matches('.').to_ascii_lowercase();
+    if name == "localhost"
+        || name.ends_with(".localhost")
+        || name == "metadata.google.internal"
+        || name == "metadata.google"
+    {
+        return Err(format!("refuses local/metadata host {host}"));
+    }
+    Ok(())
+}
+
+/// True for every IPv4/IPv6 range that is not public unicast: loopback,
+/// unspecified, private, link-local (cloud metadata lives at
+/// 169.254.169.254), multicast, reserved, documentation, and the v6
+/// wrappers that embed a v4 address (mapped/compat/6to4).
+pub(crate) fn ip_blocked(addr: &std::net::IpAddr) -> bool {
+    match addr {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 0
+                || o[0] == 10
+                || (o[0] == 100 && (64..128).contains(&o[1]))
+                || o[0] == 127
+                || (o[0] == 169 && o[1] == 254)
+                || (o[0] == 172 && (16..32).contains(&o[1]))
+                || (o[0] == 192 && o[1] == 168)
+                || (o[0] == 192 && o[1] == 0 && (o[2] == 0 || o[2] == 2))
+                || (o[0] == 192 && o[1] == 88 && o[2] == 99)
+                || (o[0] == 198 && (18..20).contains(&o[1]))
+                || (o[0] == 198 && o[1] == 51 && o[2] == 100)
+                || (o[0] == 203 && o[1] == 0 && o[2] == 113)
+                || o[0] >= 224
+        }
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (s[0] & 0xffc0) == 0xfe80
+                || (s[0] & 0xfe00) == 0xfc00
+                || (s[0] & 0xff00) == 0xff00
+                || s[0] == 0x2001 && (s[1] == 0xdb8 || s[1] == 0)
+                || s[0] == 0x2002
+                || s[0] == 0x0064 && s[1] == 0xff9b
+                || (s[0] == 0x0100 && s[1] == 0 && s[2] == 0 && s[3] == 0)
+                || (s[0..5] == [0, 0, 0, 0, 0] || (s[0..5] == [0, 0, 0, 0, 0xffff]))
+                    && ip_blocked(&std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                        (s[6] >> 8) as u8,
+                        (s[6] & 0xff) as u8,
+                        (s[7] >> 8) as u8,
+                        (s[7] & 0xff) as u8,
+                    )))
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BuiltinCatalog {
     #[serde(default)]
@@ -363,6 +440,46 @@ impl BuiltinCatalog {
     }
 }
 
+/// Validate a fetched builtin catalog before it touches disk or config.
+/// `apply_builtins` overwrites stored provider base_urls from the catalog
+/// and the user's key follows them, so a compromised remote is key
+/// exfiltration, not a cosmetic issue. Three rules, all offline-testable:
+/// every provider endpoint is https on a public host (same SSRF gate as
+/// webfetch), no inline secrets ride the catalog, and `updated_at` never
+/// moves backwards (rollback protection against a replayed old file).
+/// Signature verification is the real fix and needs repo-side signing;
+/// until then this is the enforced half.
+pub fn validate_fetched_catalog(
+    text: &str,
+    cached_updated_at: Option<&str>,
+) -> Result<BuiltinCatalog> {
+    let catalog: BuiltinCatalog =
+        toml::from_str(text).context("parsing builtin providers TOML")?;
+    let fetched_at = catalog
+        .updated_at
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("fetched catalog carries no updated_at"))?;
+    if let Some(cached) = cached_updated_at.filter(|s| !s.is_empty())
+        && fetched_at < cached
+    {
+        anyhow::bail!("fetched catalog is older than the cached one ({fetched_at} < {cached})");
+    }
+    for (name, provider) in &catalog.providers {
+        if provider.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
+            anyhow::bail!("fetched catalog plants an inline api_key for provider {name:?}");
+        }
+        let url = reqwest::Url::parse(&provider.base_url)
+            .map_err(|e| anyhow::anyhow!("provider {name:?} has an unparsable base_url: {e}"))?;
+        if url.scheme() != "https" {
+            anyhow::bail!("provider {name:?} base_url is not https: {}", provider.base_url);
+        }
+        url_host_allowed(&url)
+            .map_err(|detail| anyhow::anyhow!("provider {name:?} base_url {detail}"))?;
+    }
+    Ok(catalog)
+}
+
 pub async fn check_and_update_builtins(force: bool) -> Result<Option<BuiltinCatalog>> {
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     if !force
@@ -382,8 +499,14 @@ pub async fn check_and_update_builtins(force: bool) -> Result<Option<BuiltinCata
         anyhow::bail!("server returned status {}", res.status());
     }
     let text = res.text().await?;
-    let catalog: BuiltinCatalog =
-        toml::from_str(&text).context("parsing builtin providers TOML")?;
+    // the cached stamp is the rollback floor; a refusal leaves the meta
+    // stamp alone so tomorrow retries (and recovers on its own)
+    let cached_updated_at = builtin_cache_path()
+        .and_then(|path| std::fs::read_to_string(&path).map_err(|e| e.into()))
+        .ok()
+        .and_then(|raw| toml::from_str::<BuiltinCatalog>(&raw).ok())
+        .and_then(|catalog| catalog.updated_at);
+    let catalog = validate_fetched_catalog(&text, cached_updated_at.as_deref())?;
 
     // No-op when the content is identical: the meta stamp still advances
     // (so tomorrow's launch skips the fetch), but the caller gets Ok(None)
@@ -1935,6 +2058,42 @@ effort = "off"
         cfg.apply_builtins();
         assert!(cfg.models.contains_key("my-custom-model"));
         assert!(!cfg.is_builtin_model("my-custom-model"));
+    }
+
+    /// A fetched catalog is applied to provider endpoints with the user's
+    /// key following them, so it validates like a trust boundary: https on
+    /// a public host, no inline secrets, never backwards in time.
+    #[test]
+    fn fetched_catalog_validates_base_urls_secrets_and_freshness() {
+        fn catalog(base_url: &str, updated_at: &str, api_key: bool) -> String {
+            format!(
+                "updated_at = \"{updated_at}\"\n[providers.acme]\nformat = \"openai\"\nbase_url = \"{base_url}\"{}\n[models.\"acme-x\"]\nprovider = \"acme\"\nid = \"acme-x\"\ncontext = 1000\neffort = \"medium\"\n",
+                if api_key { "\napi_key = \"sk-planted\"" } else { "" },
+            )
+        }
+        let good = catalog("https://api.acme.example/v1", "2026-09-10", false);
+        let parsed = validate_fetched_catalog(&good, Some("2026-09-09")).unwrap();
+        assert!(parsed.providers.contains_key("acme"));
+        // same stamp is a no-op upstream, not a rollback
+        assert!(validate_fetched_catalog(&good, Some("2026-09-10")).is_ok());
+        // the shipped fallback itself passes (the gate must never reject
+        // the file it is meant to protect the updates of)
+        assert!(validate_fetched_catalog(BUILTIN_PROVIDERS_FALLBACK, None).is_ok());
+
+        for (case, url, stamp, key) in [
+            ("plain http", "http://api.acme.example/v1", "2026-09-10", false),
+            ("loopback https", "https://127.0.0.1/v1", "2026-09-10", false),
+            ("private https", "https://10.0.0.5/v1", "2026-09-10", false),
+            ("localhost", "https://localhost:8443/v1", "2026-09-10", false),
+            ("inline secret", "https://api.acme.example/v1", "2026-09-10", true),
+            ("stale stamp", "https://api.acme.example/v1", "2026-09-01", false),
+            ("missing stamp", "https://api.acme.example/v1", "", false),
+        ] {
+            assert!(
+                validate_fetched_catalog(&catalog(url, stamp, key), Some("2026-09-09")).is_err(),
+                "fetched catalog accepted {case}"
+            );
+        }
     }
 
     #[test]
