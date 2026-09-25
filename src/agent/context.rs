@@ -1243,8 +1243,11 @@ mod tests {
     }
 
     #[test]
-    fn summary_off_is_the_default() {
-        assert!(!Policy::new(100_000).summary_enabled);
+    fn summary_short_is_the_default() {
+        assert_eq!(
+            crate::config::CompactionConfig::default().summary.as_str(),
+            "short"
+        );
     }
 
     #[test]

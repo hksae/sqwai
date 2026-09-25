@@ -853,8 +853,8 @@ pub struct CompactionConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum CompactionSummary {
-    #[default]
     Off,
+    #[default]
     Short,
 }
 

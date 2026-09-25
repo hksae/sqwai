@@ -1182,7 +1182,7 @@ tool loop), agent steps (assistant messages) are counted the same way, or
 old cycles would never become summarizable. Cuts land on user turns, or —
 in such loops — before an assistant step whose kept tool results all belong
 to kept calls, so a trim never orphans a tool result.
-Optional short summary (compaction.summary: off|short, default off):
+Optional short summary (compaction.summary: off|short, default short):
 one model call, ≤ 300 tokens, restricted to "what the user asked in the
 dropped messages that is not in the plan". The request is cache-aware: the
 parent's system parts, tool schemas and full history go on the wire
@@ -1523,7 +1523,7 @@ timeout_secs = 30
 threshold = 0.80
 keep_turns = 4             # user turns kept verbatim, not messages
 anchor_ratio = 0.08
-summary = "off"            # off | short
+summary = "short"          # off | short
 
 [undo]
 keep_per_session = 50
@@ -1627,7 +1627,7 @@ number; a `partial` one is missing something the design calls for.
 | F3 | Evidence rule in `finish`, `verify`, `complete`; nudges; note | done — `verify` accepts evidence from an unrelated step (#6) | F1 |
 | F4 | Diary: host block, triggers, writer call, fallback; memory_read; secrets screening | done — journal summary/text screened at append, diary prose post-checked in host code | F2 |
 | F5 | MEMORY.md + memory_propose approval; session-start loading | done | F4 |
-| F6 | Compaction anchor; summary=off default; resume per §3.4 (fork deleted); undo→reopen | done | F1–F5 |
+| F6 | Compaction anchor; summary=short default; resume per §3.4 (fork deleted); undo→reopen | done | F1–F5 |
 | F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, zstd) + layer-2 shadow repo driven by git CLI synchronously; path-scoped restore; `/undo step N` | done | F1 |
 | F7b | Crash-safe mutation protocol | done differently — no `mutation_started/observed` sweep; Layer-1 pre-images + `file_diff` chain cover single-step revert instead | F7 |
  | G0 | Minimal comparative retention benchmark (§8.2): plan + journal + anchor vs baseline | done as engineering soak-test — harness as ignored tests (minidb T1–T3 + kaiwai T4 matrix), pre-registration, eval files and analyses under bench/ | F1b, F6 |
