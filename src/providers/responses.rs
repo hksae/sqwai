@@ -41,7 +41,10 @@ fn input_items(req: &ChatRequest) -> Vec<Value> {
                 // Replay reasoning items ahead of the assistant message they
                 // belong to, in order. Under previous_response_id continuation,
                 // the provider already holds them, so they must not be resent.
-                if req.previous_response_id.is_none()
+                // The transport decides, not the remembered id: a stateless
+                // request resends the full transcript and must resend these
+                // too, or the provider reasons without its own prior work.
+                if req.context_transport != super::ContextTransport::PreviousResponse
                     && let Some(state) = &m.provider_state
                     && let Some(items) = state.get("reasoning_items").and_then(|v| v.as_array())
                 {
@@ -115,9 +118,15 @@ pub fn build_body(req: &ChatRequest) -> Value {
                 .collect::<Vec<_>>()
         );
     }
-    // Only set when the provider documented the field: sanitize() has already
-    // cleared it for providers that did not.
-    if let Some(id) = &req.previous_response_id {
+    // The continuation reference travels only under the transport that
+    // means "the provider holds the chain". A stateless request resends
+    // the transcript itself: naming an id there duplicates the context,
+    // and a stale one 400s a request that would otherwise succeed.
+    // sanitize() has already cleared the id for providers that never
+    // documented the field.
+    if req.context_transport == super::ContextTransport::PreviousResponse
+        && let Some(id) = &req.previous_response_id
+    {
         body["previous_response_id"] = json!(id);
     }
     if let Some(mt) = req.max_tokens {
@@ -985,6 +994,51 @@ mod tests {
             !input
                 .iter()
                 .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("reasoning"))
+        );
+    }
+
+    /// A stateless request must travel alone: when the loop resends the
+    /// full transcript (answering tool calls, post-compaction) the request
+    /// still carries the loop's remembered id, and the wire used to send
+    /// both — doubling the context, dropping the reasoning items the
+    /// provider was never given, and 400ing on a stale id that a clean
+    /// stateless request would never mention.
+    #[test]
+    fn stateless_request_sends_no_continuation_id_and_keeps_reasoning() {
+        let req = ChatRequest {
+            model_id: "gpt-5.3-codex".into(),
+            system: vec![],
+            messages: vec![
+                Message::new(Role::Assistant, "done").with_provider_state(Some(json!({
+                    "reasoning_items": [
+                        {
+                            "type": "reasoning",
+                            "id": "rs_100",
+                            "encrypted_content": "OPAQUE"
+                        }
+                    ],
+                    "phase": "final_answer"
+                }))),
+                Message::new(Role::User, "next question"),
+            ],
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: Some("resp_stale".into()),
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        let b = build_body(&req);
+        assert!(
+            b.get("previous_response_id").is_none(),
+            "stateless wire must not name a continuation: {b}"
+        );
+        let input = b["input"].as_array().unwrap();
+        assert!(
+            input
+                .iter()
+                .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("reasoning")),
+            "stateless wire must resend the reasoning the provider never got: {b}"
         );
     }
 
