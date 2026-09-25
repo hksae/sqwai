@@ -338,21 +338,37 @@ impl Session {
     }
 
     pub fn save(&self) -> Result<()> {
-        // unit tests must never write real session files
+        // unit tests must never write real session files (the TUI suite
+        // reaches save/delete through full app flows); persistence logic
+        // itself is tested through save_to/load_from/delete_at below
         #[cfg(test)]
         return Ok(());
         #[allow(unreachable_code)]
         {
             let path = Self::sessions_dir()?.join(format!("{}.json", self.id));
-            let tmp = path.with_extension("json.tmp");
-            std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-            std::fs::rename(&tmp, &path).context("saving session")?;
-            Ok(())
+            self.save_to(&path)
         }
+    }
+
+    /// Write this session to an explicit path (tmp file + rename, so a
+    /// torn write never replaces a good file). `std::fs::rename` replaces
+    /// the destination on Windows too; the round-trip test saves twice to
+    /// pin that. `save()` is the same write to the real sessions dir.
+    pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
+        std::fs::rename(&tmp, path).context("saving session")?;
+        Ok(())
     }
 
     pub fn load(id: &str) -> Result<Self> {
         let path = Self::resolve_path(id)?;
+        Self::load_from(&path)
+    }
+
+    /// Read a session from an explicit path. `load()` is the same read
+    /// through id resolution in the real sessions dir.
+    pub fn load_from(path: &std::path::Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)?;
         let mut s: Self = serde_json::from_str(&raw)?;
         s.strip_system_messages();
@@ -528,7 +544,8 @@ impl Session {
     }
 
     pub fn delete(id: &str) -> Result<()> {
-        // unit tests must never remove real session files
+        // same isolation rule as save(): the TUI suite reaches delete
+        // through full app flows; the logic is tested via delete_at
         #[cfg(test)]
         {
             let _ = id;
@@ -537,9 +554,14 @@ impl Session {
         #[allow(unreachable_code)]
         {
             let path = Self::resolve_path(id)?;
-            std::fs::remove_file(path).context("deleting session")?;
-            Ok(())
+            Self::delete_at(&path)
         }
+    }
+
+    /// Remove a session file at an explicit path.
+    pub fn delete_at(path: &std::path::Path) -> Result<()> {
+        std::fs::remove_file(path).context("deleting session")?;
+        Ok(())
     }
 }
 
@@ -562,6 +584,37 @@ mod tests {
         assert_eq!(title_from("fix the bug\nmore"), "fix the bug");
         let long = "x".repeat(60);
         assert_eq!(title_from(&long).chars().count(), 41); // 40 + ellipsis
+    }
+
+    /// Persistence without the global dir: save, overwrite, load, delete.
+    /// The second save to the same path pins rename-over-existing (the
+    /// Windows half of the worry); the load pins the system-strip rule.
+    #[test]
+    fn session_round_trips_through_explicit_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test-session.json");
+        let mut s = Session::new("m".into(), 1000);
+        s.push(Role::User, "hello");
+        s.push(Role::Assistant, "hi there");
+        s.save_to(&path).unwrap();
+        // overwrite the same file: must replace, never fail
+        s.push(Role::User, "second turn");
+        s.save_to(&path).unwrap();
+        assert!(!dir.path().join("test-session.json.tmp").exists());
+
+        let back = Session::load_from(&path).unwrap();
+        assert_eq!(back.id, s.id);
+        assert_eq!(back.messages.len(), 3);
+        assert_eq!(back.title, "hello");
+        assert!(
+            back.messages.iter().all(|m| m.role != Role::System),
+            "system turns never persist"
+        );
+
+        Session::delete_at(&path).unwrap();
+        assert!(!path.exists());
+        assert!(Session::load_from(&path).is_err());
+        assert!(Session::delete_at(&path).is_err());
     }
 
     #[test]
