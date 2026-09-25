@@ -1,14 +1,8 @@
 //! Grounding helpers for manual /verify: journal touches, artifact
 //! matching, execution budgets.
 //!
-//! DROPPED: the H0 auto-detector (learned verdicts, weights,
-//! Maybe-confirm) fired too imprecisely and nothing else used it — only
-//! manual /verify drives the reflector pipeline now. The detector code,
-//! its tests and its training assets are deleted; the design record of
-//! the experiment lives in DESIGN §12.7.
-
-use std::collections::HashMap;
-use std::sync::OnceLock;
+//! The H0 auto-detector is deleted (DROPPED decision); only manual
+//! /verify drives the pipeline. Design record: DESIGN §12.7.
 
 
 // --- Turn wiring: artifact signal for manual /verify -----------------
