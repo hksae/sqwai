@@ -33,6 +33,18 @@ fn lock_for(path: &Path) -> Arc<Mutex<()>> {
 pub struct Record {
     pub seq: u64,
     pub ts: String,
+    /// Owning session journal (the file stem). Never serialized: the file
+    /// already is the namespace, persisting it would duplicate that. Filled
+    /// on read by [`Journal::records`] / [`Journal::records_for`], because
+    /// `seq` is only ordered *within* one file — comparing raw seqs across
+    /// merged sessions mixes unrelated counters (undo's `written_since`
+    /// did exactly that). Empty for hand-built records.
+    ///
+    /// The serde name is deliberately NOT `session`: record *fields* may
+    /// carry their own `session` key (the join intent's new member), and a
+    /// same-named struct field would swallow it out of the flattened map.
+    #[serde(rename = "journal_session", default, skip_serializing)]
+    pub session: String,
     pub step: Option<String>,
     pub plan: Option<String>,
     pub agent: String,
@@ -250,11 +262,20 @@ impl Journal {
             if entry.path().extension().and_then(|s| s.to_str()) != Some("jsonl") {
                 continue;
             }
+            let session = entry
+                .path()
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string();
             let file = File::open(entry.path()).context("opening journal for evidence")?;
             for line in BufReader::new(file).lines() {
                 let line = line.context("reading journal for evidence")?;
                 if !line.trim().is_empty() {
-                    records.push(serde_json::from_str(&line).context("decoding journal evidence")?);
+                    let mut record: Record =
+                        serde_json::from_str(&line).context("decoding journal evidence")?;
+                    record.session = session.clone();
+                    records.push(record);
                 }
             }
         }
@@ -274,7 +295,12 @@ impl Journal {
             .lines()
             .filter_map(|line| match line {
                 Ok(line) if !line.trim().is_empty() => {
-                    Some(serde_json::from_str(&line).context("decoding session journal record"))
+                    let parsed: Result<Record, _> =
+                        serde_json::from_str(&line).context("decoding session journal record");
+                    Some(parsed.map(|mut record| {
+                        record.session = session_id.to_string();
+                        record
+                    }))
                 }
                 Ok(_) => None,
                 Err(error) => Some(Err(error.into())),
@@ -428,7 +454,17 @@ impl Journal {
             })
         };
         let mut revert = StepRevert::default();
-        let mut last_seq_of_step = 0u64;
+        // `seq` orders one session file only; across sessions the wall
+        // clock decides. Tracked per path this step wrote, because only a
+        // later write to the *same* path stands in the way: a global step
+        // maximum hides a clobber whenever the step's own writes to other
+        // paths land after the foreign write. A busy session's high
+        // counters neither hide such a write (silent clobber) nor block a
+        // safe revert (false refusal).
+        let mut last_write: std::collections::HashMap<
+            String,
+            (String, std::collections::HashMap<String, u64>),
+        > = std::collections::HashMap::new();
 
         for record in &records {
             if record.kind != "file_diff"
@@ -437,10 +473,25 @@ impl Journal {
             {
                 continue;
             }
-            last_seq_of_step = last_seq_of_step.max(record.seq);
             let Some(path) = record.fields.get("path").and_then(Value::as_str) else {
                 continue;
             };
+            last_write
+                .entry(path.to_string())
+                .and_modify(|slot| {
+                    if record.ts.as_str() > slot.0.as_str() {
+                        slot.0 = record.ts.clone();
+                    }
+                    slot.1
+                        .entry(record.session.clone())
+                        .and_modify(|last| *last = (*last).max(record.seq))
+                        .or_insert(record.seq);
+                })
+                .or_insert_with(|| {
+                    let mut sessions = std::collections::HashMap::new();
+                    sessions.insert(record.session.clone(), record.seq);
+                    (record.ts.clone(), sessions)
+                });
             let field = |name: &str| {
                 record
                     .fields
@@ -461,20 +512,36 @@ impl Journal {
             }
         }
 
-        // Anything written after this step's last record, by a different step
-        // of the same plan, makes that path un-revertible on its own. Writes
-        // from other plans do not count: their step numbers live in a
-        // different namespace.
+        // Anything written after this step's last write to the same path,
+        // by a different step of the same plan, makes that path
+        // un-revertible on its own. Writes from other plans do not count:
+        // their step numbers live in a different namespace. "After" is the
+        // wall clock across sessions (RFC3339 strings compare
+        // chronologically) and the file order within one session; anything
+        // not provably earlier stands in the way, because a silent revert
+        // would undo that later work too.
         for record in &records {
-            if record.kind != "file_diff"
-                || !in_scope(record)
-                || record.seq <= last_seq_of_step
-                || record.step.as_deref() == Some(step)
-            {
+            if record.kind != "file_diff" || !in_scope(record) {
                 continue;
             }
-            if let Some(path) = record.fields.get("path").and_then(Value::as_str)
-                && revert.files.iter().any(|item| item.path == path)
+            let Some(path) = record.fields.get("path").and_then(Value::as_str) else {
+                continue;
+            };
+            if record.step.as_deref() == Some(step) {
+                continue;
+            }
+            // paths this step never wrote need no protection
+            let Some((step_ts, step_sessions)) = last_write.get(path) else {
+                continue;
+            };
+            let provably_earlier = record.ts.as_str() < step_ts.as_str()
+                || step_sessions
+                    .get(record.session.as_str())
+                    .is_some_and(|last| record.seq <= *last);
+            if provably_earlier {
+                continue;
+            }
+            if revert.files.iter().any(|item| item.path == path)
                 && !revert.written_since.iter().any(|known| known == path)
             {
                 revert.written_since.push(path.to_string());
@@ -946,6 +1013,12 @@ impl Journal {
         let record = Record {
             seq,
             ts: timestamp(),
+            session: self
+                .path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string(),
             step: self.step.clone(),
             plan: self.plan.clone(),
             agent: self.agent.clone(),
@@ -1418,6 +1491,69 @@ mod tests {
             Some("blake3:a-before-step-2"),
             "step 2 goes back to the state step 1 left, not to the original"
         );
+    }
+
+    /// `seq` is per session file: a later write from a quiet session must
+    /// still block the revert (no silent clobber), and an earlier write
+    /// from a busy session must not (no false refusal). The wall clock
+    /// decides across sessions, the file order within one; a cross-session
+    /// tie refuses, because the order is genuinely unknown. One sleep: the
+    /// late pair lands a full second after the early pair.
+    #[test]
+    fn written_since_orders_across_sessions_by_time_not_seq() {
+        let root = root();
+        let mut sess_a = Journal::open(&root, "sess-a").unwrap();
+        let mut sess_b = Journal::open(&root, "sess-b").unwrap();
+        let diff = |path: &str, before: &str| {
+            serde_json::json!({
+                "path": path,
+                "blob_before": before,
+                "hash_before": "sha256:h",
+                "hash_after": "sha256:h2",
+            })
+        };
+        sess_a.set_attribution(Some("1".into()), Some("plan-a".into()), "main");
+        sess_b.set_attribution(Some("2".into()), Some("plan-a".into()), "main");
+        // early pair (T0): busy session A writes X at high seq, quiet
+        // session B writes Y at seq 1
+        for i in 0..8 {
+            sess_a
+                .append("note", serde_json::json!({"n": i}))
+                .unwrap();
+        }
+        sess_a.append("file_diff", diff("x.rs", "blake3:x-a")).unwrap();
+        sess_b.append("file_diff", diff("y.rs", "blake3:y-b")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        // late pair (T1, low seqs): B rewrites X, A writes Y
+        sess_b.append("file_diff", diff("x.rs", "blake3:x-b")).unwrap();
+        sess_a.append("file_diff", diff("y.rs", "blake3:y-a")).unwrap();
+
+        // step 1's X predates step 2's rewrite: reverting alone would
+        // clobber it, so X is refused; Y is step 1's own latest word.
+        let revert = Journal::step_pre_images_in(&root, Some("plan-a"), "1").unwrap();
+        assert_eq!(revert.written_since, vec!["x.rs".to_string()]);
+        assert_eq!(
+            revert.files.iter().map(|item| item.path.clone()).collect::<Vec<_>>(),
+            vec!["y.rs".to_string()]
+        );
+        assert_eq!(
+            revert.files[0].blob_before.as_deref(),
+            Some("blake3:y-a")
+        );
+        // step 2's X is its own latest word (step 1's early X predates it
+        // despite the busy session's high counters); step 1's late Y ties
+        // it to the second, so Y is refused as ambiguous.
+        let revert = Journal::step_pre_images_in(&root, Some("plan-a"), "2").unwrap();
+        assert_eq!(revert.written_since, vec!["y.rs".to_string()]);
+        assert_eq!(
+            revert.files.iter().map(|item| item.path.clone()).collect::<Vec<_>>(),
+            vec!["x.rs".to_string()]
+        );
+        assert_eq!(
+            revert.files[0].blob_before.as_deref(),
+            Some("blake3:x-b")
+        );
+        fs::remove_dir_all(root).ok();
     }
 
     /// Records from other steps must not leak into a step's own revert, and a

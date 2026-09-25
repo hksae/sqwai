@@ -561,6 +561,7 @@ mod tests {
         let records = vec![Record {
             seq: 1,
             ts: String::new(),
+            session: String::new(),
             step: None,
             plan: None,
             agent: "main".into(),
@@ -623,6 +624,7 @@ mod tests {
             Record {
                 seq: 1,
                 ts: "".into(),
+                session: String::new(),
                 step: None,
                 plan: None,
                 agent: "main".into(),
@@ -634,6 +636,7 @@ mod tests {
             Record {
                 seq: 2,
                 ts: "".into(),
+                session: String::new(),
                 step: None,
                 plan: None,
                 agent: "main".into(),

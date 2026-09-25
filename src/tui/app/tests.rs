@@ -4166,6 +4166,7 @@ mod tests {
         let record = |seq: u64, step: &str, path: &str| crate::agent::journal::Record {
             seq,
             ts: "now".into(),
+            session: "session".into(),
             step: Some(step.into()),
             plan: Some(active.id.clone()),
             agent: "main".into(),
@@ -4211,6 +4212,7 @@ mod tests {
         let record = |seq: u64, path: &str| crate::agent::journal::Record {
             seq,
             ts: "now".into(),
+            session: "session".into(),
             step: Some("1".into()),
             plan: Some(active.id.clone()),
             agent: "main".into(),
@@ -4251,6 +4253,7 @@ mod tests {
         let record = crate::agent::journal::Record {
             seq: 10,
             ts: "now".into(),
+            session: "session".into(),
             step: Some("1".into()),
             plan: Some(active.id.clone()),
             agent: "main".into(),

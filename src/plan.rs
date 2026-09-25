@@ -1751,6 +1751,7 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
         let record = crate::agent::journal::Record {
             seq: *seq,
             ts: ts.clone(),
+            session: sess.clone(),
             step: None,
             plan: None,
             agent: String::new(),
