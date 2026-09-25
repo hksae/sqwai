@@ -1208,6 +1208,37 @@ fn plan_with_acceptance(root: &Path) -> bool {
         .is_some_and(|plan| !plan.acceptance.is_empty())
 }
 
+/// Refusal body for the plan-first gate. The gate asks "is there a
+/// criterion", not "is there a plan": when one already exists but settles
+/// nothing, telling the model to create another sends it into a
+/// plan_exists refusal followed by a plan-show reassurance loop (seen
+/// live). Name the real next step instead.
+fn plan_required_refusal(root: &Path) -> serde_json::Value {
+    let bare_plan = crate::plan::open_active(root)
+        .ok()
+        .flatten()
+        .filter(|plan| plan.acceptance.is_empty())
+        .map(|plan| plan.id);
+    let (reason, hint) = match bare_plan {
+        Some(id) => (
+            format!(
+                "In ACT mode, mutating tools require acceptance criteria first. Plan {id} is active but settles nothing yet — add executable (cmd:) or human (manual:) criteria with 'plan add_acceptance' (free-text notes go to checklist) before modifying project files."
+            ),
+            "Call 'plan add_acceptance' with items for the active plan; do not create another one.".to_string(),
+        ),
+        None => (
+            "In ACT mode, mutating tools require an active plan with acceptance criteria first. Create a plan with 'plan create' (acceptance: cmd: for executable checks, manual: for human checks, free-text notes go to checklist) before modifying project files.".to_string(),
+            "Call 'plan create' with your goal, acceptance criteria, and initial steps.".to_string(),
+        ),
+    };
+    serde_json::json!({
+        "ok": false,
+        "code": "plan_required",
+        "reason": reason,
+        "hint": hint,
+    })
+}
+
 /// Advisory repeat note for a bash outcome: when the same command already
 /// ran earlier in this session with byte-identical output, re-running
 /// learned nothing — say so once, attached to this result, instead of
@@ -2227,15 +2258,7 @@ async fn run_agent(
                 // active plan per project (§2.1.1).
                 && !plan_with_acceptance(&root)
                 {
-                    tools::Outcome::err(
-                    serde_json::json!({
-                        "ok": false,
-                        "code": "plan_required",
-                        "reason": "In ACT mode, mutating tools require an active plan with acceptance criteria first. Create a plan with 'plan create' (acceptance: cmd: for executable checks, manual: for human checks, free-text notes go to checklist) before modifying project files.",
-                        "hint": "Call 'plan create' with your goal, acceptance criteria, and initial steps."
-                    })
-                    .to_string(),
-                )
+                    tools::Outcome::err(plan_required_refusal(&root).to_string())
                 } else {
                     match call.name.as_str() {
                         "ask_user" if subagent_depth > 0 => tools::Outcome::err(
@@ -6866,6 +6889,62 @@ mod effort_tests {
             "allowed mutation must land on disk"
         );
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    /// The refusal names the real next step: with no plan at all it says
+    /// create; with an active plan that settles nothing it must say
+    /// add_acceptance — saying create there ends in plan_exists followed
+    /// by a plan-show reassurance loop (seen live in the COMODO session).
+    #[test]
+    fn plan_required_refusal_names_add_acceptance_for_bare_plan() {
+        let empty = std::env::temp_dir().join(format!(
+            "sqwai-gate-noplan-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(&empty).unwrap();
+        let refusal = plan_required_refusal(&empty);
+        assert_eq!(refusal["code"], "plan_required");
+        assert!(
+            refusal["hint"].as_str().unwrap().contains("plan create"),
+            "{refusal}"
+        );
+
+        let dir = std::env::temp_dir().join(format!(
+            "sqwai-gate-bareplan-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plan = crate::plan::create(
+            "bare goal".into(),
+            Vec::new(),
+            Vec::new(),
+            vec![crate::plan::NewStep {
+                title: "work".into(),
+                refs: Vec::new(),
+            }],
+            1000,
+            &crate::plan::Limits::default(),
+        )
+        .unwrap();
+        crate::plan::store(&dir, &plan).unwrap();
+        let refusal = plan_required_refusal(&dir);
+        assert_eq!(refusal["code"], "plan_required");
+        let hint = refusal["hint"].as_str().unwrap();
+        assert!(hint.contains("add_acceptance"), "{refusal}");
+        assert!(!hint.contains("plan create"), "must not suggest create: {refusal}");
+        assert!(
+            refusal["reason"].as_str().unwrap().contains(&plan.id),
+            "names the plan to extend: {refusal}"
+        );
+        let _ = std::fs::remove_dir_all(&empty);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Hard path survives: a two-file patch without any plan is still
