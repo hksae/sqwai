@@ -14,6 +14,7 @@ pub mod journal;
 pub mod lint;
 pub mod loop_task;
 pub mod memory;
+pub mod mentions;
 pub mod notify;
 pub mod reflector;
 pub mod safety;

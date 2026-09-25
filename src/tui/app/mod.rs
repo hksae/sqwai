@@ -543,6 +543,11 @@ pub struct App {
     popup_dismiss: bool,
     popup_scroll: usize,
     popup_rows: Vec<(u16, String)>,
+    /// @-mention completion: dismissed-by-Esc flag plus the cached file
+    /// list (root, built-at, rel paths) backing the file half of the
+    /// unified popup. Symbols come live from the graph index.
+    mention_dismiss: bool,
+    mention_files: Option<(PathBuf, std::time::Instant, Vec<String>)>,
 
     // providers/models menu (Ctrl+P)
     menu_stack: Vec<Menu>,
@@ -997,6 +1002,8 @@ impl App {
             popup_dismiss: false,
             popup_scroll: 0,
             popup_rows: Vec::new(),
+            mention_dismiss: false,
+            mention_files: None,
             menu_stack: Vec::new(),
             menu_sel: 0,
             menu_scroll: 0,
@@ -1939,7 +1946,217 @@ impl App {
             .find(|cmd| t.starts_with(&format!("{cmd} ")))
     }
 
+    /// Byte offset of the composer cursor in `input_text()`.
+    fn mention_cursor_byte(&self) -> usize {
+        let (row, col) = self.input.cursor();
+        let mut off = 0;
+        for (i, line) in self.input.lines().iter().enumerate() {
+            if i == row {
+                let mut taken = 0;
+                for (n, c) in line.chars().enumerate() {
+                    if n == col {
+                        break;
+                    }
+                    taken += c.len_utf8();
+                }
+                return off + taken;
+            }
+            off += line.len() + 1;
+        }
+        off
+    }
+
+    /// The `@` token under the composer cursor for completion: byte range
+    /// in `input_text()` plus the raw key (no `@`). None when dismissed,
+    /// when the cursor sits on no token, or on a closed token.
+    fn mention_fragment(&self) -> Option<(usize, usize, String)> {
+        if self.mention_dismiss {
+            return None;
+        }
+        let text = self.input_text();
+        let cursor = self.mention_cursor_byte().min(text.len());
+        let tok = crate::agent::mentions::mention_at(&text, cursor)?;
+        Some((tok.start, tok.end, tok.raw))
+    }
+
+    /// Cached project file list backing the file half of @ completion:
+    /// rebuilt when the root changes or the cache ages past TTL. Capped;
+    /// the resolver (not the completer) is authoritative, so staleness
+    /// only hides suggestions, never breaks references.
+    fn refresh_mention_files(&mut self) {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(10);
+        const CAP: usize = 20000;
+        let now = std::time::Instant::now();
+        if let Some((root, at, _)) = &self.mention_files
+            && *root == self.project_root
+            && now.duration_since(*at) < TTL
+        {
+            return;
+        }
+        let mut files = Vec::new();
+        let host_owned = self.project_root.join(".sqwai");
+        for entry in ignore::WalkBuilder::new(&self.project_root)
+            .hidden(true)
+            .build()
+            .flatten()
+        {
+            if files.len() >= CAP {
+                break;
+            }
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if path == host_owned || path.starts_with(&host_owned) {
+                continue;
+            }
+            if path.components().any(|c| c.as_os_str() == ".git") {
+                continue;
+            }
+            if let Ok(rel) = path.strip_prefix(&self.project_root) {
+                files.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+        files.sort();
+        self.mention_files = Some((self.project_root.clone(), now, files));
+    }
+
+    /// Unified @ completion rows: files (scored by match tier) plus graph
+    /// symbols (ranked by the index), capped. Display strings insert
+    /// verbatim: `@file:src/main.rs`, `@sym:src/main.rs::Config`.
+    fn mention_candidates(&self) -> Vec<String> {
+        const CAP: usize = 9;
+        let Some((_, _, frag)) = self.mention_fragment() else {
+            return Vec::new();
+        };
+        if frag.is_empty() {
+            return Vec::new();
+        }
+        // match on the path part so a half-typed `:range` still filters
+        let (query, _) = crate::agent::mentions::split_range(&frag);
+        let query = if query.is_empty() { frag.clone() } else { query };
+        let mut scored: Vec<(u8, f64, String)> = Vec::new();
+        if let Some((_, _, files)) = &self.mention_files {
+            for f in files {
+                if let Some(tier) = Self::mention_file_tier(f, &query) {
+                    scored.push((tier, 0.0, format!("@file:{f}")));
+                }
+            }
+        }
+        if let Ok(store) = crate::agent::graph::SqliteGraphStore::open(&self.project_root) {
+            use crate::agent::graph::GraphStore;
+            if let Ok(items) = store.recall(&query, CAP) {
+                for it in items {
+                    if !it.key.starts_with("sym:") {
+                        continue;
+                    }
+                    let tier = if it.score >= 0.9 { 2 } else { 1 };
+                    scored.push((tier, it.score, format!("@{}", it.key)));
+                }
+            }
+        }
+        scored.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| {
+                    b.1.partial_cmp(&a.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        let mut seen = std::collections::HashSet::new();
+        scored
+            .into_iter()
+            .filter(|(_, _, s)| seen.insert(s.clone()))
+            .map(|(_, _, s)| s)
+            .take(CAP)
+            .collect()
+    }
+
+    /// Match tier of a project file against the typed fragment: exact and
+    /// basename hits outrank substring hits. Case-insensitive.
+    fn mention_file_tier(path: &str, query: &str) -> Option<u8> {
+        if query.is_empty() {
+            return None;
+        }
+        let (path, query) = (
+            path.to_ascii_lowercase(),
+            query.to_ascii_lowercase(),
+        );
+        let base = path.rsplit('/').next().unwrap_or(&path);
+        if path == query || *base == query {
+            Some(3)
+        } else if path.starts_with(&query) || base.starts_with(&query) {
+            Some(2)
+        } else if path.contains(&query) {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
+    /// Move the @ completion highlight; wraps around the listed rows.
+    /// True when anything changed (caller repaints). No-op without a
+    /// visible mention popup — arrows keep their composer meaning then.
+    fn mention_hover_by(&mut self, delta: i32) -> bool {
+        if self.mention_fragment().is_none() {
+            return false;
+        }
+        let items = self.popup_items();
+        if items.is_empty() {
+            return false;
+        }
+        let n = items.len();
+        let next = match self.hover.clone().and_then(|h| items.iter().position(|i| i == &h)) {
+            Some(i) => (i as i32 + delta).rem_euclid(n as i32) as usize,
+            None => {
+                if delta < 0 {
+                    n - 1
+                } else {
+                    0
+                }
+            }
+        };
+        let changed = self.hover.as_deref() != Some(items[next].as_str());
+        self.hover = Some(items[next].clone());
+        self.popup_scroll = 0;
+        if changed {
+            self.dirty = true;
+        }
+        changed
+    }
+
+    /// Insert a completion key over the @ fragment, cursor after it.
+    fn apply_mention_insert(&mut self, start: usize, end: usize, key: &str) {
+        let text = self.input_text();
+        let new_text = format!("{}{} {}", &text[..start], key, &text[end..]);
+        self.input = Self::fresh_input(new_text.clone());
+        // byte offset back to (row, char-col) for the cursor
+        let cursor_byte = (start + key.len() + 1).min(new_text.len());
+        let mut row = 0;
+        let mut rest = cursor_byte;
+        for (i, line) in new_text.split('\n').enumerate() {
+            if rest <= line.len() {
+                row = i;
+                break;
+            }
+            rest -= line.len() + 1;
+            row = i + 1;
+        }
+        let col = new_text
+            .split('\n')
+            .nth(row)
+            .map(|line| line[..rest.min(line.len())].chars().count())
+            .unwrap_or(0);
+        self.input
+            .move_cursor(tui_textarea::CursorMove::Jump(row as u16, col as u16));
+        self.hover = None;
+        self.dirty = true;
+    }
+
     fn popup_visible(&self) -> bool {
+        if self.mention_fragment().is_some() {
+            return true;
+        }
         let t = self.input_text();
         if self.popup_dismiss || !t.starts_with('/') {
             return false;
@@ -1952,7 +2169,12 @@ impl App {
 
     /// Completion strings, used for both display and insertion.
     /// Level 1: top-level commands (`/plan`). Level 2: `<cmd> <sub>`.
+    /// A cursor-local @-mention wins over the line-prefix slash: the user
+    /// is naming a file or symbol right here, not invoking a command.
     fn popup_items(&self) -> Vec<String> {
+        if self.mention_fragment().is_some() {
+            return self.mention_candidates();
+        }
         let t = self.input_text();
         if let Some(cmd) = self.popup_level2_cmd()
             && let Some(subs) = menus::subcommands_of(cmd)
@@ -2211,6 +2433,26 @@ impl App {
         self.stable_prefix = self.stable_prefix();
         // session-aware gateways (OpenCode Go) route on this per conversation
         crate::providers::set_conversation_id(&self.session.id.to_string());
+        // @-mentions resolve here, at send: the bytes are read now, so
+        // they are always fresh (stale content cannot be injected), and
+        // the transcript keeps exactly what the model saw. Unresolved
+        // tokens stay literal with a warning — the turn still sends.
+        // Resolved files seed the read guard via the registry (taken at
+        // agent-context construction). Same root the agent is jailed to.
+        {
+            let root = std::env::current_dir().unwrap_or_default();
+            let resolved = crate::agent::mentions::resolve_mentions(&root, &text);
+            for warning in &resolved.warnings {
+                self.status(warning, StatusKind::Warn);
+            }
+            if !resolved.pre_reads.is_empty() {
+                crate::agent::tools::register_mention_prereads(
+                    &self.session.id.to_string(),
+                    resolved.pre_reads,
+                );
+            }
+            text = resolved.text;
+        }
         self.push_segment(Segment::User(text.clone()));
         self.session.push(Role::User, &text);
         self.turn_user_index = Some(self.session.messages.len().saturating_sub(1));

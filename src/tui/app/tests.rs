@@ -3433,6 +3433,86 @@ mod tests {
         assert_eq!(app.popup_items(), vec!["/plan".to_string()]);
     }
 
+    /// @ completion: fragment detection, unified file candidates, insert
+    /// over the fragment with the cursor after it, hover navigation.
+    /// No graph index in the temp project, so only files complete here;
+    /// symbols ride the same rows through recall (covered in agent tests).
+    #[test]
+    fn mention_popup_completes_files_and_inserts() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let temp = tempfile::tempdir().unwrap();
+        app.project_root = temp.path().to_path_buf();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(temp.path().join("src/lib.rs"), "lib\n").unwrap();
+        app.refresh_mention_files();
+
+        // no @, no mention popup (slash rules unchanged)
+        app.input = App::fresh_input("hello".into());
+        assert!(app.mention_fragment().is_none());
+        app.input = App::fresh_input("/pl".into());
+        assert!(app.mention_fragment().is_none());
+        assert_eq!(app.popup_items(), vec!["/plan".to_string()]);
+
+        // fragment under the cursor drives file candidates
+        app.input = App::fresh_input("see @src/ma".into());
+        let (start, end, frag) = app.mention_fragment().expect("fragment");
+        assert_eq!(frag, "src/ma");
+        assert_eq!(&app.input_text()[start..end], "@src/ma");
+        let items = app.popup_items();
+        assert!(app.popup_visible());
+        assert_eq!(items, vec!["@file:src/main.rs".to_string()]);
+
+        // hover navigation wraps; Tab-order accept takes hover-or-first
+        assert!(app.mention_hover_by(1));
+        assert_eq!(app.hover.as_deref(), Some("@file:src/main.rs"));
+        app.apply_mention_insert(start, end, "@file:src/main.rs");
+        assert_eq!(app.input_text(), "see @file:src/main.rs ");
+        // inserted key resolves at send with no warnings
+        let resolved =
+            crate::agent::mentions::resolve_mentions(temp.path(), &app.input_text());
+        assert!(resolved.warnings.is_empty(), "{:?}", resolved.warnings);
+        assert!(resolved.text.contains("@file:src/main.rs#sha256:"));
+        assert_eq!(resolved.pre_reads.len(), 1);
+        let _ = std::fs::remove_dir_all(temp.path());
+    }
+
+    /// Unresolved @ stays literal with a warning, and the mention popup
+    /// never fires for mail addresses.
+    #[test]
+    fn mention_unresolved_stays_literal() {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        let temp = tempfile::tempdir().unwrap();
+        app.project_root = temp.path().to_path_buf();
+        app.refresh_mention_files();
+        app.input = App::fresh_input("mail user@host x".into());
+        assert!(app.mention_fragment().is_none());
+        app.input = App::fresh_input("see @nosuchfile".into());
+        assert!(app.popup_visible());
+        assert!(app.popup_items().is_empty());
+        let resolved =
+            crate::agent::mentions::resolve_mentions(temp.path(), &app.input_text());
+        assert_eq!(resolved.text, "see @nosuchfile");
+        assert_eq!(resolved.warnings.len(), 1);
+        assert!(resolved.pre_reads.is_empty());
+        let _ = std::fs::remove_dir_all(temp.path());
+    }
+
+    /// Mention pre-reads register single-take: an abandoned submit cannot
+    /// poison a later turn, and the agent takes what the turn registered.
+    #[test]
+    fn mention_prereads_register_single_take() {
+        use crate::agent::tools::{register_mention_prereads, take_mention_prereads};
+        let sess = format!("mention-reg-{}", std::process::id());
+        assert!(take_mention_prereads(&sess).is_empty());
+        register_mention_prereads(&sess, vec!["a.rs".into()]);
+        register_mention_prereads(&sess, vec!["b.rs".into()]);
+        assert_eq!(take_mention_prereads(&sess), vec![std::path::PathBuf::from("b.rs")]);
+        assert!(take_mention_prereads(&sess).is_empty());
+        register_mention_prereads(&sess, Vec::new());
+        assert!(take_mention_prereads(&sess).is_empty());
+    }
+
     #[test]
     fn busy_status_is_a_replacing_toast_and_expires() {
         let mut app = test_app("http://127.0.0.1:9/v1".into());

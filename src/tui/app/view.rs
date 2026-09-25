@@ -637,6 +637,13 @@ impl App {
         // command popup item?
         if let Some((_, item)) = self.popup_rows.iter().find(|(y, _)| *y == row) {
             let item = item.clone();
+            // @ rows complete the cursor-local mention, like Tab does
+            if item.starts_with('@')
+                && let Some((start, end, _)) = self.mention_fragment()
+            {
+                self.apply_mention_insert(start, end, &item);
+                return;
+            }
             if let Some(cmd) = self.popup_level2_cmd()
                 && let Some(sub) = item.strip_prefix(&format!("{cmd} "))
             {

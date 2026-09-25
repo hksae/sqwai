@@ -1536,6 +1536,12 @@ async fn run_agent(
         .with_plan_limits(plan_limits, context_limit)
         .with_blocked_patterns(blocked_patterns.clone())
         .with_cancel(cancel_tool);
+    // @-mention bytes already in the opening message count as read, so an
+    // edit afterwards needs no redundant read (and goes stale the same
+    // way when the file moves underneath).
+    for p in tools::take_mention_prereads(&session_id) {
+        ctx.note_read(&p);
+    }
     // A child's shadow snapshots belong on the parent chain (§2.2.4), so the
     // parent's `/undo` sees step boundaries and bash mutations; the journal,
     // job isolation and read-guard stay on the child's own session.

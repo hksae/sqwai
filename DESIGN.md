@@ -970,6 +970,19 @@ primitive (`graph_query`) for @-mentions and the verifier. Canvas
 layouts, path view, provenance timeline, watcher-driven live updates:
 not planned; DOT/JSON export instead of a viewer if ever needed.
 
+2.4.10a @-mentions
+A single smart `@` in the composer completes files and graph symbols
+(`@file:src/main.rs`, `@sym:src/main.rs::Config`; explicit `:start-end`
+ranges allowed, whole files cap at 200 lines with a marker). Completion
+is convenience only — the send path resolves every token from disk, so
+typed keys work without ever opening the list. Each resolved reference
+is injected inline as a fenced block pinned by the sha256 of exactly the
+injected bytes; resolved files seed the read guard (an edit afterwards
+needs no redundant read, and goes stale the same way). Unresolvable
+tokens stay literal with a warning — never a guess. NO auto-neighbours,
+NO auto-binding to plan refs: only what the user named travels. Bytes
+are read at send, so stale content cannot be injected.
+
 #### 2.4.11 Test impact
 Planned, not implemented: using reverse traversal from changed symbols to
 select the tests a `verify` step runs first (full suite still required at
