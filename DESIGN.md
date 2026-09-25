@@ -963,16 +963,12 @@ Specified in §12.5. No graph facts are injected into prompts today; the model
 uses recall/graph_query tools on demand.
 
 2.4.10 Graph-view
-MVP (in the core deliverable): an in-process screen (Ctrl+G) with a compact
-list of the focus node's neighborhood, a details pane when width ≥ 110,
-search (f), focus (Enter), back (Backspace), open file (e), depth
-+/-, Esc to chat. Opening it does not stop a running agent; focus and
-trail survive resize. Kinds are distinguishable without color ([f] [fn] [st] [mem]).
-
-Canvas layouts (hierarchical/radial, orthogonal connectors), path view,
-provenance timeline, watcher-driven live updates: later phase. Native
-GUI and local web view: deferred indefinitely; if built, they consume the
-same projections.
+REMOVED: the in-process neighborhood screen (Ctrl+G) is gone — browsing
+paid interaction cost on every turn without feeding the agent. What stays:
+`/graph-rebuild`, the `graph ready` status indicator, and the query
+primitive (`graph_query`) for @-mentions and the verifier. Canvas
+layouts, path view, provenance timeline, watcher-driven live updates:
+not planned; DOT/JSON export instead of a viewer if ever needed.
 
 #### 2.4.11 Test impact
 Planned, not implemented: using reverse traversal from changed symbols to
@@ -1447,7 +1443,7 @@ notice is transient: it stands while the turn is unresolved and is retracted
 when the retry recovers — a terminal failure keeps its explanation. Panic hook restores the terminal.
 
 Popups: models (Ctrl+P), sessions (Ctrl+S), subagents (Ctrl+B, read-only
-child chat), help (?), graph-view (Ctrl+G), undo (Ctrl+U), todo panel
+child chat), help (?), undo (Ctrl+U), todo panel
 (Ctrl+T), settings hub (/settings) with Appearance, Providers, MCP, LSP,
 Skills.
 Todo panel (Ctrl+T): derived view — current step highlighted, counts; selecting
@@ -1673,7 +1669,8 @@ number; a `partial` one is missing something the design calls for.
 
 Ordering beyond the dependency column: core loop first (F7 → R → T → V → I4),
 then benchmark G, then infrastructure. K and O are the last passes — the
-canvas graph view and unattended mode. Unattended is last because it is only as safe as everything under
+canvas graph view (not planned since the viewer removal, §2.4.10) and
+unattended mode. Unattended is last because it is only as safe as everything under
 it, and `brief` is only as useful as the journal is complete.
 
 ULTRA (§12.12) sits between the benchmark and the infrastructure passes. AH is
@@ -1841,7 +1838,7 @@ Hidden reflector with unseen verdict	confident wrong answers with no audit trail
 Passing criticism text to the executor	frames the check and reintroduces sycophancy; blinded executor instead
 CozoDB as the graph engine	pre-1.0, unstable on-disk format, low upstream activity; SQLite covers the needed queries
 Filesystem watcher as the basis of incrementality	correctness must not depend on a watcher; explicit triggers first
-Force-directed / canvas graph view in the MVP	expensive, untestable, no value to the agent; list view first
+Force-directed / canvas graph view in the MVP	expensive, untestable, no value to the agent; list view first, then removed entirely (§2.4.10) in favor of @-mentions
 Checkpoint only before "dangerous" bash	formatters and git commands mutate silently; hash-gated checkpoints instead
 Plan bound to session id	breaks resume and multi-session tasks; plans have their own ids (fork deleted)
 /plan /act as mode commands	collides with plan document commands; modes are Tab / /mode
