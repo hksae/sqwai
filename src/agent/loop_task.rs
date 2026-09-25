@@ -4612,6 +4612,27 @@ async fn bash_call(
     let command = call.args["command"].as_str().unwrap_or("").to_string();
     let lower = command.to_lowercase();
 
+    // -1. writer-subagent scope: the loop's bash path bypasses
+    // `tools::execute`, so the scope gate lives here too. Explicit
+    // out-of-scope write targets refuse before any policy prompt.
+    if ctx.subagent_step.is_some()
+        && let Some(allowed) = ctx.subagent_write_paths.as_ref()
+        && let Some(target) = tools::bash_scope_hit(ctx, allowed, &command)
+    {
+        return tools::Outcome::err(
+            serde_json::json!({
+                "ok": false,
+                "code": "subagent_scope",
+                "reason": format!(
+                    "'{target}' is outside this subagent's declared write scope ({})",
+                    allowed.join(", ")
+                ),
+                "hint": "stay inside the spawned scope, or spawn with wider paths",
+            })
+            .to_string(),
+        );
+    }
+
     // 0. hard block from config — no questions
     for pat in blocked {
         match regex::Regex::new(pat) {

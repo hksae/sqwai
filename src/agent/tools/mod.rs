@@ -1714,6 +1714,28 @@ fn mutation_target_paths(ctx: &ToolCtx, name: &str, args: &Value) -> Vec<String>
             return Vec::new();
         }
         git::extract_patch_files(ctx, patch)
+    } else if name == "git_stage" {
+        // `paths` (array or string) plus the singular `path` alias, the
+        // same set git::stage stages. `all: true` has no bounded target
+        // list — the gate refuses it separately instead of guessing.
+        let mut paths = Vec::new();
+        if let Some(arr) = args.get("paths").and_then(Value::as_array) {
+            for v in arr {
+                if let Some(s) = v.as_str().filter(|s| !s.trim().is_empty()) {
+                    paths.push(s.to_string());
+                }
+            }
+        } else if let Some(s) = args.get("paths").and_then(Value::as_str) {
+            if !s.trim().is_empty() {
+                paths.push(s.to_string());
+            }
+        }
+        if let Some(s) = args.get("path").and_then(Value::as_str) {
+            if !s.trim().is_empty() && !paths.iter().any(|p| p == s.trim()) {
+                paths.push(s.trim().to_string());
+            }
+        }
+        paths
     } else {
         let raw = args["file_path"].as_str().unwrap_or_default();
         if raw.trim().is_empty() {
@@ -1734,7 +1756,166 @@ fn mutation_target_paths(ctx: &ToolCtx, name: &str, args: &Value) -> Vec<String>
         .collect()
 }
 
+/// First write target of a shell command outside the subagent scope, if
+/// any. Best-effort like [`frozen_input_command_hit`]: redirect
+/// destinations plus operands of the classic mutating shapes (tee, cp/mv/
+/// install/rsync/ln, dd's `of=`, truncate/mkdir/rmdir/rm/touch, in-place
+/// sed, patch application). An unresolvable target fails closed (it is an
+/// escape or it never reaches the tree — either way not an in-scope
+/// write). What slips past — implicit writes like a test run rebuilding
+/// `target/`, `cd` games — is documented, not fixed: refusing all bash
+/// for scoped children would brick their legitimate test runs.
+pub(crate) fn bash_scope_hit(ctx: &ToolCtx, scope: &[String], command: &str) -> Option<String> {
+    for target in bash_write_targets(command) {
+        match ctx.resolve(&target) {
+            Ok(abs) => {
+                let rel = abs
+                    .strip_prefix(&ctx.root)
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_else(|_| target.clone());
+                let rel = lexical_clean(&rel);
+                if !in_write_scope(&rel, scope) {
+                    return Some(rel);
+                }
+            }
+            Err(_) => return Some(target),
+        }
+    }
+    None
+}
+
 /// First frozen check input a file mutation would touch, if any. Resolves
+
+/// Raw write-target tokens of a shell command: redirect destinations and
+/// mutating-shape operands. Quoted spans never contribute operators (an
+/// `echo "a > b"` is not a redirect), but stay available as quoted
+/// destinations (`> "my file"`).
+fn bash_write_targets(command: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    // Quoted destinations come from the original text (`> "my file"`).
+    for caps in redirect_quoted_re().captures_iter(command) {
+        let dest = caps.get(1).or_else(|| caps.get(2)).map(|m| m.as_str());
+        if let Some(dest) = dest.filter(|d| !d.starts_with('&') && !d.is_empty()) {
+            targets.push(dest.to_string());
+        }
+    }
+    // Bare destinations come from a copy with quoted spans blanked, so
+    // `echo "a > b"` contributes nothing: the `>` sits inside quotes and
+    // the separator class cannot match there.
+    let blanked = blank_quoted(command);
+    for caps in redirect_bare_re().captures_iter(&blanked) {
+        if let Some(dest) = caps.get(1).map(|m| m.as_str()) {
+            if !dest.starts_with('&') && !dest.is_empty() {
+                targets.push(dest.to_string());
+            }
+        }
+    }
+    // operands of mutating shapes, per command segment (quoting blanked so
+    // a narrated "we need tee" is not a tee invocation)
+    for segment in blanked.split(|c| c == ';' || c == '\n') {
+        // pipelines run left to right; each stage is its own command
+        for stage in segment.split('|') {
+            let words: Vec<&str> = stage
+                .split(|c: char| c.is_whitespace() || c == '(' || c == ')')
+                .filter(|w| !w.is_empty() && *w != "&")
+                .collect();
+            // binary is the first word past sudo/doas/env and VAR= assignments
+            let mut words = words.into_iter().peekable();
+            while let Some(w) = words.peek() {
+                if *w == "sudo" || *w == "doas" || *w == "env" || w.contains('=') {
+                    words.next();
+                } else {
+                    break;
+                }
+            }
+            let binary = words.next().map(|w| w.rsplit('/').next().unwrap_or(w));
+            let operands: Vec<&str> = words.collect();
+            let non_flag: Vec<&str> = operands
+                .iter()
+                .filter(|w| !w.starts_with('-') && !w.contains('='))
+                .copied()
+                .collect();
+            match binary {
+                Some("tee") => targets.extend(non_flag.iter().map(|s| s.to_string())),
+                Some("cp" | "mv" | "install" | "rsync" | "ln") => {
+                    if let Some(last) = non_flag.last() {
+                        targets.push(last.to_string());
+                    }
+                }
+                Some("dd") => {
+                    for w in operands {
+                        if let Some(path) = w.strip_prefix("of=") {
+                            targets.push(path.to_string());
+                        }
+                    }
+                }
+                Some("truncate" | "mkdir" | "rmdir" | "rm" | "touch") => {
+                    targets.extend(non_flag.iter().map(|s| s.to_string()));
+                }
+                Some("sed") => {
+                    if operands.iter().any(|w| *w == "-i" || w.starts_with("-i")) {
+                        targets.extend(non_flag.iter().map(|s| s.to_string()));
+                    }
+                }
+                Some("patch") => {
+                    targets.extend(
+                        non_flag
+                            .iter()
+                            .filter(|w| w.contains('/'))
+                            .map(|s| s.to_string()),
+                    );
+                }
+                Some("git") => {
+                    // `git apply` scatters writes the tokens cannot
+                    // enumerate; any path operand outside fails below
+                    let mut ops = non_flag.iter().peekable();
+                    if ops.peek() == Some(&&"apply") {
+                        targets.extend(
+                            ops.filter(|w| w.contains('/')).map(|s| s.to_string()),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    targets
+}
+
+/// `> "dest"`, `> 'dest'` — matched on the original text.
+fn redirect_quoted_re() -> regex::Regex {
+    regex::Regex::new("(?:^|[\\s;&|])(?:\\d+)?>>?\\s*(?:\"([^\"]+)\"|'([^']+)')").unwrap()
+}
+
+/// `> dest` — matched on a copy with quoted spans blanked (see
+/// [`blank_quoted`]), so quoted operators never count.
+fn redirect_bare_re() -> regex::Regex {
+    regex::Regex::new("(?:^|[\\s;&|])(?:\\d+)?>>?\\s*([^\\s;&|]+)").unwrap()
+}
+
+/// The redirect regex above runs on the original for quoted destinations;
+/// this blanks quoted spans for the operand scan.
+fn blank_quoted(command: &str) -> String {
+    let mut out = String::with_capacity(command.len());
+    let mut quote: Option<char> = None;
+    for c in command.chars() {
+        if let Some(q) = quote {
+            out.push(' ');
+            if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => {
+                quote = Some(c);
+                out.push(' ');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
 /// for the jail verdict, then compares lexically cleaned relative paths so
 /// `..` spellings cannot dodge the freeze. Fail-open on an unreadable
 /// store: the journal heals the plan, and an infra hiccup must not brick
@@ -1989,18 +2170,69 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
     // here (refused above); the main agent carries no scope.
     if ctx.subagent_step.is_some()
         && let Some(allowed) = ctx.subagent_write_paths.as_ref()
-        && matches!(name, "write" | "edit" | "multi_edit" | "patch")
     {
-        let outside = mutation_target_paths(ctx, name, args)
-            .into_iter()
-            .find(|target| !in_write_scope(target, allowed));
-        if let Some(path) = outside {
+        // `commit -a` / `git add -A` stage the whole tree: unbounded by
+        // construction, so a scoped child never runs them. Plain `commit`
+        // only seals what is already staged.
+        if name == "git_commit" && args.get("all").and_then(Value::as_bool).unwrap_or(false) {
+            return Outcome::err(
+                serde_json::json!({
+                    "ok": false,
+                    "code": "subagent_scope",
+                    "reason": "git_commit all:true stages and commits the whole tree, outside this subagent's declared write scope",
+                    "hint": "stage scoped paths instead, or spawn with wider paths",
+                })
+                .to_string(),
+            );
+        }
+        if name == "git_stage" && args.get("all").and_then(Value::as_bool).unwrap_or(false) {
+            return Outcome::err(
+                serde_json::json!({
+                    "ok": false,
+                    "code": "subagent_scope",
+                    "reason": "git_stage all:true stages the whole tree, outside this subagent's declared write scope",
+                    "hint": "stage scoped paths instead, or spawn with wider paths",
+                })
+                .to_string(),
+            );
+        }
+        if matches!(
+            name,
+            "write" | "edit" | "multi_edit" | "patch" | "git_stage"
+        ) {
+            let outside = mutation_target_paths(ctx, name, args)
+                .into_iter()
+                .find(|target| !in_write_scope(target, allowed));
+            if let Some(path) = outside {
+                return Outcome::err(
+                    serde_json::json!({
+                        "ok": false,
+                        "code": "subagent_scope",
+                        "reason": format!(
+                            "'{path}' is outside this subagent's declared write scope ({})",
+                            allowed.join(", ")
+                        ),
+                        "hint": "stay inside the spawned scope, or spawn with wider paths",
+                    })
+                    .to_string(),
+                );
+            }
+        }
+        // Shell writes are analyzed best-effort (see `bash_scope_hit`):
+        // explicit out-of-scope targets refuse, the rest runs.
+        if name == "bash"
+            && let Some(target) = bash_scope_hit(
+                ctx,
+                allowed,
+                args["command"].as_str().unwrap_or_default(),
+            )
+        {
             return Outcome::err(
                 serde_json::json!({
                     "ok": false,
                     "code": "subagent_scope",
                     "reason": format!(
-                        "'{path}' is outside this subagent's declared write scope ({})",
+                        "'{target}' is outside this subagent's declared write scope ({})",
                         allowed.join(", ")
                     ),
                     "hint": "stay inside the spawned scope, or spawn with wider paths",
@@ -5792,6 +6024,92 @@ mod tests {
         let read = execute(&mut ctx, "read", &json!({"file_path": "README.md"}));
         assert!(read.ok, "{}", read.output);
         assert!(!dir.join("notes.txt").exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The scope gate is a boundary, not a suggestion: bash redirects,
+    /// `git_stage` paths and unbounded `all:true` commits obey it too.
+    /// Pre-fix only write/edit/multi_edit/patch were confined — a scoped
+    /// child wrote anywhere through `echo x > ../outside`.
+    #[test]
+    fn subagent_write_scope_confines_bash_git_and_commit_all() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "scoped child",
+                "acceptance": ["manual: eyeball it"],
+                "steps": [{"title": "work"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        ctx.subagent_step = Some(plan::StepContext {
+            plan_id: plan_id.clone(),
+            step_id: "1".into(),
+            step_epoch: 0,
+        });
+        ctx.subagent_write_paths = Some(vec!["src".to_string()]);
+
+        // a bare command with no write targets runs
+        let plain = execute(&mut ctx, "bash", &json!({"command": "echo hi"}));
+        assert!(plain.ok, "{}", plain.output);
+
+        // a redirect outside the scope refuses BEFORE executing
+        let outside = execute(&mut ctx, "bash", &json!({"command": "echo x > notes.txt"}));
+        assert!(!outside.ok, "{}", outside.output);
+        assert!(outside.output.contains("subagent_scope"), "{}", outside.output);
+        assert!(!dir.join("notes.txt").exists(), "refused write must not land");
+
+        // the same redirect inside the scope runs
+        let inside = execute(
+            &mut ctx,
+            "bash",
+            &json!({"command": "echo x > src/inside.txt"}),
+        );
+        assert!(inside.ok, "{}", inside.output);
+        assert!(dir.join("src/inside.txt").exists());
+
+        // quoted operators are not redirects
+        let narrated = execute(&mut ctx, "bash", &json!({"command": "echo \"a > b\""}));
+        assert!(narrated.ok, "{}", narrated.output);
+
+        // git_stage paths obey the scope; all:true is unbounded, refused.
+        // (`..` escapes die in the tool's own jail — also refused, other code.)
+        let stage_out = execute(
+            &mut ctx,
+            "git_stage",
+            &json!({"paths": ["notes.txt"]}),
+        );
+        assert!(!stage_out.ok, "{}", stage_out.output);
+        assert!(stage_out.output.contains("subagent_scope"), "{}", stage_out.output);
+        let stage_escape = execute(
+            &mut ctx,
+            "git_stage",
+            &json!({"paths": ["../outside.txt"]}),
+        );
+        assert!(!stage_escape.ok, "{}", stage_escape.output);
+        let stage_all = execute(&mut ctx, "git_stage", &json!({"all": true}));
+        assert!(!stage_all.ok, "{}", stage_all.output);
+        assert!(stage_all.output.contains("subagent_scope"), "{}", stage_all.output);
+
+        // git_commit all:true sweeps the whole tree, refused; a plain
+        // commit only seals the (gated) stage, so it passes the gate
+        let commit_all = execute(
+            &mut ctx,
+            "git_commit",
+            &json!({"message": "sweep", "all": true}),
+        );
+        assert!(!commit_all.ok, "{}", commit_all.output);
+        assert!(commit_all.output.contains("subagent_scope"), "{}", commit_all.output);
+        let commit_plain = execute(&mut ctx, "git_commit", &json!({"message": "seal"}));
+        assert!(
+            !commit_plain.output.contains("subagent_scope"),
+            "{}",
+            commit_plain.output
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

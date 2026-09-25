@@ -1537,7 +1537,18 @@ pub fn store(root: &Path, plan: &Plan) -> Result<()> {
     let dir = plans_dir(root);
     std::fs::create_dir_all(&dir).context("creating plans directory")?;
     let text = serde_json::to_string_pretty(plan).context("encoding plan")?;
-    let tmp = dir.join(format!("{}.json.tmp", plan.id));
+    // Unique tmp per writer: parallel subagents store the same plan file,
+    // and a shared tmp name lets one writer's rename publish another's
+    // half-written bytes (a torn read then quarantines a healthy plan).
+    // Renames stay atomic, so the last whole write wins and readers never
+    // see a half. Logical lost updates still heal from the journal.
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = dir.join(format!(
+        "{}.{}.{}.json.tmp",
+        plan.id,
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let target = dir.join(format!("{}.json", plan.id));
     std::fs::write(&tmp, text).context("writing plan")?;
     std::fs::rename(&tmp, &target).context("installing plan")?;
