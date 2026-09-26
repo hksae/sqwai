@@ -99,14 +99,9 @@ pub(crate) fn subagent_tasks_from_args(args: &serde_json::Value) -> Result<Vec<S
         Some(single) => subagent_task_spec(single).into_iter().collect(),
         None => Vec::new(),
     };
-    if tasks.is_empty()
-        && let Some(task) = args.get("task").and_then(subagent_task_spec)
-    {
-        tasks.push(task);
-    }
     if tasks.is_empty() {
         return Err(
-            "subagent task is required: pass task (string) or tasks (array of strings or objects with task|prompt)"
+            "subagent tasks are required: pass tasks (array of strings or objects with task|prompt)"
                 .into(),
         );
     }
@@ -410,9 +405,11 @@ pub(crate) async fn run_subagent(
                 // re-parseable single: the recursive call re-derives the
                 // same write scope from these flags
                 one.args = serde_json::json!({
-                    "task": task.label,
-                    "write": task.write,
-                    "paths": task.paths,
+                    "tasks": [{
+                        "task": task.label,
+                        "write": task.write,
+                        "paths": task.paths,
+                    }],
                 });
                 let system = system.clone();
                 let mcp = mcp.clone();

@@ -1990,15 +1990,15 @@ mod subagent_tests {
         };
         assert_eq!(
             labels(
-                subagent_tasks_from_args(&serde_json::json!({"task":" inspect "})).unwrap()
-            ),
-            vec!["inspect"]
-        );
-        assert_eq!(
-            labels(
                 subagent_tasks_from_args(&serde_json::json!({"tasks":["one","two"]})).unwrap()
             ),
             vec!["one", "two"]
+        );
+        // the legacy singular form is refused with a hint, not guessed
+        assert!(
+            subagent_tasks_from_args(&serde_json::json!({"task": "inspect"}))
+                .unwrap_err()
+                .contains("tasks")
         );
         // strings are read-only writers of nothing
         for task in subagent_tasks_from_args(&serde_json::json!({"tasks":["one"]})).unwrap() {
@@ -2008,7 +2008,7 @@ mod subagent_tests {
     }
 
     /// Regression: the model sent three task OBJECTS and the whole batch
-    /// died with "subagent task is required" — objects carry the text
+    /// died — objects carry the text
     /// under task|prompt|description, a lone string is one task.
     #[test]
     fn accepts_object_shaped_subagent_tasks() {
@@ -2036,10 +2036,10 @@ mod subagent_tests {
             ),
             vec!["do it all"]
         );
-        // empties still refuse with the original message intact
+        // empties still refuse with the tasks-only message intact
         let error =
             subagent_tasks_from_args(&serde_json::json!({"tasks": [{}, "  "]})).unwrap_err();
-        assert!(error.contains("subagent task is required"), "{error}");
+        assert!(error.contains("subagent tasks are required"), "{error}");
     }
 
     #[test]
@@ -4248,7 +4248,7 @@ mod effort_tests {
         let call = crate::providers::ToolCallReq::new(
             "c1",
             "subagent",
-            serde_json::json!({"task": "do it"}),
+            serde_json::json!({"tasks": ["do it"]}),
         );
         let outcome = run_subagent(
             &call,
@@ -4380,7 +4380,7 @@ mod effort_tests {
         let call = crate::providers::ToolCallReq::new(
             "c1",
             "subagent",
-            serde_json::json!({"task": "do it"}),
+            serde_json::json!({"tasks": ["do it"]}),
         );
         let outcome = run_subagent(
             &call,
@@ -4444,7 +4444,7 @@ mod effort_tests {
         let call = crate::providers::ToolCallReq::new(
             "c1",
             "subagent",
-            serde_json::json!({"task": "hang forever"}),
+            serde_json::json!({"tasks": ["hang forever"]}),
         );
         let outcome = run_subagent(
             &call,
@@ -4505,7 +4505,7 @@ mod effort_tests {
         let call = crate::providers::ToolCallReq::new(
             "c1",
             "subagent",
-            serde_json::json!({"task": "hang forever"}),
+            serde_json::json!({"tasks": ["hang forever"]}),
         );
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let started = std::time::Instant::now();
@@ -4560,14 +4560,14 @@ mod effort_tests {
                         crate::providers::ToolCallReq::new(
                             "c1",
                             "subagent",
-                            serde_json::json!({"task": "first"}),
+                            serde_json::json!({"tasks": ["first"]}),
                         ),
                     )),
                     Ok(crate::providers::StreamEvent::ToolCall(
                         crate::providers::ToolCallReq::new(
                             "c2",
                             "subagent",
-                            serde_json::json!({"task": "second"}),
+                            serde_json::json!({"tasks": ["second"]}),
                         ),
                     )),
                 ],

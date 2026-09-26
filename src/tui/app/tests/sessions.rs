@@ -347,7 +347,7 @@ fn history_restores_a_delegated_call_as_a_child_row() {
             ToolCallReq::new(
                 "c1",
                 "subagent",
-                serde_json::json!({"task": "look around"}),
+                serde_json::json!({"tasks": ["look around"]}),
             ),
         ]));
     app.session
