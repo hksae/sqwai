@@ -2,7 +2,7 @@ use super::{
     Acceptance, AcceptanceKind, AcceptanceStatus, Applied, Baseline, CheckInput, EvidenceRef,
     Plan, PlanStatus, Receipt, Rejection, ShapeFreeze, Snapshot, StepStatus, ValidationStatus,
 };
-use super::{accept, reject};
+use super::ops::{accept, reject};
 use std::path::Path;
 
 
