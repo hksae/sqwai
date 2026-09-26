@@ -7,9 +7,6 @@ use std::collections::BTreeMap;
 
 use super::{ChatRequest, Provider, Role, StreamEvent, StreamResult, ToolCallReq};
 
-/// Anthropic accepts at most four `cache_control` markers in one request and
-/// rejects the request beyond that.
-const MAX_CACHE_BREAKPOINTS: usize = 4;
 /// History length from which the middle anchor marker pays off: below this
 /// the end marker's ~20-block lookback already covers the whole history.
 const MID_HISTORY_MARKER_MSGS: usize = 10;
@@ -537,6 +534,10 @@ fn short(s: &str) -> String {    let mut cut = 500.min(s.len());
 
 #[cfg(test)]
 mod tests {
+    /// Anthropic accepts at most four `cache_control` markers in one request
+    /// and rejects the request beyond that.
+    const MAX_CACHE_BREAKPOINTS: usize = 4;
+
     /// The Messages API expresses effort as a token budget, which is what a
     /// model on this provider resolves to in `ModelConfig::effort_support`.
     fn budget_support() -> crate::config::EffortSupport {

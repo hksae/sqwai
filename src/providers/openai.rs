@@ -771,8 +771,10 @@ mod tests {
             previous_response_id: None,
             context_transport: crate::providers::ContextTransport::Stateless,
         };
-        let system = crate::providers::system_text(&req.system);
-        assert_eq!(system, "A\n\nB");
+        let system = crate::providers::stable_system_text(&req.system);
+        assert_eq!(system, "A");
+        let tail = crate::providers::volatile_system_text(&req.system);
+        assert_eq!(tail, "B");
         let body = OpenAiProvider::build_body(&req);
         let msgs = body["messages"].as_array().unwrap();
         // stable system first, history, volatile tail last — never glued

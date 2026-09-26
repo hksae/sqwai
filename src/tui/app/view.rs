@@ -2260,7 +2260,20 @@ impl App {
             && total == self.cache_lines.len()
             && total == self.cache_rowseg.len();
         if consistent && new_tags == self.asm_tags {
-            if self.last_fresh * 2 <= new_tags.len().max(1) {
+            // Structural chunks (blanks, group headers) rebuild every pass,
+            // so counting them would force a full concat on each streaming
+            // tick and deep-clone the whole transcript. The splice/concat
+            // choice only cares about segment chunks: those carry the rows.
+            let total_segs = new_tags
+                .iter()
+                .filter(|t| matches!(t, AsmTag::Seg(_)))
+                .count();
+            let fresh_segs = built
+                .iter()
+                .zip(fresh.iter())
+                .filter(|((tag, _), f)| **f && matches!(tag, AsmTag::Seg(_)))
+                .count();
+            if fresh_segs * 2 <= total_segs.max(1) {
                 self.splice_chunks(built, fresh);
                 self.last_merge = MergeKind::Splice;
             } else {

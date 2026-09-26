@@ -192,11 +192,6 @@ impl SystemPart {
     }
 }
 
-/// Render the system block as one string (providers with a single system field).
-pub fn system_text(system: &[SystemPart]) -> String {
-    join_texts(system.iter().map(|p| p.text.as_str()))
-}
-
 /// Split system parts for the wire. Stable (cacheable) parts stay in the
 /// system position; volatile parts (date, git status, nudges) travel last,
 /// after the history — never glued into the first message. Gluing them
