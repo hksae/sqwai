@@ -434,9 +434,10 @@ fn repeat_bash_note(messages: &[Message], call: &ToolCallReq, output: &str) -> O
         .iter()
         .any(|(cmd, out)| *cmd == command && *out == output)
     {
-        Some(format!(
+        Some(
             "\n[host: you already ran this exact command earlier in this session with byte-identical output — reuse that observation instead of re-running it. If the underlying state may have changed since, ignore this note.]"
-        ))
+                .to_string(),
+        )
     } else {
         None
     }
@@ -2855,16 +2856,13 @@ mod effort_tests {
                 tokio::select! {
                     out = &mut future => break out,
                     ev = rx_ui.recv() => {
-                        match ev {
-                            Some(AgentEvent::Approval { id, command, reason }) => {
-                                assert!(command.contains("abandon plan"), "{command}");
-                                assert!(reason.contains("removed feature"), "{reason}");
-                                tx_ui
-                                    .send(ControlMsg::ApprovalAnswer { id, decision })
-                                    .await
-                                    .unwrap();
-                            }
-                            _ => {}
+                        if let Some(AgentEvent::Approval { id, command, reason }) = ev {
+                            assert!(command.contains("abandon plan"), "{command}");
+                            assert!(reason.contains("removed feature"), "{reason}");
+                            tx_ui
+                                .send(ControlMsg::ApprovalAnswer { id, decision })
+                                .await
+                                .unwrap();
                         }
                     }
                 }

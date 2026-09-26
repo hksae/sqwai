@@ -134,11 +134,6 @@ pub(crate) fn kill_remaining_jobs() -> usize {
     exec::kill_remaining_jobs()
 }
 
-/// Project-relative, lexically cleaned mutation targets of a file-writing
-/// call: `file_path` for write/edit/multi_edit, `+++` files for patch.
-/// Unresolvable or empty spellings yield nothing — the tool's own
-/// validation reports those, not the scope gates.
-
 /// dispatch one tool call
 pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
     if ctx.read_only
@@ -289,7 +284,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             );
         }
     }
-    let outcome = match name {
+    match name {
         "read" => fs::read(ctx, args["file_path"].as_str().unwrap_or_default(), args),
         "write" => fs::write_file(
             ctx,
@@ -621,8 +616,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         }
         "journal" => journal_op(ctx, args),
         other => Outcome::err(format!("unknown tool '{other}'")),
-    };
-    outcome
+    }
 }
 
 /// The `journal` tool: a read-only projection of the host journal (§2.2).
@@ -1426,7 +1420,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         // the agent loop can ask for — direct application here would abandon
         // silently, which is exactly the rewrite-history hole this op closes
         plan::Op::ProposeReset { .. } => {
-            return Outcome::err(
+            Outcome::err(
                 "propose_reset is served by the agent loop, not by the dispatcher: \
                  call the propose_reset tool so the user confirms the abandon",
             )

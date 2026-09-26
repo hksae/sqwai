@@ -220,6 +220,9 @@ pub(crate) fn compaction_request(
     )
 }
 
+/// 8 args is the compaction call shape (provider, request, policy, hints);
+/// splitting it into a params struct would churn every caller for no gain.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn compact_history(
     provider: &SharedProvider,
     model_id: &str,

@@ -125,10 +125,9 @@ fn changed_files(root: &Path, plan_id: &str) -> Vec<String> {
                 .map(|p| p.replace('\\', "/"))
                 .map(|p| p.trim().to_string())
                 .filter(|p| !p.is_empty())
+                && !out.contains(&path)
             {
-                if !out.contains(&path) {
-                    out.push(path);
-                }
+                out.push(path);
             }
         }
     }
@@ -357,13 +356,10 @@ pub fn select_command(root: &Path, plan_id: &str, command: &str) -> Option<Impac
             // file address on the cargo CLI, so any src/ impact runs full
             let mut stems = Vec::new();
             for f in &files {
-                let Some(stem) = f
+                let stem = f
                     .strip_prefix("tests/")
                     .and_then(|rest| rest.strip_suffix(".rs"))
-                    .filter(|rest| !rest.contains('/'))
-                else {
-                    return None;
-                };
+                    .filter(|rest| !rest.contains('/'))?;
                 stems.push(format!("--test {stem}"));
             }
             if stems.is_empty() {

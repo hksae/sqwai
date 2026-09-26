@@ -521,7 +521,7 @@ fn has_dynamic_code(lower: &str) -> bool {
             return true;
         }
         if matches!(head, "sh" | "bash" | "dash" | "zsh" | "ksh" | "fish")
-            && rest.iter().any(|w| *w == "-c")
+            && rest.contains(&"-c")
         {
             return true;
         }

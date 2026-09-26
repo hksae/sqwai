@@ -24,6 +24,10 @@ pub(crate) fn step_epoch_current(root: &Path, inherited: &plan::StepContext) -> 
         .is_some_and(|step| step.step_epoch == inherited.step_epoch)
 }
 
+/// Project-relative, lexically cleaned mutation targets of a file-writing
+/// call: `file_path` for write/edit/multi_edit, `+++` files for patch.
+/// Unresolvable or empty spellings yield nothing — the tool's own
+/// validation reports those, not the scope gates.
 pub(crate) fn mutation_target_paths(ctx: &ToolCtx, name: &str, args: &Value) -> Vec<String> {
     let raws: Vec<String> = if name == "patch" {
         let patch = args["patch"].as_str().unwrap_or_default();
@@ -42,15 +46,16 @@ pub(crate) fn mutation_target_paths(ctx: &ToolCtx, name: &str, args: &Value) -> 
                     paths.push(s.to_string());
                 }
             }
-        } else if let Some(s) = args.get("paths").and_then(Value::as_str) {
-            if !s.trim().is_empty() {
-                paths.push(s.to_string());
-            }
+        } else if let Some(s) = args.get("paths").and_then(Value::as_str)
+            && !s.trim().is_empty()
+        {
+            paths.push(s.to_string());
         }
-        if let Some(s) = args.get("path").and_then(Value::as_str) {
-            if !s.trim().is_empty() && !paths.iter().any(|p| p == s.trim()) {
-                paths.push(s.trim().to_string());
-            }
+        if let Some(s) = args.get("path").and_then(Value::as_str)
+            && !s.trim().is_empty()
+            && !paths.iter().any(|p| p == s.trim())
+        {
+            paths.push(s.trim().to_string());
         }
         paths
     } else {
@@ -141,8 +146,6 @@ pub(crate) fn commanded_verify_refs(texts: &[String]) -> Vec<String> {
     names
 }
 
-/// First frozen check input a file mutation would touch, if any. Resolves
-
 /// Raw write-target tokens of a shell command: redirect destinations and
 /// mutating-shape operands. Quoted spans never contribute operators (an
 /// `echo "a > b"` is not a redirect), but stay available as quoted
@@ -161,15 +164,16 @@ fn bash_write_targets(command: &str) -> Vec<String> {
     // the separator class cannot match there.
     let blanked = blank_quoted(command);
     for caps in redirect_bare_re().captures_iter(&blanked) {
-        if let Some(dest) = caps.get(1).map(|m| m.as_str()) {
-            if !dest.starts_with('&') && !dest.is_empty() {
-                targets.push(dest.to_string());
-            }
+        if let Some(dest) = caps.get(1).map(|m| m.as_str())
+            && !dest.starts_with('&')
+            && !dest.is_empty()
+        {
+            targets.push(dest.to_string());
         }
     }
     // operands of mutating shapes, per command segment (quoting blanked so
     // a narrated "we need tee" is not a tee invocation)
-    for segment in blanked.split(|c| c == ';' || c == '\n') {
+    for segment in blanked.split([';', '\n']) {
         // pipelines run left to right; each stage is its own command
         for stage in segment.split('|') {
             let words: Vec<&str> = stage
@@ -366,20 +370,19 @@ pub(crate) fn frozen_input_command_hit(
     // `tee` writes every file arg; `patch`/`git apply` scatter writes the
     // tokens cannot resolve — any frozen token in such a command asks first
     let lower = command.to_lowercase();
-    if lower.contains("tee") || lower.contains("git apply") || lower.contains("patch ") {
-        if let Some(hit) = frozen_token() {
-            return Some(frozen_input_reason(&hit));
-        }
+    if (lower.contains("tee") || lower.contains("git apply") || lower.contains("patch "))
+        && let Some(hit) = frozen_token()
+    {
+        return Some(frozen_input_reason(&hit));
     }
     // in-place editors and copy/move: a frozen token beside the shape asks
-    if (lower.contains("sed") && lower.contains("-i"))
+    if ((lower.contains("sed") && lower.contains("-i"))
         || ["cp", "mv", "install", "rsync", "dd", "truncate"]
             .iter()
-            .any(|w| lower.split_whitespace().any(|t| t == *w))
+            .any(|w| lower.split_whitespace().any(|t| t == *w)))
+        && let Some(hit) = frozen_token()
     {
-        if let Some(hit) = frozen_token() {
-            return Some(frozen_input_reason(&hit));
-        }
+        return Some(frozen_input_reason(&hit));
     }
     None
 }
