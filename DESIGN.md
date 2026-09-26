@@ -1661,7 +1661,7 @@ number; a `partial` one is missing something the design calls for.
 | I2 | Rust + Python + TypeScript adapters (tree-sitter, minimal: declarations) | done — tree-sitter declarations and lexical imports for Rust, Python, TypeScript | I1 |
 | I3 | Freshness: edit/bash/undo/head triggers; status semantics; out-of-order protection (mandatory) | done — generation stamps, replace_file_subgraph_stamped, out-of-order protection, disk-hash freshness | I1 |
 | I4 | resolve_ref; validator refs; pre-edit warning; stale markers | done — resolve_ref, validator refs, pre-edit warning, rich provenance and freshness done; stale markers done (newly-stale acceptance gets one durable chat row per turn, deduped, re-armed on re-verify) | I2, I3, F1 |
-| I5 | Memory adapter; recall/graph_query exposed | done — memory adapter, recall, graph_query done | I4, F4 |
+| I5 | recall/graph_query exposed | done — recall, graph_query done; memory-file indexing removed (write-only: indexed best-effort, never queried) | I4, F4 |
 | J | Python references; LSP diagnostics → journal; checkpoint before/after bash | partial — graph-view list MVP done then removed (§2.4.10) in favor of @-mentions; step-boundary + pre-bash checkpoints and LSP diagnostics → journal done; Python semantic references done (decorators, base classes, submodule from-imports, assigned lambdas, call-name order fix; adapter v2) | I5, C |
 | K | Canvas graph-view, watcher, LSP semantic capabilities, path view | planned | J |
 | M | Test impact: reverse traversal, command synthesis, runner integration | done — reverse imports closure + same-dir, exact mapping for bare pytest/go/cargo, full suite still required at complete (§2.4.11) | I5, acceptance runners |

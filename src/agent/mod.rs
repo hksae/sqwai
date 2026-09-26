@@ -8,7 +8,6 @@ pub mod export;
 pub mod graph;
 pub mod graph_index;
 pub mod graph_lang;
-pub mod graph_memory;
 pub mod journal;
 pub mod lint;
 pub mod loop_task;

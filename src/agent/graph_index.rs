@@ -427,7 +427,6 @@ pub fn index_project_excluding(
     }
 
     report.removed_files = store.prune_file_subgraphs(&retained_paths)?;
-    let _ = crate::agent::graph_memory::index_memory_subsystem(store, &root);
     Ok(report)
 }
 
@@ -557,13 +556,6 @@ pub fn reindex_paths(
         stamp_file_mtime(&mut batch, &norm, mtime);
         store.replace_file_subgraph(&norm, &batch.nodes, &batch.edges, &batch.occurrences)?;
         report.indexed_files += 1;
-    }
-
-    if paths
-        .iter()
-        .any(|p| p.contains(".sqwai/memory") || p.contains(".sqwai/journal"))
-    {
-        let _ = crate::agent::graph_memory::index_memory_subsystem(store, &root);
     }
 
     Ok(report)
