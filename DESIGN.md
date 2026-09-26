@@ -417,11 +417,6 @@ they trust the file; healing happens only through this startup pass. The
 plan file alone is never trusted without its journal prefix. Known limit:
 the cursor covers one session's suffix only (see §13).
 
-**Attribute misattribution warning (non-blocking).** If the step being finished has
-file_diff evidence whose paths overlap with `refs` of another pending or in_progress step,
-the host attaches a warning to the `finish` result. The user may `/undo step N` to revert
-and reopen the step if the warning indicates a misattribution.
-
 **Blast radius (informational, one line).** Finishing a step appends the
 files it wrote (`blast radius: step 2 touched 4 files (…)`), read from the
 journal `file_diff` chain across sessions. Silent when the step wrote
@@ -476,8 +471,8 @@ edits them the same way.
 A new user message never silently changes the goal or constraints. If the
 model believes a message changes them, it proposes a revision. When a user
 demand conflicts with the plan's constraints, the model must not silently
-comply or work around them: it proposes changing the constraints (which the
-user must confirm) or keeps the step blocked.
+comply or work around them: it proposes the change with propose_plan
+(which the user must confirm) or keeps the step blocked.
 
 `propose_plan` is a tool for legitimate goal refinement, not for escaping difficult steps.
 **Model‑proposed revisions:** the host validates that evidenced step titles
@@ -532,20 +527,10 @@ starts with a known read-only verb (`Get-*`, `netstat`, `reg query`, …)
 and nothing redirects runs without a plan. Advisory classification for
 discipline only — approvals still guard real damage; anything unrecognized
 fails closed back into the gate.
-Write-path gates (Z, AF, warn-layer only — they steer, never block). After
-a successful `write`/`edit`/`multi_edit`/`patch`, the dispatcher checks the
-touched paths against the holding step's refs (the child's inherited step,
-or the session's active plan plus current step): paths matching no ref get
-a scope warning, capped at three per call. The same hook scans the outcome
-diff for test-shaped literals — confession phrases and long string
-literals compared against or returned — also capped at three. Steps with no
-refs stay silent, and `bash` is excluded from both: shell-written bytes
-leave no per-file diff to attribute or scan. Numeric magic constants are
-deliberately not flagged (ports, timeouts, status codes).
 
 2.1.10 Typed constraints
 A constraint the host can execute carries a prefix; unprefixed constraints
-stay advisory (claim-lint territory, never gates):
+stay advisory, never gates):
 - `forbid-import: <pattern>` — no source file may import it (import-statement
   lines plus bare quoted references, comments excluded; heuristic, waivable).
 - `forbid-cmd: <pattern>` — the agent may not run matching shell commands.
@@ -698,7 +683,6 @@ file_diff and tool_result records count as evidence for that step.
 Plan validator: evidence for finish and verify.
 Diary host block (§2.3.2).
 Compaction anchor (§3.3): notes for open steps, files changed.
-Graph memory adapter (§2.4.5): note records become memory nodes.
 2.3 Memory
 Three files with distinct roles:
 
@@ -872,8 +856,7 @@ sym:src/session/mod.rs::struct::Session
 sym:src/session/mod.rs::impl<Session>::fn::save
 sym:src/session/mod.rs::impl<Default for Session>::fn::default
 sym:app/models.py::class::User::fn::save
-mem:2026-08-31#18-47:decision:1             (diary date, entry time, section, index)
-mem:journal:a8f2:16                         (note seq)
+(legacy `mem:` keys still parse but nothing produces them since the §2.4.5 removal)
 Scope chains are mandatory for symbols; adapters that cannot produce a scope
 fall back to sym:<path>::<kind>::<name>#<n> where n is the ordinal of that
 (kind, name) in file order — stable under line shifts, unstable only under
@@ -881,8 +864,7 @@ reordering of same-named symbols, which is acceptable. A rename produces a new
 key; the old node is deleted on reindex (no rename tracking in core; LSP may
 add supersedes later).
 Declarations carry `roles[]`: `test` is a role of a function or class, not
-a node kind. Memory nodes always carry `source: model` — an indexed note
-keeps its author and journal reference but never becomes a parser fact.
+a node kind.
 
 2.4.4 Adapters and capabilities
 text
@@ -896,19 +878,13 @@ mentions, and honest absence of symbol resolution for unsupported files.
 Adapter contract: input (path, bytes, lang); output nodes, edges, warnings;
 never emits paths outside the root; deterministic; must not panic on malformed
 input; records adapter_version so a bumped adapter triggers reindex of its
-files. Adapters: generic, markdown, toml, rust, python, typescript, tsx, go,
-java, c, cpp (tree-sitter), then memory (§2.4.5).
+files. Adapters: generic, markdown, toml, rust, python, typescript, tsx.
 
 2.4.5 Memory adapter
-Reads memory/*.md and journal note records; emits memory|decision nodes
-with about edges to every backticked path/symbol that resolves, mentions
-for those that do not (kept for stale detection), and supersedes from a
-Corrections bullet to the entry it corrects when the bullet contains a
-j#N or a date reference. This replaces the earlier remember tool: memory
-is written through diary/MEMORY.md and indexed, never written into the graph
-directly. Memory nodes are model claims, not parser facts: they keep their
-author and journal reference through indexing, recall surfaces both, and
-indexing never upgrades a note into a verified fact.
+REMOVED: memory/*.md and journal notes were indexed into memory|decision
+nodes with about/mentions/supersedes edges. Nothing queried them — the
+indexer is deleted; NodeKind variants stay as inert format. Memory lives
+in diary/MEMORY.md files, read directly.
 
 2.4.6 Operations
 resolve_ref (host API, also exposed to the main
@@ -929,19 +905,18 @@ and provenance; limitations lists what the analyzer could not do (e.g.
 ["macro_expansion_unavailable"]). Freshness is guaranteed by §2.4.7 before
 answering.
 
-recall — bounded FTS over names, paths, headings, signatures, memory
-text; limit default 8, max 20; deterministic ranking (exact key > exact name
+recall — bounded FTS over names, paths, headings and signatures;
+limit default 8, max 20; deterministic ranking (exact key > exact name
 
 path prefix > FTS rank); returns keys, kinds, paths, one-line snippet,
-provenance, author and journal ref for memory nodes; never file contents.
+provenance; never file contents.
 Search results are candidates, not facts.
 
 graph_query — node, direction, relations[], kinds[], depth ≤ 3,
 limit ≤ 50; bounded BFS in Rust over indexed queries with a visited/edge
 budget; returns a projection (nodes, edges, truncated flag plus the reason).
 
-memory_read(date) — not a graph op but listed here because recall
-results of kind memory point to it.
+memory_read(date) — not a graph op; reads one daily diary file.
 
 2.4.7 Indexing lifecycle and freshness
 Full build: on first open, on schema/adapter version change, on /graph-rebuild,
@@ -1156,8 +1131,7 @@ text
     when the plan is rewritten), so a step that finishes re-keys nothing
  8 nudge: when the in_progress step accumulated ≥ plan.nudge_after actions
     since its last plan op — "plan: step N has K actions and no update —
-    finish, split or block it" (session-scoped); finish-time misattribution
-    warnings via refs (§2.1.4)
+    finish, split or block it" (session-scoped)
  9 triggered skills for this turn
 Anthropic: cache_control after 3 and after 5. OpenAI-compatible/Responses:
 automatic prefix caching benefits from the same layout. Cache-read tokens are
@@ -1382,8 +1356,8 @@ marks tools, stable-system end, last history message — plus a middle history
 anchor on histories of 10+ messages, because a breakpoint reaches ~20 blocks
 back and one huge tool batch would otherwise orphan the first half; four
 markers max, hard API budget. Config: provider = preset | base_url + format + api_key_env; models
-declared with id, context, effort. Presets: OpenAI, Anthropic,
-OpenRouter, DeepSeek, Groq, Mistral, xAI, Together, Ollama/LM Studio/vLLM.
+declared with id, context, effort. Presets: gemini, anthropic, openai,
+deepseek, grok, kimi.
 Models declare an optional `fallback` to another model id (same or other
 provider). On retry-exhausted network/5xx errors the host switches
 transparently, journals `provider_error` with `recovered: true, switched_to:
@@ -1440,8 +1414,9 @@ available and named in the environment, sqwai prefers it so the bash classifier
 stays authoritative. The base detector still cannot be disabled.
 
 5.3 Modes
-plan mode narrows the toolset to read-only tools plus `plan` (the rule is
-the tool's declared `Kind`, not a name list; `git_branch` additionally has
+plan mode enforcement narrows dispatch to read-only tools plus `plan` (the rule is
+the tool's declared `Kind`, not a name list — schemas are identical in both
+modes, so the prompt cache never re-keys; `git_branch` additionally has
 its schema narrowed to list/current since its create/switch actions are
 refused in PLAN mode); the agent may
 create and refine the plan but not mutate files. act mode: full toolset.
@@ -1466,10 +1441,10 @@ a step shows its combined diff (all `file_diff` of that step from its first
 checkpoint to the last) and offers `/undo step N` (reverts one step if
 its files do not overlap later steps; otherwise refuses with an explanation).
 
-Commands: /compact /constraints /debug /diary /exit /goal /graph-rebuild
+Commands: /compact /constraints /debug /diary /exit /export /goal /graph-rebuild
 /help /init /lsp /mcp /mode /models /new /plan [history|limit|complete|
 abandon|waive|confirm|delete] /providers /sessions /settings /skill /skills
-/test [animations] /undo [step]. `/fork` is deleted (removal decided instead
+/test [animations] /undo [step] /why. `/fork` is deleted (removal decided instead
 — no fork code, no fork record, `forked_from` ignored on read).
 
 5.5 MCP
@@ -1637,7 +1612,7 @@ number; a `partial` one is missing something the design calls for.
 | E | Graph prototype (Cozo, generic + markdown) | done — engine replaced by I1 | — |
 | F1 | plan tool + validator (all rules except evidence/refs) + /plan /goal /constraints /mode; prompt update | done | B |
 | F1b | Event-sourced projection reducer + deterministic replay (`applied_event`, orphan recovery) | done — journal-first projection and startup replay (per-session cursor map, evidence re-attach, orphan rebuild, corrupt-file rebuild from intents); no total-order counter by design (the map covers it without shared state) | F1, F2 |
-| F2 | Journal writer at dispatch; all kinds except `reflect`, `graph` | done (incl. `diagnostics`) | B |
+| F2 | Journal writer at dispatch; all kinds | done (incl. `diagnostics`) | B |
 | F3 | Evidence rule in `finish`, `verify`, `complete`; nudges; note | done — `verify` accepts evidence from an unrelated step (#6) | F1 |
 | F4 | Diary: host block, triggers, writer call, fallback; memory_read; secrets screening | done — journal summary/text screened at append, diary prose post-checked in host code | F2 |
 | F5 | MEMORY.md + memory_propose approval; session-start loading | done | F4 |
@@ -1653,7 +1628,7 @@ number; a `partial` one is missing something the design calls for.
 | I4 | resolve_ref; validator refs; pre-edit warning; stale markers | done — resolve_ref, validator refs, pre-edit warning, rich provenance and freshness done; stale markers done (newly-stale acceptance gets one durable chat row per turn, deduped, re-armed on re-verify) | I2, I3, F1 |
 | I5 | recall/graph_query exposed | done — recall, graph_query done; memory-file indexing removed (write-only: indexed best-effort, never queried) | I4, F4 |
 | J | Python references; LSP diagnostics → journal; checkpoint before/after bash | partial — graph-view list MVP done then removed (§2.4.10) in favor of @-mentions; step-boundary + pre-bash checkpoints and LSP diagnostics → journal done; Python semantic references done (decorators, base classes, submodule from-imports, assigned lambdas, call-name order fix; adapter v2) | I5, C |
-| K | Canvas graph-view, watcher, LSP semantic capabilities, path view | planned | J |
+| K | Watcher, LSP semantic capabilities, path view (canvas graph-view dropped with the viewer removal, §2.4.10) | planned | J |
 | M | Test impact: reverse traversal, command synthesis, runner integration | done — reverse imports closure + same-dir, exact mapping for bare pytest/go/cargo, full suite still required at complete (§2.4.11) | I5, acceptance runners |
 | O | Unattended mode: policy layer, stop conditions, `brief`, `/review`, pending memory | planned (§12.8) | F6, H0, M, Q, T |
 | P | Windows/PowerShell shell-aware safety layer (§5.2) | done | §5.2 |
@@ -1715,7 +1690,7 @@ model's restated goal matches
 Diary entries never contain a test count or exit code absent from the host
 block (post-check test).
 remember-style direct writes to the graph do not exist; rm -rf .sqwai/graph followed by /graph-rebuild restores identical recall
-results for memory nodes.
+results for code nodes.
 Incremental projection == full rebuild: reindexing files one by one yields
 the same normalized projection as a full rebuild (mandatory test).
 /undo reopens exactly the steps whose evidence was reverted.
@@ -1821,8 +1796,6 @@ ask_user count, graph unknown ratio, cache hit ratio —
 are not collected yet.)
 
 9. Open questions
-agent_claims extraction: regex vs a cheap model call — decide after H0
-data.
 Should verify acceptance evidence require exit 0 specifically, or is any
 exec result acceptable when the acceptance text is negative ("no warnings")?
 Checkpoint storage is now two-layered: mandatory content-addressed per-file
@@ -1830,8 +1803,6 @@ blobs plus an optional Bash-only shadow Git repository; Git CLI is invoked
 synchronously on the blocking tool thread and never through the user's `.git`. Large-project
 thresholds and the local/user/off shadow location are configuration questions
 (§2.5, `[undo]`), not a reason to remove layer-1 undo.
-Whether the executor should see expects for run checks to choose
-arguments — currently no; revisit if not_observable rates are high.
 Bash isolation (AD): container / bwrap / WSL sandbox with the project
 mounted read-write — the only thing that turns the safety classifier from a
 "seatbelt" into a "guarantee". Deferred to a later phase; track as open question,
@@ -2110,8 +2081,7 @@ of them, and a different diff is not a different approach.
 
 **Anti-gaming.** The acceptance check is frozen before the first attempt and
 its hash is re-checked at every receipt; a changed check invalidates the
-earlier receipts and is journaled. AF (hardcode linter) already scans the
-outcome diff for test-shaped literals and stays the warn-layer it is.
+earlier receipts and is journaled.
 
 **UI.** `ACT · ULTRA` in the status line while the flag is on. At engagement
 the host renders the acceptance block: the resolved check(s), the pre-change
@@ -2185,11 +2155,9 @@ the checkpoints.
 ## 13. Known gaps (acknowledged boundaries)
 
 - **Attribute misattribution.** resolve_ref and the plan refs validator exist,
-  and the host now warns twice: at the write (paths outside the holding
-  step's refs) and at finish (overlap with other steps' refs) — but it
-  still cannot *prove* which step a write belongs to (e.g. unattributed
-  `bash` writes). Mitigations: nudge (§2.1.4), specific hint in rejection,
-  both warnings (§2.1.9). This follows the degrade‑don’t‑refuse principle.
+  but neither can *prove* which step a write belongs to (e.g. unattributed
+  `bash` writes). Mitigations: nudge (§2.1.4), specific hint in rejection.
+  This follows the degrade‑don’t‑refuse principle.
 
 - **Approval commit discipline (resolved).** The mouse-click / focus-steal
   hazard is closed: deny is preselected when the dialog opens, a click only

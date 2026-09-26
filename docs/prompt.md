@@ -12,7 +12,7 @@ For a normal tool-enabled request, sqwai sends these parts in order:
 4. The active durable plan, if present.
 5. The host-built `ANCHOR`, then resume notice and volatile runtime context.
 
-`ANCHOR` is state, not a model summary: after compaction it is the host-built record of the goal, constraints, plan state, and bounded journal facts. The prompt identifies `ANCHOR`, `FACTS`, the durable plan and its per-turn tail (compact current-state block), and nudges as host blocks that preserve provenance: goals and constraints are user-approved state, journal lines are time-stamped observations, and summaries or assumptions inside them stay model-authored claims. The current plan tail supersedes an older anchor snapshot.
+`ANCHOR` is state, not a model summary: after compaction it is the host-built record of the goal, constraints, plan state, and bounded journal facts. The prompt identifies `ANCHOR`, the durable plan and its per-turn tail (compact current-state block), the on-demand `journal` tool, and nudges as host blocks that preserve provenance: goals and constraints are user-approved state, journal lines are time-stamped observations, and summaries or assumptions inside them stay model-authored claims. The current plan tail supersedes an older anchor snapshot.
 
 ## Design requirements
 
@@ -24,6 +24,7 @@ The tool list is derived from the registry in `src/agent/tools/mod.rs`; it must 
 
 ## Changelog
 
+- 2026-09-26: Fixed prompt-code contradictions (goal/constraint changes only via propose_plan/propose_reset/add-split; tool schemas identical in both modes; dead FACTS block replaced by journal; strict-mode clause removed; plan-first gate documented with exact semantics); added Mode: plan/act and Checks: verify-commands volatile lines; toolchains probed from project manifests.
 - 2026-09-09: Reworked host facts around provenance (user-approved state vs time-stamped observations vs model-authored claims; plan tail supersedes older anchor); moved validator thresholds into the `plan` schema; narrowed execution/state claims and added tool-scope line; rewrote untrusted content as task data vs host-designated instructions; removed bash-block promise and `/plan delete` hint; narrowed think/background to checkable approach and timeout rule with independent-batch discipline; fixed stop rule for blocked steps; replaced style bans with observation/interpretation split, minimal-demo and URL rules; narrowed safety to unauthorized-access scope and secret handling without value copying; added completion report (changed / verified / unverified-or-blocked).
 - 2026-09-05: Clarified that `ANCHOR` is host-built post-compaction state rather than a summary; documented manual acceptance, block/cancel/split outcomes, forced questions after repeated rejections, assumptions, modes, prompt layers, read-before-edit, parallel read-only calls, and minimal-change/commit rules.
 - 2026-09-05: Rewrote the prompt around identity, host facts, integrity, tools, safety, style, and recovery. Removed duplicated operating sections, guessing examples, incident-specific limits, postponed-work notes, and sqwai development rules.
