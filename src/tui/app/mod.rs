@@ -744,6 +744,29 @@ impl App {
         {
             parts.push(SystemPart::volatile(status));
         }
+        // The model is never told its mode elsewhere: without this line it
+        // learns Plan vs Act from the first refusal, burning a turn.
+        parts.push(SystemPart::volatile(format!(
+            "Mode: {}",
+            match self.mode {
+                Mode::Plan => "plan",
+                Mode::Act => "act",
+            }
+        )));
+        // Verify-command names from .sqwai/config.toml ([verify]): the model
+        // needs them to write cmd: acceptance (/init collects them, nothing
+        // else shows them).
+        let checks = crate::config::Config::project_verify_commands(&root);
+        if !checks.is_empty() {
+            parts.push(SystemPart::volatile(format!(
+                "Checks: {}",
+                checks
+                    .iter()
+                    .map(|(name, command)| format!("{name} = {command}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )));
+        }
         // The anchor is host-generated from the plan and this session's
         // journal. It is rebuilt every turn so resume/compaction never relies
         // on a model-written summary.

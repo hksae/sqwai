@@ -80,8 +80,8 @@ fn run_session_probes(root: PathBuf) -> BTreeMap<String, String> {
     let mut jobs = 0;
     for (key, task) in [
         ("os", ProbeTask::Os),
-        ("git", ProbeTask::Git(root)),
-        ("toolchains", ProbeTask::Toolchains),
+        ("git", ProbeTask::Git(root.clone())),
+        ("toolchains", ProbeTask::Toolchains(root)),
     ] {
         jobs += 1;
         let tx = tx.clone();
@@ -89,7 +89,7 @@ fn run_session_probes(root: PathBuf) -> BTreeMap<String, String> {
             let value = match task {
                 ProbeTask::Os => os_info(),
                 ProbeTask::Git(root) => git_info(&root),
-                ProbeTask::Toolchains => toolchains(),
+                ProbeTask::Toolchains(root) => toolchains(&root),
             };
             let _ = tx.send((key.to_string(), value));
         });
@@ -116,7 +116,7 @@ fn run_session_probes(root: PathBuf) -> BTreeMap<String, String> {
 enum ProbeTask {
     Os,
     Git(PathBuf),
-    Toolchains,
+    Toolchains(PathBuf),
 }
 
 fn shell_name() -> String {
@@ -271,15 +271,61 @@ fn tree_block(root: &Path) -> String {
     out
 }
 
-fn toolchains() -> String {
-    let tools = [
-        ("rustc", "rustc", vec!["--version"]),
-        ("cargo", "cargo", vec!["--version"]),
-        ("node", "node", vec!["--version"]),
-        ("npm", "npm", vec!["--version"]),
-        ("python", "python", vec!["--version"]),
-        ("go", "go", vec!["version"]),
-    ];
+/// Probe only what the project manifests imply. Blind-probing a fixed
+/// list on every start wastes processes on languages the project does not
+/// use — and lies by omission: a missing `python` reads as "no Python"
+/// where only `python3` exists. Lockfiles pick the JS package manager and
+/// the Python installer; JVM probing stays out (java versions print to
+/// stderr, which the probe intentionally ignores).
+fn toolchains(root: &Path) -> String {
+    let entries: std::collections::HashSet<String> = std::fs::read_dir(root)
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let has = |name: &str| entries.contains(name);
+    let mut tools: Vec<(&str, &str, Vec<&str>)> = Vec::new();
+    if has("Cargo.toml") {
+        tools.push(("rustc", "rustc", vec!["--version"]));
+        tools.push(("cargo", "cargo", vec!["--version"]));
+    }
+    if has("package.json") {
+        tools.push(("node", "node", vec!["--version"]));
+        if has("pnpm-lock.yaml") {
+            tools.push(("pnpm", "pnpm", vec!["--version"]));
+        } else if has("yarn.lock") {
+            tools.push(("yarn", "yarn", vec!["--version"]));
+        } else if has("bun.lockb") || has("bun.lock") {
+            tools.push(("bun", "bun", vec!["--version"]));
+        } else {
+            tools.push(("npm", "npm", vec!["--version"]));
+        }
+    }
+    if has("pyproject.toml")
+        || has("uv.lock")
+        || has("poetry.lock")
+        || has("requirements.txt")
+        || has("setup.py")
+    {
+        tools.push(("python3", "python3", vec!["--version"]));
+        if has("uv.lock") {
+            tools.push(("uv", "uv", vec!["--version"]));
+        }
+        if has("poetry.lock") {
+            tools.push(("poetry", "poetry", vec!["--version"]));
+        }
+    }
+    if has("go.mod") {
+        tools.push(("go", "go", vec!["version"]));
+    }
+    if entries
+        .iter()
+        .any(|e| e.ends_with(".csproj") || e.ends_with(".sln"))
+    {
+        tools.push(("dotnet", "dotnet", vec!["--version"]));
+    }
     let (tx, rx) = mpsc::channel();
     for (name, program, args) in tools {
         let tx = tx.clone();
@@ -294,7 +340,7 @@ fn toolchains() -> String {
 
     let deadline = Instant::now() + PROBE_TIMEOUT;
     let mut versions = BTreeMap::new();
-    while versions.len() < 6 {
+    loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             break;
@@ -418,5 +464,18 @@ mod tests {
         std::fs::create_dir(root.path().join("ignored")).unwrap();
         std::fs::write(root.path().join("ignored").join("secret.txt"), "x").unwrap();
         assert!(!tree_block(root.path()).contains("ignored"));
+    }
+
+    #[test]
+    fn toolchains_follow_manifests_not_a_fixed_list() {
+        let root = tempfile::tempdir().unwrap();
+        // no manifests: nothing probed, honest unavailability
+        assert!(toolchains(root.path()).contains("unavailable"));
+        std::fs::write(root.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let out = toolchains(root.path());
+        // cargo/rustc exist wherever tests run (they built this binary)
+        assert!(out.contains("cargo"), "{out}");
+        assert!(!out.contains("npm"), "{out}");
+        assert!(!out.contains("python"), "{out}");
     }
 }

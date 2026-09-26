@@ -763,8 +763,9 @@ mod connection_tests {
 
     /// conversation_id is process-global: tests that set it serialize here
     /// so parallel threads cannot interleave set/assert pairs (threads>1
-    /// flake). Held across awaits too — the critical sections are short.
-    static CONVERSATION_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// flake). Sync tests take it with blocking_lock (never inside a
+    /// runtime); the async test awaits it.
+    static CONVERSATION_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Serve one canned response and record the request head for assertions.
     fn mock_models_server(
@@ -875,7 +876,7 @@ mod connection_tests {
 
     #[test]
     fn opencode_session_header_is_scoped_to_opencode_hosts() {
-        let _serial = CONVERSATION_SERIAL.lock().unwrap();
+        let _serial = CONVERSATION_SERIAL.blocking_lock();
         set_conversation_id("sess-42");
         assert_eq!(
             opencode_session_value("https://opencode.ai/zen/go/v1"),
@@ -893,7 +894,7 @@ mod connection_tests {
     /// an empty id counts as unknown rather than routing nowhere.
     #[test]
     fn prompt_cache_key_tracks_the_session_id() {
-        let _serial = CONVERSATION_SERIAL.lock().unwrap();
+        let _serial = CONVERSATION_SERIAL.blocking_lock();
         set_conversation_id("sess-7");
         assert_eq!(
             prompt_cache_key("https://opencode.ai/zen/go/v1"),
@@ -907,7 +908,7 @@ mod connection_tests {
 
     #[tokio::test]
     async fn probe_never_leaks_session_header_to_other_hosts() {
-        let _serial = CONVERSATION_SERIAL.lock().unwrap();
+        let _serial = CONVERSATION_SERIAL.lock().await;
         set_conversation_id("sess-42");
         let (url, head, handle) = mock_models_server(200, "OK", r#"{"data":[{"id":"a"}]}"#);
         let outcome = check_connection(&resolved(url, WireFormat::Openai, Some("k".into()))).await;
