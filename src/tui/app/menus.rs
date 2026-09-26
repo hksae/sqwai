@@ -40,7 +40,6 @@ pub(super) const COMMANDS: &[&str] = &[
     "/skills",
     "/test",
     "/undo",
-    "/verify",
     "/why",
 ];
 
@@ -56,7 +55,6 @@ pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
         ],
     ),
     ("/undo", &["step"]),
-    ("/verify", &["--full"]),
     ("/test", &["animations"]),
     ("/providers", &["update"]),
     ("/constraints", &["add", "remove"]),

@@ -1,7 +1,7 @@
 //! AB `/why`: deterministic evidence gathering for "why" questions.
 //!
 //! The host digs the journal and the plan; the model only narrates what
-//! was found (via [`crate::agent::reflector::micro_call`]). Nothing is
+//! was found (via [`micro_call`]). Nothing is
 //! interpreted by patterns here beyond token matching — the moment the
 //! evidence ends, the narrator is instructed to say so instead of
 //! inventing. No evidence at all means no model call (status line,
@@ -187,6 +187,66 @@ pub const NARRATOR_SYSTEM: &str = "You explain past agent actions from host-supp
 pub const NARRATOR_MAX_TOKENS: u32 = 1500;
 pub const NARRATOR_TIMEOUT_SECS: u64 = 90;
 
+/// One tool-free model call with a timeout, for the `/why` narrator:
+/// schema-bound (or stop-ruled) micro-call, not a turn.
+pub(crate) async fn micro_call(
+    provider: &crate::providers::SharedProvider,
+    model_id: &str,
+    system: &str,
+    prompt: &str,
+    max_tokens: u32,
+    timeout_secs: u64,
+) -> anyhow::Result<String> {
+    let request = crate::providers::ChatRequest {
+        model_id: model_id.to_string(),
+        system: vec![crate::providers::SystemPart::volatile(system)],
+        messages: vec![crate::providers::Message::new(
+            crate::providers::Role::User,
+            prompt,
+        )],
+        // Low, not None: the gateway returns an empty completion without an
+        // effort budget on some models (observed, not theorized). Cheap call
+        // either way — schema-bound, no tools.
+        effort: Some(crate::config::EffortLevel::Low),
+        effort_support: Default::default(),
+        max_tokens: Some(max_tokens),
+        tools: Vec::new(),
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        collect_text(provider, &request),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("micro call timed out"))?
+}
+
+async fn collect_text(
+    provider: &crate::providers::SharedProvider,
+    request: &crate::providers::ChatRequest,
+) -> anyhow::Result<String> {
+    use futures::StreamExt;
+    let mut stream = provider.stream_chat(request.clone());
+    let mut text = String::new();
+    let (mut reasoning, mut tools, mut other) = (0u32, 0u32, 0u32);
+    while let Some(event) = stream.next().await {
+        match event? {
+            crate::providers::StreamEvent::Text(chunk) => text.push_str(&chunk),
+            crate::providers::StreamEvent::Reasoning(_) => reasoning += 1,
+            crate::providers::StreamEvent::ToolCall(_) => tools += 1,
+            _ => other += 1,
+        }
+    }
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        anyhow::bail!(
+            "narrator returned empty text (reasoning={reasoning} toolcalls={tools} other={other})"
+        );
+    }
+    Ok(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,7 +316,7 @@ mod tests {
             let (dir, session) = fixture("live");
             let evidence = gather(&dir, &session, "why did auth fail");
             assert!(!evidence.is_empty());
-            let answer = crate::agent::reflector::micro_call(
+            let answer = micro_call(
                 &model.provider,
                 &model.model_id,
                 NARRATOR_SYSTEM,

@@ -31,7 +31,7 @@ drift and keep progress checkable:
 | Compaction loses the thread | The post-compaction anchor is assembled from structured state, not from a summary | §3.3 |
 | Memory contains fabricated facts | Facts in memory are inserted by the host from the journal; the model adds meaning | §2.3 |
 | References to non-existent code | A project graph answers "does this symbol exist" deterministically | §2.4 |
-| Criticism answered by arguing | (planned, §12.7) criticism triggers fact retrieval and, when needed, a blinded verification pipeline | §3.5 |
+| Criticism answered by arguing | dropped (§12.7): no detector, no pipeline; a re-check is a plain request to the agent, evidence gates apply as usual | — |
 
 Everything else — providers, TUI, MCP, LSP, skills, undo — is infrastructure
 that must be solid but is not what the project is about.
@@ -51,7 +51,7 @@ that must be solid but is not what the project is about.
    in plain files under `.sqwai/`. The graph is a rebuildable cache over those
    files and the repository. Deleting `.sqwai/graph/` loses nothing.
 4. **No hidden confident conclusions.** Any mechanism that changes what the
-   agent says (reflector, fact blocks) leaves a visible trace for the user.
+   agent says (fact blocks) leaves a visible trace for the user.
 5. **Bounded everything.** Every query, injection, retry loop, subagent fan-out
    and traversal has a limit and a deterministic order.
 6. **Degrade, don't refuse.** Missing git, missing graph, missing LSP, missing
@@ -629,7 +629,7 @@ trusting" — while the class drives behavior:
 - Confirm gates (narrow, decided): at level 2, commands that send data
   outward (network upload/POST, `git push`, ssh/scp-class) require user
   approval with a trust reason, reusing the dangerous-command dialog.
-  Headless contexts (subagents, reflector) cannot prompt and deny instead.
+   Headless contexts (subagents) cannot prompt and deny instead.
   Irreversible deletes stay with the safety classifier at every level.
   Screening applies to content only; it never strips data the model needs.
 
@@ -911,7 +911,7 @@ author and journal reference through indexing, recall surfaces both, and
 indexing never upgrades a note into a verified fact.
 
 2.4.6 Operations
-resolve_ref (host API and reflector tool; also exposed to the main
+resolve_ref (host API, also exposed to the main
 model):
 
 JSON
@@ -1267,12 +1267,13 @@ Resume is the only multi-session path. Fork is deleted: no `/fork` command,
 no plan copy, no journal fork record.
 
 3.5 Criticism → Reflector
-DROPPED (auto path): auto-detection fired too imprecisely and no idea ever
-replaced it — nothing invokes the pipeline automatically, and the detector
-(classifier, weights, Maybe-confirm) is deleted, not parked. Manual
-/verify drives the kept pipeline on request: scope + neutralizer +
-blinded executor + host verdict over journal-grounded artifacts.
-Specified in §12.7.
+DROPPED outright (was: auto path dropped, manual /verify kept): the manual
+command is removed too — a user who wants a re-check asks the agent
+directly; evidence gates and cmd: acceptance still forbid unverified
+claims. The pipeline (scope, neutralizer, blinded executor, verdict), the
+H1 executor sandbox and the /verify command with its TUI wiring are
+deleted; the tool-free micro-call survives as the /why narrator (why.rs).
+Specified in §12.7 (kept for the record).
 3.6 Undo
 /undo [n] attempts to restore sqwai-recorded changes from the n-th previous
 checkpoint (default 1) — not a guaranteed full-tree rollback. `/undo step N`
@@ -1654,12 +1655,12 @@ number; a `partial` one is missing something the design calls for.
 | F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, zstd) + layer-2 shadow repo driven by git CLI synchronously; path-scoped restore; `/undo step N` | done | F1 |
 | F7b | Crash-safe mutation protocol | done differently — no `mutation_started/observed` sweep; Layer-1 pre-images + `file_diff` chain cover single-step revert instead | F7 |
  | G0 | Minimal comparative retention benchmark (§8.2): plan + journal + anchor vs baseline | done as engineering soak-test — harness as ignored tests (minidb T1–T3 + kaiwai T4 matrix), pre-registration, eval files and analyses under bench/ | F1b, F6 |
- | H0 | L0 fact block + criticism detector | DROPPED (auto path) — detector as learned student deleted with its weights, tests and training assets after the drop decision; journal grounding helpers (touches, artifacts) kept for manual /verify | F2 |
- | H1 | Reflector: Scope/Neutralizer/Executor/Verdict, /verify | manual only — full pipeline kept for manual /verify (Scope, Neutralizer with tone-invariance test, min-loop Executor in reflector ctx with dispatch refusal, host verdict mapping, host-rendered [verified], verdict file, recurrence, diary lesson + `/verify [--full]` as background task); auto Maybe-confirm and H1 self-protection (objection counting) deleted with the auto path; live-model tone + executor tests | H0, D |
+ | H0 | L0 fact block + criticism detector | DROPPED (auto path) — detector as learned student deleted with its weights, tests and training assets after the drop decision; journal grounding helpers deleted with the manual-/verify removal | F2 |
+ | H1 | Reflector: Scope/Neutralizer/Executor/Verdict, /verify | DROPPED outright — manual /verify removed with the whole pipeline (criticism.rs, reflector.rs, H1 executor sandbox, TUI wiring); the tool-free micro-call survives as the /why narrator | H0, D |
 | I1 | Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild | done — rusqlite (bundled) engine with §2.4.2 schema | E |
 | I2 | Rust + Python + TypeScript adapters (tree-sitter, minimal: declarations) | done — tree-sitter declarations and lexical imports for Rust, Python, TypeScript | I1 |
 | I3 | Freshness: edit/bash/undo/head triggers; status semantics; out-of-order protection (mandatory) | done — generation stamps, replace_file_subgraph_stamped, out-of-order protection, disk-hash freshness | I1 |
-| I4 | resolve_ref; validator refs; pre-edit warning; stale markers; reflector executor tool | done — resolve_ref, validator refs, pre-edit warning, rich provenance and freshness done; stale markers done (newly-stale acceptance gets one durable chat row per turn, deduped, re-armed on re-verify); the reflector executor is H1 work (done, §12.7) | I2, I3, F1 |
+| I4 | resolve_ref; validator refs; pre-edit warning; stale markers | done — resolve_ref, validator refs, pre-edit warning, rich provenance and freshness done; stale markers done (newly-stale acceptance gets one durable chat row per turn, deduped, re-armed on re-verify) | I2, I3, F1 |
 | I5 | Memory adapter; recall/graph_query exposed | done — memory adapter, recall, graph_query done | I4, F4 |
 | J | Python references; LSP diagnostics → journal; checkpoint before/after bash | partial — graph-view list MVP done then removed (§2.4.10) in favor of @-mentions; step-boundary + pre-bash checkpoints and LSP diagnostics → journal done; Python semantic references done (decorators, base classes, submodule from-imports, assigned lambdas, call-name order fix; adapter v2) | I5, C |
 | K | Canvas graph-view, watcher, LSP semantic capabilities, path view | planned | J |
@@ -1685,7 +1686,7 @@ number; a `partial` one is missing something the design calls for.
 | AE | Core and UI decoupling: headless `serve` (stdio/JSON-RPC) + crates workspace split (`sqwai-core`, `sqwai-tui`, `sqwai-server`) (§5.11) | planned | B |
 | AF | Hardcode linter: scan file_diff for test-shaped literals (warn-layer) | done — confession phrases + long compared/returned string literals over the outcome diff (cap 3, never blocks); numeric magic constants deliberately excluded (ports/timeouts); `bash`-written bytes not scanned | I4 |
 | AG | Safety level presets / refusal override policy for models with strong filters | planned | — |
- | AH | Verification protocol: executable acceptance as the settling rule (merged from ULTRA-1 into §2.1) — frozen check that fails before the change, rungs beyond tests, three states, `passed` required to settle | done (§2.1) — baseline proof, the settle gate, and the three states shipped for `cmd:` items (host runs every check at plan create, keeps the failing run, `verify` refuses an item without one, `plan show` marks it; a green run and a red run disagreeing on the same digest marks the item flaky/unknown, never retried into `passed`, `complete` stays blocked); rung 4 shipped (`snapshot:` freezes output at plan time, settles on byte-identical output); rung 3 shipped (   `differential:` settles on changed output, double-run freeze refuses nondeterministic inputs); rung 5 shipped (`signatures:` settles on identical declaration shapes, AST-normalized); the walk shipped (host classifies items by rung, reports the highest in create/accept and per item); differential hardening: a nonzero exit with changed output is `broken_change` (never verified — change without breakage is the whole point of the rung), `complete` re-runs and blocks on `unchanged`; dropped: the round-trip rung (no acceptance kind was ever defined) and rung synthesis (no spec was ever written); ULTRA-2 parked, ULTRA-3 dropped | V, V1, F3, H1 |
+ | AH | Verification protocol: executable acceptance as the settling rule (merged from ULTRA-1 into §2.1) — frozen check that fails before the change, rungs beyond tests, three states, `passed` required to settle | done (§2.1) — baseline proof, the settle gate, and the three states shipped for `cmd:` items (host runs every check at plan create, keeps the failing run, `verify` refuses an item without one, `plan show` marks it; a green run and a red run disagreeing on the same digest marks the item flaky/unknown, never retried into `passed`, `complete` stays blocked); rung 4 shipped (`snapshot:` freezes output at plan time, settles on byte-identical output); rung 3 shipped (   `differential:` settles on changed output, double-run freeze refuses nondeterministic inputs); rung 5 shipped (`signatures:` settles on identical declaration shapes, AST-normalized); the walk shipped (host classifies items by rung, reports the highest in create/accept and per item); differential hardening: a nonzero exit with changed output is `broken_change` (never verified — change without breakage is the whole point of the rung), `complete` re-runs and blocks on `unchanged`; dropped: the round-trip rung (no acceptance kind was ever defined) and rung synthesis (no spec was ever written); ULTRA-2 parked, ULTRA-3 dropped | V, V1, F3 |
 | AI | ULTRA-2: conditional escalation under a separate arbiter budget (`N ≤ B/T`) | PARKED — ULTRA mode development paused; the ULTRA-1 substrate above ships and lives on its own; ULTRA-3 (divergence) dropped outright: its own death criterion plus the cost thesis kill divergence-for-divergence (§12.12) | AH, M, AC |
 | AJ | Typed executable constraints (§2.1.10): `forbid-import:`, `forbid-cmd:` (live in bash), `ast:`, `path:` evaluated at `complete`; `/plan waive-constraint`; AGENTS.md advisory mining at create | done — violations block complete like red checks; unprefixed constraints stay advisory | AH |
 
@@ -1704,7 +1705,7 @@ something. AI is parked with the rest of ULTRA mode; when it unparks it needs
 measurements from the replacement benchmark format and the AC harness showing
 whether arbitration pays. Neither displaces K, L or O.
 
-Rules: no agent-facing graph feature before I3; no reflector before F2. F1 is
+Rules: no agent-facing graph feature before I3. F1 is
 complete except its explicitly deferred evidence/refs rules, which belong to
 F3/I4. Items L–AD are the external-risk + enhancement pass (§1.x/§2.x); §11 is
 the explicit exclusion list.
@@ -1729,13 +1730,12 @@ Incremental projection == full rebuild: reindexing files one by one yields
 the same normalized projection as a full rebuild (mandatory test).
 /undo reopens exactly the steps whose evidence was reverted.
 Done (see §2.4.11): impact selection with the full suite always running
-at `complete`; the reflector scenario suite (agent_error, claim_not_confirmed, scope_mismatch, partial,
-undetermined, tone invariance, no-journal degradation).
+at `complete`.
 8.2 Goal-retention benchmark
 
 - **G0 (Minimal retention benchmark)**: isolates the core anchor and plan loop
   (plan + evidence + anchor vs baseline summary=short) without depending on
-  external graph tools, provider fallbacks, or reflector escalation.
+  external graph tools, provider fallbacks.
   Cost comparisons from runs before the cache-layout fix and the host
   summary cap are suspect on both arms (volatile tail re-keyed history;
   uncapped baseline summaries) — remeasure on `cache-adjusted cost`,
@@ -1824,7 +1824,7 @@ log next to the config), and perf frame log — one line per drawn frame
 counts, tick, streaming/running flags, view) plus tool markers, into a
 fresh temp file per toggle-on. The row shows the path while recording.
 (Aggregate integrity metrics — plan rejections per accepted op, forced
-ask_user count, reflector outcomes, graph unknown ratio, cache hit ratio —
+ask_user count, graph unknown ratio, cache hit ratio —
 are not collected yet.)
 
 9. Open questions
@@ -1905,14 +1905,11 @@ depresses precision); on-demand traversal (recall/graph_query) and
 explicit pins (@-mentions) do the work instead. No automatic injection
 is planned.
 
-### 12.7 Criticism → Reflector (auto path DROPPED, manual kept)
-Moved here from §3.5; implemented, then parked, then dropped outright:
-auto-detection fired too imprecisely and no idea ever replaced it. The
-auto trigger, the Maybe-confirm step and the whole H0 inference stack
-(classifier, weights, training assets) are deleted; manual /verify drives
-the kept pipeline (scope → neutralizer → blinded executor → host verdict
-over journal-grounded artifacts) on request. Original spec below, kept
-for the record. Three levels for "you broke
+### 12.7 Criticism → Reflector (DROPPED outright)
+Moved here from §3.5; auto-detection dropped first (fired too imprecisely),
+then the manual /verify path with it: no detector, no pipeline, no command.
+The tool-free micro-call survives as the /why narrator (why.rs). Original
+spec below, kept for the record. Three levels for "you broke
 it" moments — cheap always, expensive by escalation:
 
 - **L0 fact block.** A criticism detector injects journal facts into block D

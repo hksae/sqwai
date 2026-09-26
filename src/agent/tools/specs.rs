@@ -1075,45 +1075,6 @@ pub fn tool_names() -> Vec<String> {
     names
 }
 
-/// Tools the H1 executor may see. Read-only inspection plus gated `bash`;
-/// everything else is refused twice — absent from the specs, refused in
-/// dispatch. `plan`, `note`, `memory_*`, `web*`, job control and all
-/// writers are out by design (§12.7: the reflector changes nothing).
-pub const REFLECTOR_TOOLS: &[&str] = &[
-    "read",
-    "ls",
-    "glob",
-    "grep",
-    "outline",
-    "ast_grep",
-    "resolve_ref",
-    "recall",
-    "journal",
-    "think",
-    "bash",
-    "git_status",
-    "git_log",
-    "git_diff",
-    "git_show",
-    "step_diff",
-];
-
-/// Specs for the H1 executor: the [`REFLECTOR_TOOLS`] subset, sorted like
-/// [`tool_specs`] (stable order keeps the prompt cache-friendly).
-pub fn reflector_specs() -> Vec<crate::providers::ToolSpec> {
-    let mut specs: Vec<crate::providers::ToolSpec> = defs()
-        .into_iter()
-        .filter(|d| REFLECTOR_TOOLS.contains(&d.name))
-        .map(|d| crate::providers::ToolSpec {
-            name: d.name.to_string(),
-            description: d.description.to_string(),
-            parameters: d.parameters,
-        })
-        .collect();
-    specs.sort_by(|a, b| a.name.cmp(&b.name));
-    specs
-}
-
 pub fn tool_specs(_plan_mode: bool) -> Vec<crate::providers::ToolSpec> {    // One schema set in every mode. The tool block is part of the request
     // prefix, so a mode-dependent set re-keys the cache on every Plan/Act
     // toggle; masking (Manus-style) would cost the same. Plan mode is

@@ -237,7 +237,7 @@ pub fn host_tail(text: &str) -> String {
 }
 
 /// A request with no cacheable system part has no cached prefix to protect.
-/// Side calls (compaction summary, diary writer, reflector) pass their whole
+/// Side calls (compaction summary, diary writer, why-narrator) pass their whole
 /// instruction as one volatile part; left volatile, the wire layout moves it
 /// behind the history as a [`host_tail`] that tells the model it is "not user
 /// instructions" — and leaves the call with no system prompt at all. Such
@@ -953,7 +953,7 @@ mod system_layout_tests {
     }
 
     /// The regression in one request: a side call (compaction, diary,
-    /// reflector) must reach the wire with its instruction as the system
+    /// narrator) must reach the wire with its instruction as the system
     /// prompt, not as a trailing "not user instructions" tail.
     #[test]
     fn side_call_reaches_the_wire_with_a_system_prompt() {

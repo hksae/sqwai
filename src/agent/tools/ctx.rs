@@ -64,11 +64,6 @@ pub struct ToolCtx {
     /// from the spawn registry at construction; read-only children and
     /// the main agent never set it.
     pub subagent_write_paths: Option<Vec<String>>,
-    /// H1 reflector executor (§12.7): verify-only context. The dispatcher
-    /// refuses every tool outside [`REFLECTOR_TOOLS`] plus mutating `bash`,
-    /// with an honest message. Unlike `read_only` (a lock held elsewhere)
-    /// this is a role: there is nothing to wait for or `--force` past.
-    pub reflector: bool,
     /// Hard-blocked command patterns from `[safety].blocked_patterns`.
     /// The bash tool enforces them at dispatch; acceptance runners enforce
     /// the same list through `acceptance_policy_hit`, so a `cmd:` check —
@@ -102,7 +97,6 @@ impl ToolCtx {
             current_step: None,
             subagent_step: None,
             subagent_write_paths: None,
-            reflector: false,
             blocked_patterns: Vec::new(),
         }
     }

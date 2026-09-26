@@ -100,78 +100,12 @@ fn reopen_undone_steps(
     reopened
 }
 
-/// Outcome of a background `/verify` run (H1 slice 3), rendered on the
-/// UI thread by [`App::poll_verify`]. Everything in here is owned and
-/// `Send`: the task boundary demands both.
-enum VerifyOutcome {
-    Verified {
-        block: String,
-        verdict: String,
-        seq: Option<u64>,
-    },
-    NothingToVerify,
-    Failed(String),
-}
-
 /// Outcome of a background `/why` narration (AB), rendered by
-/// [`App::poll_why`]. Same owned+`Send` shape as [`VerifyOutcome`].
+/// [`App::poll_why`]. Everything in here is owned and `Send`: the task
+/// boundary demands both.
 enum WhyOutcome {
     Answered { text: String },
     Failed(String),
-}
-
-struct VerifyTaskInput {
-    root: std::path::PathBuf,
-    session: String,
-    model_id: String,
-    provider: crate::providers::SharedProvider,
-    full: bool,
-}
-
-/// `/verify [--full]` body: L1 with a wider window and budget, on request.
-/// Target is the last fired criticism, else the last turn generically.
-/// Manual means no classifier — the command IS the assertion — but the
-/// same Scope/Neutralizer/Executor/Verdict path runs, so records and the
-/// block shape match the auto flow exactly.
-async fn run_verify_task(input: VerifyTaskInput) -> VerifyOutcome {
-    use crate::agent::{criticism, journal::Journal, reflector};
-    let budget = if input.full {
-        criticism::Budget::full()
-    } else {
-        criticism::Budget::verify()
-    };
-    crate::providers::set_conversation_id(&input.session);
-    let text = reflector::last_criticism_text(&input.root, &input.session)
-        .unwrap_or_else(|| "manual /verify of the last turn".to_string());
-    let Some((rctx, _)) = reflector::manual(&input.root, &input.session, &text, budget.window)
-    else {
-        return VerifyOutcome::NothingToVerify;
-    };
-    let mut writer = match Journal::open(&input.root, &input.session) {
-        Ok(writer) => writer,
-        Err(error) => return VerifyOutcome::Failed(format!("journal open: {error:#}")),
-    };
-    let checks = match reflector::neutralize(&input.provider, &input.model_id, &rctx).await {
-        Ok(checks) => checks,
-        Err(error) => return VerifyOutcome::Failed(format!("neutralize: {error:#}")),
-    };
-    let report = reflector::verify(
-        &input.root,
-        &input.session,
-        &input.model_id,
-        &input.provider,
-        &mut writer,
-        &rctx,
-        &checks,
-        &budget,
-    )
-    .await;
-    let verdict = report.verdict.label().to_string();
-    VerifyOutcome::Verified {
-        block: report.block,
-        verdict,
-        seq: report.seq,
-    }
 }
 
 mod events;
@@ -338,13 +272,8 @@ pub struct App {
     streaming: bool,
     aborted: bool,
     agent: Option<AgentHandle>,
-    /// background `/verify` run (H1 slice 3): collection end of a oneshot
-    /// the task sends its report through. `Some` while the run flies — the
-    /// UI never blocks on it, and a second `/verify` is refused until the
-    /// report lands. No Esc integration: bounded by the verify/full wall
-    /// budget either way.
-    verify_rx: Option<tokio::sync::oneshot::Receiver<VerifyOutcome>>,
-    /// background `/why` answer (AB): same oneshot shape as `/verify`.
+    /// background `/why` answer (AB): collection end of a oneshot
+    /// the task sends its answer through. `Some` while it flies.
     why_rx: Option<tokio::sync::oneshot::Receiver<WhyOutcome>>,
     /// derived visible steps from the active structured plan
     todos: Vec<String>,
@@ -923,7 +852,6 @@ impl App {
             streaming: false,
             aborted: false,
             agent: None,
-            verify_rx: None,
             why_rx: None,
             todos: Vec::new(),
             subagents: Vec::new(),
@@ -1355,7 +1283,6 @@ impl App {
             self.poll_input(&ev_rx)?;
             self.poll_startup_data();
             self.poll_agent();
-            self.poll_verify();
             self.poll_why();
             self.poll_provider_check();
             self.poll_builtin_update();
@@ -3156,26 +3083,6 @@ impl App {
                     self.status("/export takes no arguments", StatusKind::Warn);
                 } else {
                     self.export_session();
-                }
-            }
-            "/verify" => {
-                if self.streaming {
-                    self.show_busy_status();
-                } else if self.verify_rx.is_some() {
-                    self.status("verification already running", StatusKind::Warn);
-                } else {
-                    let mut args = rest.split_whitespace().skip(1);
-                    match args.next() {
-                        None => self.start_verify(false),
-                        Some("--full") => self.start_verify(true),
-                        Some(arg) => self.status(
-                            &format!(
-                                "/verify takes no arguments except --full, not {arg:?} — \
-                                 /verify or /verify --full"
-                            ),
-                            StatusKind::Warn,
-                        ),
-                    }
                 }
             }
             "/why" => {
@@ -4992,11 +4899,6 @@ impl App {
     }
 
     /// revert the last `n` mutating actions and reopen steps whose evidence was reverted.
-    /// H1 slice 3: `/verify [--full]` (L1 with a wider window and budget,
-    /// on request). Spawns a background task — the UI never blocks — polled
-    /// per tick by [`Self::poll_verify`]. Refused while streaming or while
-    /// a previous run still flies. No Esc integration: the run is bounded
-    /// by the verify/full wall budget either way.
     /// AB `/export`: markdown + JSON dump of the session into
     /// `.sqwai/exports/`. Synchronous and local — no model, no network.
     fn export_session(&mut self) {
@@ -5031,7 +4933,7 @@ impl App {
 
     /// AB `/why`: answer a why-question from journal evidence, narrated by
     /// the model. Gather is synchronous (no evidence → status, no call);
-    /// narration flies in the background like `/verify`.
+    /// narration flies in a background task, polled per tick.
     fn start_why(&mut self, question: String) {
         let root = self.project_root.clone();
         let session = self.session.id.to_string();
@@ -5048,7 +4950,7 @@ impl App {
         let provider = self.provider.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let outcome = match crate::agent::reflector::micro_call(
+            let outcome = match crate::agent::why::micro_call(
                 &provider,
                 &model_id,
                 crate::agent::why::NARRATOR_SYSTEM,
@@ -5093,83 +4995,6 @@ impl App {
             }
             WhyOutcome::Failed(error) => {
                 self.status(&format!("why-answer failed: {error}"), StatusKind::Err);
-            }
-        }
-        self.dirty = true;
-    }
-
-    fn start_verify(&mut self, full: bool) {
-        let root = self.project_root.clone();
-        let session = self.session.id.to_string();
-        let model_id = self.model_cfg.id.clone();
-        let provider = self.provider.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let outcome = run_verify_task(VerifyTaskInput {
-                root,
-                session,
-                model_id,
-                provider,
-                full,
-            })
-            .await;
-            let _ = tx.send(outcome);
-        });
-        self.verify_rx = Some(rx);
-        self.status(
-            if full {
-                "verifying (full pass)…"
-            } else {
-                "verifying…"
-            },
-            StatusKind::Info,
-        );
-        self.dirty = true;
-    }
-
-    /// Collect a finished `/verify` run: durable verdict row plus status.
-    /// Nothing lands mid-run — one row, once, when the report arrives.
-    fn poll_verify(&mut self) {
-        let outcome = match self.verify_rx.as_mut() {
-            None => return,
-            Some(rx) => match rx.try_recv() {
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return,
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    self.verify_rx = None;
-                    self.status("verification task died", StatusKind::Err);
-                    self.dirty = true;
-                    return;
-                }
-                Ok(outcome) => {
-                    self.verify_rx = None;
-                    outcome
-                }
-            },
-        };
-        match outcome {
-            VerifyOutcome::Verified {
-                block,
-                verdict,
-                seq,
-            } => {
-                self.push_segment(Segment::Assistant {
-                    text: block,
-                    live: false,
-                });
-                let at = seq.map(|s| format!(" (j{s})")).unwrap_or_default();
-                self.status(
-                    &format!("verification complete: {verdict}{at}"),
-                    StatusKind::Ok,
-                );
-            }
-            VerifyOutcome::NothingToVerify => {
-                self.status(
-                    "nothing to verify: the recent window holds no file writes",
-                    StatusKind::Warn,
-                );
-            }
-            VerifyOutcome::Failed(error) => {
-                self.status(&format!("verification failed: {error}"), StatusKind::Err);
             }
         }
         self.dirty = true;

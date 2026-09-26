@@ -5,7 +5,7 @@ use super::fs;
 use super::git;
 use super::outline;
 use super::policy::{bash_scope_hit, commanded_verify_refs, frozen_input_hit, in_write_scope, mutation_target_paths, step_epoch_current};
-use super::specs::{self, REFLECTOR_TOOLS};
+use super::specs;
 use super::verify::{capture_baselines, rejection, validate_complete, validate_evidence, verify_acceptance, with_assumption_warning, with_blast_radius, with_evidence_ts_warning, with_misattribution_warning};
 use crate::agent::graph::GraphStore;
 use crate::plan;
@@ -119,29 +119,6 @@ impl Outcome {
 
 const READ_MAX_BYTES: usize = 400_000;
 
-
-/// `bash` for the H1 executor: Safe commands run blocking with a cap;
-/// anything else refuses. Headless means no approvals, no background.
-fn reflector_bash(ctx: &mut ToolCtx, command: &str, timeout: Option<u64>) -> Outcome {
-    if command.trim().is_empty() {
-        return Outcome::err("bash requires a non-empty 'command' argument");
-    }
-    match crate::agent::safety::classify_for(crate::agent::shell::ShellKind::detect(), command) {
-        crate::agent::safety::Verdict::Safe => {
-            exec::bash(ctx, command, timeout.or(Some(120)), false)
-        }
-        crate::agent::safety::Verdict::Blocked(reason)
-        | crate::agent::safety::Verdict::NeedsApproval(reason) => Outcome::err(
-            serde_json::json!({
-                "ok": false,
-                "code": "reflector_read_only",
-                "reason": format!("reflector refuses this command ({reason}): verify, do not change"),
-            })
-            .to_string(),
-        ),
-    }
-}
-
 /// (id, owning session, command) of background jobs whose processes are
 /// still alive. The undo preflight (§2.5, S1) refuses a restore while any
 /// of these run — the writer lock stops in-process dispatch, but an
@@ -196,33 +173,6 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             })
             .to_string(),
         );
-    }
-    // H1 reflector executor (§12.7): verify-only. Tools outside
-    // REFLECTOR_TOOLS never reach dispatch in practice (absent from the
-    // specs), but a hallucinated name must refuse loudly rather than run.
-    // `bash` runs only when the safety classifier calls it Safe — approvals
-    // cannot exist headless, so NeedsApproval refuses like Blocked — and
-    // never in background (no job-registry pollution across the turn).
-    if ctx.reflector {
-        if name == "bash" {
-            return reflector_bash(
-                ctx,
-                args["command"].as_str().unwrap_or_default(),
-                args["timeout"].as_u64(),
-            );
-        }
-        if !REFLECTOR_TOOLS.contains(&name) {
-            return Outcome::err(
-                serde_json::json!({
-                    "ok": false,
-                    "code": "reflector_read_only",
-                    "reason": format!(
-                        "reflector is read-only: '{name}' is not a verification tool — verify the tree, do not change it"
-                    ),
-                })
-                .to_string(),
-            );
-        }
     }
     // A subagent mutating after its step was reopened (or its plan retired)
     // would attach stale work to a fresh epoch (§2.2.4). Refuse instead.
