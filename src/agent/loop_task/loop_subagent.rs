@@ -91,7 +91,7 @@ fn scopes_overlap(a: &[String], b: &[String]) -> bool {
 }
 
 pub(crate) fn subagent_tasks_from_args(args: &serde_json::Value) -> Result<Vec<SubagentTask>, String> {
-    let mut tasks: Vec<SubagentTask> = match args.get("tasks") {
+    let tasks: Vec<SubagentTask> = match args.get("tasks") {
         Some(serde_json::Value::Array(items)) => {
             items.iter().filter_map(subagent_task_spec).collect()
         }
