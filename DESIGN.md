@@ -1602,7 +1602,7 @@ Project-specific instructions	AGENTS.md	sqwai's own development rules ("build re
 User/project durable facts	MEMORY.md	stable prefix
 Environment	host-generated block B	dated to the day
 Anchor, plan, nudges	host-generated blocks B/D	never described as "hidden"; the prompt tells the model these blocks preserve provenance (user-approved state vs time-stamped observations vs model-authored claims) and that the current plan tail supersedes an older anchor snapshot
-Prompt hygiene rules enforced by review: no rule stated twice; no examples
+Prompt hygiene rules enforced by review: no examples
 that reward guessing (the "golf balls" example is removed); no magic numbers
 from past incidents ("2000 lines"); no developer notes about postponed work.
 docs/prompt.md holds the full text with a changelog.
@@ -1644,7 +1644,7 @@ number; a `partial` one is missing something the design calls for.
 | F6 | Compaction anchor; summary=short default; resume per §3.4 (fork deleted); undo→reopen | done | F1–F5 |
 | F7 | Checkpoint refactor (§2.5): drop `git2`; layer-1 blob store (blake3, zstd) + layer-2 shadow repo driven by git CLI synchronously; path-scoped restore; `/undo step N` | done | F1 |
 | F7b | Crash-safe mutation protocol | done differently — no `mutation_started/observed` sweep; Layer-1 pre-images + `file_diff` chain cover single-step revert instead | F7 |
- | G0 | Minimal comparative retention benchmark (§8.2): plan + journal + anchor vs baseline | done as engineering soak-test — harness as ignored tests (minidb T1–T3 + kaiwai T4 matrix), pre-registration, eval files and analyses under bench/ | F1b, F6 |
+ | G0 | Goal-retention soak-test (§8.2): plan + journal + anchor vs baseline | done — as soak-test (bugs found), NOT as effectiveness proof; harness as ignored tests, eval files under bench/ | F1b, F6 |
  | H0 | L0 fact block + criticism detector | DROPPED (auto path) — detector as learned student deleted with its weights, tests and training assets after the drop decision; journal grounding helpers deleted with the manual-/verify removal | F2 |
  | H1 | Reflector: Scope/Neutralizer/Executor/Verdict, /verify | DROPPED outright — manual /verify removed with the whole pipeline (criticism.rs, reflector.rs, H1 executor sandbox, TUI wiring); the tool-free micro-call survives as the /why narrator | H0, D |
 | I1 | Graph port to SQLite behind GraphStore; migrate generic/markdown adapters; /graph-rebuild | done — rusqlite (bundled) engine with §2.4.2 schema | E |
@@ -1723,21 +1723,24 @@ Done (see §2.4.11): impact selection with the full suite always running
 at `complete`.
 8.2 Goal-retention benchmark
 
-- **G0 (Minimal retention benchmark)**: isolates the core anchor and plan loop
+- **G0 (Goal-retention soak-test, not an effectiveness benchmark)**: isolates the core anchor and plan loop
   (plan + evidence + anchor vs baseline summary=short) without depending on
-  external graph tools, provider fallbacks.
+  external graph tools or provider fallbacks.
+  What G0 was: an engineering soak-test. It ran the full mechanism on long
+  tasks to shake out races, prompt skew, compaction, cache and replay bugs —
+  which it did (that is its value, recorded as done). What G0 was NOT: a
+  measure of whether the mechanism beats the baseline. On its task set the
+  baseline solved everything too (ceiling effect), so no effectiveness
+  conclusion follows in either direction — the task set failed, not the
+  mechanism. Do not evaluate the product by G0.
+  Effectiveness needs Series A first (internal ablation: full mechanism vs
+  stripped, same harness/model, discriminating long tasks), and only then a
+  head-to-head Series B (vs Claude Code and peers, pre-registered protocol).
+  Neither is started.
   Cost comparisons from runs before the cache-layout fix and the host
   summary cap are suspect on both arms (volatile tail re-keyed history;
   uncapped baseline summaries) — remeasure on `cache-adjusted cost`,
   not raw token sums.
-- **G0 verdict scope (do not evaluate the product by G0):** G0 recorded as
-  an engineering soak-test — it shook out races, prompt skew, compaction,
-  cache and replay bugs, which was its value. Effectiveness was NOT MET on
-  ceiling (baseline solved everything too), which refutes the task set, not
-  the mechanism. Product effectiveness needs Series A (internal ablation:
-  full mechanism vs stripped, same harness/model, discriminating long tasks)
-  before any head-to-head Series B (vs Claude Code and peers, pre-registered
-  protocol). See bench/analysis.md.
 
 Fixture: `minidb`, a small file-backed KV store in Rust (~15 files,
 builds in seconds, tests in milliseconds), designed to punish forgetting:
