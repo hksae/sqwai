@@ -1324,19 +1324,9 @@ without a TUI and without a human, plus `sqwai brief` / `/review` morning
 reporting. Specified in §12.8. No headless-run CLI exists today.
 
 3.9 Claim lint
-Implemented: a host pattern pass over response text marking
-result claims unverified against the journal (`[unverified]` spans + a
-`claim_lint` record). Counts, status phrases, and sized claims in English
-and Russian; paths/symbols via resolve_ref; gates (contradictions only,
-each span once, status words only without a successful `bash` in the window,
-everything only beside a failure in the window); precision rules: an `N/M`
-count fires only standalone (address tails like `:10808/10809` are not
-counts) and verifies when both halves were reported separately; a path
-followed by an arrow (`services.msc -> …`) is a usage pointer, not an
-existence claim; repetition (3+ fresh flags)
-nudges via the turn system block. Specified in §12.9. (The diary writer already strips
-unverified claims from prose host-side — §2.3.2 — but that covers diary
-entries only, not chat text.)
+DROPPED: the host pattern pass over response text is deleted (loop_lint
+removed); unverified-claim marking, `claim_lint` records and the repetition
+nudge are gone with it. Specified in §12.9 (kept for the record).
 
 4. Tools
 
@@ -1677,14 +1667,14 @@ number; a `partial` one is missing something the design calls for.
 | V1 | Verification receipts (§2.1.4): execution interval digest, check hash, stale invalidation, manual `confirm` vs `waive` | done — interval digest, check hash, stale invalidation on diff, manual /plan confirm, replay restoration | V, F1b |
  | W | Acceptance gate (Act mutate w/o acceptance-bearing plan → plan_required) | done — `plan_first: soft|off` in PlanConfig; gate checks project-global acceptance presence, not prose triviality; baseline arm exempt; read-only bash exempt (advisory verb match, fail-closed) | F3 |
 | X | Tool-output pruning + USER.md split/load | partial — USER.md split/loading and prune (§3.3.1) done; the read guard is a host path→hash map, not context-backed authorization | F1, F5 |
- | Y | Claim lint (post-generation verify against journal/resolve_ref) | done — counts/status/sized-claims/paths/symbols in English and Russian checked against the turn journal window, contradictions marked `[unverified]` + `claim_lint` record, gated (status only without a successful bash, everything only beside a failure, each span once), absence never flagged; repetition nudge (3+ fresh flags) rides the turn system block (§12.9) | I4 |
-| Z | Scope guard (step.refs vs file_diff) | done — finish-time misattribution warnings plus write-path scope warnings against the holding step's refs (warn-layer, never blocks; `bash` excluded, no per-file diff) | I4 |
+ | Y | Claim lint (post-generation verify against journal/resolve_ref) | dropped — warn-only contradiction marking + repetition nudge deleted with loop_lint; evidence gates unchanged | I4 |
+| Z | Scope guard (step.refs vs file_diff) | dropped — write-path scope warnings, finish-time misattribution warnings and their journal support deleted; scope is declared in refs, never enforced | I4 |
 | AA | Lessons tied to files (note kind) | done — `lesson` note kind done; automatic file-tied injection rejected with the context block (§12.5) | I5 |
 | AB | /why provenance, step diff + /undo step, /export | done — step diff + `/undo step` done; `/why <free text>` (host digs journal+plan, model narrates, background task) and `/export` (markdown + JSON into `.sqwai/exports/`, screened, capped) done | J |
 | AC | bench command (user-facing wrapper over §8.2 regression harness) | planned | G0 |
 | AD | Bash isolation/sandbox (container/bwrap/WSL) | open question | — |
 | AE | Core and UI decoupling: headless `serve` (stdio/JSON-RPC) + crates workspace split (`sqwai-core`, `sqwai-tui`, `sqwai-server`) (§5.11) | planned | B |
-| AF | Hardcode linter: scan file_diff for test-shaped literals (warn-layer) | done — confession phrases + long compared/returned string literals over the outcome diff (cap 3, never blocks); numeric magic constants deliberately excluded (ports/timeouts); `bash`-written bytes not scanned | I4 |
+| AF | Hardcode linter: scan file_diff for test-shaped literals (warn-layer) | dropped — confession/long-literal warnings deleted with lint.rs; acceptance still must be executable, not eyeballed | I4 |
 | AG | Safety level presets / refusal override policy for models with strong filters | planned | — |
  | AH | Verification protocol: executable acceptance as the settling rule (merged from ULTRA-1 into §2.1) — frozen check that fails before the change, rungs beyond tests, three states, `passed` required to settle | done (§2.1) — baseline proof, the settle gate, and the three states shipped for `cmd:` items (host runs every check at plan create, keeps the failing run, `verify` refuses an item without one, `plan show` marks it; a green run and a red run disagreeing on the same digest marks the item flaky/unknown, never retried into `passed`, `complete` stays blocked); rung 4 shipped (`snapshot:` freezes output at plan time, settles on byte-identical output); rung 3 shipped (   `differential:` settles on changed output, double-run freeze refuses nondeterministic inputs); rung 5 shipped (`signatures:` settles on identical declaration shapes, AST-normalized); the walk shipped (host classifies items by rung, reports the highest in create/accept and per item); differential hardening: a nonzero exit with changed output is `broken_change` (never verified — change without breakage is the whole point of the rung), `complete` re-runs and blocks on `unchanged`; dropped: the round-trip rung (no acceptance kind was ever defined) and rung synthesis (no spec was ever written); ULTRA-2 parked, ULTRA-3 dropped | V, V1, F3 |
 | AI | ULTRA-2: conditional escalation under a separate arbiter budget (`N ≤ B/T`) | PARKED — ULTRA mode development paused; the ULTRA-1 substrate above ships and lives on its own; ULTRA-3 (divergence) dropped outright: its own death criterion plus the cost thesis kill divergence-for-divergence (§12.12) | AH, M, AC |
@@ -1992,8 +1982,8 @@ unattended mode adds policy on top, not new trust. Key points:
   Nothing merged/committed/pushed unless `unattended.allow_commit`; push
   never allowed.
 
-### 12.9 Claim lint (shipped)
-After the model's response text is generated, the host runs a cheap pattern
+### 12.9 Claim lint (DROPPED)
+Was: after the model's response text is generated, the host runs a cheap pattern
 pass over it: result claims (counts, status phrases in English and Russian,
 sized claims like `12 тестов`, named paths/symbols) are checked against
 journal records since the start of the turn and via resolve_ref. On mismatch
@@ -2031,7 +2021,7 @@ context is a host observation, which fits the integrity model.
 three states, the rung table below, the ladder walk) IS the §2.1
 verification protocol above — one protocol, not two. What remains ULTRA
 proper (per-turn flag, arbiter budgets, escalation) is parked (ULTRA-2;
-ULTRA-3 divergence dropped) except manual /verify. The spec below stays
+ULTRA-3 divergence dropped). The spec below stays
 as the rung reference and the parked-phase design.
 
 **Thesis.** Selection, not generation, is the bottleneck. A strong model's

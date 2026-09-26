@@ -1392,23 +1392,6 @@ pub(crate) fn with_evidence_ts_warning(
     format!("{message}\nwarning: {}", warns.join("; "))
 }
 
-pub(crate) fn with_misattribution_warning(
-    ctx: &ToolCtx,
-    finished_step: Option<&str>,
-    active: &plan::Plan,
-    message: String,
-) -> String {
-    let Some(step) = finished_step else {
-        return message;
-    };
-    let warns =
-        crate::agent::journal::Journal::step_misattribution_warnings(&ctx.root, active, step);
-    if warns.is_empty() {
-        return message;
-    }
-    format!("{message}\nwarning: {}", warns.join("; "))
-}
-
 /// One-line blast radius on `finish`: the files this step wrote, from the
 /// journal's `file_diff` chain (all sessions — subagent writes count).
 /// Silent when the step wrote nothing (research steps). Informational,
@@ -1510,6 +1493,11 @@ const CONSTRAINT_MAX_HITS: usize = 5;
 /// when it opens with one of these (after whitespace) and names the
 /// pattern — plus bare quoted references (`"x/y"` import-block entries),
 /// minus comment lines.
+fn is_comment(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("//") || t.starts_with('#') || t.starts_with('*') || t.starts_with("<!--")
+}
+
 pub(crate) fn import_line_references(line: &str, pattern: &str) -> bool {
     const KEYWORDS: &[&str] = &[
         "use ",
@@ -1523,7 +1511,7 @@ pub(crate) fn import_line_references(line: &str, pattern: &str) -> bool {
         "extern crate ",
     ];
     let trimmed = line.trim_start();
-    if crate::agent::lint::is_comment(line) {
+    if is_comment(line) {
         return false;
     }
     if KEYWORDS.iter().any(|kw| trimmed.starts_with(kw)) {

@@ -6,7 +6,7 @@ use super::git;
 use super::outline;
 use super::policy::{bash_scope_hit, commanded_verify_refs, frozen_input_hit, in_write_scope, mutation_target_paths, step_epoch_current};
 use super::specs;
-use super::verify::{capture_baselines, rejection, validate_complete, validate_evidence, verify_acceptance, with_assumption_warning, with_blast_radius, with_evidence_ts_warning, with_misattribution_warning};
+use super::verify::{capture_baselines, rejection, validate_complete, validate_evidence, verify_acceptance, with_assumption_warning, with_blast_radius, with_evidence_ts_warning};
 use crate::agent::graph::GraphStore;
 use crate::plan;
 use serde_json::Value;
@@ -289,7 +289,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             );
         }
     }
-    let mut outcome = match name {
+    let outcome = match name {
         "read" => fs::read(ctx, args["file_path"].as_str().unwrap_or_default(), args),
         "write" => fs::write_file(
             ctx,
@@ -622,65 +622,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         "journal" => journal_op(ctx, args),
         other => Outcome::err(format!("unknown tool '{other}'")),
     };
-    lint_write_path(ctx, name, &mut outcome);
     outcome
-}
-
-/// Z + AF write-path gates (warn-layer only, §2.1.9): scope-check the
-/// touched paths against the holding step's refs, and scan the unified
-/// diff for test-shaped literals. Runs after a successful file mutation.
-/// `bash` is excluded — shell-written bytes leave no per-file diff to
-/// attribute or scan (pre/post snapshots and checkpoints cover them, and
-/// the model is told so nowhere: the gap is documented, not silent).
-fn lint_write_path(ctx: &ToolCtx, name: &str, outcome: &mut Outcome) {
-    if !outcome.ok || !matches!(name, "write" | "edit" | "multi_edit" | "patch") {
-        return;
-    }
-    let mut touched: Vec<&str> = Vec::new();
-    if let Some(diff) = outcome.file_diff.as_ref() {
-        touched.push(diff.path.as_str());
-    }
-    for diff in &outcome.file_diffs {
-        touched.push(diff.path.as_str());
-    }
-    if touched.is_empty() {
-        return;
-    }
-    // The holding step's refs: the child's inherited context, or the
-    // session's own active plan plus its current step. Anything
-    // unresolvable means "no scope declared" — the lint stays silent.
-    let refs: Vec<crate::plan::StepRef> = if let Some(inherited) = ctx.subagent_step.as_ref() {
-        crate::plan::read_plan_file(&ctx.root, &inherited.plan_id)
-            .and_then(|plan| {
-                plan.steps
-                    .into_iter()
-                    .find(|step| step.id == inherited.step_id)
-            })
-            .map(|step| step.refs)
-            .unwrap_or_default()
-    } else if let Some(step_id) = ctx.current_step.as_deref() {
-        crate::plan::open_active_for_session(&ctx.root, Some(ctx.session_id.as_str()))
-            .ok()
-            .flatten()
-            .and_then(|plan| {
-                plan.steps
-                    .into_iter()
-                    .find(|step| step.id.as_str() == step_id)
-            })
-            .map(|step| step.refs)
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let mut warnings = crate::agent::lint::scope_warnings(&refs, &touched);
-    if let Some(diff) = outcome.diff.as_deref() {
-        let label = touched.first().copied().unwrap_or("unknown file");
-        warnings.extend(crate::agent::lint::hardcode_warnings(diff, label));
-    }
-    for warning in warnings {
-        outcome.output.push('\n');
-        outcome.output.push_str(&warning);
-    }
 }
 
 /// The `journal` tool: a read-only projection of the host journal (§2.2).
@@ -1678,12 +1620,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             let msg = with_assumption_warning(ctx, finishing.as_deref(), message);
                             let msg =
                                 with_evidence_ts_warning(ctx, finishing.as_deref(), &active, msg);
-                            let msg = with_misattribution_warning(
-                                ctx,
-                                finishing.as_deref(),
-                                &active,
-                                msg,
-                            );
                             let msg = with_blast_radius(
                                 ctx,
                                 finishing.as_deref(),

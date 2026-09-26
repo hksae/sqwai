@@ -819,69 +819,6 @@ impl Journal {
         out
     }
 
-    /// Check if file modifications attached as evidence to `finished_step` overlap
-    /// with `refs` of any pending or other in_progress steps (§2.1.4).
-    pub fn step_misattribution_warnings(
-        root: &Path,
-        active: &crate::plan::Plan,
-        finished_step: &str,
-    ) -> Vec<String> {
-        let Some(step) = active.step(finished_step) else {
-            return Vec::new();
-        };
-        let other_steps_with_refs: Vec<(&str, &[crate::plan::StepRef])> = active
-            .steps
-            .iter()
-            .filter(|s| {
-                s.id != finished_step
-                    && matches!(
-                        s.status,
-                        crate::plan::StepStatus::Pending
-                            | crate::plan::StepStatus::InProgress
-                            | crate::plan::StepStatus::Reopened
-                    )
-                    && !s.refs.is_empty()
-            })
-            .map(|s| (s.id.as_str(), s.refs.as_slice()))
-            .collect();
-
-        if other_steps_with_refs.is_empty() {
-            return Vec::new();
-        }
-
-        let mut warnings = Vec::new();
-        for reference in &step.evidence {
-            let record = Self::evidence(root, &active.id, Some(finished_step), reference, None)
-                .ok()
-                .flatten();
-            let Some(record) = record else { continue };
-            if record.kind != "file_diff" {
-                continue;
-            }
-            let Some(path) = record.fields.get("path").and_then(Value::as_str) else {
-                continue;
-            };
-
-            for (other_id, refs) in &other_steps_with_refs {
-                let matches = refs.iter().any(|r| {
-                    let r_clean = r.path.as_str();
-                    path == r_clean || path.ends_with(r_clean) || r_clean.ends_with(path)
-                });
-                if matches {
-                    warnings.push(format!(
-                        "modified file '{path}' overlaps with refs of step {other_id}; \
-                         if this was done in error, use /undo step {finished_step} to revert"
-                    ));
-                    break;
-                }
-            }
-            if warnings.len() >= 3 {
-                break;
-            }
-        }
-
-        warnings
-    }
 
     /// Return a non-blocking reminder when a step has accumulated actions
     /// since its last plan operation. Scoped to the calling session so one
@@ -925,48 +862,6 @@ impl Journal {
         } else {
             Ok(None)
         }
-    }
-
-    /// Claim-lint repetition nudge (Y, §12.9): when flagged result claims
-    /// keep coming, remind the model to verify numbers against tool output
-    /// before stating them. Fires while mismatches are recent (latest flag
-    /// within the last 20 records) and stops when the model behaves — no
-    /// extra state, no nagging about ancient history. Stateless by design,
-    /// like the plan nudge above.
-    pub fn claim_nudge(root: &Path, session_id: Option<&str>) -> Result<Option<String>> {
-        const THRESHOLD: usize = 3;
-        const RECENCY: usize = 20;
-        // session journal when known (claim records live next to the turns
-        // that produced them), everything otherwise — same split as evidence
-        let records = match session_id {
-            Some(sid) => Self::records_for(root, sid)?,
-            None => Self::records(root)?,
-        };
-        let total = records.iter().filter(|r| r.kind == "claim_lint").count();
-        if total < THRESHOLD {
-            return Ok(None);
-        }
-        let recent = records.len().saturating_sub(RECENCY);
-        let fresh = records.iter().skip(recent).any(|r| r.kind == "claim_lint");
-        if !fresh {
-            return Ok(None);
-        }
-        let spans: Vec<String> = records
-            .iter()
-            .rev()
-            .filter(|r| r.kind == "claim_lint")
-            .take(3)
-            .filter_map(|r| {
-                r.fields
-                    .get("span")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            })
-            .collect();
-        Ok(Some(format!(
-            "result claims diverged from the journal {total} times (latest: {}) — verify numbers, paths and symbols against tool output before stating them.",
-            spans.join("; ")
-        )))
     }
 
     /// Append one host-owned record and flush it before returning.
@@ -1929,105 +1824,10 @@ mod tests {
     }
 
     #[test]
-    fn claim_nudge_fires_while_fresh_silent_when_stale() {
-        let root = root();
-        let mut journal = Journal::open(&root, "sess").unwrap();
-        let mut lint = |span: &str| {
-            journal
-                .append("claim_lint", json!({"span": span, "kind": "count"}))
-                .unwrap()
-        };
-        lint("12 passed");
-        lint("all green");
-        // below threshold: silence
-        assert!(Journal::claim_nudge(&root, Some("sess")).unwrap().is_none());
-        lint("99 passed");
-        // at threshold with fresh flags: nags, naming the latest spans
-        let nudge = Journal::claim_nudge(&root, Some("sess"))
-            .unwrap()
-            .expect("must nudge");
-        assert!(nudge.contains("3 times"), "{nudge}");
-        assert!(nudge.contains("99 passed"), "{nudge}");
-        // 20 unrelated records later the old flags age out: silence again
-        for i in 0..20 {
-            journal
-                .append("tool_result", json!({"tool": "read", "ok": true, "n": i}))
-                .unwrap();
-        }
-        assert!(Journal::claim_nudge(&root, Some("sess")).unwrap().is_none());
-        // other sessions are not counted
-        let mut other = Journal::open(&root, "other").unwrap();
-        for _ in 0..5 {
-            other
-                .append("claim_lint", json!({"span": "x", "kind": "count"}))
-                .unwrap();
-        }
-        assert!(Journal::claim_nudge(&root, Some("sess")).unwrap().is_none());
-        assert!(
-            Journal::claim_nudge(&root, Some("other"))
-                .unwrap()
-                .is_some()
-        );
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
     fn rejects_non_object_fields() {
         let root = root();
         let mut journal = Journal::open(&root, "session").unwrap();
         assert!(journal.append("bad", json!("nope")).is_err());
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn warns_on_step_misattribution_via_refs() {
-        let root = root();
-        let mut plan = crate::plan::create(
-            "keep working".to_string(),
-            Vec::new(),
-            Vec::new(),
-            vec![
-                crate::plan::NewStep {
-                    title: "step 1".into(),
-                    refs: Vec::new(),
-                },
-                crate::plan::NewStep {
-                    title: "auth step".into(),
-                    refs: vec!["src/auth.rs::fn::login".into()],
-                },
-            ],
-            1000,
-            &crate::plan::Limits::default(),
-        )
-        .unwrap();
-        crate::plan::store(&root, &plan).unwrap();
-
-        let mut journal = Journal::open(&root, "session").unwrap();
-        journal.set_attribution(Some("1".into()), Some(plan.id.clone()), "main");
-        let seq = journal
-            .append(
-                "file_diff",
-                json!({
-                    "path": "src/auth.rs",
-                    "checkpoint": "checkpoint-1",
-                    "hash_before": "h1",
-                    "hash_after": "h2",
-                }),
-            )
-            .unwrap();
-
-        plan.step_mut("1")
-            .unwrap()
-            .evidence
-            .push(crate::plan::EvidenceRef {
-                session: "session".into(),
-                seq,
-            });
-
-        let warns = Journal::step_misattribution_warnings(&root, &plan, "1");
-        assert_eq!(warns.len(), 1);
-        assert!(warns[0].contains("overlaps with refs of step 2"));
-        assert!(warns[0].contains("/undo step 1"));
         fs::remove_dir_all(root).ok();
     }
 

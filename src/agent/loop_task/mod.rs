@@ -33,7 +33,6 @@ pub(crate) use loop_compact::{capture_nudge, has_restriction_marker};
 
 mod loop_ask;
 mod loop_compact;
-mod loop_lint;
 mod loop_subagent;
 mod loop_turn;
 
@@ -872,13 +871,7 @@ async fn run_agent(
         {
             turn_system.push(crate::providers::SystemPart::volatile(nudge));
         }
-        // claim-lint repetition (Y, §12.9): nag only while mismatches are
-        // fresh — a model that behaves stops seeing this by itself
-        if let Ok(Some(nudge)) =
-            crate::agent::journal::Journal::claim_nudge(&root, Some(&session_id))
-        {
-            turn_system.push(crate::providers::SystemPart::volatile(nudge));
-        }
+        // claim-lint repetition removed with Y: no nag block rides here
         // Decided per request, not once per turn: a request that carries tool
         // results must never rely on the provider holding the calls they
         // answer. Field failure on an OpenAI-compatible relay that accepts
@@ -1130,9 +1123,8 @@ async fn run_agent(
         compacted_for_overflow = false;
 
         if turn.calls.is_empty() {
-            // final answer — claim lint (Y, §12.9) checks it here, marking
-            // contradictions without ever blocking the turn
-            let text = loop_lint::lint_answer(&turn.text, &root, &session_id, &mut journal);
+            // final answer
+            let text = turn.text.clone();
             messages
                 .push(Message::new(Role::Assistant, text).with_provider_state(turn.provider_state));
             break;
@@ -2285,10 +2277,6 @@ mod effort_tests {
     use super::loop_subagent::{SUBAGENT_TIMEOUT_SECS, adopt_in_progress_step};
     use super::loop_turn::{TurnOutcome, run_turn};
     use crate::providers::StreamEvent;
-    use super::loop_lint::{
-        extract_counts, extract_paths, extract_status_words, extract_symbols,
-        lint_answer, path_deleted_nearby,
-    };
     use super::*;
 
     /// The prose match that replaces the one in the error classifier. It has
@@ -3377,245 +3365,6 @@ mod effort_tests {
         // RU markers behave the same
         assert!(capture_nudge("не трогай btree", &[]).is_some());
         assert!(capture_nudge("не трогай btree", &c("btree не трогать")).is_none());
-    }
-
-    #[test]
-    fn claim_extractors_find_counts_status_paths_symbols() {
-        let counts = extract_counts("12 passed, 3 failed, suite 280/280 ok, version 2 here");
-        let texts: Vec<&str> = counts.iter().map(|(_, s)| *s).collect();
-        assert!(texts.contains(&"12 passed"), "{texts:?}");
-        assert!(texts.contains(&"3 failed"), "{texts:?}");
-        assert!(texts.contains(&"280/280"), "{texts:?}");
-        // bare version number is not a claim
-        assert!(!texts.contains(&"2"), "{texts:?}");
-
-        let words = extract_status_words("Build SUCCEEDED, all green. All tests pass!");
-        // "tests pass" nests inside "All tests pass" (deduped later in push_span)
-        assert_eq!(words.len(), 4, "{words:?}");
-
-        let paths = extract_paths("see src/main.rs, also `config.toml`, not v2.0 or e.g. this");
-        assert!(paths.contains(&"src/main.rs"), "{paths:?}");
-        assert!(paths.contains(&"config.toml"), "{paths:?}");
-        assert!(!paths.iter().any(|p| p.contains("v2")), "{paths:?}");
-
-        let syms = extract_symbols("call foo::bar and crate::x, not a::b: trailing");
-        assert!(syms.contains(&"foo::bar"), "{syms:?}");
-    }
-
-    /// Byte-walking these on multibyte text panicked mid-char (a Cyrillic
-    /// lead byte reads as alphanumeric). Regression: Russian prose passes
-    /// through every extractor without panicking and still finds ASCII
-    /// claims inside it.
-    #[test]
-    fn claim_extractors_survive_cyrillic() {
-        let text = "Проверил: всё сломалось. Тесты: 12 passed, смотри src/main.rs и `config.toml`!";
-        let counts = extract_counts(text);
-        let texts: Vec<&str> = counts.iter().map(|(_, s)| *s).collect();
-        assert!(texts.contains(&"12 passed"), "{texts:?}");
-        let paths = extract_paths(text);
-        assert!(paths.contains(&"src/main.rs"), "{paths:?}");
-        assert!(paths.contains(&"config.toml"), "{paths:?}");
-        // pure Cyrillic, no claims: silence, not a crash
-        assert!(extract_counts("Привет, всё упало").is_empty());
-        assert!(extract_paths("Привет, всё упало").is_empty());
-        assert!(extract_status_words("Всё сломалось").is_empty());
-        // nbsp between number and word (multibyte whitespace trap)
-        let nbsp = extract_counts("3\u{a0}passed");
-        assert!(nbsp.iter().any(|(_, s)| *s == "3\u{a0}passed"), "{nbsp:?}");
-        // deletion guard with a mid-char rewind window
-        assert!(path_deleted_nearby(
-            "удалил src/a.rs после правок",
-            "src/a.rs"
-        ));
-        assert!(!path_deleted_nearby("Привет, смотри src/a.rs", "src/a.rs"));
-    }
-
-    #[test]
-    fn lint_answer_marks_only_contradictions() {
-        let root = std::env::temp_dir().join(format!("sqwai-lint-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let mut journal = crate::agent::journal::Journal::open(&root, "sess").expect("open");
-        journal.append("user_msg", serde_json::json!({})).unwrap();
-        journal
-            .append(
-                "tool_result",
-                serde_json::json!({"tool": "bash", "ok": true, "summary": "12 passed"}),
-            )
-            .unwrap();
-        journal
-            .append(
-                "tool_result",
-                serde_json::json!({"tool": "bash", "ok": false, "summary": "boom"}),
-            )
-            .unwrap();
-        let mut jh = Some(journal);
-        // "12 passed" is in the window: untouched. "99 passed" is absent
-        // while a failure exists: marked. Quoted text never counts.
-        let out = lint_answer(
-            "Done: 12 passed and 99 passed.\n> user said 77 passed",
-            &root,
-            "sess",
-            &mut jh,
-        );
-        assert!(
-            out.contains("12 passed and 99 passed [unverified]"),
-            "{out}"
-        );
-        assert!(!out.contains("12 passed [unverified]"), "{out}");
-        assert!(!out.contains("77 passed [unverified]"), "{out}");
-        // record written for the marked span only
-        let recs = crate::agent::journal::Journal::records(&root).expect("read");
-        let lints: Vec<_> = recs.iter().filter(|r| r.kind == "claim_lint").collect();
-        assert_eq!(lints.len(), 1);
-        assert_eq!(lints[0].fields["span"], "99 passed");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// The user's crash: Russian model text through the whole lint. Must
-    /// neither panic nor mark what's in the journal.
-    #[test]
-    fn lint_answer_survives_russian_prose() {
-        let root = std::env::temp_dir().join(format!("sqwai-lint-ru-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let mut journal = crate::agent::journal::Journal::open(&root, "sess").expect("open");
-        journal.append("user_msg", serde_json::json!({})).unwrap();
-        journal
-            .append(
-                "tool_result",
-                serde_json::json!({"tool": "bash", "ok": true, "summary": "12 passed"}),
-            )
-            .unwrap();
-        journal
-            .append(
-                "tool_result",
-                serde_json::json!({"tool": "bash", "ok": false, "summary": "бум"}),
-            )
-            .unwrap();
-        let mut jh = Some(journal);
-        // "12 passed" is backed by the journal: no mark, no crash.
-        // (A path claim without file evidence WOULD mark — that is the
-        // lint working, not a bug — so the probe carries none.)
-        let out = lint_answer("Готово: 12 passed. Ты что сделал?", &root, "sess", &mut jh);
-        assert!(!out.contains("[unverified]"), "{out}");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Russian success phrases and sized claims mark exactly like English
-    /// ones — under the same gates: status words only with no successful
-    /// bash in the window, everything only beside a failure.
-    #[test]
-    fn lint_answer_marks_russian_status_and_sized_claims() {
-        let root = std::env::temp_dir().join(format!("sqwai-lint-ru2-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        // fail-only window: nothing backs anything
-        let mut journal = crate::agent::journal::Journal::open(&root, "sess").expect("open");
-        journal.append("user_msg", serde_json::json!({})).unwrap();
-        journal
-            .append(
-                "tool_result",
-                serde_json::json!({"tool": "bash", "ok": false, "summary": "бум"}),
-            )
-            .unwrap();
-        let mut jh = Some(journal);
-        let out = lint_answer("Готово: тесты прошли, 12 тестов.", &root, "sess", &mut jh);
-        assert!(out.contains("тесты прошли [unverified]"), "{out}");
-        assert!(out.contains("12 тестов [unverified]"), "{out}");
-
-        // backed Russian count: journal summary carries it verbatim
-        let mut journal2 = crate::agent::journal::Journal::open(&root, "sess2").expect("open");
-        journal2.append("user_msg", serde_json::json!({})).unwrap();
-        journal2
-            .append(
-                "tool_result",
-                serde_json::json!({"tool": "bash", "ok": true, "summary": "12 тестов прогнал"}),
-            )
-            .unwrap();
-        journal2
-            .append(
-                "tool_result",
-                serde_json::json!({"tool": "bash", "ok": false, "summary": "бум"}),
-            )
-            .unwrap();
-        let mut jh2 = Some(journal2);
-        let out = lint_answer("Готово: 12 тестов прогнал.", &root, "sess2", &mut jh2);
-        assert!(!out.contains("[unverified]"), "{out}");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Observed false positives from a real report: "10808/10809" is a
-    /// shorthand for two separately reported ports (boundary + parts
-    /// rules), and "services.msc -> ..." is advice to open something, not
-    /// a claim that it exists in the project (arrow rule).
-    #[test]
-    fn lint_answer_skips_shorthand_counts_and_usage_pointers() {
-        let root = std::env::temp_dir().join(format!("sqwai-lint-fp-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let mut journal = crate::agent::journal::Journal::open(&root, "sess").expect("open");
-        journal.append("user_msg", serde_json::json!({})).unwrap();
-        journal
-            .append(
-                "tool_result",
-                serde_json::json!({"tool": "bash", "ok": true, "summary": "TCP 127.0.0.1:10808 xray\nTCP 127.0.0.1:10809 xray"}),
-            )
-            .unwrap();
-        journal
-            .append(
-                "tool_result",
-                serde_json::json!({"tool": "bash", "ok": false, "summary": "бум"}),
-            )
-            .unwrap();
-        let mut jh = Some(journal);
-        // extractor level: the port pair is an address tail, not a count
-        assert!(
-            extract_counts("слушает 127.0.0.1:10808/10809").is_empty(),
-            "address tail must not extract"
-        );
-        // answer level: shorthand verified by parts, pointer skipped
-        let out = lint_answer(
-            "Локальный прокси 127.0.0.1:10808/10809, нормально. Узнать владельцев: `services.msc` -> пути и издатель.",
-            &root,
-            "sess",
-            &mut jh,
-        );
-        assert!(!out.contains("[unverified]"), "{out}");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// The guards above must not swallow real lies: an unbacked x/y count
-    /// and a missing project file still mark.
-    #[test]
-    fn lint_answer_still_marks_unbacked_counts_and_paths() {
-        let root = std::env::temp_dir().join(format!("sqwai-lint-tp-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let mut journal = crate::agent::journal::Journal::open(&root, "sess").expect("open");
-        journal.append("user_msg", serde_json::json!({})).unwrap();
-        journal
-            .append(
-                "tool_result",
-                serde_json::json!({"tool": "bash", "ok": true, "summary": "пил кофе"}),
-            )
-            .unwrap();
-        journal
-            .append(
-                "tool_result",
-                serde_json::json!({"tool": "bash", "ok": false, "summary": "бум"}),
-            )
-            .unwrap();
-        let mut jh = Some(journal);
-        let out = lint_answer(
-            "Упало 7/9 тестов. Подробности в src/missing.rs.",
-            &root,
-            "sess",
-            &mut jh,
-        );
-        assert!(out.contains("7/9 [unverified]"), "{out}");
-        assert!(out.contains("src/missing.rs [unverified]"), "{out}");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn count_summaries(messages: &[Message]) -> usize {
