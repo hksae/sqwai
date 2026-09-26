@@ -128,7 +128,6 @@ pub const DEFAULT_MAX_EDGES: usize = 50;
 pub enum GraphPreset {
     Dependencies,
     Structure,
-    RelatedNotes,
 }
 
 impl GraphPreset {
@@ -136,7 +135,6 @@ impl GraphPreset {
         match s.to_ascii_lowercase().as_str() {
             "dependencies" | "deps" => Some(Self::Dependencies),
             "structure" | "struct" => Some(Self::Structure),
-            "related_notes" | "notes" | "memory" => Some(Self::RelatedNotes),
             _ => None,
         }
     }
@@ -153,7 +151,6 @@ impl GraphPreset {
                 "supersedes",
             ],
             Self::Structure => &["contains", "defines", "implements", "member_of"],
-            Self::RelatedNotes => &["about", "mentions", "supersedes"],
         }
     }
 }

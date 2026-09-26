@@ -450,8 +450,8 @@ Returns connected nodes, incident edges, and explicit truncation status.",
                     },
                     "preset": {
                         "type": "string",
-                        "enum": ["dependencies", "structure", "related_notes", "all"],
-                        "description": "relation preset: 'dependencies' (calls, imports, references, about; default), 'structure' (hierarchy/containment), 'related_notes' (memories/decisions), 'all'"
+                        "enum": ["dependencies", "structure", "all"],
+                        "description": "relation preset: 'dependencies' (calls, imports, references, about; default), 'structure' (hierarchy/containment), 'all'"
                     },
                     "direction": {
                         "type": "string",
