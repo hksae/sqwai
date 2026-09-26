@@ -221,7 +221,9 @@ mod tests {
         let source = "available: {{TOOLS}}";
         let expected = crate::agent::tools::tool_names().join(", ");
         assert_eq!(render_tools(source), format!("available: {expected}"));
-        assert!(include_str!("system.md").contains("{{TOOLS}}"));
+        // the builtin prompt carries no tool list (schemas travel in the
+        // request); the placeholder stays for user-overridden system.md files
+        assert!(!include_str!("system.md").contains("{{TOOLS}}"));
     }
 
     #[test]

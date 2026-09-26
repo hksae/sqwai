@@ -181,7 +181,7 @@ await its result before dependent changes or reporting success.",
                 "properties": {
                     "command": {"type": "string", "description": "the shell command line to run"},
                     "timeout": {"type": "integer", "description": "seconds; kills the process on expiry"},
-                    "background": {"type": "boolean", "description": "detach and return immediately with a job id; poll bash_output, stop bash_kill"}
+                    "background": {"type": "boolean", "description": "detach and return immediately with a job id when the command may outlast the tool timeout; wait with bash_output, stop with bash_kill; await its result before dependent changes or reporting success"}
                 },
                 "required": ["command"]
             }),
