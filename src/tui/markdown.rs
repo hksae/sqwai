@@ -17,6 +17,52 @@ pub struct Highlighter {
     ps: &'static SyntaxSet,
     ts: &'static ThemeSet,
     theme_name: &'static str,
+    code_cache: std::cell::RefCell<CodeCache>,
+}
+
+/// Bounded memo of highlighted+wrapped code blocks. Closed fences never
+/// change mid-stream, so every per-tick re-render of a growing answer hits
+/// this instead of re-parsing (syntect regexes dominate the stream profile).
+/// The key covers everything the output depends on — resolved language,
+/// code bytes, wrap width, theme — so hits are always exact; eviction is
+/// oldest-first, memory is bounded by the cap times block size.
+const CODE_CACHE_CAP: usize = 32;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct CodeCacheKey {
+    lang: String,
+    code_hash: u64,
+    width: u16,
+    theme: &'static str,
+}
+
+#[derive(Default)]
+struct CodeCache {
+    map: std::collections::HashMap<CodeCacheKey, Vec<Line<'static>>>,
+    order: Vec<CodeCacheKey>,
+}
+
+impl CodeCache {
+    fn get(&mut self, key: &CodeCacheKey) -> Option<Vec<Line<'static>>> {
+        let hit = self.map.get(key)?.clone();
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            let k = self.order.remove(pos);
+            self.order.push(k);
+        }
+        Some(hit)
+    }
+
+    fn put(&mut self, key: CodeCacheKey, rows: Vec<Line<'static>>) {
+        if self.map.contains_key(&key) {
+            return;
+        }
+        if self.order.len() >= CODE_CACHE_CAP {
+            let old = self.order.remove(0);
+            self.map.remove(&old);
+        }
+        self.order.push(key.clone());
+        self.map.insert(key, rows);
+    }
 }
 
 static SYNTAX_SET: std::sync::OnceLock<SyntaxSet> = std::sync::OnceLock::new();
@@ -28,11 +74,42 @@ impl Highlighter {
             ps: SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines),
             ts: THEME_SET.get_or_init(ThemeSet::load_defaults),
             theme_name: "base16-eighties.dark",
+            code_cache: std::cell::RefCell::new(CodeCache::default()),
         }
     }
 
     fn theme(&self) -> &syntect::highlighting::Theme {
         &self.ts.themes[self.theme_name]
+    }
+
+    /// Highlight a code block and wrap it to `width`, memoised. Repeat
+    /// renders of the same closed fence return the cached rows.
+    pub fn highlight_wrapped(&self, code: &str, lang: Option<&str>, width: u16) -> Vec<Line<'static>> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        code.hash(&mut h);
+        let key = CodeCacheKey {
+            // same normalisation as the syntax lookup below: `Rust` and
+            // `rust` resolve identically, so they must share the key
+            lang: lang.map(|l| l.to_ascii_lowercase()).unwrap_or_default(),
+            code_hash: h.finish(),
+            width,
+            theme: self.theme_name,
+        };
+        if let Some(hit) = self.code_cache.borrow_mut().get(&key) {
+            return hit;
+        }
+        let mut rows = Vec::new();
+        for line in self.highlight_code(code, lang) {
+            rows.extend(wrap_code_line(line, width as usize));
+        }
+        self.code_cache.borrow_mut().put(key, rows.clone());
+        rows
+    }
+
+    #[cfg(test)]
+    fn cache_len(&self) -> usize {
+        self.code_cache.borrow().map.len()
     }
 
     /// Highlight a code block; falls back to plain text for unknown languages.
@@ -638,10 +715,8 @@ fn emit_code(
     // Long source lines still wrap to the chat width (the outer wrapper must
     // never see an over-wide row).
     let w = (width as usize).max(1);
-    for line in hl.highlight_code(code, lang) {
-        for l in wrap_code_line(line, w) {
-            out.push(l);
-        }
+    for l in hl.highlight_wrapped(code, lang, w as u16) {
+        out.push(l);
     }
 }
 
@@ -1570,6 +1645,24 @@ mod tests {
             cols.iter().all(|&c| c == cols[0]),
             "ragged narrow grid {cols:?}"
         );
+    }
+
+    #[test]
+    fn highlight_cache_hits_repeats_and_evicts_oldest() {
+        let hl = Highlighter::new();
+        let code = "fn main() {}\n";
+        let first = hl.highlight_wrapped(code, Some("rust"), 80);
+        // case-insensitive lang shares the key with the first render
+        let second = hl.highlight_wrapped(code, Some("RUST"), 80);
+        assert_eq!(first.len(), second.len());
+        assert_eq!(hl.cache_len(), 1);
+        // width is part of the key
+        hl.highlight_wrapped(code, Some("rust"), 40);
+        assert_eq!(hl.cache_len(), 2);
+        for i in 0..40 {
+            hl.highlight_wrapped(&format!("let x{i} = {i};\n"), Some("rust"), 80);
+        }
+        assert_eq!(hl.cache_len(), 32);
     }
 
     #[test]
