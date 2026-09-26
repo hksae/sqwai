@@ -143,9 +143,10 @@ pub(super) struct ActivePlanInfo {
     pub current_step: usize,
     pub total_steps: usize,
     pub status_text: String,
-    /// where this plan comes from: linked session, previous session, or the
-    /// project-global newest active plan — so the startup screen never shows
-    /// a plan without saying whose it is
+    /// where this plan comes from: linked session, previous session, or another
+    /// session's plan — never presented as the current session's. The source
+    /// line always says whose it is, so the startup screen cannot claim a
+    /// foreign plan as yours.
     pub source: String,
 }
 
@@ -5464,6 +5465,29 @@ impl App {
         }
     }
 
+    /// Source line for the startup screen's plan. A fresh session never owns
+    /// the project-global plan it is shown, so the fallback branches name
+    /// the owning session explicitly instead of letting "active plan" read
+    /// as the current session's.
+    fn plan_source_label(
+        preferred: bool,
+        last: Option<&crate::session::SessionHeader>,
+    ) -> String {
+        if preferred {
+            return "previous session's plan".to_string();
+        }
+        match last {
+            Some(s) => {
+                let short: String = s.id.to_string().chars().take(8).collect();
+                format!(
+                    "another session's plan · session {short} · {}",
+                    fmt_relative_time(s.last_activity())
+                )
+            }
+            None => "newest active plan in this project".to_string(),
+        }
+    }
+
     pub(super) fn collect_startup_data(
         cfg: &Config,
         model_cfg: &ModelConfig,
@@ -5588,15 +5612,7 @@ impl App {
                 })
                 .or_else(|| sessions.first());
 
-            plan_info.source = if preferred {
-                "previous session's plan".to_string()
-            } else if let Some(s) = last_sess_obj {
-                let short = s.id.to_string();
-                let short = short.chars().take(8).collect::<String>();
-                format!("session {short} · {}", fmt_relative_time(s.last_activity()))
-            } else {
-                "newest active plan".to_string()
-            };
+            plan_info.source = Self::plan_source_label(preferred, last_sess_obj);
 
             let last_session_info = last_sess_obj.map(|s| RecentSessionInfo {
                 date: fmt_relative_time(s.last_activity()),

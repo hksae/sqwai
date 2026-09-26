@@ -983,6 +983,38 @@ fn snap_startup_active_plan() {
 }
 
 #[test]
+fn startup_foreign_plan_source_names_another_session() {
+    // the startup screen must never present a foreign plan as the current
+    // session's: the source line always says whose it is
+    let header = crate::session::SessionHeader {
+        id: uuid::Uuid::new_v4(),
+        title: "old".into(),
+        pinned: false,
+        created_at: chrono::Utc::now(),
+        last_message_at: None,
+        model_key: "m".into(),
+        plan_id: None,
+        context_tokens: 0,
+        calls: 0,
+        errors: 0,
+        project: None,
+    };
+    assert_eq!(
+        App::plan_source_label(true, Some(&header)),
+        "previous session's plan"
+    );
+    let foreign = App::plan_source_label(false, Some(&header));
+    assert!(
+        foreign.starts_with("another session's plan · session "),
+        "{foreign}"
+    );
+    assert_eq!(
+        App::plan_source_label(false, None),
+        "newest active plan in this project"
+    );
+}
+
+#[test]
 fn snap_startup_no_plan_with_history() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = true;
