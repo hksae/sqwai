@@ -174,9 +174,8 @@ Use instead of grep when whitespace, line breaks or comments vary.",
             description: "Run a shell command in the project directory. Destructive or risky commands \
 (rm -rf, sudo, disk ops, force-push, etc.) require user approval and the model should avoid them. \
 Long output is truncated to a tail and the full log path is returned. Use background=true when the \
-command is expected to outlast the normal tool timeout or when useful independent work can \
-continue; wait on it with bash_output(id, wait_secs) or sleep(seconds) instead of polling in a \
-tight loop; await its result before dependent changes or reporting success.",
+command may outlast the tool timeout; wait on it with bash_output(id, wait_secs) or sleep(seconds); \
+await its result before dependent changes or reporting success.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -190,13 +189,13 @@ tight loop; await its result before dependent changes or reporting success.",
         ToolDef {
             name: "bash_output",
             kind: Kind::ReadOnly,
-            description: "Wait for a background command and read its output. ALWAYS prefer wait_secs (0-60): it parks until the job exits or the timeout lapses — intermediate output never wakes it early — then returns everything accumulated. One call instead of a poll loop. Reads without it on a running job are free twice, then force-waited (15s, then 30s). Output is incremental: the first read returns the tail, later reads return only bytes appended since the previous read (from_start=true re-reads the tail). Only this session's jobs are visible here. A finished job is reported once with its exit code, then cleaned up. Without id: a list of this session's background jobs with their commands and log paths.",
+            description: "Wait for a background command and read its output. ALWAYS prefer wait_secs (0-60): it parks until the job exits or the timeout lapses, then returns everything accumulated. Reads without it on a running job are free twice, then force-waited (15s, then 30s). Output is incremental (first read: tail; later: only new bytes; from_start=true re-reads the tail). Only this session's jobs are visible. A finished job is reported once with its exit code, then cleaned up. Without id: list this session's background jobs.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "id": {"type": "integer", "description": "job id from bash background=true"},
                     "tail": {"type": "integer", "description": "bytes of output to return (default 10000, max 50000)"},
-                    "wait_secs": {"type": "integer", "description": "PREFERRED: park up to N seconds (max 60) until the job exits; returns everything accumulated. Never wakes early on output."},
+                        "wait_secs": {"type": "integer", "description": "PREFERRED: park up to N seconds (max 60) until the job exits"},
                     "from_start": {"type": "boolean", "description": "re-read the tail from scratch instead of the delta"}
                 }
             }),
@@ -343,7 +342,7 @@ tight loop; await its result before dependent changes or reporting success.",
         ToolDef {
             name: "subagent",
             kind: Kind::ReadOnly,
-            description: "Delegate one or more focused tasks to child agents. Children inherit the current Plan/Act mode; up to 8 tasks are accepted, at most 4 run concurrently, and child agents cannot create further subagents. A child that produces nothing for 600s is cancelled and reported as timed out. Separate subagent calls in one turn also run concurrently. Children are read-only by default; a task object with write:true and paths:[...] declares a writer scoped to those roots (non-empty, non-overlapping with sibling writers) — writes outside the scope are refused.",
+            description: "Delegate one or more focused tasks to child agents. Children inherit the current Plan/Act mode; up to 8 tasks are accepted, at most 4 run concurrently, and child agents cannot create further subagents. A child silent for 600s is cancelled and reported as timed out. Children are read-only by default; a task object with write:true and paths:[...] declares a writer scoped to those roots (non-empty, non-overlapping with sibling writers) — writes outside the scope are refused.",
             parameters: json!({"type":"object","properties":{"task":{"type":["string","object"],"description":"one focused child task: a string (read-only), or an object with task|prompt plus write:true and paths:[...] to declare a scoped writer"},"tasks":{"type":"array","items":{"anyOf":[{"type":"string"},{"type":"object","properties":{"task":{"type":"string"},"prompt":{"type":"string"},"description":{"type":"string"},"write":{"type":"boolean","description":"allow file writes, scoped to paths"},"paths":{"type":"array","items":{"type":"string"},"description":"write scope roots, required with write:true"}},"additionalProperties":true}]},"minItems":1,"maxItems":8,"description":"focused child tasks to run concurrently (strings, or objects with task|prompt)"}},"anyOf":[{"required":["task"]},{"required":["tasks"]}]}),
         },
         ToolDef {
@@ -355,12 +354,11 @@ tight loop; await its result before dependent changes or reporting success.",
         ToolDef {
             name: "journal",
             kind: Kind::ReadOnly,
-            description: "Read the host journal: the factual event log of what happened in this \
+            description: "Read the host journal: the factual event log of this \
              project (user messages, tool calls and results, file diffs, plan ops, notes, \
              checkpoints). Every line carries j#<seq>, the stable reference used by plan \
-             evidence and note resolves. Times are UTC. Use it to answer questions about \
-             past actions, find which evidence exists for a step, or recall what was already \
-             tried. Output is newest-tail first narrowed by filters and always capped: \
+             evidence and note resolves. Times are UTC. Use it to find what evidence exists \
+             or what was already tried. Output is newest-first and always capped: \
              narrow with kind/step/from/to/after/query instead of dumping everything.",
             parameters: json!({
                 "type": "object",
@@ -415,15 +413,16 @@ Returns definition location, signature, provenance (source_hash, generation, fre
         ToolDef {
             name: "recall",
             kind: Kind::ReadOnly,
-            description: "Search code and memory graph by symbol name, path, concept, or memory text snippet using deterministic ranking. \
-Returns matching items with canonical keys (sym:..., file:..., mem:...), kinds, paths, one-line snippets, and provenance. \
+            description: "Search the code graph by symbol name, path or concept \
+using deterministic ranking. \
+Returns matching items with canonical keys (sym:..., file:...), kinds, paths, one-line snippets, and provenance. \
 Always prefer using the canonical keys returned by recall in subsequent graph_query calls.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "search query (symbol, path, concept, or memory text)"
+                        "description": "search query (symbol, path or concept)"
                     },
                     "limit": {
                         "type": "integer",
@@ -436,10 +435,10 @@ Always prefer using the canonical keys returned by recall in subsequent graph_qu
         ToolDef {
             name: "graph_query",
             kind: Kind::ReadOnly,
-            description: "Traverse relationships in the code and memory graph from a starting node using bounded breadth-first search. \
-Accepts canonical keys (sym:..., file:..., mem:...) or shorthand (path::symbol, symbol name). \
-If the starting node is unresolvable or ambiguous, returns an explicit error with candidates (use recall to find canonical keys). \
-By default, uses the 'dependencies' preset and does not expand file containers into sibling declarations. \
+            description: "Traverse relationships in the code graph from a starting node using bounded breadth-first search. \
+Accepts canonical keys (sym:..., file:...) or shorthand (path::symbol, symbol name). \
+Unresolvable or ambiguous starts return an error with candidates (use recall for canonical keys). \
+Default preset is 'dependencies', without expanding file containers into sibling declarations. \
 Returns connected nodes, incident edges, and explicit truncation status.",
             parameters: json!({
                 "type": "object",
@@ -492,11 +491,10 @@ Returns connected nodes, incident edges, and explicit truncation status.",
             name: "propose_plan",
             kind: Kind::ReadOnly,
             description: "Propose a new full plan or a replacement for the active one. \
-             Nothing is written until the user accepts: the host validates the draft first \
-             (format errors reject this call without bothering the user), then shows it \
-             for accept/decline with a preview. If declined, the outcome says so — ask \
-             the user what was wrong and adjust, do not stop. Use for a new goal and for \
-             replacing the active plan; small edits to the active plan use plan add/split.",
+Nothing is written until the user accepts: the host validates the draft first, \
+then shows it for accept/decline with a preview. If declined, ask \
+the user what was wrong and adjust, do not stop. Use for a new goal and for \
+replacing the active plan; small edits to the active plan use plan add/split.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -523,12 +521,12 @@ Returns connected nodes, incident edges, and explicit truncation status.",
             name: "propose_reset",
             kind: Kind::ReadOnly,
             description: "Propose abandoning the active plan when the plan itself is wrong \
-             (not the work): the reason must quote the plan defect, and the user confirms \
-             through a dialog showing what gets discarded — nothing is written until then. \
-             The old plan stays on disk as abandoned (history is never rewritten); a \
-             replacement, if any, goes through a fresh plan create with all its gates. \
-             For a bad direction with a salvageable structure use propose_plan instead; \
-             for an impossible task use plan block_plan.",
+(not the work): the reason must quote the plan defect, and the user confirms \
+through a dialog showing what gets discarded — nothing is written until then. \
+The old plan stays on disk as abandoned; a \
+replacement, if any, goes through a fresh plan create with all its gates. \
+For a bad direction with a salvageable structure use propose_plan instead; \
+for an impossible task use plan block_plan.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -543,22 +541,21 @@ Returns connected nodes, incident edges, and explicit truncation status.",
             description: "Work the structured plan, one operation per call. Ops: create, start, \
 finish, block, unblock, cancel, add, split, verify, complete, show, block_plan. To abandon \
 a wrong plan, use propose_reset (user-confirmed), never cancel-and-recreate around it. Plans are for \
-work that changes things: read-only inspection needs no plan and no acceptance — just look. \
-For a write, create with goal + steps; acceptance is optional at create (trivial writes can \
-complete on closed steps alone) and required only as executable or human-settled criteria for \
+work that changes things: read-only inspection needs no plan — just look. \
+For a write, create with goal + steps; acceptance is optional at create \
+and required only as executable or human-settled criteria for \
 real mutations: cmd: for a check that fails before the change and passes after, manual: for \
 anything a human eyeballs. Advanced rung kinds (snapshot:/differential:/signatures:) are \
 host-suggested after the first run, never written by hand. Call \
 show first if you are unsure of the current step ids. The host owns the goal, the constraints, \
 acceptance status, validation and evidence; to change the goal, propose the full updated plan with \
 propose_plan instead. finish records completion of the step's work with a summary and does not \
-by itself establish that acceptance criteria passed; it requires host-recorded evidence since \
-start only in strict mode ([plan] strict), and rejections return a code and hint to follow. \
+by itself establish that acceptance criteria passed; rejections return a code and hint to follow. \
 A manual: acceptance can be \
 waived only by the user, never verified by the model. complete requires every step closed and \
 every acceptance validation passed or waived with fresh receipts. block_plan surrenders \
 an impossible task: use it when the spec contradicts the tests (or itself) instead of gaming \
-either side — quote the conflict in reason. A blocked plan is an honest result, never a failure. \
+either side — quote the conflict in reason. \
 Never invent evidence identifiers.",
             parameters: json!({
                 "type": "object",
