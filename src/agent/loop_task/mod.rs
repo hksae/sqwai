@@ -1975,7 +1975,6 @@ mod subagent_tests {
         MAX_PARALLEL_SUBAGENTS, SubagentTask, next_subagent_session,
         subagent_tasks_from_args,
     };
-    use super::*;
 
     /// #190: every child session id is distinct, even back-to-back —
     /// journal files must never be shared between runs.
@@ -2285,7 +2284,7 @@ mod effort_tests {
     };
     use super::loop_subagent::{SUBAGENT_TIMEOUT_SECS, adopt_in_progress_step};
     use super::loop_turn::{TurnOutcome, run_turn};
-    use crate::providers::{ContextTransport, StreamEvent};
+    use crate::providers::StreamEvent;
     use super::loop_lint::{
         extract_counts, extract_paths, extract_status_words, extract_symbols,
         lint_answer, path_deleted_nearby,

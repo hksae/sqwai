@@ -35,11 +35,10 @@ pub(crate) use specs::{
 mod tests {
     use super::dispatch::plan_op;
     use super::policy::acceptance_policy_hit;
-    use super::verify::{rejection, validate_attached_records, verify_acceptance};
+    use super::verify::{validate_attached_records, verify_acceptance};
     use super::*;
-    use crate::agent::graph::GraphStore;
     use crate::plan;
-    use serde_json::{Value, json};
+    use serde_json::json;
     use std::fs;
     use std::path::{Path, PathBuf};
 
