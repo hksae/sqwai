@@ -4944,12 +4944,12 @@ end
         assert!(created.ok);
 
         // 1. step_diff requires step_id
-        let no_id = execute(&mut ctx, "step_diff", &json!({}));
+        let no_id = plan_op(&mut ctx, &json!({"op": "step_diff"}));
         assert!(!no_id.ok);
-        assert!(no_id.output.contains("step_id is required"));
+        assert!(no_id.output.contains("step_id"));
 
         // 2. Pending step reports it has not started
-        let pending = execute(&mut ctx, "step_diff", &json!({"step_id": "1"}));
+        let pending = plan_op(&mut ctx, &json!({"op": "step_diff", "step_id": "1"}));
         assert!(pending.ok);
         assert!(pending.output.contains("pending"));
 
@@ -4963,7 +4963,7 @@ end
         assert!(write1.ok);
 
         // Diff while step 1 is in progress
-        let diff_prog = execute(&mut ctx, "step_diff", &json!({"step_id": "1"}));
+        let diff_prog = plan_op(&mut ctx, &json!({"op": "step_diff", "step_id": "1"}));
         assert!(diff_prog.ok, "{}", diff_prog.output);
         assert!(diff_prog.output.contains("feat1"));
         assert!(diff_prog.output.contains("feature1.rs"));
@@ -5032,24 +5032,23 @@ end
         );
 
         // 5. Querying step 1 diff shows only step 1 changes
-        let diff1 = execute(&mut ctx, "step_diff", &json!({"step_id": "1"}));
+        let diff1 = plan_op(&mut ctx, &json!({"op": "step_diff", "step_id": "1"}));
         assert!(diff1.ok, "{}", diff1.output);
         assert!(diff1.output.contains("feature1.rs"));
         assert!(diff1.output.contains("feat1"));
         assert!(!diff1.output.contains("feature2.rs"));
 
         // 6. Querying step 2 diff shows only step 2 changes
-        let diff2 = execute(&mut ctx, "step_diff", &json!({"step_id": "2"}));
+        let diff2 = plan_op(&mut ctx, &json!({"op": "step_diff", "step_id": "2"}));
         assert!(diff2.ok, "{}", diff2.output);
         assert!(diff2.output.contains("feature2.rs"));
         assert!(diff2.output.contains("feat2"));
         assert!(!diff2.output.contains("feat1"));
 
         // 7. Path-scoped step diff
-        let diff_path = execute(
+        let diff_path = plan_op(
             &mut ctx,
-            "step_diff",
-            &json!({"step_id": "2", "path": "src/feature2.rs"}),
+            &json!({"op": "step_diff", "step_id": "2", "path": "src/feature2.rs"}),
         );
         assert!(diff_path.ok, "{}", diff_path.output);
         assert!(diff_path.output.contains("feature2.rs"));

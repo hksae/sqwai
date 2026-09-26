@@ -21,7 +21,7 @@ pub use ops::{
     Applied, Limits, NewStep, Op, PlanDraftArgs, Rejection, abandon,
     apply, create, reset_discards, validate_proposal_invariants, validate_surrender_reason,
 };
-pub(crate) use ops::{accept, add_acceptance, reject};
+pub(crate) use ops::{accept, add_acceptance, reject, step_diff};
 pub use render::{
     apply_flaky, apply_invalidate, attach_confirmation, confirm, invalidate_on_diff,
     render, render_goal, render_status, set_goal, stale_announcements, waive,

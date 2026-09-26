@@ -249,25 +249,6 @@ await its result before dependent changes or reporting success.",
             parameters: json!({"type":"object","properties":{"target":{"type":"string"}}}),
         },
         ToolDef {
-            name: "step_diff",
-            kind: Kind::ReadOnly,
-            description: "Show what changed in a specific plan step by comparing shadow checkpoint boundaries. Answers what was modified during that step.",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "step_id": {
-                        "type": "string",
-                        "description": "plan step id (e.g. '1', '2')"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "optional path to restrict the diff to"
-                    }
-                },
-                "required": ["step_id"]
-            }),
-        },
-        ToolDef {
             name: "git_log",
             kind: Kind::ReadOnly,
             description: "Show recent Git commits.",
@@ -563,9 +544,11 @@ Never invent evidence identifiers.",
                     "op": {"type": "string", "enum": [
                         "create", "start", "finish", "block", "unblock", "cancel",
                         "add", "split", "verify", "complete", "show", "block_plan",
-                        "add_acceptance"
+                        "add_acceptance", "step_diff"
                     ]},
                     "id": {"type": "string", "description": "step id"},
+                    "step_id": {"type": "string", "description": "step_diff: plan step id"},
+                    "path": {"type": "string", "description": "step_diff: restrict the diff to this path"},
                     "goal": {"type": "string", "description": "create"},
                     "constraints": {"type": "array", "items": {"type": "string"}},
                     "acceptance": {
@@ -945,15 +928,6 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             }
         }
         "git_diff" => s("target"),
-        "step_diff" => {
-            let step = s("step_id");
-            let path = s("path");
-            if path.is_empty() {
-                format!("step {step}")
-            } else {
-                format!("step {step} {path}")
-            }
-        }
         "git_commit" => s("message"),
         "git_stage" => {
             let action = match args["action"].as_str() {

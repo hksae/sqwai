@@ -329,7 +329,6 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         ),
         "git_status" => git::status(ctx, args),
         "git_diff" => git::diff(ctx, args),
-        "step_diff" => git::step_diff(ctx, args),
         "git_log" => git::log(ctx, args),
         "git_show" => git::show(ctx, args),
         "git_commit" => git::commit(ctx, args),
@@ -1121,6 +1120,21 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         return Outcome::err(
             "plan op rejected: join is host-only — sessions join a plan via plan start, not this op",
         );
+    }
+    // Read-only step diffs bypass validator, journal and store: nothing is
+    // recorded, like Show (which keeps its own path below).
+    if let plan::Op::StepDiff { step_id, path } = &op {
+        return match plan::step_diff(
+            &ctx.root,
+            &ctx.session_id,
+            ctx.shadow_store,
+            ctx.checkpoint_chain(),
+            step_id,
+            path.as_deref(),
+        ) {
+            Ok(text) => Outcome::ok(text),
+            Err(r) => rejection(r),
+        };
     }
     let limits = plan::Limits {
         max_steps: ctx.plan_limits.max_steps,

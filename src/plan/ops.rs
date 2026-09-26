@@ -5,6 +5,8 @@ use super::{
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::path::Path;
 
 
 // ---------------------------------------------------------------- operations
@@ -108,6 +110,14 @@ pub enum Op {
     },
     Complete,
     Show,
+    /// Read-only: what changed during one plan step, from shadow checkpoint
+    /// boundaries. Answered by the dispatcher without touching the plan file
+    /// (see `step_diff`); never journaled, never replayed.
+    StepDiff {
+        step_id: String,
+        #[serde(default)]
+        path: Option<String>,
+    },
     /// Host-only: a child session joins its parent's plan so its evidence
     /// attaches under session-strict resolution. Never exposed to the model
     /// (the `plan` tool refuses it); recorded journal-first like every op.
@@ -487,6 +497,142 @@ pub fn create(
     Ok(plan)
 }
 
+/// Read-only step diff for the `step_diff` plan op: what changed during one
+/// plan step, from shadow checkpoint boundaries. Takes explicit host handles
+/// (root, session, shadow store, checkpoint chain) instead of a ToolCtx —
+/// the plan crate owns the operation, dispatch owns the context. Never
+/// journaled, never replayed.
+pub fn step_diff(
+    root: &Path,
+    session_id: &str,
+    shadow_store: crate::config::ShadowStore,
+    chain: &str,
+    step_id: &str,
+    path: Option<&str>,
+) -> Result<String, Rejection> {
+    let fail = |reason: &str| {
+        Rejection::new(
+            "step_diff_failed",
+            reason,
+            "need a started step with checkpointed work",
+        )
+    };
+    let target_path = path.map(str::trim).filter(|s| !s.is_empty());
+
+    // Check plan if present
+    if let Ok(Some(plan)) = super::store::open_active_for_session(root, Some(session_id))
+        && let Some(step) = plan.step(step_id)
+        && step.status == StepStatus::Pending
+    {
+        return Ok(format!(
+            "step '{step_id}' is pending and has not been started yet"
+        ));
+    }
+
+    let Some(shadow) = crate::agent::checkpoints::shadow_repo(root, shadow_store) else {
+        return Err(fail("shadow checkpoint repository is not available"));
+    };
+
+    // If step is currently in progress, ensure current worktree is snapshotted
+    let _ = crate::agent::checkpoints::snapshot_boundary(
+        root,
+        shadow_store,
+        chain,
+        &format!("step_{step_id}_probe"),
+    );
+
+    // Find commits in the session chain
+    let commits = match shadow.commit_log(chain) {
+        Ok(c) if !c.is_empty() => c,
+        _ => match shadow.commit_log("shared") {
+            Ok(c) => c,
+            Err(e) => return Err(fail(&format!("reading shadow history failed: {e:#}"))),
+        },
+    };
+
+    let (mut start_sha, mut finish_sha) = resolve_boundary_commits(&commits, step_id);
+
+    // Fallback to journal records if labels not in commit messages
+    if (start_sha.is_none() || finish_sha.is_none())
+        && let Ok(records) = crate::agent::journal::Journal::records_for(root, session_id)
+    {
+        for r in &records {
+            let matches_step = r.step.as_deref() == Some(step_id)
+                || r.fields.get("step").and_then(Value::as_str) == Some(step_id)
+                || (r.kind == "plan"
+                    && r.fields.get("id").and_then(Value::as_str) == Some(step_id));
+            if !matches_step {
+                continue;
+            }
+            if let Some(sha) = r.fields.get("id").and_then(Value::as_str) {
+                let reason = r.fields.get("reason").and_then(Value::as_str);
+                if reason == Some("step_start") {
+                    start_sha = Some(sha.to_string());
+                    finish_sha = None;
+                }
+                if reason == Some("step_finish") && start_sha.is_some() {
+                    finish_sha = Some(sha.to_string());
+                }
+            }
+            if let Some(sha) = r.fields.get("checkpoint").and_then(Value::as_str) {
+                start_sha = Some(sha.to_string());
+                finish_sha = None;
+            }
+        }
+    }
+
+    // If finish is still not found, use latest commit on the session chain
+    if finish_sha.is_none() {
+        finish_sha = shadow
+            .head_of(chain)
+            .or_else(|| shadow.head_of("shared"));
+    }
+
+    let (Some(start), Some(finish)) = (start_sha, finish_sha) else {
+        return Err(fail(&format!(
+            "no checkpoint boundaries found for step '{step_id}'"
+        )));
+    };
+
+    match shadow.diff(&start, &finish, target_path) {
+        Ok(diff) => {
+            let trimmed = diff.trim();
+            if trimmed.is_empty() {
+                if let Some(path) = target_path {
+                    Ok(format!("no changes to '{path}' in step {step_id}"))
+                } else {
+                    Ok(format!("no changes recorded for step {step_id}"))
+                }
+            } else {
+                Ok(trimmed.to_string())
+            }
+        }
+        Err(e) => Err(fail(&format!("git diff failed: {e:#}"))),
+    }
+}
+
+pub(crate) fn resolve_boundary_commits(
+    commits: &[(String, String)],
+    step_id: &str,
+) -> (Option<String>, Option<String>) {
+    let start_label = format!("step_{step_id}_start");
+    let finish_label = format!("step_{step_id}_finish");
+
+    let mut start_sha: Option<String> = None;
+    let mut finish_sha: Option<String> = None;
+
+    // commits are newest first (reverse chronological order)
+    for (sha, label) in commits {
+        if label.contains(&finish_label) && finish_sha.is_none() && start_sha.is_none() {
+            finish_sha = Some(sha.clone());
+        }
+        if label.contains(&start_label) && start_sha.is_none() {
+            start_sha = Some(sha.clone());
+        }
+    }
+    (start_sha, finish_sha)
+}
+
 /// Apply one operation. Every rule from §2.1.4 except the evidence rule and
 /// refs (deferred to F3 / I4).
 pub fn apply(
@@ -498,7 +644,7 @@ pub fn apply(
     // Closed plans are read-only: Show inspects, everything else belongs
     // to an active plan. Without this the model path could keep mutating
     // completed or abandoned plans (defect A).
-    if plan.status != PlanStatus::Active && !matches!(op, Op::Show) {
+    if plan.status != PlanStatus::Active && !matches!(op, Op::Show | Op::StepDiff { .. }) {
         return reject(
             plan,
             "plan_closed",
@@ -526,6 +672,15 @@ pub fn apply(
             plan.rejections_in_a_row = 0;
             Ok(Applied::Shown { text: render(plan) })
         }
+        // Answered by the dispatcher (which owns root, session and shadow
+        // handles this signature lacks); reaching apply means a bug. Kept
+        // explicit so the match stays exhaustive if the dispatcher changes.
+        Op::StepDiff { .. } => reject(
+            plan,
+            "step_diff_dispatched",
+            "step diffs are answered by the dispatcher without touching the plan",
+            "call plan with op step_diff",
+        ),
         Op::Start { id, confirm } => start(plan, &id, confirm, current_step),
         Op::Finish {
             id,
@@ -979,5 +1134,37 @@ fn split(
     let ids: Vec<String> = replacements.iter().map(|s| s.id.clone()).collect();
     plan.steps.splice(index..=index, replacements);
     accept(plan, format!("step {id} split into {}", ids.join(", ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_boundary_commits_handles_reopened_steps() {
+        // Step was finished (cycle 1), reopened, and started again (cycle 2 in progress)
+        // Commits in reverse-chronological order (newest first):
+        let commits = vec![
+            ("sha_work".into(), "commit: work in progress".into()),
+            ("sha_start_2".into(), "checkpoint: step_1_start".into()),
+            ("sha_finish_1".into(), "checkpoint: step_1_finish".into()),
+            ("sha_start_1".into(), "checkpoint: step_1_start".into()),
+        ];
+        let (start, finish) = resolve_boundary_commits(&commits, "1");
+        assert_eq!(start.as_deref(), Some("sha_start_2"));
+        // finish must NOT pair with stale sha_finish_1 from prior cycle
+        assert_eq!(finish, None);
+
+        // Once cycle 2 finishes:
+        let commits_finished = vec![
+            ("sha_finish_2".into(), "checkpoint: step_1_finish".into()),
+            ("sha_start_2".into(), "checkpoint: step_1_start".into()),
+            ("sha_finish_1".into(), "checkpoint: step_1_finish".into()),
+            ("sha_start_1".into(), "checkpoint: step_1_start".into()),
+        ];
+        let (start, finish) = resolve_boundary_commits(&commits_finished, "1");
+        assert_eq!(start.as_deref(), Some("sha_start_2"));
+        assert_eq!(finish.as_deref(), Some("sha_finish_2"));
+    }
 }
 
