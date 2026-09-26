@@ -780,6 +780,12 @@ fn spill(contents: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// Background-job tests share one process-global registry, and
+    /// `kill_remaining_jobs` reaps every live job in it: tests that hold a
+    /// live job (or kill them all) serialize here, or parallel threads
+    /// interleave kills with reads and all five assert global state.
+    static BG_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn ctx() -> ToolCtx {
         ToolCtx::new(std::env::temp_dir())
     }
@@ -946,6 +952,7 @@ mod tests {
     /// while finished jobs are left for their normal reaping.
     #[test]
     fn shutdown_kills_live_jobs_but_keeps_finished_ones_listed() {
+        let _bg = BG_SERIAL.lock().unwrap();
         let mut c = ctx();
         let started = bash(&mut c, &long_sleep_command(), None, true);
         assert!(started.ok, "{}", started.output);
@@ -961,6 +968,7 @@ mod tests {
     /// fire-and-forget leak but something the model can observe and stop.
     #[test]
     fn background_jobs_can_be_polled_and_killed() {
+        let _bg = BG_SERIAL.lock().unwrap();
         let mut c = ctx();
         // a long command whose output lands in the job log steadily; no inner
         // redirection: cmd under DETACHED_PROCESS dies silently the moment
@@ -1010,6 +1018,7 @@ mod tests {
     /// `bash_kill` on the same id says so instead of pretending to kill.
     #[test]
     fn a_finished_job_is_reported_then_reaped() {
+        let _bg = BG_SERIAL.lock().unwrap();
         let mut c = ctx();
         let started = bash(&mut c, "echo hi", None, true);
         assert!(started.ok, "{}", started.output);
@@ -1071,6 +1080,7 @@ mod tests {
     /// its `%TEMP%/sqwai-bg/bg-*.out` go away together.
     #[test]
     fn reaped_and_killed_jobs_leave_no_log_files() {
+        let _bg = BG_SERIAL.lock().unwrap();
         let mut c = ctx();
         // kill path: running job removed by bash_kill
         let (id, log) = spawn_bg_with_log(&mut c, &long_sleep_command());
@@ -1092,6 +1102,7 @@ mod tests {
     /// what landed since — a chatty log crosses the context exactly once.
     #[test]
     fn bash_output_returns_deltas_after_the_first_read() {
+        let _bg = BG_SERIAL.lock().unwrap();
         let mut c = ctx();
         let id = spawn_bg(&mut c, &long_sleep_command());
         std::thread::sleep(std::time::Duration::from_millis(1500));
@@ -1142,6 +1153,7 @@ mod tests {
     /// wait_secs wakes on fresh output: one call instead of a poll loop.
     #[test]
     fn bash_output_wait_returns_when_bytes_land() {
+        let _bg = BG_SERIAL.lock().unwrap();
         let mut c = ctx();
         let id = spawn_bg(&mut c, "echo hello-wait");
         let t0 = std::time::Instant::now();
@@ -1162,6 +1174,7 @@ mod tests {
     /// wait_secs gives up at the timeout while the job keeps running.
     #[test]
     fn bash_output_wait_times_out_on_a_quiet_job() {
+        let _bg = BG_SERIAL.lock().unwrap();
         let mut c = ctx();
         let id = spawn_bg(&mut c, &long_sleep_command());
         // drain the startup burst so the wait has nothing fresh to wake on
@@ -1195,6 +1208,7 @@ mod tests {
     /// test — not slept out here).
     #[test]
     fn repeated_nowait_reads_force_a_wait() {
+        let _bg = BG_SERIAL.lock().unwrap();
         let mut c = ctx();
         // ~5s of output, then exit: the forced wait wakes on the exit,
         // not on the full 15s cap
@@ -1246,6 +1260,7 @@ mod tests {
     /// and kills only its own background jobs.
     #[test]
     fn background_jobs_are_isolated_by_session() {
+        let _bg = BG_SERIAL.lock().unwrap();
         let mut a = ctx();
         a.session_id = "session-a".into();
         let mut b = ctx();
