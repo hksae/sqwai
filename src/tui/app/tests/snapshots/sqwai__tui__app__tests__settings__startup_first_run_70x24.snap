@@ -1,6 +1,5 @@
 ---
-source: src/tui/app/tests.rs
-assertion_line: 4837
+source: src/tui/app/tests/settings.rs
 expression: s
 ---
 
@@ -13,11 +12,11 @@ expression: s
   this project has no .sqwai yet
   /init create AGENTS.md and memory or just type a task
 
+  ❯ type a task to start
+
   tab    plan / act
   /help  controls
   /init  set up project
-
-
 
 
 

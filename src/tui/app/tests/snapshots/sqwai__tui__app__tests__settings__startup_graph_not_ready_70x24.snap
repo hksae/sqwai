@@ -1,6 +1,5 @@
 ---
-source: src/tui/app/tests.rs
-assertion_line: 4870
+source: src/tui/app/tests/settings.rs
 expression: s
 ---
 
@@ -13,10 +12,10 @@ expression: s
   no active plan
   memory  MEMORY.md · diary 2025-01-14
 
+  ❯ type a task to start
+
   tab    plan / act
   /help  controls
-
-
 
 
 

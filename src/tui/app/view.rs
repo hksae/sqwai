@@ -3723,17 +3723,17 @@ impl App {
         let is_narrow = chat.width < 80;
         let mut raw_lines: Vec<Line<'static>> = Vec::new();
 
-        // 1. Identification line
+        // 1. Identification line: app bold, path/branch meta, model accent
         let mut id_spans = Vec::new();
         id_spans.push(Span::styled(
             format!("sqwai {}", data.version),
-            Theme::base(),
+            Theme::base().add_modifier(Modifier::BOLD),
         ));
         id_spans.push(Span::styled(" · ", Theme::dim()));
-        id_spans.push(Span::styled(data.project_path.clone(), Theme::base()));
+        id_spans.push(Span::styled(data.project_path.clone(), Theme::meta()));
         id_spans.push(Span::styled(" · ", Theme::dim()));
         if let Some(branch) = &data.git_branch {
-            id_spans.push(Span::styled(branch.clone(), Theme::base()));
+            id_spans.push(Span::styled(branch.clone(), Theme::meta()));
             id_spans.push(Span::styled(" ", Theme::base()));
             match data.git_modified {
                 Some(0) => {
@@ -3755,7 +3755,7 @@ impl App {
         }
         if !is_narrow {
             id_spans.push(Span::styled(" · ", Theme::dim()));
-            id_spans.push(Span::styled(data.model.clone(), Theme::base()));
+            id_spans.push(Span::styled(data.model.clone(), Theme::accent()));
         }
         raw_lines.push(Line::from(id_spans));
         raw_lines.push(Line::default()); // blank line
@@ -3857,7 +3857,7 @@ impl App {
                 Theme::dim(),
             )]));
             raw_lines.push(Line::from(vec![
-                Span::styled("/init", Theme::base()),
+                Span::styled("/init", Theme::base().add_modifier(Modifier::BOLD)),
                 Span::styled(
                     " create AGENTS.md and memory or just type a task",
                     Theme::dim(),
@@ -3891,7 +3891,18 @@ impl App {
             }
         }
 
-        // 5. Hints
+        // 5. CTA on its own line: the primary action must not drown in
+        // the hint columns. Marker guides the eye, text stays bright.
+        raw_lines.push(Line::default()); // blank line
+        raw_lines.push(Line::from(vec![
+            Span::styled("❯ ", Theme::accent()),
+            Span::styled(
+                "type a task to start",
+                Theme::base().add_modifier(Modifier::BOLD),
+            ),
+        ]));
+
+        // 6. Hints
         raw_lines.push(Line::default()); // blank line
         if is_narrow {
             let mut hint_items: Vec<(&str, &str)> = Vec::new();
@@ -3905,7 +3916,10 @@ impl App {
             }
             for (k, d) in hint_items {
                 raw_lines.push(Line::from(vec![
-                    Span::styled(format!("{:<7}", k), Theme::base()),
+                    Span::styled(
+                        format!("{:<7}", k),
+                        Theme::base().add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(d, Theme::dim()),
                 ]));
             }
@@ -3919,17 +3933,15 @@ impl App {
                 col2_items.push(("tab", "plan / act"));
                 col3_items.push(("/help", "controls"));
 
-                col1_items.push(("type a task to start", ""));
                 if !data.has_sqwai_dir {
                     col3_items.push(("/init", "set up project"));
                 }
             } else {
-                col1_items.push(("type a task to start", ""));
-                col2_items.push(("tab", "plan / act"));
-                col3_items.push(("/help", "controls"));
+                col1_items.push(("tab", "plan / act"));
+                col2_items.push(("/help", "controls"));
 
                 if !data.has_sqwai_dir {
-                    col2_items.push(("/init", "set up project"));
+                    col3_items.push(("/init", "set up project"));
                 }
             }
 
@@ -3946,8 +3958,8 @@ impl App {
                     if d.is_empty() {
                         row_spans.push(Span::styled(k, Theme::dim()));
                     } else {
-                        row_spans.push(Span::styled(k, Theme::base()));
-                        row_spans.push(Span::styled(format!("  {d}"), Theme::dim()));
+                        row_spans.push(Span::styled(k, Theme::base().add_modifier(Modifier::BOLD)));
+                        row_spans.push(Span::styled(format!(": {d}"), Theme::dim()));
                     }
                     row_spans.push(Span::styled(" ".repeat(pad), Theme::base()));
                 } else {
@@ -3964,8 +3976,8 @@ impl App {
                     if d.is_empty() {
                         row_spans.push(Span::styled(k, Theme::dim()));
                     } else {
-                        row_spans.push(Span::styled(k, Theme::base()));
-                        row_spans.push(Span::styled(format!("  {d}"), Theme::dim()));
+                        row_spans.push(Span::styled(k, Theme::base().add_modifier(Modifier::BOLD)));
+                        row_spans.push(Span::styled(format!(": {d}"), Theme::dim()));
                     }
                     row_spans.push(Span::styled(" ".repeat(pad), Theme::base()));
                 } else {
@@ -3976,8 +3988,8 @@ impl App {
                     if d.is_empty() {
                         row_spans.push(Span::styled(k, Theme::dim()));
                     } else {
-                        row_spans.push(Span::styled(k, Theme::base()));
-                        row_spans.push(Span::styled(format!("  {d}"), Theme::dim()));
+                        row_spans.push(Span::styled(k, Theme::base().add_modifier(Modifier::BOLD)));
+                        row_spans.push(Span::styled(format!(": {d}"), Theme::dim()));
                     }
                 }
                 raw_lines.push(Line::from(row_spans));
