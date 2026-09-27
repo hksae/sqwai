@@ -3,14 +3,13 @@ use super::menus::{Menu, MenuAction};
 use super::view::{GROUP_BASE, blank};
 use super::*;
 
-
-    use super::*;
-    use crate::config::{Config, ModelConfig, ProviderConfig, WireFormat};
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-    use std::collections::BTreeMap;
-    use std::io::{BufRead, BufReader, Read, Write};
-    use std::net::TcpListener;
+use super::*;
+use crate::config::{Config, ModelConfig, ProviderConfig, WireFormat};
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 
 fn mock_sse_server(reasoning: &str, content: &str) -> (String, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -388,4 +387,3 @@ mod plans;
 mod sessions;
 mod settings;
 mod widgets;
-

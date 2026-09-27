@@ -545,7 +545,8 @@ mod tests {
     /// Nothing to remove means nothing is marked: the marker has to mean
     /// something when it shows up.
     #[test]
-    fn an_entry_within_the_host_block_is_left_alone() {        let host = "commands: bash ✓ ((exit code 0) 253 passed)\n";
+    fn an_entry_within_the_host_block_is_left_alone() {
+        let host = "commands: bash ✓ ((exit code 0) 253 passed)\n";
         let prose = "### Done\n- 253 passed after the change.\n";
         let (kept, removed) = strip_unverified_claims(prose, host);
         assert!(!removed);

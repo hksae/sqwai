@@ -74,7 +74,8 @@ fn content_blocks(m: &super::Message, thinking_on: bool) -> Vec<Value> {
 /// history anchor on long histories (see below). Volatile parts
 /// travel unmarked after the history, so a changed date or git status costs
 /// only the tail instead of the cached prefix behind it.
-pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints: bool) -> Value {    // What the caller asked for, falling back to the provider default. This
+pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints: bool) -> Value {
+    // What the caller asked for, falling back to the provider default. This
     // used to ignore `req.max_tokens` entirely and always send the default, so
     // a request for a larger answer was silently capped.
     let base_max_tokens = req.max_tokens.unwrap_or(default_max_tokens);
@@ -99,8 +100,7 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
             )
         });
 
-    let stable: Vec<&super::SystemPart> =
-        req.system.iter().filter(|part| part.cacheable).collect();
+    let stable: Vec<&super::SystemPart> = req.system.iter().filter(|part| part.cacheable).collect();
     let mut system: Vec<Value> = stable
         .iter()
         .map(|part| json!({"type": "text", "text": part.text}))
@@ -161,9 +161,7 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
     // nothing, and every marker is a potential cache write.
     if cache_breakpoints && msgs.len() >= MID_HISTORY_MARKER_MSGS {
         let mid = msgs.len() / 2;
-        if let Some(arr) = msgs[mid]
-            .get_mut("content")
-            .and_then(|c| c.as_array_mut())
+        if let Some(arr) = msgs[mid].get_mut("content").and_then(|c| c.as_array_mut())
             && let Some(block) = arr.last_mut()
         {
             block["cache_control"] = json!({"type": "ephemeral"});
@@ -525,7 +523,8 @@ impl ThinkingBlock {
     }
 }
 
-fn short(s: &str) -> String {    let mut cut = 500.min(s.len());
+fn short(s: &str) -> String {
+    let mut cut = 500.min(s.len());
     while cut > 0 && !s.is_char_boundary(cut) {
         cut -= 1;
     }
@@ -629,7 +628,10 @@ mod tests {
         assert_eq!(msgs[0]["role"], "user");
         assert!(msgs[0]["content"][0].get("cache_control").is_none());
         assert!(
-            msgs[0]["content"][0]["text"].as_str().unwrap().contains("anchor"),
+            msgs[0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("anchor"),
             "volatile tail travels last: {}",
             msgs[0]["content"][0]["text"]
         );
@@ -843,8 +845,14 @@ mod tests {
         assert_eq!(before["system"], after["system"]);
         // history block identical, tail block moved (merged into the same
         // trailing user turn)
-        assert_eq!(before["messages"][0]["content"][0], after["messages"][0]["content"][0]);
-        assert_ne!(before["messages"][0]["content"][1], after["messages"][0]["content"][1]);
+        assert_eq!(
+            before["messages"][0]["content"][0],
+            after["messages"][0]["content"][0]
+        );
+        assert_ne!(
+            before["messages"][0]["content"][1],
+            after["messages"][0]["content"][1]
+        );
     }
 
     #[test]
@@ -1092,7 +1100,10 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(thinking, "let me check", "thinking still streams: {events:?}");
+        assert_eq!(
+            thinking, "let me check",
+            "thinking still streams: {events:?}"
+        );
 
         let state = events
             .iter()
@@ -1193,7 +1204,11 @@ mod tests {
         let b = build_body(&req, 8192, true);
         let msgs = b["messages"].as_array().unwrap();
         let content = msgs[1]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 2, "text, tool_use, no thinking: {content:#?}");
+        assert_eq!(
+            content.len(),
+            2,
+            "text, tool_use, no thinking: {content:#?}"
+        );
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[1]["type"], "tool_use");
         assert!(b.get("thinking").is_none());

@@ -700,9 +700,7 @@ pub fn is_multi_file_mutation(name: &str, args: &Value) -> bool {
         // explicit path list is enumerable, and a plain commit only seals
         // what is already staged (both reversible). The `all: true`
         // variants stage the whole tree — unbounded, hard.
-        "git_stage" | "git_commit" => {
-            args.get("all").and_then(Value::as_bool).unwrap_or(false)
-        }
+        "git_stage" | "git_commit" => args.get("all").and_then(Value::as_bool).unwrap_or(false),
         // bash is opaque, git_stage/commit span the index, MCP unknown:
         // fail closed into the hard path
         _ => true,
@@ -736,8 +734,8 @@ pub fn is_readonly_bash(name: &str, args: &Value) -> bool {
 /// PowerShell read-only verb prefixes (`Get-Process`, `Where-Object`, bare
 /// `select`/`sort` aliases included by prefix).
 const READONLY_PS_VERBS: &[&str] = &[
-    "get-", "select-", "where-", "sort-", "format-", "measure-", "compare-", "test-",
-    "resolve-", "group-",
+    "get-", "select-", "where-", "sort-", "format-", "measure-", "compare-", "test-", "resolve-",
+    "group-",
 ];
 
 /// cmd read-only heads. The query-capable ones (`schtasks`, `reg`, `sc`)
@@ -1046,7 +1044,8 @@ pub fn tool_names() -> Vec<String> {
     names
 }
 
-pub fn tool_specs(_plan_mode: bool) -> Vec<crate::providers::ToolSpec> {    // One schema set in every mode. The tool block is part of the request
+pub fn tool_specs(_plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
+    // One schema set in every mode. The tool block is part of the request
     // prefix, so a mode-dependent set re-keys the cache on every Plan/Act
     // toggle; masking (Manus-style) would cost the same. Plan mode is
     // enforced by the dispatcher instead (`is_mutating_call` at dispatch
@@ -1144,16 +1143,13 @@ fn cp866_char(byte: u8) -> char {
         0x80..=0x9F => char::from_u32(0x0410 + (byte - 0x80) as u32).unwrap_or('�'),
         0xA0..=0xAF => char::from_u32(0x0430 + (byte - 0xA0) as u32).unwrap_or('�'),
         0xB0..=0xBF => [
-            '░', '▒', '▓', '│', '┤', '╡', '╢', '╖', '╕', '╣', '║', '╗', '╝', '╜',
-            '╛', '┐',
+            '░', '▒', '▓', '│', '┤', '╡', '╢', '╖', '╕', '╣', '║', '╗', '╝', '╜', '╛', '┐',
         ][(byte - 0xB0) as usize],
         0xC0..=0xCF => [
-            '└', '┴', '┬', '├', '─', '┼', '╞', '╟', '╚', '╔', '╩', '╦', '╠', '═',
-            '╬', '╧',
+            '└', '┴', '┬', '├', '─', '┼', '╞', '╟', '╚', '╔', '╩', '╦', '╠', '═', '╬', '╧',
         ][(byte - 0xC0) as usize],
         0xD0..=0xDF => [
-            '╨', '╤', '╥', '╙', '╘', '╒', '╓', '╫', '╪', '┘', '┌', '█', '▄', '▌',
-            '▐', '■',
+            '╨', '╤', '╥', '╙', '╘', '╒', '╓', '╫', '╪', '┘', '┌', '█', '▄', '▌', '▐', '■',
         ][(byte - 0xD0) as usize],
         0xE0..=0xEF => char::from_u32(0x0440 + (byte - 0xE0) as u32).unwrap_or('�'),
         0xF0 => 'Ё',
@@ -1180,7 +1176,10 @@ fn cp866_char(byte: u8) -> char {
 /// through untouched, and mixed lines decode each in its own encoding.
 #[test]
 fn decode_child_output_handles_console_codepage() {
-    assert_eq!(decode_child_output(&[0x8F, 0xE0, 0xA8, 0xA2, 0xA5, 0xE2]), "Привет");
+    assert_eq!(
+        decode_child_output(&[0x8F, 0xE0, 0xA8, 0xA2, 0xA5, 0xE2]),
+        "Привет"
+    );
     assert_eq!(decode_child_output("ok 🔥 ЕС".as_bytes()), "ok 🔥 ЕС");
     let mut mixed = b"done\n".to_vec();
     mixed.extend_from_slice(&[0x8E, 0xE8, 0xA8, 0xA1, 0xAA, 0xA0]); // "Ошибка" in cp866

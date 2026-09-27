@@ -65,8 +65,7 @@ pub(crate) fn mutation_target_paths(ctx: &ToolCtx, name: &str, args: &Value) -> 
         }
         vec![raw.to_string()]
     };
-    raws
-        .into_iter()
+    raws.into_iter()
         .filter_map(|raw| {
             let resolved = ctx.resolve(&raw).ok()?;
             let rel = resolved
@@ -231,9 +230,7 @@ fn bash_write_targets(command: &str) -> Vec<String> {
                     // enumerate; any path operand outside fails below
                     let mut ops = non_flag.iter().peekable();
                     if ops.peek() == Some(&&"apply") {
-                        targets.extend(
-                            ops.filter(|w| w.contains('/')).map(|s| s.to_string()),
-                        );
+                        targets.extend(ops.filter(|w| w.contains('/')).map(|s| s.to_string()));
                     }
                 }
                 _ => {}
@@ -352,8 +349,7 @@ pub(crate) fn frozen_input_command_hit(
         let op = word.trim_matches(|c| c == '\'' || c == '"');
         let redirect = op == ">"
             || op == ">>"
-            || (op.ends_with('>')
-                && op[..op.len() - 1].chars().all(|c| c.is_ascii_digit()));
+            || (op.ends_with('>') && op[..op.len() - 1].chars().all(|c| c.is_ascii_digit()));
         if !redirect {
             continue;
         }
@@ -439,7 +435,11 @@ pub(crate) fn register_mention_prereads(session: &str, paths: Vec<PathBuf>) {
 
 /// Take registered @-paths for context construction (single take).
 pub(crate) fn take_mention_prereads(session: &str) -> Vec<PathBuf> {
-    mention_prereads().lock().unwrap().remove(session).unwrap_or_default()
+    mention_prereads()
+        .lock()
+        .unwrap()
+        .remove(session)
+        .unwrap_or_default()
 }
 
 /// True when `path` (project-relative, forward slashes) sits inside one
@@ -471,10 +471,7 @@ pub(crate) struct PolicyRefusal {
 /// project-injected `cmd: $name` (`.sqwai/config.toml`, MEMORY.md) face
 /// the same list either way: a `[verify]` plant that classifies Safe is
 /// exactly what the egress rule stops.
-pub(crate) fn acceptance_policy_hit(
-    ctx: &ToolCtx,
-    command: &str,
-) -> Option<PolicyRefusal> {
+pub(crate) fn acceptance_policy_hit(ctx: &ToolCtx, command: &str) -> Option<PolicyRefusal> {
     for pat in &ctx.blocked_patterns {
         match regex::Regex::new(pat) {
             Ok(re) => {

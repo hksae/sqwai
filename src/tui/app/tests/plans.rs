@@ -235,10 +235,8 @@ fn completed_linked_plan_refuses_tui_mutations() {
     );
 
     let after: plan::Plan = serde_json::from_str(
-        &std::fs::read_to_string(
-            plan::plans_dir(&temp_dir).join(format!("{}.json", finished.id)),
-        )
-        .unwrap(),
+        &std::fs::read_to_string(plan::plans_dir(&temp_dir).join(format!("{}.json", finished.id)))
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(after.status, plan::PlanStatus::Completed);
@@ -961,8 +959,7 @@ fn toggled_tool_with_tabbed_output_leaves_no_control_cells() {
         name: "read".into(),
         args: "Cargo.toml".into(),
         ok: Some(true),
-        output: "     1\t[package]\n     2\tname = \"sqwai\"\nprogress 50%\rprogress 100%"
-            .into(),
+        output: "     1\t[package]\n     2\tname = \"sqwai\"\nprogress 50%\rprogress 100%".into(),
         diff: None,
         preview: Vec::new(),
         preview_total: 0,
@@ -1091,4 +1088,3 @@ fn test_node_badge_method_and_memory() {
     assert_eq!(node_badge(&NodeKind::Struct), "[st]");
     assert_eq!(node_badge(&NodeKind::Enum), "[e]");
 }
-

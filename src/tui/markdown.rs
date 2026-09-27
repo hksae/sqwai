@@ -84,7 +84,12 @@ impl Highlighter {
 
     /// Highlight a code block and wrap it to `width`, memoised. Repeat
     /// renders of the same closed fence return the cached rows.
-    pub fn highlight_wrapped(&self, code: &str, lang: Option<&str>, width: u16) -> Vec<Line<'static>> {
+    pub fn highlight_wrapped(
+        &self,
+        code: &str,
+        lang: Option<&str>,
+        width: u16,
+    ) -> Vec<Line<'static>> {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         code.hash(&mut h);

@@ -198,7 +198,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn lang_of(path: &str) -> &'static str {
-    match path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+    match path
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "rs" => "rust",
         "py" => "python",
         "js" => "javascript",
@@ -414,7 +420,16 @@ mod tests {
         assert_eq!(split_range("f:10"), ("f".into(), Some((10, 10))));
         assert_eq!(split_range("f:10-20"), ("f".into(), Some((10, 20))));
         assert_eq!(split_range("sym:p::n:3"), ("sym:p::n".into(), Some((3, 3))));
-        for bad in ["f:0", "f:20-10", "f:", "f:-3", ":10", "2130706433", "a:b", "f:1x"] {
+        for bad in [
+            "f:0",
+            "f:20-10",
+            "f:",
+            "f:-3",
+            ":10",
+            "2130706433",
+            "a:b",
+            "f:1x",
+        ] {
             assert_eq!(split_range(bad), (bad.into(), None), "{bad}");
         }
     }
@@ -442,13 +457,19 @@ mod tests {
         let body = resolved.text.split("```rust\n").nth(1).unwrap();
         let body = body.split("\n```").next().unwrap();
         let pin_at = resolved.text.find("#sha256:").unwrap() + "#sha256:".len();
-        assert_eq!(&sha256_hex(body.as_bytes())[..12], &resolved.text[pin_at..pin_at + 12]);
+        assert_eq!(
+            &sha256_hex(body.as_bytes())[..12],
+            &resolved.text[pin_at..pin_at + 12]
+        );
         std::fs::remove_dir_all(dir.path()).ok();
     }
 
     #[test]
     fn resolve_ranges_caps_and_warns() {
-        let content = (1..=10).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let content = (1..=10)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let dir = proj(&[("a.txt", &content)]);
         // explicit range bypasses the cap
         let resolved = resolve_mentions(dir.path(), "@file:a.txt:3-5");

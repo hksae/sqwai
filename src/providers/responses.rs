@@ -887,20 +887,17 @@ mod tests {
             first.unwrap().unwrap_err()
         }
 
-        let quota = first_err(
-            r#"{"response":{"error":{"message":"insufficient_quota: out of credit"}}}"#,
-        )
-        .await;
+        let quota =
+            first_err(r#"{"response":{"error":{"message":"insufficient_quota: out of credit"}}}"#)
+                .await;
         assert_eq!(
             crate::providers::class_of(&quota),
             Some(crate::providers::ErrorClass::Quota)
         );
         assert!(!crate::providers::class_of(&quota).unwrap().retryable());
 
-        let overload = first_err(
-            r#"{"response":{"error":{"message":"server overloaded, try again"}}}"#,
-        )
-        .await;
+        let overload =
+            first_err(r#"{"response":{"error":{"message":"server overloaded, try again"}}}"#).await;
         assert_eq!(
             crate::providers::class_of(&overload),
             Some(crate::providers::ErrorClass::Server)

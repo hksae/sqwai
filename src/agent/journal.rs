@@ -694,9 +694,7 @@ impl Journal {
                         .fields
                         .get("note")
                         .and_then(Value::as_str)
-                        .is_some_and(|kind| {
-                            matches!(kind, "decision" | "lesson" | "rejected")
-                        })
+                        .is_some_and(|kind| matches!(kind, "decision" | "lesson" | "rejected"))
             })
             .filter_map(|record| record.fields.get("text").and_then(Value::as_str))
             .map(str::to_string)
@@ -830,7 +828,6 @@ impl Journal {
         }
         out
     }
-
 
     /// Return a non-blocking reminder when a step has accumulated actions
     /// since its last plan operation. Scoped to the calling session so one
@@ -1424,42 +1421,50 @@ mod tests {
         // early pair (T0): busy session A writes X at high seq, quiet
         // session B writes Y at seq 1
         for i in 0..8 {
-            sess_a
-                .append("note", serde_json::json!({"n": i}))
-                .unwrap();
+            sess_a.append("note", serde_json::json!({"n": i})).unwrap();
         }
-        sess_a.append("file_diff", diff("x.rs", "blake3:x-a")).unwrap();
-        sess_b.append("file_diff", diff("y.rs", "blake3:y-b")).unwrap();
+        sess_a
+            .append("file_diff", diff("x.rs", "blake3:x-a"))
+            .unwrap();
+        sess_b
+            .append("file_diff", diff("y.rs", "blake3:y-b"))
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1200));
         // late pair (T1, low seqs): B rewrites X, A writes Y
-        sess_b.append("file_diff", diff("x.rs", "blake3:x-b")).unwrap();
-        sess_a.append("file_diff", diff("y.rs", "blake3:y-a")).unwrap();
+        sess_b
+            .append("file_diff", diff("x.rs", "blake3:x-b"))
+            .unwrap();
+        sess_a
+            .append("file_diff", diff("y.rs", "blake3:y-a"))
+            .unwrap();
 
         // step 1's X predates step 2's rewrite: reverting alone would
         // clobber it, so X is refused; Y is step 1's own latest word.
         let revert = Journal::step_pre_images_in(&root, Some("plan-a"), "1").unwrap();
         assert_eq!(revert.written_since, vec!["x.rs".to_string()]);
         assert_eq!(
-            revert.files.iter().map(|item| item.path.clone()).collect::<Vec<_>>(),
+            revert
+                .files
+                .iter()
+                .map(|item| item.path.clone())
+                .collect::<Vec<_>>(),
             vec!["y.rs".to_string()]
         );
-        assert_eq!(
-            revert.files[0].blob_before.as_deref(),
-            Some("blake3:y-a")
-        );
+        assert_eq!(revert.files[0].blob_before.as_deref(), Some("blake3:y-a"));
         // step 2's X is its own latest word (step 1's early X predates it
         // despite the busy session's high counters); step 1's late Y ties
         // it to the second, so Y is refused as ambiguous.
         let revert = Journal::step_pre_images_in(&root, Some("plan-a"), "2").unwrap();
         assert_eq!(revert.written_since, vec!["y.rs".to_string()]);
         assert_eq!(
-            revert.files.iter().map(|item| item.path.clone()).collect::<Vec<_>>(),
+            revert
+                .files
+                .iter()
+                .map(|item| item.path.clone())
+                .collect::<Vec<_>>(),
             vec!["x.rs".to_string()]
         );
-        assert_eq!(
-            revert.files[0].blob_before.as_deref(),
-            Some("blake3:x-b")
-        );
+        assert_eq!(revert.files[0].blob_before.as_deref(), Some("blake3:x-b"));
         fs::remove_dir_all(root).ok();
     }
 

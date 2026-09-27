@@ -686,11 +686,7 @@ mod tests {
         // Windows where hidden(true) checks attributes, not dotfiles)
         let outcome = grep(&mut ctx, "host_secret_marker_xyz", None, None);
         assert!(outcome.ok);
-        assert!(
-            !outcome.output.contains(".sqwai"),
-            "{}",
-            outcome.output
-        );
+        assert!(!outcome.output.contains(".sqwai"), "{}", outcome.output);
         // glob must not list host-owned files either
         let listed = glob(&mut ctx, "**/*", None);
         assert!(listed.ok);
@@ -739,16 +735,25 @@ mod tests {
         assert!(read(&mut ctx, "t.txt", &json!({})).ok);
         let out = multi_edit(&mut ctx, "t.txt", &[("a".into(), "ba".into(), false)]);
         assert!(out.ok, "{}", out.output);
-        assert_eq!(std::fs::read_to_string(dir.path().join("t.txt")).unwrap(), "ba");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("t.txt")).unwrap(),
+            "ba"
+        );
         // chained edits see each other's results, still once each
         std::fs::write(dir.path().join("u.txt"), "a").unwrap();
         assert!(read(&mut ctx, "u.txt", &json!({})).ok);
         let out = multi_edit(
             &mut ctx,
             "u.txt",
-            &[("a".into(), "ba".into(), false), ("ba".into(), "cba".into(), false)],
+            &[
+                ("a".into(), "ba".into(), false),
+                ("ba".into(), "cba".into(), false),
+            ],
         );
         assert!(out.ok, "{}", out.output);
-        assert_eq!(std::fs::read_to_string(dir.path().join("u.txt")).unwrap(), "cba");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("u.txt")).unwrap(),
+            "cba"
+        );
     }
 }

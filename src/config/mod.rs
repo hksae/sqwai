@@ -453,8 +453,7 @@ pub fn validate_fetched_catalog(
     text: &str,
     cached_updated_at: Option<&str>,
 ) -> Result<BuiltinCatalog> {
-    let catalog: BuiltinCatalog =
-        toml::from_str(text).context("parsing builtin providers TOML")?;
+    let catalog: BuiltinCatalog = toml::from_str(text).context("parsing builtin providers TOML")?;
     let fetched_at = catalog
         .updated_at
         .as_deref()
@@ -472,7 +471,10 @@ pub fn validate_fetched_catalog(
         let url = reqwest::Url::parse(&provider.base_url)
             .map_err(|e| anyhow::anyhow!("provider {name:?} has an unparsable base_url: {e}"))?;
         if url.scheme() != "https" {
-            anyhow::bail!("provider {name:?} base_url is not https: {}", provider.base_url);
+            anyhow::bail!(
+                "provider {name:?} base_url is not https: {}",
+                provider.base_url
+            );
         }
         url_host_allowed(&url)
             .map_err(|detail| anyhow::anyhow!("provider {name:?} base_url {detail}"))?;
@@ -957,14 +959,7 @@ struct MemoryOverride {
 /// (table, keys) accepted from a project file. Anything else present is
 /// ignored and reported. Keep in sync with the `*Override` structs above.
 const PROJECT_ALLOWLIST: &[(&str, &[&str])] = &[
-    (
-        "diary",
-        &[
-            "token_budget",
-            "effort",
-            "timeout_secs",
-        ],
-    ),
+    ("diary", &["token_budget", "effort", "timeout_secs"]),
     ("ui", &["typewriter", "http_log", "experimental_test"]),
     (
         "compaction",
@@ -2068,7 +2063,11 @@ effort = "off"
         fn catalog(base_url: &str, updated_at: &str, api_key: bool) -> String {
             format!(
                 "updated_at = \"{updated_at}\"\n[providers.acme]\nformat = \"openai\"\nbase_url = \"{base_url}\"{}\n[models.\"acme-x\"]\nprovider = \"acme\"\nid = \"acme-x\"\ncontext = 1000\neffort = \"medium\"\n",
-                if api_key { "\napi_key = \"sk-planted\"" } else { "" },
+                if api_key {
+                    "\napi_key = \"sk-planted\""
+                } else {
+                    ""
+                },
             )
         }
         let good = catalog("https://api.acme.example/v1", "2026-09-10", false);
@@ -2081,12 +2080,37 @@ effort = "off"
         assert!(validate_fetched_catalog(BUILTIN_PROVIDERS_FALLBACK, None).is_ok());
 
         for (case, url, stamp, key) in [
-            ("plain http", "http://api.acme.example/v1", "2026-09-10", false),
-            ("loopback https", "https://127.0.0.1/v1", "2026-09-10", false),
+            (
+                "plain http",
+                "http://api.acme.example/v1",
+                "2026-09-10",
+                false,
+            ),
+            (
+                "loopback https",
+                "https://127.0.0.1/v1",
+                "2026-09-10",
+                false,
+            ),
             ("private https", "https://10.0.0.5/v1", "2026-09-10", false),
-            ("localhost", "https://localhost:8443/v1", "2026-09-10", false),
-            ("inline secret", "https://api.acme.example/v1", "2026-09-10", true),
-            ("stale stamp", "https://api.acme.example/v1", "2026-09-01", false),
+            (
+                "localhost",
+                "https://localhost:8443/v1",
+                "2026-09-10",
+                false,
+            ),
+            (
+                "inline secret",
+                "https://api.acme.example/v1",
+                "2026-09-10",
+                true,
+            ),
+            (
+                "stale stamp",
+                "https://api.acme.example/v1",
+                "2026-09-01",
+                false,
+            ),
             ("missing stamp", "https://api.acme.example/v1", "", false),
         ] {
             assert!(

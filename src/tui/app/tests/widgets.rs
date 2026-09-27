@@ -694,7 +694,10 @@ fn inline_ask_click_targets_decode_options_custom_confirm() {
         at(3),
         Some((seg, super::super::view::AskRow::Option { q: 0, opt: 1 }))
     );
-    assert_eq!(at(4), Some((seg, super::super::view::AskRow::Custom { q: 0 })));
+    assert_eq!(
+        at(4),
+        Some((seg, super::super::view::AskRow::Custom { q: 0 }))
+    );
     assert_eq!(at(5), None, "separator is not clickable");
     assert_eq!(
         at(9),
@@ -1389,4 +1392,3 @@ fn session_recovery_with_deleted_or_broken_plan_id() {
         Some("another_corrupt_or_deleted_plan_88888")
     );
 }
-

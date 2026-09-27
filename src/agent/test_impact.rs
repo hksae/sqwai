@@ -49,10 +49,7 @@ fn split_runner(command: &str) -> Option<(Runner, Vec<String>)> {
     let words: Vec<&str> = command.split_whitespace().collect();
     // leading VAR= assignments are environment, not selection
     let mut start = 0;
-    while start < words.len()
-        && words[start].contains('=')
-        && !words[start].starts_with('-')
-    {
+    while start < words.len() && words[start].contains('=') && !words[start].starts_with('-') {
         start += 1;
     }
     let words = &words[start..];
@@ -71,9 +68,21 @@ fn split_runner(command: &str) -> Option<(Runner, Vec<String>)> {
         let selective = match runner {
             Runner::Cargo => matches!(
                 name,
-                "--test" | "--tests" | "--lib" | "--bins" | "--bin" | "--doc" | "--doctests"
-                    | "--examples" | "--example" | "--benches" | "--bench" | "--all-targets"
-                    | "-p" | "--package" | "--exclude"
+                "--test"
+                    | "--tests"
+                    | "--lib"
+                    | "--bins"
+                    | "--bin"
+                    | "--doc"
+                    | "--doctests"
+                    | "--examples"
+                    | "--example"
+                    | "--benches"
+                    | "--bench"
+                    | "--all-targets"
+                    | "-p"
+                    | "--package"
+                    | "--exclude"
             ),
             Runner::Pytest => matches!(
                 name,
@@ -137,17 +146,12 @@ fn changed_files(root: &Path, plan_id: &str) -> Vec<String> {
 
 /// True when the file is a test file: indexed nodes with a `test` role
 /// win; path conventions only speak for files the index never saw.
-fn is_test_file(
-    store: Option<&crate::agent::graph::SqliteGraphStore>,
-    path: &str,
-) -> bool {
+fn is_test_file(store: Option<&crate::agent::graph::SqliteGraphStore>, path: &str) -> bool {
     if let Some(store) = store
         && let Ok(nodes) = store.nodes_in_file(path)
         && !nodes.is_empty()
     {
-        return nodes
-            .iter()
-            .any(|n| n.roles.iter().any(|r| r == "test"));
+        return nodes.iter().any(|n| n.roles.iter().any(|r| r == "test"));
     }
     test_convention(path)
 }
@@ -165,10 +169,7 @@ fn test_convention(path: &str) -> bool {
 }
 
 /// Test-role symbol names declared in a file, for `-run` narrowing.
-fn test_names(
-    store: Option<&crate::agent::graph::SqliteGraphStore>,
-    path: &str,
-) -> Vec<String> {
+fn test_names(store: Option<&crate::agent::graph::SqliteGraphStore>, path: &str) -> Vec<String> {
     let Some(store) = store else {
         return Vec::new();
     };
@@ -179,9 +180,7 @@ fn test_names(
         .into_iter()
         .filter(|n| n.roles.iter().any(|r| r == "test"))
         .filter_map(|n| n.name)
-        .filter(|name| {
-            !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_')
-        })
+        .filter(|name| !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_'))
         .collect()
 }
 
@@ -213,10 +212,7 @@ fn covering_tests(
     // reverse-import closure over the changed files
     if let Some(store) = store {
         let mut seen = std::collections::HashSet::new();
-        let mut boundary: Vec<String> = changed
-            .iter()
-            .map(|p| format!("file:{p}"))
-            .collect();
+        let mut boundary: Vec<String> = changed.iter().map(|p| format!("file:{p}")).collect();
         let mut depth = 0;
         let mut over_cap = false;
         while !boundary.is_empty() && depth <= CLOSURE_DEPTH {
@@ -331,9 +327,14 @@ pub fn select_command(root: &Path, plan_id: &str, command: &str) -> Option<Impac
         Runner::Go => {
             let mut dirs: Vec<String> = files
                 .iter()
-                .map(|f| match std::path::Path::new(f).parent().map(|p| p.to_string_lossy().into_owned()) {
-                    Some(d) if !d.is_empty() && d != "." => format!("./{d}"),
-                    _ => ".".to_string(),
+                .map(|f| {
+                    match std::path::Path::new(f)
+                        .parent()
+                        .map(|p| p.to_string_lossy().into_owned())
+                    {
+                        Some(d) if !d.is_empty() && d != "." => format!("./{d}"),
+                        _ => ".".to_string(),
+                    }
                 })
                 .collect();
             dirs.sort();
@@ -388,17 +389,17 @@ mod tests {
 
     #[test]
     fn split_runner_accepts_bare_and_benign_flags() {
-        assert_eq!(
-            split_runner("cargo test"),
-            Some((Runner::Cargo, vec![]))
-        );
+        assert_eq!(split_runner("cargo test"), Some((Runner::Cargo, vec![])));
         assert_eq!(
             split_runner("cargo test --release"),
             Some((Runner::Cargo, vec!["--release".to_string()]))
         );
         assert_eq!(
             split_runner("pytest -q --tb=short"),
-            Some((Runner::Pytest, vec!["-q".to_string(), "--tb=short".to_string()]))
+            Some((
+                Runner::Pytest,
+                vec!["-q".to_string(), "--tb=short".to_string()]
+            ))
         );
         assert_eq!(split_runner("go test"), Some((Runner::Go, vec![])));
         // leading env assignments are not selection
@@ -465,8 +466,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("tests")).unwrap();
         std::fs::write(dir.path().join("src/a.rs"), "a\n").unwrap();
         std::fs::write(dir.path().join("tests/test_a.py"), "t\n").unwrap();
-        let mut store =
-            crate::agent::graph::SqliteGraphStore::open(dir.path()).unwrap();
+        let mut store = crate::agent::graph::SqliteGraphStore::open(dir.path()).unwrap();
         store
             .apply_batch(
                 &[
@@ -477,8 +477,7 @@ mod tests {
             )
             .unwrap();
         // the agent wrote src/a.rs this session under the plan
-        let mut journal =
-            crate::agent::journal::Journal::open(dir.path(), "sess").unwrap();
+        let mut journal = crate::agent::journal::Journal::open(dir.path(), "sess").unwrap();
         journal.set_attribution(Some("1".into()), Some("plan-1".into()), "main");
         journal
             .append("file_diff", serde_json::json!({"path": "src/a.rs"}))
@@ -489,11 +488,14 @@ mod tests {
     #[test]
     fn pytest_selects_covering_tests() {
         let dir = impact_root();
-        let impacted = select_command(dir.path(), "plan-1", "pytest -q")
-            .expect("pytest selects");
+        let impacted = select_command(dir.path(), "plan-1", "pytest -q").expect("pytest selects");
         assert_eq!(impacted.files, vec!["tests/test_a.py".to_string()]);
         assert_eq!(impacted.command, "pytest -q tests/test_a.py");
-        assert!(impacted.note.contains("full suite still required at complete"));
+        assert!(
+            impacted
+                .note
+                .contains("full suite still required at complete")
+        );
         // unknown runner / no diffs / other plan: full command (None)
         assert_eq!(select_command(dir.path(), "plan-1", "make test"), None);
         assert_eq!(select_command(dir.path(), "plan-9", "pytest"), None);
@@ -518,22 +520,22 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("tests/i_a.rs"), "t\n").unwrap();
         std::fs::write(dir.path().join("src/a.rs"), "a\n").unwrap();
-        let mut store =
-            crate::agent::graph::SqliteGraphStore::open(dir.path()).unwrap();
+        let mut store = crate::agent::graph::SqliteGraphStore::open(dir.path()).unwrap();
         store
             .apply_batch(
-                &[file_node("tests/i_a.rs", true), file_node("src/a.rs", false)],
+                &[
+                    file_node("tests/i_a.rs", true),
+                    file_node("src/a.rs", false),
+                ],
                 &[edge("file:tests/i_a.rs", "file:src/a.rs")],
             )
             .unwrap();
-        let mut journal =
-            crate::agent::journal::Journal::open(dir.path(), "sess").unwrap();
+        let mut journal = crate::agent::journal::Journal::open(dir.path(), "sess").unwrap();
         journal.set_attribution(Some("1".into()), Some("plan-1".into()), "main");
         journal
             .append("file_diff", serde_json::json!({"path": "tests/i_a.rs"}))
             .unwrap();
-        let impacted =
-            select_command(dir.path(), "plan-1", "cargo test").expect("cargo selects");
+        let impacted = select_command(dir.path(), "plan-1", "cargo test").expect("cargo selects");
         assert_eq!(impacted.files, vec!["tests/i_a.rs".to_string()]);
         assert_eq!(impacted.command, "cargo test --test i_a");
         std::fs::remove_dir_all(dir.path()).ok();
@@ -546,22 +548,22 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("pkg")).unwrap();
         std::fs::write(dir.path().join("pkg/f.go"), "p\n").unwrap();
         std::fs::write(dir.path().join("pkg/f_test.go"), "t\n").unwrap();
-        let mut store =
-            crate::agent::graph::SqliteGraphStore::open(dir.path()).unwrap();
+        let mut store = crate::agent::graph::SqliteGraphStore::open(dir.path()).unwrap();
         store
             .apply_batch(
-                &[file_node("pkg/f.go", false), file_node("pkg/f_test.go", true)],
+                &[
+                    file_node("pkg/f.go", false),
+                    file_node("pkg/f_test.go", true),
+                ],
                 &[edge("file:pkg/f_test.go", "file:pkg/f.go")],
             )
             .unwrap();
-        let mut journal =
-            crate::agent::journal::Journal::open(dir.path(), "sess").unwrap();
+        let mut journal = crate::agent::journal::Journal::open(dir.path(), "sess").unwrap();
         journal.set_attribution(Some("1".into()), Some("plan-1".into()), "main");
         journal
             .append("file_diff", serde_json::json!({"path": "pkg/f.go"}))
             .unwrap();
-        let impacted =
-            select_command(dir.path(), "plan-1", "go test").expect("go selects");
+        let impacted = select_command(dir.path(), "plan-1", "go test").expect("go selects");
         assert_eq!(impacted.files, vec!["pkg/f_test.go".to_string()]);
         assert_eq!(impacted.command, "go test ./pkg");
         std::fs::remove_dir_all(dir.path()).ok();

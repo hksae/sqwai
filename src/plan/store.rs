@@ -1,13 +1,11 @@
 use super::{
-    Baseline, CheckInput, EvidenceRef, Limits, NewStep, Op, Plan, PlanDraftArgs,
-    PlanStatus, Receipt, Rejection, ShapeFreeze, Snapshot, add_acceptance, apply,
-    apply_flaky, apply_invalidate, attach_confirmation, create, plans_dir,
-    reopen_for_undo, set_baselines, set_goal, set_inputs, set_shapes, set_snapshots,
-    verify_acceptance, waive, waive_constraint,
+    Baseline, CheckInput, EvidenceRef, Limits, NewStep, Op, Plan, PlanDraftArgs, PlanStatus,
+    Receipt, Rejection, ShapeFreeze, Snapshot, add_acceptance, apply, apply_flaky,
+    apply_invalidate, attach_confirmation, create, plans_dir, reopen_for_undo, set_baselines,
+    set_goal, set_inputs, set_shapes, set_snapshots, verify_acceptance, waive, waive_constraint,
 };
 use anyhow::{Context, Result};
 use std::path::Path;
-
 
 /// Immutable spawn context a subagent inherits (§2.2.4): which plan step it
 /// works on and at which epoch. Mutations and evidence from an older epoch
@@ -368,9 +366,7 @@ fn rebuild_created(
 /// Build the replacement plan an `accept_proposal` intent carries, without
 /// touching the store or siblings. Shared by the orphan path and the
 /// corrupt-file path so both construct the identical base.
-fn build_fresh_from_accept(
-    fields: &serde_json::Map<String, serde_json::Value>,
-) -> Option<Plan> {
+fn build_fresh_from_accept(fields: &serde_json::Map<String, serde_json::Value>) -> Option<Plan> {
     let draft: PlanDraftArgs = serde_json::from_value(fields.get("draft")?.clone()).ok()?;
     let mut fresh = draft.build(u64::MAX, &Limits::default()).ok()?;
     // §12.12: same as create — the baselines captured on accept ride the
@@ -550,9 +546,8 @@ fn apply_record(
             let index = fields
                 .get("index")
                 .and_then(|value| value.as_u64())
-                .ok_or_else(|| {
-                    Rejection::new("replay_shape", "flaky intent without index", "")
-                })? as usize;
+                .ok_or_else(|| Rejection::new("replay_shape", "flaky intent without index", ""))?
+                as usize;
             apply_flaky(plan, index);
             Ok(true)
         }
@@ -592,9 +587,8 @@ fn apply_record(
                         .collect()
                 })
                 .unwrap_or_default();
-            add_acceptance(plan, items).map_err(|_| {
-                Rejection::new("replay_diverged", "cannot re-add acceptance", "")
-            })?;
+            add_acceptance(plan, items)
+                .map_err(|_| Rejection::new("replay_diverged", "cannot re-add acceptance", ""))?;
             // proof vectors are probe-relative (new items only): they map
             // onto the last N acceptance items, which are exactly the ones
             // this intent appended (nothing ever removes acceptance items)
@@ -856,8 +850,7 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
                 abandon_if_active(root, &accept_sess, accept_seq, abandoned);
             }
             plan.applied_event = Some(scoped(&accept_sess, accept_seq));
-            plan.applied_events
-                .insert(accept_sess.clone(), accept_seq);
+            plan.applied_events.insert(accept_sess.clone(), accept_seq);
             (accept_idx, plan)
         }
     };
@@ -975,4 +968,3 @@ pub fn list_active(root: &Path) -> Vec<Plan> {
         .filter(|p| p.status == PlanStatus::Active)
         .collect()
 }
-

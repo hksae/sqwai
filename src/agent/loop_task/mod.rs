@@ -13,23 +13,26 @@ use tokio::sync::mpsc;
 
 use crate::config::EffortLevel;
 use crate::providers::{
-    ChatRequest, Message, RequestBreakdown, Role, SharedProvider,
-    SystemPart, ToolCallReq, Usage,
+    ChatRequest, Message, RequestBreakdown, Role, SharedProvider, SystemPart, ToolCallReq, Usage,
 };
 
+use crate::agent::checkpoints;
 use crate::agent::context;
 use crate::agent::tools::{self, ToolCtx};
-use crate::agent::checkpoints;
 use crate::plan;
-use loop_ask::{ask_user, bash_call, is_accepted_memory_answer, propose_plan, propose_reset, run_tool_blocking};
-use loop_subagent::{SUBAGENT_TIMEOUT_SECS, adopt_in_progress_step, run_subagent, run_subagent_batch};
-use loop_turn::{request_messages, run_turn, turn_transport};
-pub(crate) use loop_turn::TurnOutcome;
+use loop_ask::{
+    ask_user, bash_call, is_accepted_memory_answer, propose_plan, propose_reset, run_tool_blocking,
+};
 use loop_compact::{
-    CompactionPrefix, compact_history, effort_ignored_reason,
-    plan_hint_for_summary, record_compaction, turn_shows_no_reasoning,
+    CompactionPrefix, compact_history, effort_ignored_reason, plan_hint_for_summary,
+    record_compaction, turn_shows_no_reasoning,
 };
 pub(crate) use loop_compact::{capture_nudge, has_restriction_marker};
+use loop_subagent::{
+    SUBAGENT_TIMEOUT_SECS, adopt_in_progress_step, run_subagent, run_subagent_batch,
+};
+pub(crate) use loop_turn::TurnOutcome;
+use loop_turn::{request_messages, run_turn, turn_transport};
 
 mod loop_ask;
 mod loop_compact;
@@ -332,8 +335,6 @@ pub struct AgentInput {
     pub fallback_chain: Vec<FallbackCandidate>,
 }
 
-
-
 pub fn spawn_agent(input: AgentInput) -> AgentHandle {
     let (tx, rx) = mpsc::channel::<AgentEvent>(256);
     let (ctl_tx, ctl_rx) = mpsc::channel::<ControlMsg>(32);
@@ -442,7 +443,6 @@ fn repeat_bash_note(messages: &[Message], call: &ToolCallReq, output: &str) -> O
         None
     }
 }
-
 
 /// Sessions this process already opened an agent run for. `run_agent` is
 /// spawned per turn, but `session_start` plus the resume record describe a
@@ -1313,15 +1313,8 @@ async fn run_agent(
                             "subagents cannot reset plans; plans belong to the primary session",
                         ),
                         "propose_reset" => {
-                            propose_reset(
-                                call,
-                                &mut ctx,
-                                read_only,
-                                &tx,
-                                &mut ctl,
-                                &mut next_id,
-                            )
-                            .await
+                            propose_reset(call, &mut ctx, read_only, &tx, &mut ctl, &mut next_id)
+                                .await
                         }
                         "bash" => {
                             bash_call(
@@ -1957,16 +1950,11 @@ async fn run_agent(
     }
 }
 
-
-
-
-
 #[cfg(test)]
 mod subagent_tests {
     use super::loop_ask::is_accepted_memory_answer;
     use super::loop_subagent::{
-        MAX_PARALLEL_SUBAGENTS, SubagentTask, next_subagent_session,
-        subagent_tasks_from_args,
+        MAX_PARALLEL_SUBAGENTS, SubagentTask, next_subagent_session, subagent_tasks_from_args,
     };
 
     /// #190: every child session id is distinct, even back-to-back —
@@ -1985,13 +1973,10 @@ mod subagent_tests {
 
     #[test]
     fn accepts_one_or_many_subagent_tasks() {
-        let labels = |tasks: Vec<SubagentTask>| {
-            tasks.into_iter().map(|t| t.label).collect::<Vec<_>>()
-        };
+        let labels =
+            |tasks: Vec<SubagentTask>| tasks.into_iter().map(|t| t.label).collect::<Vec<_>>();
         assert_eq!(
-            labels(
-                subagent_tasks_from_args(&serde_json::json!({"tasks":["one","two"]})).unwrap()
-            ),
+            labels(subagent_tasks_from_args(&serde_json::json!({"tasks":["one","two"]})).unwrap()),
             vec!["one", "two"]
         );
         // the legacy singular form is refused with a hint, not guessed
@@ -2012,9 +1997,8 @@ mod subagent_tests {
     /// under task|prompt|description, a lone string is one task.
     #[test]
     fn accepts_object_shaped_subagent_tasks() {
-        let labels = |tasks: Vec<SubagentTask>| {
-            tasks.into_iter().map(|t| t.label).collect::<Vec<_>>()
-        };
+        let labels =
+            |tasks: Vec<SubagentTask>| tasks.into_iter().map(|t| t.label).collect::<Vec<_>>();
         assert_eq!(
             labels(
                 subagent_tasks_from_args(&serde_json::json!({"tasks":[
@@ -2031,9 +2015,7 @@ mod subagent_tests {
             ]
         );
         assert_eq!(
-            labels(
-                subagent_tasks_from_args(&serde_json::json!({"tasks": "do it all"})).unwrap()
-            ),
+            labels(subagent_tasks_from_args(&serde_json::json!({"tasks": "do it all"})).unwrap()),
             vec!["do it all"]
         );
         // empties still refuse with the tasks-only message intact
@@ -2102,8 +2084,8 @@ mod subagent_tests {
 mod transport_tests {
     use super::loop_compact::rejects_continuation;
     use super::loop_turn::{request_messages, turn_transport};
-    use crate::providers::ContextTransport;
     use super::*;
+    use crate::providers::ContextTransport;
 
     fn roles(messages: &[Message]) -> Vec<Role> {
         messages.iter().map(|m| m.role).collect()
@@ -2271,14 +2253,14 @@ mod transport_tests {
 mod effort_tests {
     use super::loop_ask::propose_reset;
     use super::loop_compact::{
-        MIN_ZERO_TURNS_BEFORE_REPORTING, compact_history, compaction_request,
+        CompactionPrefix, MIN_ZERO_TURNS_BEFORE_REPORTING, compact_history, compaction_request,
         effort_ignored_reason, record_compaction, rejects_effort_parameter,
-        turn_shows_no_reasoning, CompactionPrefix,
+        turn_shows_no_reasoning,
     };
     use super::loop_subagent::{SUBAGENT_TIMEOUT_SECS, adopt_in_progress_step};
     use super::loop_turn::{TurnOutcome, run_turn};
-    use crate::providers::StreamEvent;
     use super::*;
+    use crate::providers::StreamEvent;
 
     /// The prose match that replaces the one in the error classifier. It has
     /// to catch the shapes gateways actually use, and — more importantly — not
@@ -2817,7 +2799,10 @@ mod effort_tests {
         ];
         let again = bash_call("c2", "netstat");
         let note = repeat_bash_note(&messages, &again, "TCP 1.2.3.4:443");
-        assert!(note.clone().is_some_and(|n| n.contains("already ran")), "{note:?}");
+        assert!(
+            note.clone().is_some_and(|n| n.contains("already ran")),
+            "{note:?}"
+        );
         // changed output: fresh state, no note
         assert!(repeat_bash_note(&messages, &again, "TCP 9.9.9.9:80").is_none());
         // different command: no note
@@ -2826,7 +2811,6 @@ mod effort_tests {
         // first run ever: no note
         assert!(repeat_bash_note(&[], &again, "TCP 1.2.3.4:443").is_none());
     }
-
 
     /// `propose_reset` through the approval dialog: RunOnce abandons (plan
     /// stays on disk as Abandoned, session hold cleared), Deny keeps the
@@ -2850,7 +2834,14 @@ mod effort_tests {
             let (tx_agent, mut rx_ui) = mpsc::channel::<AgentEvent>(8);
             let (tx_ui, mut rx_agent) = mpsc::channel::<ControlMsg>(8);
             let mut next_id = 0u64;
-            let future = propose_reset(&call, &mut ctx, false, &tx_agent, &mut rx_agent, &mut next_id);
+            let future = propose_reset(
+                &call,
+                &mut ctx,
+                false,
+                &tx_agent,
+                &mut rx_agent,
+                &mut next_id,
+            );
             tokio::pin!(future);
             loop {
                 tokio::select! {
@@ -2890,7 +2881,11 @@ mod effort_tests {
 
         let outcome = run_reset(&dir, session, ApprovalDecision::RunOnce).await;
         assert!(outcome.ok, "{}", outcome.output);
-        assert!(outcome.output.contains("abandoned by user approval"), "{}", outcome.output);
+        assert!(
+            outcome.output.contains("abandoned by user approval"),
+            "{}",
+            outcome.output
+        );
         let after = plan::open(&dir, &plan_id).unwrap();
         assert_eq!(after.status, plan::PlanStatus::Abandoned);
 
@@ -2911,9 +2906,16 @@ mod effort_tests {
         plan::store(&dir, &plan2).unwrap();
         let denied = run_reset(&dir, session, ApprovalDecision::Deny).await;
         assert!(!denied.ok, "{}", denied.output);
-        assert!(denied.output.contains("denied by user"), "{}", denied.output);
+        assert!(
+            denied.output.contains("denied by user"),
+            "{}",
+            denied.output
+        );
         // the first plan stays abandoned; the second stays active
-        assert_eq!(plan::open(&dir, &plan_id).unwrap().status, plan::PlanStatus::Abandoned);
+        assert_eq!(
+            plan::open(&dir, &plan_id).unwrap().status,
+            plan::PlanStatus::Abandoned
+        );
         assert_eq!(
             plan::open(&dir, &plan2.id).unwrap().status,
             plan::PlanStatus::Active
@@ -3123,8 +3125,15 @@ mod effort_tests {
             system: &system,
             tools: &tools,
         };
-        let (aware, is_aware) =
-            compaction_request(Some(&prefix), older, &history, None, "", &bench.model_id, false);
+        let (aware, is_aware) = compaction_request(
+            Some(&prefix),
+            older,
+            &history,
+            None,
+            "",
+            &bench.model_id,
+            false,
+        );
         assert!(is_aware);
         let u = send(&bench, aware).await;
         report("aware", &u);
@@ -3525,9 +3534,9 @@ mod effort_tests {
                 + crate::agent::context::SUMMARY_SHORT_MAX_CHARS / 2,
         );
         let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
-            events: std::sync::Mutex::new(vec![vec![Ok(
-                crate::providers::StreamEvent::Text(over),
-            )]]),
+            events: std::sync::Mutex::new(vec![vec![Ok(crate::providers::StreamEvent::Text(
+                over,
+            ))]]),
         });
         let policy = summary_policy();
         let mut messages = three_turns();
@@ -3816,7 +3825,10 @@ mod effort_tests {
         assert_eq!(refusal["code"], "plan_required");
         let hint = refusal["hint"].as_str().unwrap();
         assert!(hint.contains("add_acceptance"), "{refusal}");
-        assert!(!hint.contains("plan create"), "must not suggest create: {refusal}");
+        assert!(
+            !hint.contains("plan create"),
+            "must not suggest create: {refusal}"
+        );
         assert!(
             refusal["reason"].as_str().unwrap().contains(&plan.id),
             "names the plan to extend: {refusal}"
@@ -3987,9 +3999,7 @@ mod effort_tests {
                     refused = true;
                 }
                 AgentEvent::Completed(Ok(outcome)) => {
-                    if let Some(tool_msg) =
-                        outcome.messages.iter().find(|m| m.role == Role::Tool)
-                    {
+                    if let Some(tool_msg) = outcome.messages.iter().find(|m| m.role == Role::Tool) {
                         assert!(
                             tool_msg.content.contains("constraint_violated"),
                             "outcome message: {}",
@@ -4862,7 +4872,9 @@ mod trust_gate_tests {
         assert!(dir.join("probe.txt").exists(), "command mutated");
         // the gate skipped: no pre_bash snapshot journaled…
         assert!(
-            !ctx.journal.iter().any(|(_, label)| label.starts_with("bash ")),
+            !ctx.journal
+                .iter()
+                .any(|(_, label)| label.starts_with("bash ")),
             "no snapshot must be journaled for Safe-on-clean: {:?}",
             ctx.journal
         );

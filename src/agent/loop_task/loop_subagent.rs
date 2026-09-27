@@ -1,4 +1,7 @@
-use super::{AgentEvent, AgentHandle, AgentInput, ApprovalDecision, ControlMsg, FallbackCandidate, spawn_agent};
+use super::{
+    AgentEvent, AgentHandle, AgentInput, ApprovalDecision, ControlMsg, FallbackCandidate,
+    spawn_agent,
+};
 use crate::agent::tools;
 use crate::config::EffortLevel;
 use crate::plan;
@@ -6,7 +9,6 @@ use crate::providers::{Message, Role, SharedProvider, SystemPart, ToolCallReq};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
-
 
 const MAX_SUBAGENTS_PER_CALL: usize = 8;
 pub(crate) const MAX_PARALLEL_SUBAGENTS: usize = 4;
@@ -84,13 +86,14 @@ fn subagent_task_spec(item: &serde_json::Value) -> Option<SubagentTask> {
 /// attribution and undo beyond what epochs can separate.
 fn scopes_overlap(a: &[String], b: &[String]) -> bool {
     a.iter().any(|x| {
-        b.iter().any(|y| {
-            x == y || x.starts_with(&format!("{y}/")) || y.starts_with(&format!("{x}/"))
-        })
+        b.iter()
+            .any(|y| x == y || x.starts_with(&format!("{y}/")) || y.starts_with(&format!("{x}/")))
     })
 }
 
-pub(crate) fn subagent_tasks_from_args(args: &serde_json::Value) -> Result<Vec<SubagentTask>, String> {
+pub(crate) fn subagent_tasks_from_args(
+    args: &serde_json::Value,
+) -> Result<Vec<SubagentTask>, String> {
     let tasks: Vec<SubagentTask> = match args.get("tasks") {
         Some(serde_json::Value::Array(items)) => {
             items.iter().filter_map(subagent_task_spec).collect()
@@ -776,4 +779,3 @@ pub(crate) fn next_subagent_session() -> String {
         .unwrap_or(0);
     format!("sub-{ms}-{}-{n}", std::process::id())
 }
-

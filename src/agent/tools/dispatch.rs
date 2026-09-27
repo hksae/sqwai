@@ -4,14 +4,19 @@ use super::exec;
 use super::fs;
 use super::git;
 use super::outline;
-use super::policy::{bash_scope_hit, commanded_verify_refs, frozen_input_hit, in_write_scope, mutation_target_paths, step_epoch_current};
+use super::policy::{
+    bash_scope_hit, commanded_verify_refs, frozen_input_hit, in_write_scope, mutation_target_paths,
+    step_epoch_current,
+};
 use super::specs;
-use super::verify::{capture_baselines, rejection, validate_complete, validate_evidence, verify_acceptance, with_assumption_warning, with_blast_radius, with_evidence_ts_warning};
+use super::verify::{
+    capture_baselines, rejection, validate_complete, validate_evidence, verify_acceptance,
+    with_assumption_warning, with_blast_radius, with_evidence_ts_warning,
+};
 use crate::agent::graph::GraphStore;
 use crate::plan;
 use serde_json::Value;
 use std::path::Path;
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileDiff {
@@ -115,7 +120,6 @@ impl Outcome {
         self
     }
 }
-
 
 const READ_MAX_BYTES: usize = 400_000;
 
@@ -264,11 +268,8 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         // Shell writes are analyzed best-effort (see `bash_scope_hit`):
         // explicit out-of-scope targets refuse, the rest runs.
         if name == "bash"
-            && let Some(target) = bash_scope_hit(
-                ctx,
-                allowed,
-                args["command"].as_str().unwrap_or_default(),
-            )
+            && let Some(target) =
+                bash_scope_hit(ctx, allowed, args["command"].as_str().unwrap_or_default())
         {
             return Outcome::err(
                 serde_json::json!({
@@ -1143,7 +1144,12 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let gate = if matches!(op, plan::Op::Complete) {
         validate_complete(ctx)
     } else {
-        validate_evidence(&ctx.root, &op, Some(&ctx.session_id), ctx.plan_limits.strict)
+        validate_evidence(
+            &ctx.root,
+            &op,
+            Some(&ctx.session_id),
+            ctx.plan_limits.strict,
+        )
     };
     if let Err(message) = gate {
         return Outcome::err(message);
@@ -1278,8 +1284,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                                     )
                                 });
                                 if !typed {
-                                    let candidates =
-                                        mine_constraint_candidates(&ctx.root);
+                                    let candidates = mine_constraint_candidates(&ctx.root);
                                     if !candidates.is_empty() {
                                         message.push_str(&format!(
                                             "\nconstraints: AGENTS.md restricts {} — consider forbid-import:/forbid-cmd:/ast:/path: (advisory; untyped constraints are not enforced)",
@@ -1320,12 +1325,12 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                                         if offered >= 3 {
                                             break;
                                         }
-                                        let plan::AcceptanceKind::Command(command) =
-                                            item.kind()
+                                        let plan::AcceptanceKind::Command(command) = item.kind()
                                         else {
                                             continue;
                                         };
-                                        if proof.slots.get(index).is_some_and(|slot| slot.is_some()) {
+                                        if proof.slots.get(index).is_some_and(|slot| slot.is_some())
+                                        {
                                             continue;
                                         }
                                         // not run (unsafe/needs-approval) or
@@ -1433,12 +1438,10 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         // reset needs a user confirm through the approval dialog, which only
         // the agent loop can ask for — direct application here would abandon
         // silently, which is exactly the rewrite-history hole this op closes
-        plan::Op::ProposeReset { .. } => {
-            Outcome::err(
-                "propose_reset is served by the agent loop, not by the dispatcher: \
+        plan::Op::ProposeReset { .. } => Outcome::err(
+            "propose_reset is served by the agent loop, not by the dispatcher: \
                  call the propose_reset tool so the user confirms the abandon",
-            )
-        }
+        ),
         other => {
             let mut active = match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
                 Ok(Some(p)) => p,
@@ -1561,8 +1564,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             item.baseline = proof.slots.get(slot).cloned().flatten();
                             item.snapshot = proof.frozen.get(slot).cloned().flatten();
                             item.shape = proof.shapes.get(slot).cloned().flatten();
-                            item.inputs =
-                                proof.inputs.get(slot).cloned().unwrap_or_default();
+                            item.inputs = proof.inputs.get(slot).cloned().unwrap_or_default();
                         }
                         if let Some(record) = op_value.as_object_mut() {
                             record.insert(
@@ -1628,12 +1630,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             let msg = with_assumption_warning(ctx, finishing.as_deref(), message);
                             let msg =
                                 with_evidence_ts_warning(ctx, finishing.as_deref(), &active, msg);
-                            let msg = with_blast_radius(
-                                ctx,
-                                finishing.as_deref(),
-                                &active,
-                                msg,
-                            );
+                            let msg = with_blast_radius(ctx, finishing.as_deref(), &active, msg);
                             let msg = format!("{msg}{proof_notes}");
                             Outcome::ok(msg)
                         }
@@ -1661,4 +1658,3 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         }
     }
 }
-

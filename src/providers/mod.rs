@@ -903,7 +903,10 @@ mod connection_tests {
         assert_eq!(prompt_cache_key("https://api.openai.com/v1"), None);
         set_conversation_id("");
         assert_eq!(prompt_cache_key("https://opencode.ai/zen/go/v1"), None);
-        assert_eq!(opencode_session_value("https://opencode.ai/zen/go/v1"), None);
+        assert_eq!(
+            opencode_session_value("https://opencode.ai/zen/go/v1"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -1082,11 +1085,23 @@ mod error_class_tests {
     #[test]
     fn stream_prose_classifies_only_when_confident() {
         for (body, expected) in [
-            ("insufficient_quota: you exceeded it", Some(ErrorClass::Quota)),
-            ("maximum context length exceeded", Some(ErrorClass::ContextOverflow)),
+            (
+                "insufficient_quota: you exceeded it",
+                Some(ErrorClass::Quota),
+            ),
+            (
+                "maximum context length exceeded",
+                Some(ErrorClass::ContextOverflow),
+            ),
             ("invalid api key provided", Some(ErrorClass::Auth)),
-            ("rate_limit_exceeded: slow down", Some(ErrorClass::RateLimit)),
-            ("invalid_request_error: bad field", Some(ErrorClass::BadRequest)),
+            (
+                "rate_limit_exceeded: slow down",
+                Some(ErrorClass::RateLimit),
+            ),
+            (
+                "invalid_request_error: bad field",
+                Some(ErrorClass::BadRequest),
+            ),
             ("server overloaded, try later", Some(ErrorClass::Server)),
             ("something strange happened", None),
             ("error 4290 in module x", None),

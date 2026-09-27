@@ -1,10 +1,9 @@
-use super::{
-    Acceptance, AcceptanceKind, AcceptanceStatus, Applied, Baseline, CheckInput, EvidenceRef,
-    Plan, PlanStatus, Receipt, Rejection, ShapeFreeze, Snapshot, StepStatus, ValidationStatus,
-};
 use super::ops::{accept, reject};
+use super::{
+    Acceptance, AcceptanceKind, AcceptanceStatus, Applied, Baseline, CheckInput, EvidenceRef, Plan,
+    PlanStatus, Receipt, Rejection, ShapeFreeze, Snapshot, StepStatus, ValidationStatus,
+};
 use std::path::Path;
-
 
 /// Manifests that every state digest covers in addition to the traversed
 /// paths: a dependency or toolchain move invalidates checks even when no
@@ -332,11 +331,9 @@ fn is_check_input(rel: &str, name: &str) -> bool {
 pub fn changed_check_inputs(root: &Path, inputs: &[CheckInput]) -> Vec<String> {
     inputs
         .iter()
-        .filter(|input| {
-            match std::fs::read(root.join(&input.path)) {
-                Ok(bytes) => blake3::hash(&bytes).to_hex().to_string() != input.hash,
-                Err(_) => true,
-            }
+        .filter(|input| match std::fs::read(root.join(&input.path)) {
+            Ok(bytes) => blake3::hash(&bytes).to_hex().to_string() != input.hash,
+            Err(_) => true,
         })
         .map(|input| input.path.clone())
         .collect()
@@ -543,4 +540,3 @@ pub(crate) fn next_id(plan: &Plan) -> String {
         .unwrap_or(0);
     (max + 1).to_string()
 }
-

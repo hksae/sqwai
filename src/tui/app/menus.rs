@@ -50,7 +50,13 @@ pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
     (
         "/plan",
         &[
-            "history", "limit", "complete", "abandon", "waive", "waive-constraint", "confirm",
+            "history",
+            "limit",
+            "complete",
+            "abandon",
+            "waive",
+            "waive-constraint",
+            "confirm",
             "delete",
         ],
     ),
@@ -549,7 +555,6 @@ impl App {
     pub(super) fn cur_menu(&self) -> Option<&Menu> {
         self.menu_stack.last()
     }
-
 
     pub(super) fn open_menu(&mut self, menu: Menu) {
         self.menu_stack.push(menu);

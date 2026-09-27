@@ -310,14 +310,21 @@ fn subagent_row_joins_the_turn_activity_group() {
     });
     app.finalize_activity_group();
 
-    assert_eq!(app.activity_groups.len(), 1, "the turn folds into one group");
+    assert_eq!(
+        app.activity_groups.len(),
+        1,
+        "the turn folds into one group"
+    );
     let g = &app.activity_groups[0];
     assert_eq!((g.seg_start, g.seg_end), (1, 4));
     assert_eq!(g.calls, 3, "grep + read + subagent are three calls");
 
     app.rebuild_cache(80);
     let text = rendered(&app);
-    assert!(text.contains("activity · 3 calls"), "header missing: {text}");
+    assert!(
+        text.contains("activity · 3 calls"),
+        "header missing: {text}"
+    );
     assert!(
         !text.contains("subagent-1"),
         "the child row folds away with the rest: {text}"
@@ -430,7 +437,10 @@ fn abort_drops_subagent_rows_inside_a_group() {
         text.contains("activity · 1 calls · 1 thinking"),
         "header stays coherent after the abort: {text}"
     );
-    assert!(!text.contains("subagent"), "no subagent row survives: {text}");
+    assert!(
+        !text.contains("subagent"),
+        "no subagent row survives: {text}"
+    );
 }
 
 /// A provider dump must not flood the chat: multi-line errors arrive
@@ -678,9 +688,7 @@ fn ctrl_c_copy_keeps_scroll_position() {
 fn drag_copy_then_ctrl_c_keeps_scroll_position() {
     // full mouse flow: press, drag, release (auto-copy), then Ctrl+C —
     // the viewport must stay parked where the user scrolled it
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind,
-    };
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.cache_lines = (0..50).map(|_| blank()).collect();
@@ -813,4 +821,3 @@ async fn submit_without_api_key_is_rejected() {
         "typed input must be preserved"
     );
 }
-

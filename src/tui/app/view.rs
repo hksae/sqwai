@@ -3155,11 +3155,11 @@ impl App {
             );
         }
 
-            Clear.render(rect, buf);
-            Paragraph::new(rows)
-                .style(Theme::base())
-                .block(block)
-                .render(rect, buf);
+        Clear.render(rect, buf);
+        Paragraph::new(rows)
+            .style(Theme::base())
+            .block(block)
+            .render(rect, buf);
         // mini scrollbar inside the right border when the list overflows —
         // exactly like the command popup (last content column, border intact)
         if !is_form && !self.menu_rows.is_empty() {

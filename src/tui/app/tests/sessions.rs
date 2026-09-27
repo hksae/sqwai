@@ -343,13 +343,13 @@ fn history_restores_a_delegated_call_as_a_child_row() {
     app.session.push(Role::User, "delegate");
     app.session
         .messages
-        .push(Message::new(Role::Assistant, "").with_tool_calls(vec![
-            ToolCallReq::new(
+        .push(
+            Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
                 "c1",
                 "subagent",
                 serde_json::json!({"tasks": ["look around"]}),
-            ),
-        ]));
+            )]),
+        );
     app.session
         .messages
         .push(Message::tool_result("c1", "found it", false));
@@ -371,10 +371,7 @@ fn history_restores_a_delegated_call_as_a_child_row() {
         .iter()
         .find_map(|s| match s {
             Segment::Subagent {
-                id,
-                status,
-                output,
-                ..
+                id, status, output, ..
             } => Some((*id, status.clone(), output.clone())),
             _ => None,
         })
@@ -481,8 +478,7 @@ fn menu_scrollbar_yields_to_drawn_frames() {
     let area = Rect::new(0, 0, 100, 14);
     let mut buf = Buffer::empty(area);
     app.draw_menu(&mut buf, area);
-    let row_text =
-        |y: u16| -> String { (0..area.width).map(|x| buf[(x, y)].symbol()).collect() };
+    let row_text = |y: u16| -> String { (0..area.width).map(|x| buf[(x, y)].symbol()).collect() };
     // pinned frame survived the scrollbar: corners still corners
     let hy = (0..area.height)
         .find(|y| row_text(*y).contains("pinned"))
@@ -529,8 +525,7 @@ fn pinned_frame_resolves_against_real_card_not_stale_rect() {
     let mut buf = Buffer::empty(area);
     app.draw_menu(&mut buf, area);
     // the draw-time check rebuilt rows for the real card
-    let row_text =
-        |y: u16| -> String { (0..area.width).map(|x| buf[(x, y)].symbol()).collect() };
+    let row_text = |y: u16| -> String { (0..area.width).map(|x| buf[(x, y)].symbol()).collect() };
     let hy = (0..area.height)
         .find(|y| row_text(*y).contains("pinned"))
         .expect("pinned header row");
@@ -564,8 +559,7 @@ fn pinned_sessions_frame_stays_dim() {
     let area = Rect::new(0, 0, 100, 30);
     let mut buf = Buffer::empty(area);
     app.draw_menu(&mut buf, area);
-    let row_text =
-        |y: u16| -> String { (0..area.width).map(|x| buf[(x, y)].symbol()).collect() };
+    let row_text = |y: u16| -> String { (0..area.width).map(|x| buf[(x, y)].symbol()).collect() };
     // the pinned header row (not the outer menu frame corner)
     let hy = (0..area.height)
         .find(|y| row_text(*y).contains("pinned"))
@@ -857,4 +851,3 @@ fn successful_finish_retracts_transient_retry_notice() {
         "unfinished answer stays explained: {texts:?}"
     );
 }
-

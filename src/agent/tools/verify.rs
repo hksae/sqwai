@@ -13,7 +13,6 @@ use std::path::Path;
 /// really a timeout.
 const ACCEPTANCE_TIMEOUT_SECS: u64 = 900;
 
-
 /// How much of a baseline's failing output is kept inline (§12.12). Enough to
 /// see *why* it failed — "cannot find function foo" is a baseline, "command
 /// not found" is a typo — without copying a test log into the plan file.
@@ -67,7 +66,6 @@ pub(crate) enum Frozen {
     Empty,
     Cancelled,
 }
-
 
 /// Rung 4: freeze one `snapshot:` item's output at plan time. The same
 /// host-run rules as a baseline — model-controlled text through the
@@ -299,7 +297,12 @@ const SHAPE_MAX_BYTES: u64 = 512_000;
 /// no typo guard; the failure modes are missing/unreadable files instead.
 /// All-or-nothing: one bad path leaves the whole item unfrozen with a note
 /// naming it, so a typo cannot silently narrow the commitment.
-pub(crate) fn freeze_shapes(ctx: &mut ToolCtx, index: usize, paths: &str, notes: &mut Vec<String>) -> Shaped {
+pub(crate) fn freeze_shapes(
+    ctx: &mut ToolCtx,
+    index: usize,
+    paths: &str,
+    notes: &mut Vec<String>,
+) -> Shaped {
     let names = plan::signature_paths(paths);
     if names.is_empty() {
         notes.push(format!(
@@ -357,7 +360,9 @@ pub(crate) fn freeze_shapes(ctx: &mut ToolCtx, index: usize, paths: &str, notes:
         };
         let ext = full.extension().and_then(|e| e.to_str()).unwrap_or("");
         let (parser, shape) = crate::agent::tools::outline::shape_of(src, ext);
-        let shape_hash = blake3::hash(shape.join("\n").as_bytes()).to_hex().to_string();
+        let shape_hash = blake3::hash(shape.join("\n").as_bytes())
+            .to_hex()
+            .to_string();
         total_items += shape.len();
         summary.push(format!("{name} ({parser}, {})", shape.len()));
         files.push(plan::ShapeFile {
@@ -382,7 +387,10 @@ pub(crate) fn freeze_shapes(ctx: &mut ToolCtx, index: usize, paths: &str, notes:
 /// Re-read the shapes named by a frozen rung-5 record: `(path, hash)` per
 /// file, `None` where the file no longer reads. A deleted file is a
 /// changed shape, not an error — removal breaks a freeze like any edit.
-pub(crate) fn read_shapes(ctx: &ToolCtx, files: &[plan::ShapeFile]) -> Vec<(String, Option<String>)> {
+pub(crate) fn read_shapes(
+    ctx: &ToolCtx,
+    files: &[plan::ShapeFile],
+) -> Vec<(String, Option<String>)> {
     files
         .iter()
         .map(|file| {
@@ -391,7 +399,9 @@ pub(crate) fn read_shapes(ctx: &ToolCtx, files: &[plan::ShapeFile]) -> Vec<(Stri
                     std::str::from_utf8(&bytes).ok().map(|src| {
                         let ext = full.extension().and_then(|e| e.to_str()).unwrap_or("");
                         let (_, shape) = crate::agent::tools::outline::shape_of(src, ext);
-                        blake3::hash(shape.join("\n").as_bytes()).to_hex().to_string()
+                        blake3::hash(shape.join("\n").as_bytes())
+                            .to_hex()
+                            .to_string()
                     })
                 })
             });
@@ -587,7 +597,11 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
 /// untracked file) reads as a flake, honestly — the host truly cannot tell
 /// those apart. Tracking what the check depends on in step refs is what
 /// keeps genuine regressions out of this verdict.
-pub(crate) fn same_state_disagreement(item: &plan::Acceptance, command: &str, state_digest: &str) -> bool {
+pub(crate) fn same_state_disagreement(
+    item: &plan::Acceptance,
+    command: &str,
+    state_digest: &str,
+) -> bool {
     if item.status != plan::AcceptanceStatus::Passed {
         return false;
     }
@@ -645,7 +659,8 @@ pub(crate) fn inputs_verdict(
 
 /// Refusal for a flaky item (§12.12): reported as such, never silently
 /// retried into verified. Waiver is the way out.
-pub(crate) fn flaky_rejection(index: usize, command: &str) -> plan::Rejection {    plan::Rejection {
+pub(crate) fn flaky_rejection(index: usize, command: &str) -> plan::Rejection {
+    plan::Rejection {
         code: "flaky_check",
         reason: format!("acceptance {index} runs disagree on the same state: {command}"),
         hint: "a green run and a red run attested the same digest, so the check \
@@ -687,14 +702,12 @@ pub(crate) fn issue_exec_receipt(
         "paths": paths,
     });
     let seq = match crate::agent::journal::Journal::open(&ctx.root, &ctx.session_id) {
-        Ok(mut journal) => {
-            match journal.append_verification_receipt(index, receipt_fields) {
-                Ok(seq) => seq,
-                Err(e) => {
-                    return Err(format!("receipt journal unwritable: {e:#}"));
-                }
+        Ok(mut journal) => match journal.append_verification_receipt(index, receipt_fields) {
+            Ok(seq) => seq,
+            Err(e) => {
+                return Err(format!("receipt journal unwritable: {e:#}"));
             }
-        }
+        },
         Err(e) => {
             return Err(format!("receipt journal unwritable: {e:#}"));
         }
@@ -774,9 +787,7 @@ pub(crate) fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool)
                 };
                 return rejection(plan::Rejection {
                     code: "no_baseline",
-                    reason: format!(
-                        "acceptance {index} has no proof that it can fail: {command}"
-                    ),
+                    reason: format!("acceptance {index} has no proof that it can fail: {command}"),
                     hint,
                 });
             }
@@ -832,11 +843,7 @@ pub(crate) fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool)
             // means the covering tests passed, while the suite-wide
             // verdict stays with `complete`. Anything unrecognized
             // runs the authored command unchanged.
-            let impact = crate::agent::test_impact::select_command(
-                &ctx.root,
-                &active.id,
-                &command,
-            );
+            let impact = crate::agent::test_impact::select_command(&ctx.root, &active.id, &command);
             let run_command = impact
                 .as_ref()
                 .map(|selected| selected.command.clone())
@@ -850,7 +857,11 @@ pub(crate) fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool)
                 let state_after = plan::state_digest(&ctx.root, &paths, &run_command);
                 // same attested state, opposite outcome: flaky, not failed
                 if state_before == state_after
-                    && same_state_disagreement(&active.acceptance[index], &run_command, &state_after)
+                    && same_state_disagreement(
+                        &active.acceptance[index],
+                        &run_command,
+                        &state_after,
+                    )
                 {
                     if plan::apply_flaky(&mut active, index) {
                         let args = serde_json::json!({
@@ -1346,7 +1357,11 @@ pub(crate) fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool)
 /// point is that an assumption cannot quietly outlive the step that made it —
 /// the model either resolves it with `note { resolves }` or carries it
 /// forward knowingly.
-pub(crate) fn with_assumption_warning(ctx: &ToolCtx, finished_step: Option<&str>, message: String) -> String {
+pub(crate) fn with_assumption_warning(
+    ctx: &ToolCtx,
+    finished_step: Option<&str>,
+    message: String,
+) -> String {
     let Some(step) = finished_step else {
         return message;
     };
@@ -1406,12 +1421,9 @@ pub(crate) fn with_blast_radius(
     let Some(step) = finished_step else {
         return message;
     };
-    let revert = crate::agent::journal::Journal::step_pre_images_in(
-        &ctx.root,
-        Some(&active.id),
-        step,
-    )
-    .unwrap_or_default();
+    let revert =
+        crate::agent::journal::Journal::step_pre_images_in(&ctx.root, Some(&active.id), step)
+            .unwrap_or_default();
     let mut paths: Vec<String> = revert
         .files
         .iter()
@@ -1427,7 +1439,11 @@ pub(crate) fn with_blast_radius(
     let list = if paths.len() <= SHOW {
         paths.join(", ")
     } else {
-        format!("{}, … (+{} more)", paths[..SHOW].join(", "), paths.len() - SHOW)
+        format!(
+            "{}, … (+{} more)",
+            paths[..SHOW].join(", "),
+            paths.len() - SHOW
+        )
     };
     format!(
         "{message}\nblast radius: step {step} touched {} file(s) ({list})",
@@ -1477,12 +1493,13 @@ pub(crate) fn validate_evidence(
 /// Source extensions scanned for `forbid-import:` violations. Mirrors
 /// the outline/ast-grep language set.
 const CONSTRAINT_SOURCE_EXTS: &[&str] = &[
-    "rs", "py", "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "go", "sh", "bash", "c",
-    "h", "cpp", "cc", "cxx", "hpp", "hh", "hxx", "cs", "java",
+    "rs", "py", "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "go", "sh", "bash", "c", "h",
+    "cpp", "cc", "cxx", "hpp", "hh", "hxx", "cs", "java",
 ];
 
 /// Never scanned for constraint evaluation: VCS, host state, build outputs.
-const CONSTRAINT_SKIP_DIRS: &[&str] = &[".git", ".sqwai", "target", "node_modules", "dist", "build"];
+const CONSTRAINT_SKIP_DIRS: &[&str] =
+    &[".git", ".sqwai", "target", "node_modules", "dist", "build"];
 
 /// Caps mirror the `ast_grep` tool's own ceilings.
 const CONSTRAINT_MAX_FILES: usize = 2_000;
@@ -1529,13 +1546,7 @@ pub(crate) fn import_line_references(line: &str, pattern: &str) -> bool {
 /// strings); the waiver covers false positives, silence would cover
 /// violations.
 pub(crate) fn forbid_import_violations(root: &Path, pattern: &str) -> Vec<String> {
-    fn walk(
-        root: &Path,
-        dir: &Path,
-        pattern: &str,
-        out: &mut Vec<String>,
-        scanned: &mut usize,
-    ) {
+    fn walk(root: &Path, dir: &Path, pattern: &str, out: &mut Vec<String>, scanned: &mut usize) {
         if out.len() >= CONSTRAINT_MAX_HITS || *scanned >= CONSTRAINT_MAX_FILES {
             return;
         }
@@ -1622,7 +1633,6 @@ pub(crate) fn plan_file_diff_paths(root: &Path, plan: &plan::Plan) -> Vec<String
     out
 }
 
-
 /// Typed-constraint verdicts at `complete`: every non-waived executable
 /// constraint must hold. `forbid-cmd:` is live-gated in `bash_call` and
 /// has nothing to re-check; unprefixed constraints are advisory.
@@ -1641,7 +1651,10 @@ pub(crate) fn validate_constraints(ctx: &mut ToolCtx, active: &plan::Plan) -> Re
                 }
                 let hits = forbid_import_violations(&ctx.root, pattern);
                 (!hits.is_empty()).then(|| {
-                    format!("forbidden import '{pattern}' referenced at {}", hits.join("; "))
+                    format!(
+                        "forbidden import '{pattern}' referenced at {}",
+                        hits.join("; ")
+                    )
                 })
             }
             plan::ConstraintKind::Ast(pattern) => {
@@ -2090,4 +2103,3 @@ pub(crate) fn rejection(r: plan::Rejection) -> Outcome {
         .to_string(),
     )
 }
-

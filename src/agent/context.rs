@@ -23,7 +23,8 @@ use crate::providers::{Message, Role};
 /// It contains only durable plan data and bounded journal-derived facts; the
 /// model never writes or rewrites this block.
 pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
-    let mut out = String::from("ANCHOR (host-generated working memo; current host state, not a summary)\n");
+    let mut out =
+        String::from("ANCHOR (host-generated working memo; current host state, not a summary)\n");
     // Finished work must stay visible: when no plan is active, fall back to
     // the session's latest completed plan — "none" would lie about done work
     // (every G0 matrix anchor printed empty for exactly this reason).
@@ -224,7 +225,11 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
                 .get("summary")
                 .and_then(|value| value.as_str())
                 .unwrap_or("");
-            failures.push(format!("{tool} j#{}: {}", record.seq, bounded(summary, 200)));
+            failures.push(format!(
+                "{tool} j#{}: {}",
+                record.seq,
+                bounded(summary, 200)
+            ));
         }
     }
     if failures.is_empty() {
@@ -1013,10 +1018,19 @@ mod tests {
             .lines()
             .find(|line| line.starts_with("decisions:"))
             .unwrap_or("");
-        assert!(!decisions.contains("disk is fast"), "assumptions have their own line: {decisions}");
-        assert!(rendered.contains("open assumptions: j#3: disk is fast"), "{rendered}");
+        assert!(
+            !decisions.contains("disk is fast"),
+            "assumptions have their own line: {decisions}"
+        );
+        assert!(
+            rendered.contains("open assumptions: j#3: disk is fast"),
+            "{rendered}"
+        );
         assert!(rendered.contains("boom: segfault"), "{rendered}");
-        assert!(!rendered.contains("cancelled"), "user-cancelled runs are not failures: {rendered}");
+        assert!(
+            !rendered.contains("cancelled"),
+            "user-cancelled runs are not failures: {rendered}"
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -1287,8 +1301,7 @@ mod tests {
         let mut messages: Vec<Message> = Vec::new();
         for i in 0..15 {
             messages.push(user(&format!("turn {i}")));
-            let mut result =
-                Message::tool_result(format!("call{i}"), "y".repeat(6_000), false);
+            let mut result = Message::tool_result(format!("call{i}"), "y".repeat(6_000), false);
             if i == 2 {
                 result.is_error = true;
             }
@@ -1301,8 +1314,16 @@ mod tests {
         // idx 1 (turn 0): past the mask window → stub
         assert_eq!(pruned[1].content, MASK_STUB, "{}", pruned[1].content);
         // idx 5 (turn 2): error → prune tier, never the stub
-        assert!(pruned[5].content.contains(PRUNE_NOTE), "{}", pruned[5].content);
-        assert!(!pruned[5].content.contains("masked"), "{}", pruned[5].content);
+        assert!(
+            pruned[5].content.contains(PRUNE_NOTE),
+            "{}",
+            pruned[5].content
+        );
+        assert!(
+            !pruned[5].content.contains("masked"),
+            "{}",
+            pruned[5].content
+        );
         // newest results keep their full payload
         assert!(pruned[29].content.contains(&"y".repeat(6_000)));
         // pairs stay paired: masking touches results, never calls

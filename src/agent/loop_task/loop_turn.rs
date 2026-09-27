@@ -1,11 +1,10 @@
-use super::{AgentEvent, ControlMsg};
 use super::loop_compact::{TurnFailure, rejects_continuation, rejects_effort_parameter};
+use super::{AgentEvent, ControlMsg};
 use crate::providers::{
     ChatRequest, ContextTransport, Message, Role, SharedProvider, StreamEvent, ToolCallReq,
 };
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-
 
 const RETRY_WINDOW: Duration = Duration::from_secs(3600);
 
@@ -92,7 +91,6 @@ pub(crate) struct TurnOutcome {
     /// provider-owned opaque state attached to this turn (reasoning items, phase)
     pub(crate) provider_state: Option<serde_json::Value>,
 }
-
 
 pub(crate) async fn run_turn(
     provider: &SharedProvider,
@@ -329,4 +327,3 @@ pub(crate) async fn run_turn(
         tokio::time::sleep(delay).await;
     }
 }
-

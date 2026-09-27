@@ -659,7 +659,13 @@ impl App {
     fn retract_transient_status(&mut self) {
         let before = self.segments.len();
         self.retain_segments(|seg| {
-            !matches!(seg, Segment::Status { transient: true, .. })
+            !matches!(
+                seg,
+                Segment::Status {
+                    transient: true,
+                    ..
+                }
+            )
         });
         if self.segments.len() != before {
             self.dirty = true;
@@ -1985,7 +1991,11 @@ impl App {
         }
         // match on the path part so a half-typed `:range` still filters
         let (query, _) = crate::agent::mentions::split_range(&frag);
-        let query = if query.is_empty() { frag.clone() } else { query };
+        let query = if query.is_empty() {
+            frag.clone()
+        } else {
+            query
+        };
         let mut scored: Vec<(u8, f64, String)> = Vec::new();
         if let Some((_, _, files)) = &self.mention_files {
             for f in files {
@@ -2008,10 +2018,7 @@ impl App {
         }
         scored.sort_by(|a, b| {
             b.0.cmp(&a.0)
-                .then_with(|| {
-                    b.1.partial_cmp(&a.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
+                .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
                 .then_with(|| a.2.cmp(&b.2))
         });
         let mut seen = std::collections::HashSet::new();
@@ -2029,10 +2036,7 @@ impl App {
         if query.is_empty() {
             return None;
         }
-        let (path, query) = (
-            path.to_ascii_lowercase(),
-            query.to_ascii_lowercase(),
-        );
+        let (path, query) = (path.to_ascii_lowercase(), query.to_ascii_lowercase());
         let base = path.rsplit('/').next().unwrap_or(&path);
         if path == query || *base == query {
             Some(3)
@@ -2057,7 +2061,11 @@ impl App {
             return false;
         }
         let n = items.len();
-        let next = match self.hover.clone().and_then(|h| items.iter().position(|i| i == &h)) {
+        let next = match self
+            .hover
+            .clone()
+            .and_then(|h| items.iter().position(|i| i == &h))
+        {
             Some(i) => (i as i32 + delta).rem_euclid(n as i32) as usize,
             None => {
                 if delta < 0 {
@@ -3311,7 +3319,8 @@ impl App {
                             match plan::waive_constraint(&mut active, index, reason) {
                                 Ok(()) => {
                                     let sid = self.session.id.to_string();
-                                    let args = serde_json::json!({"index": index, "reason": reason});
+                                    let args =
+                                        serde_json::json!({"index": index, "reason": reason});
                                     match plan::commit(
                                         &root,
                                         &sid,
@@ -4486,7 +4495,10 @@ impl App {
             // here used to disagree with it (questions and plan proposals
             // were silently dropped).
             for g in &mut self.activity_groups {
-                let run = self.segments.get(g.seg_start..g.seg_end).unwrap_or_default();
+                let run = self
+                    .segments
+                    .get(g.seg_start..g.seg_end)
+                    .unwrap_or_default();
                 (g.calls, g.thinking, g.errors) = Self::tally_activity(run);
             }
         }
@@ -5469,10 +5481,7 @@ impl App {
     /// the project-global plan it is shown, so the fallback branches name
     /// the owning session explicitly instead of letting "active plan" read
     /// as the current session's.
-    fn plan_source_label(
-        preferred: bool,
-        last: Option<&crate::session::SessionHeader>,
-    ) -> String {
+    fn plan_source_label(preferred: bool, last: Option<&crate::session::SessionHeader>) -> String {
         if preferred {
             return "previous session's plan".to_string();
         }

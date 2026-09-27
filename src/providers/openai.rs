@@ -789,7 +789,10 @@ mod tests {
             msgs[2]["content"]
         );
         assert!(
-            msgs[2]["content"].as_str().unwrap().contains("host context"),
+            msgs[2]["content"]
+                .as_str()
+                .unwrap()
+                .contains("host context"),
             "tail is marked host-owned: {}",
             msgs[2]["content"]
         );
@@ -1125,7 +1128,9 @@ mod tests {
                 ));
                 let mut req = base_request(&live);
                 let mut system = stable_prefix();
-                system.push(crate::providers::SystemPart::cached(plan::render_goal(&plan)));
+                system.push(crate::providers::SystemPart::cached(plan::render_goal(
+                    &plan,
+                )));
                 system.push(crate::providers::SystemPart::volatile(plan::render_status(
                     &plan,
                 )));

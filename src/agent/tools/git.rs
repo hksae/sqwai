@@ -20,7 +20,9 @@ fn drain_into(stream: impl std::io::Read, buf: &std::sync::Arc<std::sync::Mutex<
         match handle.read(&mut chunk) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                buf.lock().map(|mut b| b.extend_from_slice(&chunk[..n])).ok();
+                buf.lock()
+                    .map(|mut b| b.extend_from_slice(&chunk[..n]))
+                    .ok();
             }
         }
     }
@@ -60,9 +62,10 @@ fn wait_git(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
         if let Ok(Some(status)) = child.try_wait() {
-            let deadline =
-                std::time::Instant::now() + std::time::Duration::from_secs(2);
-            while readers.iter().any(|h: &std::thread::JoinHandle<()>| !h.is_finished())
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while readers
+                .iter()
+                .any(|h: &std::thread::JoinHandle<()>| !h.is_finished())
                 && std::time::Instant::now() < deadline
             {
                 std::thread::sleep(std::time::Duration::from_millis(5));
@@ -105,7 +108,12 @@ fn run_git(ctx: &ToolCtx, args: &[&str]) -> Outcome {
         Ok(child) => child,
         Err(error) => return Outcome::err(format!("git could not start: {error}")),
     };
-    let output = match wait_git(ctx, &mut child, args.first().unwrap_or(&"?"), GIT_TIMEOUT_SECS) {
+    let output = match wait_git(
+        ctx,
+        &mut child,
+        args.first().unwrap_or(&"?"),
+        GIT_TIMEOUT_SECS,
+    ) {
         Ok(output) => output,
         Err(message) => return Outcome::err(message),
     };

@@ -4,7 +4,6 @@ use crate::providers::{
     ChatRequest, ContextTransport, Message, Role, SharedProvider, StreamEvent, SystemPart,
 };
 
-
 /// Run the compaction policy, cheapest stage first.
 ///
 /// 1. prune aged-out tool output (no LLM);
@@ -452,7 +451,10 @@ pub(crate) fn turn_shows_no_reasoning(turn: &TurnOutcome) -> bool {
 /// zero on a 10k-token prompt, alongside a 24-second turn that produced six
 /// output tokens. So it is reported only after several turns, and phrased as
 /// what was measured rather than as a verdict about the model.
-pub(crate) fn effort_ignored_reason(turn: &TurnOutcome, consecutive_zero_turns: u32) -> Option<String> {
+pub(crate) fn effort_ignored_reason(
+    turn: &TurnOutcome,
+    consecutive_zero_turns: u32,
+) -> Option<String> {
     if turn.effort_rejected {
         return Some("the provider rejected the effort parameter".to_string());
     }
@@ -489,4 +491,3 @@ pub(crate) fn rejects_effort_parameter(err: &str) -> bool {
             || lower.contains("not allowed")
             || lower.contains("invalid"))
 }
-

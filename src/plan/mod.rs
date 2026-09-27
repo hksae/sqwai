@@ -18,27 +18,27 @@ mod render;
 mod store;
 mod verify;
 pub use ops::{
-    Applied, Limits, NewStep, Op, PlanDraftArgs, Rejection, abandon,
-    apply, create, reset_discards, validate_proposal_invariants, validate_surrender_reason,
+    Applied, Limits, NewStep, Op, PlanDraftArgs, Rejection, abandon, apply, create, reset_discards,
+    validate_proposal_invariants, validate_surrender_reason,
 };
 pub(crate) use ops::{accept, add_acceptance, reject, step_diff};
 pub use render::{
-    apply_flaky, apply_invalidate, attach_confirmation, confirm, invalidate_on_diff,
-    render, render_goal, render_status, set_goal, stale_announcements, waive,
+    apply_flaky, apply_invalidate, attach_confirmation, confirm, invalidate_on_diff, render,
+    render_goal, render_status, set_goal, stale_announcements, waive,
 };
 pub use store::{
-    StepContext, commit, list, list_active, open, open_active,
-    open_active_for_session, preferred_active_plan, read_plan_file, replay, store,
+    StepContext, commit, list, list_active, open, open_active, open_active_for_session,
+    preferred_active_plan, read_plan_file, replay, store,
 };
-pub use verify::{
-    changed_check_inputs, check_definition_hash, differential_current,
-    digest_paths, freeze_check_inputs, frozen_input_paths, ladder_note, ladder_rung,
-    proven_failing, set_baselines, set_inputs, set_shapes, set_snapshots,
-    signatures_current, snapshot_current, state_digest, verify_acceptance,
-};
-pub(crate) use verify::{complete, next_id};
 #[cfg(test)]
 pub(crate) use verify::{Rung, ladder_top, legacy_passed};
+pub use verify::{
+    changed_check_inputs, check_definition_hash, differential_current, digest_paths,
+    freeze_check_inputs, frozen_input_paths, ladder_note, ladder_rung, proven_failing,
+    set_baselines, set_inputs, set_shapes, set_snapshots, signatures_current, snapshot_current,
+    state_digest, verify_acceptance,
+};
+pub(crate) use verify::{complete, next_id};
 
 /// A host-owned journal reference. The session is part of the identity because
 /// journal sequence numbers restart for every session.
@@ -799,11 +799,7 @@ pub fn waive_constraint(plan: &mut Plan, index: usize, reason: &str) -> Result<(
             "call /plan to see the constraints list",
         ));
     }
-    if !plan
-        .waived_constraints
-        .iter()
-        .any(|w| w.index == index)
-    {
+    if !plan.waived_constraints.iter().any(|w| w.index == index) {
         plan.waived_constraints.push(WaivedConstraint {
             index,
             reason: reason.to_string(),
@@ -916,10 +912,6 @@ pub fn reopen_for_undo(plan: &mut Plan, step_id: &str, reason: impl Into<String>
     Ok(())
 }
 
-
-
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -931,7 +923,10 @@ mod tests {
     fn render_splits_stable_goal_from_moving_status() {
         let mut plan = new_plan();
         let goal_before = render_goal(&plan);
-        assert!(goal_before.contains("persist the plan on disk"), "{goal_before}");
+        assert!(
+            goal_before.contains("persist the plan on disk"),
+            "{goal_before}"
+        );
         assert!(goal_before.contains("no new dependencies"), "{goal_before}");
         assert!(!goal_before.contains("add the model"), "{goal_before}");
         assert!(!goal_before.contains("active"), "{goal_before}");
@@ -942,7 +937,11 @@ mod tests {
 
         plan.steps[0].status = StepStatus::Done;
         plan.steps[1].status = StepStatus::InProgress;
-        assert_eq!(render_goal(&plan), goal_before, "step moves re-key nothing cached");
+        assert_eq!(
+            render_goal(&plan),
+            goal_before,
+            "step moves re-key nothing cached"
+        );
         assert_ne!(render_status(&plan), status_before, "step moves surface");
 
         // the full render still carries both halves
@@ -1328,7 +1327,8 @@ mod tests {
             apply(
                 &mut plan,
                 Op::ProposeReset {
-                    reason: "goal targets removed feature X, steps assume the deleted API".to_string(),
+                    reason: "goal targets removed feature X, steps assume the deleted API"
+                        .to_string(),
                 },
                 &Limits::default(),
                 None,
@@ -1916,9 +1916,15 @@ mod tests {
         let rebuilt = open(&dir, &plan.id).unwrap();
         assert_eq!(rebuilt.acceptance.len(), 2);
         assert_eq!(rebuilt.acceptance[0].text, "cmd: exit 3");
-        let baseline = rebuilt.acceptance[0].baseline.as_ref().expect("proof restored");
+        let baseline = rebuilt.acceptance[0]
+            .baseline
+            .as_ref()
+            .expect("proof restored");
         assert_eq!(baseline.exit, 3);
-        assert!(rebuilt.acceptance[1].baseline.is_none(), "manual proves nothing");
+        assert!(
+            rebuilt.acceptance[1].baseline.is_none(),
+            "manual proves nothing"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2335,7 +2341,10 @@ mod tests {
         .unwrap();
         assert!(!snapshot_current(&plan.acceptance[0]), "nothing frozen yet");
         assert!(render(&plan).contains("[no snapshot]"));
-        set_snapshots(&mut plan, vec![Some(snapshot_for("snapshot: mycli --version"))]);
+        set_snapshots(
+            &mut plan,
+            vec![Some(snapshot_for("snapshot: mycli --version"))],
+        );
         assert!(snapshot_current(&plan.acceptance[0]));
         assert!(!render(&plan).contains("[no snapshot]"));
         // rewriting the command makes a new check: the old output stops
@@ -2496,7 +2505,10 @@ mod tests {
         let mut plan = create(
             "frozen".to_string(),
             Vec::new(),
-            vec!["cmd: cargo test".to_string(), "cmd: cargo clippy".to_string()],
+            vec![
+                "cmd: cargo test".to_string(),
+                "cmd: cargo clippy".to_string(),
+            ],
             vec![NewStep {
                 title: "do the work".to_string(),
                 refs: Vec::new(),
@@ -2513,10 +2525,7 @@ mod tests {
         assert_eq!(frozen_input_paths(&plan).len(), 2);
         plan.acceptance[0].status = AcceptanceStatus::Waived;
         // waiving takes responsibility: the item's inputs unfreeze
-        assert_eq!(
-            frozen_input_paths(&plan),
-            vec!["tests/a.rs".to_string()]
-        );
+        assert_eq!(frozen_input_paths(&plan), vec!["tests/a.rs".to_string()]);
     }
 
     fn rung_of(text: &str) -> Option<Rung> {
@@ -2554,7 +2563,8 @@ mod tests {
     }
 
     #[test]
-    fn ladder_walk_stops_at_the_highest_trust_rung() {        let mut plan = create(
+    fn ladder_walk_stops_at_the_highest_trust_rung() {
+        let mut plan = create(
             "walk the ladder".to_string(),
             Vec::new(),
             vec![
@@ -2593,7 +2603,8 @@ mod tests {
     }
 
     #[test]
-    fn baseline_never_proves_a_manual_item() {        let mut plan = create(
+    fn baseline_never_proves_a_manual_item() {
+        let mut plan = create(
             "render the page".to_string(),
             Vec::new(),
             vec![
@@ -2626,7 +2637,10 @@ mod tests {
         let mut plan = create(
             "two checks".to_string(),
             Vec::new(),
-            vec!["cmd: cargo test".to_string(), "cmd: cargo clippy".to_string()],
+            vec![
+                "cmd: cargo test".to_string(),
+                "cmd: cargo clippy".to_string(),
+            ],
             vec![NewStep {
                 title: "do the work".to_string(),
                 refs: Vec::new(),

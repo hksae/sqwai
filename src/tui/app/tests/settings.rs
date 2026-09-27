@@ -1141,4 +1141,3 @@ async fn session_save_called_only_after_first_message() {
         "session should have at least one message after submit"
     );
 }
-

@@ -1,13 +1,12 @@
 use super::{
-    Acceptance, AcceptanceKind, AcceptanceStatus, Budget, Goal, Plan, PlanStatus, Step,
-    StepRef, StepStatus, Validation, ValidationStatus, complete, new_id, next_id, now,
-    render, verify_acceptance, MAX_STEPS_DEFAULT,
+    Acceptance, AcceptanceKind, AcceptanceStatus, Budget, Goal, MAX_STEPS_DEFAULT, Plan,
+    PlanStatus, Step, StepRef, StepStatus, Validation, ValidationStatus, complete, new_id, next_id,
+    now, render, verify_acceptance,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
-
 
 // ---------------------------------------------------------------- operations
 
@@ -257,7 +256,8 @@ pub fn validate_surrender_reason(reason: &str, what: &str) -> Result<String, Rej
         return Err(Rejection::new(
             "thin_reason",
             format!("{what} reason is too thin to judge: {quoted}"),
-            "quote the defect itself — which requirement, step, or criterion is wrong and why".to_string(),
+            "quote the defect itself — which requirement, step, or criterion is wrong and why"
+                .to_string(),
         ));
     }
     Ok(quoted)
@@ -583,9 +583,7 @@ pub fn step_diff(
 
     // If finish is still not found, use latest commit on the session chain
     if finish_sha.is_none() {
-        finish_sha = shadow
-            .head_of(chain)
-            .or_else(|| shadow.head_of("shared"));
+        finish_sha = shadow.head_of(chain).or_else(|| shadow.head_of("shared"));
     }
 
     let (Some(start), Some(finish)) = (start_sha, finish_sha) else {
@@ -705,11 +703,7 @@ pub fn apply(
                 format!("plan {} abandoned on approved reset: {quoted}", plan.id),
             )
         }
-        Op::Add {
-            after,
-            title,
-            refs,
-        } => add(plan, after.as_deref(), title, refs, limits),
+        Op::Add { after, title, refs } => add(plan, after.as_deref(), title, refs, limits),
         Op::AddAcceptance { items } => add_acceptance(plan, items),
         Op::Split { id, into } => split(plan, &id, into, limits),
         // The host prepares the evidence (and runs `cmd:` items) before
@@ -927,7 +921,8 @@ fn cancel(plan: &mut Plan, id: Option<&str>, reason: String) -> Result<Applied, 
             plan,
             "abandon_user_only",
             format!("plan {} can only be abandoned by the user", plan.id),
-            "surrender a contradiction with block_plan (quote it), or ask the user to abandon it".to_string(),
+            "surrender a contradiction with block_plan (quote it), or ask the user to abandon it"
+                .to_string(),
         );
     }
     let Some((status, _)) = step_status(plan, id) else {
@@ -1167,4 +1162,3 @@ mod tests {
         assert_eq!(finish.as_deref(), Some("sha_finish_2"));
     }
 }
-

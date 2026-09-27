@@ -1087,4 +1087,3 @@ fn queue_preview_renders_above_input() {
     );
     assert!(lines[input_y - 1].contains("[+1 more]"));
 }
-

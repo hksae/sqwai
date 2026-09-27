@@ -413,8 +413,7 @@ fn mention_popup_completes_files_and_inserts() {
     app.apply_mention_insert(start, end, "@file:src/main.rs");
     assert_eq!(app.input_text(), "see @file:src/main.rs ");
     // inserted key resolves at send with no warnings
-    let resolved =
-        crate::agent::mentions::resolve_mentions(temp.path(), &app.input_text());
+    let resolved = crate::agent::mentions::resolve_mentions(temp.path(), &app.input_text());
     assert!(resolved.warnings.is_empty(), "{:?}", resolved.warnings);
     assert!(resolved.text.contains("@file:src/main.rs#sha256:"));
     assert_eq!(resolved.pre_reads.len(), 1);
@@ -434,8 +433,7 @@ fn mention_unresolved_stays_literal() {
     app.input = App::fresh_input("see @nosuchfile".into());
     assert!(app.popup_visible());
     assert!(app.popup_items().is_empty());
-    let resolved =
-        crate::agent::mentions::resolve_mentions(temp.path(), &app.input_text());
+    let resolved = crate::agent::mentions::resolve_mentions(temp.path(), &app.input_text());
     assert_eq!(resolved.text, "see @nosuchfile");
     assert_eq!(resolved.warnings.len(), 1);
     assert!(resolved.pre_reads.is_empty());
@@ -451,7 +449,10 @@ fn mention_prereads_register_single_take() {
     assert!(take_mention_prereads(&sess).is_empty());
     register_mention_prereads(&sess, vec!["a.rs".into()]);
     register_mention_prereads(&sess, vec!["b.rs".into()]);
-    assert_eq!(take_mention_prereads(&sess), vec![std::path::PathBuf::from("b.rs")]);
+    assert_eq!(
+        take_mention_prereads(&sess),
+        vec![std::path::PathBuf::from("b.rs")]
+    );
     assert!(take_mention_prereads(&sess).is_empty());
     register_mention_prereads(&sess, Vec::new());
     assert!(take_mention_prereads(&sess).is_empty());
@@ -605,8 +606,7 @@ fn user_surface_strip_fills_the_entire_terminal_row() {
     let buffer = terminal.backend().buffer();
     let user_row = (0..buffer.area.height)
         .find(|y| {
-            (0..buffer.area.width)
-                .any(|x| buffer.cell((x, *y)).is_some_and(|c| c.symbol() == "›"))
+            (0..buffer.area.width).any(|x| buffer.cell((x, *y)).is_some_and(|c| c.symbol() == "›"))
         })
         .expect("user prefix rendered");
     for y in [user_row - 1, user_row, user_row + 1] {
@@ -823,7 +823,8 @@ fn settings_safety_list_add_and_remove() {
     use super::super::menus::ListSection;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::AddListItem(ListSection::SafetyBlocked));
-    app.form_fields[0] = super::super::forms::FormField::text("blocked patterns", "rm -rf /".into());
+    app.form_fields[0] =
+        super::super::forms::FormField::text("blocked patterns", "rm -rf /".into());
     app.form_save();
     assert!(
         app.cfg
@@ -1289,4 +1290,3 @@ fn undo_reopened_step_ids_matches_across_path_separators() {
     let reopened = reopened_step_ids(&active, &[record], "session", &["src/changed.rs".into()]);
     assert_eq!(reopened, vec!["1"]);
 }
-

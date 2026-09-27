@@ -145,19 +145,11 @@ pub fn egress_kind(cmd: &str) -> Option<&'static str> {
     // PowerShell web cmdlets (full names and aliases): bare GETs are
     // downloads, but -Method POST/PUT/PATCH/DELETE, -Body or -InFile send
     // data outward — the same upload shape as curl above.
-    if [
-        "invoke-webrequest",
-        "invoke-restmethod",
-        "iwr",
-        "irm",
-    ]
-    .iter()
-    .any(|name| has(name))
+    if ["invoke-webrequest", "invoke-restmethod", "iwr", "irm"]
+        .iter()
+        .any(|name| has(name))
     {
-        if tokens
-            .iter()
-            .any(|t| t == "-body" || t == "-infile")
-        {
+        if tokens.iter().any(|t| t == "-body" || t == "-infile") {
             return Some("network upload");
         }
         for (i, token) in tokens.iter().enumerate() {
@@ -520,9 +512,7 @@ fn has_dynamic_code(lower: &str) -> bool {
         if head == "eval" || head == "source" || head == "." {
             return true;
         }
-        if matches!(head, "sh" | "bash" | "dash" | "zsh" | "ksh" | "fish")
-            && rest.contains(&"-c")
-        {
+        if matches!(head, "sh" | "bash" | "dash" | "zsh" | "ksh" | "fish") && rest.contains(&"-c") {
             return true;
         }
         if head == "cmd" && rest.iter().any(|w| w.eq_ignore_ascii_case("/c")) {
@@ -679,9 +669,13 @@ fn walk(tree: &Tree, src: &str) -> Verdict {
                 if let Some((head, words, elev)) = command_parts(&node, src) {
                     // find -delete / find -exec (and kin): bulk execution
                     if head == "find"
-                        && words
-                            .iter()
-                            .any(|w| w == "-delete" || w == "-exec" || w == "-execdir" || w == "-ok" || w == "-okdir")
+                        && words.iter().any(|w| {
+                            w == "-delete"
+                                || w == "-exec"
+                                || w == "-execdir"
+                                || w == "-ok"
+                                || w == "-okdir"
+                        })
                     {
                         return Verdict::NeedsApproval(
                             "find -delete/-exec (bulk file destruction)",

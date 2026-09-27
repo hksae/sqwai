@@ -1,12 +1,11 @@
 use super::{
-    AcceptanceKind, AcceptanceStatus, Applied, GoalRevision, Plan, PlanStatus,
-    Receipt, Rejection, StepStatus, ValidationStatus, accept, commit, digest_paths,
-    differential_current, ladder_rung, now, open_active_for_session, proven_failing,
-    reject, signatures_current, snapshot_current, state_digest, waived_constraint_indices,
+    AcceptanceKind, AcceptanceStatus, Applied, GoalRevision, Plan, PlanStatus, Receipt, Rejection,
+    StepStatus, ValidationStatus, accept, commit, differential_current, digest_paths, ladder_rung,
+    now, open_active_for_session, proven_failing, reject, signatures_current, snapshot_current,
+    state_digest, waived_constraint_indices,
 };
 use anyhow::Result;
 use std::path::Path;
-
 
 // ---------------------------------------------------------------- host-only
 
@@ -29,7 +28,8 @@ pub fn set_goal(plan: &mut Plan, text: String, source: &str, reason: Option<Stri
 }
 
 /// User waives an acceptance item (§2.1.7). Host-only.
-pub fn waive(plan: &mut Plan, index: usize, reason: &str) -> Result<(), Rejection> {    if index >= plan.acceptance.len() {
+pub fn waive(plan: &mut Plan, index: usize, reason: &str) -> Result<(), Rejection> {
+    if index >= plan.acceptance.len() {
         return Err(Rejection::new(
             "unknown_acceptance",
             format!("no acceptance item {index}"),
@@ -90,7 +90,9 @@ pub fn confirm(
             return reject(
                 plan,
                 "not_manual",
-                format!("acceptance {index} compares a command's output old-vs-new; verify it instead"),
+                format!(
+                    "acceptance {index} compares a command's output old-vs-new; verify it instead"
+                ),
                 format!("run the check ({cmd}), or waive the item with /plan waive"),
             );
         }
@@ -98,9 +100,7 @@ pub fn confirm(
             return reject(
                 plan,
                 "not_manual",
-                format!(
-                    "acceptance {index} freezes declaration shapes; verify it instead"
-                ),
+                format!("acceptance {index} freezes declaration shapes; verify it instead"),
                 format!(
                     "re-read the shapes ({}), or waive the item with /plan waive",
                     paths.join(", ")
@@ -311,7 +311,10 @@ pub fn render_goal(plan: &Plan) -> String {
         out.push_str(&format!("constraints: {}\n", rendered.join(" · ")));
     }
     if !plan.checklist.is_empty() {
-        out.push_str(&format!("checklist (non-blocking): {}\n", plan.checklist.join(" · ")));
+        out.push_str(&format!(
+            "checklist (non-blocking): {}\n",
+            plan.checklist.join(" · ")
+        ));
     }
     out
 }
@@ -411,4 +414,3 @@ fn status_word(status: PlanStatus) -> &'static str {
         PlanStatus::Blocked => "blocked",
     }
 }
-

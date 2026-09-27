@@ -5,7 +5,6 @@ use crate::plan;
 use crate::providers::ToolCallReq;
 use tokio::sync::mpsc;
 
-
 pub(crate) async fn ask_user(
     call: &ToolCallReq,
     tx: &mpsc::Sender<AgentEvent>,
@@ -728,4 +727,3 @@ pub(crate) fn is_accepted_memory_answer(answer_ok: bool, raw_answer: &str) -> bo
                 && lower != "edit"
                 && !lower.starts_with("subagents cannot")))
 }
-
