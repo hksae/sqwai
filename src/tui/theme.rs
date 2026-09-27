@@ -37,6 +37,13 @@ impl Theme {
     pub const fn DIM() -> Color {
         Color::DarkGray
     }
+    /// Second rung of the gray ladder: metadata, secondary columns, key
+    /// states. FG = data, META = meta, DIM = hints/chrome. Three rungs,
+    /// no more — everything else earns color by semantics.
+    #[allow(non_snake_case)]
+    pub const fn META() -> Color {
+        Color::Gray
+    }
     #[allow(non_snake_case)]
     pub const fn ACCENT() -> Color {
         Color::Cyan
@@ -107,6 +114,43 @@ impl Theme {
     pub fn dim() -> Style {
         Style::new().fg(Self::DIM())
     }
+    pub fn meta() -> Style {
+        Style::new().fg(Self::META())
+    }
+    /// Selection marker (❯ / numbers): house accent, never LightBlue.
+    pub fn marker() -> Style {
+        Style::new().fg(Self::ACCENT()).add_modifier(Modifier::BOLD)
+    }
+    /// Selected menu row: subtle fill + bright text. Fill is a 256-color
+    /// gray like USER_SURFACE (no custom RGB, no transparency games), so
+    /// the row reads as one band on every dark terminal.
+    #[allow(non_snake_case)]
+    pub const fn SELECTION_BG() -> Color {
+        Color::Indexed(237)
+    }
+    pub fn selection() -> Style {
+        Style::new()
+            .bg(Self::SELECTION_BG())
+            .add_modifier(Modifier::BOLD)
+    }
+    /// Hint chips: `key` bright + `desc` dim, joined with a dim `·`.
+    /// `(key, desc)` pairs keep one visual language for every footer.
+    pub fn hints(pairs: &[(&str, &str)]) -> ratatui::text::Line<'static> {
+        use ratatui::text::Span;
+        let mut spans = vec![Span::styled(" ", Self::dim())];
+        for (i, (key, desc)) in pairs.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" · ", Self::dim()));
+            }
+            spans.push(Span::styled(
+                key.to_string(),
+                Style::new().add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(format!(": {desc}"), Self::dim()));
+        }
+        spans.push(Span::styled(" ", Self::dim()));
+        ratatui::text::Line::from(spans)
+    }
     pub fn accent() -> Style {
         Style::new().fg(Self::ACCENT())
     }
@@ -128,11 +172,6 @@ impl Theme {
     #[allow(dead_code)]
     pub fn border_dim() -> Style {
         Style::new().fg(Self::BORDER_DIM())
-    }
-    /// Frames of every modal menu and popup: plain white, so overlays read
-    /// as a surface above the dimmed chat.
-    pub fn border_popup() -> Style {
-        Style::new().fg(Color::White)
     }
     /// Busy/attention status: bold yellow, no chip background (Codex status).
     pub fn status_chip() -> Style {

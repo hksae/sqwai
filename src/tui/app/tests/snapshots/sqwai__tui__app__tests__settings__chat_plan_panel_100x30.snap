@@ -1,6 +1,5 @@
 ---
-source: src/tui/app/tests.rs
-assertion_line: 4762
+source: src/tui/app/tests/settings.rs
 expression: s
 ---
 
@@ -15,12 +14,12 @@ expression: s
 
 
 
-           ┌  To-do  ───────────────────────────────────────────────────────────────────┐
-           │ agent to-do list                                                           │
-           │  1. Step 1: Analyse requirements                                           │
-           │  2. Step 2: Implement feature                                              │
-           │  3. Step 3: Write tests                                                    │
-           └────────────────────────────────────────────────────────────────────────────┘
+             To-do
+             agent to-do list
+              1. Step 1: Analyse requirements
+              2. Step 2: Implement feature
+              3. Step 3: Write tests
+
 
 
 

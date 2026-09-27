@@ -2523,7 +2523,7 @@ impl App {
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled(
                         format!(" {}", crate::config::catalog_status_line()),
-                        Theme::dim(),
+                        Theme::meta(),
                     )]),
                     MenuAction::None,
                 ));
@@ -2754,7 +2754,7 @@ impl App {
                             }
                         };
                         let mut spans = vec![
-                            Span::styled(format!("{checked}{}. ", o_idx + 1), Theme::LIGHT_BLUE()),
+                            Span::styled(format!("{checked}{}. ", o_idx + 1), Theme::marker()),
                             Span::styled(
                                 label,
                                 if is_recommended {
@@ -2929,7 +2929,7 @@ impl App {
                     for (i, item) in self.todos.iter().enumerate() {
                         self.menu_rows.push(row(
                             Line::from(vec![
-                                Span::styled(format!("  {}. ", i + 1), Theme::LIGHT_BLUE()),
+                                Span::styled(format!("  {}. ", i + 1), Theme::marker()),
                                 Span::styled(item.clone(), Theme::base()),
                             ]),
                             MenuAction::None,

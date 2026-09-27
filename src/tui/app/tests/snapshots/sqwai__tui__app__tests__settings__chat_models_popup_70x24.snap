@@ -1,6 +1,5 @@
 ---
-source: src/tui/app/tests.rs
-assertion_line: 4741
+source: src/tui/app/tests/settings.rs
 expression: s
 ---
 
@@ -10,15 +9,15 @@ expression: s
 
  Hi there!
 
-  ┌  Models · p  ──────────────────────────────────────────────────┐
-  │ m *  test-model · 1k · ef:off                                  │
-  │ + add model                                                    │
-  │ · switch active model                                          │
-  │ · check connection                                             │
-  │ · edit provider                                                │
-  │ · delete model                                                 │
-  │ · delete provider                                              │
-  └────────────────────────────────────────────────────────────────┘
+    Models · p
+    m *  test-model · 1k · ef:off
+    + add model
+    · switch active model
+    · check connection
+    · edit provider
+    · delete model
+    · delete provider
+
 
 
 

@@ -8,7 +8,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget};
 use std::hash::{Hash, Hasher};
 use tui_textarea::TextArea;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -3095,7 +3095,10 @@ impl App {
                 rows.push(Line::from(spans));
             }
         } else {
-            // render only the visible window of the list
+            // render only the visible window of the list. Selection is one
+            // fill band across the content width (Crush dialog style): the
+            // band carries focus, so per-span hues survive underneath.
+            let content_w = rect.width.saturating_sub(2) as usize;
             for (n, (line, _)) in self
                 .menu_rows
                 .iter()
@@ -3105,24 +3108,36 @@ impl App {
             {
                 let abs = self.menu_scroll + n;
                 if abs == self.menu_sel {
-                    // Codex-style selection: the whole row goes cyan bold,
-                    // no inverted block.
-                    rows.push(Line::from(
+                    let mut out = Line::from(
                         line.spans
                             .iter()
-                            .map(|s| Span::styled(s.content.to_string(), Theme::accent_bold()))
+                            .map(|s| {
+                                Span::styled(
+                                    s.content.to_string(),
+                                    s.style.patch(Theme::selection()),
+                                )
+                            })
                             .collect::<Vec<_>>(),
-                    ));
+                    );
+                    let pad = content_w.saturating_sub(cols(&line_text(&out)));
+                    if pad > 0 {
+                        out.spans.push(Span::styled(
+                            " ".repeat(pad),
+                            Style::new().bg(Theme::SELECTION_BG()),
+                        ));
+                    }
+                    rows.push(out);
                 } else {
                     rows.push(line.clone());
                 }
             }
         }
 
+        // Flat Codex-style panel: no frame, content inset by padding. Title
+        // and hint rows take the rows the borders used to occupy, so the
+        // card keeps its size.
         let mut block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Plain)
-            .border_style(Theme::border_popup())
+            .padding(ratatui::widgets::Padding::horizontal(1))
             .title(Span::styled(
                 format!(" {} ", self.menu_title()),
                 Style::new()
@@ -3130,13 +3145,10 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             ));
         if matches!(self.cur_menu(), Some(Menu::Sessions)) {
-            block = block.title_bottom(
-                Line::from(Span::styled(" p: pin · d: delete ", Theme::dim())).right_aligned(),
-            );
+            block =
+                block.title_bottom(Theme::hints(&[("p", "pin"), ("d", "delete")]).right_aligned());
         } else if matches!(self.cur_menu(), Some(Menu::TestAnims)) {
-            block = block.title_bottom(
-                Line::from(Span::styled(" enter/esc: close ", Theme::dim())).right_aligned(),
-            );
+            block = block.title_bottom(Theme::hints(&[("enter/esc", "close")]).right_aligned());
         } else if matches!(
             self.cur_menu(),
             Some(
@@ -3150,8 +3162,7 @@ impl App {
             )
         ) {
             block = block.title_bottom(
-                Line::from(Span::styled(" enter: save · esc: cancel ", Theme::dim()))
-                    .right_aligned(),
+                Theme::hints(&[("enter", "save"), ("esc", "cancel")]).right_aligned(),
             );
         }
 
@@ -3160,8 +3171,7 @@ impl App {
             .style(Theme::base())
             .block(block)
             .render(rect, buf);
-        // mini scrollbar inside the right border when the list overflows —
-        // exactly like the command popup (last content column, border intact)
+        // mini scrollbar on the last content column when the list overflows
         if !is_form && !self.menu_rows.is_empty() {
             let total = self.menu_rows.len();
             let shown = total
@@ -3238,9 +3248,6 @@ impl App {
         }
 
         let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Plain)
-            .border_style(Theme::border_popup())
             .title(Span::styled(
                 format!(" {} ", self.menu_title()),
                 Style::new()
@@ -3371,7 +3378,7 @@ impl App {
             .min((input_area.y as usize).saturating_sub(2).max(3));
         let max_scroll = items.len().saturating_sub(shown);
         let skip = self.popup_scroll.min(max_scroll);
-        let h = (shown + 2) as u16; // + borders
+        let h = shown as u16; // flat panel, no border rows
         let w = 64.min(input_area.width.saturating_sub(2)).max(24);
         let y = input_area.y.saturating_sub(h);
         let rect = Rect {
@@ -3387,36 +3394,37 @@ impl App {
         self.popup_rows.clear();
         for (n, item) in items.iter().skip(skip).take(shown).enumerate() {
             let hovered = self.hover.as_deref() == Some(item.as_str());
-            let cmd_style = if hovered {
-                Theme::accent_bold()
-            } else {
-                Theme::base()
-            };
             let pad = 1usize;
-            rows.push(Line::from(vec![Span::styled(
-                format!(" {item}{}", " ".repeat(pad)),
-                cmd_style,
-            )]));
-            self.popup_rows.push((rect.y + 1 + n as u16, item.clone()));
+            if hovered {
+                let mut out = Line::from(vec![Span::styled(
+                    format!(" {item}{}", " ".repeat(pad)),
+                    Theme::selection(),
+                )]);
+                let fill = (rect.width as usize).saturating_sub(cols(&line_text(&out)));
+                if fill > 0 {
+                    out.spans.push(Span::styled(
+                        " ".repeat(fill),
+                        Style::new().bg(Theme::SELECTION_BG()),
+                    ));
+                }
+                rows.push(out);
+            } else {
+                rows.push(Line::from(vec![Span::styled(
+                    format!(" {item}{}", " ".repeat(pad)),
+                    Theme::base(),
+                )]));
+            }
+            self.popup_rows.push((rect.y + n as u16, item.clone()));
         }
 
         Clear.render(rect, buf);
-        Paragraph::new(rows)
-            .style(Theme::base())
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Plain)
-                    .border_style(Theme::border_dim()),
-            )
-            .render(rect, buf);
-        // mini scrollbar inside the right border when the list overflows
-        // (on the last content column, so the border stays intact)
+        Paragraph::new(rows).style(Theme::base()).render(rect, buf);
+        // mini scrollbar on the last content column when the list overflows
         if max_scroll > 0 {
             let track = shown;
             let thumb = 1.max(track * shown / items.len());
             let pos = skip * (track - thumb) / max_scroll.max(1);
-            let bx = rect.right().saturating_sub(2);
+            let bx = rect.right().saturating_sub(1);
             for i in 0..track {
                 if let Some(cell) =
                     buf.cell_mut(ratatui::layout::Position::new(bx, rect.y + 1 + i as u16))
