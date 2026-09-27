@@ -834,10 +834,18 @@ mod tests {
 
     #[cfg(windows)]
     fn marker_loop_command(marker: &std::path::Path) -> String {
-        format!(
-            "for /L %i in (1,1,2400) do @echo %time%>>\"{}\" & @ping -n 1 -w 40 127.0.0.1",
-            marker.display()
-        )
+        // The runtime shell comes from SHELL/SQWAI_SHELL, not the OS: a Git
+        // Bash environment makes spawn_command run bash here, where the cmd
+        // `for /L` spelling is a syntax error. Mirror the same detection.
+        if ShellKind::detect() == ShellKind::Cmd {
+            format!(
+                "for /L %i in (1,1,2400) do @echo %time%>>\"{}\" & @ping -n 1 -w 40 127.0.0.1",
+                marker.display()
+            )
+        } else {
+            let path = marker.display().to_string().replace('\\', "/");
+            format!("for i in $(seq 1 2400); do date +%s%N >> \"{path}\"; sleep 0.05; done")
+        }
     }
 
     /// The bug this exists to fix: before the poll loop checked the cancel

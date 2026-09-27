@@ -2208,13 +2208,20 @@ mod tests {
         "echo $$".to_string()
     }
 
-    /// Cmd spelling of [`clock_command`]: `%TIME%` ticks in centiseconds,
-    /// and two process spawns never land in the same one. (No PowerShell
-    /// here: its scriptlets trip the safety classifier — `-Format` even
-    /// matches the destructive-disk heuristic.)
+    /// Windows spelling of [`clock_command`], picked by the *runtime* shell
+    /// (SHELL/SQWAI_SHELL), not the OS: under Git Bash `%TIME%` stays a
+    /// literal — constant across runs, so the freeze would wrongly bless it.
+    /// Cmd: `%TIME%` ticks in centiseconds, and two process spawns never land
+    /// in the same one. Bash: `date +%s%N` ticks in nanoseconds. (No
+    /// PowerShell here: its scriptlets trip the safety classifier — `-Format`
+    /// even matches the destructive-disk heuristic.)
     #[cfg(windows)]
     fn clock_command() -> String {
-        "echo %TIME%".to_string()
+        if crate::agent::shell::ShellKind::detect() == crate::agent::shell::ShellKind::Cmd {
+            "echo %TIME%".to_string()
+        } else {
+            "date +%s%N".to_string()
+        }
     }
 
     /// `complete` runs `cmd:` items again instead of trusting the verify that
