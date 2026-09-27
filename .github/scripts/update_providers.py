@@ -23,8 +23,11 @@ Policy (agreed):
 - Unknown direct chat models outside the cap are reported as CANDIDATES.
 - Fetch failure is fatal (exit 1) so the Action goes red instead of silently
   writing stale fallbacks with a fresh date.
-- If nothing but the date changed, the file is left untouched (keeps the old
-  updated_at, so git sees no diff and no empty commit is made).
+- Freshness is a monotonic `serial`, not the date: when models change, the
+  new file carries existing serial + 1 (the client refuses replays of older
+  serials, so the number must never go backwards or be reset by hand).
+- If nothing but the stamps changed, the file is left untouched (keeps the
+  old updated_at, so git sees no diff and no empty commit is made).
 """
 
 import datetime
@@ -47,6 +50,12 @@ EXCLUDE_SUBSTRINGS = (
 
 DATE_SUFFIX = re.compile(r"-20\d{6}$|-20\d\d-\d\d-\d\d$")
 VENDOR_DOT = re.compile(r"^[a-z0-9_]+\.")
+
+# Freshness stamps: serial is the rollback floor the client enforces,
+# updated_at is informational. Both are ignored when deciding whether
+# the models actually changed.
+SERIAL_RE = re.compile(r"^serial = (\d+)$", re.M)
+STAMP_RE = re.compile(r'^(serial = \d+|updated_at = ".*")$', re.M)
 
 # Confirmed-phantom API IDs: present in the LiteLLM DB but not real models
 # (e.g. bare gpt-5.6 — only luna/terra/sol/cyber exist). Logged when dropped.
@@ -330,8 +339,15 @@ def lookup(data, prefixes, model_id):
     return None, None
 
 
-def build_catalog(data, today):
-    lines = [f'updated_at = "{today}"', ""]
+def build_catalog(data, today, serial):
+    lines = [
+        "# Monotonic freshness stamp, bumped by .github/scripts/update_providers.py on",
+        "# every content change (never by hand). The client compares serials, not",
+        "# dates: a replayed old file never wins, and missing serial reads as 0.",
+        f"serial = {serial}",
+        f'updated_at = "{today}"',
+        "",
+    ]
     total = 0
     for p in PROVIDERS_CONFIG:
         lines += [
@@ -380,22 +396,25 @@ def build_catalog(data, today):
 def main():
     data = fetch_litellm_data()
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-    content, total = build_catalog(data, today)
 
     target = os.path.abspath(CATALOG_PATH)
-    # No-op when only the date would change: keeps history clean and lets
-    # the workflow correctly report "No changes".
+    existing = None
     if os.path.exists(target):
         with open(target, encoding="utf-8") as f:
             existing = f.read()
-        strip_date = re.compile(r'^updated_at = ".*"$', re.M)
-        if strip_date.sub("", existing) == strip_date.sub("", content):
-            print(f"No model changes ({total} models); leaving {target} untouched.")
-            return
+    m = SERIAL_RE.search(existing) if existing else None
+    serial = (int(m.group(1)) + 1) if m else 1
+    content, total = build_catalog(data, today, serial)
+
+    # No-op when only the stamps would change: keeps history clean and lets
+    # the workflow correctly report "No changes".
+    if existing is not None and STAMP_RE.sub("", existing) == STAMP_RE.sub("", content):
+        print(f"No model changes ({total} models); leaving {target} untouched.")
+        return
 
     with open(target, "w", encoding="utf-8") as f:
         f.write(content)
-    print(f"Updated {target} with {len(PROVIDERS_CONFIG)} providers and {total} models.")
+    print(f"Updated {target} with {len(PROVIDERS_CONFIG)} providers and {total} models (serial {serial}).")
 
 
 if __name__ == "__main__":

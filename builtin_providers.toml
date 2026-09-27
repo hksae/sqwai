@@ -1,3 +1,7 @@
+# Monotonic freshness stamp, bumped by .github/scripts/update_providers.py on
+# every content change (never by hand). The client compares serials, not
+# dates: a replayed old file never wins, and missing serial reads as 0.
+serial = 1
 updated_at = "2026-09-27"
 
 # Gemini
