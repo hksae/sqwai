@@ -435,7 +435,7 @@ pub const BUILTIN_ORIGINS: &[(&str, &str, &str)] = &[
     ("openai", "api.openai.com", "OPENAI_API_KEY"),
     ("deepseek", "api.deepseek.com", "DEEPSEEK_API_KEY"),
     ("grok", "api.x.ai", "XAI_API_KEY"),
-    ("kimi", "api.moonshot.cn", "MOONSHOT_API_KEY"),
+    ("kimi", "api.moonshot.ai", "MOONSHOT_API_KEY"),
 ];
 
 fn pinned_origin(name: &str) -> Option<(&'static str, &'static str)> {

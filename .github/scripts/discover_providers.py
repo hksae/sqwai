@@ -75,7 +75,7 @@ PROVIDERS = [
     ("anthropic", "ANTHROPIC_API_KEY", fetch_anthropic),
     ("openai", "OPENAI_API_KEY", lambda k: openai_style("https://api.openai.com/v1", k)),
     ("deepseek", "DEEPSEEK_API_KEY", lambda k: openai_style("https://api.deepseek.com/v1", k)),
-    ("kimi", "MOONSHOT_API_KEY", lambda k: openai_style("https://api.moonshot.cn/v1", k)),
+    ("kimi", "MOONSHOT_API_KEY", lambda k: openai_style("https://api.moonshot.ai/v1", k)),
     ("grok", "XAI_API_KEY", lambda k: openai_style("https://api.x.ai/v1", k)),
 ]
 
