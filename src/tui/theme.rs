@@ -29,7 +29,7 @@ impl Theme {
     /// with a weak DIM — the surface guarantees depth everywhere.
     #[allow(non_snake_case)]
     pub const fn MENU_BG() -> Color {
-        Color::Indexed(234)
+        Color::Indexed(233)
     }
     /// User message band: Codex-style white-12%-over-dark (~#262626).
     /// A 256-color gray (not a custom RGB): present on every modern terminal.
