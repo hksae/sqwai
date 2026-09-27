@@ -3807,6 +3807,35 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// Audit L28: on Windows `hidden(true)` checks attributes, not dots, so
+    /// `.sqwai/` is walked without an explicit skip — inconsistent with
+    /// grep/glob, which never list host-owned state.
+    #[test]
+    fn ast_grep_skips_host_owned_state() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".sqwai/skills/demo")).unwrap();
+        fs::write(
+            dir.path().join(".sqwai/skills/demo/skill.rs"),
+            "fn helper() {\n    let x = Ok(1);\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("demo.rs"),
+            "fn main() {\n    let a = Ok(2);\n}\n",
+        )
+        .unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        let o = execute(&mut ctx, "ast_grep", &json!({"pattern": "Ok($E)"}));
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("demo.rs"), "{}", o.output);
+        assert!(
+            !o.output.contains(".sqwai"),
+            "host-owned state must be invisible to ast_grep: {}",
+            o.output
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn ast_grep_matches_by_shape_with_metavariables() {
         let dir = tempfile::tempdir().unwrap();
