@@ -24,8 +24,9 @@ Policy (agreed):
 - Fetch failure is fatal (exit 1) so the Action goes red instead of silently
   writing stale fallbacks with a fresh date.
 - With --discovery-dir, direct lists from discover_providers.py union in
-  ids the DB missed (specs: provider_overlay.toml -> LiteLLM DB ->
-  conservative default). Ids the catalog shipped but the run drops are
+  ids the DB missed (specs: provider_overlay.toml -> LiteLLM DB; ids with
+  neither become report candidates, never heuristic guesses). Ids the
+  catalog shipped but the run drops are
   reported, never silently re-added; removals always need human review.
 - Freshness is a monotonic `serial`, not the date: when models change, the
   new file carries existing serial + 1 (the client refuses replays of older
@@ -74,18 +75,6 @@ DROP_IDS = {"gpt-5.6"}
 # Extra substrings that disqualify a model for coding/chat use in sqwai.
 # (generic audio/image/... live in EXCLUDE_SUBSTRINGS; these are search APIs.)
 SEARCH_SUBSTRINGS = ("search",)
-
-# Conservative context for a direct-discovered id with no overlay entry and
-# no LiteLLM record. Under-claiming only truncates history earlier; the next
-# DB sync or an overlay line corrects it. Never used when the DB knows the id.
-DEFAULT_CTX = {
-    "gemini": 1000000,
-    "anthropic": 200000,
-    "openai": 128000,
-    "deepseek": 64000,
-    "kimi": 200000,
-    "grok": 128000,
-}
 
 EFFORT_VALUES = ("off", "low", "medium", "high")
 
@@ -431,11 +420,17 @@ def catalog_model_ids(text):
 def direct_extras(p, have, data, discovered, overlay, today):
     """Discovered ids the LiteLLM path missed: (id, effort, ctx, source).
 
-    Specs resolve overlay -> LiteLLM DB -> conservative default. Anything
-    looking non-chat (exclusions, snapshots, known phantoms) is skipped
-    with a log line, same policy as the DB path.
+    Auto-add is gated on a spec source — overlay entry or usable LiteLLM
+    record. A bare direct id proves existence, not suitability: Google and
+    OpenAI list test harnesses (aqa), music/video/image models (lyria, veo,
+    sora), moderation and robotics endpoints next to chat ones, and shape
+    alone cannot tell them apart. Gated-out ids are returned as candidates
+    for the report (a curator pins the real ones via the overlay), never
+    added with heuristic specs. Anything looking non-chat (exclusions,
+    snapshots, known phantoms) is skipped with a log line, same policy as
+    the DB path.
     """
-    extras = []
+    extras, candidates = [], []
     prefixes = tuple(p.get("litellm_prefixes", ()) or p.get("prefixes", ()))
     for did in discovered:
         if did in have or did in DROP_IDS:
@@ -456,11 +451,11 @@ def direct_extras(p, have, data, discovered, overlay, today):
                 ctx, effort = specs_from_db(info), guess_effort(did)
                 source = "litellm"
             else:
-                ctx, effort = DEFAULT_CTX.get(p["name"], 128000), guess_effort(did)
-                source = "default"
-                print(f"  - {did}: direct-only, no DB record (ctx={ctx} heuristic)")
+                candidates.append(did)
+                print(f"  - {did}: direct-only, no spec source (candidate, not added)")
+                continue
         extras.append((did, effort, ctx, source))
-    return extras
+    return extras, candidates
 
 
 def build_catalog(data, today, serial, discovery=None, overlay=None, report=None):
@@ -505,18 +500,20 @@ def build_catalog(data, today, serial, discovery=None, overlay=None, report=None
                 print(f"  - {cid}: ctx={ctx} effort={effort}")
                 models.append((cid, effort, ctx))
         total += len(models)
-        sec = {"added": [], "source": "litellm", "direct_ids": 0}
+        sec = {"added": [], "candidates": [], "source": "litellm", "direct_ids": 0}
         discovered = (discovery or {}).get(p["name"])
         if discovered is not None:
             sec["source"] = f"direct ({len(discovered)} ids) + litellm"
             sec["direct_ids"] = len(discovered)
             have = {mid for mid, _, _ in models}
-            for did, effort, ctx, origin in direct_extras(
+            added, candidates = direct_extras(
                 p, have, data, discovered, overlay or {}, today
-            ):
+            )
+            for did, effort, ctx, origin in added:
                 models.append((did, effort, ctx))
                 sec["added"].append(f"{did} (ctx={ctx} via {origin})")
                 print(f"  + {did}: direct-only, ctx={ctx} via {origin}")
+            sec["candidates"] = candidates
             total += len(sec["added"])
         if report is not None:
             report[p["name"]] = sec
@@ -582,12 +579,19 @@ def main():
 
     md = [f"# Catalog sync — {today} (serial {serial})\n\n"]
     for p in PROVIDERS_CONFIG:
-        sec = report.get(p["name"], {"added": [], "source": "litellm", "direct_ids": 0})
+        sec = report.get(p["name"], {"added": [], "candidates": [], "source": "litellm", "direct_ids": 0})
         md.append(f"## {p['name']} — {sec['source']}\n")
         for a in sec["added"]:
             md.append(f"- added {a}\n")
         if not sec["added"]:
             md.append("- no direct-only additions\n")
+        if sec["candidates"]:
+            md.append(
+                "- candidates (direct-listed, no spec source — "
+                "pin the real ones in provider_overlay.toml):\n"
+            )
+            for c in sec["candidates"]:
+                md.append(f"  - {c}\n")
     if stale:
         md.append("\n## Needs human review\n")
         for name, mid, why in stale:

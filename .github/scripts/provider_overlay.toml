@@ -3,7 +3,10 @@
 # Resolution order for a discovered id in update_providers.py:
 #   1. this overlay (exact id match) — curator-pinned, wins over everything;
 #   2. LiteLLM database lookup;
-#   3. conservative per-provider default context + guessed effort.
+#   3. report candidates — the id is listed for a human, never auto-added
+#      with guessed specs (a bare direct id proves existence, not
+#      suitability: test harnesses and music/video endpoints list next
+#      to chat models).
 #
 # Add an entry when the bot files a PR with heuristic specs you know are
 # wrong, or pre-emptively for an announced model. `effort` is one of
