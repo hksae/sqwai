@@ -23,6 +23,14 @@ impl Theme {
     pub const fn SURFACE() -> Color {
         Color::Reset
     }
+    /// Raised surface for flat modal panels (menus, completion popups):
+    /// one step above the terminal background, one below USER_SURFACE, two
+    /// below the selection fill. Dim-only separation merges on terminals
+    /// with a weak DIM — the surface guarantees depth everywhere.
+    #[allow(non_snake_case)]
+    pub const fn MENU_BG() -> Color {
+        Color::Indexed(234)
+    }
     /// User message band: Codex-style white-12%-over-dark (~#262626).
     /// A 256-color gray (not a custom RGB): present on every modern terminal.
     #[allow(non_snake_case)]

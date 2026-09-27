@@ -3167,6 +3167,17 @@ impl App {
         }
 
         Clear.render(rect, buf);
+        // Raised surface: paint the flat panel one step above the
+        // background so it never merges with the dimmed chat behind it.
+        for y in rect.y..rect.bottom() {
+            for x in rect.x..rect.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    let mut style = cell.style();
+                    style.bg = Some(Theme::MENU_BG());
+                    cell.set_style(style);
+                }
+            }
+        }
         Paragraph::new(rows)
             .style(Theme::base())
             .block(block)
@@ -3259,6 +3270,15 @@ impl App {
                     .right_aligned(),
             );
         Clear.render(rect, buf);
+        for y in rect.y..rect.bottom() {
+            for x in rect.x..rect.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    let mut style = cell.style();
+                    style.bg = Some(Theme::MENU_BG());
+                    cell.set_style(style);
+                }
+            }
+        }
         let inner = Rect {
             x: rect.x + 1,
             y: rect.y + 1,
@@ -3418,6 +3438,15 @@ impl App {
         }
 
         Clear.render(rect, buf);
+        for y in rect.y..rect.bottom() {
+            for x in rect.x..rect.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    let mut style = cell.style();
+                    style.bg = Some(Theme::MENU_BG());
+                    cell.set_style(style);
+                }
+            }
+        }
         Paragraph::new(rows).style(Theme::base()).render(rect, buf);
         // mini scrollbar on the last content column when the list overflows
         if max_scroll > 0 {
