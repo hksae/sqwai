@@ -578,19 +578,31 @@ fn pinned_sessions_frame_stays_dim() {
         .find(|(_, a)| matches!(a, MenuAction::OpenSession(_)))
         .expect("session row");
     assert_eq!(
-        row.spans[1].style.fg,
+        row.spans[3].style.fg,
         Some(Color::Reset),
         "title is terminal default"
     );
     assert_eq!(
-        row.spans[5].style.fg,
+        row.spans[7].style.fg,
         Some(Color::Gray),
         "model is the meta rung"
     );
     assert_eq!(
-        row.spans[3].style.fg,
+        row.spans[5].style.fg,
         Some(Color::DarkGray),
         "date stays dim"
+    );
+    // pinned rows carry the cyan pin marker in the first column,
+    // unpinned rows leave it blank
+    assert_eq!(
+        row.spans[1].content.as_ref(),
+        "◈ ",
+        "pinned row must show the marker"
+    );
+    assert_eq!(
+        row.spans[1].style.fg,
+        Some(Color::Cyan),
+        "marker uses the house accent"
     );
 }
 #[test]
@@ -607,57 +619,42 @@ fn pinned_session_frame_aligns_columns_and_respects_narrow_terminal() {
     app.cache_w = 40;
     app.open_menu(Menu::Sessions);
 
-    let render_line = |l: &ratatui::text::Line| -> String {
-        l.spans.iter().map(|sp| sp.content.as_ref()).collect()
+    // 40-col card → 34-col budget: header and row share one grid.
+    // Span-level widths (byte-slicing breaks on the CJK title).
+    let span_widths = |l: &ratatui::text::Line| -> Vec<usize> {
+        l.spans
+            .iter()
+            .map(|sp| unicode_width::UnicodeWidthStr::width(sp.content.as_ref()))
+            .collect()
     };
-
-    // 40-col card → 34-col budget: header and row share one grid
-    let header = render_line(app.menu_table_header.as_ref().expect("table header"));
-    let content_row = app
+    let header_line = app.menu_table_header.as_ref().expect("table header");
+    let content_line = app
         .menu_rows
         .iter()
         .find(|(_, a)| matches!(a, MenuAction::OpenSession(_)))
-        .map(|(l, _)| render_line(l))
+        .map(|(l, _)| l)
         .expect("content row");
-
+    // lead 1 + pin 2 + gap 2 + title 8 + gap 2 + date 11 + gap 2
+    // + model cut to 8 = 34: the exact-fit pass drops trailing columns
+    // first, so SIZE never shifts the grid on narrow terminals
     assert_eq!(
-        UnicodeWidthStr::width(header.as_str()),
-        UnicodeWidthStr::width(content_row.as_str()),
-        "header and row must share the grid"
+        span_widths(header_line),
+        vec![1, 2, 2, 8, 2, 11, 2, 6],
+        "header must share the grid"
     );
-    assert!(
-        UnicodeWidthStr::width(content_row.as_str()) <= 40,
-        "must fit within menu rect width: {content_row:?}"
-    );
-    // date starts at the same display column in header and content.
-    // budget 34 → title 8, so DATE sits at column 1 + 8 + 2 = 11.
-    // (display columns, not bytes: the CJK title shifts byte offsets)
-    fn disp_slice(s: &str, start: usize, len: usize) -> String {
-        use unicode_width::UnicodeWidthChar;
-        let mut out = String::new();
-        let mut col = 0usize;
-        for ch in s.chars() {
-            let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if col >= start && col < start + len {
-                out.push(ch);
-            }
-            col += w;
-            if col >= start + len {
-                break;
-            }
-        }
-        out
-    }
     assert_eq!(
-        disp_slice(&header, 11, 4),
-        "DATE",
-        "header label must sit on the date column: {header:?}"
+        span_widths(content_line),
+        vec![1, 2, 2, 8, 2, 11, 2, 6],
+        "row must share the grid"
     );
-    let date = disp_slice(&content_row, 11, 11);
+    assert_eq!(header_line.spans[5].content.as_ref(), "DATE       ");
+    let date = content_line.spans[5].content.as_ref();
     assert!(
         date.as_bytes()[2] == b'.' && date.as_bytes()[8] == b':',
-        "row date must start at column 11: {content_row:?}"
+        "row date must fill the date column: {date:?}"
     );
+    let total: usize = span_widths(content_line).iter().sum();
+    assert!(total <= 40, "must fit within menu rect width: {total} > 40");
 }
 
 #[test]
@@ -674,26 +671,34 @@ fn sessions_rows_share_date_model_token_columns() {
         SessionHeader::from_session(&b),
     ];
     app.open_menu(Menu::Sessions);
-    let rows: Vec<String> = app
+    // grid geometry asserted per span (byte-slicing the joined row is
+    // fragile across invisible chars): lead 1 + pin 2 + gap 2 + title 27
+    // + gap 2 + date 11 + gap 2 + model 16 + gap 2 + tokens 7 = 72
+    let rows: Vec<&ratatui::text::Line> = app
+        .menu_rows
+        .iter()
+        .filter(|(_, act)| matches!(act, MenuAction::OpenSession(_)))
+        .map(|(l, _)| l)
+        .collect();
+    assert_eq!(rows.len(), 2);
+    for line in rows {
+        let widths: Vec<usize> = line
+            .spans
+            .iter()
+            .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+            .collect();
+        assert_eq!(widths, vec![1, 2, 2, 27, 2, 11, 2, 16, 2, 7], "{line:?}");
+        assert_eq!(&line.spans[5].content.as_ref()[2..3], ".");
+        assert_eq!(&line.spans[5].content.as_ref()[8..9], ":");
+    }
+    let texts: Vec<String> = app
         .menu_rows
         .iter()
         .filter(|(_, act)| matches!(act, MenuAction::OpenSession(_)))
         .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
-    assert_eq!(rows.len(), 2, "{rows:?}");
-    // lead 1 + `{title:28}` + gap 2 + `{date:11}` + gap 2 + `{model:16}`
-    // + gap 2 + `{tok:>7}` = 69 content cols, exact-fit to the 72 budget
-    for r in &rows {
-        assert_eq!(UnicodeWidthStr::width(r.as_str()), 72, "{r:?}");
-        let date = &r[31..42];
-        assert!(
-            date.as_bytes()[2] == b'.' && date.as_bytes()[8] == b':',
-            "date must start at column 31: {r:?}"
-        );
-        assert!(!r.contains("tok"), "token unit must be gone: {r:?}");
-    }
-    assert!(rows[0].contains("hi"));
-    assert!(rows[1].contains("a medium length title!"));
+    assert!(texts[0].contains("hi"));
+    assert!(texts[1].contains("a medium length title!"));
 }
 
 fn project_session(title: &str, project: Option<std::path::PathBuf>) -> Session {

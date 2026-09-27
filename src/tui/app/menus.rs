@@ -2367,10 +2367,12 @@ impl App {
                 // once on mismatch (also covers an empty pinned section).
                 let budget = table_budget(self.menu_rect.width);
                 self.table_built_w = budget as u16;
-                let title_w = budget.saturating_sub(25 + 16).clamp(8, 28);
-                let model_w = budget.saturating_sub(25 + title_w).clamp(8, 16);
+                // lead 1 + pin 2 + 3 gaps of 2 + date 11 + tokens 7
+                let title_w = budget.saturating_sub(29 + 16).clamp(8, 28);
+                let model_w = budget.saturating_sub(29 + title_w).clamp(8, 16);
                 self.menu_table_header = Some(table_header(
                     vec![
+                        tcell("", 2, false, Theme::dim()),
                         tcell("TITLE", title_w, false, Theme::dim()),
                         tcell("DATE", 11, false, Theme::dim()),
                         tcell("MODEL", model_w, false, Theme::dim()),
@@ -3228,9 +3230,12 @@ fn session_row(
 ) -> (Line<'static>, MenuAction) {
     const TOK_W: usize = 7;
     const DATE_W: usize = 11;
+    const PIN_W: usize = 2;
     let action = MenuAction::OpenSession(s.id.to_string());
     let mark = if is_current { " *" } else { "" };
+    let pin = if s.pinned { "◈" } else { "" };
     let line = table_line(vec![
+        tcell(pin, PIN_W, false, Theme::marker()),
         tcell(&format!("{}{mark}", s.title), title_w, false, Theme::FG()),
         tcell(&fmt_date(s.last_activity()), DATE_W, false, Theme::dim()),
         tcell(&s.model_key, model_w, false, Theme::meta()),
