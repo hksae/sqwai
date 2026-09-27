@@ -194,9 +194,10 @@ impl App {
                         ];
                     }
                     _ => {
+                        // new models start at medium (the old global default)
                         let ef_sel = EFFORT_OPTS
                             .iter()
-                            .position(|s| *s == self.cfg.default_effort.as_str())
+                            .position(|s| *s == EffortLevel::Medium.as_str())
                             .unwrap_or(0);
                         self.form_fields = vec![
                             FormField::text("key", String::new()),

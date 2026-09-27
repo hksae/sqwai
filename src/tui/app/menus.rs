@@ -256,7 +256,6 @@ pub(super) enum MenuAction {
     TogglePerfLog,
     TogglePlanStrict,
     CycleModelEffort,
-    CycleDefaultEffort,
     /// cycle what the current model is declared to do with the slider
     CycleEffortControl,
     /// toggle "this model always reasons, `off` cannot be honoured"
@@ -1313,16 +1312,6 @@ impl App {
                 self.status(&plan.label(), StatusKind::Ok);
                 self.build_menu_rows();
             }
-            MenuAction::CycleDefaultEffort => {
-                let all = EffortLevel::ALL;
-                let cur = all
-                    .iter()
-                    .position(|l| *l == self.cfg.default_effort)
-                    .unwrap_or(0);
-                self.cfg.default_effort = all[(cur + 1) % all.len()];
-                self.cfg.save().ok();
-                self.build_menu_rows();
-            }
             MenuAction::ToggleMode => {
                 let next = self.mode.toggle();
                 self.set_mode(next);
@@ -2308,11 +2297,6 @@ impl App {
                     MenuAction::ToggleEffortAlwaysOn,
                 ));
                 self.menu_rows.push(setting(
-                    "default effort",
-                    self.cfg.default_effort.as_str().to_string(),
-                    MenuAction::CycleDefaultEffort,
-                ));
-                self.menu_rows.push(setting(
                     "mode",
                     self.mode.label().to_string(),
                     MenuAction::ToggleMode,
@@ -2503,13 +2487,6 @@ impl App {
                         tcell("KEY", KEY_W, false, Theme::dim()),
                     ],
                     budget,
-                ));
-                self.menu_rows.push(row(
-                    Line::from(vec![
-                        Span::styled(format!("  {:<16}", "default effort"), Theme::FG()),
-                        Span::styled(self.cfg.default_effort.as_str().to_string(), Theme::dim()),
-                    ]),
-                    MenuAction::CycleDefaultEffort,
                 ));
                 for (name, pc) in &self.cfg.providers {
                     let models = self

@@ -1360,7 +1360,6 @@ fn session_recovery_with_deleted_or_broken_plan_id() {
     let cfg = Config {
         last_model: "m".into(),
         legacy_default_model: String::new(),
-        default_effort: crate::config::EffortLevel::Off,
         providers,
         models,
         safety: Default::default(),

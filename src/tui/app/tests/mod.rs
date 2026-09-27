@@ -77,7 +77,6 @@ fn test_app(url: String) -> App {
     let cfg = Config {
         last_model: "m".into(),
         legacy_default_model: String::new(),
-        default_effort: crate::config::EffortLevel::Off,
         providers,
         models,
         safety: Default::default(),
@@ -178,7 +177,6 @@ async fn real_zen_smoke() {
     let cfg = Config {
         last_model: "m".into(),
         legacy_default_model: String::new(),
-        default_effort: crate::config::EffortLevel::Off,
         providers,
         models,
         safety: Default::default(),

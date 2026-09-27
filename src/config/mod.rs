@@ -1188,8 +1188,6 @@ pub struct Config {
     /// legacy name for `last_model`; read on load, never written back
     #[serde(default, skip_serializing, rename = "default_model")]
     pub(crate) legacy_default_model: String,
-    #[serde(default = "default_effort", alias = "default_thinking")]
-    pub default_effort: EffortLevel,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
@@ -1228,9 +1226,6 @@ fn first_builtin_model() -> String {
         .cloned()
         .unwrap_or_default()
 }
-fn default_effort() -> EffortLevel {
-    EffortLevel::Medium
-}
 
 #[derive(Debug, Clone)]
 pub struct ResolvedProvider {
@@ -1268,7 +1263,6 @@ impl Default for Config {
         Self {
             last_model: first_builtin_model(),
             legacy_default_model: String::new(),
-            default_effort: EffortLevel::Medium,
             providers: catalog.providers,
             models: catalog.models,
             safety: SafetyConfig::default(),
@@ -2119,8 +2113,6 @@ effort = "off"
         )
         .unwrap();
         assert_eq!(m.effort, EffortLevel::High);
-        let cfg: Config = toml::from_str("default_thinking = \"low\"\n").unwrap();
-        assert_eq!(cfg.default_effort, EffortLevel::Low);
     }
 
     #[test]

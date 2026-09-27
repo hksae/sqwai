@@ -699,9 +699,22 @@ fn settings_hub_rows_have_no_hint_subtitles() {
 }
 
 #[test]
-fn providers_default_rows_are_spaced() {
+fn providers_table_has_frozen_header() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::Providers);
+    let header = app
+        .menu_table_header
+        .as_ref()
+        .expect("providers table header");
+    let text: String = header
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(
+        text.contains("PROVIDER") && text.contains("ENDPOINT"),
+        "header must label the grid: {text:?}"
+    );
     let texts: Vec<String> = app
         .menu_rows
         .iter()
@@ -713,8 +726,8 @@ fn providers_default_rows_are_spaced() {
         })
         .collect();
     assert!(
-        texts.iter().any(|t| t.contains("default effort  ")),
-        "value must not stick to the label: {texts:?}"
+        !texts.iter().any(|t| t.contains("default effort")),
+        "dead preference must be gone: {texts:?}"
     );
 }
 
