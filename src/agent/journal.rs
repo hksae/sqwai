@@ -127,8 +127,20 @@ impl Journal {
         let dir = root.join(".sqwai").join("journal");
         fs::create_dir_all(&dir).context("creating journal directory")?;
         let path = dir.join(format!("{session_id}.jsonl"));
-        let repaired = repair_tail(&path)?;
-        let next_seq = last_seq(&path)?.saturating_add(1);
+        // Repair and seq-scan under the same per-file lock append holds:
+        // an unlocked repair_tail can truncate a line another handle is
+        // mid-write (bytes written, '\n' not yet), losing the record and
+        // handing its seq to a later append. The guard must drop before
+        // the journal_repair append below — the mutex is not reentrant.
+        let (repaired, next_seq) = {
+            let file_lock = lock_for(&path);
+            let _guard = file_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let repaired = repair_tail(&path)?;
+            let next_seq = last_seq(&path)?.saturating_add(1);
+            (repaired, next_seq)
+        };
         let file = OpenOptions::new()
             .create(true)
             .append(true)
