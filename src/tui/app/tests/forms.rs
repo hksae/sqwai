@@ -712,7 +712,7 @@ fn providers_table_has_frozen_header() {
         .map(|span| span.content.as_ref())
         .collect();
     assert!(
-        text.contains("PROVIDER") && text.contains("ENDPOINT"),
+        text.contains("PROVIDER") && text.contains("MODELS"),
         "header must label the grid: {text:?}"
     );
     let texts: Vec<String> = app

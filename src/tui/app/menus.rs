@@ -2472,17 +2472,14 @@ impl App {
             Menu::Providers => {
                 let budget = table_budget(self.menu_rect.width);
                 self.table_built_w = budget as u16;
-                // lead 1 + 3 gaps of 2; name/count/key fixed, host flexes
-                const NAME_W: usize = 18;
+                // lead 1 + 2 gaps of 2; endpoint lives in the edit form,
+                // the list keeps identity + counts + key state
+                const NAME_W: usize = 22;
                 const COUNT_W: usize = 9;
-                const KEY_W: usize = 10;
-                let host_w = budget
-                    .saturating_sub(1 + 6 + NAME_W + COUNT_W + KEY_W)
-                    .clamp(12, 34);
+                const KEY_W: usize = 12;
                 self.menu_table_header = Some(table_header(
                     vec![
                         tcell("PROVIDER", NAME_W, false, Theme::dim()),
-                        tcell("ENDPOINT", host_w, false, Theme::dim()),
                         tcell("MODELS", COUNT_W, true, Theme::dim()),
                         tcell("KEY", KEY_W, false, Theme::dim()),
                     ],
@@ -2505,14 +2502,10 @@ impl App {
                         };
                     let is_builtin = self.cfg.is_builtin_provider(name);
                     let badge = if is_builtin { " builtin" } else { "" };
-                    // strip the scheme: every endpoint is https, it carries
-                    // no information and eats the host column
-                    let host = pc.base_url.strip_prefix("https://").unwrap_or(&pc.base_url);
                     self.menu_rows.push(row(
                         fit_line_width(
                             table_line(vec![
                                 tcell(&format!("{name}{badge}"), NAME_W, false, Theme::FG()),
-                                tcell(host, host_w, false, Theme::meta()),
                                 tcell(&format!("{models} models"), COUNT_W, true, Theme::meta()),
                                 tcell(&key_state, KEY_W, false, key_style),
                             ]),
