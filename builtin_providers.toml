@@ -1,7 +1,7 @@
 # Monotonic freshness stamp, bumped by .github/scripts/update_providers.py on
 # every content change (never by hand). The client compares serials, not
 # dates: a replayed old file never wins, and missing serial reads as 0.
-serial = 1
+serial = 2
 updated_at = "2026-09-27"
 
 # Gemini
@@ -53,6 +53,192 @@ id = "gemini-3.1-flash-lite"
 context = 1048576
 effort = "off"
 
+[models."antigravity-preview-05-2026"]
+provider = "gemini"
+id = "antigravity-preview-05-2026"
+context = 1000000
+effort = "medium"
+
+[models."antigravity-preview-09-2026"]
+provider = "gemini"
+id = "antigravity-preview-09-2026"
+context = 1000000
+effort = "medium"
+
+[models."antigravity-preview-latest"]
+provider = "gemini"
+id = "antigravity-preview-latest"
+context = 1000000
+effort = "medium"
+
+[models."aqa"]
+provider = "gemini"
+id = "aqa"
+context = 1000000
+effort = "medium"
+
+[models."gemini-2.5-computer-use-preview-10-2025"]
+provider = "gemini"
+id = "gemini-2.5-computer-use-preview-10-2025"
+context = 128000
+effort = "off"
+
+[models."gemini-2.5-flash"]
+provider = "gemini"
+id = "gemini-2.5-flash"
+context = 1048576
+effort = "off"
+
+[models."gemini-2.5-flash-lite"]
+provider = "gemini"
+id = "gemini-2.5-flash-lite"
+context = 1048576
+effort = "off"
+
+[models."gemini-2.5-pro"]
+provider = "gemini"
+id = "gemini-2.5-pro"
+context = 1048576
+effort = "off"
+
+[models."gemini-3-flash-preview"]
+provider = "gemini"
+id = "gemini-3-flash-preview"
+context = 1048576
+effort = "off"
+
+[models."gemini-3.1-flash-lite-preview"]
+provider = "gemini"
+id = "gemini-3.1-flash-lite-preview"
+context = 1048576
+effort = "off"
+
+[models."gemini-3.1-flash-live-preview"]
+provider = "gemini"
+id = "gemini-3.1-flash-live-preview"
+context = 1000000
+effort = "off"
+
+[models."gemini-3.1-pro-preview-customtools"]
+provider = "gemini"
+id = "gemini-3.1-pro-preview-customtools"
+context = 1048576
+effort = "off"
+
+[models."gemini-3.5-live-translate-preview"]
+provider = "gemini"
+id = "gemini-3.5-live-translate-preview"
+context = 1000000
+effort = "off"
+
+[models."gemini-3.8-live"]
+provider = "gemini"
+id = "gemini-3.8-live"
+context = 1000000
+effort = "off"
+
+[models."gemini-3.8-live-extended-thinking"]
+provider = "gemini"
+id = "gemini-3.8-live-extended-thinking"
+context = 1000000
+effort = "off"
+
+[models."gemini-flash-latest"]
+provider = "gemini"
+id = "gemini-flash-latest"
+context = 1048576
+effort = "off"
+
+[models."gemini-flash-lite-latest"]
+provider = "gemini"
+id = "gemini-flash-lite-latest"
+context = 1048576
+effort = "off"
+
+[models."gemini-omni-1.1-flash"]
+provider = "gemini"
+id = "gemini-omni-1.1-flash"
+context = 1048576
+effort = "off"
+
+[models."gemini-omni-flash-preview"]
+provider = "gemini"
+id = "gemini-omni-flash-preview"
+context = 1048576
+effort = "off"
+
+[models."gemini-pro-latest"]
+provider = "gemini"
+id = "gemini-pro-latest"
+context = 1048576
+effort = "off"
+
+[models."gemini-robotics-er-2-preview"]
+provider = "gemini"
+id = "gemini-robotics-er-2-preview"
+context = 131072
+effort = "off"
+
+[models."gemini-robotics-er-2-streaming-preview"]
+provider = "gemini"
+id = "gemini-robotics-er-2-streaming-preview"
+context = 1000000
+effort = "off"
+
+[models."gemma-4-26b-a4b-it"]
+provider = "gemini"
+id = "gemma-4-26b-a4b-it"
+context = 262144
+effort = "medium"
+
+[models."gemma-4-31b-it"]
+provider = "gemini"
+id = "gemma-4-31b-it"
+context = 262144
+effort = "medium"
+
+[models."lyria-3-clip-preview"]
+provider = "gemini"
+id = "lyria-3-clip-preview"
+context = 131072
+effort = "medium"
+
+[models."lyria-3-pro-preview"]
+provider = "gemini"
+id = "lyria-3-pro-preview"
+context = 131072
+effort = "medium"
+
+[models."lyria-3.5"]
+provider = "gemini"
+id = "lyria-3.5"
+context = 1048576
+effort = "medium"
+
+[models."nano-banana-pro-preview"]
+provider = "gemini"
+id = "nano-banana-pro-preview"
+context = 1000000
+effort = "off"
+
+[models."veo-3.1-fast-generate-preview"]
+provider = "gemini"
+id = "veo-3.1-fast-generate-preview"
+context = 1000000
+effort = "medium"
+
+[models."veo-3.1-generate-preview"]
+provider = "gemini"
+id = "veo-3.1-generate-preview"
+context = 1000000
+effort = "medium"
+
+[models."veo-3.1-lite-generate-preview"]
+provider = "gemini"
+id = "veo-3.1-lite-generate-preview"
+context = 1000000
+effort = "off"
+
 # Anthropic
 [providers.anthropic]
 format = "anthropic"
@@ -101,6 +287,30 @@ provider = "anthropic"
 id = "claude-mythos-5-1"
 context = 1000000
 effort = "medium"
+
+[models."claude-fable-5"]
+provider = "anthropic"
+id = "claude-fable-5"
+context = 1000000
+effort = "medium"
+
+[models."claude-opus-4-6"]
+provider = "anthropic"
+id = "claude-opus-4-6"
+context = 1000000
+effort = "high"
+
+[models."claude-opus-4-7"]
+provider = "anthropic"
+id = "claude-opus-4-7"
+context = 1000000
+effort = "high"
+
+[models."claude-opus-4-8"]
+provider = "anthropic"
+id = "claude-opus-4-8"
+context = 1000000
+effort = "high"
 
 # OpenAI
 [providers.openai]
@@ -169,6 +379,258 @@ id = "o4-mini"
 context = 200000
 effort = "medium"
 
+[models."babbage-002"]
+provider = "openai"
+id = "babbage-002"
+context = 128000
+effort = "medium"
+
+[models."chat-latest"]
+provider = "openai"
+id = "chat-latest"
+context = 400000
+effort = "medium"
+
+[models."davinci-002"]
+provider = "openai"
+id = "davinci-002"
+context = 128000
+effort = "medium"
+
+[models."gpt-3.5-turbo"]
+provider = "openai"
+id = "gpt-3.5-turbo"
+context = 16385
+effort = "medium"
+
+[models."gpt-3.5-turbo-0125"]
+provider = "openai"
+id = "gpt-3.5-turbo-0125"
+context = 16385
+effort = "medium"
+
+[models."gpt-3.5-turbo-1106"]
+provider = "openai"
+id = "gpt-3.5-turbo-1106"
+context = 16385
+effort = "medium"
+
+[models."gpt-3.5-turbo-16k"]
+provider = "openai"
+id = "gpt-3.5-turbo-16k"
+context = 16385
+effort = "medium"
+
+[models."gpt-3.5-turbo-instruct"]
+provider = "openai"
+id = "gpt-3.5-turbo-instruct"
+context = 128000
+effort = "medium"
+
+[models."gpt-3.5-turbo-instruct-0914"]
+provider = "openai"
+id = "gpt-3.5-turbo-instruct-0914"
+context = 128000
+effort = "medium"
+
+[models."gpt-4.1"]
+provider = "openai"
+id = "gpt-4.1"
+context = 1047576
+effort = "medium"
+
+[models."gpt-4.1-mini"]
+provider = "openai"
+id = "gpt-4.1-mini"
+context = 1047576
+effort = "off"
+
+[models."gpt-4.1-nano"]
+provider = "openai"
+id = "gpt-4.1-nano"
+context = 1047576
+effort = "off"
+
+[models."gpt-4o"]
+provider = "openai"
+id = "gpt-4o"
+context = 128000
+effort = "medium"
+
+[models."gpt-4o-mini"]
+provider = "openai"
+id = "gpt-4o-mini"
+context = 128000
+effort = "off"
+
+[models."gpt-5"]
+provider = "openai"
+id = "gpt-5"
+context = 272000
+effort = "medium"
+
+[models."gpt-5-chat-latest"]
+provider = "openai"
+id = "gpt-5-chat-latest"
+context = 128000
+effort = "medium"
+
+[models."gpt-5-codex"]
+provider = "openai"
+id = "gpt-5-codex"
+context = 128000
+effort = "high"
+
+[models."gpt-5-mini"]
+provider = "openai"
+id = "gpt-5-mini"
+context = 272000
+effort = "off"
+
+[models."gpt-5-nano"]
+provider = "openai"
+id = "gpt-5-nano"
+context = 272000
+effort = "off"
+
+[models."gpt-5-pro"]
+provider = "openai"
+id = "gpt-5-pro"
+context = 400000
+effort = "medium"
+
+[models."gpt-5.1"]
+provider = "openai"
+id = "gpt-5.1"
+context = 272000
+effort = "medium"
+
+[models."gpt-5.1-chat-latest"]
+provider = "openai"
+id = "gpt-5.1-chat-latest"
+context = 128000
+effort = "medium"
+
+[models."gpt-5.1-codex"]
+provider = "openai"
+id = "gpt-5.1-codex"
+context = 128000
+effort = "high"
+
+[models."gpt-5.1-codex-max"]
+provider = "openai"
+id = "gpt-5.1-codex-max"
+context = 128000
+effort = "high"
+
+[models."gpt-5.1-codex-mini"]
+provider = "openai"
+id = "gpt-5.1-codex-mini"
+context = 128000
+effort = "high"
+
+[models."gpt-5.2"]
+provider = "openai"
+id = "gpt-5.2"
+context = 272000
+effort = "medium"
+
+[models."gpt-5.2-chat-latest"]
+provider = "openai"
+id = "gpt-5.2-chat-latest"
+context = 128000
+effort = "medium"
+
+[models."gpt-5.2-codex"]
+provider = "openai"
+id = "gpt-5.2-codex"
+context = 128000
+effort = "high"
+
+[models."gpt-5.2-pro"]
+provider = "openai"
+id = "gpt-5.2-pro"
+context = 272000
+effort = "medium"
+
+[models."gpt-5.3-chat-latest"]
+provider = "openai"
+id = "gpt-5.3-chat-latest"
+context = 128000
+effort = "medium"
+
+[models."gpt-5.4"]
+provider = "openai"
+id = "gpt-5.4"
+context = 1050000
+effort = "high"
+
+[models."gpt-5.4-pro"]
+provider = "openai"
+id = "gpt-5.4-pro"
+context = 1050000
+effort = "medium"
+
+[models."gpt-5.5-pro"]
+provider = "openai"
+id = "gpt-5.5-pro"
+context = 1050000
+effort = "medium"
+
+[models."gpt-6-astra"]
+provider = "openai"
+id = "gpt-6-astra"
+context = 922000
+effort = "medium"
+
+[models."gpt-6-luna"]
+provider = "openai"
+id = "gpt-6-luna"
+context = 922000
+effort = "low"
+
+[models."gpt-live-1"]
+provider = "openai"
+id = "gpt-live-1"
+context = 128000
+effort = "medium"
+
+[models."o1"]
+provider = "openai"
+id = "o1"
+context = 200000
+effort = "high"
+
+[models."o3"]
+provider = "openai"
+id = "o3"
+context = 200000
+effort = "high"
+
+[models."o3-mini"]
+provider = "openai"
+id = "o3-mini"
+context = 200000
+effort = "high"
+
+[models."omni-moderation-latest"]
+provider = "openai"
+id = "omni-moderation-latest"
+context = 128000
+effort = "medium"
+
+[models."sora-2"]
+provider = "openai"
+id = "sora-2"
+context = 128000
+effort = "medium"
+
+[models."sora-2-pro"]
+provider = "openai"
+id = "sora-2-pro"
+context = 128000
+effort = "medium"
+
 # DeepSeek
 [providers.deepseek]
 format = "openai"
@@ -204,6 +666,12 @@ effort = "medium"
 provider = "deepseek"
 id = "deepseek-v3.2"
 context = 163840
+effort = "medium"
+
+[models."deepseek-flash"]
+provider = "deepseek"
+id = "deepseek-flash"
+context = 1000000
 effort = "medium"
 
 # Grok
