@@ -575,7 +575,7 @@ def main():
         gone = sorted(old_ids.get(name, set()) - dset - new_ids.get(name, set()))
         stale += [(name, i, "retired upstream") for i in gone]
         dropped = sorted((old_ids.get(name, set()) & dset) - new_ids.get(name, set()))
-        stale += [(name, i, "still served but dropped by family caps") for i in dropped]
+        stale += [(name, i, "in direct list but unresolved (no spec source or over cap)") for i in dropped]
 
     md = [f"# Catalog sync — {today} (serial {serial})\n\n"]
     for p in PROVIDERS_CONFIG:
