@@ -1073,11 +1073,15 @@ async fn run_agent(
                         .await;
                     break;
                 }
-                // Stage T: Provider Fallback Chain on retry-exhausted network / 5xx error (§5.1, §7 T)
-                let can_fallback = matches!(
-                    failure.class,
-                    Some(ErrorClass::Network | ErrorClass::Server)
-                ) || failure.retries > 0;
+                // Stage T: Provider Fallback Chain on retry-exhausted network / 5xx error (§5.1, §7 T).
+                // A turn whose text was already streamed to the user never
+                // falls back: re-running it on another provider would show a
+                // second answer on top of the partial one (audit H8).
+                let can_fallback = !failure.partial
+                    && (matches!(
+                        failure.class,
+                        Some(ErrorClass::Network | ErrorClass::Server)
+                    ) || failure.retries > 0);
                 if can_fallback && !fallback_chain.is_empty() {
                     let next = fallback_chain.remove(0);
                     if let Some(writer) = journal.as_mut() {
@@ -1118,6 +1122,15 @@ async fn run_agent(
                             ),
                     );
                     previous_response_id = None;
+                    // The new provider gets its own overflow budget: its
+                    // context_limit may be smaller and the already-compacted
+                    // history may still not fit — without this reset the
+                    // forced compaction is refused and the turn dies (audit
+                    // H7). The continuation refusal belonged to the OLD
+                    // provider; the fallback may well support references
+                    // (audit M8).
+                    compacted_for_overflow = false;
+                    continuation_usable = true;
                     continue;
                 }
 
@@ -1759,6 +1772,19 @@ async fn run_agent(
                     if !invalidated_paths.is_empty() {
                         let _ = plan::invalidate_on_diff(&root, &session_id, &invalidated_paths);
                     }
+                    // audit H4: bash-written bytes leave no file_diff, so a
+                    // `sed -i` on a tracked path left its passed receipt
+                    // reading green. Attribute them through the shadow head
+                    // diff and stale whatever they cover.
+                    if call.name == "bash" && invalidated_paths.is_empty() && !ctx.read_only {
+                        let store = ctx.shadow_store;
+                        let chain = ctx.checkpoint_chain().to_string();
+                        let bash_paths =
+                            crate::agent::checkpoints::changed_since_head(&root, store, &chain);
+                        if !bash_paths.is_empty() {
+                            let _ = plan::invalidate_on_diff(&root, &session_id, &bash_paths);
+                        }
+                    }
                     if call.name == "plan" {
                         // `plan_op` journals its own intent records ahead of every
                         // store (§2.1.4); resync this long-lived handle past them
@@ -2075,6 +2101,16 @@ mod subagent_tests {
             true,
             "subagents cannot reach the user; decide yourself and continue"
         ));
+        // audit H10: a refusal typed at the dialog is not content
+        for refusal in [
+            "no", "No.", "nope", "n", "deny", "cancel", "stop", "don't", "never", "abort", "skip",
+            "rejected",
+        ] {
+            assert!(
+                !is_accepted_memory_answer(true, refusal),
+                "refusal '{refusal}' must not be accepted as memory content"
+            );
+        }
     }
 }
 
@@ -2748,6 +2784,92 @@ mod effort_tests {
         assert!(
             got_fallback_text,
             "should have received text from fallback provider"
+        );
+    }
+
+    /// Audit H8: a turn whose text was already streamed to the user must
+    /// not fall back — re-running it on another provider stacks a second
+    /// answer on top of the partial one.
+    #[tokio::test]
+    async fn partial_stream_failure_does_not_fall_back() {
+        let primary_provider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(vec![vec![
+                Ok(crate::providers::StreamEvent::Text("partial answer".into())),
+                Err(anyhow::anyhow!("request failed: connection reset by peer")),
+            ]]),
+        });
+        let fallback_provider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(vec![vec![Ok(crate::providers::StreamEvent::Text(
+                "fallback response".into(),
+            ))]]),
+        });
+        let fallback = FallbackCandidate {
+            key: "fallback-model".into(),
+            model_id: "m-fallback".into(),
+            provider: fallback_provider.clone(),
+            effort_support: crate::config::EffortSupport::default(),
+            context_limit: 10000,
+        };
+        let temp_dir =
+            std::env::temp_dir().join(format!("sqwai-test-partial-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let input = AgentInput {
+            provider: primary_provider,
+            model_id: "m-primary".into(),
+            model_key: "primary-model".into(),
+            effort: None,
+            effort_support: crate::config::EffortSupport::default(),
+            max_tokens: None,
+            system: vec![],
+            messages: vec![Message::new(Role::User, "hello")],
+            root: temp_dir.clone(),
+            session_id: "test-partial-sess".into(),
+            blocked_patterns: vec![],
+            plan_mode: false,
+            context_limit: 10000,
+            enable_tools: false,
+            read_only: false,
+            previous_response_id: None,
+            summary: None,
+            mcp: Default::default(),
+            lsp: Default::default(),
+            compact_only: false,
+            diary: Default::default(),
+            memory: Default::default(),
+            compaction: Default::default(),
+            plan_limits: Default::default(),
+            shadow_store: crate::config::ShadowStore::Off,
+            subagent_depth: 0,
+            parent_step: None,
+            parent_session: None,
+            fallback_chain: vec![fallback],
+        };
+
+        let mut handle = spawn_agent(input);
+        let mut switched = false;
+        let mut completed_with_error = false;
+        while let Some(ev) = handle.rx.recv().await {
+            match ev {
+                AgentEvent::FallbackSwitched { .. } => switched = true,
+                AgentEvent::Completed(Err(e)) => {
+                    assert!(
+                        e.contains("partial answer kept"),
+                        "the kept-partial reason must surface: {e}"
+                    );
+                    completed_with_error = true;
+                    break;
+                }
+                AgentEvent::Completed(Ok(_)) => panic!("the turn must not succeed"),
+                _ => {}
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        assert!(completed_with_error, "loop must end with the partial error");
+        assert!(!switched, "a partial turn must not fall back");
+        assert_eq!(
+            fallback_provider.events.lock().unwrap().len(),
+            1,
+            "the fallback provider must stay unconsumed"
         );
     }
 

@@ -133,9 +133,16 @@ fn extract_ts(src: &str, lang: Lang, max_depth: usize) -> Vec<OutlineItem> {
     };
 
     let mut items = Vec::new();
-    walk_node(tree.root_node(), src, lang, 1, max_depth, &mut items);
+    walk_node(tree.root_node(), src, lang, 1, max_depth, 0, &mut items);
     items
 }
+
+/// Hard bound on raw AST recursion. `depth` only counts declaration
+/// nesting; wrapper-expression chains (`(((...)))`, deep binary trees,
+/// ERROR nodes) recurse at the same `depth`, so the Rust call stack
+/// tracked the raw tree — a 512KB file of nested parens overflowed it
+/// (audit H14).
+const RAW_RECURSION_LIMIT: usize = 256;
 
 fn walk_node(
     node: Node,
@@ -143,9 +150,10 @@ fn walk_node(
     lang: Lang,
     depth: usize,
     max_depth: usize,
+    raw_depth: usize,
     out: &mut Vec<OutlineItem>,
 ) {
-    if depth > max_depth {
+    if depth > max_depth || raw_depth > RAW_RECURSION_LIMIT {
         return;
     }
 
@@ -155,7 +163,7 @@ fn walk_node(
     if is_transparent_container(kind, lang) {
         let mut cursor = node.walk();
         for c in node.children(&mut cursor) {
-            walk_node(c, src, lang, depth, max_depth, out);
+            walk_node(c, src, lang, depth, max_depth, raw_depth + 1, out);
         }
         return;
     }
@@ -184,7 +192,7 @@ fn walk_node(
                 };
                 let mut cursor = body.walk();
                 for c in body.children(&mut cursor) {
-                    walk_node(c, src, lang, next_depth, max_depth, out);
+                    walk_node(c, src, lang, next_depth, max_depth, raw_depth + 1, out);
                 }
             }
         }
@@ -194,7 +202,7 @@ fn walk_node(
     // Default: visit children at same depth (e.g. wrapper expressions, blocks at root)
     let mut cursor = node.walk();
     for c in node.children(&mut cursor) {
-        walk_node(c, src, lang, depth, max_depth, out);
+        walk_node(c, src, lang, depth, max_depth, raw_depth + 1, out);
     }
 }
 

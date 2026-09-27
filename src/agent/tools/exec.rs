@@ -701,8 +701,12 @@ pub(crate) fn kill_remaining_jobs() -> usize {
             kill_tree(&mut job.child);
             let _ = job.child.wait();
             killed += 1;
+            // the process is exiting: an unread log nobody will ever open
+            // must not stay behind in %TEMP% (audit H16)
+            std::fs::remove_file(&job.log).ok();
             return false;
         }
+        std::fs::remove_file(&job.log).ok();
         true
     });
     killed
@@ -739,22 +743,36 @@ fn elapsed_of(job: &BgJob) -> String {
 
 /// Last `max` bytes of a file, cut on a char boundary.
 fn tail_of_file(path: &PathBuf, max: usize) -> Option<String> {
-    let data = std::fs::read(path).ok()?;
+    // Bounded read: seek to the tail instead of loading the whole file. A
+    // forgotten `while true; do date; done` job grows its log for hours,
+    // and `fs::read` on a multi-GB log allocated all of it (audit H15).
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len == 0 {
+        return None;
+    }
+    let start = len.saturating_sub(max as u64);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut data: Vec<u8> = Vec::new();
+    // take(): the job may still be writing — never read past the tail
+    // window plus a small growth allowance
+    (&mut file)
+        .take(max as u64 + 4096)
+        .read_to_end(&mut data)
+        .ok()?;
     if data.is_empty() {
         return None;
     }
-    let start = if data.len() <= max {
-        0
-    } else {
-        let mut cut = data.len() - max;
+    let mut cut = 0usize;
+    if start > 0 {
         // walk forward to the next UTF-8 char start (skip continuation bytes)
         while cut < data.len() && (data[cut] & 0b1100_0000) == 0b1000_0000 {
             cut += 1;
         }
-        cut
-    };
+    }
     let truncated = start > 0;
-    let text = String::from_utf8_lossy(&data[start..]).into_owned();
+    let text = String::from_utf8_lossy(&data[cut..]).into_owned();
     Some(if truncated {
         format!("…(only the last {max} bytes shown)\n{text}")
     } else {
@@ -1198,6 +1216,35 @@ mod tests {
         );
         let killed = bash_kill(&c, &serde_json::json!({"id": id}));
         assert!(killed.ok, "{}", killed.output);
+    }
+
+    /// Audit H15: a forgotten background job grows its log without bound;
+    /// the tail read must be bounded — `fs::read` on a 5 GB log allocated
+    /// all of it and OOM'd the process.
+    #[test]
+    fn tail_of_large_log_is_bounded() {
+        let dir = tempfile::Builder::new()
+            .prefix("sqwai-tail")
+            .tempdir()
+            .unwrap();
+        let log = dir.path().join("bg.out");
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = std::fs::File::create(&log).unwrap();
+            // 5GB of zeros via metadata only (sparse); write a marker at the end
+            f.set_len(5_000_000_000).unwrap();
+            f.seek(SeekFrom::End(-8)).unwrap();
+            f.write_all(b"TAIL-END").unwrap();
+        }
+        let started = std::time::Instant::now();
+        let tail = tail_of_file(&log, 4096).expect("tail must be readable");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "tail read the whole file: {:?}",
+            started.elapsed()
+        );
+        assert!(tail.contains("TAIL-END"), "{tail}");
+        assert!(tail.contains("only the last"), "{tail}");
     }
 
     #[test]

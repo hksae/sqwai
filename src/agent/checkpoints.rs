@@ -106,6 +106,29 @@ pub fn changed_files(root: &Path, store: ShadowStore, sha: &str) -> Result<Vec<S
     shadow.changed_files(sha)
 }
 
+/// Worktree paths that differ from the session's shadow head. Bash-written
+/// bytes leave no per-file diff of their own (audit H4); this attributes
+/// them after the fact so passed receipts covering those paths go stale.
+/// Empty when the shadow is off, the chain has no commit, or the tree is
+/// clean against the head.
+pub fn changed_since_head(root: &Path, store: ShadowStore, session_id: &str) -> Vec<String> {
+    let Some(shadow) = shadow(root, store) else {
+        return Vec::new();
+    };
+    if !shadow.tree_changed(session_id) {
+        return Vec::new();
+    }
+    let Some(head) = shadow
+        .commit_log(session_id)
+        .ok()
+        .and_then(|log| log.into_iter().next())
+        .map(|(sha, _)| sha)
+    else {
+        return Vec::new();
+    };
+    shadow.changed_files(&head).unwrap_or_default()
+}
+
 /// What one maintenance pass did, for the status line and the journal.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Maintenance {
@@ -394,6 +417,36 @@ pub fn restore_paths_in(
 mod tests {
     use super::*;
     use std::fs;
+
+    /// Audit H4: bash mutations leave no file_diff; the shadow-head diff
+    /// attributes them so passed receipts over those paths can go stale.
+    #[test]
+    fn changed_since_head_attributes_unjournaled_writes() {
+        let dir = tempfile::Builder::new()
+            .prefix("sqwai-h4")
+            .tempdir()
+            .unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+        if shadow(root, ShadowStore::Local).is_none() {
+            return; // no git binary: layer 2 absent
+        }
+        snapshot_boundary(root, ShadowStore::Local, "s", "base")
+            .unwrap()
+            .expect("first boundary commits");
+        // a bash-style write with no journal record anywhere
+        fs::write(root.join("a.rs"), "fn a() { changed(); }\n").unwrap();
+        let paths = changed_since_head(root, ShadowStore::Local, "s");
+        assert!(
+            paths.iter().any(|p| p.ends_with("a.rs")),
+            "bash-written change must be attributed: {paths:?}"
+        );
+        // a clean tree attributes nothing
+        snapshot_boundary(root, ShadowStore::Local, "s", "after")
+            .unwrap()
+            .expect("boundary");
+        assert!(changed_since_head(root, ShadowStore::Local, "s").is_empty());
+    }
 
     /// Audit H17: restore joins journal-provided paths straight onto the
     /// root. A corrupted or hand-edited journal with `..` in a path made

@@ -3924,6 +3924,59 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// Audit H9: consecutive `$$$` multi-metavariables against a wide flat
+    /// argument list explore O(N^K) split points — an Esc-unreachable CPU
+    /// loop. The per-file effort budget must give up fast and say so.
+    #[test]
+    fn ast_grep_effort_budget_bounds_multi_metavar_backtracking() {
+        let dir = tempfile::tempdir().unwrap();
+        let args: Vec<String> = (0..120).map(|i| format!("a{i}")).collect();
+        fs::write(
+            dir.path().join("wide.rs"),
+            format!("fn main() {{\n    f({});\n}}\n", args.join(", ")),
+        )
+        .unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        let started = std::time::Instant::now();
+        let o = execute(
+            &mut ctx,
+            "ast_grep",
+            // the trailing literal never matches, so every split point of
+            // the three multis is explored and fails — the O(N^3) shape
+            &json!({"pattern": "f($$$A, $$$B, $$$C, zzz_no_such_arg)", "lang": "rust"}),
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "matching hung: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            o.output.contains("effort exhausted"),
+            "exhaustion must be reported, not silent: {}",
+            o.output
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Audit H14: wrapper-expression nesting recurses at the same
+    /// declaration depth, so the Rust stack tracked the raw tree — a file
+    /// of nested parens overflowed it and killed the process.
+    #[test]
+    fn outline_survives_deeply_nested_expressions() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = format!(
+            "fn g() {{ {}1{} }}\n",
+            "(".repeat(50_000),
+            ")".repeat(50_000)
+        );
+        fs::write(dir.path().join("deep.rs"), format!("fn f() {{}}\n{deep}")).unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        let o = execute(&mut ctx, "outline", &json!({"path": "deep.rs"}));
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("fn f"), "{}", o.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// Audit L28: on Windows `hidden(true)` checks attributes, not dots, so
     /// `.sqwai/` is walked without an explicit skip — inconsistent with
     /// grep/glob, which never list host-owned state.

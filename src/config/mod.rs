@@ -822,7 +822,15 @@ impl Default for SecretsConfig {
 impl PlanConfig {
     /// Token budget for the injected plan, from the model's context.
     pub fn budget_tokens(&self, context_limit: u64) -> u64 {
-        ((context_limit as f64) * self.budget_ratio.clamp(0.0, 1.0)) as u64
+        // NaN survives `clamp` (both comparisons false) and `NaN as u64`
+        // is 0 — a `budget_ratio = nan` override silently zeroed every
+        // plan budget (audit H19). Non-finite falls back to the default.
+        let ratio = if self.budget_ratio.is_finite() {
+            self.budget_ratio.clamp(0.0, 1.0)
+        } else {
+            default_plan_budget_ratio()
+        };
+        ((context_limit as f64) * ratio) as u64
     }
 }
 
@@ -2132,6 +2140,28 @@ effort = "off"
                 "fetched catalog accepted {case}"
             );
         }
+    }
+
+    /// Audit H19: NaN survives `clamp` (both comparisons false) and
+    /// `NaN as u64` is 0 — a `budget_ratio = nan` override silently
+    /// zeroed every plan budget. Non-finite falls back to the default.
+    #[test]
+    fn non_finite_budget_ratio_falls_back_to_default() {
+        let mut plan = PlanConfig::default();
+        let default_budget = plan.budget_tokens(100_000);
+        assert_eq!(default_budget, 10_000, "default ratio is 0.10");
+        plan.budget_ratio = f64::NAN;
+        assert_eq!(
+            plan.budget_tokens(100_000),
+            default_budget,
+            "NaN must not zero the budget"
+        );
+        plan.budget_ratio = f64::INFINITY;
+        assert_eq!(plan.budget_tokens(100_000), default_budget);
+        plan.budget_ratio = 0.5;
+        assert_eq!(plan.budget_tokens(100_000), 50_000);
+        plan.budget_ratio = -1.0;
+        assert_eq!(plan.budget_tokens(100_000), 0, "clamped, not defaulted");
     }
 
     /// Audit C8: the disk path used to `toml::from_str` whatever sat in

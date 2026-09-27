@@ -394,6 +394,10 @@ pub struct TurnFailure {
     /// the provider refused the continuation reference; the caller can retry
     /// once with the transcript it owns
     pub continuation_rejected: bool,
+    /// text for this turn was already streamed to the user before the
+    /// failure. Retrying or falling back would show a second answer on top
+    /// of the partial one (audit H8) — the caller must stop instead.
+    pub partial: bool,
 }
 
 impl TurnFailure {
@@ -407,7 +411,13 @@ impl TurnFailure {
             class,
             retries,
             continuation_rejected: false,
+            partial: false,
         }
+    }
+
+    pub(crate) fn with_partial(mut self, yes: bool) -> Self {
+        self.partial = yes;
+        self
     }
 
     pub(crate) fn continuation_rejected(message: impl Into<String>, retries: u32) -> Self {

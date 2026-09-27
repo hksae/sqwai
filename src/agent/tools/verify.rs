@@ -1815,6 +1815,14 @@ pub(crate) fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
                         run.output.lines().take(6).collect::<Vec<_>>().join(" / ")
                     ));
                 }
+                // audit H5: interval consistency binds the PASSING re-run
+                // too — a check that raced a mutation proves nothing even
+                // when it came out green (verify-time already refused it)
+                if state_before != state_after {
+                    return Err(format!(
+                        "raced_mutation: acceptance {index} ran while the tracked state changed under it: {command} — re-run against a stable tree"
+                    ));
+                }
             }
             plan::AcceptanceKind::Snapshot(command) => {
                 // rung 4 re-runs like a command, but settles on frozen
@@ -1864,6 +1872,13 @@ pub(crate) fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
                 if Some(output_hash.as_str()) == frozen_hash.as_deref()
                     && run.exit_code == frozen_exit
                 {
+                    // audit H5: matching output from a raced interval
+                    // proves nothing — the state must have been stable
+                    if state_before != state_after {
+                        return Err(format!(
+                            "raced_mutation: acceptance {index} ran while the tracked state changed under it: {command_text} — re-run against a stable tree"
+                        ));
+                    }
                     continue;
                 }
                 let flaky = state_before == state_after
@@ -1939,7 +1954,18 @@ pub(crate) fn validate_complete(ctx: &mut ToolCtx) -> Result<(), String> {
                     safety::Verdict::Safe => {}
                 }
                 let command_text = command.to_string();
+                // audit H5: the differential arm never even computed the
+                // interval — a changed output caused by a concurrent
+                // mutation would settle the item
+                let paths = plan::digest_paths(&active);
+                let state_before = plan::state_digest(&root, &paths, command);
                 let run = exec::bash(ctx, command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
+                let state_after = plan::state_digest(&root, &paths, command);
+                if state_before != state_after {
+                    return Err(format!(
+                        "raced_mutation: acceptance {index} ran while the tracked state changed under it: {command_text} — re-run against a stable tree"
+                    ));
+                }
                 let output_hash = blake3::hash(run.output.as_bytes()).to_hex().to_string();
                 if frozen_hash.as_deref() == Some(output_hash.as_str())
                     && frozen_exit == run.exit_code

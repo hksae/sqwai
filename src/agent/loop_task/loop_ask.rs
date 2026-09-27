@@ -14,9 +14,13 @@ pub(crate) async fn ask_user(
     let id = *next_id;
     *next_id += 1;
     // Support both single-question (legacy) and multi-question (questions array) modes.
+    // One dialog, bounded: a dump of dozens of questions is a wall the user
+    // cannot answer (audit M23) — the rest waits for the next call.
+    const MAX_QUESTIONS_PER_CALL: usize = 8;
     let questions: Vec<AskQuestion> =
         if let Some(arr) = call.args.get("questions").and_then(|v| v.as_array()) {
             arr.iter()
+                .take(MAX_QUESTIONS_PER_CALL)
                 .map(|q| {
                     let header = q
                         .get("header")
@@ -716,10 +720,16 @@ pub(crate) async fn run_tool_blocking(
 pub(crate) fn is_accepted_memory_answer(answer_ok: bool, raw_answer: &str) -> bool {
     let raw = raw_answer.trim();
     let lower = raw.to_ascii_lowercase();
+    // Free text is edited content (the typed text replaces the proposal),
+    // but a bare refusal word typed at the dialog must never become the
+    // memory body (audit H10): "no" used to be accepted as content "no".
+    const REFUSALS: &[&str] = &[
+        "reject", "rejected", "edit", "no", "no.", "nope", "n", "deny", "cancel", "stop", "don't",
+        "do not", "never", "abort", "skip",
+    ];
     answer_ok
         && (lower == "accept"
             || (!raw.is_empty()
-                && lower != "reject"
-                && lower != "edit"
+                && !REFUSALS.contains(&lower.as_str())
                 && !lower.starts_with("subagents cannot")))
 }

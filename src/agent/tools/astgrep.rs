@@ -410,6 +410,14 @@ fn match_seq(pats: &[PNode], trees: &[Node], lang: Lang, src: &[u8], binds: &mut
     if let Some(Meta::Multi(name)) = &first.meta {
         let name = name.clone();
         for k in 0..=trees.len() {
+            // K consecutive multi-metavariables against N siblings explore
+            // O(N^K) split points, each cloning the bind map — an unbounded
+            // CPU loop no Esc can reach (audit H9). The budget bounds the
+            // effort; exhaustion means "no match found within budget", and
+            // the caller reports that the file's results may be incomplete.
+            if !effort_take() {
+                return false;
+            }
             let mut trial = binds.clone();
             let joined = trees[..k]
                 .iter()
@@ -438,6 +446,37 @@ fn match_seq(pats: &[PNode], trees: &[Node], lang: Lang, src: &[u8], binds: &mut
     false
 }
 
+thread_local! {
+    static MATCH_EFFORT: std::cell::Cell<u64> = const { std::cell::Cell::new(MATCH_EFFORT_BUDGET) };
+    static EFFORT_EXHAUSTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Split-point trials one file may spend before matching gives up. Bounded
+/// work per file, not per pattern: a pathological file cannot hang the
+/// agent loop (audit H9).
+const MATCH_EFFORT_BUDGET: u64 = 100_000;
+
+fn effort_reset() {
+    MATCH_EFFORT.with(|c| c.set(MATCH_EFFORT_BUDGET));
+    EFFORT_EXHAUSTED.with(|c| c.set(false));
+}
+
+fn effort_take() -> bool {
+    MATCH_EFFORT.with(|c| {
+        let left = c.get();
+        if left == 0 {
+            EFFORT_EXHAUSTED.with(|e| e.set(true));
+            return false;
+        }
+        c.set(left - 1);
+        true
+    })
+}
+
+fn effort_exhausted() -> bool {
+    EFFORT_EXHAUSTED.with(|c| c.get())
+}
+
 /// Try the pattern at `node` and every descendant, return the first matching
 /// node and its bindings.
 fn search_tree<'t>(
@@ -446,6 +485,7 @@ fn search_tree<'t>(
     lang: Lang,
     src: &[u8],
 ) -> Option<(Node<'t>, Binds)> {
+    effort_reset();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let mut binds = Binds::default();
@@ -607,6 +647,7 @@ pub fn ast_grep(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             .strip_prefix(&ctx.root)
             .unwrap_or(file)
             .to_string_lossy();
+        effort_reset();
         let mut stack = vec![tree.root_node()];
         while let Some(node) = stack.pop() {
             let mut binds = Binds::default();
@@ -637,6 +678,11 @@ pub fn ast_grep(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             for child in node.children(&mut c) {
                 stack.push(child);
             }
+        }
+        if effort_exhausted() {
+            lines.push(format!(
+                "{disp}: pattern-matching effort exhausted — matches in this file may be incomplete"
+            ));
         }
     }
 

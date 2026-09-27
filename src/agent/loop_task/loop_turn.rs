@@ -275,18 +275,17 @@ pub(crate) async fn run_turn(
                     ErrorClass::Quota => " — the account is out of quota or credit",
                     _ => "",
                 };
-                return Err(TurnFailure::new(
-                    format!("{err}{advice}"),
-                    Some(class),
-                    attempt,
-                ));
+                return Err(
+                    TurnFailure::new(format!("{err}{advice}"), Some(class), attempt)
+                        .with_partial(got_delta),
+                );
             }
         } else if err.contains("provider returned 400 Bad Request")
             || err.contains("invalid_request_error")
         {
             // Unclassified, but recognisably deterministic: a gateway that
             // answers 200 with an error body lands here.
-            return Err(TurnFailure::new(err, None, attempt));
+            return Err(TurnFailure::new(err, None, attempt).with_partial(got_delta));
         }
 
         if got_delta {
@@ -295,7 +294,8 @@ pub(crate) async fn run_turn(
                 format!("{err} — partial answer kept, not retried"),
                 class,
                 attempt,
-            ));
+            )
+            .with_partial(true));
         }
 
         let now = Instant::now();
