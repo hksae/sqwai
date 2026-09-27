@@ -701,6 +701,10 @@ async fn run_agent(
     // Subagents inherit their spawn context (§2.2.4): it stamps their
     // journal records and gates their mutations against reopen races.
     ctx.subagent_step = parent_step.clone();
+    // ...and their parent's trust state: a fresh child journal reads
+    // clean, and the task text itself may be shaped by what the parent
+    // consumed (audit H1).
+    ctx.parent_session = parent_session.clone();
     // ...and a writer child's declared scope, if any (read-only children
     // and the main agent take nothing).
     ctx.subagent_write_paths = tools::take_subagent_scope(&session_id);
@@ -4801,6 +4805,46 @@ mod trust_gate_tests {
         )
         .await;
         assert!(!outcome.ok, "must refuse");
+        assert!(
+            outcome.output.contains("no user to confirm"),
+            "{}",
+            outcome.output
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Audit H1: a real spawned child gets a FRESH session — its own
+    /// journal has no taint records, so the parent's external exposure was
+    /// silently dropped and the trust gate never fired. The parent link
+    /// must carry the taint into the child's gate.
+    #[tokio::test]
+    async fn trust_gate_inherits_parent_taint_for_a_fresh_child_session() {
+        let (dir, parent_session) = tainted_project("inherit");
+        let child_session = "child-fresh".to_string();
+        // the child's journal exists and is empty of taint, as after a
+        // real spawn
+        crate::agent::journal::Journal::open(&dir, &child_session).expect("journal opens");
+        let (call, mut ctx, tx_agent, _rx_ui, _tx_ui, mut rx_agent) =
+            bash_call_parts(&dir, &child_session);
+        ctx.parent_session = Some(parent_session);
+        let mut always_allow = Vec::new();
+        let mut next_id = 0u64;
+        let outcome = bash_call(
+            &call,
+            &mut ctx,
+            &tx_agent,
+            &mut rx_agent,
+            &mut always_allow,
+            &[],
+            &mut next_id,
+            1,
+        )
+        .await;
+        assert!(
+            !outcome.ok,
+            "inherited taint must gate the child's egress: {}",
+            outcome.output
+        );
         assert!(
             outcome.output.contains("no user to confirm"),
             "{}",

@@ -410,6 +410,123 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// Audit H2: `nohup`/`nice`/`timeout` are transparent execution
+    /// prefixes. The scope gate's skip list covered only sudo/doas/env, so
+    /// the wrapper became "the binary", no write target was extracted, and
+    /// an out-of-scope `mv`/`cp` sailed through.
+    #[test]
+    fn subagent_scope_sees_through_wrapper_prefixes() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "scoped child",
+                "acceptance": ["manual: eyeball it"],
+                "steps": [{"title": "work"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        ctx.subagent_step = Some(plan::StepContext {
+            plan_id,
+            step_id: "1".into(),
+            step_epoch: 0,
+        });
+        ctx.subagent_write_paths = Some(vec!["src".to_string()]);
+        fs::write(dir.join("src/payload.txt"), "x\n").unwrap();
+
+        for cmd in [
+            "nohup mv src/payload.txt notes-escape.txt",
+            "nice -n 10 cp src/payload.txt notes-escape.txt",
+            "timeout 30 mv src/payload.txt notes-escape.txt",
+        ] {
+            let out = execute(&mut ctx, "bash", &json!({"command": cmd}));
+            assert!(!out.ok, "wrapper prefix escaped the scope: {cmd}");
+            assert!(
+                out.output.contains("subagent_scope"),
+                "expected subagent_scope refusal for `{cmd}`: {}",
+                out.output
+            );
+        }
+        assert!(
+            !dir.join("notes-escape.txt").exists(),
+            "refused write must not land"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Audit H3: scope was compared lexically while the OS resolves
+    /// symlinks — a link inside scope `a/` pointing at sibling `b/` let a
+    /// writer confined to `a/` mutate `b/`. Scope decisions must run on
+    /// canonical paths.
+    #[test]
+    fn subagent_scope_follows_symlinks_canonically() {
+        let (mut ctx, dir) = proj();
+        fs::create_dir_all(dir.join("b")).unwrap();
+        // link a/link -> ../b ; skip the test where symlinks need privileges
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(dir.join("b"), dir.join("src/link")).is_ok();
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(dir.join("b"), dir.join("src/link")).is_ok();
+        if !made {
+            eprintln!("symlink creation unsupported here; skipping");
+            return;
+        }
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "scoped child",
+                "acceptance": ["manual: eyeball it"],
+                "steps": [{"title": "work"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+        ctx.subagent_step = Some(plan::StepContext {
+            plan_id,
+            step_id: "1".into(),
+            step_epoch: 0,
+        });
+        ctx.subagent_write_paths = Some(vec!["src".to_string()]);
+
+        // a file-tool write through the link lands in b/ — outside scope
+        let out = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": "src/link/escape.txt", "content": "x\n"}),
+        );
+        assert!(!out.ok, "symlink write escaped the scope: {}", out.output);
+        assert!(out.output.contains("subagent_scope"), "{}", out.output);
+        assert!(!dir.join("b/escape.txt").exists(), "write must not land");
+
+        // the same through a bash redirect
+        let out = execute(
+            &mut ctx,
+            "bash",
+            &json!({"command": "echo x > src/link/escape2.txt"}),
+        );
+        assert!(
+            !out.ok,
+            "symlink redirect escaped the scope: {}",
+            out.output
+        );
+        assert!(out.output.contains("subagent_scope"), "{}", out.output);
+        assert!(!dir.join("b/escape2.txt").exists(), "write must not land");
+
+        // a plain in-scope write still works
+        let out = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": "src/ok.txt", "content": "x\n"}),
+        );
+        assert!(out.ok, "{}", out.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn read_then_edit_flow_and_guards() {
         let (mut ctx, dir) = proj();

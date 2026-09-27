@@ -683,7 +683,44 @@ const DANGEROUS_HEADS: &[&str] = &[
 ];
 
 /// command heads that elevate privileges (skip them to find the real target)
-const ELEVATION_PREFIXES: &[&str] = &["sudo", "doas", "env", "nice", "nohup", "xargs"];
+/// Transparent execution wrappers: the real command follows the prefix (and
+/// possibly its flags/numeric args). One list for both layers that strip
+/// them — the AST walk here and the subagent scope gate in
+/// `tools/policy.rs`. They diverged once already, and `nohup mv` escaped
+/// the scope (audit H2).
+pub(crate) const ELEVATION_PREFIXES: &[&str] = &[
+    "sudo", "doas", "env", "nice", "nohup", "xargs", "time", "timeout", "strace",
+];
+
+/// Index of the operative command word after transparent wrappers, `VAR=`
+/// assignments and the wrapper's own flags/numeric args (`nice -n 10`,
+/// `timeout 30`). Shared by the AST walk and the scope gate so both see the
+/// same command. May point at the last word when nothing but wrappers is
+/// present.
+pub(crate) fn effective_command_index(words: &[&str]) -> usize {
+    let mut i = 0;
+    let mut saw_wrapper = false;
+    while i < words.len() {
+        let w = words[i];
+        if ELEVATION_PREFIXES.contains(&w) {
+            saw_wrapper = true;
+            i += 1;
+            continue;
+        }
+        if !w.starts_with('-') && w.contains('=') {
+            i += 1;
+            continue;
+        }
+        if saw_wrapper
+            && (w.starts_with('-') || (!w.is_empty() && w.chars().all(|c| c.is_ascii_digit())))
+        {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    i.min(words.len().saturating_sub(1))
+}
 
 /// paths that must never be overwritten by a redirect
 fn is_critical_path(path: &str) -> bool {
@@ -893,12 +930,8 @@ fn command_parts(node: &Node, src: &str) -> Option<(String, Vec<String>, bool)> 
     let mut head = words[0].clone();
     if ELEVATION_PREFIXES.contains(&head.as_str()) {
         elevated = true;
-        if let Some(i) = words
-            .iter()
-            .position(|w| !ELEVATION_PREFIXES.contains(&w.as_str()) && !w.contains('='))
-        {
-            head = words[i].clone();
-        }
+        let refs: Vec<&str> = words.iter().map(|w| w.as_str()).collect();
+        head = words[effective_command_index(&refs)].clone();
     }
     Some((head, words, elevated))
 }

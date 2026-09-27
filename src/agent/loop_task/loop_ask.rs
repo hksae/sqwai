@@ -570,11 +570,7 @@ pub(crate) async fn bash_call(
     // instead. Runs after the safety verdict so a Blocked command never
     // reaches here; a command both dangerous and exfiltrating carries one
     // combined reason into the single dialog.
-    match crate::agent::trust::trust_gate(
-        &command,
-        crate::agent::trust::taint_level(&ctx.root, &ctx.session_id).external,
-        subagent_depth > 0,
-    ) {
+    match crate::agent::trust::trust_gate(&command, ctx.external_taint(), subagent_depth > 0) {
         crate::agent::trust::Gate::Allow => {}
         crate::agent::trust::Gate::Deny(reason) => {
             return tools::Outcome::err(format!("command denied ({reason})"));

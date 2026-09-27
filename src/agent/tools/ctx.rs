@@ -64,6 +64,11 @@ pub struct ToolCtx {
     /// from the spawn registry at construction; read-only children and
     /// the main agent never set it.
     pub subagent_write_paths: Option<Vec<String>>,
+    /// Session id of the spawning agent, if any (audit H1). A child starts
+    /// with an empty journal, so its own taint reads clean no matter what
+    /// the parent consumed; trust gates must see the parent's external
+    /// exposure too. `None` for main agents.
+    pub parent_session: Option<String>,
     /// Hard-blocked command patterns from `[safety].blocked_patterns`.
     /// The bash tool enforces them at dispatch; acceptance runners enforce
     /// the same list through `acceptance_policy_hit`, so a `cmd:` check —
@@ -97,8 +102,21 @@ impl ToolCtx {
             current_step: None,
             subagent_step: None,
             subagent_write_paths: None,
+            parent_session: None,
             blocked_patterns: Vec::new(),
         }
+    }
+
+    /// External taint that trust gates must honor: this session's own
+    /// journal, OR the spawning parent's when this is a child (audit H1 —
+    /// a fresh child journal reads clean no matter what the parent
+    /// consumed, and the task text itself may be shaped by it).
+    pub fn external_taint(&self) -> bool {
+        crate::agent::trust::taint_level(&self.root, &self.session_id).external
+            || self
+                .parent_session
+                .as_deref()
+                .is_some_and(|p| crate::agent::trust::taint_level(&self.root, p).external)
     }
 
     /// Canonical path of the host-owned state dir (`.sqwai/`). Walks must
@@ -161,6 +179,24 @@ impl ToolCtx {
     /// resolve a user-supplied path inside the project; rejects escapes and
     /// host-owned state under `.sqwai/` (§2.0)
     pub fn resolve(&self, p: &str) -> Result<PathBuf, String> {
+        self.resolve_parts(p).map(|(joined, _)| joined)
+    }
+
+    /// Canonical project-relative spelling (forward-slashed) of what `p`
+    /// actually points at. Scope gates must decide on this, not on the
+    /// lexical spelling: the OS resolves symlinks, so `src/link/x` with
+    /// `src/link -> b/` writes into `b/` (audit H3). Same jail as
+    /// [`resolve`](Self::resolve).
+    pub fn resolve_scope_rel(&self, p: &str) -> Result<String, String> {
+        self.resolve_parts(p)
+            .map(|(_, rel)| rel.to_string_lossy().replace('\\', "/"))
+    }
+
+    /// Shared walk behind [`resolve`](Self::resolve) and
+    /// [`resolve_scope_rel`](Self::resolve_scope_rel): returns the
+    /// display spelling (uncanonicalized join) and the canonical
+    /// project-relative path the security decisions run on.
+    fn resolve_parts(&self, p: &str) -> Result<(PathBuf, PathBuf), String> {
         let joined = if Path::new(p).is_absolute() {
             PathBuf::from(p)
         } else {
@@ -202,15 +238,15 @@ impl ToolCtx {
         if let Some(denied) = host_owned_denial(relative) {
             return Err(denied);
         }
-        // Return `joined`, not `resolved`: the whole display layer
-        // (`rel_label`, checkpoint labels, `FileDiff.path`) strips the
+        // The display spelling is `joined`, not `resolved`: the whole display
+        // layer (`rel_label`, checkpoint labels, `FileDiff.path`) strips the
         // *uncanonicalized* root, and where the root itself is reached
         // through a symlink (macOS `/var` -> `/private/var`) a canonical
         // path would miss that prefix and leak absolute machine-specific
         // paths into the journal. The security decision above was already
         // made in canonical space, so the spelling returned here only
         // affects labels, never the verdict.
-        Ok(joined)
+        Ok((joined, relative.to_path_buf()))
     }
 
     fn read_key(p: &Path) -> PathBuf {

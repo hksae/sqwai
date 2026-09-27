@@ -67,11 +67,9 @@ pub(crate) fn mutation_target_paths(ctx: &ToolCtx, name: &str, args: &Value) -> 
     };
     raws.into_iter()
         .filter_map(|raw| {
-            let resolved = ctx.resolve(&raw).ok()?;
-            let rel = resolved
-                .strip_prefix(&ctx.root)
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_else(|_| raw.clone());
+            // scope decisions run in canonical space: the OS resolves
+            // symlinks, the lexical spelling does not (audit H3)
+            let rel = ctx.resolve_scope_rel(&raw).ok()?;
             Some(lexical_clean(&rel))
         })
         .collect()
@@ -88,12 +86,10 @@ pub(crate) fn mutation_target_paths(ctx: &ToolCtx, name: &str, args: &Value) -> 
 /// for scoped children would brick their legitimate test runs.
 pub(crate) fn bash_scope_hit(ctx: &ToolCtx, scope: &[String], command: &str) -> Option<String> {
     for target in bash_write_targets(command) {
-        match ctx.resolve(&target) {
-            Ok(abs) => {
-                let rel = abs
-                    .strip_prefix(&ctx.root)
-                    .map(|p| p.to_string_lossy().replace('\\', "/"))
-                    .unwrap_or_else(|_| target.clone());
+        // canonical, not lexical: a symlink inside scope can point at a
+        // sibling's directory, and the OS follows it (audit H3)
+        match ctx.resolve_scope_rel(&target) {
+            Ok(rel) => {
                 let rel = lexical_clean(&rel);
                 if !in_write_scope(&rel, scope) {
                     return Some(rel);
@@ -179,17 +175,13 @@ fn bash_write_targets(command: &str) -> Vec<String> {
                 .split(|c: char| c.is_whitespace() || c == '(' || c == ')')
                 .filter(|w| !w.is_empty() && *w != "&")
                 .collect();
-            // binary is the first word past sudo/doas/env and VAR= assignments
-            let mut words = words.into_iter().peekable();
-            while let Some(w) = words.peek() {
-                if *w == "sudo" || *w == "doas" || *w == "env" || w.contains('=') {
-                    words.next();
-                } else {
-                    break;
-                }
-            }
-            let binary = words.next().map(|w| w.rsplit('/').next().unwrap_or(w));
-            let operands: Vec<&str> = words.collect();
+            // binary is the first word past the transparent wrappers —
+            // the SAME list the safety AST walk strips (audit H2: the
+            // desynced copy here let `nohup mv` escape the scope) — and
+            // past VAR= assignments and the wrapper's flags/numeric args
+            let idx = crate::agent::safety::effective_command_index(&words);
+            let binary = words.get(idx).map(|w| w.rsplit('/').next().unwrap_or(w));
+            let operands: Vec<&str> = words[idx + 1..].to_vec();
             let non_flag: Vec<&str> = operands
                 .iter()
                 .filter(|w| !w.starts_with('-') && !w.contains('='))
@@ -502,7 +494,7 @@ pub(crate) fn acceptance_policy_hit(ctx: &ToolCtx, command: &str) -> Option<Poli
                    rewrite it or have the user waive the item",
         });
     }
-    let tainted = crate::agent::trust::taint_level(&ctx.root, &ctx.session_id).external;
+    let tainted = ctx.external_taint();
     match crate::agent::trust::trust_gate(command, tainted, true) {
         crate::agent::trust::Gate::Allow => None,
         crate::agent::trust::Gate::Deny(reason) | crate::agent::trust::Gate::Confirm(reason) => {
