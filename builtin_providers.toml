@@ -71,12 +71,6 @@ id = "antigravity-preview-latest"
 context = 1000000
 effort = "medium"
 
-[models."aqa"]
-provider = "gemini"
-id = "aqa"
-context = 1000000
-effort = "medium"
-
 [models."gemini-2.5-computer-use-preview-10-2025"]
 provider = "gemini"
 id = "gemini-2.5-computer-use-preview-10-2025"
@@ -173,18 +167,6 @@ id = "gemini-pro-latest"
 context = 1048576
 effort = "off"
 
-[models."gemini-robotics-er-2-preview"]
-provider = "gemini"
-id = "gemini-robotics-er-2-preview"
-context = 131072
-effort = "off"
-
-[models."gemini-robotics-er-2-streaming-preview"]
-provider = "gemini"
-id = "gemini-robotics-er-2-streaming-preview"
-context = 1000000
-effort = "off"
-
 [models."gemma-4-26b-a4b-it"]
 provider = "gemini"
 id = "gemma-4-26b-a4b-it"
@@ -196,48 +178,6 @@ provider = "gemini"
 id = "gemma-4-31b-it"
 context = 262144
 effort = "medium"
-
-[models."lyria-3-clip-preview"]
-provider = "gemini"
-id = "lyria-3-clip-preview"
-context = 131072
-effort = "medium"
-
-[models."lyria-3-pro-preview"]
-provider = "gemini"
-id = "lyria-3-pro-preview"
-context = 131072
-effort = "medium"
-
-[models."lyria-3.5"]
-provider = "gemini"
-id = "lyria-3.5"
-context = 1048576
-effort = "medium"
-
-[models."nano-banana-pro-preview"]
-provider = "gemini"
-id = "nano-banana-pro-preview"
-context = 1000000
-effort = "off"
-
-[models."veo-3.1-fast-generate-preview"]
-provider = "gemini"
-id = "veo-3.1-fast-generate-preview"
-context = 1000000
-effort = "medium"
-
-[models."veo-3.1-generate-preview"]
-provider = "gemini"
-id = "veo-3.1-generate-preview"
-context = 1000000
-effort = "medium"
-
-[models."veo-3.1-lite-generate-preview"]
-provider = "gemini"
-id = "veo-3.1-lite-generate-preview"
-context = 1000000
-effort = "off"
 
 # Anthropic
 [providers.anthropic]
@@ -379,22 +319,10 @@ id = "o4-mini"
 context = 200000
 effort = "medium"
 
-[models."babbage-002"]
-provider = "openai"
-id = "babbage-002"
-context = 128000
-effort = "medium"
-
 [models."chat-latest"]
 provider = "openai"
 id = "chat-latest"
 context = 400000
-effort = "medium"
-
-[models."davinci-002"]
-provider = "openai"
-id = "davinci-002"
-context = 128000
 effort = "medium"
 
 [models."gpt-3.5-turbo"]
@@ -419,18 +347,6 @@ effort = "medium"
 provider = "openai"
 id = "gpt-3.5-turbo-16k"
 context = 16385
-effort = "medium"
-
-[models."gpt-3.5-turbo-instruct"]
-provider = "openai"
-id = "gpt-3.5-turbo-instruct"
-context = 128000
-effort = "medium"
-
-[models."gpt-3.5-turbo-instruct-0914"]
-provider = "openai"
-id = "gpt-3.5-turbo-instruct-0914"
-context = 128000
 effort = "medium"
 
 [models."gpt-4.1"]
@@ -612,24 +528,6 @@ provider = "openai"
 id = "o3-mini"
 context = 200000
 effort = "high"
-
-[models."omni-moderation-latest"]
-provider = "openai"
-id = "omni-moderation-latest"
-context = 128000
-effort = "medium"
-
-[models."sora-2"]
-provider = "openai"
-id = "sora-2"
-context = 128000
-effort = "medium"
-
-[models."sora-2-pro"]
-provider = "openai"
-id = "sora-2-pro"
-context = 128000
-effort = "medium"
 
 # DeepSeek
 [providers.deepseek]
