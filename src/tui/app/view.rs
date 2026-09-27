@@ -2935,7 +2935,8 @@ impl App {
         let inner = if is_form {
             content_rows
         } else {
-            content_rows + footer_h
+            // frozen table header takes one panel row above the window
+            content_rows + footer_h + usize::from(self.menu_table_header.is_some())
         };
         let max_h = area.height.saturating_sub(4).max(4);
         let h = (inner as u16 + 2).clamp(4, max_h);
@@ -2951,15 +2952,20 @@ impl App {
         };
         self.menu_rect = rect;
 
-        // Sessions rows bake the pinned frame width in at build time, when
-        // the rect may still be stale (0 or another menu's card). Re-resolve
-        // against the real card and rebuild once — header and content can
-        // never disagree on screen.
-        if matches!(menu, Some(Menu::Sessions)) {
-            let want = super::menus::sessions_frame_w(rect.width) as u16;
-            if want != self.sessions_frame_built_w {
+        // Table menus bake the card width into every column: rebuild once
+        // when the real card disagrees, so a stale rect never desyncs
+        // header from content.
+        if matches!(
+            menu,
+            Some(Menu::Sessions)
+                | Some(Menu::Models { .. })
+                | Some(Menu::PickModel { .. })
+                | Some(Menu::Providers)
+        ) {
+            let want = super::menus::table_budget(rect.width) as u16;
+            if want != self.table_built_w {
                 self.build_menu_rows();
-                self.sessions_frame_built_w = want;
+                self.table_built_w = want;
             }
         }
 
@@ -2991,6 +2997,10 @@ impl App {
         }
 
         let mut rows: Vec<Line> = Vec::new();
+        // frozen table header: drawn, never scrolled, never a nav step
+        if let Some(header) = self.menu_table_header.clone() {
+            rows.push(header);
+        }
         let mut focused_field_rect: Option<(usize, Rect)> = None;
         if is_form {
             // column layout: " {label:>w$} : " then the value, with the
@@ -3194,13 +3204,15 @@ impl App {
                 let thumb = 1.max(shown * shown / total);
                 let pos = self.menu_scroll * (shown - thumb) / max_scroll.max(1);
                 let bx = rect.right().saturating_sub(2);
+                // frozen table header shifts the item window down one row
+                let top = rect.y + 1 + usize::from(self.menu_table_header.is_some()) as u16;
                 for i in 0..shown {
                     if let Some(cell) = buf
-                        .cell_mut(ratatui::layout::Position::new(bx, rect.y + 1 + i as u16))
+                        .cell_mut(ratatui::layout::Position::new(bx, top + i as u16))
                         && i >= pos
                         && i < pos + thumb
-                        // never punch through drawn frames (pinned rails,
-                        // table borders): the thumb yields, the frame wins
+                        // never punch through drawn rules (section dividers):
+                        // the thumb yields, the rule wins
                         && !matches!(
                             cell.symbol(),
                             "│" | "─" | "┌" | "┐" | "└" | "┘" | "├" | "┤" | "┬" | "┴" | "┼"

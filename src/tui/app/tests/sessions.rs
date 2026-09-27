@@ -480,14 +480,21 @@ fn menu_scrollbar_yields_to_drawn_frames() {
     let mut buf = Buffer::empty(area);
     app.draw_menu(&mut buf, area);
     let row_text = |y: u16| -> String { (0..area.width).map(|x| buf[(x, y)].symbol()).collect() };
-    // pinned frame survived the scrollbar: corners still corners
+    // pinned divider survived the scrollbar: dashes still dashes
     let hy = (0..area.height)
         .find(|y| row_text(*y).contains("pinned"))
-        .expect("pinned header row");
+        .expect("pinned divider row");
     let row = row_text(hy);
     assert!(
-        row.contains("┌") && row.contains("┐"),
-        "scrollbar must not eat the frame: {row:?}"
+        row.contains("── pinned ──"),
+        "divider must stay intact: {row:?}"
+    );
+    // the thumb may share the row, but never inside the divider text:
+    // ── cells yield, the rule wins
+    let start = row.find("── pinned ──").expect("divider span");
+    assert!(
+        !row[start..start + "── pinned ──".len()].contains('▐'),
+        "scrollbar must not eat the divider: {row:?}"
     );
 }
 
@@ -525,60 +532,66 @@ fn pinned_frame_resolves_against_real_card_not_stale_rect() {
     let area = Rect::new(0, 0, 100, 30);
     let mut buf = Buffer::empty(area);
     app.draw_menu(&mut buf, area);
-    // the draw-time check rebuilt rows for the real card
-    let row_text = |y: u16| -> String { (0..area.width).map(|x| buf[(x, y)].symbol()).collect() };
-    let hy = (0..area.height)
-        .find(|y| row_text(*y).contains("pinned"))
-        .expect("pinned header row");
-    let row = row_text(hy);
-    assert!(
-        row.contains("┌") && row.contains("┐"),
-        "header must carry the full frame: {row:?}"
-    );
-    // real card is 78 wide → 72-col frame + corners; a stale 52-wide
-    // estimate would leave a 50-col header behind
-    let start = row.find('┌').expect("frame start");
-    let end = row.find('┐').expect("frame end") + '┐'.len_utf8();
-    let frame = &row[start..end];
+    // the draw-time check rebuilt rows for the real card: 78-wide card
+    // → 72-col budget, every row exact-fit
+    assert_eq!(app.table_built_w, 72, "must track the real card");
+    let (line, _) = app
+        .menu_rows
+        .iter()
+        .find(|(_, a)| matches!(a, MenuAction::OpenSession(_)))
+        .expect("session row");
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
     assert_eq!(
-        unicode_width::UnicodeWidthStr::width(frame),
-        74,
-        "header must span the real card: {row:?}"
+        unicode_width::UnicodeWidthStr::width(text.as_str()),
+        72,
+        "row must span the table budget: {text:?}"
     );
 }
 
 #[test]
 fn pinned_sessions_frame_stays_dim() {
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
     use ratatui::style::Color;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let mut s = Session::new("m".into(), 1000);
     s.pinned = true;
     app.sessions = vec![crate::session::SessionHeader::from_session(&s)];
     app.open_menu(Menu::Sessions);
-    let area = Rect::new(0, 0, 100, 30);
-    let mut buf = Buffer::empty(area);
-    app.draw_menu(&mut buf, area);
-    let row_text = |y: u16| -> String { (0..area.width).map(|x| buf[(x, y)].symbol()).collect() };
-    // the pinned header row (not the outer menu frame corner)
-    let hy = (0..area.height)
-        .find(|y| row_text(*y).contains("pinned"))
-        .expect("pinned header row");
-    let corner_x = (0..area.width)
-        .find(|x| buf[(*x, hy)].symbol() == "┌")
-        .expect("pinned frame corner");
-    assert_eq!(buf[(corner_x, hy)].style().fg, Some(Color::DarkGray));
-    // pinned row rails live strictly inside the outer menu frame
-    let r = app.menu_rect;
-    let rail = buf
-        .content()
+    let text = |l: &ratatui::text::Line| -> String {
+        l.spans.iter().map(|sp| sp.content.as_ref()).collect()
+    };
+    // the pinned divider is pure chrome: every span dim
+    let (div, _) = app
+        .menu_rows
         .iter()
-        .enumerate()
-        .map(|(i, c)| (i as u16 % area.width, c))
-        .find(|(x, c)| c.symbol() == "│" && *x != r.x && *x != r.right().saturating_sub(1))
-        .expect("pinned row rail");
-    assert_eq!(rail.1.style().fg, Some(Color::DarkGray));
+        .find(|(l, _)| text(l).contains("pinned"))
+        .expect("pinned divider row");
+    assert!(
+        div.spans
+            .iter()
+            .all(|sp| sp.style.fg == Some(Color::DarkGray)),
+        "divider must stay dim"
+    );
+    // data rung (title) bright, meta rung (model) gray, hint rung dim
+    let (row, _) = app
+        .menu_rows
+        .iter()
+        .find(|(_, a)| matches!(a, MenuAction::OpenSession(_)))
+        .expect("session row");
+    assert_eq!(
+        row.spans[1].style.fg,
+        Some(Color::Reset),
+        "title is terminal default"
+    );
+    assert_eq!(
+        row.spans[5].style.fg,
+        Some(Color::Gray),
+        "model is the meta rung"
+    );
+    assert_eq!(
+        row.spans[3].style.fg,
+        Some(Color::DarkGray),
+        "date stays dim"
+    );
 }
 #[test]
 fn pinned_session_frame_aligns_columns_and_respects_narrow_terminal() {
@@ -598,37 +611,52 @@ fn pinned_session_frame_aligns_columns_and_respects_narrow_terminal() {
         l.spans.iter().map(|sp| sp.content.as_ref()).collect()
     };
 
-    let top_row = app
-        .menu_rows
-        .iter()
-        .find(|(l, _)| render_line(l).contains("pinned"))
-        .map(|(l, _)| render_line(l))
-        .expect("top border");
-    let bot_row = app
-        .menu_rows
-        .iter()
-        .find(|(l, _)| render_line(l).starts_with('└'))
-        .map(|(l, _)| render_line(l))
-        .expect("bottom border");
+    // 40-col card → 34-col budget: header and row share one grid
+    let header = render_line(app.menu_table_header.as_ref().expect("table header"));
     let content_row = app
         .menu_rows
         .iter()
-        .find(|(l, _)| render_line(l).starts_with('│'))
+        .find(|(_, a)| matches!(a, MenuAction::OpenSession(_)))
         .map(|(l, _)| render_line(l))
         .expect("content row");
 
-    let w_top = UnicodeWidthStr::width(top_row.as_str());
-    let w_bot = UnicodeWidthStr::width(bot_row.as_str());
-    let w_row = UnicodeWidthStr::width(content_row.as_str());
-
-    assert_eq!(w_top, w_bot, "top and bottom borders must match");
-    assert_eq!(w_top, w_row, "row and borders must match in display width");
-    assert!(w_top <= 40, "must fit within menu rect width: {w_top} > 40");
-    // the closing rail seals the row: padding lives inside the frame,
-    // never parked after the rail (right rail must not drift left)
+    assert_eq!(
+        UnicodeWidthStr::width(header.as_str()),
+        UnicodeWidthStr::width(content_row.as_str()),
+        "header and row must share the grid"
+    );
     assert!(
-        content_row.ends_with('│'),
-        "trailing pad leaked past the rail: {content_row:?}"
+        UnicodeWidthStr::width(content_row.as_str()) <= 40,
+        "must fit within menu rect width: {content_row:?}"
+    );
+    // date starts at the same display column in header and content.
+    // budget 34 → title 8, so DATE sits at column 1 + 8 + 2 = 11.
+    // (display columns, not bytes: the CJK title shifts byte offsets)
+    fn disp_slice(s: &str, start: usize, len: usize) -> String {
+        use unicode_width::UnicodeWidthChar;
+        let mut out = String::new();
+        let mut col = 0usize;
+        for ch in s.chars() {
+            let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if col >= start && col < start + len {
+                out.push(ch);
+            }
+            col += w;
+            if col >= start + len {
+                break;
+            }
+        }
+        out
+    }
+    assert_eq!(
+        disp_slice(&header, 11, 4),
+        "DATE",
+        "header label must sit on the date column: {header:?}"
+    );
+    let date = disp_slice(&content_row, 11, 11);
+    assert!(
+        date.as_bytes()[2] == b'.' && date.as_bytes()[8] == b':',
+        "row date must start at column 11: {content_row:?}"
     );
 }
 
@@ -653,14 +681,14 @@ fn sessions_rows_share_date_model_token_columns() {
         .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
     assert_eq!(rows.len(), 2, "{rows:?}");
-    // `{title:28}  {date:11}  {model:16}  {tok:>7}` — every row 68 cols
-    // (the leading space lives inside the title cell)
+    // lead 1 + `{title:28}` + gap 2 + `{date:11}` + gap 2 + `{model:16}`
+    // + gap 2 + `{tok:>7}` = 69 content cols, exact-fit to the 72 budget
     for r in &rows {
-        assert_eq!(UnicodeWidthStr::width(r.as_str()), 68, "{r:?}");
-        let date = &r[30..41];
+        assert_eq!(UnicodeWidthStr::width(r.as_str()), 72, "{r:?}");
+        let date = &r[31..42];
         assert!(
             date.as_bytes()[2] == b'.' && date.as_bytes()[8] == b':',
-            "date must start at column 30: {r:?}"
+            "date must start at column 31: {r:?}"
         );
         assert!(!r.contains("tok"), "token unit must be gone: {r:?}");
     }

@@ -1740,6 +1740,7 @@ impl App {
 
     pub(super) fn build_menu_rows(&mut self) {
         self.menu_rows.clear();
+        self.menu_table_header = None;
         self.menu_footer_text = None;
         let Some(menu) = self.cur_menu().cloned() else {
             return;
@@ -2353,53 +2354,47 @@ impl App {
                     .collect();
                 if !self.startup {
                     self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(" + new session", Theme::ACCENT_SOFT())]),
+                        Line::from(vec![Span::styled(" + new session", Theme::FG())]),
                         MenuAction::NewSession,
                     ));
                 }
                 let cur_id = self.session.id.to_string();
                 let pinned: Vec<&SessionHeader> =
                     visible.iter().filter(|s| s.pinned).copied().collect();
-                // Resolved width travels with the rows: draw_menu compares it
-                // against the real card and rebuilds once on mismatch (also
-                // covers an empty pinned section — it must track, not stick).
-                let menu_w = if self.menu_rect.width > 0 {
-                    self.menu_rect.width
-                } else {
-                    78.min(self.cache_w.saturating_sub(2)).max(30)
-                };
-                let frame_w = sessions_frame_w(menu_w);
-                self.sessions_frame_built_w = frame_w as u16;
+                // grid geometry, shared by the header and every row: title
+                // takes priority, model clamps, date/tokens are fixed.
+                // Resolved width travels in table_built_w: draw_menu rebuilds
+                // once on mismatch (also covers an empty pinned section).
+                let budget = table_budget(self.menu_rect.width);
+                self.table_built_w = budget as u16;
+                let title_w = budget.saturating_sub(25 + 16).clamp(8, 28);
+                let model_w = budget.saturating_sub(25 + title_w).clamp(8, 16);
+                self.menu_table_header = Some(table_header(
+                    vec![
+                        tcell("TITLE", title_w, false, Theme::dim()),
+                        tcell("DATE", 11, false, Theme::dim()),
+                        tcell("MODEL", model_w, false, Theme::dim()),
+                        tcell("SIZE", 7, true, Theme::dim()),
+                    ],
+                    budget,
+                ));
                 if !pinned.is_empty() {
-                    let head = " pinned ";
-                    let mid = {
-                        let label = format!(" {head} ");
-                        let fill = frame_w.saturating_sub(super::view::cols(&label));
-                        format!(
-                            "{}{}{}",
-                            "─".repeat(fill / 2),
-                            label,
-                            "─".repeat(fill - fill / 2)
-                        )
-                    };
                     self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(format!("┌{mid}┐"), Theme::rule_color())]),
+                        Line::from(vec![Span::styled(
+                            " ── pinned ──".to_string(),
+                            Theme::dim(),
+                        )]),
                         MenuAction::None,
                     ));
                     for s in &pinned {
                         self.menu_rows.push(session_row(
                             s,
                             s.id.to_string() == cur_id,
-                            Some(frame_w),
+                            title_w,
+                            model_w,
+                            budget,
                         ));
                     }
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(
-                            format!("└{}┘", "─".repeat(frame_w)),
-                            Theme::rule_color(),
-                        )]),
-                        MenuAction::None,
-                    ));
                 }
                 // sessions born in another project live below their own
                 // divider: same rows, no column surgery, and opening one
@@ -2416,8 +2411,13 @@ impl App {
                     if s.pinned {
                         continue;
                     }
-                    self.menu_rows
-                        .push(session_row(s, s.id.to_string() == cur_id, None));
+                    self.menu_rows.push(session_row(
+                        s,
+                        s.id.to_string() == cur_id,
+                        title_w,
+                        model_w,
+                        budget,
+                    ));
                 }
                 if !foreign.is_empty() {
                     self.menu_rows.push(row(
@@ -2428,8 +2428,13 @@ impl App {
                         MenuAction::None,
                     ));
                     for s in foreign {
-                        self.menu_rows
-                            .push(session_row(s, s.id.to_string() == cur_id, None));
+                        self.menu_rows.push(session_row(
+                            s,
+                            s.id.to_string() == cur_id,
+                            title_w,
+                            model_w,
+                            budget,
+                        ));
                     }
                 }
                 if visible.is_empty() {
@@ -2475,6 +2480,24 @@ impl App {
                 ));
             }
             Menu::Providers => {
+                let budget = table_budget(self.menu_rect.width);
+                self.table_built_w = budget as u16;
+                // lead 1 + 3 gaps of 2; name/count/key fixed, host flexes
+                const NAME_W: usize = 18;
+                const COUNT_W: usize = 9;
+                const KEY_W: usize = 10;
+                let host_w = budget
+                    .saturating_sub(1 + 6 + NAME_W + COUNT_W + KEY_W)
+                    .clamp(12, 34);
+                self.menu_table_header = Some(table_header(
+                    vec![
+                        tcell("PROVIDER", NAME_W, false, Theme::dim()),
+                        tcell("ENDPOINT", host_w, false, Theme::dim()),
+                        tcell("MODELS", COUNT_W, true, Theme::dim()),
+                        tcell("KEY", KEY_W, false, Theme::dim()),
+                    ],
+                    budget,
+                ));
                 self.menu_rows.push(row(
                     Line::from(vec![
                         Span::styled(format!("  {:<16}", "default effort"), Theme::FG()),
@@ -2489,28 +2512,34 @@ impl App {
                         .values()
                         .filter(|m| &m.provider == name)
                         .count();
-                    let key_state = if pc.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
-                        "key set".to_string()
-                    } else if let Some(env) = pc.key_env_name(name) {
-                        format!("key ${env}")
-                    } else {
-                        "no key".to_string()
-                    };
+                    let (key_state, key_style) =
+                        if pc.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
+                            ("key set".to_string(), Theme::ok())
+                        } else if let Some(env) = pc.key_env_name(name) {
+                            (format!("key ${env}"), Theme::dim())
+                        } else {
+                            ("no key".to_string(), Theme::dim())
+                        };
                     let is_builtin = self.cfg.is_builtin_provider(name);
-                    let badge = if is_builtin { " [builtin]" } else { "" };
+                    let badge = if is_builtin { " builtin" } else { "" };
+                    // strip the scheme: every endpoint is https, it carries
+                    // no information and eats the host column
+                    let host = pc.base_url.strip_prefix("https://").unwrap_or(&pc.base_url);
                     self.menu_rows.push(row(
-                        Line::from(vec![
-                            Span::styled(format!(" {name}{badge}"), Theme::FG()),
-                            Span::styled(
-                                format!("  {} · {models} models · {key_state}", pc.base_url),
-                                Theme::dim(),
-                            ),
-                        ]),
+                        fit_line_width(
+                            table_line(vec![
+                                tcell(&format!("{name}{badge}"), NAME_W, false, Theme::FG()),
+                                tcell(host, host_w, false, Theme::meta()),
+                                tcell(&format!("{models} models"), COUNT_W, true, Theme::meta()),
+                                tcell(&key_state, KEY_W, false, key_style),
+                            ]),
+                            budget,
+                        ),
                         MenuAction::OpenModels(name.clone()),
                     ));
                 }
                 self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(" + add provider", Theme::ACCENT_SOFT())]),
+                    Line::from(vec![Span::styled(" + add provider", Theme::FG())]),
                     MenuAction::AddProvider,
                 ));
                 self.menu_rows.push(row(
@@ -2530,6 +2559,18 @@ impl App {
             }
             Menu::Models { provider } => {
                 let is_builtin = self.cfg.is_builtin_provider(&provider);
+                let budget = table_budget(self.menu_rect.width);
+                let (name_w, id_w) = model_cols(budget);
+                self.table_built_w = budget as u16;
+                self.menu_table_header = Some(table_header(
+                    vec![
+                        tcell("NAME", name_w, false, Theme::dim()),
+                        tcell("ID", id_w, false, Theme::dim()),
+                        tcell("CONTEXT", 8, true, Theme::dim()),
+                        tcell("EFFORT", 8, false, Theme::dim()),
+                    ],
+                    budget,
+                ));
                 for (k, m) in &self.cfg.models {
                     if m.provider == provider && m.status.visible_in_picker() {
                         let current = k == &self.session.model_key;
@@ -2539,38 +2580,36 @@ impl App {
                         } else {
                             MenuAction::EditModel(provider.clone(), k.clone())
                         };
+                        // each row reports what that model would actually do
+                        // with its level
+                        let effort = crate::providers::effort::plan(
+                            m.effort,
+                            m.effort_support(
+                                self.cfg
+                                    .providers
+                                    .get(&m.provider)
+                                    .map(|p| p.format)
+                                    .unwrap_or(WireFormat::Openai),
+                            ),
+                        )
+                        .short_label();
                         self.menu_rows.push(row(
-                            Line::from(vec![
-                                Span::styled(format!(" {k}{mark}"), Theme::FG()),
-                                Span::styled(
-                                    format!(
-                                        "  {} · {} · {}",
-                                        m.id,
-                                        fmt_ctx(m.context),
-                                        // each row reports what that model
-                                        // would actually do with its level
-                                        crate::providers::effort::plan(
-                                            m.effort,
-                                            m.effort_support(
-                                                self.cfg
-                                                    .providers
-                                                    .get(&m.provider)
-                                                    .map(|p| p.format)
-                                                    .unwrap_or(WireFormat::Openai)
-                                            )
-                                        )
-                                        .short_label()
-                                    ),
-                                    Theme::dim(),
-                                ),
-                            ]),
+                            fit_line_width(
+                                table_line(vec![
+                                    tcell(&format!("{k}{mark}"), name_w, false, Theme::FG()),
+                                    tcell(&m.id, id_w, false, Theme::meta()),
+                                    tcell(&fmt_ctx(m.context), 8, true, Theme::meta()),
+                                    tcell(&effort, 8, false, Theme::base()),
+                                ]),
+                                budget,
+                            ),
                             action,
                         ));
                     }
                 }
                 if !is_builtin {
                     self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(" + add model", Theme::ACCENT_SOFT())]),
+                        Line::from(vec![Span::styled(" + add model", Theme::FG())]),
                         MenuAction::AddModel(provider.clone()),
                     ));
                 }
@@ -2617,15 +2656,28 @@ impl App {
                 }
             }
             Menu::PickModel { provider } => {
+                let budget = table_budget(self.menu_rect.width);
+                let (name_w, id_w) = model_cols(budget);
+                self.table_built_w = budget as u16;
+                self.menu_table_header = Some(table_header(
+                    vec![
+                        tcell("NAME", name_w, false, Theme::dim()),
+                        tcell("ID", id_w, false, Theme::dim()),
+                    ],
+                    budget,
+                ));
                 for (k, m) in &self.cfg.models {
                     if m.provider == provider && m.status.visible_in_picker() {
                         let current = k == &self.session.model_key;
                         let mark = if current { " *current" } else { "" };
                         self.menu_rows.push(row(
-                            Line::from(vec![
-                                Span::styled(format!(" {k}"), Theme::FG()),
-                                Span::styled(format!("  {}{mark}", m.id), Theme::dim()),
-                            ]),
+                            fit_line_width(
+                                table_line(vec![
+                                    tcell(k, name_w, false, Theme::FG()),
+                                    tcell(&format!("{}{mark}", m.id), id_w, false, Theme::meta()),
+                                ]),
+                                budget,
+                            ),
                             MenuAction::UseModel(k.clone()),
                         ));
                     }
@@ -3167,68 +3219,85 @@ fn plan_rows(
 
 /// Pinned-section inner width for a menu card of `menu_w` columns.
 /// Shared by the row builder and the draw-time mismatch check below.
-pub(super) fn sessions_frame_w(menu_w: u16) -> usize {
-    (menu_w as usize).saturating_sub(4).clamp(24, 72)
-}
-
 fn session_row(
     s: &SessionHeader,
     is_current: bool,
-    framed: Option<usize>,
+    title_w: usize,
+    model_w: usize,
+    pad_w: usize,
 ) -> (Line<'static>, MenuAction) {
-    const TITLE_MAX: usize = 28;
-    const MODEL_MAX: usize = 16;
     const TOK_W: usize = 7;
-    // everything except title+model: lead space, gaps, fixed date, gaps, tok
-    const FIXED: usize = 1 + 2 + 11 + 2 + 2 + TOK_W;
+    const DATE_W: usize = 11;
     let action = MenuAction::OpenSession(s.id.to_string());
-    // narrow frames yield title first, then model; tokens (rightmost) are
-    // the last thing the exact-fit pass below may touch
-    let (title_w, model_w) = match framed {
-        None => (TITLE_MAX, MODEL_MAX),
-        Some(budget) => {
-            let title_w = budget.saturating_sub(FIXED + 4).clamp(4, TITLE_MAX);
-            let model_w = budget.saturating_sub(title_w + FIXED).clamp(4, MODEL_MAX);
-            (title_w, model_w)
-        }
-    };
     let mark = if is_current { " *" } else { "" };
-    let title = fit_cell(&format!(" {}{mark}", s.title), title_w);
-    let date = fmt_date(s.last_activity());
-    let model = fit_cell(&s.model_key, model_w);
-    let tok_raw = super::view::truncate_display_width(&fmt_k(s.context_tokens), TOK_W);
-    let tok = format!(
-        "{}{tok_raw}",
-        " ".repeat(TOK_W.saturating_sub(super::view::cols(&tok_raw)))
-    );
-    let gap = || Span::styled("  ".to_string(), Theme::dim());
-    let spans = vec![
-        Span::styled(title, Theme::FG()),
-        gap(),
-        Span::styled(date, Theme::dim()),
-        gap(),
-        Span::styled(model, Theme::dim()),
-        gap(),
-        Span::styled(tok, Theme::dim()),
-    ];
-    let Some(frame_w) = framed else {
-        return (Line::from(spans), action);
-    };
-    // rails + exact fit: every framed row matches the borders column-wise.
-    // The pad lives INSIDE the rails (fit first, wrap after): padding
-    // outside would park the closing rail left of the border.
-    let inner = fit_line_width(Line::from(spans), frame_w);
-    let mut full = vec![Span::styled("│".to_string(), Theme::rule_color())];
-    full.extend(inner.spans);
-    full.push(Span::styled("│".to_string(), Theme::rule_color()));
-    (Line::from(full), action)
+    let line = table_line(vec![
+        tcell(&format!("{}{mark}", s.title), title_w, false, Theme::FG()),
+        tcell(&fmt_date(s.last_activity()), DATE_W, false, Theme::dim()),
+        tcell(&s.model_key, model_w, false, Theme::meta()),
+        tcell(&fmt_k(s.context_tokens), TOK_W, true, Theme::dim()),
+    ]);
+    // exact fit: every row matches the header column-wise, narrow frames
+    // truncate (never shift) via fit_line_width
+    (fit_line_width(line, pad_w), action)
 }
 
-/// truncate + pad to exactly `w` display columns (never chars: a CJK title
-/// must not shift every column after it)
-fn fit_cell(s: &str, w: usize) -> String {
-    let t = super::view::truncate_display_width(s, w);
-    format!("{t}{}", " ".repeat(w.saturating_sub(super::view::cols(&t))))
+/// One grid cell: truncated/padded, left- or right-aligned.
+fn tcell(text: &str, w: usize, right: bool, style: impl Into<Style>) -> Span<'static> {
+    let t = super::view::truncate_display_width(text, w);
+    let fill = " ".repeat(w.saturating_sub(super::view::cols(&t)));
+    Span::styled(
+        if right {
+            format!("{fill}{t}")
+        } else {
+            format!("{t}{fill}")
+        },
+        style,
+    )
+}
+
+/// Frozen column header: same grid as the rows, exact-fit to the budget
+/// (a narrow header must not outgrow its columns).
+fn table_header(cells: Vec<Span<'static>>, budget: usize) -> Line<'static> {
+    fit_line_width(table_line(cells), budget)
+}
+/// One table row: lead space + 2-column gaps, every cell grid-aligned.
+/// Headers use the same builder with dim labels, so columns can never drift.
+fn table_line(cells: Vec<Span<'static>>) -> Line<'static> {
+    let mut spans = vec![Span::styled(" ".to_string(), Theme::base())];
+    for (i, c) in cells.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ".to_string(), Theme::dim()));
+        }
+        spans.push(c);
+    }
+    Line::from(spans)
+}
+
+/// Content width for table menus: the card minus chrome, clamped so narrow
+/// terminals shrink columns instead of clipping rows. An undrawn menu
+/// (zero rect) builds at full width — the draw-time re-resolve in
+/// draw_menu shrinks it once the real card is known.
+pub(super) fn table_budget(menu_rect_w: u16) -> usize {
+    if menu_rect_w == 0 {
+        return 72;
+    }
+    (menu_rect_w as usize).saturating_sub(6).clamp(30, 72)
+}
+
+/// NAME | ID | CONTEXT | EFFORT geometry for the model tables: fixed
+/// name/context/effort, the id absorbs the slack (min 10 so narrow
+/// terminals degrade to truncation, never to column drift).
+fn model_cols(budget: usize) -> (usize, usize) {
+    const CTX_W: usize = 8;
+    const EFFORT_W: usize = 8;
+    let name_w = 20usize.clamp(
+        10,
+        budget.saturating_sub(1 + 6 + CTX_W + EFFORT_W + 10).max(10),
+    );
+    let id_w = budget
+        .saturating_sub(1 + 6 + name_w + CTX_W + EFFORT_W)
+        .clamp(10, 30);
+    (name_w, id_w)
 }
 
 /// cut or pad a styled line to exactly `width` display columns, keeping
