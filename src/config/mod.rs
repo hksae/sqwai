@@ -2191,10 +2191,12 @@ effort = "off"
                 "provider {provider} has only {count} models"
             );
         }
-        // retired IDs must be gone, not kept alongside
+        // retired IDs must be gone, not kept alongside. The list is a
+        // snapshot of delistings, not doctrine: if a provider serves an id
+        // again (gpt-4o rejoined via direct discovery 2026-09-27), it leaves
+        // this list — presence in the live API wins over history.
         for retired in [
             "claude-3-7-sonnet-20250219",
-            "gpt-4o",
             "o1-mini",
             "grok-2-1212",
             "grok-beta",
