@@ -125,9 +125,14 @@ impl Theme {
     pub fn meta() -> Style {
         Style::new().fg(Self::META())
     }
-    /// Selection marker (❯ / numbers): house accent, never LightBlue.
+    /// Selection marker (numbers): house accent, never LightBlue.
     pub fn marker() -> Style {
         Style::new().fg(Self::ACCENT()).add_modifier(Modifier::BOLD)
+    }
+    /// Pinned-row marker: plain white dot, deliberately quiet — it marks
+    /// state, not focus, so it must not compete with the cyan accent.
+    pub fn pin_marker() -> Style {
+        Style::new().fg(Color::White)
     }
     /// Selected menu row: subtle fill + bright text. Fill is a 256-color
     /// gray like USER_SURFACE (no custom RGB, no transparency games), so

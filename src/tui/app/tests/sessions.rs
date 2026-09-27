@@ -592,17 +592,17 @@ fn pinned_sessions_frame_stays_dim() {
         Some(Color::DarkGray),
         "date stays dim"
     );
-    // pinned rows carry the cyan pin marker in the first column,
+    // pinned rows carry a quiet white dot in the first column,
     // unpinned rows leave it blank
     assert_eq!(
         row.spans[1].content.as_ref(),
-        "◈ ",
+        "● ",
         "pinned row must show the marker"
     );
     assert_eq!(
         row.spans[1].style.fg,
-        Some(Color::Cyan),
-        "marker uses the house accent"
+        Some(Color::White),
+        "marker is quiet white, not the accent"
     );
 }
 #[test]

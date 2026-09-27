@@ -3233,9 +3233,9 @@ fn session_row(
     const PIN_W: usize = 2;
     let action = MenuAction::OpenSession(s.id.to_string());
     let mark = if is_current { " *" } else { "" };
-    let pin = if s.pinned { "◈" } else { "" };
+    let pin = if s.pinned { "●" } else { "" };
     let line = table_line(vec![
-        tcell(pin, PIN_W, false, Theme::marker()),
+        tcell(pin, PIN_W, false, Theme::pin_marker()),
         tcell(&format!("{}{mark}", s.title), title_w, false, Theme::FG()),
         tcell(&fmt_date(s.last_activity()), DATE_W, false, Theme::dim()),
         tcell(&s.model_key, model_w, false, Theme::meta()),
