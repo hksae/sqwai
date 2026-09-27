@@ -212,6 +212,10 @@ impl Journal {
             .and_then(|name| name.to_str())
             .unwrap_or_default()
             .to_string();
+        // Under the plan lock and re-read inside it (audit C3): a store
+        // from a copy loaded before a concurrent commit would regress that
+        // commit's content and cursors.
+        let _lock = crate::plan::store::PlanLock::acquire(root, &plan_id)?;
         let mut active = match crate::plan::open_active_for_session(root, Some(&session))? {
             Some(plan) if plan.id == plan_id => plan,
             _ => return Ok(seq),
@@ -283,12 +287,19 @@ impl Journal {
             let file = File::open(entry.path()).context("opening journal for evidence")?;
             for line in BufReader::new(file).lines() {
                 let line = line.context("reading journal for evidence")?;
-                if !line.trim().is_empty() {
-                    let mut record: Record =
-                        serde_json::from_str(&line).context("decoding journal evidence")?;
-                    record.session = session.clone();
-                    records.push(record);
+                if line.trim().is_empty() {
+                    continue;
                 }
+                // Degrade, don't refuse (audit H18): one malformed line —
+                // a crash mid-write, a disk error, a hand edit — used to
+                // fail this whole read, and every consumer (undo, blob
+                // purge, evidence validation) died with it. Unreadable
+                // lines are skipped; the readable history survives.
+                let Ok(mut record) = serde_json::from_str::<Record>(&line) else {
+                    continue;
+                };
+                record.session = session.clone();
+                records.push(record);
             }
         }
         Ok(records)
@@ -307,12 +318,16 @@ impl Journal {
             .lines()
             .filter_map(|line| match line {
                 Ok(line) if !line.trim().is_empty() => {
-                    let parsed: Result<Record, _> =
-                        serde_json::from_str(&line).context("decoding session journal record");
-                    Some(parsed.map(|mut record| {
-                        record.session = session_id.to_string();
-                        record
-                    }))
+                    // same degrade-don't-refuse rule as `records` (audit
+                    // H18): a corrupt line is skipped, not fatal. An
+                    // evidence ref pointing at it simply finds no record
+                    // and is rejected — fail-closed where it matters.
+                    serde_json::from_str::<Record>(&line)
+                        .ok()
+                        .map(|mut record| {
+                            record.session = session_id.to_string();
+                            Ok(record)
+                        })
                 }
                 Ok(_) => None,
                 Err(error) => Some(Err(error.into())),
@@ -1971,6 +1986,32 @@ mod tests {
     /// Concurrent handles on one journal file must never duplicate a seq:
     /// without the per-file append lock two handles read the same tail and
     /// write the same number twice, poisoning replay cursors downstream.
+    /// One malformed line mid-file (a crash, a disk error, a hand edit)
+    /// used to fail the whole read — every caller of `records()` (undo,
+    /// blob purge, evidence validation) died project-wide (audit H18).
+    /// Degrade, don't refuse: unreadable lines are skipped, the readable
+    /// history survives.
+    #[test]
+    fn records_skip_a_corrupt_mid_file_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let jdir = dir.path().join(".sqwai/journal");
+        std::fs::create_dir_all(&jdir).unwrap();
+        std::fs::write(
+            jdir.join("s.jsonl"),
+            concat!(
+                "{\"seq\":1,\"ts\":\"t\",\"agent\":\"main\",\"kind\":\"note\",\"text\":\"a\"}\n",
+                "{\"seq\":2,\"ts\":\"t\",\"agent\":\"main\",\"kind\":\"no\n",
+                "{\"seq\":3,\"ts\":\"t\",\"agent\":\"main\",\"kind\":\"note\",\"text\":\"c\"}\n",
+            ),
+        )
+        .unwrap();
+        let records =
+            Journal::records(dir.path()).expect("a corrupt line must not kill the whole read");
+        let seqs: Vec<u64> = records.iter().map(|r| r.seq).collect();
+        assert_eq!(seqs, vec![1, 3]);
+        assert_eq!(records[0].session, "s", "session stamp survives");
+    }
+
     #[test]
     fn concurrent_handles_never_duplicate_seq() {
         let dir = tempfile::tempdir().unwrap();

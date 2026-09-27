@@ -86,7 +86,7 @@ impl Drop for ProjectLock {
 }
 
 #[cfg(windows)]
-fn is_pid_alive(pid: u32) -> bool {
+pub(crate) fn is_pid_alive(pid: u32) -> bool {
     let out = std::process::Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .output();
@@ -100,7 +100,7 @@ fn is_pid_alive(pid: u32) -> bool {
 }
 
 #[cfg(unix)]
-fn is_pid_alive(pid: u32) -> bool {
+pub(crate) fn is_pid_alive(pid: u32) -> bool {
     std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
         .stderr(std::process::Stdio::null())

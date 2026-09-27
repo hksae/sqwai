@@ -4689,6 +4689,97 @@ end
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// Audit C3: two sessions on one plan (cross-process `--force`)
+    /// interleave load→append→store without arbitration; the later store
+    /// from a stale load regressed the other session's content AND its
+    /// cursor, and replay could not heal it (Start/Start collides with the
+    /// single-active-step invariant and strands the stream in `stalled`).
+    /// With arbitration the stale commit is REFUSED before it journals:
+    /// A's work stays intact, B is told to re-read and retry.
+    #[test]
+    fn plan_stale_session_commit_is_refused_not_regressed() {
+        let (mut ctx_a, dir) = proj();
+        let created = plan_op(
+            &mut ctx_a,
+            &json!({
+                "op": "create",
+                "goal": "race",
+                "steps": [{"title": "one"}, {"title": "two"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+
+        // session B loads the plan before A's next store
+        let mut plan_b = plan::open(&dir, &plan_id).unwrap();
+
+        // A starts step 1: journal intent, then store
+        assert!(plan_op(&mut ctx_a, &json!({"op": "start", "id": "1"})).ok);
+
+        // B starts step 2 on its stale copy — the commit must be refused
+        assert!(
+            plan::apply(
+                &mut plan_b,
+                plan::Op::Start {
+                    id: "2".into(),
+                    confirm: None
+                },
+                &plan::Limits::default(),
+                None,
+            )
+            .is_ok()
+        );
+        let err = plan::commit(
+            &dir,
+            "sess-b",
+            &mut plan_b,
+            "start",
+            "model",
+            true,
+            json!({"id": "2"}),
+        )
+        .expect_err("a stale-base commit must be refused");
+        assert!(err.to_string().contains("plan_moved"), "{err:#}");
+
+        // A's work is intact, B's op left no trace on disk or in the journal
+        let on_disk = plan::open(&dir, &plan_id).unwrap();
+        assert_eq!(
+            on_disk.step("1").unwrap().status,
+            plan::StepStatus::InProgress,
+            "A's start must survive"
+        );
+        assert_eq!(
+            on_disk.step("2").unwrap().status,
+            plan::StepStatus::Pending,
+            "B's refused op must not half-land"
+        );
+        assert!(
+            !dir.join(".sqwai/journal/sess-b.jsonl").exists(),
+            "a refused commit must not journal an intent (it would stall replay)"
+        );
+
+        // nothing to heal, nothing stalled
+        let report = plan::replay(&dir).unwrap();
+        assert!(report.stalled.is_empty(), "{report:?}");
+
+        // B's retry path: re-read, and the legitimate conflict is now
+        // VISIBLE — step 1 is in progress, so starting step 2 is rejected
+        // by the invariant instead of silently clobbering A
+        let fresh = plan::open(&dir, &plan_id).unwrap();
+        let mut fresh = fresh;
+        let rejected = plan::apply(
+            &mut fresh,
+            plan::Op::Start {
+                id: "2".into(),
+                confirm: None,
+            },
+            &plan::Limits::default(),
+            None,
+        );
+        assert!(rejected.is_err(), "single-active-step must reject B now");
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// Evidence journaled but lost from the file (crash between the journal
     /// write and the plan store) must still re-attach on replay even when a
     /// later finish already moved the cursor past it. Pre-fix: the evidence

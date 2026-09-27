@@ -244,12 +244,29 @@ fn current_hash(path: &Path) -> Option<String> {
 /// content is not what the host last left is reported as skipped, never
 /// overwritten. A pre-image of `None` means the file did not exist before the
 /// undone window, so reverting it means removing it.
+/// Journal-provided paths are trusted to be project-relative. A `..`
+/// segment or an absolute spelling means the journal is corrupt or
+/// tampered; restore must never join it onto the root (audit H17) — it
+/// would write or delete outside the project.
+fn traversal_path(p: &str) -> bool {
+    let path = Path::new(p);
+    path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        || p.replace('\\', "/").starts_with('/')
+}
+
 pub fn restore_from_blobs(
     root: &Path,
     pre_images: &[crate::agent::journal::PreImage],
 ) -> Result<RestoreReport> {
     let mut report = RestoreReport::default();
     for item in pre_images {
+        if traversal_path(&item.path) {
+            report.skipped.push(item.path.clone());
+            continue;
+        }
         let path = root.join(&item.path);
         let current = current_hash(&path);
         // Only skip when we know both what it should be and what it is, and
@@ -325,6 +342,10 @@ pub fn restore_paths_in(
     };
     let mut report = RestoreReport::default();
     for target in targets {
+        if traversal_path(&target.path) {
+            report.skipped.push(target.path.clone());
+            continue;
+        }
         let absolute = root.join(&target.path);
         let live = current_hash(&absolute);
 
@@ -373,6 +394,40 @@ pub fn restore_paths_in(
 mod tests {
     use super::*;
     use std::fs;
+
+    /// Audit H17: restore joins journal-provided paths straight onto the
+    /// root. A corrupted or hand-edited journal with `..` in a path made
+    /// undo delete (or overwrite) files outside the project.
+    #[test]
+    fn restore_refuses_traversal_paths_from_the_journal() {
+        let dir = tempfile::Builder::new()
+            .prefix("sqwai-traversal")
+            .tempdir()
+            .unwrap();
+        let root = dir.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        let outside = dir.path().join("outside.txt");
+        fs::write(&outside, "user data").unwrap();
+
+        // agent-created-inside-the-window shape: revert = delete
+        let pre_images = vec![crate::agent::journal::PreImage {
+            path: "../outside.txt".to_string(),
+            blob_before: None,
+            existed_before: false,
+            agent_hash: None,
+        }];
+        let report = restore_from_blobs(&root, &pre_images).unwrap();
+        assert!(
+            outside.exists(),
+            "restore followed a traversal path out of the root"
+        );
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "user data");
+        assert!(
+            report.skipped.iter().any(|p| p.contains("..")),
+            "traversal target must be reported skipped: {:?}",
+            report.skipped
+        );
+    }
 
     #[test]
     fn available_in_respects_the_configured_store() {

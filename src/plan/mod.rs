@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 mod ops;
 mod render;
-mod store;
+pub(crate) mod store;
 mod verify;
 pub use ops::{
     Applied, Limits, NewStep, Op, PlanDraftArgs, Rejection, abandon, apply, create, reset_discards,

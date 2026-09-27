@@ -7,6 +7,80 @@ use super::{
 use anyhow::{Context, Result};
 use std::path::Path;
 
+/// Cross-process arbitration for plan-file writers (audit C3). Under
+/// `--force` two processes can load→append→store the same plan; the later
+/// store regressed the earlier one's content and cursor, and replay then
+/// stalled on the re-apply conflict. An exclusive lock file (create-only,
+/// PID-stale pruned, same pattern as the project lock) serializes the
+/// journal-append + store pair; [`commit`] additionally refuses when the
+/// file moved since the caller loaded it.
+pub(crate) struct PlanLock {
+    path: std::path::PathBuf,
+}
+
+impl PlanLock {
+    pub(crate) fn acquire(root: &Path, plan_id: &str) -> Result<Self> {
+        let path = plans_dir(root).join(format!("{plan_id}.lock"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        for attempt in 0..300u32 {
+            use std::io::Write;
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    let _ = write!(file, "{}", std::process::id());
+                    return Ok(Self { path });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if Self::holder_dead(&path) {
+                        std::fs::remove_file(&path).ok();
+                        continue;
+                    }
+                    if attempt == 299 {
+                        anyhow::bail!("plan lock busy: another process is committing to {plan_id}");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => return Err(e).with_context(|| "creating plan lock"),
+            }
+        }
+        unreachable!("the attempt loop always returns or bails")
+    }
+
+    fn holder_dead(path: &Path) -> bool {
+        let stale_by_age = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .map(|mtime| {
+                mtime
+                    .elapsed()
+                    .is_ok_and(|age| age > std::time::Duration::from_secs(60))
+            })
+            .unwrap_or(false);
+        if stale_by_age {
+            return true;
+        }
+        match std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+        {
+            Some(pid) => pid != std::process::id() && !crate::lock::is_pid_alive(pid),
+            // unreadable/garbage holder: let the age rule decide, do not
+            // steal a lock we cannot attribute
+            None => false,
+        }
+    }
+}
+
+impl Drop for PlanLock {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.path).ok();
+    }
+}
+
 /// Immutable spawn context a subagent inherits (§2.2.4): which plan step it
 /// works on and at which epoch. Mutations and evidence from an older epoch
 /// are refused / filtered after the step is reopened.
@@ -49,6 +123,24 @@ pub fn commit(
     ok: bool,
     args: serde_json::Value,
 ) -> Result<u64> {
+    // Arbitration (audit C3): serialize writers on this plan file and
+    // refuse a commit whose base is stale — a store over a newer on-disk
+    // state regresses both content and cursors, and the replay cannot
+    // always re-apply (single-active-step makes Start/Start conflicts
+    // unrecoverable, stranding the stream in `stalled`).
+    let _lock = PlanLock::acquire(root, &plan.id)?;
+    if let Some(disk) = read_plan_file(root, &plan.id) {
+        let moved = disk
+            .applied_events
+            .iter()
+            .any(|(sess, seq)| plan.applied_events.get(sess).is_none_or(|mine| mine < seq));
+        if moved {
+            anyhow::bail!(
+                "plan_moved: another session committed to {} while this operation was in flight — re-read the plan and retry",
+                plan.id
+            );
+        }
+    }
     let mut fields = args.as_object().cloned().unwrap_or_default();
     fields.insert("op".to_string(), serde_json::Value::String(op.to_string()));
     fields.insert(

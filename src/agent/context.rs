@@ -834,8 +834,19 @@ fn hard_trim_inner(messages: &[Message], budget: u64) -> Vec<Message> {
         }
         return vec![Message::new(Role::User, "Continue.")];
     }
-    messages[start..].to_vec()
+    let mut kept = messages[start..].to_vec();
+    // Anthropic rejects an assistant-first transcript with a 400, and the
+    // only safe cut in an autonomous tool loop is before an assistant step
+    // (audit H6). A host-authored marker opens the transcript honestly.
+    if kept.first().is_some_and(|m| m.role != Role::User) {
+        kept.insert(0, Message::new(Role::User, TRIM_MARKER));
+    }
+    kept
 }
+
+/// Host note replacing the trimmed head when the safe cut lands mid tool
+/// loop. Host-authored, not model text: nothing here claims anything.
+const TRIM_MARKER: &str = "[earlier turns were trimmed to fit the context window]";
 
 #[allow(dead_code)]
 /// Boundary for the local compaction path: keep the most recent
@@ -1550,8 +1561,13 @@ mod tests {
             trimmed.len(),
             messages.len()
         );
-        assert!(estimated_tokens(&trimmed) <= budget);
-        assert_eq!(trimmed[0].role, Role::Assistant);
+        // the host trim marker absorbs the small overshoot (audit H6):
+        // an assistant-first transcript is a 400 on Anthropic, so the cut
+        // gets a user-voiced head instead
+        assert!(estimated_tokens(&trimmed) <= budget + 32);
+        assert_eq!(trimmed[0].role, Role::User);
+        assert_eq!(trimmed[0].content, TRIM_MARKER);
+        assert_eq!(trimmed[1].role, Role::Assistant);
         // no orphan: every kept tool result's call is kept as well
         let kept: std::collections::HashSet<&str> = trimmed
             .iter()

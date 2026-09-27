@@ -399,25 +399,39 @@ fn session_ref(session_id: &str) -> String {
 }
 
 /// Directories inside the project that are repositories of their own,
-/// relative to the root and ready for `info/exclude`.
+/// relative to the root and ready for `info/exclude`. Recursive with a
+/// depth bound: a nested checkout deeper than one level was recorded as a
+/// gitlink whose "content" on restore is a 40-char SHA (audit C9). A
+/// directory that IS a repo stops the descent — its internals are its own
+/// git's business.
 fn nested_git_dirs(root: &Path) -> Vec<String> {
-    let mut found = Vec::new();
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return found;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
+    fn walk(dir: &Path, root: &Path, depth: u8, found: &mut Vec<String>) {
+        if depth > 6 || found.len() >= 64 {
+            return;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name == ".git" || name == ".sqwai" || name == "target" || name == "node_modules" {
-            continue;
-        }
-        if path.join(".git").exists() {
-            found.push(format!("{name}/"));
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == ".git" || name == ".sqwai" || name == "target" || name == "node_modules" {
+                continue;
+            }
+            if path.join(".git").exists() {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    found.push(format!("{}/", rel.to_string_lossy().replace('\\', "/")));
+                }
+                continue;
+            }
+            walk(&path, root, depth + 1, found);
         }
     }
+    let mut found = Vec::new();
+    walk(root, root, 0, &mut found);
     found
 }
 
@@ -432,6 +446,30 @@ mod tests {
             .unwrap();
         std::fs::write(dir.path().join("a.rs"), b"fn main() {}").unwrap();
         dir
+    }
+
+    /// Audit C9: nested repos deeper than the top level were invisible to
+    /// the exclude scan — the shadow recorded them as gitlinks, and a
+    /// restore overwrote the user's file with the 40-char SHA string.
+    #[test]
+    fn nested_git_dirs_finds_repos_at_depth() {
+        let dir = project();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("vendor/deep/repo/.git")).unwrap();
+        std::fs::create_dir_all(root.join("top/.git")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules/pkg/.git")).unwrap();
+        std::fs::write(root.join("vendor/deep/repo/f.rs"), b"fn f() {}").unwrap();
+
+        let found = nested_git_dirs(root);
+        assert!(found.contains(&"top/".to_string()), "{found:?}");
+        assert!(
+            found.contains(&"vendor/deep/repo/".to_string()),
+            "depth-2 nested repo missed: {found:?}"
+        );
+        assert!(
+            !found.iter().any(|f| f.contains("node_modules")),
+            "heavy dirs stay skipped: {found:?}"
+        );
     }
 
     fn open(root: &Path) -> Shadow {
