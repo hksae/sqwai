@@ -5,7 +5,7 @@ use super::*;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Widget};
@@ -2923,22 +2923,36 @@ impl App {
         self.menu_footer_text = None;
         // Popup actions do not show transient green notices at the bottom.
         let footer_h = 0usize;
+        // chrome rows inside the panel: frozen table header + one air row
+        // under the centered title (lists only; forms keep field geometry).
+        // Chrome takes its rows from the window budget, never on top of it:
+        // in a short terminal the panel is capped by max_h, and an extra
+        // row would land under the hint line.
+        let chrome_h = if is_form {
+            0
+        } else {
+            footer_h + usize::from(self.menu_table_header.is_some()) + 1
+        };
         let avail_inner = (area.height.saturating_sub(6)).max(3) as usize;
+        let max_h = area.height.saturating_sub(4).max(4);
+        let max_items = (max_h as usize)
+            .saturating_sub(2)
+            .saturating_sub(chrome_h)
+            .max(1);
         let content_rows: usize = if is_form {
             self.form_fields.len() + 1
         } else {
             // scrollable window; never smaller than what fits
             self.menu_rows
                 .len()
-                .min(avail_inner - footer_h.min(avail_inner - 1))
+                .min(avail_inner.saturating_sub(chrome_h).max(1))
+                .min(max_items)
         };
         let inner = if is_form {
             content_rows
         } else {
-            // frozen table header takes one panel row above the window
-            content_rows + footer_h + usize::from(self.menu_table_header.is_some())
+            content_rows + chrome_h
         };
-        let max_h = area.height.saturating_sub(4).max(4);
         let h = (inner as u16 + 2).clamp(4, max_h);
         // Width cap order matters: the 30-column minimum must not win over
         // the terminal's real width — in a 20..29-column terminal that would
@@ -2997,6 +3011,11 @@ impl App {
         }
 
         let mut rows: Vec<Line> = Vec::new();
+        // one air row under the centered title (list menus only; forms
+        // keep their own field geometry and click mapping)
+        if !is_form {
+            rows.push(Line::default());
+        }
         // frozen table header: drawn, never scrolled, never a nav step
         if let Some(header) = self.menu_table_header.clone() {
             rows.push(header);
@@ -3144,10 +3163,11 @@ impl App {
         }
 
         // Flat Codex-style panel: no frame, content inset by padding. Title
-        // and hint rows take the rows the borders used to occupy, so the
-        // card keeps its size.
+        // centered (every list menu reads the same), hint rows take the
+        // rows the borders used to occupy, so the card keeps its size.
         let mut block = Block::default()
             .padding(ratatui::widgets::Padding::horizontal(1))
+            .title_alignment(Alignment::Center)
             .title(Span::styled(
                 format!(" {} ", self.menu_title()),
                 Style::new()
@@ -3204,8 +3224,9 @@ impl App {
                 let thumb = 1.max(shown * shown / total);
                 let pos = self.menu_scroll * (shown - thumb) / max_scroll.max(1);
                 let bx = rect.right().saturating_sub(2);
-                // frozen table header shifts the item window down one row
-                let top = rect.y + 1 + usize::from(self.menu_table_header.is_some()) as u16;
+                // items start after title + air row (+ frozen header):
+                // the thumb tracks the item window, not the chrome
+                let top = rect.y + 2 + usize::from(self.menu_table_header.is_some()) as u16;
                 for i in 0..shown {
                     if let Some(cell) = buf
                         .cell_mut(ratatui::layout::Position::new(bx, top + i as u16))

@@ -820,8 +820,9 @@ fn effort_narrow_fallback_list_hovers_and_clicks_by_row() {
     let mut buf = Buffer::empty(area);
     app.draw_menu(&mut buf, area);
     assert!(app.effort_hits.is_empty(), "slider must not render narrow");
-    // hover the first row moves the selection (unlike the slider card)
-    let first_row = app.menu_rect.y + 1;
+    // hover the first row moves the selection (unlike the slider card):
+    // title + air row precede the items, no header on the Effort list
+    let first_row = app.menu_rect.y + 2;
     assert_eq!(app.menu_hover(first_row), Some(0));
     assert_eq!(app.menu_sel, 0);
     // click commits the row's level and closes the menu

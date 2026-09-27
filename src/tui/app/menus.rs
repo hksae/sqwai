@@ -768,13 +768,17 @@ impl App {
             return Some(self.menu_sel);
         }
         let r = self.menu_rect;
-        // forms highlight nothing; clicks/hover on the frame (borders) or on
-        // rows past the last entry must not select anything — otherwise a
-        // click on the top border would run the first menu item (rel == 0)
-        if self.is_form_menu() || r.height == 0 || row <= r.y || row + 1 >= r.bottom() {
+        // list rows start after title + air row (+ frozen table header):
+        // clicks on chrome select nothing. Forms keep their own mapping.
+        let skip = 2 + usize::from(self.menu_table_header.is_some());
+        if self.is_form_menu()
+            || r.height == 0
+            || row.saturating_sub(r.y) < skip as u16
+            || row + 1 >= r.bottom()
+        {
             return None;
         }
-        let abs = self.menu_scroll + (row - r.y - 1) as usize;
+        let abs = self.menu_scroll + (row - r.y) as usize - skip;
         if abs >= self.menu_rows.len() {
             return None;
         }

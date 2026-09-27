@@ -528,8 +528,9 @@ fn approval_click_selects_without_committing() {
         width: 80,
         height: 20,
     };
-    // screen row 4 → row index 3 → the "run once" option
-    app.menu_click(4);
+    // screen row 5 → row index 3 → the "run once" option
+    // (title + air row precede the items)
+    app.menu_click(5);
     assert_eq!(
         app.menu_sel,
         approval_option_index(&app, ApprovalDecision::RunOnce)
