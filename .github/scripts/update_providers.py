@@ -23,6 +23,10 @@ Policy (agreed):
 - Unknown direct chat models outside the cap are reported as CANDIDATES.
 - Fetch failure is fatal (exit 1) so the Action goes red instead of silently
   writing stale fallbacks with a fresh date.
+- With --discovery-dir, direct lists from discover_providers.py union in
+  ids the DB missed (specs: provider_overlay.toml -> LiteLLM DB ->
+  conservative default). Ids the catalog shipped but the run drops are
+  reported, never silently re-added; removals always need human review.
 - Freshness is a monotonic `serial`, not the date: when models change, the
   new file carries existing serial + 1 (the client refuses replays of older
   serials, so the number must never go backwards or be reset by hand).
@@ -30,12 +34,18 @@ Policy (agreed):
   old updated_at, so git sees no diff and no empty commit is made).
 """
 
+import argparse
 import datetime
 import json
 import os
 import re
 import sys
 import urllib.request
+
+try:
+    import tomllib
+except ImportError:  # overlay needs 3.11+; CI runs 3.12, older stays DB-only
+    tomllib = None
 
 LITELLM_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 CATALOG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "builtin_providers.toml")
@@ -64,6 +74,22 @@ DROP_IDS = {"gpt-5.6"}
 # Extra substrings that disqualify a model for coding/chat use in sqwai.
 # (generic audio/image/... live in EXCLUDE_SUBSTRINGS; these are search APIs.)
 SEARCH_SUBSTRINGS = ("search",)
+
+# Conservative context for a direct-discovered id with no overlay entry and
+# no LiteLLM record. Under-claiming only truncates history earlier; the next
+# DB sync or an overlay line corrects it. Never used when the DB knows the id.
+DEFAULT_CTX = {
+    "gemini": 1000000,
+    "anthropic": 200000,
+    "openai": 128000,
+    "deepseek": 64000,
+    "kimi": 200000,
+    "grok": 128000,
+}
+
+EFFORT_VALUES = ("off", "low", "medium", "high")
+
+OVERLAY_PATH = os.path.join(os.path.dirname(__file__), "provider_overlay.toml")
 
 # Effort defaults for auto-discovered models (known IDs keep curated values).
 EFFORT_HIGH = ("reason", "r1", "opus", "codex", "k3", "build", "o1", "o3", "o4")
@@ -339,7 +365,105 @@ def lookup(data, prefixes, model_id):
     return None, None
 
 
-def build_catalog(data, today, serial):
+def load_discovery(discovery_dir):
+    """{provider: [ids]} from discover_providers.py; missing dir = {}."""
+    out = {}
+    if not discovery_dir or not os.path.isdir(discovery_dir):
+        return out
+    for name in [p["name"] for p in PROVIDERS_CONFIG]:
+        path = os.path.join(discovery_dir, f"{name}.json")
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                ids = json.load(f).get("ids", [])
+            out[name] = [i for i in ids if isinstance(i, str) and i]
+        except Exception as e:
+            print(f"  ! discovery file for {name} unreadable ({e}), LiteLLM-only")
+    return out
+
+
+def load_overlay():
+    """{provider: {id: (context, effort)}}; bad entries warn and drop."""
+    if tomllib is None or not os.path.exists(OVERLAY_PATH):
+        return {}
+    try:
+        with open(OVERLAY_PATH, "rb") as f:
+            raw = tomllib.load(f)
+    except Exception as e:
+        print(f"  ! overlay unreadable ({e}), ignored")
+        return {}
+    out = {}
+    for provider, table in raw.items():
+        if not isinstance(table, dict):
+            continue
+        for mid, spec in table.items():
+            if not isinstance(spec, dict):
+                continue
+            try:
+                ctx = int(spec["context"])
+                effort = str(spec["effort"])
+            except (KeyError, ValueError, TypeError):
+                print(f"  ! overlay {provider}/{mid}: bad spec, ignored")
+                continue
+            if ctx <= 0 or effort not in EFFORT_VALUES:
+                print(f"  ! overlay {provider}/{mid}: bad spec, ignored")
+                continue
+            out.setdefault(provider, {})[mid] = (ctx, effort)
+    return out
+
+
+def catalog_model_ids(text):
+    """{provider: {ids}} parsed from a catalog file (header + provider lines)."""
+    out, current = {}, None
+    for line in text.splitlines():
+        m = re.match(r'^\[models\."([^"]+)"\]$', line.strip())
+        if m:
+            current = m.group(1)
+            continue
+        m = re.match(r'^provider\s*=\s*"([^"]+)"$', line.strip())
+        if m and current:
+            out.setdefault(m.group(1), set()).add(current)
+            current = None
+    return out
+
+
+def direct_extras(p, have, data, discovered, overlay, today):
+    """Discovered ids the LiteLLM path missed: (id, effort, ctx, source).
+
+    Specs resolve overlay -> LiteLLM DB -> conservative default. Anything
+    looking non-chat (exclusions, snapshots, known phantoms) is skipped
+    with a log line, same policy as the DB path.
+    """
+    extras = []
+    prefixes = tuple(p.get("litellm_prefixes", ()) or p.get("prefixes", ()))
+    for did in discovered:
+        if did in have or did in DROP_IDS:
+            continue
+        low = did.lower()
+        if any(x in low for x in EXCLUDE_SUBSTRINGS + SEARCH_SUBSTRINGS):
+            print(f"  - {did}: direct-only but excluded substring, skipped")
+            continue
+        if DATE_SUFFIX.search(did):
+            print(f"  - {did}: direct-only dated snapshot, skipped")
+            continue
+        if did in overlay.get(p["name"], {}):
+            ctx, effort = overlay[p["name"]][did]
+            source = "overlay"
+        else:
+            info, _ = lookup(data, prefixes, did)
+            if info is not None and usable_entry(info, today):
+                ctx, effort = specs_from_db(info), guess_effort(did)
+                source = "litellm"
+            else:
+                ctx, effort = DEFAULT_CTX.get(p["name"], 128000), guess_effort(did)
+                source = "default"
+                print(f"  - {did}: direct-only, no DB record (ctx={ctx} heuristic)")
+        extras.append((did, effort, ctx, source))
+    return extras
+
+
+def build_catalog(data, today, serial, discovery=None, overlay=None, report=None):
     lines = [
         "# Monotonic freshness stamp, bumped by .github/scripts/update_providers.py on",
         "# every content change (never by hand). The client compares serials, not",
@@ -381,6 +505,21 @@ def build_catalog(data, today, serial):
                 print(f"  - {cid}: ctx={ctx} effort={effort}")
                 models.append((cid, effort, ctx))
         total += len(models)
+        sec = {"added": [], "source": "litellm", "direct_ids": 0}
+        discovered = (discovery or {}).get(p["name"])
+        if discovered is not None:
+            sec["source"] = f"direct ({len(discovered)} ids) + litellm"
+            sec["direct_ids"] = len(discovered)
+            have = {mid for mid, _, _ in models}
+            for did, effort, ctx, origin in direct_extras(
+                p, have, data, discovered, overlay or {}, today
+            ):
+                models.append((did, effort, ctx))
+                sec["added"].append(f"{did} (ctx={ctx} via {origin})")
+                print(f"  + {did}: direct-only, ctx={ctx} via {origin}")
+            total += len(sec["added"])
+        if report is not None:
+            report[p["name"]] = sec
         for model_id, effort, ctx in models:
             lines += [
                 f'[models."{model_id}"]',
@@ -393,9 +532,29 @@ def build_catalog(data, today, serial):
     return "\n".join(lines) + "\n", total
 
 
+def write_sync_files(kind, lines):
+    with open("catalog_change.txt", "w", encoding="utf-8") as f:
+        f.write(kind + "\n")
+    with open("catalog_report.md", "w", encoding="utf-8") as f:
+        f.write("".join(lines))
+
+
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--discovery-dir",
+        default=None,
+        help="directory with discovery/<provider>.json from discover_providers.py",
+    )
+    args = ap.parse_args()
+
     data = fetch_litellm_data()
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    discovery = load_discovery(args.discovery_dir)
+    overlay = load_overlay()
+    if discovery:
+        print(f"direct discovery active for: {', '.join(sorted(discovery))}")
+    report = {}
 
     target = os.path.abspath(CATALOG_PATH)
     existing = None
@@ -404,17 +563,49 @@ def main():
             existing = f.read()
     m = SERIAL_RE.search(existing) if existing else None
     serial = (int(m.group(1)) + 1) if m else 1
-    content, total = build_catalog(data, today, serial)
+    content, total = build_catalog(data, today, serial, discovery, overlay, report)
+
+    # Change classification (stamps ignored): removals always need a human,
+    # pure additions and spec tweaks auto-merge.
+    old_ids = catalog_model_ids(existing) if existing else {}
+    new_ids = catalog_model_ids(content)
+    old_all = {i for ids in old_ids.values() for i in ids}
+    new_all = {i for ids in new_ids.values() for i in ids}
+    removed = sorted(old_all - new_all)
+    stale = []
+    for name, dids in discovery.items():
+        dset = set(dids)
+        gone = sorted(old_ids.get(name, set()) - dset - new_ids.get(name, set()))
+        stale += [(name, i, "retired upstream") for i in gone]
+        dropped = sorted((old_ids.get(name, set()) & dset) - new_ids.get(name, set()))
+        stale += [(name, i, "still served but dropped by family caps") for i in dropped]
+
+    md = [f"# Catalog sync — {today} (serial {serial})\n\n"]
+    for p in PROVIDERS_CONFIG:
+        sec = report.get(p["name"], {"added": [], "source": "litellm", "direct_ids": 0})
+        md.append(f"## {p['name']} — {sec['source']}\n")
+        for a in sec["added"]:
+            md.append(f"- added {a}\n")
+        if not sec["added"]:
+            md.append("- no direct-only additions\n")
+    if stale:
+        md.append("\n## Needs human review\n")
+        for name, mid, why in stale:
+            md.append(f"- {name}/{mid}: {why}\n")
+    kind = "removal" if removed else "additive"
+    md.append(f"\nChange kind: **{kind}**\n")
 
     # No-op when only the stamps would change: keeps history clean and lets
     # the workflow correctly report "No changes".
     if existing is not None and STAMP_RE.sub("", existing) == STAMP_RE.sub("", content):
         print(f"No model changes ({total} models); leaving {target} untouched.")
+        write_sync_files("none", md)
         return
 
     with open(target, "w", encoding="utf-8") as f:
         f.write(content)
     print(f"Updated {target} with {len(PROVIDERS_CONFIG)} providers and {total} models (serial {serial}).")
+    write_sync_files(kind, md)
 
 
 if __name__ == "__main__":

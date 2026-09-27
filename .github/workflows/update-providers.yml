@@ -1,8 +1,9 @@
 name: Update Built-in Providers
 
 on:
-  schedule:
-    - cron: '0 0 * * 0' # Every Sunday at 00:00 UTC
+  # Schedule removed: discover-providers.yml does the weekly sync
+  # (direct APIs + LiteLLM) and opens reviewable PRs. Kept for manual
+  # LiteLLM-only refreshes.
   workflow_dispatch: # Manual trigger from GitHub UI
 
 permissions:

@@ -1,0 +1,74 @@
+name: Direct Discovery Providers
+
+# Phase 2 catalog sync: ask each provider's own list-models API what exists
+# (keys from repository Secrets; a missing key degrades that provider to
+# LiteLLM-only, never red), union the ids into the catalog, and open a PR.
+# Pure additions/spec tweaks auto-merge (same trust as the old direct push);
+# removals stay open for human review. The old LiteLLM-only workflow is kept
+# for manual dispatch only.
+
+on:
+  schedule:
+    - cron: '0 0 * * 6' # Every Saturday at 00:00 UTC
+  workflow_dispatch: # Manual trigger from GitHub UI
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Direct discovery + catalog sync
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          python3 --version
+          python3 .github/scripts/discover_providers.py
+          python3 .github/scripts/update_providers.py --discovery-dir discovery
+          echo "change kind: $(cat catalog_change.txt)"
+
+      - name: Read change kind
+        id: kind
+        run: echo "kind=$(cat catalog_change.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Open sync PR
+        if: steps.kind.outputs.kind != 'none'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          DATE=$(date -u +%F)
+          KIND=$(cat catalog_change.txt)
+          BRANCH="catalog/discovery-$DATE"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add builtin_providers.toml
+          git commit -m "chore(providers): direct-discovery sync $DATE [skip ci]"
+          git push -u origin "$BRANCH"
+          gh pr create \
+            --title "chore(providers): direct-discovery sync $DATE ($KIND)" \
+            --body-file catalog_report.md \
+            --base master --head "$BRANCH"
+          if [ "$KIND" = "additive" ]; then
+            gh pr merge --squash --delete-branch "$BRANCH" \
+              || echo "::notice::auto-merge unavailable (branch protection?), PR left open"
+          else
+            echo "::notice::removal detected, PR left for human review"
+          fi

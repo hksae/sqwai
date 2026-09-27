@@ -27,6 +27,11 @@ ehthumbs.db
 
 tui.md
 
+# CI discovery artifacts (ephemeral; the workflow commits only the TOML)
+/discovery/
+/catalog_report.md
+/catalog_change.txt
+
 # Local-only implementation plan (never commit)
 /IMPL_PLAN.local.md
 
