@@ -166,9 +166,12 @@ pub fn egress_kind(cmd: &str) -> Option<&'static str> {
 }
 
 pub fn classify_for(shell: ShellKind, cmd: &str) -> Verdict {
-    // 0. Protected host-owned state (.sqwai/) hard block
-    if let Verdict::Blocked(reason) = check_protected_path(cmd) {
-        return Verdict::Blocked(reason);
+    // 0. Protected host-owned state (.sqwai/) hard block, or approval when
+    // a variable expansion makes the real path unknowable (audit C1)
+    match check_protected_path(cmd) {
+        Verdict::Blocked(reason) => return Verdict::Blocked(reason),
+        Verdict::NeedsApproval(reason) => return Verdict::NeedsApproval(reason),
+        Verdict::Safe => {}
     }
     // Layer 1: shell-specific heuristic (substring/regex)
     if let Verdict::NeedsApproval(reason) = heuristic_classify(shell, cmd) {
@@ -191,11 +194,73 @@ fn check_protected_path(cmd: &str) -> Verdict {
         .chars()
         .filter(|c| *c != '"' && *c != '\'' && *c != '`')
         .collect();
-    let lower = dequoted.to_lowercase();
-    if !lower.contains(".sqwai") {
-        return Verdict::Safe;
+    // Shells also expand `x=sqwai; cat .$x/...` into the protected path at
+    // runtime (audit C1). Resolve inline assignments before matching so the
+    // gate sees what the shell will open.
+    let lower = expand_inline_assignments(&dequoted).to_lowercase();
+    if lower.contains(".sqwai") {
+        return scan_protected_tokens(&lower);
     }
+    // What is left can still be a protected path assembled at runtime: a
+    // `.$x` / `.${d}` / `.%VAR%` expansion in hidden-path position opens any
+    // dot-directory, and no text match can prove which. Not provably safe →
+    // approval, never Safe. Ordinary `$VAR` args (token-initial) stay quiet:
+    // approval fatigue is its own safety problem.
+    if hidden_path_expansion(&lower) {
+        return Verdict::NeedsApproval("path assembled from a variable expansion");
+    }
+    Verdict::Safe
+}
 
+/// Substitute `name=value` assignments made earlier on the same command
+/// line into later `$name` / `${name}` expansions, to a fixed point (max
+/// 4 rounds) so chains like `a=sq; b=wai; cat .$a$b/x` resolve too.
+/// Over-expansion (a variable used before its assignment) only ever adds
+/// matches — fail closed.
+fn expand_inline_assignments(text: &str) -> String {
+    let mut vars: Vec<(String, String)> = Vec::new();
+    for token in text.split(|c: char| c.is_whitespace() || c == ';' || c == '|' || c == '&') {
+        if let Some((name, value)) = token.split_once('=') {
+            let valid_name = !name.is_empty()
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if valid_name && !value.is_empty() {
+                vars.push((name.to_string(), value.to_string()));
+            }
+        }
+    }
+    if vars.is_empty() {
+        return text.to_string();
+    }
+    let mut out = text.to_string();
+    for _ in 0..4 {
+        let mut changed = false;
+        for (name, value) in &vars {
+            for pattern in [format!("${{{name}}}"), format!("${name}")] {
+                if out.contains(&pattern) {
+                    out = out.replace(&pattern, value);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    out
+}
+
+/// True when an expansion sits in hidden-path position: `$` or `%` right
+/// after `.` or a path separator. `cat $FILE` is ordinary use; `cat .$FILE`
+/// assembles a dot-directory name the classifier cannot see through.
+fn hidden_path_expansion(lower: &str) -> bool {
+    let bytes = lower.as_bytes();
+    (1..bytes.len()).any(|i| {
+        (bytes[i] == b'$' || bytes[i] == b'%') && matches!(bytes[i - 1], b'.' | b'/' | b'\\')
+    })
+}
+
+fn scan_protected_tokens(lower: &str) -> Verdict {
     // Split into tokens by whitespace and shell operators/delimiters
     for raw_token in lower.split(|c: char| {
         c.is_whitespace()
@@ -254,6 +319,13 @@ fn check_protected_path(cmd: &str) -> Verdict {
 
 fn heuristic_classify(shell: ShellKind, cmd: &str) -> Verdict {
     let lower = cmd.to_lowercase();
+
+    // Decoding an opaque payload and piping/redirecting it onward hides the
+    // real bytes from every text-based layer (audit M10). Decoding to stdout
+    // alone stays quiet — it is just `cat` with extra steps.
+    if decodes_and_forwards(&lower) {
+        return Verdict::NeedsApproval("decoding and forwarding an opaque payload");
+    }
 
     if matches!(shell, ShellKind::Cmd) {
         if contains_any(
@@ -503,9 +575,12 @@ fn has_dynamic_code(lower: &str) -> bool {
         let mut words = segment.split_whitespace();
         let head = words.next().unwrap_or("");
         let rest: Vec<&str> = words.collect();
+        // Any dollar form counts, not just `$(...)`: `eval "$PAYLOAD"` runs
+        // bytes the classifier never sees (audit C2). The shell expands a
+        // bare `$VAR` just the same.
         let dynamic = rest
             .iter()
-            .any(|w| w.contains("$(") || w.contains('`') || w.contains("<("));
+            .any(|w| w.contains('$') || w.contains('`') || w.contains("<("));
         if !dynamic {
             continue;
         }
@@ -520,6 +595,25 @@ fn has_dynamic_code(lower: &str) -> bool {
         }
     }
     false
+}
+
+/// `base64 -d`/`xxd -r`/`certutil -decode` whose output is piped or
+/// redirected: the bytes every other layer inspects are not the bytes that
+/// run or land on disk (audit M10). Decode-to-stdout stays quiet.
+fn decodes_and_forwards(lower: &str) -> bool {
+    if !lower.contains('|') && !lower.contains('>') {
+        return false;
+    }
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    // combined short flags (`-di`, `-rp`) count too
+    let short_flag =
+        |flag: &str, c: char| flag.starts_with('-') && !flag.starts_with("--") && flag.contains(c);
+    words.windows(2).any(|w| match w {
+        ["base64", flag] => matches!(*flag, "-d" | "-D" | "--decode") || short_flag(flag, 'd'),
+        ["xxd", flag] => matches!(*flag, "-r" | "--revert") || short_flag(flag, 'r'),
+        ["certutil", flag] => *flag == "-decode",
+        _ => false,
+    })
 }
 
 /// Token-aware, not substring: `| head` stays Safe while `| sh`,
@@ -1280,6 +1374,100 @@ mod tests {
                     "fragmentation bypass for shell {shell:?}: {cmd}"
                 );
             }
+        }
+    }
+
+    /// Variable-expansion bypass (audit C1): `.$x` is not `.sqwai` as text,
+    /// but the shell expands it into a hidden-path read. A dollar expansion
+    /// in hidden-path position (dot or slash immediately before `$`) can
+    /// build any protected path at runtime — the classifier cannot prove
+    /// otherwise, so it must never return Safe.
+    #[test]
+    fn sqwai_variable_expansion_is_not_safe() {
+        let expansion_cases = [
+            "x=sqwai; cat .$x/journal/live.jsonl",
+            "cat .${d}/plans/1.json",
+            "rm -rf .$DIR",
+            "d=sqwai; cat .$d/x",
+            "echo pwned > .$x/memory/MEMORY.md",
+            "cat $HOME/.sqwai/journal/live.jsonl",
+        ];
+        for cmd in expansion_cases {
+            for shell in [ShellKind::Bash, ShellKind::Sh] {
+                assert!(
+                    !matches!(classify_for(shell, cmd), Verdict::Safe),
+                    "variable expansion sailed through as Safe for {shell:?}: {cmd}"
+                );
+            }
+        }
+        // regression: an assignment carrying the literal is still Blocked
+        assert_eq!(
+            classify_for(ShellKind::Bash, "x=.sqwai; rm -rf $x/plans"),
+            Verdict::Blocked("protected_path")
+        );
+    }
+
+    /// Ordinary expansions outside hidden-path position stay usable:
+    /// approval fatigue is its own safety problem.
+    #[test]
+    fn plain_variable_use_stays_safe() {
+        for cmd in [
+            "cat $FILE",
+            "cp $SRC $DST",
+            "echo $HOME",
+            "grep -r pattern $dir",
+        ] {
+            assert_eq!(
+                classify_for(ShellKind::Bash, cmd),
+                Verdict::Safe,
+                "plain variable use must not require approval: {cmd}"
+            );
+        }
+    }
+
+    /// Audit C2: `eval "$VAR"` executes content the classifier never sees.
+    /// A bare dollar expansion as eval/source/sh -c argument is dynamic
+    /// code even without `$(`, backtick or `<(`.
+    #[test]
+    fn eval_with_bare_variable_needs_approval() {
+        for cmd in [
+            "eval \"$PAYLOAD\"",
+            "eval $CMD",
+            "source \"$SCRIPT\"",
+            "bash -c \"$JOB\"",
+            "sh -c $TASK",
+        ] {
+            assert!(
+                matches!(
+                    classify_for(ShellKind::Bash, cmd),
+                    Verdict::NeedsApproval(_)
+                ),
+                "bare-variable eval must need approval: {cmd}"
+            );
+        }
+        // static spellings stay pinned Safe (existing behavior)
+        assert_eq!(
+            classify_for(ShellKind::Bash, "sh -c \"echo hi\""),
+            Verdict::Safe
+        );
+    }
+
+    /// Audit M10: decoding an opaque payload and piping it onward hides the
+    /// real command/path from every text-based layer.
+    #[test]
+    fn base64_decode_piped_onward_needs_approval() {
+        for cmd in [
+            "echo LnNxd2FpL2pvdXJuYWwvbGl2ZS5qc29ubA== | base64 -d | xargs cat",
+            "base64 --decode payload.txt | xargs rm",
+            "base64 -d x.b64 | tee /etc/hosts",
+        ] {
+            assert!(
+                matches!(
+                    classify_for(ShellKind::Bash, cmd),
+                    Verdict::NeedsApproval(_) | Verdict::Blocked(_)
+                ),
+                "base64 decode piped onward must not be Safe: {cmd}"
+            );
         }
     }
 
