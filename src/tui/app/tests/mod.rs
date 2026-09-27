@@ -71,6 +71,7 @@ fn test_app(url: String) -> App {
             effort_control: None,
             effort_always_on: false,
             fallback: None,
+            status: crate::config::ModelStatus::Active,
         },
     );
     let cfg = Config {
@@ -171,6 +172,7 @@ async fn real_zen_smoke() {
             effort_control: None,
             effort_always_on: false,
             fallback: None,
+            status: crate::config::ModelStatus::Active,
         },
     );
     let cfg = Config {

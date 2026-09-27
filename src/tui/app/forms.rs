@@ -11,7 +11,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tui_textarea::TextArea;
 
 use crate::agent::loop_task::AgentEvent;
-use crate::config::{Config, EffortControl, EffortLevel, ModelConfig, WireFormat};
+use crate::config::{Config, EffortControl, EffortLevel, ModelConfig, ModelStatus, WireFormat};
 use crate::providers::{self, ChatRequest, Message as PMessage, Role, SharedProvider};
 use crate::session::Session;
 use crate::tui::markdown::{Highlighter, render, wrap_tagged};
@@ -614,6 +614,10 @@ impl App {
                     effort_control,
                     effort_always_on,
                     fallback: previous.as_ref().and_then(|p| p.fallback.clone()),
+                    status: previous
+                        .as_ref()
+                        .map(|p| p.status)
+                        .unwrap_or(ModelStatus::Active),
                 };
                 self.cfg.models.insert(new_key.clone(), updated.clone());
                 if self.session.model_key == new_key {

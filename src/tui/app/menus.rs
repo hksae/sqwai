@@ -2520,11 +2520,18 @@ impl App {
                     )]),
                     MenuAction::UpdateBuiltins,
                 ));
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(
+                        format!(" {}", crate::config::catalog_status_line()),
+                        Theme::dim(),
+                    )]),
+                    MenuAction::None,
+                ));
             }
             Menu::Models { provider } => {
                 let is_builtin = self.cfg.is_builtin_provider(&provider);
                 for (k, m) in &self.cfg.models {
-                    if m.provider == provider {
+                    if m.provider == provider && m.status.visible_in_picker() {
                         let current = k == &self.session.model_key;
                         let mark = if current { " *" } else { "" };
                         let action = if is_builtin {
@@ -2611,7 +2618,7 @@ impl App {
             }
             Menu::PickModel { provider } => {
                 for (k, m) in &self.cfg.models {
-                    if m.provider == provider {
+                    if m.provider == provider && m.status.visible_in_picker() {
                         let current = k == &self.session.model_key;
                         let mark = if current { " *current" } else { "" };
                         self.menu_rows.push(row(

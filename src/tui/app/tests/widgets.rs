@@ -1354,6 +1354,7 @@ fn session_recovery_with_deleted_or_broken_plan_id() {
             effort_control: None,
             effort_always_on: false,
             fallback: None,
+            status: crate::config::ModelStatus::Active,
         },
     );
     let cfg = Config {

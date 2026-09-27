@@ -548,6 +548,7 @@ fn model_menu_row_formats_ctx() {
             effort_control: None,
             effort_always_on: false,
             fallback: None,
+            status: crate::config::ModelStatus::Active,
         },
     );
     app.open_menu(Menu::Models {

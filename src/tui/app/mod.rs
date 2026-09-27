@@ -10,7 +10,7 @@ use tui_textarea::TextArea;
 use crate::agent::loop_task::{
     AgentEvent, AgentHandle, AgentOutcome, ApprovalDecision, ControlMsg, spawn_agent,
 };
-use crate::config::{Config, EffortLevel, ModelConfig};
+use crate::config::{Config, EffortLevel, ModelConfig, ModelStatus};
 use crate::plan;
 use crate::providers::{self, Message as PMessage, Role, SharedProvider};
 use crate::session::{ActivitySummary, Session, SessionHeader, TurnNote};
@@ -834,6 +834,7 @@ impl App {
                 effort_control: None,
                 effort_always_on: false,
                 fallback: None,
+                status: ModelStatus::Active,
             });
         let resolved = cfg.resolve_provider(&model_cfg)?;
         let provider = providers::create(&resolved)?;
@@ -3641,7 +3642,8 @@ impl App {
                     if manual {
                         self.status(
                             &format!(
-                                "built-in providers updated ({} models)",
+                                "built-in providers updated (#{} · {} models)",
+                                new_catalog.serial,
                                 new_catalog.models.len()
                             ),
                             StatusKind::Ok,
@@ -3650,7 +3652,8 @@ impl App {
                         crate::tui::event_log::log(
                             "PROVIDERS",
                             format!(
-                                "built-in providers updated in background ({} models)",
+                                "built-in providers updated in background (#{} · {} models)",
+                                new_catalog.serial,
                                 new_catalog.models.len()
                             ),
                         );
@@ -3662,12 +3665,19 @@ impl App {
                     }
                 }
                 Err(e) => {
+                    // Auto failures surface once as a status line (at most
+                    // daily — the check gate keeps it quiet otherwise), not
+                    // just the event log nobody opens.
+                    crate::tui::event_log::log(
+                        "PROVIDERS",
+                        format!("background update check failed: {e}"),
+                    );
                     if manual {
                         self.status(&format!("update failed: {e}"), StatusKind::Err);
                     } else {
-                        crate::tui::event_log::log(
-                            "PROVIDERS",
-                            format!("background update check failed: {e}"),
+                        self.status(
+                            &format!("provider catalog check failed: {e}"),
+                            StatusKind::Warn,
                         );
                     }
                 }

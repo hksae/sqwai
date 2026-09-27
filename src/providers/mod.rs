@@ -15,6 +15,25 @@ use crate::config::{EffortLevel, ResolvedProvider, WireFormat};
 /// reqwest default. Version tracks the package automatically.
 pub const USER_AGENT: &str = concat!("sqwai/", env!("CARGO_PKG_VERSION"));
 
+/// Process-wide base HTTP client for untuned calls (catalog fetch,
+/// connection probes): one pool and one place where proxy/TLS behavior is
+/// decided, instead of independently-built clients that can silently
+/// diverge. Per-request timeouts stay on the builders; streaming providers
+/// keep their own tuned clients (http1_only, long reads).
+static SHARED_HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+pub fn http_client() -> reqwest::Client {
+    SHARED_HTTP
+        .get_or_init(|| {
+            reqwest::ClientBuilder::new()
+                .user_agent(USER_AGENT)
+                .connect_timeout(std::time::Duration::from_secs(8))
+                .build()
+                .expect("default http client builds")
+        })
+        .clone()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -703,13 +722,8 @@ pub async fn check_connection(p: &ResolvedProvider) -> Result<String, String> {
         .filter(|k| !k.is_empty())
         .ok_or_else(|| "no API key configured for this provider".to_string())?;
     let url = format!("{}/models", p.base_url.trim_end_matches('/'));
-    let http = reqwest::ClientBuilder::new()
-        .user_agent(USER_AGENT)
-        .connect_timeout(std::time::Duration::from_secs(8))
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
-    let mut request = http.get(&url);
+    let http = http_client();
+    let mut request = http.get(&url).timeout(std::time::Duration::from_secs(15));
     request = match p.format {
         WireFormat::Anthropic => request
             .header("x-api-key", &key)

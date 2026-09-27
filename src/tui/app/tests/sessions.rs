@@ -77,6 +77,7 @@ fn apply_session_renders_history_and_switches_model() {
             effort_control: None,
             effort_always_on: false,
             fallback: None,
+            status: crate::config::ModelStatus::Active,
         },
     );
     let mut s = Session::new("m2".into(), 2000);

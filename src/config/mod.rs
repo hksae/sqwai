@@ -251,6 +251,34 @@ pub struct ModelConfig {
     /// Optional fallback model key (same or other provider)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<String>,
+    /// Lifecycle marker from the catalog. `retired` models are hidden from
+    /// pickers but never deleted (user configs referencing them keep working
+    /// until the user switches). Absent means active.
+    #[serde(default, skip_serializing_if = "ModelStatus::is_active")]
+    pub status: ModelStatus,
+}
+
+/// Lifecycle of a catalog model. Tombstones retire without deleting:
+/// nothing references a removed id, and a resurrected id stays retired
+/// until the catalog says otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelStatus {
+    #[default]
+    Active,
+    Deprecated,
+    Retired,
+}
+
+impl ModelStatus {
+    fn is_active(&self) -> bool {
+        *self == Self::Active
+    }
+
+    /// Retired models never surface in pickers; deprecated ones do.
+    pub fn visible_in_picker(self) -> bool {
+        self != Self::Retired
+    }
 }
 
 /// A model's declared effort behaviour, resolved against its wire format.
@@ -380,10 +408,41 @@ pub(crate) fn ip_blocked(addr: &std::net::IpAddr) -> bool {
 pub struct BuiltinCatalog {
     #[serde(default)]
     pub updated_at: Option<String>,
+    /// Monotonic serial stamped by the generator (CI), never by hand.
+    /// Freshness compares serials, not dates: a content change without a
+    /// stamp bump still propagates, and a replayed old file never wins.
+    /// Missing (old files) reads as 0.
+    #[serde(default)]
+    pub serial: u64,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
     pub models: BTreeMap<String, ModelConfig>,
+}
+
+/// Pinned origins for the six built-in providers: (name, host, key env).
+/// A remote catalog may refresh metadata, but it can never move a key to
+/// a new host (that is key exfiltration, not an update) and it can never
+/// introduce a new provider (those ship with releases). Unknown names in
+/// a fetched file are skipped, never applied.
+pub const BUILTIN_ORIGINS: &[(&str, &str, &str)] = &[
+    (
+        "gemini",
+        "generativelanguage.googleapis.com",
+        "GEMINI_API_KEY",
+    ),
+    ("anthropic", "api.anthropic.com", "ANTHROPIC_API_KEY"),
+    ("openai", "api.openai.com", "OPENAI_API_KEY"),
+    ("deepseek", "api.deepseek.com", "DEEPSEEK_API_KEY"),
+    ("grok", "api.x.ai", "XAI_API_KEY"),
+    ("kimi", "api.moonshot.cn", "MOONSHOT_API_KEY"),
+];
+
+fn pinned_origin(name: &str) -> Option<(&'static str, &'static str)> {
+    BUILTIN_ORIGINS
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, host, key_env)| (*host, *key_env))
 }
 
 pub fn builtin_cache_path() -> Result<PathBuf> {
@@ -394,9 +453,34 @@ pub fn builtin_meta_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("builtin_providers_meta.json"))
 }
 
+/// One-line catalog provenance for the providers menu: serial, stamp and
+/// last check. Never empty — even the embedded fallback reports itself,
+/// so "no info" itself tells the user updates never landed.
+pub fn catalog_status_line() -> String {
+    let catalog = BuiltinCatalog::current();
+    let date = catalog
+        .updated_at
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("undated");
+    let checked = builtin_meta_path()
+        .and_then(|path| std::fs::read_to_string(&path).map_err(|e| e.into()))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<BuiltinMeta>(&raw).ok())
+        .map(|meta| meta.last_checked)
+        .unwrap_or_else(|| "never".to_string());
+    format!(
+        "catalog #{} · {} · checked {}",
+        catalog.serial, date, checked
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BuiltinMeta {
     pub last_checked: String,
+    /// ETag of the cached catalog body, for conditional refresh.
+    #[serde(default)]
+    pub etag: Option<String>,
 }
 
 static BUILTIN_CACHE: std::sync::RwLock<Option<BuiltinCatalog>> = std::sync::RwLock::new(None);
@@ -447,36 +531,34 @@ impl BuiltinCatalog {
 /// an attacker's *public https* endpoint is indistinguishable from a
 /// legitimate update until catalogs are signed (tracked separately).
 fn validated_disk_catalog(raw: &str, fallback: &BuiltinCatalog) -> Result<BuiltinCatalog> {
-    let catalog = validate_fetched_catalog(raw, None)?;
-    if catalog.updated_at < fallback.updated_at {
+    let catalog = validate_fetched_catalog(raw, 0)?;
+    if catalog.serial < fallback.serial {
         anyhow::bail!("cached catalog is older than the built-in one");
     }
     Ok(catalog)
 }
 
 /// Validate a fetched builtin catalog before it touches disk or config.
-/// `apply_builtins` overwrites stored provider base_urls from the catalog
-/// and the user's key follows them, so a compromised remote is key
-/// exfiltration, not a cosmetic issue. Three rules, all offline-testable:
-/// every provider endpoint is https on a public host (same SSRF gate as
-/// webfetch), no inline secrets ride the catalog, and `updated_at` never
-/// moves backwards (rollback protection against a replayed old file).
+/// `apply_builtins` copies provider base_urls from the catalog and the
+/// user's key follows them, so a compromised remote is key exfiltration,
+/// not a cosmetic issue. Rules, all offline-testable:
+/// - every provider endpoint is https on a public host (same SSRF gate as
+///   webfetch), no inline secrets ride the catalog;
+/// - a builtin provider's host and key env must equal the pinned origin —
+///   a moved host is an attack, not an update (new providers never arrive
+///   this way; they ship with releases and are skipped here);
+/// - `serial` never moves backwards (rollback protection against a replayed
+///   old file); `updated_at` is informational only.
+///
 /// Signature verification is the real fix and needs repo-side signing;
 /// until then this is the enforced half.
-pub fn validate_fetched_catalog(
-    text: &str,
-    cached_updated_at: Option<&str>,
-) -> Result<BuiltinCatalog> {
+pub fn validate_fetched_catalog(text: &str, cached_serial: u64) -> Result<BuiltinCatalog> {
     let catalog: BuiltinCatalog = toml::from_str(text).context("parsing builtin providers TOML")?;
-    let fetched_at = catalog
-        .updated_at
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("fetched catalog carries no updated_at"))?;
-    if let Some(cached) = cached_updated_at.filter(|s| !s.is_empty())
-        && fetched_at < cached
-    {
-        anyhow::bail!("fetched catalog is older than the cached one ({fetched_at} < {cached})");
+    if catalog.serial < cached_serial {
+        anyhow::bail!(
+            "fetched catalog is older than the cached one (serial {} < {cached_serial})",
+            catalog.serial
+        );
     }
     for (name, provider) in &catalog.providers {
         if provider.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
@@ -492,37 +574,80 @@ pub fn validate_fetched_catalog(
         }
         url_host_allowed(&url)
             .map_err(|detail| anyhow::anyhow!("provider {name:?} base_url {detail}"))?;
+        if let Some((host, key_env)) = pinned_origin(name) {
+            if url.host_str() != Some(host) {
+                anyhow::bail!(
+                    "provider {name:?} moves off its pinned host ({host}): refusing catalog"
+                );
+            }
+            if provider
+                .api_key_env
+                .as_deref()
+                .is_some_and(|k| k != key_env)
+            {
+                anyhow::bail!(
+                    "provider {name:?} rebinds its key env (pinned {key_env}): refusing catalog"
+                );
+            }
+        }
     }
     Ok(catalog)
 }
 
 pub async fn check_and_update_builtins(force: bool) -> Result<Option<BuiltinCatalog>> {
+    // Air-gapped escape hatch: no network, embedded catalog stays.
+    if std::env::var("SQWAI_NO_CATALOG_UPDATE")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    {
+        return Ok(None);
+    }
+    let url = std::env::var("SQWAI_CATALOG_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| BUILTIN_PROVIDERS_URL.to_string());
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let meta_now = builtin_meta_path()
+        .and_then(|path| std::fs::read_to_string(&path).map_err(|e| e.into()))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<BuiltinMeta>(&raw).ok());
     if !force
-        && let Ok(meta_path) = builtin_meta_path()
-        && let Ok(raw) = std::fs::read_to_string(&meta_path)
-        && let Ok(meta) = serde_json::from_str::<BuiltinMeta>(&raw)
+        && let Some(meta) = meta_now.as_ref()
         && meta.last_checked == today
     {
         return Ok(None);
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()?;
-    let res = client.get(BUILTIN_PROVIDERS_URL).send().await?;
+    let mut request = crate::providers::http_client()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(5));
+    if let Some(etag) = meta_now.as_ref().and_then(|m| m.etag.clone()) {
+        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+    }
+    let res = request.send().await?;
+    if res.status() == reqwest::StatusCode::NOT_MODIFIED {
+        // Edge: 304 with no usable cache on disk falls through to the
+        // embedded fallback below via Ok(None) — same as "up to date".
+        write_meta(&today, meta_now.as_ref().and_then(|m| m.etag.clone()));
+        return Ok(None);
+    }
     if !res.status().is_success() {
         anyhow::bail!("server returned status {}", res.status());
     }
+    let etag = res
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let text = res.text().await?;
-    // the cached stamp is the rollback floor; a refusal leaves the meta
+    // the cached serial is the rollback floor; a refusal leaves the meta
     // stamp alone so tomorrow retries (and recovers on its own)
-    let cached_updated_at = builtin_cache_path()
+    let cached_serial = builtin_cache_path()
         .and_then(|path| std::fs::read_to_string(&path).map_err(|e| e.into()))
         .ok()
         .and_then(|raw| toml::from_str::<BuiltinCatalog>(&raw).ok())
-        .and_then(|catalog| catalog.updated_at);
-    let catalog = validate_fetched_catalog(&text, cached_updated_at.as_deref())?;
+        .map(|catalog| catalog.serial)
+        .unwrap_or(0);
+    let catalog = validate_fetched_catalog(&text, cached_serial)?;
 
     // No-op when the content is identical: the meta stamp still advances
     // (so tomorrow's launch skips the fetch), but the caller gets Ok(None)
@@ -531,28 +656,30 @@ pub async fn check_and_update_builtins(force: bool) -> Result<Option<BuiltinCata
         && let Ok(cached) = std::fs::read_to_string(&cache_path)
         && cached == text
     {
-        if let Ok(meta_path) = builtin_meta_path()
-            && let Ok(meta_json) = serde_json::to_string(&BuiltinMeta {
-                last_checked: today,
-            })
-        {
-            let _ = atomic_write(&meta_path, &meta_json);
-        }
+        write_meta(
+            &today,
+            etag.or(meta_now.as_ref().and_then(|m| m.etag.clone())),
+        );
         return Ok(None);
     }
 
     if let Ok(cache_path) = builtin_cache_path() {
         let _ = atomic_write(&cache_path, &text);
     }
+    write_meta(&today, etag);
+    BuiltinCatalog::invalidate_cache();
+    Ok(Some(catalog))
+}
+
+fn write_meta(today: &str, etag: Option<String>) {
     if let Ok(meta_path) = builtin_meta_path()
         && let Ok(meta_json) = serde_json::to_string(&BuiltinMeta {
-            last_checked: today,
+            last_checked: today.to_string(),
+            etag,
         })
     {
         let _ = atomic_write(&meta_path, &meta_json);
     }
-    BuiltinCatalog::invalidate_cache();
-    Ok(Some(catalog))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1177,6 +1304,12 @@ impl Config {
     pub fn apply_builtins(&mut self) {
         let catalog = BuiltinCatalog::current();
         for (name, p) in catalog.providers {
+            // New providers never arrive over the wire: they ship with
+            // releases (which extend the pinned origins above), so anything
+            // else is skipped, never applied.
+            if pinned_origin(&name).is_none() {
+                continue;
+            }
             if let Some(user_p) = self.providers.get_mut(&name) {
                 user_p.base_url = p.base_url;
                 user_p.format = p.format;
@@ -1188,7 +1321,22 @@ impl Config {
             }
         }
         for (k, m) in catalog.models {
-            self.models.entry(k).or_insert(m);
+            // Models of skipped (unknown) providers are unusable — skip
+            // with them. Otherwise insert new ones whole; for known ones
+            // only the lifecycle flows (a user-marked status always wins).
+            if !self.providers.contains_key(&m.provider) {
+                continue;
+            }
+            match self.models.get_mut(&k) {
+                Some(u) => {
+                    if u.status == ModelStatus::Active {
+                        u.status = m.status;
+                    }
+                }
+                None => {
+                    self.models.insert(k, m);
+                }
+            }
         }
     }
 
@@ -2070,6 +2218,7 @@ effort = "off"
                 effort_control: None,
                 effort_always_on: false,
                 fallback: None,
+                status: ModelStatus::Active,
             },
         );
         cfg.apply_builtins();
@@ -2079,12 +2228,13 @@ effort = "off"
 
     /// A fetched catalog is applied to provider endpoints with the user's
     /// key following them, so it validates like a trust boundary: https on
-    /// a public host, no inline secrets, never backwards in time.
+    /// a public host, no inline secrets, pinned origins for builtins,
+    /// serial never backwards.
     #[test]
     fn fetched_catalog_validates_base_urls_secrets_and_freshness() {
-        fn catalog(base_url: &str, updated_at: &str, api_key: bool) -> String {
+        fn catalog(base_url: &str, serial: u64, api_key: bool) -> String {
             format!(
-                "updated_at = \"{updated_at}\"\n[providers.acme]\nformat = \"openai\"\nbase_url = \"{base_url}\"{}\n[models.\"acme-x\"]\nprovider = \"acme\"\nid = \"acme-x\"\ncontext = 1000\neffort = \"medium\"\n",
+                "serial = {serial}\n[providers.acme]\nformat = \"openai\"\nbase_url = \"{base_url}\"{}\n[models.\"acme-x\"]\nprovider = \"acme\"\nid = \"acme-x\"\ncontext = 1000\neffort = \"medium\"\n",
                 if api_key {
                     "\napi_key = \"sk-planted\""
                 } else {
@@ -2092,54 +2242,74 @@ effort = "off"
                 },
             )
         }
-        let good = catalog("https://api.acme.example/v1", "2026-09-10", false);
-        let parsed = validate_fetched_catalog(&good, Some("2026-09-09")).unwrap();
+        let good = catalog("https://api.acme.example/v1", 10, false);
+        let parsed = validate_fetched_catalog(&good, 9).unwrap();
         assert!(parsed.providers.contains_key("acme"));
-        // same stamp is a no-op upstream, not a rollback
-        assert!(validate_fetched_catalog(&good, Some("2026-09-10")).is_ok());
+        // same serial is a no-op upstream, not a rollback
+        assert!(validate_fetched_catalog(&good, 10).is_ok());
         // the shipped fallback itself passes (the gate must never reject
         // the file it is meant to protect the updates of)
-        assert!(validate_fetched_catalog(BUILTIN_PROVIDERS_FALLBACK, None).is_ok());
+        assert!(validate_fetched_catalog(BUILTIN_PROVIDERS_FALLBACK, 0).is_ok());
 
-        for (case, url, stamp, key) in [
-            (
-                "plain http",
-                "http://api.acme.example/v1",
-                "2026-09-10",
-                false,
-            ),
-            (
-                "loopback https",
-                "https://127.0.0.1/v1",
-                "2026-09-10",
-                false,
-            ),
-            ("private https", "https://10.0.0.5/v1", "2026-09-10", false),
-            (
-                "localhost",
-                "https://localhost:8443/v1",
-                "2026-09-10",
-                false,
-            ),
-            (
-                "inline secret",
-                "https://api.acme.example/v1",
-                "2026-09-10",
-                true,
-            ),
-            (
-                "stale stamp",
-                "https://api.acme.example/v1",
-                "2026-09-01",
-                false,
-            ),
-            ("missing stamp", "https://api.acme.example/v1", "", false),
+        for (case, url, serial, key) in [
+            ("plain http", "http://api.acme.example/v1", 10, false),
+            ("loopback https", "https://127.0.0.1/v1", 10, false),
+            ("private https", "https://10.0.0.5/v1", 10, false),
+            ("localhost", "https://localhost:8443/v1", 10, false),
+            ("inline secret", "https://api.acme.example/v1", 10, true),
+            ("stale serial", "https://api.acme.example/v1", 8, false),
         ] {
             assert!(
-                validate_fetched_catalog(&catalog(url, stamp, key), Some("2026-09-09")).is_err(),
+                validate_fetched_catalog(&catalog(url, serial, key), 9).is_err(),
                 "fetched catalog accepted {case}"
             );
         }
+    }
+
+    /// Pinned origins: a builtin provider that moves host or rebinds its
+    /// key env fails the whole file (that is key exfiltration, not an
+    /// update). Unknown providers pass validation but are skipped at apply.
+    #[test]
+    fn fetched_catalog_pins_builtin_origins() {
+        fn catalog(name: &str, base_url: &str, key_env: &str) -> String {
+            format!(
+                "serial = 10\n[providers.{name}]\nformat = \"openai\"\nbase_url = \"{base_url}\"\napi_key_env = \"{key_env}\"\n"
+            )
+        }
+        // moved host refuses (public-looking, so only the pin catches it)
+        let err = validate_fetched_catalog(
+            &catalog(
+                "openai",
+                "https://api.evil-example.com/v1",
+                "OPENAI_API_KEY",
+            ),
+            9,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("pinned"), "{err:?}");
+        // rebound key env refuses
+        let err = validate_fetched_catalog(
+            &catalog("openai", "https://api.openai.com/v1", "EVIL_KEY"),
+            9,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("pinned"), "{err:?}");
+        // pinned values pass
+        assert!(
+            validate_fetched_catalog(
+                &catalog("openai", "https://api.openai.com/v1", "OPENAI_API_KEY"),
+                9
+            )
+            .is_ok()
+        );
+        // unknown providers pass validation (skipped at apply, never added)
+        assert!(
+            validate_fetched_catalog(
+                &catalog("acme", "https://api.acme.example/v1", "ACME_API_KEY"),
+                9
+            )
+            .is_ok()
+        );
     }
 
     /// Audit H19: NaN survives `clamp` (both comparisons false) and
@@ -2170,9 +2340,9 @@ effort = "off"
     /// into `apply_builtins`, base_url and the user's key with it.
     #[test]
     fn disk_catalog_runs_the_same_gate_as_a_fetch() {
-        fn catalog(base_url: &str, updated_at: &str, api_key: bool) -> String {
+        fn catalog(base_url: &str, serial: u64, api_key: bool) -> String {
             format!(
-                "updated_at = \"{updated_at}\"\n[providers.acme]\nformat = \"openai\"\nbase_url = \"{base_url}\"{}\n",
+                "serial = {serial}\n[providers.acme]\nformat = \"openai\"\nbase_url = \"{base_url}\"{}\n",
                 if api_key {
                     "\napi_key = \"sk-planted\""
                 } else {
@@ -2184,42 +2354,32 @@ effort = "off"
         // a legitimate fresh catalog passes
         assert!(
             validated_disk_catalog(
-                &catalog("https://api.acme.example/v1", "9999-12-31", false),
+                &catalog("https://api.acme.example/v1", 99, false),
                 &fallback
             )
             .is_ok()
         );
-        for (case, url, stamp, key) in [
-            (
-                "plain http",
-                "http://attacker.example/v1",
-                "9999-12-31",
-                false,
-            ),
-            (
-                "loopback https",
-                "https://127.0.0.1/v1",
-                "9999-12-31",
-                false,
-            ),
-            (
-                "inline secret",
-                "https://api.acme.example/v1",
-                "9999-12-31",
-                true,
-            ),
-            (
-                "rollback below the shipped floor",
-                "https://api.acme.example/v1",
-                "2020-01-01",
-                false,
-            ),
+        for (case, url, serial, key) in [
+            ("plain http", "http://attacker.example/v1", 99, false),
+            ("loopback https", "https://127.0.0.1/v1", 99, false),
+            ("inline secret", "https://api.acme.example/v1", 99, true),
         ] {
             assert!(
-                validated_disk_catalog(&catalog(url, stamp, key), &fallback).is_err(),
+                validated_disk_catalog(&catalog(url, serial, key), &fallback).is_err(),
                 "disk cache accepted {case}"
             );
         }
+        // rollback below the shipped floor refuses even with good urls
+        let shipped: BuiltinCatalog =
+            toml::from_str("serial = 50\n[providers.acme]\nformat = \"openai\"\nbase_url = \"https://api.acme.example/v1\"\n").unwrap();
+        assert!(
+            validated_disk_catalog(&catalog("https://api.acme.example/v1", 49, false), &shipped)
+                .is_err()
+        );
+        assert!(
+            validated_disk_catalog(&catalog("https://api.acme.example/v1", 50, false), &shipped)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2383,6 +2543,7 @@ provider = "p"
                 effort_control: None,
                 effort_always_on: false,
                 fallback: Some("m_b".into()),
+                status: ModelStatus::Active,
             },
         );
         cfg.models.insert(
@@ -2395,6 +2556,7 @@ provider = "p"
                 effort_control: None,
                 effort_always_on: false,
                 fallback: Some("m_c".into()),
+                status: ModelStatus::Active,
             },
         );
         cfg.models.insert(
@@ -2407,6 +2569,7 @@ provider = "p"
                 effort_control: None,
                 effort_always_on: false,
                 fallback: Some("m_a".into()), // cycle back to A
+                status: ModelStatus::Active,
             },
         );
 
