@@ -1,4 +1,4 @@
-updated_at = "2026-09-09"
+updated_at = "2026-09-27"
 
 # Gemini
 [providers.gemini]
@@ -56,15 +56,15 @@ base_url = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
 continuation = true
 
-[models."claude-opus-5"]
+[models."claude-opus-5-5"]
 provider = "anthropic"
-id = "claude-opus-5"
+id = "claude-opus-5-5"
 context = 1000000
 effort = "high"
 
-[models."claude-opus-4-8"]
+[models."claude-opus-5"]
 provider = "anthropic"
-id = "claude-opus-4-8"
+id = "claude-opus-5"
 context = 1000000
 effort = "high"
 
@@ -153,9 +153,9 @@ id = "gpt-5.5"
 context = 1050000
 effort = "high"
 
-[models."gpt-6-astra"]
+[models."gpt-6-sol"]
 provider = "openai"
-id = "gpt-6-astra"
+id = "gpt-6-sol"
 context = 922000
 effort = "medium"
 
