@@ -2195,6 +2195,17 @@ the checkpoints.
   does not close the gap. Mitigations: the ladder, manual acceptance items,
   diff review.
 
+- **LSP diagnostics are trusted evidence.** A zero-error `diagnostics`
+  record satisfies step evidence (and strict `finish`). LSP servers come
+  only from the user's global config — `[lsp]` is not project-overridable,
+  so a cloned repo cannot bring its own server — and diagnostics carry the
+  same trust the user puts in their editor toolchain. A compromised or
+  misconfigured user-level server can still report `errors: 0` and close a
+  step with no host-run command (audit C7, accepted 2026-09-27).
+  Mitigations: prefer `cmd:`/`differential:` acceptance items, which the
+  host executes itself; `complete` re-runs executable checks regardless of
+  what closed the step.
+
 ### Findings vs notes
 
 Findings (bugs, issues, vulnerabilities found during code review) are not stored in `note`.

@@ -430,14 +430,28 @@ impl BuiltinCatalog {
                 toml::from_str(BUILTIN_PROVIDERS_FALLBACK).unwrap_or_default();
             if let Ok(path) = builtin_cache_path()
                 && let Ok(raw) = std::fs::read_to_string(&path)
-                && let Ok(catalog) = toml::from_str::<BuiltinCatalog>(&raw)
-                && catalog.updated_at >= fallback.updated_at
+                && let Ok(catalog) = validated_disk_catalog(&raw, &fallback)
             {
                 return catalog;
             }
             fallback
         }
     }
+}
+
+/// The on-disk cache is untrusted input until proven otherwise (audit C8):
+/// the fetch path validates before writing, but the file can be rewritten
+/// behind its back, and `apply_builtins` copies `base_url` straight into
+/// provider config — the user's key follows. Same content rules as the
+/// fetch, plus the freshness floor. Residual: a tampered cache pointing at
+/// an attacker's *public https* endpoint is indistinguishable from a
+/// legitimate update until catalogs are signed (tracked separately).
+fn validated_disk_catalog(raw: &str, fallback: &BuiltinCatalog) -> Result<BuiltinCatalog> {
+    let catalog = validate_fetched_catalog(raw, None)?;
+    if catalog.updated_at < fallback.updated_at {
+        anyhow::bail!("cached catalog is older than the built-in one");
+    }
+    Ok(catalog)
 }
 
 /// Validate a fetched builtin catalog before it touches disk or config.
@@ -2116,6 +2130,64 @@ effort = "off"
             assert!(
                 validate_fetched_catalog(&catalog(url, stamp, key), Some("2026-09-09")).is_err(),
                 "fetched catalog accepted {case}"
+            );
+        }
+    }
+
+    /// Audit C8: the disk path used to `toml::from_str` whatever sat in
+    /// `builtin_providers.toml` — validation ran on the network fetch
+    /// only, so a cache rewritten behind the app's back went straight
+    /// into `apply_builtins`, base_url and the user's key with it.
+    #[test]
+    fn disk_catalog_runs_the_same_gate_as_a_fetch() {
+        fn catalog(base_url: &str, updated_at: &str, api_key: bool) -> String {
+            format!(
+                "updated_at = \"{updated_at}\"\n[providers.acme]\nformat = \"openai\"\nbase_url = \"{base_url}\"{}\n",
+                if api_key {
+                    "\napi_key = \"sk-planted\""
+                } else {
+                    ""
+                },
+            )
+        }
+        let fallback: BuiltinCatalog = toml::from_str(BUILTIN_PROVIDERS_FALLBACK).unwrap();
+        // a legitimate fresh catalog passes
+        assert!(
+            validated_disk_catalog(
+                &catalog("https://api.acme.example/v1", "9999-12-31", false),
+                &fallback
+            )
+            .is_ok()
+        );
+        for (case, url, stamp, key) in [
+            (
+                "plain http",
+                "http://attacker.example/v1",
+                "9999-12-31",
+                false,
+            ),
+            (
+                "loopback https",
+                "https://127.0.0.1/v1",
+                "9999-12-31",
+                false,
+            ),
+            (
+                "inline secret",
+                "https://api.acme.example/v1",
+                "9999-12-31",
+                true,
+            ),
+            (
+                "rollback below the shipped floor",
+                "https://api.acme.example/v1",
+                "2020-01-01",
+                false,
+            ),
+        ] {
+            assert!(
+                validated_disk_catalog(&catalog(url, stamp, key), &fallback).is_err(),
+                "disk cache accepted {case}"
             );
         }
     }

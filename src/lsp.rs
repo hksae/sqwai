@@ -11,6 +11,12 @@ use tokio::process::{Child, ChildStdin, Command};
 
 const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
+/// Bound on waiting for the next server message during a request. A live
+/// server always produces something (response or notification) well inside
+/// this; a wedged one must fail the startup instead of hanging the agent
+/// forever (audit H13).
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub async fn write_message<W: AsyncWrite + Unpin>(writer: &mut W, value: &Value) -> Result<()> {
     let body = serde_json::to_vec(value)?;
     if body.len() > MAX_MESSAGE_BYTES {
@@ -165,6 +171,18 @@ impl Client {
     }
 
     async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.request_bounded(method, params, REQUEST_TIMEOUT).await
+    }
+
+    /// A server that accepts the pipe but never answers (wrapper script up,
+    /// real server dead) must not wedge the agent forever — every wait for
+    /// the next message is bounded (audit H13).
+    async fn request_bounded(
+        &mut self,
+        method: &str,
+        params: Value,
+        limit: std::time::Duration,
+    ) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
         write_message(
@@ -173,10 +191,14 @@ impl Client {
         )
         .await?;
         loop {
-            let msg = match self.incoming.recv().await {
-                Some(Ok(msg)) => msg,
-                Some(Err(e)) => return Err(e),
-                None => bail!("LSP server closed stdout"),
+            let msg = match tokio::time::timeout(limit, self.incoming.recv()).await {
+                Err(_) => bail!(
+                    "LSP server sent nothing for {}s while waiting on {method}",
+                    limit.as_secs()
+                ),
+                Ok(Some(Ok(msg))) => msg,
+                Ok(Some(Err(e))) => return Err(e),
+                Ok(None) => bail!("LSP server closed stdout"),
             };
             if let Some(resp) =
                 handle_server_message(&mut self.stdin, &mut self.diagnostics, msg).await?
@@ -449,6 +471,51 @@ pub fn file_uri(path: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use tokio::io::BufReader;
+
+    /// Audit H13: a wrapper script that opens the pipe but never answers
+    /// `initialize` must fail within the bound, not hang the agent forever.
+    #[tokio::test]
+    async fn request_times_out_on_a_silent_server() {
+        // a child that stays alive without writing anything to stdout
+        #[cfg(windows)]
+        let def = crate::config::LspServerDef {
+            name: "silent".into(),
+            enabled: true,
+            language: "rust".into(),
+            command: "cmd".into(),
+            args: ["/C", "ping -n 30 127.0.0.1 >nul"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            root_markers: Vec::new(),
+        };
+        #[cfg(not(windows))]
+        let def = crate::config::LspServerDef {
+            name: "silent".into(),
+            enabled: true,
+            language: "rust".into(),
+            command: "sleep".into(),
+            args: vec!["30".to_string()],
+            root_markers: Vec::new(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut client = Client::spawn(&def, dir.path()).await.expect("spawn");
+        let started = std::time::Instant::now();
+        let err = client
+            .request_bounded(
+                "initialize",
+                Value::Null,
+                std::time::Duration::from_millis(300),
+            )
+            .await
+            .expect_err("a silent server must not satisfy the request");
+        assert!(
+            err.to_string().contains("sent nothing"),
+            "expected a timeout error, got: {err:#}"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        client.child.start_kill().ok();
+    }
 
     #[tokio::test]
     async fn frames_messages_by_utf8_bytes() {

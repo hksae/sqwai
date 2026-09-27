@@ -1497,21 +1497,15 @@ async fn run_agent(
                                 .call(other, call.args.clone())
                                 .await
                             {
-                                Ok((output, is_error)) => tools::Outcome {
-                                    // R banner (§2.2), same rule as web:
-                                    // external bytes delimited, errors bare.
-                                    output: if is_error {
-                                        output
-                                    } else {
-                                        crate::agent::trust::banner_wrap(&output)
-                                    },
-                                    ok: !is_error,
-                                    exit_code: None,
-                                    diff: None,
-                                    file_diff: None,
-                                    file_diffs: Vec::new(),
-                                    cancelled: false,
-                                },
+                                // R banner (§2.2): server-authored bytes are
+                                // untrusted content even when the server
+                                // labels them an error (audit H11) — unlike
+                                // webfetch failures, which the host
+                                // generates. Only the transport Err below
+                                // stays bare.
+                                Ok((output, is_error)) => {
+                                    crate::mcp::result_outcome(output, is_error)
+                                }
                                 Err(e) => tools::Outcome::err(format!("MCP call failed: {e:#}")),
                             }
                         }
