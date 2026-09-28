@@ -2668,18 +2668,6 @@ impl App {
                 }
             }
         }
-        // fade-out under the composer: one step down (232) on the gap row,
-        // then the terminal background. No hard edge between the band and
-        // the chrome, no extra rows spent.
-        for x in layout[3].x..layout[3].right() {
-            if let Some(cell) = buf.cell_mut((x, layout[3].y)) {
-                let mut style = cell.style();
-                if matches!(style.bg, None | Some(ratatui::style::Color::Reset)) {
-                    style.bg = Some(Theme::INPUT_FADE());
-                    cell.set_style(style);
-                }
-            }
-        }
 
         self.status_y = layout[4].y;
         let sb = self.status_bar(area.width);

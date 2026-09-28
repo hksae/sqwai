@@ -44,12 +44,6 @@ impl Theme {
     pub const fn INPUT_BG() -> Color {
         Color::Indexed(234)
     }
-    /// Fade-out step under the composer: one rung below the input band,
-    /// then the terminal background. The band melts into the chrome.
-    #[allow(non_snake_case)]
-    pub const fn INPUT_FADE() -> Color {
-        Color::Indexed(232)
-    }
     #[allow(non_snake_case)]
     pub const fn FG() -> Color {
         Color::Reset

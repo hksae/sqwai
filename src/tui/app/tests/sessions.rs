@@ -480,15 +480,6 @@ fn composer_band_fill_matches_input_background() {
         !text.contains(&"─".repeat(20)),
         "rules are gone, band instead"
     );
-    // fade-out row under the composer: one step darker, then background
-    let fade = terminal.backend().buffer()[(r.x + 10, app.status_y - 1)]
-        .style()
-        .bg;
-    assert_eq!(
-        fade,
-        Some(ratatui::style::Color::Indexed(232)),
-        "gap row melts the band into the chrome"
-    );
 }
 
 #[test]
