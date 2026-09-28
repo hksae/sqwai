@@ -2407,10 +2407,22 @@ impl App {
             second.push(Span::styled(format!("{mcp} MCP"), Theme::meta()));
             second.push(Span::styled(" · ".to_string(), Theme::dim()));
         }
+        let first = Line::from(vec![
+            Span::styled("  ".to_string(), Theme::base()),
+            Span::styled("UwU".to_string(), Theme::accent_bold()),
+            Span::styled(" ".to_string(), Theme::base()),
+            Span::styled(
+                "sqwai".to_string(),
+                Style::new()
+                    .fg(ratatui::style::Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" (v{})", env!("CARGO_PKG_VERSION")), Theme::dim()),
+        ]);
         if self.session.plan_id.is_some() {
             // matches Enter-continue (linked plan); a session-scoped but
             // unlinked legacy plan still continues on Enter while the mark
-            // says "type to start" — rare, accepted (no per-frame plan I/O)
+            // stays quiet — rare, accepted (no per-frame plan I/O)
             second.push(Span::styled(
                 "enter".to_string(),
                 Theme::base().add_modifier(Modifier::BOLD),
@@ -2419,24 +2431,15 @@ impl App {
                 ": continue next plan step".to_string(),
                 Theme::dim(),
             ));
+            vec![first, Line::from(second)]
+        } else if mcp > 0 {
+            // no plan hint ("type to start" is obvious); MCP alone still
+            // earns its row
+            vec![first, Line::from(second)]
         } else {
-            second.push(Span::styled("type to start".to_string(), Theme::dim()));
+            // brand only
+            vec![first]
         }
-        vec![
-            Line::from(vec![
-                Span::styled("  ".to_string(), Theme::base()),
-                Span::styled("UwU".to_string(), Theme::accent_bold()),
-                Span::styled(" ".to_string(), Theme::base()),
-                Span::styled(
-                    "sqwai".to_string(),
-                    Style::new()
-                        .fg(ratatui::style::Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!(" (v{})", env!("CARGO_PKG_VERSION")), Theme::dim()),
-            ]),
-            Line::from(second),
-        ]
     }
 
     /// Test/compat entry: production renders via [`Self::render_into`]

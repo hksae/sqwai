@@ -412,13 +412,12 @@ fn empty_mark_lines_cover_mcp_plan_and_plain_states() {
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect()
     };
-    // plain: no MCP, no linked plan
+    // plain: no MCP, no linked plan → brand only ("type to start"
+    // is obvious and stays out)
     let app = test_app("http://127.0.0.1:9/v1".into());
     let lines = text(&app);
-    assert_eq!(lines.len(), 2);
+    assert_eq!(lines.len(), 1);
     assert!(lines[0].contains("UwU sqwai (v"), "{lines:?}");
-    assert!(lines[1].contains("type to start"), "{lines:?}");
-    assert!(!lines[1].contains("MCP"), "{lines:?}");
     // linked plan: enter hint instead
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.session.plan_id = Some("p1".into());
