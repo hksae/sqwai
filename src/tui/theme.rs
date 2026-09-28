@@ -37,6 +37,13 @@ impl Theme {
     pub const fn USER_SURFACE() -> Color {
         Color::Indexed(235)
     }
+    /// Composer band: one step darker than the user-message band (235),
+    /// one above the menu surface (233). Same family, quieter — the input
+    /// reads as kin to your messages without competing with them.
+    #[allow(non_snake_case)]
+    pub const fn INPUT_BG() -> Color {
+        Color::Indexed(234)
+    }
     #[allow(non_snake_case)]
     pub const fn FG() -> Color {
         Color::Reset

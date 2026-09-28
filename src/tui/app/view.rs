@@ -2620,18 +2620,11 @@ impl App {
             }
         }
 
-        let rule = Paragraph::new(Line::from(Span::styled(
-            "─".repeat(area.width as usize),
-            Theme::border_dim(),
-        )))
-        .style(Theme::base());
-        // queued follow-ups live in the rule row above the composer: no
-        // layout shift, no reserved space — the separator simply turns
-        // informative while something is queued
+        // queued follow-ups keep their row above the composer (layout
+        // unchanged); the separator lines are gone, the composer is a
+        // filled band instead
         if !self.pending_queue.is_empty() {
             Paragraph::new(self.queue_line(area.width)).render(layout[1], buf);
-        } else {
-            rule.clone().render(layout[1], buf);
         }
         self.input.set_block(Self::input_block());
         // the cursor is rendered by tui-textarea; the input has no frame.
@@ -2660,7 +2653,21 @@ impl App {
             );
         }
         self.input.render(input_rect, buf);
-        rule.render(layout[3], buf);
+        // composer band fill: gutter, marker and short rows share the
+        // input background (the textarea paints its own rect already).
+        // Both None and explicit Reset count as unpainted; real fills
+        // (block cursor, text selection) must survive.
+        for y in layout[2].y..layout[2].bottom() {
+            for x in layout[2].x..layout[2].right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    let mut style = cell.style();
+                    if matches!(style.bg, None | Some(ratatui::style::Color::Reset)) {
+                        style.bg = Some(Theme::INPUT_BG());
+                        cell.set_style(style);
+                    }
+                }
+            }
+        }
 
         self.status_y = layout[4].y;
         let sb = self.status_bar(area.width);

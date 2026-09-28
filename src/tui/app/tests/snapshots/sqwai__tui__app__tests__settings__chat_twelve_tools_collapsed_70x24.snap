@@ -1,6 +1,5 @@
 ---
-source: src/tui/app/tests.rs
-assertion_line: 4604
+source: src/tui/app/tests/settings.rs
 expression: s
 ---
 
@@ -23,7 +22,7 @@ expression: s
 
 
 
-──────────────────────────────────────────────────────────────────────
+
 ›
-──────────────────────────────────────────────────────────────────────
+
  ACT                            cache 0% · 0% · 0 · m  ef:off [CWD]

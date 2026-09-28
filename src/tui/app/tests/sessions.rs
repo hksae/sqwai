@@ -453,6 +453,36 @@ fn empty_mark_lines_cover_mcp_plan_and_plain_states() {
 }
 
 #[test]
+fn composer_band_fill_matches_input_background() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    // composer rows carry the input band, one step darker than user strips
+    let r = app.last_input;
+    assert!(r.width > 12 && r.height > 0, "{r:?}");
+    // away from the block cursor (white by design): empty row cells
+    let bg = terminal.backend().buffer()[(r.x + 10, r.y)].style().bg;
+    assert_eq!(
+        bg,
+        Some(ratatui::style::Color::Indexed(234)),
+        "composer must sit on the input band"
+    );
+    // no separator rules survive around the composer
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(
+        !text.contains(&"─".repeat(20)),
+        "rules are gone, band instead"
+    );
+}
+
+#[test]
 fn pin_from_menu_does_not_pollute_chat() {
     use crate::providers::Role;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
