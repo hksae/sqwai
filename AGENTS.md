@@ -1,8 +1,8 @@
 # AGENTS.md — sqwai development rules
 
 ## Build and test
-- Use `C:\Users\Asus\.cargo\bin\cargo.exe check` for a fast compile check.
-- Use `C:\Users\Asus\.cargo\bin\cargo.exe test` for the full test suite when requested or when verifying a completed change.
+- Use `cargo check` for a fast compile check (pinned toolchain via rust-toolchain.toml).
+- Use `cargo test` for the full test suite when requested or when verifying a completed change.
 - Do not build a release executable automatically unless explicitly asked (the user builds it); run only tests.
 
 ## Git and workflow
