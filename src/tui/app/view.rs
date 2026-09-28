@@ -3250,8 +3250,14 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             ));
         if matches!(self.cur_menu(), Some(Menu::Sessions)) {
-            block =
-                block.title_bottom(Theme::hints(&[("p", "pin"), ("d", "delete")]).right_aligned());
+            block = block.title_bottom(
+                Theme::hints(&[
+                    ("ctrl+p", "pin"),
+                    ("ctrl+d", "delete"),
+                    ("ctrl+r", "rename"),
+                ])
+                .right_aligned(),
+            );
         } else if matches!(self.cur_menu(), Some(Menu::TestAnims) | Some(Menu::TestArt)) {
             block = block.title_bottom(Theme::hints(&[("enter/esc", "close")]).right_aligned());
         } else if matches!(

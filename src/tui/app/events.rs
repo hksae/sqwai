@@ -654,25 +654,25 @@ impl App {
                         {
                             self.open_menu(Menu::Effort);
                         }
+                        // Sessions actions live on Ctrl combos so plain letters
+                        // (including r/p/d) always reach the type-to-filter
+                        // box, even on the first keystroke
                         KeyCode::Char('r')
-                            if matches!(self.cur_menu(), Some(Menu::Sessions))
-                                && self.sessions_filter.is_empty() =>
+                            if ctrl && matches!(self.cur_menu(), Some(Menu::Sessions)) =>
                         {
                             if let Some(id) = self.selected_session_id() {
                                 self.run_action(MenuAction::RenameSession(id));
                             }
                         }
                         KeyCode::Char('p')
-                            if matches!(self.cur_menu(), Some(Menu::Sessions))
-                                && self.sessions_filter.is_empty() =>
+                            if ctrl && matches!(self.cur_menu(), Some(Menu::Sessions)) =>
                         {
                             if let Some(id) = self.selected_session_id() {
                                 self.run_action(MenuAction::PinSession(id));
                             }
                         }
                         KeyCode::Char('d')
-                            if matches!(self.cur_menu(), Some(Menu::Sessions))
-                                && self.sessions_filter.is_empty() =>
+                            if ctrl && matches!(self.cur_menu(), Some(Menu::Sessions)) =>
                         {
                             if let Some(id) = self.selected_session_id() {
                                 self.run_action(MenuAction::DeleteSession(id));

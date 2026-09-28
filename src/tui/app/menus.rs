@@ -2452,7 +2452,8 @@ impl App {
                 // title_bottom hint, and a dead selectable row eats wheel
                 // steps and hover targets
                 self.menu_footer_text = Some(if self.sessions_filter.is_empty() {
-                    "enter: open · r: rename · p: pin · d: delete · type to filter".into()
+                    "enter: open · ctrl+r: rename · ctrl+p: pin · ctrl+d: delete · type to filter"
+                        .into()
                 } else {
                     "type: filter · backspace: erase · esc: clear filter".into()
                 });

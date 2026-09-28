@@ -1032,6 +1032,56 @@ fn sessions_filter_narrows_and_esc_clears() {
     assert!(app.menu_stack.is_empty(), "second esc closes");
 }
 
+#[test]
+fn sessions_first_keystroke_filters_instead_of_acting() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let mut a = Session::new("m".into(), 100);
+    a.title = "apple task".into();
+    let mut b = Session::new("m".into(), 100);
+    b.title = "apricot task".into();
+    app.sessions = vec![
+        SessionHeader::from_session(&a),
+        SessionHeader::from_session(&b),
+    ];
+    app.open_menu(Menu::Sessions);
+
+    let send = |app: &mut App, code: KeyCode, mods: KeyModifiers| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Event::Key(KeyEvent::new(code, mods))).unwrap();
+        app.poll_input(&rx).unwrap();
+    };
+
+    // 'p' with an empty filter must filter, not pin (the reported bug:
+    // searching names with p/d/r was impossible on the first keystroke)
+    send(&mut app, KeyCode::Char('p'), KeyModifiers::empty());
+    assert_eq!(app.sessions_filter, "p");
+    assert!(
+        !app.sessions.iter().any(|s| s.pinned),
+        "nothing must pin from typing"
+    );
+    // ctrl+p pins the selected row, filter untouched
+    let row = app
+        .menu_rows
+        .iter()
+        .position(|(_, act)| matches!(act, MenuAction::OpenSession(_)))
+        .expect("session row");
+    app.menu_sel = row;
+    send(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
+    assert_eq!(app.sessions_filter, "p");
+    let pinned_id = match &app.menu_rows[row].1 {
+        MenuAction::OpenSession(id) => id.clone(),
+        _ => unreachable!(),
+    };
+    assert!(
+        app.sessions
+            .iter()
+            .find(|s| s.id.to_string() == pinned_id)
+            .is_some_and(|s| s.pinned),
+        "ctrl+p must pin the selected session"
+    );
+}
+
 /// The debug menu holds the http-log switch and the effort declaration,
 /// and nothing in the UI opened it — it was reachable from tests only, so
 /// every setting in it was effectively config-file-only. Every section
