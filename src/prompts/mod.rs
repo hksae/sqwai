@@ -90,7 +90,11 @@ fn stable_prefix_at(root: &std::path::Path) -> String {
 }
 
 fn stable_prefix_inner(root: &std::path::Path, baseline: bool) -> String {
-    let mut prompt = compose(&builtin_prompt(), project_agents_at(root).as_deref());
+    let mut prompt = compose(
+        &builtin_prompt(),
+        project_agents_at(root).as_deref(),
+        project_sqwai_at(root).as_deref(),
+    );
     prompt.push_str("\n\n");
     prompt.push_str(&env::process_block_at(root));
     // G0 baseline (§8.2): no durable memory in the prefix.
@@ -169,11 +173,40 @@ pub fn project_agents_at(root: &std::path::Path) -> Option<String> {
     }
 }
 
-/// combine the base prompt with optional project instructions
-pub fn compose(builtin: &str, agents: Option<&str>) -> String {
-    match agents {
+/// combine the base prompt with optional project instructions.
+/// SQWAI.md comes last and wins on conflict: it holds this agent's own
+/// rules, AGENTS.md the shared project conventions.
+pub fn compose(builtin: &str, agents: Option<&str>, sqwai: Option<&str>) -> String {
+    let mut out = match agents {
         None => builtin.to_string(),
         Some(a) => format!("{builtin}\n\n# Project instructions (AGENTS.md)\n\n{a}"),
+    };
+    if let Some(s) = sqwai {
+        out.push_str(
+            "\n\n# Project instructions (SQWAI.md — this agent's own rules, highest priority on conflict)\n\n",
+        );
+        out.push_str(s);
+    }
+    out
+}
+
+/// SQWAI.md of a project: instructions for this agent only, other tools
+/// ignore the file. Same truncation as AGENTS.md.
+pub fn project_sqwai_at(root: &std::path::Path) -> Option<String> {
+    let s = std::fs::read_to_string(root.join("SQWAI.md")).ok()?;
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    const MAX: usize = 12_000;
+    if s.len() <= MAX {
+        Some(s.to_string())
+    } else {
+        let mut cut = MAX;
+        while !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        Some(format!("{}\n…(truncated)", &s[..cut]))
     }
 }
 
@@ -188,21 +221,73 @@ pub const AGENTS_TEMPLATE: &str = "# AGENTS.md — instructions for sqwai\n\
 - <language, style, rules>\n\
 \n\
 ## Notes\n\
-- <anything the agent must know>\n";
+- <anything the agent must know>\n\
+\n\
+## Sqwai-only rules\n\
+- rules for this agent alone live in SQWAI.md (other tools ignore it)\n";
+
+/// skeleton written by `/init` next to AGENTS.md: this agent's own
+/// rules (style, workflow habits). Instructions, not memories — facts
+/// and history belong to MEMORY.md/diary, not here.
+pub const SQWAI_TEMPLATE: &str = "# SQWAI.md — this agent's own rules\n\
+\n\
+Read by sqwai only (highest priority on conflict with AGENTS.md).\n\
+Put instructions here, not facts — memories live in MEMORY.md/diary.\n\
+\n\
+## Style\n\
+- <how to talk to the user>\n\
+\n\
+## Workflow\n\
+- <habits for this project>\n";
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn sqwai_md_loads_with_priority_over_agents_md() {
+        let dir = std::env::temp_dir().join(format!("sqwai-sqwai-md-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "shared rule").unwrap();
+        std::fs::write(dir.join("SQWAI.md"), "own rule").unwrap();
+        let p = super::bench_prefix(&dir, true);
+        assert!(p.contains("own rule"), "sqwai rules must load");
+        assert!(p.contains("shared rule"), "agents rules must load");
+        let agents_at = p.find("AGENTS.md").unwrap();
+        let sqwai_at = p.find("SQWAI.md").unwrap();
+        assert!(agents_at < sqwai_at, "sqwai section comes last");
+        // empty SQWAI.md behaves as absent
+        std::fs::write(dir.join("SQWAI.md"), "  \n").unwrap();
+        let p = super::bench_prefix(&dir, true);
+        assert!(!p.contains("SQWAI.md"), "empty file must not load");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sqwai_template_states_rules_not_memories() {
+        assert!(SQWAI_TEMPLATE.contains("MEMORY.md"));
+        assert!(SQWAI_TEMPLATE.contains("highest priority"));
+        assert!(AGENTS_TEMPLATE.contains("SQWAI.md"));
+    }
+
+    #[test]
     fn compose_appends_agents_section() {
-        let s = compose("base prompt", Some("rule one"));
+        let s = compose("base prompt", Some("rule one"), None);
         assert!(s.starts_with("base prompt"));
         assert!(s.contains("# Project instructions (AGENTS.md)"));
         assert!(s.contains("rule one"));
+        assert!(!s.contains("SQWAI.md"));
 
-        let s = compose("base prompt", None);
+        let s = compose("base prompt", None, None);
         assert!(!s.contains("AGENTS.md"));
+
+        // sqwai rules come last and win on conflict
+        let s = compose("base prompt", Some("shared rule"), Some("own rule"));
+        let agents_at = s.find("AGENTS.md").unwrap();
+        let sqwai_at = s.find("SQWAI.md").unwrap();
+        assert!(agents_at < sqwai_at, "{s:?}");
+        assert!(s.contains("highest priority"), "{s:?}");
+        assert!(s.contains("own rule"), "{s:?}");
     }
 
     #[test]

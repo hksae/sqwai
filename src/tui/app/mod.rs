@@ -2966,6 +2966,18 @@ impl App {
                         Err(e) => self.status(&format!("init: {e}"), StatusKind::Err),
                     }
                 }
+                // sqwai-only rules live apart so other tools never see them
+                if std::path::Path::new("SQWAI.md").exists() {
+                    self.status("SQWAI.md already exists", StatusKind::Warn);
+                } else {
+                    match std::fs::write("SQWAI.md", crate::prompts::SQWAI_TEMPLATE) {
+                        Ok(()) => self.status(
+                            "SQWAI.md created — this agent's own rules, highest priority",
+                            StatusKind::Ok,
+                        ),
+                        Err(e) => self.status(&format!("init: {e}"), StatusKind::Err),
+                    }
+                }
                 // seed named verify commands (repo probing + MEMORY.md) so
                 // `cmd: $name` in plans resolves; hand-written names win.
                 let root = std::env::current_dir().unwrap_or_default();
