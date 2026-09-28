@@ -651,31 +651,25 @@ fn pinned_sessions_frame_stays_dim() {
         .find(|(_, a)| matches!(a, MenuAction::OpenSession(_)))
         .expect("session row");
     assert_eq!(
-        row.spans[3].style.fg,
+        row.spans[1].style.fg,
         Some(Color::Reset),
         "title is terminal default"
     );
     assert_eq!(
-        row.spans[7].style.fg,
+        row.spans[5].style.fg,
         Some(Color::Gray),
         "model is the meta rung"
     );
     assert_eq!(
-        row.spans[5].style.fg,
+        row.spans[3].style.fg,
         Some(Color::DarkGray),
-        "date stays dim"
+        "time stays dim"
     );
-    // pinned rows carry a quiet white dot in the first column,
-    // unpinned rows leave it blank
-    assert_eq!(
-        row.spans[1].content.as_ref(),
-        "● ",
-        "pinned row must show the marker"
-    );
-    assert_eq!(
-        row.spans[1].style.fg,
-        Some(Color::White),
-        "marker is quiet white, not the accent"
+    // row number rides glued to the title (opencode-style), one space off
+    assert!(
+        row.spans[1].content.as_ref().starts_with("1 "),
+        "first row must carry its number: {:?}",
+        row.spans[1].content.as_ref()
     );
 }
 #[test]
@@ -707,21 +701,21 @@ fn pinned_session_frame_aligns_columns_and_respects_narrow_terminal() {
         .find(|(_, a)| matches!(a, MenuAction::OpenSession(_)))
         .map(|(l, _)| l)
         .expect("content row");
-    // lead 1 + pin 2 + gap 2 + title 8 + gap 2 + time 5 + gap 2
-    // + model 8 + gap 2 + tokens cut to 2 = 34: the exact-fit pass
+    // lead 1 + title 8 (number glued) + gap 2 + time 5 + gap 2
+    // + model 8 + gap 2 + tokens cut to 6 = 34: the exact-fit pass
     // drops trailing columns first, so SIZE never shifts the grid
     assert_eq!(
         span_widths(header_line),
-        vec![1, 2, 2, 8, 2, 5, 2, 8, 2, 2],
+        vec![1, 8, 2, 5, 2, 8, 2, 6],
         "header must share the grid"
     );
     assert_eq!(
         span_widths(content_line),
-        vec![1, 2, 2, 8, 2, 5, 2, 8, 2, 2],
+        vec![1, 8, 2, 5, 2, 8, 2, 6],
         "row must share the grid"
     );
-    assert_eq!(header_line.spans[5].content.as_ref(), "TIME ");
-    let time = content_line.spans[5].content.as_ref();
+    assert_eq!(header_line.spans[3].content.as_ref(), "TIME ");
+    let time = content_line.spans[3].content.as_ref();
     assert!(
         time.as_bytes()[2] == b':',
         "row time must fill the time column: {time:?}"
@@ -744,9 +738,10 @@ fn sessions_rows_share_date_model_token_columns() {
         SessionHeader::from_session(&b),
     ];
     app.open_menu(Menu::Sessions);
-    // grid geometry asserted per span: lead 1 + pin 2 + gap 2 + title 28
-    // + gap 2 + time 5 + gap 2 + model 16 + gap 2 + tokens 7 = 72.
-    // The section carries the date (── today ──), rows keep HH:MM.
+    // grid geometry asserted per span: lead 1 + title 28 (number glued
+    // to the title, one space off) + gap 2 + time 5 + gap 2 + model 16
+    // + gap 2 + tokens 7 = 63 content cols, exact-fit to the 72 budget.
+    // The section carries the date, rows keep HH:MM.
     let rows: Vec<&ratatui::text::Line> = app
         .menu_rows
         .iter()
@@ -761,9 +756,9 @@ fn sessions_rows_share_date_model_token_columns() {
             .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
             .collect();
         // exact-fit pads the 67 content cols to the 72 budget
-        assert_eq!(&widths[..10], &[1, 2, 2, 28, 2, 5, 2, 16, 2, 7], "{line:?}");
+        assert_eq!(&widths[..8], &[1, 28, 2, 5, 2, 16, 2, 7], "{line:?}");
         assert_eq!(widths.iter().sum::<usize>(), 72, "{line:?}");
-        assert_eq!(&line.spans[5].content.as_ref()[2..3], ":");
+        assert_eq!(&line.spans[3].content.as_ref()[2..3], ":");
     }
     let texts: Vec<String> = app
         .menu_rows
@@ -771,8 +766,11 @@ fn sessions_rows_share_date_model_token_columns() {
         .filter(|(_, act)| matches!(act, MenuAction::OpenSession(_)))
         .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
-    assert!(texts[0].contains("hi"));
-    assert!(texts[1].contains("a medium length title!"));
+    assert!(texts[0].starts_with(" 1 hi"), "{texts:?}");
+    assert!(
+        texts[1].starts_with(" 2 a medium length title!"),
+        "{texts:?}"
+    );
 }
 
 fn project_session(title: &str, project: Option<std::path::PathBuf>) -> Session {
