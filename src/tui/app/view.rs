@@ -3176,7 +3176,7 @@ impl App {
         if matches!(self.cur_menu(), Some(Menu::Sessions)) {
             block =
                 block.title_bottom(Theme::hints(&[("p", "pin"), ("d", "delete")]).right_aligned());
-        } else if matches!(self.cur_menu(), Some(Menu::TestAnims)) {
+        } else if matches!(self.cur_menu(), Some(Menu::TestAnims) | Some(Menu::TestArt)) {
             block = block.title_bottom(Theme::hints(&[("enter/esc", "close")]).right_aligned());
         } else if matches!(
             self.cur_menu(),

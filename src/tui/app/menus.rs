@@ -61,7 +61,7 @@ pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
         ],
     ),
     ("/undo", &["step"]),
-    ("/test", &["animations"]),
+    ("/test", &["animations", "art"]),
     ("/providers", &["update"]),
     ("/constraints", &["add", "remove"]),
     ("/mode", &["plan", "act"]),
@@ -189,6 +189,8 @@ pub(super) enum Menu {
     Effort,
     /// /test animations: spinner/animation showcase gallery (eye candy, picks welcome)
     TestAnims,
+    /// /test art: numbered static logo variants for picking the empty-state mark
+    TestArt,
     /// the model asked the user structured questions (ask_user)
     /// legacy modal path; live asks render inline in the chat instead
     #[allow(dead_code)]
@@ -855,8 +857,8 @@ impl App {
             self.form_save();
             return;
         }
-        // gallery is a showcase: any commit just closes it
-        if matches!(self.cur_menu(), Some(Menu::TestAnims)) {
+        // galleries are showcases: any commit just closes them
+        if matches!(self.cur_menu(), Some(Menu::TestAnims) | Some(Menu::TestArt)) {
             self.menu_back();
             return;
         }
@@ -1715,6 +1717,7 @@ impl App {
             Some(Menu::ConfirmDelete { .. }) => " Confirm ".into(),
             Some(Menu::Effort) => " Effort ".into(),
             Some(Menu::TestAnims) => " Test ".into(),
+            Some(Menu::TestArt) => " Art ".into(),
             Some(Menu::AskUser { .. }) => " Ask ".into(),
             Some(Menu::Approval { .. }) => " Confirm command ".into(),
             Some(Menu::AskFree { .. }) => " Answer ".into(),
@@ -2723,6 +2726,27 @@ impl App {
                             format!(" {}", entry.name),
                             Theme::base(),
                         )]),
+                        MenuAction::None,
+                    ));
+                }
+            }
+            Menu::TestArt => {
+                // static art blocks: one numbered label row per variant,
+                // then its lines. All dead rows (viewing only) — the pick
+                // comes back as a variant number.
+                for (idx, (name, lines)) in crate::tui::art::variants().into_iter().enumerate() {
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled(
+                            format!(" {:02} · {name}", idx + 1),
+                            Theme::dim(),
+                        )]),
+                        MenuAction::None,
+                    ));
+                    for line in lines {
+                        self.menu_rows.push(row(line, MenuAction::None));
+                    }
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled(String::new(), Theme::base())]),
                         MenuAction::None,
                     ));
                 }

@@ -948,7 +948,10 @@ fn test_animations_gated_behind_experimental_flag() {
     app.input = App::fresh_input("/test".into());
     assert!(app.popup_items().contains(&"/test".to_string()));
     app.input = App::fresh_input("/test ".into());
-    assert_eq!(app.popup_items(), vec!["/test animations".to_string()]);
+    assert_eq!(
+        app.popup_items(),
+        vec!["/test animations".to_string(), "/test art".to_string()]
+    );
     app.command("test animations");
     assert!(matches!(app.cur_menu(), Some(Menu::TestAnims)));
     // bare /test with the flag on hints at the subcommand
@@ -956,6 +959,32 @@ fn test_animations_gated_behind_experimental_flag() {
     app2.cfg.ui.experimental_test = true;
     app2.command("test");
     assert!(app2.menu_stack.is_empty(), "bare /test opens nothing");
+}
+
+#[test]
+fn test_art_opens_numbered_gallery() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.cfg.ui.experimental_test = true;
+    app.command("test art");
+    assert!(matches!(app.cur_menu(), Some(Menu::TestArt)));
+    assert_eq!(
+        crate::tui::art::variants().len(),
+        10,
+        "gallery holds ten picks"
+    );
+    let labels: Vec<String> = app
+        .menu_rows
+        .iter()
+        .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .filter(|t: &String| t.contains(" · "))
+        .collect();
+    assert_eq!(labels.len(), 10, "{labels:?}");
+    for (i, label) in labels.iter().enumerate() {
+        assert!(
+            label.starts_with(&format!(" {:02} · ", i + 1)),
+            "variant {i} must carry its number: {label:?}"
+        );
+    }
 }
 
 fn queue_test_app() -> crate::tui::app::App {

@@ -2868,8 +2868,10 @@ impl App {
                     self.status("unknown command /test", StatusKind::Warn);
                 } else if rest.split_whitespace().nth(1) == Some("animations") {
                     self.open_menu(Menu::TestAnims);
+                } else if rest.split_whitespace().nth(1) == Some("art") {
+                    self.open_menu(Menu::TestArt);
                 } else {
-                    self.status("/test takes: animations", StatusKind::Warn);
+                    self.status("/test takes: animations, art", StatusKind::Warn);
                 }
             }
             "/debug" => self.open_menu(Menu::Debug),
