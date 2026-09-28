@@ -769,11 +769,6 @@ pub struct UiConfig {
     /// unlock /test ... commands (off by default, /settings -> Experimental)
     #[serde(default)]
     pub experimental_test: bool,
-    /// raw wheel events per physical wheel notch (terminal-specific:
-    /// commonly 1, 3 or 9+). Always ≈3 transcript lines per notch —
-    /// fractional remainders carry into the next event.
-    #[serde(default = "wheel_events_per_notch")]
-    pub wheel_events_per_notch: u32,
 }
 
 impl Default for UiConfig {
@@ -782,13 +777,8 @@ impl Default for UiConfig {
             typewriter: true,
             http_log: false,
             experimental_test: false,
-            wheel_events_per_notch: wheel_events_per_notch(),
         }
     }
-}
-
-fn wheel_events_per_notch() -> u32 {
-    3
 }
 
 fn default_true() -> bool {

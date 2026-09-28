@@ -5395,25 +5395,28 @@ impl App {
         self.scroll(-dir * 20);
     }
 
-    /// Wheel normalization (Codex-tui2-lite): terminals report 1, 3 or 9+
-    /// raw events per physical notch and trackpads stream dense partials.
-    /// Raw events accumulate fractionally (`ui.wheel_events_per_notch`
-    /// events ≈ 3 lines); a direction flip or a >150ms gap starts a new
-    /// stream so remainders never slingshot. Returns signed screen lines
-    /// (+down / −up); zero means the event dissolved into the carry and
-    /// the caller must skip its side effects (e.g. selection clearing).
+    /// Wheel input (no density config — the stream shape decides): the
+    /// first event of a stream is a full 3-line notch, so deliberate
+    /// single notches feel identical on every terminal; the rest of a
+    /// dense stream (multi-event notches, trackpads) trickles in thirds
+    /// with fractional carry. A direction flip or a >150ms gap starts a
+    /// new stream, so remainders never slingshot. Returns signed screen
+    /// lines (+down / −up); zero means the event dissolved into the carry
+    /// and the caller must skip its side effects (e.g. selection clearing).
     pub(super) fn wheel_lines(&mut self, dir: i32) -> i32 {
         const GAP: std::time::Duration = std::time::Duration::from_millis(150);
-        const LINES_PER_NOTCH: f32 = 3.0;
+        const NOTCH_LINES: i32 = 3;
+        const STREAM_STEP: f32 = 1.0 / 3.0;
         let now = std::time::Instant::now();
         let fresh = self.wheel_at.is_none_or(|t| now.duration_since(t) > GAP);
         if fresh || self.wheel_dir != dir {
             self.wheel_dir = dir;
             self.wheel_carry = 0.0;
+            self.wheel_at = Some(now);
+            return dir * NOTCH_LINES;
         }
         self.wheel_at = Some(now);
-        let per = LINES_PER_NOTCH / self.cfg.ui.wheel_events_per_notch.max(1) as f32;
-        self.wheel_carry += dir as f32 * per;
+        self.wheel_carry += dir as f32 * STREAM_STEP;
         let lines = self.wheel_carry.trunc() as i32;
         self.wheel_carry -= lines as f32;
         lines
