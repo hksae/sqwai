@@ -172,9 +172,9 @@ impl Mode {
 
 /// Mode-chip color sweep length: a quick flash, not a lingering animation.
 const MODE_BLEND_MS: u64 = 250;
-/// Sweep endpoints, close to the indexed chip colors (bold Yellow / bold
-/// LightBlue) so the settle frame does not pop.
-const MODE_ACT_RGB: (u8, u8, u8) = (250, 200, 70);
+/// Sweep endpoints, close to the indexed chip colors (bold LightGreen /
+/// bold LightBlue) so the settle frame does not pop.
+const MODE_ACT_RGB: (u8, u8, u8) = (144, 238, 144);
 const MODE_PLAN_RGB: (u8, u8, u8) = (110, 165, 255);
 
 const WORKING_SPINNER: [char; 6] = ['◜', '◠', '◝', '◞', '◡', '◟'];

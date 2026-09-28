@@ -3709,11 +3709,11 @@ impl App {
             format!("{} ", truncate_display_width(&dir, dir_budget - 1))
         };
         let right_len = fixed_len + cols(&dir_label);
-        // mode chip: yellow ACT, blue PLAN, with a quick RGB sweep between
+        // mode chip: green ACT, blue PLAN, with a quick RGB sweep between
         // them on toggle (truecolor only). Same text and width either way,
         // so the padding and click targets below are unaffected.
         let chip_settled = match self.mode {
-            Mode::Act => Theme::status_chip(),
+            Mode::Act => Theme::mode_chip_act(),
             Mode::Plan => Theme::mode_chip_plan(),
         };
         let chip_style = match self.mode_blend {

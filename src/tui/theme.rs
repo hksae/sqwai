@@ -186,9 +186,13 @@ impl Theme {
     pub fn border_dim() -> Style {
         Style::new().fg(Self::BORDER_DIM())
     }
-    /// Busy/attention status: bold yellow, no chip background (Codex status).
-    pub fn status_chip() -> Style {
-        Style::new().fg(Self::WARN()).add_modifier(Modifier::BOLD)
+    /// ACT mode chip: bold bright-green ("go/active"). Yellow read as a
+    /// permanent warning; green states the mode without shouting. Plain
+    /// Green is too dark on black terminals — LightGreen carries it.
+    pub fn mode_chip_act() -> Style {
+        Style::new()
+            .fg(Color::LightGreen)
+            .add_modifier(Modifier::BOLD)
     }
     /// PLAN mode chip: bold light-blue, mirrors the yellow ACT chip.
     pub fn mode_chip_plan() -> Style {

@@ -678,10 +678,10 @@ fn effort_levels_include_off_for_status_bar_and_model_settings() {
 #[test]
 fn mode_chip_matches_mode_when_settled() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    // settled ACT: the classic yellow chip
+    // settled ACT: bright-green go-chip
     let spans = app.status_bar_spans(120);
     assert_eq!(spans[0].content.as_ref(), " ACT ");
-    assert_eq!(spans[0].style, crate::tui::theme::Theme::status_chip());
+    assert_eq!(spans[0].style, crate::tui::theme::Theme::mode_chip_act());
     // settled PLAN: blue chip (blend force-expired, no timing involved)
     app.set_mode(Mode::Plan);
     app.mode_blend = Some((
