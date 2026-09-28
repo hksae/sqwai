@@ -2986,15 +2986,31 @@ impl App {
         self.menu_footer_text = None;
         // Popup actions do not show transient green notices at the bottom.
         let footer_h = 0usize;
+        // air row above the bottom hints, mirroring the one under the
+        // title — only where hints exist, so hint-less menus keep size.
+        // (kept in sync with the title_bottom block below)
+        let has_hints = matches!(
+            menu,
+            Some(Menu::Sessions)
+                | Some(Menu::TestAnims)
+                | Some(Menu::TestArt)
+                | Some(Menu::EditProvider { .. })
+                | Some(Menu::EditModel { .. })
+                | Some(Menu::EditSessionTitle { .. })
+                | Some(Menu::EditScalar(..))
+                | Some(Menu::AddListItem(..))
+                | Some(Menu::EditMcpServer { .. })
+                | Some(Menu::EditLspServer { .. })
+        );
         // chrome rows inside the panel: frozen table header + one air row
         // under the centered title (lists only; forms keep field geometry).
         // Chrome takes its rows from the window budget, never on top of it:
         // in a short terminal the panel is capped by max_h, and an extra
         // row would land under the hint line.
         let chrome_h = if is_form {
-            0
+            usize::from(has_hints)
         } else {
-            footer_h + usize::from(self.menu_table_header.is_some()) + 1
+            footer_h + usize::from(self.menu_table_header.is_some()) + 1 + usize::from(has_hints)
         };
         let avail_inner = (area.height.saturating_sub(6)).max(3) as usize;
         let max_h = area.height.saturating_sub(4).max(4);
@@ -3011,11 +3027,7 @@ impl App {
                 .min(avail_inner.saturating_sub(chrome_h).max(1))
                 .min(max_items)
         };
-        let inner = if is_form {
-            content_rows
-        } else {
-            content_rows + chrome_h
-        };
+        let inner = content_rows + chrome_h;
         let h = (inner as u16 + 2).clamp(4, max_h);
         // Width cap order matters: the 30-column minimum must not win over
         // the terminal's real width — in a 20..29-column terminal that would
@@ -3257,6 +3269,10 @@ impl App {
             block = block.title_bottom(
                 Theme::hints(&[("enter", "save"), ("esc", "cancel")]).right_aligned(),
             );
+        }
+        // air row above the hints (has_hints computed with the geometry)
+        if has_hints {
+            rows.push(Line::default());
         }
 
         Clear.render(rect, buf);
