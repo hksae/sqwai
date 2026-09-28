@@ -369,7 +369,10 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
     if in_code {
         emit_code(&mut out, &code_buf, code_lang.as_deref(), hl, width);
     }
-    out
+    // untrusted content reaches the terminal through these rows (assistant
+    // segments bypass wrap_tagged): strip controls here so no caller can
+    // forget. sanitize_line is a no-op pass-through for clean lines.
+    out.into_iter().map(sanitize_line).collect()
 }
 
 fn is_hr(s: &str) -> bool {
@@ -1597,6 +1600,28 @@ mod tests {
         let (rows, _) = wrap_tagged(vec![(input, None)], 80);
         let text: Vec<_> = rows.iter().map(line_text_pub).collect();
         assert_eq!(text, vec!["abc"]);
+    }
+
+    #[test]
+    fn hostile_model_output_cannot_emit_escapes() {
+        // untrusted content (tool output, pasted text) reaches the
+        // terminal through these rows: a CSI/OSC sequence must die here,
+        // never in the buffer. Use the full render entry, not internals.
+        let hostile = "done\x1b[2J\x1b[1;1Hwiped\x1b]8;;http://evil\x07link\nsecond\x1b[31mred";
+        let hl = Highlighter::new();
+        for line in render(hostile, 80, &hl) {
+            for span in &line.spans {
+                assert!(
+                    !span.content.chars().any(|c| c.is_control()),
+                    "escape survived: {span:?}"
+                );
+            }
+        }
+        let text: Vec<_> = render(hostile, 80, &hl).iter().map(line_text_pub).collect();
+        let joined = text.join("\n");
+        assert!(joined.contains("done"), "{joined:?}");
+        assert!(joined.contains("second"), "{joined:?}");
+        assert!(!joined.contains('\x1b'), "{joined:?}");
     }
 
     #[test]
