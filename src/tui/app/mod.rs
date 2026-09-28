@@ -454,6 +454,11 @@ pub struct App {
     /// click/hover targets of the effort slider (rect → SELECTABLE index),
     /// rebuilt on every slider draw; empty when another menu is open
     effort_hits: Vec<(Rect, usize)>,
+    /// effort slider color sweep: (displayed color, arm time) plus the
+    /// selection it was armed for. Mirrors the mode-chip blend: a level
+    /// change redirects mid-sweep instead of restarting it.
+    effort_blend: Option<((u8, u8, u8), Instant)>,
+    effort_blend_sel: Option<usize>,
     form_fields: Vec<FormField>,
     form_focus: usize,
     /// cached session list for the sessions menus (headers only — see
@@ -916,6 +921,8 @@ impl App {
             menu_rect: Rect::default(),
             table_built_w: 0,
             effort_hits: Vec::new(),
+            effort_blend: None,
+            effort_blend_sel: None,
             form_fields: Vec::new(),
             form_focus: 0,
             sessions: Vec::new(),

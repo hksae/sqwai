@@ -109,6 +109,18 @@ impl Theme {
             EffortLevel::Max => Color::Magenta,
         }
     }
+    /// Truecolor twin of [`Self::effort_color`] for the slider sweep:
+    /// close to the indexed colors so the settle frame does not pop.
+    pub const fn effort_rgb(level: EffortLevel) -> (u8, u8, u8) {
+        match level {
+            EffortLevel::Off => (128, 128, 128),
+            EffortLevel::Low => (80, 200, 120),
+            EffortLevel::Medium => (80, 220, 220),
+            EffortLevel::High => (110, 165, 255),
+            EffortLevel::Xhigh => (250, 200, 70),
+            EffortLevel::Max => (220, 130, 220),
+        }
+    }
 
     pub fn effort(level: EffortLevel) -> Style {
         Style::new()

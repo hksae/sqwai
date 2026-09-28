@@ -789,6 +789,20 @@ fn effort_slider_opens_on_current_level_with_hits() {
     let mut buf = Buffer::empty(area);
     app.draw_menu(&mut buf, area);
     assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
+    // first draw only tracks, never sweeps from nothing
+    assert_eq!(app.effort_blend_sel, Some(want));
+    assert!(app.effort_blend.is_none(), "no sweep on open");
+    // moving the selection arms the color sweep for the new level
+    app.menu_sel = 0;
+    app.draw_menu(&mut buf, area);
+    assert_eq!(app.effort_blend_sel, Some(0));
+    assert!(
+        app.effort_blend.is_some(),
+        "level change must arm the sweep"
+    );
+    // restore High for the dots/hover checks below (they assume it selected)
+    app.menu_sel = want;
+    app.draw_menu(&mut buf, area);
     assert!(app.menu_rect.width > 0 && app.menu_rect.height > 0);
     // progress dots: High is index 3, so 4 filled dots, 2 hollow
     let dots: String = buf.content().iter().map(|c| c.symbol()).collect();

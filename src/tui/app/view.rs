@@ -3322,7 +3322,49 @@ impl App {
         let sel = self.menu_sel.min(n.saturating_sub(1));
         let active = EffortLevel::SELECTABLE[sel];
         let active_color = Theme::effort_color(active);
-        let active_style = Theme::effort(active);
+        // color sweep on level change (mirrors the mode chip): arm from
+        // the currently displayed color so a quick hop across levels
+        // redirects mid-sweep instead of restarting it
+        let now = std::time::Instant::now();
+        let endpoint = Theme::effort_rgb(active);
+        if self.effort_blend_sel != Some(sel) {
+            // first sighting only tracks; a sweep needs a previous color
+            if let Some(old) = self.effort_blend_sel
+                && let Some(old_lvl) = EffortLevel::SELECTABLE.get(old)
+            {
+                let old_to = Theme::effort_rgb(*old_lvl);
+                let from = match &self.effort_blend {
+                    Some((f, t0)) => {
+                        let el = now.duration_since(*t0).as_millis();
+                        if el >= MODE_BLEND_MS as u128 {
+                            old_to
+                        } else {
+                            crate::tui::shimmer::blend(*f, old_to, el as f64 / MODE_BLEND_MS as f64)
+                        }
+                    }
+                    None => old_to,
+                };
+                self.effort_blend = Some((from, now));
+            }
+            self.effort_blend_sel = Some(sel);
+        }
+        let (fill, active_style) = match &self.effort_blend {
+            Some((f, t0))
+                if crate::tui::shimmer::has_truecolor()
+                    && now.duration_since(*t0).as_millis() < MODE_BLEND_MS as u128 =>
+            {
+                let el = now.duration_since(*t0).as_millis();
+                let (r, g, b) =
+                    crate::tui::shimmer::blend(*f, endpoint, el as f64 / MODE_BLEND_MS as f64);
+                (
+                    Style::new().fg(Color::Rgb(r, g, b)),
+                    Style::new()
+                        .fg(Color::Rgb(r, g, b))
+                        .add_modifier(Modifier::BOLD),
+                )
+            }
+            _ => (Style::new().fg(active_color), Theme::effort(active)),
+        };
 
         // card geometry: 1 pad + n columns; labels + track + one air row
         let inner_w = 1 + COL_W * n as u16;
@@ -3355,8 +3397,16 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             ))
             .title_bottom(
-                Line::from(Span::styled(" ← → move · click · enter ", Theme::dim()))
-                    .right_aligned(),
+                Line::from(vec![
+                    Span::styled(
+                        "← →".to_string(),
+                        Style::new()
+                            .fg(ratatui::style::Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" move ".to_string(), Theme::dim()),
+                ])
+                .right_aligned(),
             );
         Clear.render(rect, buf);
         for y in rect.y..rect.bottom() {
@@ -3420,7 +3470,8 @@ impl App {
         let total = COL_W as usize * n;
         let dot_off = (COL_W / 2) as usize;
         let dim = Theme::dim();
-        let fill = Style::new().fg(active_color);
+        // `fill` comes from the sweep above (lerped mid-transition,
+        // indexed when settled): track and dots share one color source
         // each cell: (glyph, style)
         let mut cells: Vec<(&str, Style)> = vec![(" ", Theme::base()); total];
         for i in 0..n {
