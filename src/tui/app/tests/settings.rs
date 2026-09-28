@@ -304,74 +304,6 @@ fn form_paste_burst_undoes_completely() {
 }
 
 #[test]
-fn startup_screen_renders_identification_and_state_wide() {
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.startup = true;
-    app.startup_data = Some(App::collect_startup_data(
-        &app.cfg,
-        &app.model_cfg,
-        app.read_only,
-        None,
-        &app.session.model_key.clone(),
-    ));
-
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-    terminal.draw(|frame| app.draw(frame)).unwrap();
-
-    let buffer = terminal.backend().buffer();
-    let text: Vec<String> = buffer
-        .content
-        .chunks(buffer.area.width as usize)
-        .map(|row| row.iter().map(|cell| cell.symbol()).collect())
-        .collect();
-
-    // Must contain sqwai version from cargo
-    let has_version = text
-        .iter()
-        .any(|line| line.contains(&format!("sqwai {}", env!("CARGO_PKG_VERSION"))));
-    assert!(has_version, "startup screen must show cargo version");
-
-    // Must show hints
-    let has_hints = text
-        .iter()
-        .any(|line| line.contains("tab") && line.contains("plan / act"));
-    assert!(has_hints, "startup screen must show tab hint");
-}
-
-#[test]
-fn startup_screen_renders_narrow_layout() {
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.startup = true;
-    app.startup_data = Some(App::collect_startup_data(
-        &app.cfg,
-        &app.model_cfg,
-        app.read_only,
-        None,
-        &app.session.model_key.clone(),
-    ));
-
-    let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
-    terminal.draw(|frame| app.draw(frame)).unwrap();
-
-    let buffer = terminal.backend().buffer();
-    let text: Vec<String> = buffer
-        .content
-        .chunks(buffer.area.width as usize)
-        .map(|row| row.iter().map(|cell| cell.symbol()).collect())
-        .collect();
-
-    // Identification line must NOT contain model in narrow layout
-    let id_line = text
-        .iter()
-        .find(|line| line.contains("sqwai"))
-        .expect("identification line");
-    assert!(
-        !id_line.contains(&app.model_cfg.id),
-        "narrow layout omits model from line 1"
-    );
-}
-
-#[test]
 fn startup_keys_q_and_n_type_into_input() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -433,35 +365,35 @@ async fn startup_empty_enter_with_plan_continues_plan() {
 }
 
 #[test]
-fn startup_command_keeps_startup_screen() {
+fn empty_session_survives_command_popup() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = true;
     app.input = App::fresh_input("/help".into());
 
     app.submit();
 
-    // a command popup no longer dismisses the startup screen: the screen
-    // belongs to the empty session, so it must survive opening/closing
+    // a command popup no longer dismisses the fresh session: emptiness
+    // belongs to the session, so it must survive opening/closing
     // menus like /help or /plan
     assert!(app.startup);
     assert!(matches!(app.cur_menu(), Some(Menu::Help)));
 }
 
 #[test]
-fn startup_screen_survives_menu_close() {
+fn empty_session_survives_menu_close() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = true;
     app.input = App::fresh_input("/help".into());
     app.submit();
     app.menu_home();
 
-    // closing the popup restores the startup screen
+    // closing the popup restores the fresh session
     assert!(app.startup);
     assert!(app.menu_stack.is_empty());
 }
 
 #[test]
-fn session_switch_back_to_empty_session_shows_startup() {
+fn session_switch_back_to_empty_session_marks_fresh() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = true;
     let mut s = Session::new("m".into(), 10_000);
@@ -471,7 +403,7 @@ fn session_switch_back_to_empty_session_shows_startup() {
 
     app.apply_session(Session::new("m".into(), 10_000));
 
-    assert!(app.startup, "empty session must show the startup screen");
+    assert!(app.startup, "empty session must stay fresh");
 }
 
 fn open_test_approval(app: &mut App) {
@@ -578,76 +510,13 @@ fn startup_new_command_does_nothing_on_startup() {
     assert!(app.session.messages.is_empty());
 }
 
-#[test]
-fn startup_screen_wraps_text_on_narrow_window() {
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.startup = true;
-    let mut data = App::collect_startup_data(
-        &app.cfg,
-        &app.model_cfg,
-        app.read_only,
-        None,
-        &app.session.model_key.clone(),
-    );
-    data.project_path = "~/dev/a/very/long/nested/path/to/project".into();
-    app.startup_data = Some(data);
-
-    let mut terminal = Terminal::new(TestBackend::new(35, 24)).unwrap();
-    terminal.draw(|frame| app.draw(frame)).unwrap();
-
-    let buffer = terminal.backend().buffer();
-    let text: Vec<String> = buffer
-        .content
-        .chunks(buffer.area.width as usize)
-        .map(|row| row.iter().map(|cell| cell.symbol()).collect())
-        .collect();
-
-    // Path should wrap across rows instead of being truncated
-    let path_rows = text
-        .iter()
-        .filter(|line| line.contains("nested") || line.contains("project"))
-        .count();
-    assert!(path_rows >= 1, "path should wrap on narrow screen");
-}
-
-#[test]
-fn startup_preferred_plan_falls_back_to_global_when_missing() {
-    let app = test_app("http://127.0.0.1:9/v1".into());
-    // a dangling preferred id (deleted plan) must not break collection:
-    // same result as no preference
-    let with_pref = App::collect_startup_data(
-        &app.cfg,
-        &app.model_cfg,
-        app.read_only,
-        Some("01JDOESNOTEXIST000000000000".into()),
-        &app.session.model_key.clone(),
-    );
-    let without_pref = App::collect_startup_data(
-        &app.cfg,
-        &app.model_cfg,
-        app.read_only,
-        None,
-        &app.session.model_key.clone(),
-    );
-    assert_eq!(
-        with_pref.active_plan.map(|p| p.title),
-        without_pref.active_plan.map(|p| p.title)
-    );
-}
-
 /// Shared insta filter: normalises the fixture directory label.
 ///
 /// Fixtures always render with the literal label `sqwai` (pinned in
 /// `render_to_string`, not read from the environment), so the pattern
 /// is a constant rather than built from the actual checkout directory.
 /// Anchored at end of line on purpose: the directory label is the last
-/// thing on the status row. A bare word match would also rewrite the
-/// product name on the startup screen, since this repository happens
-/// to be named after it.
-///
-/// Nothing else needs a filter: every startup fixture supplies its own
-/// `StartupData`, so the version and project path are literals owned by
-/// the test rather than values read out of the environment.
+/// thing on the status row.
 fn cwd_filter() -> Vec<(&'static str, &'static str)> {
     vec![(r"(?m)sqwai\s*$", "[CWD]")]
 }
@@ -658,26 +527,6 @@ macro_rules! snap {
             insta::assert_snapshot!($name, $rendered);
         });
     };
-}
-
-fn make_startup_data() -> StartupData {
-    StartupData {
-        version: "1.2.3",
-        project_path: "/home/user/projects/myapp".into(),
-        git_branch: Some("main".into()),
-        git_modified: Some(0),
-        model: "test-model".into(),
-        active_plan: None,
-        last_session: None,
-        memory: MemoryInfo {
-            has_memory_md: false,
-            latest_diary: None,
-            graph_ready: true,
-        },
-        recent: Vec::new(),
-        warnings: Vec::new(),
-        has_sqwai_dir: true,
-    }
 }
 
 // ── Chat fixtures ──────────────────────────────────────────────────────
@@ -962,155 +811,14 @@ fn snap_chat_plan_panel_open() {
     }
 }
 
-// ── Startup-screen fixtures ────────────────────────────────────────────
-
-#[test]
-fn snap_startup_active_plan() {
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.startup = true;
-    let mut data = make_startup_data();
-    data.active_plan = Some(ActivePlanInfo {
-        title: "Refactor auth module".into(),
-        current_step: 2,
-        total_steps: 5,
-        status_text: "In progress".into(),
-        source: "session a8f2c1d4 · 14:02".into(),
-    });
-    app.startup_data = Some(data);
-    for w_h in [(100u16, 30u16), (70, 24)] {
-        let s = render_to_string(&mut app, w_h.0, w_h.1);
-        snap!(format!("startup_active_plan_{}x{}", w_h.0, w_h.1), s);
-    }
-}
-
-#[test]
-fn startup_foreign_plan_source_names_another_session() {
-    // the startup screen must never present a foreign plan as the current
-    // session's: the source line always says whose it is
-    let header = crate::session::SessionHeader {
-        id: uuid::Uuid::new_v4(),
-        title: "old".into(),
-        pinned: false,
-        created_at: chrono::Utc::now(),
-        last_message_at: None,
-        model_key: "m".into(),
-        plan_id: None,
-        context_tokens: 0,
-        calls: 0,
-        errors: 0,
-        project: None,
-    };
-    assert_eq!(
-        App::plan_source_label(true, Some(&header)),
-        "previous session's plan"
-    );
-    let foreign = App::plan_source_label(false, Some(&header));
-    assert!(
-        foreign.starts_with("another session's plan · session "),
-        "{foreign}"
-    );
-    assert_eq!(
-        App::plan_source_label(false, None),
-        "newest active plan in this project"
-    );
-}
-
-#[test]
-fn snap_startup_no_plan_with_history() {
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.startup = true;
-    let mut data = make_startup_data();
-    data.active_plan = None;
-    data.last_session = Some(RecentSessionInfo {
-        date: "2025-01-15".into(),
-        title: "Fix login bug".into(),
-        outcome: "Completed successfully".into(),
-    });
-    data.recent = vec![
-        RecentSessionInfo {
-            date: "2025-01-15".into(),
-            title: "Fix login bug".into(),
-            outcome: "Completed".into(),
-        },
-        RecentSessionInfo {
-            date: "2025-01-14".into(),
-            title: "Add dark mode".into(),
-            outcome: "Completed".into(),
-        },
-    ];
-    app.startup_data = Some(data);
-    for w_h in [(100u16, 30u16), (70, 24)] {
-        let s = render_to_string(&mut app, w_h.0, w_h.1);
-        snap!(
-            format!("startup_no_plan_with_history_{}x{}", w_h.0, w_h.1),
-            s
-        );
-    }
-}
-
-#[test]
-fn snap_startup_first_run() {
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.startup = true;
-    let mut data = make_startup_data();
-    data.active_plan = None;
-    data.last_session = None;
-    data.recent = Vec::new();
-    data.has_sqwai_dir = false;
-    data.memory = MemoryInfo {
-        has_memory_md: false,
-        latest_diary: None,
-        graph_ready: false,
-    };
-    app.startup_data = Some(data);
-    for w_h in [(100u16, 30u16), (70, 24)] {
-        let s = render_to_string(&mut app, w_h.0, w_h.1);
-        snap!(format!("startup_first_run_{}x{}", w_h.0, w_h.1), s);
-    }
-}
-
-#[test]
-fn snap_startup_api_key_warning() {
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.startup = true;
-    let mut data = make_startup_data();
-    data.warnings = vec![
-        "API key not set for provider 'openai'. Set OPENAI_API_KEY or add api_key to config."
-            .into(),
-    ];
-    app.startup_data = Some(data);
-    for w_h in [(100u16, 30u16), (70, 24)] {
-        let s = render_to_string(&mut app, w_h.0, w_h.1);
-        snap!(format!("startup_api_key_warning_{}x{}", w_h.0, w_h.1), s);
-    }
-}
-
-#[test]
-fn snap_startup_graph_not_ready() {
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.startup = true;
-    let mut data = make_startup_data();
-    data.memory = MemoryInfo {
-        has_memory_md: true,
-        latest_diary: Some("2025-01-14".into()),
-        graph_ready: false,
-    };
-    app.startup_data = Some(data);
-    for w_h in [(100u16, 30u16), (70, 24)] {
-        let s = render_to_string(&mut app, w_h.0, w_h.1);
-        snap!(format!("startup_graph_not_ready_{}x{}", w_h.0, w_h.1), s);
-    }
-}
-
 // ── Behavioural tests (no snapshot) ───────────────────────────────────
 
 #[tokio::test]
 async fn after_first_message_startup_info_block_gone() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = true;
-    app.startup_data = Some(make_startup_data());
 
-    // Startup screen is shown before the first message
+    // Fresh session before the first message
     assert!(app.startup, "startup should be true before first message");
 
     // Simulate submitting a message — startup becomes false

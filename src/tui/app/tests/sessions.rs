@@ -386,9 +386,9 @@ fn history_restores_a_delegated_call_as_a_child_row() {
 
 #[test]
 fn apply_session_from_startup_does_not_persist_empty_stub() {
-    // on the startup screen the current session is empty; opening an
-    // existing session from there must switch to it without saving that
-    // empty startup stub to disk (see apply_session's session_has_messages guard)
+    // the fresh empty session must switch to an existing one without
+    // saving the empty stub to disk (see apply_session's
+    // session_has_messages guard)
     use crate::providers::Role;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     assert!(app.session.messages.is_empty(), "startup session is empty");
@@ -401,6 +401,42 @@ fn apply_session_from_startup_does_not_persist_empty_stub() {
         app.session_has_messages(),
         "active session is the existing one with history"
     );
+}
+
+#[test]
+fn exit_transcript_prints_blocks_and_skips_noise() {
+    use crate::providers::{Message, Role, ToolCallReq};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    // empty session prints nothing: a bare launch leaves no trace
+    assert!(app.exit_transcript().is_empty());
+    app.session.messages.push(Message::new(Role::System, "sys"));
+    app.session
+        .messages
+        .push(Message::new(Role::User, "do the thing"));
+    app.session
+        .messages
+        .push(
+            Message::new(Role::Assistant, "on it").with_tool_calls(vec![ToolCallReq::new(
+                "c1",
+                "read_file",
+                serde_json::json!({"path": "src/main.rs"}),
+            )]),
+        );
+    app.session
+        .messages
+        .push(Message::tool_result("c1", "fn main() {}", false));
+    app.session
+        .messages
+        .push(Message::tool_result("c2", "boom\nline2", true));
+    let out = app.exit_transcript().join("\n");
+    assert!(out.contains("> do the thing"), "{out:?}");
+    assert!(out.contains("» read_file"), "{out:?}");
+    assert!(!out.contains("sys"), "system prompts stay out: {out:?}");
+    assert!(
+        !out.contains("fn main() {}"),
+        "successful outputs stay out: {out:?}"
+    );
+    assert!(out.contains("boom"), "failures stay in: {out:?}");
 }
 
 #[test]

@@ -415,6 +415,9 @@ impl Session {
     /// Pinned sessions are exempt from the window: with more sessions on
     /// disk than `limit`, a pinned one would otherwise be unreachable from
     /// the menu, defeating the point of pinning.
+    /// Only called from non-test menu code (unit tests inject sessions
+    /// directly), so test builds would flag it dead without the allow.
+    #[cfg_attr(test, allow(dead_code))]
     pub fn list_visible_headers(limit: usize) -> Result<Vec<SessionHeader>> {
         let dir = Self::sessions_dir()?;
         #[derive(Serialize, Deserialize)]

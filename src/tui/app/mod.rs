@@ -122,48 +122,6 @@ use view::{ActivityGroup, AskRow, CellPos, ProposalRow, SegMeta, Segment, Select
 
 use menus::COMMANDS;
 
-#[derive(Debug, Clone)]
-pub(super) struct StartupData {
-    pub version: &'static str,
-    pub project_path: String,
-    pub git_branch: Option<String>,
-    pub git_modified: Option<usize>,
-    pub model: String,
-    pub active_plan: Option<ActivePlanInfo>,
-    pub last_session: Option<RecentSessionInfo>,
-    pub memory: MemoryInfo,
-    pub recent: Vec<RecentSessionInfo>,
-    pub warnings: Vec<String>,
-    pub has_sqwai_dir: bool,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct ActivePlanInfo {
-    pub title: String,
-    pub current_step: usize,
-    pub total_steps: usize,
-    pub status_text: String,
-    /// where this plan comes from: linked session, previous session, or another
-    /// session's plan — never presented as the current session's. The source
-    /// line always says whose it is, so the startup screen cannot claim a
-    /// foreign plan as yours.
-    pub source: String,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct RecentSessionInfo {
-    pub date: String,
-    pub title: String,
-    pub outcome: String,
-}
-
-#[derive(Debug, Clone, Default)]
-pub(super) struct MemoryInfo {
-    pub has_memory_md: bool,
-    pub latest_diary: Option<String>,
-    pub graph_ready: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum StatusKind {
     Info,
@@ -316,17 +274,9 @@ pub struct App {
     thinking_open: bool,
     thinking_idx: Option<usize>,
     mode: Mode,
-    /// true while the current session has no user turns yet: the startup
-    /// screen is shown for every such session, not only at launch
+    /// true while the current session has no user turns yet: a fresh,
+    /// unsaved scratch session (never persisted until the first message)
     startup: bool,
-    pub(super) startup_data: Option<StartupData>,
-    /// background collector for startup_data; Some while a collection is
-    /// still running, so /new and session switches never block the UI
-    startup_data_rx: Option<std::sync::mpsc::Receiver<StartupData>>,
-    /// plan id the startup screen prefers over the global newest active
-    /// plan: the previous session's plan on /new, the session's own plan
-    /// when switching to an empty session
-    startup_preferred_plan: Option<String>,
     pub(super) last_ctrl_c: Option<Instant>,
     /// transient bottom-bar notice (3s): every status/error lands here, the
     /// chat stays clean. A new notice replaces the current one.
@@ -842,14 +792,6 @@ impl App {
         let resolved = cfg.resolve_provider(&model_cfg)?;
         let provider = providers::create(&resolved)?;
 
-        let startup_data = if startup {
-            Some(Self::collect_startup_data(
-                &cfg, &model_cfg, read_only, None, &model_key,
-            ))
-        } else {
-            None
-        };
-
         let project_root = std::env::current_dir().unwrap_or_default();
         if !read_only {
             // Heal a crash between a journal intent and its plan store
@@ -907,9 +849,6 @@ impl App {
             thinking_idx: None,
             mode: Mode::Act,
             startup,
-            startup_data,
-            startup_data_rx: None,
-            startup_preferred_plan: None,
             last_ctrl_c: None,
             read_only,
             toast: None,
@@ -1276,7 +1215,7 @@ impl App {
         stats_rx: std::sync::mpsc::Receiver<crate::tui::presenter::FrameReport>,
         presenter_alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
         term_size: ratatui::layout::Size,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         self.term_size = term_size;
         let (ev_tx, ev_rx) = std::sync::mpsc::channel::<crossterm::event::Event>();
         let input_notify = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -1316,7 +1255,6 @@ impl App {
                 self.submit();
             }
             self.poll_input(&ev_rx)?;
-            self.poll_startup_data();
             self.poll_agent();
             self.poll_why();
             self.poll_provider_check();
@@ -1520,7 +1458,7 @@ impl App {
         } else if self.session_has_messages() {
             self.session.save().ok();
         }
-        Ok(())
+        Ok(self.exit_transcript())
     }
 
     /// a session is only worth persisting once it carries real conversation;
@@ -1528,6 +1466,62 @@ impl App {
     /// be written to disk as a stub
     fn session_has_messages(&self) -> bool {
         !self.session.messages.is_empty()
+    }
+
+    /// Plain-text transcript for the terminal scrollback, printed after the
+    /// alternate screen is gone (Codex-style exit printing). One block per
+    /// message, no ANSI: user/assistant text verbatim, tool calls as
+    /// one-liners, failed results trimmed. Successful outputs stay out —
+    /// a build log would bury the conversation; failures are what the
+    /// scrollback review is for. Each block capped so a runaway tool
+    /// cannot flood the buffer.
+    pub(super) fn exit_transcript(&self) -> Vec<String> {
+        const BODY_LINES: usize = 120;
+        const ERR_LINES: usize = 12;
+        fn cap(text: &str, n: usize) -> Vec<String> {
+            let lines: Vec<&str> = text.lines().collect();
+            let mut out: Vec<String> = lines.iter().take(n).map(|l| l.to_string()).collect();
+            if lines.len() > n {
+                out.push(format!("… ({} more lines)", lines.len() - n));
+            }
+            out
+        }
+        let mut out = Vec::new();
+        for m in &self.session.messages {
+            match m.role {
+                crate::providers::Role::System => continue,
+                crate::providers::Role::User => {
+                    if m.content.trim().is_empty() {
+                        continue;
+                    }
+                    out.push("> ".to_string() + m.content.trim());
+                }
+                crate::providers::Role::Assistant => {
+                    if !m.content.trim().is_empty() {
+                        out.extend(cap(m.content.trim(), BODY_LINES));
+                    }
+                    for call in &m.tool_calls {
+                        let args = call.args.to_string();
+                        let short = truncate_chars(&args, 160);
+                        out.push(format!("» {} {short}", call.name));
+                    }
+                }
+                crate::providers::Role::Tool => {
+                    // successes are noise in scrollback; failures stay
+                    if !m.is_error || m.content.trim().is_empty() {
+                        continue;
+                    }
+                    out.push("✗ tool failed:".to_string());
+                    out.extend(cap(m.content.trim(), ERR_LINES));
+                }
+            }
+            out.push(String::new());
+        }
+        // trailing blank line is the paragraph separator, not content
+        if out.last().is_some_and(|l| l.is_empty()) {
+            out.pop();
+        }
+        out
     }
 
     fn jump_to_bottom_on_typing(&mut self) {
@@ -2594,9 +2588,9 @@ impl App {
     }
 
     fn apply_session(&mut self, mut s: Session) {
-        // persist the session we are leaving — but skip a brand-new empty one
-        // (e.g. the startup stub), otherwise opening an existing session from
-        // the startup screen would litter the list with an extra empty file
+        // persist the session we are leaving — but skip a brand-new empty one,
+        // otherwise opening an existing session from a fresh stub would
+        // litter the list with an extra empty file
         if self.session_has_messages() {
             self.session.save().ok();
         }
@@ -2683,15 +2677,9 @@ impl App {
         self.ask_custom_focus = None;
         self.rebuild_session_environment();
         self.load_history_segments();
-        // an empty session shows the startup screen like a fresh launch;
-        // data is collected in the background — switching must not block
+        // an empty session is a fresh scratch pad, never persisted until
+        // the first message (see the session_has_messages guards)
         self.startup = self.session.messages.is_empty();
-        if self.startup {
-            // an empty session shows its own plan when it has one, not the
-            // global newest — same rule as /new
-            self.startup_preferred_plan = self.session.plan_id.clone();
-            self.refresh_startup_data();
-        }
         self.menu_home();
         self.follow = true;
         self.view_top = 0;
@@ -2740,9 +2728,6 @@ impl App {
         if self.session_has_messages() {
             self.session.save().ok();
         }
-        // the startup screen after /new prefers the plan we just left over
-        // the global newest: it is the plan the user was working on
-        self.startup_preferred_plan = self.session.plan_id.clone();
         // §2.5 runs retention when a session ends. Doing it here rather than
         // on the way out means it also happens for a session the user simply
         // walks away from, and the new session's own chain is protected by
@@ -2761,10 +2746,8 @@ impl App {
         .flatten()
         .map(|plan| plan.id);
         self.context_bootstrap_pending = true;
-        // a fresh empty session shows the startup screen again; the data
-        // refresh runs in the background so /new returns instantly
+        // a fresh empty session stays unsaved until the first message
         self.startup = true;
-        self.refresh_startup_data();
         self.clear_segments();
         self.seg_cache.clear();
         self.cache_lines.clear();
@@ -3394,12 +3377,6 @@ impl App {
             }
             Some(other) => format!("unknown /plan action '{other}'"),
         };
-        // complete/abandon change the status the startup screen shows,
-        // delete is menu-confirmed elsewhere; waive/confirm touch only
-        // receipts (invisible on the startup screen) and skip the refresh.
-        if matches!(args.first().copied(), Some("complete" | "abandon")) {
-            self.refresh_startup_data();
-        }
         self.status(&result, StatusKind::Info);
     }
 
@@ -3428,11 +3405,7 @@ impl App {
                 });
                 let sid = self.session.id.to_string();
                 match plan::commit(&root, &sid, &mut active, "set_goal", "user", true, args) {
-                    Ok(_) => {
-                        // the startup screen quotes the goal verbatim
-                        self.refresh_startup_data();
-                        self.status("goal updated; pending steps are stale", StatusKind::Ok)
-                    }
+                    Ok(_) => self.status("goal updated; pending steps are stale", StatusKind::Ok),
                     Err(e) => self.status(&format!("goal update failed: {e:#}"), StatusKind::Err),
                 }
             }
@@ -5440,375 +5413,6 @@ impl App {
         if (self.follow, self.view_top) != old || had_sel {
             self.dirty = true;
         }
-    }
-
-    /// Start collecting startup screen data on a background thread. The
-    /// heavy parts (git subprocesses, session index, plan file) would stall
-    /// the UI for seconds when run synchronously inside /new.
-    /// Until the result arrives the previous data (if any) keeps rendering.
-    /// Plan mutations must refresh this too (delete/complete/abandon/waive/
-    /// confirm/goal/constraints) — otherwise the startup screen keeps
-    /// showing the pre-mutation plan.
-    pub(super) fn refresh_startup_data(&mut self) {
-        // Drop any in-flight collection: its result predates this call, and
-        // the orphaned worker's send fails silently once the receiver is
-        // gone. Last refresh wins, so a mutation landing mid-collection
-        // (delete → collect) can never render pre-mutation data.
-        self.startup_data_rx = None;
-        let cfg = self.cfg.clone();
-        let model_cfg = self.model_cfg.clone();
-        let read_only = self.read_only;
-        let preferred_plan_id = self.startup_preferred_plan.clone();
-        let session_model_key = self.session.model_key.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let data = Self::collect_startup_data(
-                &cfg,
-                &model_cfg,
-                read_only,
-                preferred_plan_id,
-                &session_model_key,
-            );
-            let _ = tx.send(data);
-        });
-        self.startup_data_rx = Some(rx);
-    }
-
-    /// Pick up a finished background startup-data collection, if any.
-    fn poll_startup_data(&mut self) {
-        if self.startup_data_rx.is_none() {
-            return;
-        }
-        if let Some(rx) = self.startup_data_rx.take() {
-            match rx.try_recv() {
-                Ok(data) => {
-                    self.startup_data = Some(data);
-                    self.dirty = true;
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => self.startup_data_rx = Some(rx),
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
-            }
-        }
-    }
-
-    /// Source line for the startup screen's plan. A fresh session never owns
-    /// the project-global plan it is shown, so the fallback branches name
-    /// the owning session explicitly instead of letting "active plan" read
-    /// as the current session's.
-    fn plan_source_label(preferred: bool, last: Option<&crate::session::SessionHeader>) -> String {
-        if preferred {
-            return "previous session's plan".to_string();
-        }
-        match last {
-            Some(s) => {
-                let short: String = s.id.to_string().chars().take(8).collect();
-                format!(
-                    "another session's plan · session {short} · {}",
-                    fmt_relative_time(s.last_activity())
-                )
-            }
-            None => "newest active plan in this project".to_string(),
-        }
-    }
-
-    pub(super) fn collect_startup_data(
-        cfg: &Config,
-        model_cfg: &ModelConfig,
-        read_only: bool,
-        preferred_plan_id: Option<String>,
-        session_model_key: &str,
-    ) -> StartupData {
-        let root = std::env::current_dir().unwrap_or_default();
-        let version = env!("CARGO_PKG_VERSION");
-        let project_path = shorten_path(&root);
-        let (git_branch, git_modified) = collect_git_info(&root);
-        let model = session_model_key.to_string();
-
-        let active_plan_raw = preferred_plan_id
-            .as_deref()
-            .and_then(|id| crate::plan::preferred_active_plan(&root, id))
-            .map(|plan| (plan, true))
-            .or_else(|| {
-                crate::plan::open_active(&root)
-                    .ok()
-                    .flatten()
-                    .map(|plan| (plan, false))
-            });
-        let has_sqwai_dir = root.join(".sqwai").exists();
-
-        // Memory info
-        let has_memory_md = root.join("MEMORY.md").exists();
-        let diary_dir = root.join(".sqwai").join("memory");
-        let latest_diary = if diary_dir.exists() {
-            let mut dates = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(&diary_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if name.ends_with(".md") && name != "MEMORY.md" {
-                        let date_str = name.trim_end_matches(".md");
-                        if chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").is_ok() {
-                            dates.push(date_str.to_string());
-                        }
-                    }
-                }
-            }
-            dates.sort();
-            dates.pop()
-        } else {
-            None
-        };
-        let graph_ready = root.join(".sqwai").join("graph").join("graph.db").exists();
-        let memory = MemoryInfo {
-            has_memory_md,
-            latest_diary,
-            graph_ready,
-        };
-
-        // Saved sessions: this project's own (legacy saves belong
-        // everywhere); foreign ones live in the sessions menu instead
-        let sessions: Vec<SessionHeader> = Session::list_visible_headers(10)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|s| Session::project_is_here(&s.project, &root))
-            .collect();
-
-        let (active_plan, last_session, recent) = if let Some((plan, preferred)) = active_plan_raw {
-            let in_prog = plan
-                .steps
-                .iter()
-                .position(|s| s.status == crate::plan::StepStatus::InProgress);
-            let (curr, st) = if let Some(i) = in_prog {
-                (i + 1, "in progress".to_string())
-            } else if let Some(i) = plan
-                .steps
-                .iter()
-                .position(|s| s.status == crate::plan::StepStatus::Pending)
-            {
-                (i + 1, "pending".to_string())
-            } else if !plan.steps.is_empty()
-                && plan
-                    .steps
-                    .iter()
-                    .all(|s| s.status == crate::plan::StepStatus::Done)
-            {
-                (plan.steps.len(), "all completed".to_string())
-            } else {
-                (1, "in progress".to_string())
-            };
-
-            let mut plan_info = ActivePlanInfo {
-                title: plan.goal.text.clone(),
-                current_step: curr,
-                total_steps: plan.steps.len(),
-                status_text: st,
-                source: String::new(),
-            };
-
-            let done = plan
-                .steps
-                .iter()
-                .filter(|s| s.status == crate::plan::StepStatus::Done)
-                .count();
-            let blocked = plan
-                .steps
-                .iter()
-                .filter(|s| s.status == crate::plan::StepStatus::Blocked)
-                .count();
-            let mut stats = Vec::new();
-            if done > 0 {
-                stats.push(format!("{done} steps done"));
-            }
-            if blocked > 0 {
-                stats.push(format!("{blocked} blocked"));
-            }
-            let stats_str = if stats.is_empty() {
-                format!("{} steps", plan.steps.len())
-            } else {
-                stats.join(" · ")
-            };
-
-            let last_sess_obj = sessions
-                .iter()
-                .find(|s| {
-                    plan.sessions.contains(&s.id.to_string())
-                        || s.plan_id.as_deref() == Some(&plan.id)
-                })
-                .or_else(|| sessions.first());
-
-            plan_info.source = Self::plan_source_label(preferred, last_sess_obj);
-
-            let last_session_info = last_sess_obj.map(|s| RecentSessionInfo {
-                date: fmt_relative_time(s.last_activity()),
-                title: s.title.clone(),
-                outcome: stats_str,
-            });
-
-            let outside_sessions: Vec<RecentSessionInfo> = sessions
-                .iter()
-                .filter(|s| {
-                    !plan.sessions.contains(&s.id.to_string())
-                        && s.plan_id.as_deref() != Some(&plan.id)
-                })
-                .take(3)
-                .map(|s| {
-                    let outcome = if s.calls > 0 || s.errors > 0 {
-                        let mut parts = Vec::new();
-                        if s.calls > 0 {
-                            parts.push(format!("{} done", s.calls));
-                        }
-                        if s.errors > 0 {
-                            parts.push(format!("{} blocked", s.errors));
-                        }
-                        parts.join(" · ")
-                    } else {
-                        "complete".to_string()
-                    };
-                    RecentSessionInfo {
-                        date: fmt_relative_time(s.last_activity()),
-                        title: s.title.clone(),
-                        outcome,
-                    }
-                })
-                .collect();
-
-            (Some(plan_info), last_session_info, outside_sessions)
-        } else {
-            let last_session_info = sessions.first().map(|s| RecentSessionInfo {
-                date: fmt_relative_time(s.last_activity()),
-                title: s.title.clone(),
-                outcome: String::new(),
-            });
-
-            let recent_sessions: Vec<RecentSessionInfo> = sessions
-                .iter()
-                .take(3)
-                .map(|s| {
-                    let outcome = if s.calls > 0 || s.errors > 0 {
-                        let mut parts = Vec::new();
-                        if s.calls > 0 {
-                            parts.push(format!("{} done", s.calls));
-                        }
-                        if s.errors > 0 {
-                            parts.push(format!("{} blocked", s.errors));
-                        }
-                        parts.join(" · ")
-                    } else {
-                        "complete".to_string()
-                    };
-                    RecentSessionInfo {
-                        date: fmt_relative_time(s.last_activity()),
-                        title: s.title.clone(),
-                        outcome,
-                    }
-                })
-                .collect();
-
-            (None, last_session_info, recent_sessions)
-        };
-
-        let mut warnings = Vec::new();
-        if let Some(pc) = cfg.providers.get(&model_cfg.provider)
-            && pc.effective_api_key(&model_cfg.provider).is_none()
-        {
-            let env_name = pc
-                .key_env_name(&model_cfg.provider)
-                .unwrap_or_else(|| "API_KEY".into());
-            warnings.push(format!("no API key: set {env_name} or run /settings"));
-        }
-        if git_branch.is_none() {
-            warnings.push("git not found: undo for shell commands disabled".to_string());
-        }
-        if read_only {
-            warnings.push("another sqwai instance holds this project — read-only".to_string());
-        }
-        warnings.truncate(2);
-
-        StartupData {
-            version,
-            project_path,
-            git_branch,
-            git_modified,
-            model,
-            active_plan,
-            last_session,
-            memory,
-            recent,
-            warnings,
-            has_sqwai_dir,
-        }
-    }
-}
-
-pub(super) fn shorten_path(path: &std::path::Path) -> String {
-    let path_str = path.to_string_lossy().replace('\\', "/");
-    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-        let home_str = home.replace('\\', "/");
-        if path_str.starts_with(&home_str) {
-            let rest = &path_str[home_str.len()..];
-            if rest.is_empty() {
-                return "~".to_string();
-            }
-            if rest.starts_with('/') {
-                return format!("~{rest}");
-            }
-            return format!("~/{rest}");
-        }
-    }
-    path_str
-}
-
-/// Branch and dirty-file count for the status bar, read through the `git`
-/// binary rather than libgit2 (§5.10).
-///
-/// This is the user's own repository, so it is read and never written: two
-/// plumbing commands, no index, no locks. `--porcelain` output is stable
-/// across git versions, which is the point of asking for it.
-pub(super) fn collect_git_info(root: &std::path::Path) -> (Option<String>, Option<usize>) {
-    let git = |args: &[&str]| -> Option<String> {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .output()
-            .ok()?;
-        out.status
-            .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
-    };
-    // `--abbrev-ref HEAD` prints `HEAD` on a detached head, which is what the
-    // libgit2 version reported too
-    let Some(branch) = git(&["rev-parse", "--abbrev-ref", "HEAD"]) else {
-        // not a repository, or no git binary: the bar simply shows no branch
-        return (None, None);
-    };
-    let branch = branch.trim().to_string();
-    if branch.is_empty() {
-        return (None, None);
-    }
-    let modified = git(&["status", "--porcelain", "--untracked-files=all"])
-        .map(|out| out.lines().filter(|line| !line.trim().is_empty()).count())
-        .unwrap_or(0);
-    (Some(branch), Some(modified))
-}
-
-pub(super) fn fmt_relative_time(dt: chrono::DateTime<chrono::Utc>) -> String {
-    let local = dt.with_timezone(&chrono::Local);
-    let now = chrono::Local::now();
-    let duration = now.signed_duration_since(local);
-    if duration.num_minutes() < 1 {
-        "just now".to_string()
-    } else if duration.num_hours() < 24 && now.date_naive() == local.date_naive() {
-        local.format("%H:%M").to_string()
-    } else if (now.date_naive() - local.date_naive()).num_days() == 1 {
-        format!("yesterday {}", local.format("%H:%M"))
-    } else if duration.num_days() < 7 {
-        let days = duration.num_days().max(2);
-        format!("{days} days ago")
-    } else {
-        local.format("%d.%m %H:%M").to_string()
     }
 }
 

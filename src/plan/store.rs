@@ -795,16 +795,6 @@ pub fn open(root: &Path, id: &str) -> Result<Plan> {
     }
 }
 
-/// Preferred plan for the startup screen: the linked plan while it is
-/// still active. A deleted, completed or abandoned id resolves to `None`
-/// so the caller falls back to the global newest active plan instead of
-/// showing a dead plan as active.
-pub fn preferred_active_plan(root: &Path, id: &str) -> Option<Plan> {
-    open(root, id)
-        .ok()
-        .filter(|plan| plan.status == PlanStatus::Active)
-}
-
 /// Rebuild a schema-broken plan file from journaled intents (§2.1.4).
 /// Collects the birth intent (create, or accept_proposal for replacement
 /// plans) plus every later op for this plan id across all session journals —
