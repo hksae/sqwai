@@ -3321,7 +3321,6 @@ impl App {
         let n = EffortLevel::SELECTABLE.len();
         let sel = self.menu_sel.min(n.saturating_sub(1));
         let active = EffortLevel::SELECTABLE[sel];
-        let active_color = Theme::effort_color(active);
         // color sweep on level change (mirrors the mode chip): arm from
         // the currently displayed color so a quick hop across levels
         // redirects mid-sweep instead of restarting it
@@ -3348,23 +3347,20 @@ impl App {
             }
             self.effort_blend_sel = Some(sel);
         }
-        let (fill, active_style) = match &self.effort_blend {
-            Some((f, t0))
-                if crate::tui::shimmer::has_truecolor()
-                    && now.duration_since(*t0).as_millis() < MODE_BLEND_MS as u128 =>
-            {
+        // One ink for the whole lit part of the card. Past the sweep window it
+        // is exactly the endpoint the sweep was heading to, so the final
+        // animation frame and the settled frame are the same color and a
+        // dropped repaint cannot leave the card brighter than it should be.
+        let ink = match &self.effort_blend {
+            Some((f, t0)) if now.duration_since(*t0).as_millis() < MODE_BLEND_MS as u128 => {
                 let el = now.duration_since(*t0).as_millis();
                 let (r, g, b) =
                     crate::tui::shimmer::blend(*f, endpoint, el as f64 / MODE_BLEND_MS as f64);
-                (
-                    Style::new().fg(Color::Rgb(r, g, b)),
-                    Style::new()
-                        .fg(Color::Rgb(r, g, b))
-                        .add_modifier(Modifier::BOLD),
-                )
+                Color::Rgb(r, g, b)
             }
-            _ => (Style::new().fg(active_color), Theme::effort(active)),
+            _ => Theme::effort_color(active),
         };
+        let ink = Style::new().fg(ink);
 
         // card geometry: 1 pad + n columns; labels + track + one air row
         let inner_w = 1 + COL_W * n as u16;
@@ -3379,12 +3375,17 @@ impl App {
         self.menu_rect = rect;
         self.effort_hits.clear();
 
-        // modal dim, same as generic menus (text and colors preserved)
+        // modal dim, same as generic menus (text and colors preserved): DIM
+        // alone only dulls the foreground, so painted backgrounds behind the
+        // card get stepped down by hand or they keep glowing
         for y in area.y..area.bottom() {
             for x in area.x..area.right() {
                 if let Some(cell) = buf.cell_mut((x, y)) {
-                    let style = cell.style();
-                    cell.set_style(style.add_modifier(Modifier::DIM));
+                    let mut style = cell.style().add_modifier(Modifier::DIM);
+                    if let Some(bg) = style.bg {
+                        style.bg = Some(dim_bg(bg));
+                    }
+                    cell.set_style(style);
                 }
             }
         }
@@ -3439,7 +3440,7 @@ impl App {
             let col_x = base_x + COL_W * i as u16;
             let name_w = name.len() as u16;
             let pad = COL_W.saturating_sub(name_w) / 2;
-            let style = if i == sel { active_style } else { Theme::dim() };
+            let style = if i == sel { ink } else { Theme::dim() };
             Paragraph::new(Line::from(vec![
                 Span::styled(" ".repeat(pad as usize), Theme::base()),
                 Span::styled(name.to_string(), style),
@@ -3470,25 +3471,17 @@ impl App {
         let total = COL_W as usize * n;
         let dot_off = (COL_W / 2) as usize;
         let dim = Theme::dim();
-        // `fill` comes from the sweep above (lerped mid-transition,
-        // indexed when settled): track and dots share one color source
         // each cell: (glyph, style)
         let mut cells: Vec<(&str, Style)> = vec![(" ", Theme::base()); total];
         for i in 0..n {
             let dx = i * COL_W as usize + dot_off;
-            // progress dots: every level up to the selection is filled,
-            // the selection itself additionally bold; the rest are hollow
-            let (dot, dot_style) = if i == sel {
-                ("●", active_style)
-            } else if i < sel {
-                ("●", fill)
-            } else {
-                ("○", dim)
-            };
+            // progress dots: every level up to the selection is filled with one
+            // ink, the rest are hollow — the fill boundary is the selection
+            let (dot, dot_style) = if i <= sel { ("●", ink) } else { ("○", dim) };
             cells[dx] = (dot, dot_style);
             // connector to the next dot: filled iff fully left of selection
             if i + 1 < n {
-                let cstyle = if i < sel { fill } else { dim };
+                let cstyle = if i < sel { ink } else { dim };
                 for c in cells
                     .iter_mut()
                     .take((i + 1) * COL_W as usize + dot_off)

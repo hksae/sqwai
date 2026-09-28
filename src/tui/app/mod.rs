@@ -456,7 +456,8 @@ pub struct App {
     effort_hits: Vec<(Rect, usize)>,
     /// effort slider color sweep: (displayed color, arm time) plus the
     /// selection it was armed for. Mirrors the mode-chip blend: a level
-    /// change redirects mid-sweep instead of restarting it.
+    /// change redirects mid-sweep instead of restarting it. Retired (→ None)
+    /// past the sweep, and cleared whenever the popup opens fresh.
     effort_blend: Option<((u8, u8, u8), Instant)>,
     effort_blend_sel: Option<usize>,
     form_fields: Vec<FormField>,
@@ -1356,6 +1357,16 @@ impl App {
             {
                 self.mode_blend = None;
                 self.dirty = true;
+            }
+            // Retire the finished slider sweep too. Its endpoint is the
+            // settled color, so nothing visual sticks — but the stale start
+            // color must go, or the next level change anchors a blend from a
+            // frame that expired long ago.
+            if self
+                .effort_blend
+                .is_some_and(|(_, t0)| t0.elapsed().as_millis() >= MODE_BLEND_MS as u128)
+            {
+                self.effort_blend = None;
             }
             if animating {
                 // fixed 20 FPS animation rate from the wall clock, not per

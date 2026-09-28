@@ -581,6 +581,10 @@ impl App {
                 .iter()
                 .position(|l| *l == self.model_cfg.effort)
                 .unwrap_or(0);
+            // a fresh open is a first sighting: it must land on the level's own
+            // color, not sweep from wherever an earlier popup left the slider
+            self.effort_blend = None;
+            self.effort_blend_sel = None;
         }
         // unit tests inject the cache directly and never hit the disk
         #[cfg(not(test))]

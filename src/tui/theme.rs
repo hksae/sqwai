@@ -96,21 +96,10 @@ impl Theme {
     pub const fn QUOTE_BG() -> Color {
         Color::Rgb(18, 31, 18)
     }
-    /// Slider/status color per effort level: off gray → low green →
-    /// medium cyan (house accent) → high light-blue → xhigh yellow →
-    /// max magenta. First cut for live review; tune after seeing it.
-    pub const fn effort_color(level: EffortLevel) -> Color {
-        match level {
-            EffortLevel::Off => Color::DarkGray,
-            EffortLevel::Low => Color::Green,
-            EffortLevel::Medium => Color::Cyan,
-            EffortLevel::High => Color::LightBlue,
-            EffortLevel::Xhigh => Color::Yellow,
-            EffortLevel::Max => Color::Magenta,
-        }
-    }
-    /// Truecolor twin of [`Self::effort_color`] for the slider sweep:
-    /// close to the indexed colors so the settle frame does not pop.
+    /// Effort palette, one source of truth for every effort-colored surface
+    /// (slider track, dots, labels, status-bar chip). The slider sweep blends
+    /// between these same numbers, so the frame it lands on *is* its endpoint:
+    /// moving the level cannot leave the card brighter than it settles to.
     pub const fn effort_rgb(level: EffortLevel) -> (u8, u8, u8) {
         match level {
             EffortLevel::Off => (128, 128, 128),
@@ -121,11 +110,16 @@ impl Theme {
             EffortLevel::Max => (220, 130, 220),
         }
     }
+    pub const fn effort_color(level: EffortLevel) -> Color {
+        let (r, g, b) = Self::effort_rgb(level);
+        Color::Rgb(r, g, b)
+    }
 
+    /// One hue per level, never bold: a brightening terminal shows bold ANSI
+    /// as a lighter rung, so bold would paint the label and the track under it
+    /// as two faces of the same level.
     pub fn effort(level: EffortLevel) -> Style {
-        Style::new()
-            .fg(Self::effort_color(level))
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(Self::effort_color(level))
     }
 
     pub fn base() -> Style {

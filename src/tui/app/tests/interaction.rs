@@ -803,8 +803,8 @@ fn effort_slider_opens_on_current_level_with_hits() {
     // restore High for the dots/hover checks below (they assume it selected)
     app.menu_sel = want;
     app.draw_menu(&mut buf, area);
-    // expired sweep settles back to the indexed level color: the selected
-    // dot reads the theme color, not a stale blend frame
+    // expired sweep settles back to the palette color: the selected dot reads
+    // the theme color, not a stale blend frame
     app.effort_blend = Some((
         (0, 0, 0),
         std::time::Instant::now() - std::time::Duration::from_secs(5),
@@ -812,7 +812,11 @@ fn effort_slider_opens_on_current_level_with_hits() {
     app.draw_menu(&mut buf, area);
     let (hit, _) = app.effort_hits[want];
     let dot = buf[(hit.x + 4, hit.y + 1)].style().fg;
-    assert_eq!(dot, Some(ratatui::style::Color::LightBlue), "{dot:?}");
+    assert_eq!(
+        dot,
+        Some(ratatui::style::Color::Rgb(110, 165, 255)),
+        "{dot:?}"
+    );
     assert!(app.menu_rect.width > 0 && app.menu_rect.height > 0);
     // progress dots: High is index 3, so 4 filled dots, 2 hollow
     let dots: String = buf.content().iter().map(|c| c.symbol()).collect();
@@ -859,13 +863,92 @@ fn effort_narrow_fallback_list_hovers_and_clicks_by_row() {
 fn effort_slider_colors_span_gray_to_magenta() {
     use crate::tui::theme::Theme;
     use ratatui::style::Color;
-    assert_eq!(Theme::effort_color(EffortLevel::Off), Color::DarkGray);
-    assert_eq!(Theme::effort_color(EffortLevel::Max), Color::Magenta);
+    assert_eq!(
+        Theme::effort_color(EffortLevel::Off),
+        Color::Rgb(128, 128, 128)
+    );
+    assert_eq!(
+        Theme::effort_color(EffortLevel::Max),
+        Color::Rgb(220, 130, 220)
+    );
     // every level gets a distinct color
     let mut seen = std::collections::HashSet::new();
     for lvl in EffortLevel::SELECTABLE {
         assert!(seen.insert(Theme::effort_color(lvl)), "{lvl:?}");
     }
+}
+
+/// The sweep blends between the same numbers the palette rests on, so the
+/// frame it ends on cannot be brighter than the settled one. This identity is
+/// the whole anti-pop invariant: break it and a level change leaves a stuck,
+/// lighter card behind.
+#[test]
+fn effort_sweep_lands_exactly_on_the_settled_color() {
+    use crate::tui::theme::Theme;
+    use ratatui::style::Color;
+    for lvl in EffortLevel::SELECTABLE {
+        let (r, g, b) = Theme::effort_rgb(lvl);
+        assert_eq!(Theme::effort_color(lvl), Color::Rgb(r, g, b), "{lvl:?}");
+        // a fully-progressed blend is the endpoint, not something past it
+        let from = Theme::effort_rgb(EffortLevel::Off);
+        assert_eq!(
+            crate::tui::shimmer::blend(from, (r, g, b), 1.0),
+            (r, g, b),
+            "{lvl:?}"
+        );
+        assert!(
+            !Theme::effort(lvl)
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD),
+            "{lvl:?} must not be bold: a brightening terminal would show one level as two hues"
+        );
+    }
+}
+
+/// Reopening the Effort popup lands on the level's own color. The previous
+/// blend belonged to a popup that is no longer on screen, and sweeping from it
+/// made a fresh open look like a level change that never happened.
+#[test]
+fn effort_menu_reopens_without_a_stale_sweep() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    app.model_cfg.effort = EffortLevel::High;
+    app.open_menu(Menu::Effort);
+    app.draw_menu(&mut buf, area);
+    app.menu_sel = EffortLevel::SELECTABLE.len() - 1;
+    app.draw_menu(&mut buf, area);
+    assert!(app.effort_blend.is_some(), "a level change sweeps");
+    app.menu_home();
+    app.model_cfg.effort = EffortLevel::Low;
+    app.open_menu(Menu::Effort);
+    assert!(
+        app.effort_blend.is_none() && app.effort_blend_sel.is_none(),
+        "opening must clear the old popup's blend state"
+    );
+    app.draw_menu(&mut buf, area);
+    assert!(app.effort_blend.is_none(), "first frame must not sweep");
+}
+
+/// The effort card dims the screen behind it like every other menu. DIM alone
+/// only dulls the foreground, so painted backgrounds (user band, selection
+/// fills) would keep glowing behind this one popup.
+#[test]
+fn effort_card_dims_painted_backgrounds() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::{Color, Style};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.model_cfg.effort = EffortLevel::Max;
+    app.open_menu(Menu::Effort);
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    // well outside the centered card, so only the modal dim can reach it
+    buf[(0, 0)].set_style(Style::new().bg(Color::Indexed(235)));
+    app.draw_menu(&mut buf, area);
+    assert_eq!(buf[(0, 0)].style().bg, Some(Color::Indexed(233)));
 }
 
 #[test]
