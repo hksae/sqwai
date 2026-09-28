@@ -829,19 +829,15 @@ impl App {
                     self.dirty = true;
                 }
                 Event::Mouse(m) => match m.kind {
-                    // wheel goes through the normalizer (density-independent
-                    // lines); menus scroll the bare view, never the selection
+                    // wheel moves the menu selection (the view follows it);
+                    // scrolling the bare offset instead would fight hover:
+                    // the draw clamp snaps the view back to the hovered row
+                    // and the wheel looks dead at both ends (forms inert)
                     MouseEventKind::ScrollUp if !self.menu_stack.is_empty() => {
-                        let d = self.wheel_lines(-1);
-                        if d != 0 {
-                            self.menu_wheel(d);
-                        }
+                        self.menu_wheel(-3);
                     }
                     MouseEventKind::ScrollDown if !self.menu_stack.is_empty() => {
-                        let d = self.wheel_lines(1);
-                        if d != 0 {
-                            self.menu_wheel(d);
-                        }
+                        self.menu_wheel(3);
                     }
                     MouseEventKind::ScrollUp => {
                         if self.menu_stack.is_empty()
@@ -855,25 +851,17 @@ impl App {
                                 .scroll(tui_textarea::Scrolling::Delta { rows: -1, cols: 0 });
                             self.dirty = true;
                         } else if self.popup_visible() {
-                            let d = self.wheel_lines(-1);
-                            let moved = if d != 0 {
-                                self.popup_scroll_by(d)
-                            } else {
-                                false
-                            };
+                            let moved = self.popup_scroll_by(-3);
                             let unhovered = self.hover.is_some();
                             self.hover = None;
                             if moved || unhovered {
                                 self.dirty = true;
                             }
                         } else {
-                            // normalized lines; scroll() clears the selection
-                            // as a side effect, so dissolved notches (0)
-                            // must not reach it
-                            let d = self.wheel_lines(-1);
-                            if d != 0 {
-                                self.scroll(-d);
-                            }
+                            // 3 lines per notch (was 4): smaller steps read as
+                            // smoother motion now that each notch draws its own
+                            // frame instead of batching into a 50ms tick.
+                            self.scroll(3);
                         }
                     }
                     MouseEventKind::ScrollDown => {
@@ -888,22 +876,14 @@ impl App {
                                 .scroll(tui_textarea::Scrolling::Delta { rows: 1, cols: 0 });
                             self.dirty = true;
                         } else if self.popup_visible() {
-                            let d = self.wheel_lines(1);
-                            let moved = if d != 0 {
-                                self.popup_scroll_by(d)
-                            } else {
-                                false
-                            };
+                            let moved = self.popup_scroll_by(3);
                             let unhovered = self.hover.is_some();
                             self.hover = None;
                             if moved || unhovered {
                                 self.dirty = true;
                             }
                         } else {
-                            let d = self.wheel_lines(1);
-                            if d != 0 {
-                                self.scroll(-d);
-                            }
+                            self.scroll(-3);
                         }
                     }
                     MouseEventKind::Down(MouseButton::Left) if !self.menu_stack.is_empty() => {

@@ -443,12 +443,6 @@ pub struct App {
     /// drawn above the scroll window, never a nav step
     menu_table_header: Option<Line<'static>>,
     menu_rect: Rect,
-    /// wheel normalizer state: fractional carry across raw events, stream
-    /// direction (+1 down / −1 up), last event time. A flip or a >150ms
-    /// gap starts a new stream so remainders never slingshot.
-    wheel_carry: f32,
-    wheel_dir: i32,
-    wheel_at: Option<Instant>,
     /// when the current approval dialog opened: Enter inside the grace
     /// window does not commit (focus-steal protection), it only keeps
     /// the preselected deny
@@ -920,9 +914,6 @@ impl App {
             menu_table_header: None,
             approval_opened_at: None,
             menu_rect: Rect::default(),
-            wheel_carry: 0.0,
-            wheel_dir: 0,
-            wheel_at: None,
             table_built_w: 0,
             effort_hits: Vec::new(),
             form_fields: Vec::new(),
@@ -1224,7 +1215,7 @@ impl App {
         stats_rx: std::sync::mpsc::Receiver<crate::tui::presenter::FrameReport>,
         presenter_alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
         term_size: ratatui::layout::Size,
-    ) -> Result<Vec<String>> {
+    ) -> Result<()> {
         self.term_size = term_size;
         let (ev_tx, ev_rx) = std::sync::mpsc::channel::<crossterm::event::Event>();
         let input_notify = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -1467,7 +1458,7 @@ impl App {
         } else if self.session_has_messages() {
             self.session.save().ok();
         }
-        Ok(self.exit_transcript())
+        Ok(())
     }
 
     /// a session is only worth persisting once it carries real conversation;
@@ -1475,62 +1466,6 @@ impl App {
     /// be written to disk as a stub
     fn session_has_messages(&self) -> bool {
         !self.session.messages.is_empty()
-    }
-
-    /// Plain-text transcript for the terminal scrollback, printed after the
-    /// alternate screen is gone (Codex-style exit printing). One block per
-    /// message, no ANSI: user/assistant text verbatim, tool calls as
-    /// one-liners, failed results trimmed. Successful outputs stay out —
-    /// a build log would bury the conversation; failures are what the
-    /// scrollback review is for. Each block capped so a runaway tool
-    /// cannot flood the buffer.
-    pub(super) fn exit_transcript(&self) -> Vec<String> {
-        const BODY_LINES: usize = 120;
-        const ERR_LINES: usize = 12;
-        fn cap(text: &str, n: usize) -> Vec<String> {
-            let lines: Vec<&str> = text.lines().collect();
-            let mut out: Vec<String> = lines.iter().take(n).map(|l| l.to_string()).collect();
-            if lines.len() > n {
-                out.push(format!("… ({} more lines)", lines.len() - n));
-            }
-            out
-        }
-        let mut out = Vec::new();
-        for m in &self.session.messages {
-            match m.role {
-                crate::providers::Role::System => continue,
-                crate::providers::Role::User => {
-                    if m.content.trim().is_empty() {
-                        continue;
-                    }
-                    out.push("> ".to_string() + m.content.trim());
-                }
-                crate::providers::Role::Assistant => {
-                    if !m.content.trim().is_empty() {
-                        out.extend(cap(m.content.trim(), BODY_LINES));
-                    }
-                    for call in &m.tool_calls {
-                        let args = call.args.to_string();
-                        let short = truncate_chars(&args, 160);
-                        out.push(format!("» {} {short}", call.name));
-                    }
-                }
-                crate::providers::Role::Tool => {
-                    // successes are noise in scrollback; failures stay
-                    if !m.is_error || m.content.trim().is_empty() {
-                        continue;
-                    }
-                    out.push("✗ tool failed:".to_string());
-                    out.extend(cap(m.content.trim(), ERR_LINES));
-                }
-            }
-            out.push(String::new());
-        }
-        // trailing blank line is the paragraph separator, not content
-        if out.last().is_some_and(|l| l.is_empty()) {
-            out.pop();
-        }
-        out
     }
 
     fn jump_to_bottom_on_typing(&mut self) {
@@ -5393,33 +5328,6 @@ impl App {
 
     fn page(&mut self, dir: i32) {
         self.scroll(-dir * 20);
-    }
-
-    /// Wheel input (no density config — the stream shape decides): the
-    /// first event of a stream is a full 3-line notch, so deliberate
-    /// single notches feel identical on every terminal; the rest of a
-    /// dense stream (multi-event notches, trackpads) trickles in thirds
-    /// with fractional carry. A direction flip or a >150ms gap starts a
-    /// new stream, so remainders never slingshot. Returns signed screen
-    /// lines (+down / −up); zero means the event dissolved into the carry
-    /// and the caller must skip its side effects (e.g. selection clearing).
-    pub(super) fn wheel_lines(&mut self, dir: i32) -> i32 {
-        const GAP: std::time::Duration = std::time::Duration::from_millis(150);
-        const NOTCH_LINES: i32 = 3;
-        const STREAM_STEP: f32 = 1.0 / 3.0;
-        let now = std::time::Instant::now();
-        let fresh = self.wheel_at.is_none_or(|t| now.duration_since(t) > GAP);
-        if fresh || self.wheel_dir != dir {
-            self.wheel_dir = dir;
-            self.wheel_carry = 0.0;
-            self.wheel_at = Some(now);
-            return dir * NOTCH_LINES;
-        }
-        self.wheel_at = Some(now);
-        self.wheel_carry += dir as f32 * STREAM_STEP;
-        let lines = self.wheel_carry.trunc() as i32;
-        self.wheel_carry -= lines as f32;
-        lines
     }
 
     fn scroll(&mut self, delta: i32) {
