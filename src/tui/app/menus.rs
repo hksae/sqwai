@@ -2372,10 +2372,7 @@ impl App {
                 ));
                 if !pinned.is_empty() {
                     self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(
-                            " ── pinned ──".to_string(),
-                            Theme::dim(),
-                        )]),
+                        Line::from(vec![Span::styled("  pinned".to_string(), Theme::section())]),
                         MenuAction::None,
                     ));
                     for s in &pinned {
@@ -2410,7 +2407,7 @@ impl App {
                     if section != day {
                         day = section;
                         self.menu_rows.push(row(
-                            Line::from(vec![Span::styled(format!(" ── {day} ──"), Theme::dim())]),
+                            Line::from(vec![Span::styled(format!("  {day}"), Theme::section())]),
                             MenuAction::None,
                         ));
                     }
@@ -2425,8 +2422,8 @@ impl App {
                 if !foreign.is_empty() {
                     self.menu_rows.push(row(
                         Line::from(vec![Span::styled(
-                            " ── other projects ──".to_string(),
-                            Theme::dim(),
+                            "  other projects".to_string(),
+                            Theme::section(),
                         )]),
                         MenuAction::None,
                     ));

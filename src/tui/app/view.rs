@@ -3295,8 +3295,7 @@ impl App {
                         .cell_mut(ratatui::layout::Position::new(bx, top + i as u16))
                         && i >= pos
                         && i < pos + thumb
-                        // never punch through drawn rules (section dividers):
-                        // the thumb yields, the rule wins
+                        // never punch through drawn chrome: the thumb yields
                         && !matches!(
                             cell.symbol(),
                             "│" | "─" | "┌" | "┐" | "└" | "┘" | "├" | "┤" | "┬" | "┴" | "┼"

@@ -559,20 +559,16 @@ fn menu_scrollbar_yields_to_drawn_frames() {
     let mut buf = Buffer::empty(area);
     app.draw_menu(&mut buf, area);
     let row_text = |y: u16| -> String { (0..area.width).map(|x| buf[(x, y)].symbol()).collect() };
-    // pinned divider survived the scrollbar: dashes still dashes
+    // pinned divider survived the scrollbar: label still label
     let hy = (0..area.height)
         .find(|y| row_text(*y).contains("pinned"))
         .expect("pinned divider row");
     let row = row_text(hy);
+    assert!(row.contains("pinned"), "divider must stay intact: {row:?}");
+    // the thumb may share the row, but never inside the label text
+    let start = row.find("pinned").expect("divider span");
     assert!(
-        row.contains("── pinned ──"),
-        "divider must stay intact: {row:?}"
-    );
-    // the thumb may share the row, but never inside the divider text:
-    // ── cells yield, the rule wins
-    let start = row.find("── pinned ──").expect("divider span");
-    assert!(
-        !row[start..start + "── pinned ──".len()].contains('▐'),
+        !row[start..start + "pinned".len()].contains('▐'),
         "scrollbar must not eat the divider: {row:?}"
     );
 }
@@ -638,17 +634,15 @@ fn pinned_sessions_frame_stays_dim() {
     let text = |l: &ratatui::text::Line| -> String {
         l.spans.iter().map(|sp| sp.content.as_ref()).collect()
     };
-    // the pinned divider is pure chrome: every span dim
+    // the pinned divider is a bold bright label, no dash rules
     let (div, _) = app
         .menu_rows
         .iter()
         .find(|(l, _)| text(l).contains("pinned"))
         .expect("pinned divider row");
     assert!(
-        div.spans
-            .iter()
-            .all(|sp| sp.style.fg == Some(Color::DarkGray)),
-        "divider must stay dim"
+        div.spans.iter().all(|sp| sp.style.fg == Some(Color::White)),
+        "divider must read as a header"
     );
     // data rung (title) bright, meta rung (model) gray, hint rung dim
     let (row, _) = app
@@ -856,8 +850,8 @@ fn sessions_menu_groups_rows_by_day_sections() {
             .unwrap_or_else(|| panic!("missing {needle:?} in {all:?}"))
     };
     // sections newest-first, rows under their own divider
-    let today = pos("── today ──");
-    let yesterday = pos("── yesterday ──");
+    let today = pos("today");
+    let yesterday = pos("yesterday");
     assert!(pos("today one") > today);
     assert!(pos("yesterday one") > yesterday);
     assert!(yesterday > today, "{all:?}");

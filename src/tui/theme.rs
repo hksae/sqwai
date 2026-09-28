@@ -138,6 +138,11 @@ impl Theme {
     pub fn meta() -> Style {
         Style::new().fg(Self::META())
     }
+    /// Section headers in list menus (pinned / today / dates): bold
+    /// bright label, no dash rules — the weight carries the structure.
+    pub fn section() -> Style {
+        Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
+    }
     /// Selection marker (numbers): house accent, never LightBlue.
     pub fn marker() -> Style {
         Style::new().fg(Self::ACCENT()).add_modifier(Modifier::BOLD)
