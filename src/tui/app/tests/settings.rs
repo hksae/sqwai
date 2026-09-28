@@ -348,20 +348,47 @@ fn startup_ctrl_s_opens_sessions_menu() {
 }
 
 #[tokio::test]
-async fn startup_empty_enter_with_plan_continues_plan() {
+async fn startup_empty_enter_ignores_foreign_global_plan() {
+    use crate::plan::{Limits, NewStep};
     let (_url, _h) = mock_sse_server("x", "y");
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = true;
+    // temp project with an active plan that belongs to nobody here:
+    // Enter must not silently adopt it (#171) — the Plan menu agrees
+    // (session_plan() is None too)
+    let temp_dir =
+        std::env::temp_dir().join(format!("sqwai-test-enter-foreign-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    app.project_root = temp_dir.clone();
+    let limits = Limits { max_steps: 10 };
+    let foreign = crate::plan::create(
+        "someone else's goal".into(),
+        vec![],
+        vec![],
+        vec![NewStep {
+            title: "foreign step".into(),
+            refs: vec![],
+        }],
+        1000,
+        &limits,
+    )
+    .unwrap();
+    crate::plan::store(&temp_dir, &foreign).unwrap();
     assert!(app.input_text().trim().is_empty());
-
-    let root = std::env::current_dir().unwrap_or_default();
-    if crate::plan::open_active(&root).ok().flatten().is_some() {
-        app.submit();
-        assert!(!app.startup);
-        assert_eq!(app.session.messages.len(), 1);
-        let msg = &app.session.messages[0].content;
-        assert!(msg.starts_with("Continue next plan step"));
-    }
+    app.submit();
+    assert!(app.startup, "no silent adoption: stays fresh");
+    assert!(
+        app.session.messages.is_empty(),
+        "no turn started from a foreign plan"
+    );
+    // linked plan: Enter continues it as before
+    app.session.plan_id = Some(foreign.id.clone());
+    app.submit();
+    assert!(!app.startup);
+    assert_eq!(app.session.messages.len(), 1);
+    let msg = &app.session.messages[0].content;
+    assert!(msg.starts_with("Continue next plan step"), "{msg:?}");
+    std::fs::remove_dir_all(&temp_dir).ok();
 }
 
 #[test]

@@ -2249,13 +2249,11 @@ impl App {
         let mut text = self.input_text().trim().to_string();
         if text.is_empty() {
             if self.startup {
-                // Startup is a blank slate (no history, no identity yet),
-                // so continuing the project's plan is not silent adoption:
-                // the session joins explicitly at the first `plan start`.
-                // Linked plan first, then session-strict, then global newest.
-                let active = self
-                    .session_plan()
-                    .or_else(|| crate::plan::open_active(&self.project_root).ok().flatten());
+                // Linked or session-scoped plan only: falling back to the
+                // project-global newest here would silently adopt a foreign
+                // plan (#171) that the Plan menu — correctly — does not
+                // show. No plan of ours → Enter is a no-op.
+                let active = self.session_plan();
                 if let Some(active) = active {
                     text = if let Some(step) = active.steps.iter().find(|s| {
                         s.status == crate::plan::StepStatus::InProgress

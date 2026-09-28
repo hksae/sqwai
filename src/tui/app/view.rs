@@ -2408,6 +2408,9 @@ impl App {
             second.push(Span::styled(" · ".to_string(), Theme::dim()));
         }
         if self.session.plan_id.is_some() {
+            // matches Enter-continue (linked plan); a session-scoped but
+            // unlinked legacy plan still continues on Enter while the mark
+            // says "type to start" — rare, accepted (no per-frame plan I/O)
             second.push(Span::styled(
                 "enter".to_string(),
                 Theme::base().add_modifier(Modifier::BOLD),
