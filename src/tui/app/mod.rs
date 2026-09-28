@@ -5458,6 +5458,12 @@ fn fmt_date(t: chrono::DateTime<chrono::Utc>) -> String {
         .to_string()
 }
 
+/// time of day for grouped session rows (the section header carries
+/// the date, so the column keeps HH:MM only)
+fn fmt_time(t: chrono::DateTime<chrono::Utc>) -> String {
+    t.with_timezone(&chrono::Local).format("%H:%M").to_string()
+}
+
 fn on_off(v: bool) -> String {
     if v { "on" } else { "off" }.to_string()
 }

@@ -2352,19 +2352,19 @@ impl App {
                 let pinned: Vec<&SessionHeader> =
                     visible.iter().filter(|s| s.pinned).copied().collect();
                 // grid geometry, shared by the header and every row: title
-                // takes priority, model clamps, date/tokens are fixed.
+                // takes priority, model clamps, time/tokens are fixed.
                 // Resolved width travels in table_built_w: draw_menu rebuilds
                 // once on mismatch (also covers an empty pinned section).
                 let budget = table_budget(self.menu_rect.width);
                 self.table_built_w = budget as u16;
-                // lead 1 + pin 2 + 3 gaps of 2 + date 11 + tokens 7
-                let title_w = budget.saturating_sub(29 + 16).clamp(8, 28);
-                let model_w = budget.saturating_sub(29 + title_w).clamp(8, 16);
+                // lead 1 + pin 2 + 3 gaps of 2 + time 5 + tokens 7
+                let title_w = budget.saturating_sub(23 + 16).clamp(8, 28);
+                let model_w = budget.saturating_sub(23 + title_w).clamp(8, 16);
                 self.menu_table_header = Some(table_header(
                     vec![
                         tcell("", 2, false, Theme::dim()),
                         tcell("TITLE", title_w, false, Theme::dim()),
-                        tcell("DATE", 11, false, Theme::dim()),
+                        tcell("TIME", 5, false, Theme::dim()),
                         tcell("MODEL", model_w, false, Theme::dim()),
                         tcell("SIZE", 7, true, Theme::dim()),
                     ],
@@ -2399,9 +2399,20 @@ impl App {
                                 &self.project_root,
                             )
                     });
+                // mine, grouped by activity day (listing order within a day
+                // is preserved); the header carries the date, rows keep time
+                let mut day = String::new();
                 for s in mine {
                     if s.pinned {
                         continue;
+                    }
+                    let section = day_section(s.last_activity());
+                    if section != day {
+                        day = section;
+                        self.menu_rows.push(row(
+                            Line::from(vec![Span::styled(format!(" ── {day} ──"), Theme::dim())]),
+                            MenuAction::None,
+                        ));
                     }
                     self.menu_rows.push(session_row(
                         s,
@@ -3214,8 +3225,8 @@ fn plan_rows(
     rows
 }
 
-/// Pinned-section inner width for a menu card of `menu_w` columns.
-/// Shared by the row builder and the draw-time mismatch check below.
+/// One session row in the table grid. The section header carries the
+/// date, so the row keeps time-of-day only.
 fn session_row(
     s: &SessionHeader,
     is_current: bool,
@@ -3224,7 +3235,7 @@ fn session_row(
     pad_w: usize,
 ) -> (Line<'static>, MenuAction) {
     const TOK_W: usize = 7;
-    const DATE_W: usize = 11;
+    const TIME_W: usize = 5;
     const PIN_W: usize = 2;
     let action = MenuAction::OpenSession(s.id.to_string());
     let mark = if is_current { " *" } else { "" };
@@ -3232,13 +3243,27 @@ fn session_row(
     let line = table_line(vec![
         tcell(pin, PIN_W, false, Theme::pin_marker()),
         tcell(&format!("{}{mark}", s.title), title_w, false, Theme::FG()),
-        tcell(&fmt_date(s.last_activity()), DATE_W, false, Theme::dim()),
+        tcell(&fmt_time(s.last_activity()), TIME_W, false, Theme::dim()),
         tcell(&s.model_key, model_w, false, Theme::meta()),
         tcell(&fmt_k(s.context_tokens), TOK_W, true, Theme::dim()),
     ]);
     // exact fit: every row matches the header column-wise, narrow frames
     // truncate (never shift) via fit_line_width
     (fit_line_width(line, pad_w), action)
+}
+
+/// Section label for a session's activity day: today, yesterday, or the
+/// calendar date. Rows arrive newest-first, so labels change rarely.
+fn day_section(last: chrono::DateTime<chrono::Utc>) -> String {
+    let day = last.with_timezone(&chrono::Local).date_naive();
+    let today = chrono::Local::now().date_naive();
+    if day == today {
+        "today".to_string()
+    } else if day == today - chrono::Duration::days(1) {
+        "yesterday".to_string()
+    } else {
+        day.format("%d.%m").to_string()
+    }
 }
 
 /// One grid cell: truncated/padded, left- or right-aligned.

@@ -713,24 +713,24 @@ fn pinned_session_frame_aligns_columns_and_respects_narrow_terminal() {
         .find(|(_, a)| matches!(a, MenuAction::OpenSession(_)))
         .map(|(l, _)| l)
         .expect("content row");
-    // lead 1 + pin 2 + gap 2 + title 8 + gap 2 + date 11 + gap 2
-    // + model cut to 8 = 34: the exact-fit pass drops trailing columns
-    // first, so SIZE never shifts the grid on narrow terminals
+    // lead 1 + pin 2 + gap 2 + title 8 + gap 2 + time 5 + gap 2
+    // + model 8 + gap 2 + tokens cut to 2 = 34: the exact-fit pass
+    // drops trailing columns first, so SIZE never shifts the grid
     assert_eq!(
         span_widths(header_line),
-        vec![1, 2, 2, 8, 2, 11, 2, 6],
+        vec![1, 2, 2, 8, 2, 5, 2, 8, 2, 2],
         "header must share the grid"
     );
     assert_eq!(
         span_widths(content_line),
-        vec![1, 2, 2, 8, 2, 11, 2, 6],
+        vec![1, 2, 2, 8, 2, 5, 2, 8, 2, 2],
         "row must share the grid"
     );
-    assert_eq!(header_line.spans[5].content.as_ref(), "DATE       ");
-    let date = content_line.spans[5].content.as_ref();
+    assert_eq!(header_line.spans[5].content.as_ref(), "TIME ");
+    let time = content_line.spans[5].content.as_ref();
     assert!(
-        date.as_bytes()[2] == b'.' && date.as_bytes()[8] == b':',
-        "row date must fill the date column: {date:?}"
+        time.as_bytes()[2] == b':',
+        "row time must fill the time column: {time:?}"
     );
     let total: usize = span_widths(content_line).iter().sum();
     assert!(total <= 40, "must fit within menu rect width: {total} > 40");
@@ -750,9 +750,9 @@ fn sessions_rows_share_date_model_token_columns() {
         SessionHeader::from_session(&b),
     ];
     app.open_menu(Menu::Sessions);
-    // grid geometry asserted per span (byte-slicing the joined row is
-    // fragile across invisible chars): lead 1 + pin 2 + gap 2 + title 27
-    // + gap 2 + date 11 + gap 2 + model 16 + gap 2 + tokens 7 = 72
+    // grid geometry asserted per span: lead 1 + pin 2 + gap 2 + title 28
+    // + gap 2 + time 5 + gap 2 + model 16 + gap 2 + tokens 7 = 72.
+    // The section carries the date (── today ──), rows keep HH:MM.
     let rows: Vec<&ratatui::text::Line> = app
         .menu_rows
         .iter()
@@ -766,9 +766,10 @@ fn sessions_rows_share_date_model_token_columns() {
             .iter()
             .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
             .collect();
-        assert_eq!(widths, vec![1, 2, 2, 27, 2, 11, 2, 16, 2, 7], "{line:?}");
-        assert_eq!(&line.spans[5].content.as_ref()[2..3], ".");
-        assert_eq!(&line.spans[5].content.as_ref()[8..9], ":");
+        // exact-fit pads the 67 content cols to the 72 budget
+        assert_eq!(&widths[..10], &[1, 2, 2, 28, 2, 5, 2, 16, 2, 7], "{line:?}");
+        assert_eq!(widths.iter().sum::<usize>(), 72, "{line:?}");
+        assert_eq!(&line.spans[5].content.as_ref()[2..3], ":");
     }
     let texts: Vec<String> = app
         .menu_rows
@@ -818,6 +819,49 @@ fn sessions_menu_splits_foreign_projects() {
     assert!(pos("mine task") < div, "{joined:?}");
     assert!(pos("legacy task") < div, "{joined:?}");
     assert!(pos("away task") > div, "{joined:?}");
+}
+
+#[test]
+fn sessions_menu_groups_rows_by_day_sections() {
+    use chrono::Duration;
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let now = chrono::Utc::now();
+    let header_at = |title: &str, at| crate::session::SessionHeader {
+        id: uuid::Uuid::new_v4(),
+        title: title.into(),
+        pinned: false,
+        created_at: at,
+        last_message_at: None,
+        model_key: "m".into(),
+        plan_id: None,
+        context_tokens: 0,
+        calls: 0,
+        errors: 0,
+        project: Some(app.project_root.clone()),
+    };
+    app.sessions = vec![
+        header_at("today one", now),
+        header_at("yesterday one", now - Duration::days(1)),
+        header_at("old one", now - Duration::days(9)),
+    ];
+    app.open_menu(Menu::Sessions);
+    let all: Vec<String> = app
+        .menu_rows
+        .iter()
+        .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    let pos = |needle: &str| {
+        all.iter()
+            .position(|r| r.contains(needle))
+            .unwrap_or_else(|| panic!("missing {needle:?} in {all:?}"))
+    };
+    // sections newest-first, rows under their own divider
+    let today = pos("── today ──");
+    let yesterday = pos("── yesterday ──");
+    assert!(pos("today one") > today);
+    assert!(pos("yesterday one") > yesterday);
+    assert!(yesterday > today, "{all:?}");
+    assert!(pos("old one") > yesterday, "{all:?}");
 }
 
 #[test]
