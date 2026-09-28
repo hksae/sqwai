@@ -133,7 +133,18 @@ async fn run(cfg: config::Config, resume_id: Option<String>, read_only: bool) ->
     if killed > 0 {
         eprintln!("stopped {killed} background job(s) on exit");
     }
-    res
+    // Exit printing: the transcript lands in the terminal scrollback as
+    // plain text (native scroll, search and copy after the session).
+    // Empty sessions print nothing — a bare launch leaves no trace.
+    match res {
+        Ok(lines) => {
+            for line in lines {
+                println!("{line}");
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Start raw mode + alternate screen, then hand the terminal to the

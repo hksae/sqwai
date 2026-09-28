@@ -404,6 +404,42 @@ fn apply_session_from_startup_does_not_persist_empty_stub() {
 }
 
 #[test]
+fn exit_transcript_prints_blocks_and_skips_noise() {
+    use crate::providers::{Message, Role, ToolCallReq};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    // empty session prints nothing: a bare launch leaves no trace
+    assert!(app.exit_transcript().is_empty());
+    app.session.messages.push(Message::new(Role::System, "sys"));
+    app.session
+        .messages
+        .push(Message::new(Role::User, "do the thing"));
+    app.session
+        .messages
+        .push(
+            Message::new(Role::Assistant, "on it").with_tool_calls(vec![ToolCallReq::new(
+                "c1",
+                "read_file",
+                serde_json::json!({"path": "src/main.rs"}),
+            )]),
+        );
+    app.session
+        .messages
+        .push(Message::tool_result("c1", "fn main() {}", false));
+    app.session
+        .messages
+        .push(Message::tool_result("c2", "boom\nline2", true));
+    let out = app.exit_transcript().join("\n");
+    assert!(out.contains("> do the thing"), "{out:?}");
+    assert!(out.contains("» read_file"), "{out:?}");
+    assert!(!out.contains("sys"), "system prompts stay out: {out:?}");
+    assert!(
+        !out.contains("fn main() {}"),
+        "successful outputs stay out: {out:?}"
+    );
+    assert!(out.contains("boom"), "failures stay in: {out:?}");
+}
+
+#[test]
 fn pin_from_menu_does_not_pollute_chat() {
     use crate::providers::Role;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
@@ -434,6 +470,20 @@ fn pin_from_menu_does_not_pollute_chat() {
         "pin notice goes to the toast"
     );
     assert!(app.sessions[0].pinned);
+}
+
+#[test]
+fn wheel_lines_bursts_against_a_capped_bucket() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    // sparse notch: full 3 lines instantly
+    assert_eq!(app.wheel_lines(1), 3);
+    // same instant: bucket empty, event dissolves (callers skip side effects)
+    assert_eq!(app.wheel_lines(1), 0);
+    // direction flip still applies from whatever is left (here: nothing)
+    assert_eq!(app.wheel_lines(-1), 0);
+    // after refill the bucket is whole again
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    assert_eq!(app.wheel_lines(-1), -3);
 }
 
 #[test]
