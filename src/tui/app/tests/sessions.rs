@@ -473,6 +473,25 @@ fn pin_from_menu_does_not_pollute_chat() {
 }
 
 #[test]
+fn wheel_lines_normalizes_density_and_resets_on_flip() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    // default: 3 raw events per notch → 1 line each, 3 lines total
+    assert_eq!(app.wheel_lines(1), 1);
+    assert_eq!(app.wheel_lines(1), 1);
+    assert_eq!(app.wheel_lines(1), 1);
+    // dense terminal: 9 events per notch → fractional carry, thirds
+    // dissolve until they accumulate a whole line
+    app.cfg.ui.wheel_events_per_notch = 9;
+    assert_eq!(app.wheel_lines(-1), 0);
+    assert_eq!(app.wheel_lines(-1), 0);
+    assert_eq!(app.wheel_lines(-1), -1);
+    // direction flip resets the carry: no slingshot from remainders
+    assert_eq!(app.wheel_lines(1), 0);
+    assert_eq!(app.wheel_lines(1), 0);
+    assert_eq!(app.wheel_lines(1), 1);
+}
+
+#[test]
 fn menu_wheel_scrolls_view_without_wrap_or_trap() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::Controls);

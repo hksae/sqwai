@@ -443,6 +443,12 @@ pub struct App {
     /// drawn above the scroll window, never a nav step
     menu_table_header: Option<Line<'static>>,
     menu_rect: Rect,
+    /// wheel normalizer state: fractional carry across raw events, stream
+    /// direction (+1 down / −1 up), last event time. A flip or a >150ms
+    /// gap starts a new stream so remainders never slingshot.
+    wheel_carry: f32,
+    wheel_dir: i32,
+    wheel_at: Option<Instant>,
     /// when the current approval dialog opened: Enter inside the grace
     /// window does not commit (focus-steal protection), it only keeps
     /// the preselected deny
@@ -914,6 +920,9 @@ impl App {
             menu_table_header: None,
             approval_opened_at: None,
             menu_rect: Rect::default(),
+            wheel_carry: 0.0,
+            wheel_dir: 0,
+            wheel_at: None,
             table_built_w: 0,
             effort_hits: Vec::new(),
             form_fields: Vec::new(),
@@ -5384,6 +5393,30 @@ impl App {
 
     fn page(&mut self, dir: i32) {
         self.scroll(-dir * 20);
+    }
+
+    /// Wheel normalization (Codex-tui2-lite): terminals report 1, 3 or 9+
+    /// raw events per physical notch and trackpads stream dense partials.
+    /// Raw events accumulate fractionally (`ui.wheel_events_per_notch`
+    /// events ≈ 3 lines); a direction flip or a >150ms gap starts a new
+    /// stream so remainders never slingshot. Returns signed screen lines
+    /// (+down / −up); zero means the event dissolved into the carry and
+    /// the caller must skip its side effects (e.g. selection clearing).
+    pub(super) fn wheel_lines(&mut self, dir: i32) -> i32 {
+        const GAP: std::time::Duration = std::time::Duration::from_millis(150);
+        const LINES_PER_NOTCH: f32 = 3.0;
+        let now = std::time::Instant::now();
+        let fresh = self.wheel_at.is_none_or(|t| now.duration_since(t) > GAP);
+        if fresh || self.wheel_dir != dir {
+            self.wheel_dir = dir;
+            self.wheel_carry = 0.0;
+        }
+        self.wheel_at = Some(now);
+        let per = LINES_PER_NOTCH / self.cfg.ui.wheel_events_per_notch.max(1) as f32;
+        self.wheel_carry += dir as f32 * per;
+        let lines = self.wheel_carry.trunc() as i32;
+        self.wheel_carry -= lines as f32;
+        lines
     }
 
     fn scroll(&mut self, delta: i32) {
