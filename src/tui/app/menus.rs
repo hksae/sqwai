@@ -2500,12 +2500,10 @@ impl App {
                         } else {
                             ("no key".to_string(), Theme::dim())
                         };
-                    let is_builtin = self.cfg.is_builtin_provider(name);
-                    let badge = if is_builtin { " builtin" } else { "" };
                     self.menu_rows.push(row(
                         fit_line_width(
                             table_line(vec![
-                                tcell(&format!("{name}{badge}"), NAME_W, false, Theme::FG()),
+                                tcell(name, NAME_W, false, Theme::FG()),
                                 tcell(&format!("{models} models"), COUNT_W, true, Theme::meta()),
                                 tcell(&key_state, KEY_W, false, key_style),
                             ]),
