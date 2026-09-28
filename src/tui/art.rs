@@ -8,85 +8,34 @@ use ratatui::text::{Line, Span};
 
 use crate::tui::theme::Theme;
 
-/// 5-wide × 7-tall block capitals, one space gap added when joining.
+/// 5-wide × 5-tall block capitals, one space gap added when joining.
+/// Squat on purpose: tall thin letters read stretched on terminal cells.
 /// Every row is exactly 5 display columns (plain ASCII blocks).
-const S: [&str; 7] = [
-    " ████",
-    "█    ",
-    "█    ",
-    " ███ ",
-    "    █",
-    "    █",
-    " ███ ",
-];
-const Q: [&str; 7] = [
-    " ███ ",
-    "█   █",
-    "█   █",
-    "█   █",
-    "█ █ █",
-    "█  █ ",
-    " ██ █",
-];
-const W: [&str; 7] = [
-    "█   █",
-    "█   █",
-    "█   █",
-    "█   █",
-    "█ █ █",
-    "██ ██",
-    "█   █",
-];
-const A: [&str; 7] = [
-    " ███ ",
-    "█   █",
-    "█   █",
-    "█████",
-    "█   █",
-    "█   █",
-    "█   █",
-];
-const I: [&str; 7] = [
-    "█████",
-    "  █  ",
-    "  █  ",
-    "  █  ",
-    "  █  ",
-    "  █  ",
-    "█████",
-];
+const S: &[&str] = &[" ████", "█    ", " ███ ", "    █", " ███ "];
+const Q: &[&str] = &[" ███ ", "█   █", "█   █", "█ █ █", " ██ █"];
+const W: &[&str] = &["█   █", "█   █", "█ █ █", "██ ██", "█   █"];
+const A: &[&str] = &[" ███ ", "█   █", "█████", "█   █", "█   █"];
+const I: &[&str] = &["█████", "  █  ", "  █  ", "  █  ", "█████"];
 
 /// 3-wide × 5-tall mini capitals for the small variant.
-const S3: [&str; 5] = [" ██", "█  ", " █ ", "  █", "██ "];
-const Q3: [&str; 5] = [" ██", "█ █", "█ █", "█ █", " ██"];
-const W3: [&str; 5] = ["█ █", "█ █", "█ █", "███", "█ █"];
-const A3: [&str; 5] = [" █ ", "█ █", "███", "█ █", "█ █"];
-const I3: [&str; 5] = ["███", " █ ", " █ ", " █ ", "███"];
+const S3: &[&str] = &[" ██", "█  ", " █ ", "  █", "██ "];
+const Q3: &[&str] = &[" ██", "█ █", "█ █", "█ █", " ██"];
+const W3: &[&str] = &["█ █", "█ █", "█ █", "███", "█ █"];
+const A3: &[&str] = &[" █ ", "█ █", "███", "█ █", "█ █"];
+const I3: &[&str] = &["███", " █ ", " █ ", " █ ", "███"];
 
 fn sty(fg: Color) -> Style {
     Style::new().fg(fg)
 }
 
-fn block_word(glyphs: &[&[&str; 7]; 5], colors: &[Style; 5]) -> Vec<Line<'static>> {
-    (0..7)
+fn block_word(glyphs: &[&[&str]], colors: &[Style]) -> Vec<Line<'static>> {
+    let rows = glyphs.first().map(|g| g.len()).unwrap_or(0);
+    (0..rows)
         .map(|r| {
             let mut spans = vec![Span::styled(" ".to_string(), Theme::base())];
             for (g, s) in glyphs.iter().zip(colors.iter()) {
                 spans.push(Span::styled(" ".to_string(), Theme::base()));
                 spans.push(Span::styled(g[r].to_string(), *s));
-            }
-            Line::from(spans)
-        })
-        .collect()
-}
-
-fn mini_word(glyphs: &[&[&str; 5]; 5], style: Style) -> Vec<Line<'static>> {
-    (0..5)
-        .map(|r| {
-            let mut spans = vec![Span::styled(" ".to_string(), Theme::base())];
-            for g in glyphs {
-                spans.push(Span::styled(" ".to_string(), Theme::base()));
-                spans.push(Span::styled(g[r].to_string(), style));
             }
             Line::from(spans)
         })
@@ -129,16 +78,13 @@ pub fn variants() -> Vec<(&'static str, Vec<Line<'static>>)> {
             ])],
         ),
         ("upper flat white", vec![text_line("SQWAI", white_bold)]),
-        ("block dim", block_word(&[&S, &Q, &W, &A, &I], &[dark; 5])),
+        ("block dim", block_word(&[S, Q, W, A, I], &[dark; 5])),
         (
             "block gray ramp (opencode style)",
-            block_word(&[&S, &Q, &W, &A, &I], &ramp),
+            block_word(&[S, Q, W, A, I], &ramp),
         ),
-        (
-            "block cyan ramp",
-            block_word(&[&S, &Q, &W, &A, &I], &cyan_ramp),
-        ),
-        ("mini caps", mini_word(&[&S3, &Q3, &W3, &A3, &I3], gray)),
+        ("block cyan ramp", block_word(&[S, Q, W, A, I], &cyan_ramp)),
+        ("mini caps", block_word(&[S3, Q3, W3, A3, I3], &[gray; 5])),
     ];
 
     // agy-style pixel triangle + wordmark under it
@@ -164,4 +110,20 @@ pub fn variants() -> Vec<(&'static str, Vec<Line<'static>>)> {
     out.push(("word gray ramp", vec![Line::from(spans)]));
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn glyph_rows_share_width() {
+        use unicode_width::UnicodeWidthStr;
+        // a ragged row would shift every column after it in the gallery
+        for g in [S, Q, W, A, I, S3, Q3, W3, A3, I3] {
+            let w = g[0].width();
+            assert!(g.iter().all(|r| r.width() == w), "{g:?}");
+        }
+        assert_eq!(variants().len(), 10);
+    }
 }
