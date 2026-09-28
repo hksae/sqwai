@@ -96,37 +96,36 @@ impl Theme {
     pub const fn QUOTE_BG() -> Color {
         Color::Rgb(18, 31, 18)
     }
-    /// Slider/status color per effort level. Bright variants throughout:
-    /// bold text gets brightened by most terminals anyway (Windows Terminal
-    /// default), so the palette bakes the light hues in directly — the same
-    /// hue everywhere, bold or not, instead of two faces per level.
+    /// Slider/status color per effort level: off gray → low green →
+    /// medium cyan (house accent) → high light-blue → xhigh yellow →
+    /// max magenta. First cut for live review; tune after seeing it.
     pub const fn effort_color(level: EffortLevel) -> Color {
         match level {
-            EffortLevel::Off => Color::Gray,
-            EffortLevel::Low => Color::LightGreen,
-            EffortLevel::Medium => Color::LightCyan,
+            EffortLevel::Off => Color::DarkGray,
+            EffortLevel::Low => Color::Green,
+            EffortLevel::Medium => Color::Cyan,
             EffortLevel::High => Color::LightBlue,
-            EffortLevel::Xhigh => Color::LightYellow,
-            EffortLevel::Max => Color::LightMagenta,
+            EffortLevel::Xhigh => Color::Yellow,
+            EffortLevel::Max => Color::Magenta,
         }
     }
     /// Truecolor twin of [`Self::effort_color`] for the slider sweep:
     /// close to the indexed colors so the settle frame does not pop.
     pub const fn effort_rgb(level: EffortLevel) -> (u8, u8, u8) {
         match level {
-            EffortLevel::Off => (170, 170, 170),
-            EffortLevel::Low => (140, 240, 140),
-            EffortLevel::Medium => (140, 240, 240),
+            EffortLevel::Off => (128, 128, 128),
+            EffortLevel::Low => (80, 200, 120),
+            EffortLevel::Medium => (80, 220, 220),
             EffortLevel::High => (110, 165, 255),
-            EffortLevel::Xhigh => (250, 250, 160),
-            EffortLevel::Max => (232, 160, 232),
+            EffortLevel::Xhigh => (250, 200, 70),
+            EffortLevel::Max => (220, 130, 220),
         }
     }
 
     pub fn effort(level: EffortLevel) -> Style {
-        // no BOLD: the hues are bright-baked already, and bold would let
-        // brightening terminals show a second face of the same level
-        Style::new().fg(Self::effort_color(level))
+        Style::new()
+            .fg(Self::effort_color(level))
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn base() -> Style {
