@@ -859,8 +859,9 @@ fn effort_narrow_fallback_list_hovers_and_clicks_by_row() {
 fn effort_slider_colors_span_gray_to_magenta() {
     use crate::tui::theme::Theme;
     use ratatui::style::Color;
-    assert_eq!(Theme::effort_color(EffortLevel::Off), Color::DarkGray);
-    assert_eq!(Theme::effort_color(EffortLevel::Max), Color::Magenta);
+    // bright-baked palette: same hue bold or not, on any terminal
+    assert_eq!(Theme::effort_color(EffortLevel::Off), Color::Gray);
+    assert_eq!(Theme::effort_color(EffortLevel::Max), Color::LightMagenta);
     // every level gets a distinct color
     let mut seen = std::collections::HashSet::new();
     for lvl in EffortLevel::SELECTABLE {
