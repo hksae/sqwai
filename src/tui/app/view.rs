@@ -2397,6 +2397,45 @@ impl App {
         }
     }
 
+    /// Empty-session mark: static brand + MCP count + next action.
+    /// Everything here is already in memory (binary version, loaded
+    /// config, linked plan id) — no background collection, ever.
+    pub(super) fn empty_mark_lines(&self) -> Vec<Line<'static>> {
+        let mcp = self.cfg.mcp.servers.iter().filter(|s| s.enabled).count();
+        let mut second = vec![Span::styled("  ".to_string(), Theme::base())];
+        if mcp > 0 {
+            second.push(Span::styled(format!("{mcp} MCP"), Theme::meta()));
+            second.push(Span::styled(" · ".to_string(), Theme::dim()));
+        }
+        if self.session.plan_id.is_some() {
+            second.push(Span::styled(
+                "enter".to_string(),
+                Theme::base().add_modifier(Modifier::BOLD),
+            ));
+            second.push(Span::styled(
+                ": continue next plan step".to_string(),
+                Theme::dim(),
+            ));
+        } else {
+            second.push(Span::styled("type to start".to_string(), Theme::dim()));
+        }
+        vec![
+            Line::from(vec![
+                Span::styled("  ".to_string(), Theme::base()),
+                Span::styled("UwU".to_string(), Theme::accent_bold()),
+                Span::styled(" ".to_string(), Theme::base()),
+                Span::styled(
+                    "sqwai".to_string(),
+                    Style::new()
+                        .fg(ratatui::style::Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!(" (v{})", env!("CARGO_PKG_VERSION")), Theme::dim()),
+            ]),
+            Line::from(second),
+        ]
+    }
+
     /// Test/compat entry: production renders via [`Self::render_into`]
     /// for the presenter thread.
     #[cfg(test)]
@@ -2530,6 +2569,18 @@ impl App {
             // Lines carry their own styles. Do not apply the base background at
             // widget level: it would override USER_SURFACE on user-strip rows.
             Paragraph::new(visible).render(chat, buf);
+            // Empty session mark: static lines at the top of the chat area.
+            if self.segments.is_empty() && !self.streaming {
+                Paragraph::new(self.empty_mark_lines()).render(
+                    Rect {
+                        x: chat.x,
+                        y: chat.y + 1,
+                        width: chat.width,
+                        height: 2,
+                    },
+                    buf,
+                );
+            }
             // The transcript widget repaints its own rectangle, so apply the
             // full-width fill again afterwards to restore the two outer gutters.
             for (screen_row, abs_row) in (top..top + chat.height as usize).enumerate() {

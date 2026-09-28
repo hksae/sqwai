@@ -404,6 +404,56 @@ fn apply_session_from_startup_does_not_persist_empty_stub() {
 }
 
 #[test]
+fn empty_mark_lines_cover_mcp_plan_and_plain_states() {
+    use crate::config::{McpServerDef, McpTransport};
+    let text = |app: &crate::tui::app::App| -> Vec<String> {
+        app.empty_mark_lines()
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    };
+    // plain: no MCP, no linked plan
+    let app = test_app("http://127.0.0.1:9/v1".into());
+    let lines = text(&app);
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].contains("UwU sqwai (v"), "{lines:?}");
+    assert!(lines[1].contains("type to start"), "{lines:?}");
+    assert!(!lines[1].contains("MCP"), "{lines:?}");
+    // linked plan: enter hint instead
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.session.plan_id = Some("p1".into());
+    let lines = text(&app);
+    assert!(
+        lines[1].contains("enter: continue next plan step"),
+        "{lines:?}"
+    );
+    // MCP: enabled servers counted, disabled skipped
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.cfg.mcp.servers = vec![
+        McpServerDef {
+            name: "a".into(),
+            enabled: true,
+            transport: McpTransport::Stdio {
+                command: "x".into(),
+                args: Vec::new(),
+                env: Default::default(),
+            },
+        },
+        McpServerDef {
+            name: "b".into(),
+            enabled: false,
+            transport: McpTransport::Stdio {
+                command: "y".into(),
+                args: Vec::new(),
+                env: Default::default(),
+            },
+        },
+    ];
+    let lines = text(&app);
+    assert!(lines[1].contains("1 MCP"), "{lines:?}");
+}
+
+#[test]
 fn pin_from_menu_does_not_pollute_chat() {
     use crate::providers::Role;
     let mut app = test_app("http://127.0.0.1:9/v1".into());

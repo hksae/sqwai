@@ -1,11 +1,10 @@
 ---
-source: src/tui/app/tests.rs
-assertion_line: 4492
+source: src/tui/app/tests/settings.rs
 expression: s
 ---
 
-
-
+   UwU sqwai (v0.1.0)
+   type to start
 
 
 
