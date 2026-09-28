@@ -1298,6 +1298,11 @@ impl App {
                 || self.mode_blend.is_some_and(|(_, t0)| {
                     t0.elapsed().as_millis() < MODE_BLEND_MS as u128
                 })
+                // live effort-slider sweep gets its 250ms too, or it
+                // would freeze on the arming frame showing the old color
+                || self.effort_blend.is_some_and(|(_, t0)| {
+                    t0.elapsed().as_millis() < MODE_BLEND_MS as u128
+                })
                 // finish waves get their 700ms even past streaming end,
                 // or the sweep would freeze mid-row on the last tool
                 || self.segments.iter().any(|s| {

@@ -803,6 +803,16 @@ fn effort_slider_opens_on_current_level_with_hits() {
     // restore High for the dots/hover checks below (they assume it selected)
     app.menu_sel = want;
     app.draw_menu(&mut buf, area);
+    // expired sweep settles back to the indexed level color: the selected
+    // dot reads the theme color, not a stale blend frame
+    app.effort_blend = Some((
+        (0, 0, 0),
+        std::time::Instant::now() - std::time::Duration::from_secs(5),
+    ));
+    app.draw_menu(&mut buf, area);
+    let (hit, _) = app.effort_hits[want];
+    let dot = buf[(hit.x + 4, hit.y + 1)].style().fg;
+    assert_eq!(dot, Some(ratatui::style::Color::LightBlue), "{dot:?}");
     assert!(app.menu_rect.width > 0 && app.menu_rect.height > 0);
     // progress dots: High is index 3, so 4 filled dots, 2 hollow
     let dots: String = buf.content().iter().map(|c| c.symbol()).collect();
