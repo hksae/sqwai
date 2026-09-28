@@ -1818,6 +1818,17 @@ non-overlapping pending steps? Current policy: continue.
 Should impact analysis gate `finish` of `change` steps when impacted tests are
 red? Current policy: no — the verify step handles it.
 
+**Ceremony on demand (PARKED, return here).** Proposal (audit author +
+review 2026-09-28): `plan_first = off` (no refusals at all) plus a counter
+of edits-without-plan that appends plan-creation advice to tool results, so
+the agent organizes plans itself and only for complex tasks. Accepted risks,
+to be closed before implementing: (1) nudge blindness — escalate wording
+(5 edits hint, 15 direct) and always include WHY (acceptance criteria), not
+just "create a plan"; (2) cargo-cult plans to silence the counter —
+lean on the existing rule (a plan without acceptance settles nothing);
+(3) magic N — do not guess, log edits-without-plan until creation and read
+N off the distribution. No implementation without the measurement.
+
 ## 10. Rejected decisions
 Rejected	Why
 todowrite / plan_update with a free-form document	unverifiable; the model can rewrite the goal; nothing to attach evidence to
