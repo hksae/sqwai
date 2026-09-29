@@ -332,10 +332,11 @@ impl Provider for OpenAiProvider {
                             ));
                         }
 
-                        // streamed text / reasoning. Gemini marks thought
-                        // summaries in the very same content field, flagged by
-                        // extra_content.google.thought: they are reasoning, not
-                        // answer text, and must not leak into the reply.
+                        // streamed text / reasoning. Gemini wraps thought
+                        // summaries in <thought> tags and flags their deltas
+                        // with extra_content.google.thought; the closing tag
+                        // rides on the first UNflagged delta, so the boundary
+                        // is stripped here or it leaks into the answer.
                         let is_thought = delta
                             .pointer("/extra_content/google/thought")
                             .and_then(|t| t.as_bool())
@@ -344,9 +345,16 @@ impl Provider for OpenAiProvider {
                             && !c.is_empty()
                         {
                             if is_thought {
-                                yield Ok(StreamEvent::Reasoning(c.to_string()));
+                                let c = c.strip_prefix("<thought>").unwrap_or(c);
+                                let c = c.strip_suffix("</thought>").unwrap_or(c);
+                                if !c.is_empty() {
+                                    yield Ok(StreamEvent::Reasoning(c.to_string()));
+                                }
                             } else {
-                                yield Ok(StreamEvent::Text(c.to_string()));
+                                let c = c.strip_prefix("</thought>").unwrap_or(c);
+                                if !c.is_empty() {
+                                    yield Ok(StreamEvent::Text(c.to_string()));
+                                }
                             }
                         }
                         let reasoning = delta
@@ -710,10 +718,34 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            vec![
-                ("reasoning", "<thought>weighing options</thought>"),
-                ("text", "the answer"),
-            ],
+            vec![("reasoning", "weighing options"), ("text", "the answer")],
+            "{events:?}"
+        );
+    }
+
+    /// The closing tag arrives on the delta that opens the answer, unflagged.
+    /// Stripping it there is the whole difference between a clean reply and
+    /// one that starts with `</thought>`.
+    #[tokio::test]
+    async fn the_thought_close_tag_on_the_first_answer_delta_is_stripped() {
+        let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<thought>hmm</thought>\",\"extra_content\":{\"google\":{\"thought\":true}},\"role\":\"assistant\"}}]}\n\n\
+                    data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"</thought>42\",\"role\":\"assistant\"},\"finish_reason\":\"stop\"}]}\n\n\
+                    data: [DONE]\n\n"
+            .to_string();
+        let (url, h) = sse_server(body);
+        let events = collect(url).await;
+        h.join().unwrap();
+        let kinds: Vec<(&str, &str)> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Reasoning(s) => Some(("reasoning", s.as_str())),
+                StreamEvent::Text(s) => Some(("text", s.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![("reasoning", "hmm"), ("text", "42")],
             "{events:?}"
         );
     }
