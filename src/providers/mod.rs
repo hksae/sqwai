@@ -102,6 +102,11 @@ pub struct Message {
     /// next request of the same turn. The host never interprets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_state: Option<serde_json::Value>,
+    /// reasoning the model streamed on this turn, kept for display only: a
+    /// restored session rebuilds its thought rows from it. Never goes on the
+    /// wire — replay of reasoning uses `provider_state`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub thinking: String,
 }
 
 impl Message {
@@ -113,6 +118,7 @@ impl Message {
             tool_call_id: None,
             is_error: false,
             provider_state: None,
+            thinking: String::new(),
         }
     }
 
@@ -128,6 +134,7 @@ impl Message {
             tool_call_id: Some(call_id.into()),
             is_error,
             provider_state: None,
+            thinking: String::new(),
         }
     }
 
@@ -138,6 +145,11 @@ impl Message {
 
     pub fn with_provider_state(mut self, state: Option<serde_json::Value>) -> Self {
         self.provider_state = state;
+        self
+    }
+
+    pub fn with_thinking(mut self, thinking: String) -> Self {
+        self.thinking = thinking;
         self
     }
 }

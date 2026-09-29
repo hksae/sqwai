@@ -986,6 +986,19 @@ impl App {
     }
 
     /// render persisted messages as chat segments (used on start and on resume)
+    /// A thought row rebuilt from a saved session: folded and finished, with no
+    /// clock — the save carries the reasoning text, not its duration, and a
+    /// restored row must not invent one.
+    fn restored_thinking(text: &str) -> Segment {
+        Segment::Thinking {
+            text: text.to_string(),
+            expanded: false,
+            started: None,
+            duration_ms: 0,
+            live: false,
+        }
+    }
+
     fn load_history_segments(&mut self) {
         // Tool calls and their results are part of the durable provider
         // transcript. Keep the rendered row keyed by call id so batched calls
@@ -1034,6 +1047,11 @@ impl App {
                     self.push_segment(Segment::User(m.content.clone()));
                 }
                 Role::Assistant if m.tool_calls.is_empty() => {
+                    // a restored thought row joins the work run it preceded,
+                    // exactly where the live path painted it
+                    if !m.thinking.is_empty() {
+                        self.push_segment(Self::restored_thinking(&m.thinking));
+                    }
                     if let Some(seg_start) = work_start.take() {
                         // A saved session is never streaming: historical work
                         // must begin folded, even if it ended with an error.
@@ -1051,6 +1069,9 @@ impl App {
                 }
                 Role::Assistant => {
                     work_start.get_or_insert(self.segments.len());
+                    if !m.thinking.is_empty() {
+                        self.push_segment(Self::restored_thinking(&m.thinking));
+                    }
                     let trimmed = m.content.trim();
                     if !trimmed.is_empty() {
                         self.push_segment(Segment::Commentary(trimmed.to_string()));

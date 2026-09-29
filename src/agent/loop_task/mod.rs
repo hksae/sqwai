@@ -1160,8 +1160,11 @@ async fn run_agent(
         if turn.calls.is_empty() {
             // final answer
             let text = turn.text.clone();
-            messages
-                .push(Message::new(Role::Assistant, text).with_provider_state(turn.provider_state));
+            messages.push(
+                Message::new(Role::Assistant, text)
+                    .with_provider_state(turn.provider_state)
+                    .with_thinking(turn.reasoning_text),
+            );
             break;
         }
 
@@ -1169,7 +1172,8 @@ async fn run_agent(
         messages.push(
             Message::new(Role::Assistant, turn.text)
                 .with_tool_calls(turn.calls.clone())
-                .with_provider_state(turn.provider_state),
+                .with_provider_state(turn.provider_state)
+                .with_thinking(turn.reasoning_text),
         );
 
         // §3.7 / §7 S: once the user cancels one call, no further calls in
@@ -2467,6 +2471,7 @@ mod effort_tests {
             retries: 0,
             reasoning_tokens,
             saw_reasoning: false,
+            reasoning_text: String::new(),
             effort_rejected,
             provider_state: None,
         }

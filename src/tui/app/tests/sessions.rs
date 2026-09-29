@@ -147,6 +147,77 @@ fn load_history_restores_tool_calls_and_results() {
 }
 
 #[test]
+fn restored_session_rebuilds_thought_rows_in_order() {
+    use crate::providers::{Message, Role, ToolCallReq};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    // one thought before a tool turn, one before the final answer: the save
+    // carries them per assistant message, so the interleaving must survive
+    app.session.messages = vec![
+        Message::new(Role::User, "inspect"),
+        Message::new(Role::Assistant, "")
+            .with_thinking("weighing the options".into())
+            .with_tool_calls(vec![ToolCallReq::new(
+                "call-1",
+                "read",
+                serde_json::json!({}),
+            )]),
+        Message::tool_result("call-1", "file contents", false),
+        Message::new(Role::Assistant, "done").with_thinking("one more consideration".into()),
+    ];
+    app.clear_segments();
+    app.load_history_segments();
+    let kinds: Vec<&str> = app
+        .segments
+        .iter()
+        .map(|s| match s {
+            Segment::User(_) => "user",
+            Segment::Thinking { .. } => "thinking",
+            Segment::Tool { .. } => "tool",
+            Segment::Assistant { .. } => "assistant",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["user", "thinking", "tool", "thinking", "assistant"],
+        "{:?}",
+        app.segments
+    );
+    let thoughts: Vec<&str> = app
+        .segments
+        .iter()
+        .filter_map(|s| match s {
+            Segment::Thinking { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        thoughts,
+        vec!["weighing the options", "one more consideration"]
+    );
+
+    // a restored row carries no clock: it must not invent a duration
+    app.rebuild_cache(80);
+    let text = rendered(&app);
+    assert!(
+        text.contains("2 thoughts"),
+        "aggregate counts restored rows: {text}"
+    );
+    let footer = app
+        .cache_rowseg
+        .iter()
+        .position(|tag| *tag == Some(GROUP_BASE))
+        .expect("restored activity footer");
+    app.click(footer);
+    app.rebuild_cache(80);
+    let text = rendered(&app);
+    assert!(
+        !text.contains("thought ·") && !text.contains("thought…"),
+        "no invented duration on restored rows: {text}"
+    );
+}
+
+#[test]
 fn restore_keeps_stopped_turns_out_of_later_groups() {
     use crate::providers::{Message, Role, ToolCallReq};
     use crate::session::{ActivitySummary, SessionHeader};

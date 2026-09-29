@@ -1673,20 +1673,25 @@ impl App {
                 } else {
                     *duration_ms
                 };
-                let elapsed = if elapsed_ms < 1000 {
-                    format!("0.{}s", (elapsed_ms % 1000) / 100)
+                // a row rebuilt from a saved session carries text but no
+                // clock: printing a duration there would invent one
+                let restored = !*live && started.is_none() && *duration_ms == 0;
+                let time = if restored {
+                    String::new()
+                } else if elapsed_ms < 1000 {
+                    format!(" · 0.{}s", (elapsed_ms % 1000) / 100)
                 } else {
-                    format!("{}s", elapsed_ms / 1000)
+                    format!(" · {}s", elapsed_ms / 1000)
                 };
                 if !*expanded {
                     // a finished block is a thought that was had; only the
                     // still-streaming one is thinking
                     let label = if !*live {
-                        format!("  thought · {elapsed}")
+                        format!("  thought{time}")
                     } else if text.is_empty() {
-                        format!("  thinking… {elapsed}")
+                        format!("  thinking…{time}")
                     } else {
-                        format!("  thinking · {elapsed}")
+                        format!("  thinking{time}")
                     };
                     let spans = vec![Span::styled(label, Theme::dim())];
                     out.push((Line::from(spans), Some(idx)));
@@ -1696,7 +1701,7 @@ impl App {
                     }
                     out.push((
                         Line::from(vec![Span::styled(
-                            format!("  click to collapse · {elapsed}"),
+                            format!("  click to collapse{time}"),
                             Style::new().fg(Theme::DIM()).add_modifier(Modifier::ITALIC),
                         )]),
                         Some(idx),

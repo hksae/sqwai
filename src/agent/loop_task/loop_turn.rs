@@ -85,6 +85,9 @@ pub(crate) struct TurnOutcome {
     /// reasoning content was streamed in this turn, which contradicts a zero
     /// count whatever the usage block says
     pub(crate) saw_reasoning: bool,
+    /// the reasoning text of this turn, for display only: the session stores
+    /// it so a reloaded transcript can rebuild its thought rows
+    pub(crate) reasoning_text: String,
     /// the provider rejected the effort parameter outright, so the turn was
     /// retried without it and the session must stop sending it
     pub(crate) effort_rejected: bool,
@@ -121,6 +124,9 @@ pub(crate) async fn run_turn(
         let mut got_delta = false;
         let mut failed: Option<anyhow::Error> = None;
         let mut text = String::new();
+        // reasoning of THIS attempt only: a retry that replaces a failed
+        // request must not inherit the dead attempt's thoughts
+        let mut reasoning_text = String::new();
         let mut calls: Vec<ToolCallReq> = Vec::new();
         let mut provider_state: Option<serde_json::Value> = None;
 
@@ -140,6 +146,7 @@ pub(crate) async fn run_turn(
                     if !t.is_empty() {
                         got_delta = true;
                         saw_reasoning = true;
+                        reasoning_text.push_str(&t);
                         if tx.send(AgentEvent::ThinkingDelta(t)).await.is_err() {
                             return Err(TurnFailure::new("tui closed", None, attempt));
                         }
@@ -227,6 +234,7 @@ pub(crate) async fn run_turn(
                 calls,
                 reasoning_tokens,
                 saw_reasoning,
+                reasoning_text,
                 effort_rejected,
                 retries: attempt,
                 provider_state,
