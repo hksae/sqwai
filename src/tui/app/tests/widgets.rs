@@ -121,8 +121,8 @@ fn running_tool_name_shimmers_like_activity_header() {
 }
 
 #[test]
-fn live_activity_header_shimmers_finished_stays_dim() {
-    use super::super::view::{ActivityGroup, activity_header_line};
+fn live_activity_footer_shimmers_finished_stays_dim() {
+    use super::super::view::{ActivityGroup, activity_footer_line};
     let g = ActivityGroup {
         seg_start: 0,
         seg_end: 0,
@@ -134,37 +134,45 @@ fn live_activity_header_shimmers_finished_stays_dim() {
         expanded: true,
         turn_user: None,
     };
-    // finished header: static dim text
-    let still = activity_header_line(&g, None);
+    // finished footer: static dim text
+    let still = activity_footer_line(&g, None, None);
     let text: String = still.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(text.contains("activity · 3 calls"), "{text:?}");
+    assert!(text.contains("3 calls"), "{text:?}");
     assert!(
         still.spans.iter().all(|s| s.style == Theme::dim()),
-        "finished header must stay dim: {still:?}"
+        "finished footer must stay dim: {still:?}"
     );
-    // live header at mid-sweep: same text, shaded letters
-    let live = activity_header_line(&g, Some(crate::tui::shimmer::SHIMMER_PERIOD_TICKS / 4));
+    // live footer at mid-sweep: the same aggregate led by the shimmer word
+    let live = activity_footer_line(
+        &g,
+        Some(crate::tui::shimmer::SHIMMER_PERIOD_TICKS / 4),
+        None,
+    );
     let live_text: String = live.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert_eq!(live_text, text, "shimmer must not change the text");
-    // the 8 "activity" letters carry more than one brightness step
+    assert!(live_text.contains("Working · 3 calls"), "{live_text:?}");
+    assert!(
+        !text.contains("Working"),
+        "done footer is static text: {text:?}"
+    );
+    // the 7 "Working" letters carry more than one brightness step
     let word: String = live
         .spans
         .iter()
         .skip(1)
-        .take(8)
+        .take(7)
         .map(|s| s.content.as_ref())
         .collect();
-    assert_eq!(word, "activity");
+    assert_eq!(word, "Working");
     let styles: std::collections::HashSet<String> = live
         .spans
         .iter()
         .skip(1)
-        .take(8)
+        .take(7)
         .map(|s| format!("{:?}", s.style))
         .collect();
     assert!(
         styles.len() > 1,
-        "live header must shade the word differently: {styles:?}"
+        "live footer must shade the word differently: {styles:?}"
     );
 }
 
@@ -1113,10 +1121,10 @@ fn preamble_before_tool_becomes_commentary_row_in_activity() {
     assert_eq!(g.seg_end, 5);
     assert_eq!(g.calls, 2);
 
-    // Rendering check: activity collapsed header
+    // Rendering check: collapsed activity footer under the folded tools
     app.rebuild_cache(80);
     let screen = rendered(&app);
-    assert!(screen.contains("activity · 2 calls"), "header: {screen}");
+    assert!(screen.contains("▸ 2 calls"), "footer: {screen}");
     assert!(
         screen.contains("I have finished the fix."),
         "answer: {screen}"

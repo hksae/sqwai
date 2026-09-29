@@ -557,7 +557,7 @@ fn sub_group_folds_finished_chat_like_main() {
     assert_eq!((groups[0].seg_start, groups[0].seg_end), (1, 3));
     assert!(!groups[0].expanded, "ok child folds shut");
     let s = render_to_string(&mut app, 100, 30);
-    assert!(s.contains("activity"), "header shows:\n{s}");
+    assert!(s.contains("▸ 1 calls"), "footer shows:\n{s}");
     assert!(s.contains("found it"), "answer stays visible:\n{s}");
     assert!(!s.contains("a.rs"), "tool row folds away:\n{s}");
 }
@@ -574,11 +574,11 @@ fn sub_group_header_click_toggles() {
         .cache_rowseg
         .iter()
         .position(|t| *t == Some(GROUP_BASE))
-        .expect("header row");
+        .expect("footer row");
     app.click(abs);
     assert!(
         app.sub_groups[&7][0].expanded,
-        "header click unfolds the child turn"
+        "footer click unfolds the child turn"
     );
     let s = render_to_string(&mut app, 100, 30);
     assert!(s.contains("a.rs"), "tool row is back:\n{s}");
@@ -597,7 +597,7 @@ fn close_subagent_view_folds_expanded_child_groups() {
         .cache_rowseg
         .iter()
         .position(|t| *t == Some(GROUP_BASE))
-        .expect("header row");
+        .expect("footer row");
     app.click(abs);
     assert!(app.sub_groups[&7][0].expanded);
     app.close_subagent_view();
@@ -623,7 +623,7 @@ fn sub_group_live_while_running() {
         *ok = None;
     }
     let s = render_to_string(&mut app, 100, 30);
-    assert!(s.contains("activity"), "live header shows:\n{s}");
+    assert!(s.contains("Working"), "live footer shows:\n{s}");
     assert!(s.contains("a.rs"), "running rows stay visible:\n{s}");
 }
 

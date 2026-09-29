@@ -7,8 +7,8 @@ expression: s
  › Run the tests.
 
 
-   ▾ activity · 1 calls · 0s
      ◜ bash  {"cmd":"cargo test"}
+   ▾ Working · bash · 1 calls · 0s
 
 
 
@@ -24,5 +24,5 @@ expression: s
 
 
 ›
-▲ Working · bash · 0 calls · 0s
+
  ACT                            cache 0% · 0% · 0 · m  ef:off [CWD]

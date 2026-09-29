@@ -1,10 +1,9 @@
 use super::*;
 
 #[test]
-fn working_line_mirrors_live_turn_without_args() {
+fn footer_line_sits_under_the_tools_and_folds_them() {
+    use super::super::view::activity_footer_line;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    // idle: no line at all
-    assert!(app.working_line().is_none());
     app.streaming = true;
     let ev = |e: AgentEvent, app: &mut App| match e {
         AgentEvent::ToolStart {
@@ -48,18 +47,44 @@ fn working_line_mirrors_live_turn_without_args() {
         },
         &mut app,
     );
-    let text: String = app
-        .working_line()
-        .expect("streaming turn must show the line")
-        .spans
+    app.rebuild_cache(80);
+    let line_text = |row: usize| -> String {
+        app.cache_lines[row]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    };
+    // the footer closes the group UNDER its rows: the earliest tool row
+    // sits above the tagged footer row
+    let footer = app
+        .cache_rowseg
         .iter()
-        .map(|s| s.content.as_ref())
-        .collect();
-    assert!(text.contains("▲ Working · bash · 1 calls"), "{text:?}");
+        .position(|t| *t == Some(GROUP_BASE))
+        .expect("footer row tagged as group 0");
+    let tool_row = (0..app.cache_lines.len())
+        .find(|&r| r != footer && line_text(r).contains("bash"))
+        .expect("tool row visible");
+    assert!(tool_row < footer, "footer sits under the tools");
+    let foot = line_text(footer);
     assert!(
-        !text.contains("cargo test"),
-        "args stay in the transcript: {text:?}"
+        foot.contains("Working · bash · 2 calls"),
+        "live aggregate: {foot:?}"
     );
+    assert!(
+        !foot.contains("cargo test"),
+        "args stay in the transcript: {foot:?}"
+    );
+    // clicking the footer folds the tools above it; the turn keeps running
+    app.click(footer);
+    assert!(app.streaming);
+    app.rebuild_cache(80);
+    let text = rendered(&app);
+    // the tool row (with its args) is gone; the collapsed footer keeps
+    // the aggregate and the current tool name
+    assert!(!text.contains("cargo test"), "folded tools hide: {text}");
+    assert!(text.contains("▸ Working · bash"), "footer stays: {text}");
+
     ev(
         AgentEvent::ToolNotice {
             name: "bash".into(),
@@ -70,12 +95,15 @@ fn working_line_mirrors_live_turn_without_args() {
         },
         &mut app,
     );
-    let line = app.working_line().expect("still streaming");
+    // finished group: static aggregate, no lead word, red error kept
+    let g = app.build_activity_group((0, app.segments.len()));
+    let line = activity_footer_line(&g, None, None);
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(
         text.contains("2 calls") && text.contains("1 error"),
         "{text:?}"
     );
+    assert!(!text.contains("Working"), "done footer is static: {text:?}");
     assert!(
         line.spans
             .iter()
@@ -248,20 +276,20 @@ fn activity_group_folds_the_turn_work_and_keeps_the_answer() {
     app.rebuild_cache(80);
     let text = rendered(&app);
     assert!(
-        text.contains("activity · 1 calls · 1 thinking"),
-        "header missing: {text}"
+        text.contains("1 calls · 1 thinking"),
+        "footer missing: {text}"
     );
     assert!(!text.contains("read"), "tool row must be folded: {text}");
     assert!(!text.contains("hmm"), "thinking must be folded: {text}");
     assert!(text.contains("done"), "the answer stays visible: {text}");
 
-    // clicking the header unfolds the whole block
-    let header = app
+    // clicking the footer unfolds the whole block
+    let footer = app
         .cache_rowseg
         .iter()
         .position(|t| *t == Some(GROUP_BASE))
-        .expect("one header row tagged as group 0");
-    app.click(header);
+        .expect("footer row tagged as group 0");
+    app.click(footer);
     assert!(app.activity_groups[0].expanded);
     app.rebuild_cache(80);
     let text = rendered(&app);
@@ -283,13 +311,13 @@ fn failed_turn_folds_its_activity_group_shut() {
     let text = rendered(&app);
     assert!(text.contains("1 error"), "error marker missing: {text}");
     assert!(!text.contains("read"), "the failed call folds away: {text}");
-    // clicking the header unfolds the block on demand
-    let header = app
+    // clicking the footer unfolds the block on demand
+    let footer = app
         .cache_rowseg
         .iter()
         .position(|t| *t == Some(GROUP_BASE))
-        .expect("one header row tagged as group 0");
-    app.click(header);
+        .expect("footer row tagged as group 0");
+    app.click(footer);
     assert!(app.activity_groups[0].expanded);
     app.rebuild_cache(80);
     assert!(
@@ -351,8 +379,8 @@ fn abort_remaps_activity_group_ranges_past_dropped_rows() {
     app.rebuild_cache(80);
     let text = rendered(&app);
     assert!(
-        text.contains("activity · 1 calls · 1 thinking"),
-        "header intact: {text}"
+        text.contains("1 calls · 1 thinking"),
+        "footer intact: {text}"
     );
     assert!(!text.contains("read"), "group stays folded: {text}");
     assert!(!text.contains("subagent"), "subagent row removed: {text}");
@@ -405,10 +433,7 @@ fn subagent_row_joins_the_turn_activity_group() {
 
     app.rebuild_cache(80);
     let text = rendered(&app);
-    assert!(
-        text.contains("activity · 3 calls"),
-        "header missing: {text}"
-    );
+    assert!(text.contains("3 calls"), "footer missing: {text}");
     assert!(
         !text.contains("subagent-1"),
         "the child row folds away with the rest: {text}"
@@ -455,14 +480,14 @@ fn delegated_call_paints_one_row_and_folds_with_the_turn() {
 
     app.rebuild_cache(80);
     let text = rendered(&app);
-    assert!(text.contains("activity · 1 calls"), "header: {text}");
+    assert!(text.contains("1 calls"), "footer: {text}");
     assert!(!text.contains("subagent-1"), "child row folds away: {text}");
     assert!(text.contains("done"), "the answer stays visible: {text}");
 }
 
 /// Stopping mid-turn drops the subagent rows from *inside* a group: the
 /// range must pull in by exactly the rows removed, and the recount must
-/// agree with the builder that produced the header.
+/// agree with the builder that produced the footer.
 #[test]
 fn abort_drops_subagent_rows_inside_a_group() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
@@ -518,8 +543,8 @@ fn abort_drops_subagent_rows_inside_a_group() {
     app.rebuild_cache(80);
     let text = rendered(&app);
     assert!(
-        text.contains("activity · 1 calls · 1 thinking"),
-        "header stays coherent after the abort: {text}"
+        text.contains("1 calls · 1 thinking"),
+        "footer stays coherent after the abort: {text}"
     );
     assert!(
         !text.contains("subagent"),
@@ -614,14 +639,14 @@ fn failed_turn_without_an_answer_still_groups_its_tools() {
     assert_eq!((g.seg_start, g.seg_end), (1, 3));
     assert!(!g.expanded, "a failed turn folds shut");
 
-    // and the header unfolds the block on click
+    // and the footer unfolds the block on click
     app.rebuild_cache(80);
-    let header = app
+    let footer = app
         .cache_rowseg
         .iter()
         .position(|t| *t == Some(GROUP_BASE))
-        .expect("header row tagged");
-    app.click(header);
+        .expect("footer row tagged");
+    app.click(footer);
     assert!(app.activity_groups[0].expanded);
     app.rebuild_cache(80);
     assert!(
@@ -683,22 +708,22 @@ fn activity_group_renders_live_while_the_turn_streams() {
     app.rebuild_cache(80);
     let text = rendered(&app);
     assert!(
-        text.contains("activity · 1 calls · 1 thinking"),
-        "live header missing: {text}"
+        text.contains("Working · read · 1 calls · 1 thinking"),
+        "live footer missing: {text}"
     );
     assert!(text.contains("read"), "live work is expanded: {text}");
 
-    // clicking the live header folds it; the turn stays running
-    let header = app
+    // clicking the live footer folds it; the turn stays running
+    let footer = app
         .cache_rowseg
         .iter()
         .position(|t| *t == Some(GROUP_BASE))
-        .expect("live header row");
-    app.click(header);
+        .expect("live footer row");
+    app.click(footer);
     assert!(app.streaming);
     app.rebuild_cache(80);
     assert!(
-        !rendered(&app).contains("read"),
+        !rendered(&app).contains("a.rs"),
         "live group folds on click"
     );
 }

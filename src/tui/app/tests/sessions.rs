@@ -129,19 +129,16 @@ fn load_history_restores_tool_calls_and_results() {
 
     app.rebuild_cache(80);
     let text = rendered(&app);
-    assert!(
-        text.contains("activity · 1 calls"),
-        "header restored: {text}"
-    );
+    assert!(text.contains("▸ 1 calls"), "footer restored: {text}");
     assert!(!text.contains("read"), "tool is folded: {text}");
     assert!(text.contains("done"), "answer remains visible: {text}");
 
-    let header = app
+    let footer = app
         .cache_rowseg
         .iter()
         .position(|tag| *tag == Some(GROUP_BASE))
-        .expect("restored activity header");
-    app.click(header);
+        .expect("restored activity footer");
+    app.click(footer);
     app.rebuild_cache(80);
     assert!(
         rendered(&app).contains("read"),
