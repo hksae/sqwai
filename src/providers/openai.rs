@@ -115,28 +115,36 @@ impl OpenAiProvider {
         });
         // openai-compatible reasoning control; servers that do not know
         // the field simply ignore it
-        if let Some(level) = req.effort.filter(|l| *l != EffortLevel::Off)
-            && let super::effort::Wire::Level(effort) =
-                super::effort::plan(level, req.effort_support).wire
-        {
-            body["reasoning_effort"] = json!(effort);
+        let requested = req
+            .effort
+            .filter(|l| *l != EffortLevel::Off)
+            .and_then(
+                |level| match super::effort::plan(level, req.effort_support).wire {
+                    super::effort::Wire::Level(effort) => Some(effort),
+                    _ => None,
+                },
+            );
+        // Gemini's OpenAI-compat layer takes its reasoning control in
+        // `thinking_config` and rejects a body that also carries
+        // `reasoning_effort` ("Expected one of either ... found both"), so
+        // gemini ids get the level there and nowhere else. `include_thoughts`
+        // is what makes the stream carry thought summaries at all; without it
+        // the model thinks silently and the wire shows nothing to parse.
+        if let Some(effort) = requested {
+            if req.model_id.starts_with("gemini-") {
+                body["extra_body"] = json!({
+                    "google": {
+                        "thinking_config": {
+                            "thinking_level": effort,
+                            "include_thoughts": true
+                        }
+                    }
+                });
+            } else {
+                body["reasoning_effort"] = json!(effort);
+            }
         }
-        // Gemini's OpenAI-compat layer thinks silently unless asked for
-        // thought summaries: without `include_thoughts` the stream carries
-        // no reasoning text at all. Scoped to gemini model ids (any
-        // endpoint) and only when reasoning was requested, so effort off
-        // keeps meaning off as far as Gemini allows.
-        // `google` sits at the top level of the wire body: that is where the
-        // OpenAI SDK's `extra_body` parameter flattens to. Sent as a literal
-        // `extra_body` key the config never reaches Gemini — the endpoint
-        // rejects the unknown name, and a tolerant proxy ignores it.
-        if body.get("reasoning_effort").is_some() && req.model_id.starts_with("gemini-") {
-            body["google"] = json!({
-                "thinking_config": { "include_thoughts": true }
-            });
-        }
-        let uses_max_completion =
-            uses_max_completion_tokens(&req.model_id, body.get("reasoning_effort").is_some());
+        let uses_max_completion = uses_max_completion_tokens(&req.model_id, requested.is_some());
         if let Some(mt) = req.max_tokens {
             if uses_max_completion {
                 body["max_completion_tokens"] = json!(mt);
@@ -307,11 +315,39 @@ impl Provider for OpenAiProvider {
                         let choice = &v["choices"][0];
                         let Some(delta) = choice.get("delta") else { continue };
 
-                        // streamed text / reasoning
+                        // diagnostic: a chunk that carries neither text nor
+                        // tool calls is where an unparsed field hides. With
+                        // the http log on, its key list names the field the
+                        // stream actually uses (thoughts included).
+                        if super::http_log_on()
+                            && delta.get("content").is_none()
+                            && delta.get("tool_calls").is_none()
+                        {
+                            super::log_http(&format!(
+                                "openai: bare delta keys={:?}",
+                                delta
+                                    .as_object()
+                                    .map(|o| o.keys().collect::<Vec<_>>())
+                                    .unwrap_or_default()
+                            ));
+                        }
+
+                        // streamed text / reasoning. Gemini marks thought
+                        // summaries in the very same content field, flagged by
+                        // extra_content.google.thought: they are reasoning, not
+                        // answer text, and must not leak into the reply.
+                        let is_thought = delta
+                            .pointer("/extra_content/google/thought")
+                            .and_then(|t| t.as_bool())
+                            .unwrap_or(false);
                         if let Some(c) = delta.get("content").and_then(|c| c.as_str())
                             && !c.is_empty()
                         {
-                            yield Ok(StreamEvent::Text(c.to_string()));
+                            if is_thought {
+                                yield Ok(StreamEvent::Reasoning(c.to_string()));
+                            } else {
+                                yield Ok(StreamEvent::Text(c.to_string()));
+                            }
                         }
                         let reasoning = delta
                             .get("reasoning_content")
@@ -617,19 +653,30 @@ mod tests {
             context_transport: crate::providers::ContextTransport::Stateless,
         };
         let thinking = |body: &Value| {
-            body.pointer("/google/thinking_config/include_thoughts")
+            body.pointer("/extra_body/google/thinking_config/include_thoughts")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
         };
+        let level = |body: &Value| {
+            body.pointer("/extra_body/google/thinking_config/thinking_level")
+                .and_then(|v| v.as_str().map(str::to_string))
+        };
         let body =
             OpenAiProvider::build_body(&req_with("gemini-3.8-flash", Some(EffortLevel::High)));
-        assert_eq!(body["reasoning_effort"], "high");
+        // the endpoint rejects a body carrying both controls ("Expected one
+        // of either `reasoning_effort` or custom `thinking_config`; found
+        // both"), so gemini ids get the level in thinking_config alone
+        assert_eq!(level(&body), Some("high".to_string()), "{body}");
         assert!(thinking(&body), "gemini + effort asks for thoughts: {body}");
-        // `extra_body` is an SDK client parameter, not a wire key: nested
-        // under it the config never reaches Gemini
         assert!(
-            body.get("extra_body").is_none(),
-            "thinking config must sit at the top level: {body}"
+            body.get("reasoning_effort").is_none(),
+            "gemini must not carry reasoning_effort next to thinking_config: {body}"
+        );
+        // a top-level `google` key is rejected by the endpoint outright
+        // ("Unknown name \"google\""): the config rides inside extra_body
+        assert!(
+            body.get("google").is_none(),
+            "thinking config must ride inside extra_body: {body}"
         );
         let body = OpenAiProvider::build_body(&req_with("gpt-5", Some(EffortLevel::High)));
         assert_eq!(body["reasoning_effort"], "high");
@@ -639,6 +686,36 @@ mod tests {
         assert!(!thinking(&body), "effort off stays off: {body}");
         let body = OpenAiProvider::build_body(&req_with("gemini-3.8-flash", None));
         assert!(!thinking(&body), "no effort stays silent: {body}");
+    }
+
+    /// Thought summaries arrive in the same content field as the answer,
+    /// flagged by extra_content.google.thought. Routing them as answer text
+    /// would leak the model's private reasoning into the reply.
+    #[tokio::test]
+    async fn a_thought_flagged_delta_is_reasoning_not_text() {
+        let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<thought>weighing options</thought>\",\"extra_content\":{\"google\":{\"thought\":true}},\"role\":\"assistant\"}}]}\n\n\
+                    data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"the answer\",\"role\":\"assistant\"},\"finish_reason\":\"stop\"}]}\n\n\
+                    data: [DONE]\n\n"
+            .to_string();
+        let (url, h) = sse_server(body);
+        let events = collect(url).await;
+        h.join().unwrap();
+        let kinds: Vec<(&str, &str)> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Reasoning(s) => Some(("reasoning", s.as_str())),
+                StreamEvent::Text(s) => Some(("text", s.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("reasoning", "<thought>weighing options</thought>"),
+                ("text", "the answer"),
+            ],
+            "{events:?}"
+        );
     }
     /// Gemini 3 attaches a `thought_signature` to the first function call of a
     /// turn and rejects the next request of that same turn with a 400 when it

@@ -2248,6 +2248,20 @@ impl App {
         plan
     }
 
+    /// Drop an observed "ignored" notice once reasoning visibly streams: the
+    /// zero-token run it was built from is contradicted. A refused parameter
+    /// stays — that verdict is the provider's word, and thoughts arriving
+    /// anyway are the model's own, not the level the user asked for.
+    fn note_effort_honoured(&mut self) {
+        let rejected = self
+            .effort_observed_ignored
+            .as_ref()
+            .is_some_and(|(_, _, why)| why == "the provider rejected the effort parameter");
+        if !rejected && self.effort_observed_ignored.take().is_some() {
+            self.dirty = true;
+        }
+    }
+
     fn rebuild_provider(&mut self) {
         let mc = self.model_cfg.clone();
         match self
@@ -3700,6 +3714,7 @@ impl App {
                         Some((self.model_cfg.id.clone(), self.model_cfg.effort, why));
                     self.dirty = true;
                 }
+                AgentEvent::EffortHonoured => self.note_effort_honoured(),
                 AgentEvent::ResponseId(id) => {
                     // the id only continues a conversation for the model that
                     // produced it; the scope is re-checked before each request

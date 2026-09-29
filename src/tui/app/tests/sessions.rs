@@ -901,6 +901,35 @@ fn session_switch_drops_stale_notices() {
 }
 
 #[test]
+fn observed_ignored_notice_clears_when_reasoning_arrives() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    // an observation (zero reasoning tokens) is contradicted by a turn that
+    // streams thoughts: the notice must go
+    app.effort_observed_ignored = Some((
+        "m".into(),
+        EffortLevel::High,
+        "no reasoning reported on 2 turns in a row".into(),
+    ));
+    app.note_effort_honoured();
+    assert!(
+        app.effort_observed_ignored.is_none(),
+        "contradicted observation must clear"
+    );
+    // a refused parameter is the provider's word, not silence: thoughts that
+    // arrive anyway are the model's own and clear nothing
+    app.effort_observed_ignored = Some((
+        "m".into(),
+        EffortLevel::High,
+        "the provider rejected the effort parameter".into(),
+    ));
+    app.note_effort_honoured();
+    assert!(
+        app.effort_observed_ignored.is_some(),
+        "a rejected parameter must stay reported"
+    );
+}
+
+#[test]
 fn start_new_session_stamps_project() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     assert!(app.start_new_session());

@@ -90,6 +90,12 @@ pub enum AgentEvent {
         level: String,
         why: String,
     },
+    /// A turn streamed reasoning after an observed zero-reasoning run stamped
+    /// the level as ignored: the observation is contradicted, so the notice
+    /// must go. A rejected parameter is never cleared this way — that verdict
+    /// came from the provider, and reasoning that arrives anyway is the
+    /// model's own, not the level the user asked for.
+    EffortHonoured,
     ResponseId(String),
     RequestBreakdown(RequestBreakdown),
     /// a delegated child agent was created
@@ -784,6 +790,9 @@ async fn run_agent(
     let mut compacted_for_overflow = false;
     // one record and one status line per session, not per turn
     let mut effort_ignored_reported = false;
+    // the reported verdict was an observation (zero reasoning), not a refused
+    // parameter: only an observation can be contradicted by a later turn
+    let mut effort_ignored_observed = false;
     // consecutive turns that asked for effort and came back with no reasoning
     let mut zero_reasoning_turns: u32 = 0;
 
@@ -934,12 +943,20 @@ async fn run_agent(
                     zero_reasoning_turns += 1;
                 } else {
                     zero_reasoning_turns = 0;
+                    // streamed reasoning contradicts an observed verdict: the
+                    // chrome must stop saying "ignored" while thoughts are
+                    // visibly arriving
+                    if effort_ignored_observed {
+                        effort_ignored_observed = false;
+                        let _ = tx.send(AgentEvent::EffortHonoured).await;
+                    }
                 }
                 if let Some(level) = effort
                     && !effort_ignored_reported
                     && let Some(why) = effort_ignored_reason(&turn, zero_reasoning_turns)
                 {
                     effort_ignored_reported = true;
+                    effort_ignored_observed = !turn.effort_rejected;
                     if let Some(writer) = journal.as_mut() {
                         let _ = writer.append(
                             "effort_ignored",

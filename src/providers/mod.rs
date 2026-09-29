@@ -678,6 +678,12 @@ pub fn set_http_log(on: bool) {
     HTTP_LOG.store(on, Ordering::Relaxed);
 }
 
+/// whether the request debug log is on, for callers that would otherwise
+/// build a log string nobody reads
+pub fn http_log_on() -> bool {
+    HTTP_LOG.load(Ordering::Relaxed)
+}
+
 /// append one line to `debug.log` next to the config when logging is enabled
 pub fn log_http(msg: &str) {
     use std::io::Write;
