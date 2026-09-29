@@ -2467,19 +2467,12 @@ impl App {
         // the activity header shows how long the turn took; measure from here
         self.turn_started = Some(Instant::now());
         self.live_group_collapsed = false;
-        // show the thinking placeholder right away so the indicator is visible
-        // from turn start even before any reasoning deltas arrive
-        let tpos = self.push_segment(Segment::Thinking {
-            text: String::new(),
-            expanded: false,
-            // Do not start the thinking stopwatch at request start: connection
-            // latency before the first reasoning delta is not model thinking.
-            started: None,
-            duration_ms: 0,
-            live: true,
-        });
-        self.thinking_idx = Some(tpos);
-        self.thinking_open = true;
+        // no thinking placeholder up front: the row appears only when real
+        // reasoning deltas arrive (handle_thinking_delta builds it lazily),
+        // so an empty "thinking... 0s" never flashes on turns that do not
+        // think — effort off, or providers that stay silent.
+        self.thinking_open = false;
+        self.thinking_idx = None;
         self.push_segment(Segment::Assistant {
             text: String::new(),
             live: true,

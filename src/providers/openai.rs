@@ -121,6 +121,18 @@ impl OpenAiProvider {
         {
             body["reasoning_effort"] = json!(effort);
         }
+        // Gemini's OpenAI-compat layer thinks silently unless asked for
+        // thought summaries: without `include_thoughts` the stream carries
+        // no reasoning text at all. Scoped to gemini model ids (any
+        // endpoint) and only when reasoning was requested, so effort off
+        // keeps meaning off as far as Gemini allows.
+        if body.get("reasoning_effort").is_some() && req.model_id.starts_with("gemini-") {
+            body["extra_body"] = json!({
+                "google": {
+                    "thinking_config": { "include_thoughts": true }
+                }
+            });
+        }
         let uses_max_completion =
             uses_max_completion_tokens(&req.model_id, body.get("reasoning_effort").is_some());
         if let Some(mt) = req.max_tokens {
@@ -582,6 +594,44 @@ mod tests {
         }
     }
 
+    /// Gemini's OpenAI-compat layer thinks silently unless asked for thought
+    /// summaries. Only gemini ids on this wire get the flag, and only when
+    /// reasoning was actually requested — effort off stays off.
+    #[test]
+    fn gemini_models_ask_for_thought_summaries_when_reasoning() {
+        use crate::config::{EffortControl, EffortLevel, EffortSupport};
+        let req_with = |model: &str, effort: Option<EffortLevel>| ChatRequest {
+            model_id: model.into(),
+            system: vec![],
+            messages: vec![Message::new(Role::User, "hi")],
+            effort,
+            effort_support: EffortSupport {
+                control: EffortControl::Named,
+                always_on: false,
+            },
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        let thinking = |body: &Value| {
+            body.pointer("/extra_body/google/thinking_config/include_thoughts")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        };
+        let body =
+            OpenAiProvider::build_body(&req_with("gemini-3.8-flash", Some(EffortLevel::High)));
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(thinking(&body), "gemini + effort asks for thoughts: {body}");
+        let body = OpenAiProvider::build_body(&req_with("gpt-5", Some(EffortLevel::High)));
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(!thinking(&body), "other models untouched: {body}");
+        let body =
+            OpenAiProvider::build_body(&req_with("gemini-3.8-flash", Some(EffortLevel::Off)));
+        assert!(!thinking(&body), "effort off stays off: {body}");
+        let body = OpenAiProvider::build_body(&req_with("gemini-3.8-flash", None));
+        assert!(!thinking(&body), "no effort stays silent: {body}");
+    }
     /// Gemini 3 attaches a `thought_signature` to the first function call of a
     /// turn and rejects the next request of that same turn with a 400 when it
     /// is missing. The host cannot regenerate it, so the only correct
