@@ -2482,14 +2482,14 @@ impl App {
             Menu::Providers => {
                 let budget = table_budget(self.menu_rect.width);
                 self.table_built_w = budget as u16;
-                // lead 1 + 2 gaps of 2; endpoint lives in the edit form,
-                // the list keeps identity + counts + key state
-                const NAME_W: usize = 22;
+                // lead 1 + 2 gaps of 2; name flexes to fill the card,
+                // counts and key stay fixed on the right
                 const COUNT_W: usize = 9;
                 const KEY_W: usize = 12;
+                let name_w = budget.saturating_sub(1 + 4 + COUNT_W + KEY_W).clamp(12, 46);
                 self.menu_table_header = Some(table_header(
                     vec![
-                        tcell("PROVIDER", NAME_W, false, Theme::dim()),
+                        tcell("PROVIDER", name_w, false, Theme::dim()),
                         tcell("MODELS", COUNT_W, true, Theme::dim()),
                         tcell("KEY", KEY_W, false, Theme::dim()),
                     ],
@@ -2513,7 +2513,7 @@ impl App {
                     self.menu_rows.push(row(
                         fit_line_width(
                             table_line(vec![
-                                tcell(name, NAME_W, false, Theme::FG()),
+                                tcell(name, name_w, false, Theme::FG()),
                                 tcell(&format!("{models} models"), COUNT_W, true, Theme::meta()),
                                 tcell(&key_state, KEY_W, false, key_style),
                             ]),
