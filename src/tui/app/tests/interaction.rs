@@ -1094,6 +1094,29 @@ fn test_art_opens_numbered_gallery() {
     }
 }
 
+#[test]
+fn held_tab_toggles_mode_only_once() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let send = |app: &mut App, kind: KeyEventKind| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Tab,
+            KeyModifiers::empty(),
+            kind,
+        )))
+        .unwrap();
+        app.poll_input(&rx).unwrap();
+    };
+    let before = app.mode;
+    send(&mut app, KeyEventKind::Press);
+    assert_ne!(app.mode, before, "press must toggle");
+    // auto-repeat while held must not flap back and forth
+    send(&mut app, KeyEventKind::Repeat);
+    send(&mut app, KeyEventKind::Repeat);
+    assert_ne!(app.mode, before, "repeat must not toggle");
+}
+
 fn queue_test_app() -> crate::tui::app::App {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;

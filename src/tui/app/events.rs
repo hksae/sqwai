@@ -562,8 +562,12 @@ impl App {
                         KeyCode::Tab
                             if self.menu_stack.is_empty() && self.active_ask_seg().is_none() =>
                         {
-                            let next = self.mode.toggle();
-                            self.set_mode(next);
+                            // held Tab auto-repeats: toggle once per press,
+                            // or it flaps act/plan while held
+                            if k.kind == KeyEventKind::Press {
+                                let next = self.mode.toggle();
+                                self.set_mode(next);
+                            }
                         }
                         KeyCode::Tab if matches!(self.cur_menu(), Some(Menu::AskUser { .. })) => {
                             if let Some(Menu::AskUser { questions, .. }) = self.cur_menu() {
