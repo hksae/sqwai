@@ -2580,7 +2580,7 @@ impl App {
                 self.menu_sticky_footer.push(row(
                     Line::from(vec![Span::styled(
                         format!(" {}", crate::config::catalog_status_line()),
-                        Theme::meta(),
+                        Theme::dim(),
                     )]),
                     MenuAction::None,
                 ));
