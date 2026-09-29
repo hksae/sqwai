@@ -113,6 +113,47 @@ fn footer_line_sits_under_the_tools_and_folds_them() {
 }
 
 #[test]
+fn tool_row_name_is_quiet_gray_and_call_caps_at_half_width() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.push_segment(Segment::Tool {
+        call_id: None,
+        name: "bash".into(),
+        args: "x".repeat(200),
+        ok: Some(true),
+        output: String::new(),
+        diff: None,
+        preview: Vec::new(),
+        preview_total: 0,
+        expanded: false,
+        flash: None,
+    });
+    let rows = app.render_segment(&app.segments, 0, 80, true);
+    assert_eq!(rows.len(), 1, "one head row: {rows:?}");
+    let head = &rows[0].0;
+    // marker keeps its state style, the name is the markdown base gray
+    assert!(
+        head.spans[0].content.contains('✓'),
+        "marker as-is: {head:?}"
+    );
+    let name = head
+        .spans
+        .iter()
+        .find(|s| s.content.as_ref() == "bash")
+        .expect("name span: {head:?}");
+    assert_eq!(
+        name.style.fg,
+        Some(ratatui::style::Color::Gray),
+        "white, but a touch silver: {head:?}"
+    );
+    // the call never runs past mid-window (4 marker + name + 2 gap + w/2)
+    let width: usize = head.spans.iter().map(|s| s.content.chars().count()).sum();
+    assert!(
+        width <= 4 + "bash".len() + 2 + 40,
+        "call capped at half of 80: {width}"
+    );
+}
+
+#[test]
 fn thinking_segments_stay_in_event_order() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     // Simulate an agent stream: think, two tools, think again.

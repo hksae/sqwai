@@ -1742,11 +1742,11 @@ impl App {
                 ..
             } => {
                 // Every tool uses the same three-part row: state marker, tool
-                // name, and a quiet one-line argument summary. Calm white
-                // throughout — state reads from the marker shape and the
-                // finish wave, not from row colors. Keeping the geometry
-                // identical makes running, successful, and failed calls
-                // scan as one list.
+                // name, and a quiet one-line argument summary. The name is
+                // the markdown base gray (white, but a touch silver); state
+                // reads from the marker shape and the finish wave, not from
+                // row colors. Keeping the geometry identical makes running,
+                // successful, and failed calls scan as one list.
                 let marker = match ok {
                     None => (
                         format!(
@@ -1774,7 +1774,11 @@ impl App {
                 let counts_width = edit_counts
                     .map(|(added, removed)| format!("  +{added} -{removed}").width())
                     .unwrap_or(0);
-                let summary_width = available.saturating_sub(counts_width);
+                let summary_width = available
+                    .saturating_sub(counts_width)
+                    // the call never runs past mid-window: on small
+                    // terminals a full-width tail would crowd the name out
+                    .min(usize::from(w) / 2);
                 let summary = if args.is_empty() || summary_width == 0 {
                     String::new()
                 } else {
@@ -1821,7 +1825,7 @@ impl App {
                     }
                     None => vec![
                         Span::styled(marker.0, marker.1),
-                        Span::styled(shown_name, Theme::tool_head()),
+                        Span::styled(shown_name, Theme::meta()),
                         Span::styled(summary, Theme::dim()),
                     ],
                 };
