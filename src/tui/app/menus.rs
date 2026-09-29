@@ -2504,7 +2504,7 @@ impl App {
                         .count();
                     let (key_state, key_style) =
                         if pc.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
-                            ("key set".to_string(), Theme::ok())
+                            ("key".to_string(), Theme::ok())
                         } else if let Some(env) = pc.key_env_name(name) {
                             (format!("key ${env}"), Theme::dim())
                         } else {
