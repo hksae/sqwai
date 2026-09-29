@@ -732,6 +732,53 @@ fn providers_table_has_frozen_header() {
 }
 
 #[test]
+fn providers_footer_stays_pinned_while_body_scrolls() {
+    use crate::config::{ProviderConfig, WireFormat};
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    for i in 0..12 {
+        app.cfg.providers.insert(
+            format!("prov-{i:02}"),
+            ProviderConfig {
+                format: WireFormat::Openai,
+                base_url: "https://api.example.com/v1".into(),
+                api_key: None,
+                api_key_env: None,
+                continuation: false,
+            },
+        );
+    }
+    app.open_menu(Menu::Providers);
+    let body = app.menu_rows.len();
+    assert!(body > 6, "need overflow for the scroll check");
+    // actions live outside the scrollable body now
+    assert_eq!(app.menu_sticky_footer.len(), 3);
+    assert!(matches!(
+        app.menu_row_at(body).map(|(_, a)| a),
+        Some(MenuAction::AddProvider)
+    ));
+    assert_eq!(app.menu_len(), body + 3);
+    // scroll the body to the bottom: first provider rows leave the
+    // window, the footer stays painted
+    app.menu_wheel(10000);
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(text.contains("+ add provider"), "footer must stay");
+    assert!(
+        text.contains("update built-in providers"),
+        "footer must stay"
+    );
+    assert!(!text.contains("prov-00"), "scrolled body rows must leave");
+}
+
+#[test]
 fn ctrl_shortcuts_open_providers_plan_settings() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     let mut app = test_app("http://127.0.0.1:9/v1".into());

@@ -439,6 +439,9 @@ pub struct App {
     /// fixed hint line under a list menu (not part of the scrolled rows)
     menu_footer_text: Option<String>,
     menu_rows: Vec<(Line<'static>, MenuAction)>,
+    /// pinned action rows below the scroll window (Providers actions):
+    /// always visible, navigable, never scrolled. Empty everywhere else.
+    menu_sticky_footer: Vec<(Line<'static>, MenuAction)>,
     /// frozen column header for table menus (Sessions/Models/Providers):
     /// drawn above the scroll window, never a nav step
     menu_table_header: Option<Line<'static>>,
@@ -917,6 +920,7 @@ impl App {
             menu_visible_rows: 0,
             menu_footer_text: None,
             menu_rows: Vec::new(),
+            menu_sticky_footer: Vec::new(),
             menu_table_header: None,
             approval_opened_at: None,
             menu_rect: Rect::default(),

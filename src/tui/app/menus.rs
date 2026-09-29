@@ -675,12 +675,17 @@ impl App {
 
     /// Pull the view after the selection (keyboard nav): the selection
     /// must stay visible. The wheel never calls this — it scrolls free.
+    /// Footer rows are always visible, so a selection there never moves
+    /// the body scroll.
     fn menu_follow_sel(&mut self) {
-        let n = self.menu_rows.len();
+        let n = self.menu_len();
         if n == 0 {
             return;
         }
         self.menu_sel = self.menu_sel.min(n - 1);
+        if self.menu_sel >= self.menu_rows.len() {
+            return;
+        }
         let vis = self.menu_visible_rows.max(1);
         if self.menu_sel < self.menu_scroll {
             self.menu_scroll = self.menu_sel;
@@ -712,9 +717,9 @@ impl App {
             }
         } else if dir.abs() > 1 {
             // page jump
-            let n = self.menu_rows.len();
+            let n = self.menu_len();
             if n > 0 {
-                let step = (self.menu_rows.len() as i32 / 2).clamp(1, 10) as usize;
+                let step = (self.menu_len() as i32 / 2).clamp(1, 10) as usize;
                 self.menu_sel = if dir < 0 {
                     self.menu_sel.saturating_sub(step)
                 } else {
@@ -723,7 +728,7 @@ impl App {
                 self.menu_follow_sel();
             }
         } else {
-            let n = self.menu_rows.len();
+            let n = self.menu_len();
             if n > 0 {
                 self.menu_sel = if dir < 0 {
                     (self.menu_sel + n - 1) % n
@@ -741,8 +746,8 @@ impl App {
             self.menu_nav(if to_end { 1 } else { -1 });
             return;
         }
-        if !self.menu_rows.is_empty() {
-            self.menu_sel = if to_end { self.menu_rows.len() - 1 } else { 0 };
+        if self.menu_len() > 0 {
+            self.menu_sel = if to_end { self.menu_len() - 1 } else { 0 };
             self.menu_follow_sel();
         }
         self.dirty = true;
@@ -774,7 +779,9 @@ impl App {
         }
         let r = self.menu_rect;
         // list rows start after title + air row (+ frozen table header):
-        // clicks on chrome select nothing. Forms keep their own mapping.
+        // clicks on chrome select nothing. The sticky footer (with its
+        // separator rule above it) maps after the visible body window.
+        // Forms keep their own mapping.
         let skip = 2 + usize::from(self.menu_table_header.is_some());
         if self.is_form_menu()
             || r.height == 0
@@ -783,10 +790,30 @@ impl App {
         {
             return None;
         }
-        let abs = self.menu_scroll + (row - r.y) as usize - skip;
-        if abs >= self.menu_rows.len() {
+        let body = self.menu_rows.len();
+        let foot = self.menu_sticky_footer.len();
+        // undrawn menus (tests, first frame) have no window yet: every
+        // body row is hoverable, like before the sticky footer existed
+        let shown = if self.menu_visible_rows == 0 {
+            body.saturating_sub(self.menu_scroll)
+        } else {
+            self.menu_visible_rows
+                .min(body.saturating_sub(self.menu_scroll))
+        };
+        let rel = (row - r.y) as usize - skip;
+        let abs = if rel < shown {
+            self.menu_scroll + rel
+        } else if foot > 0 && rel == shown {
+            return None; // separator rule
+        } else if foot > 0 {
+            let f = rel - shown - 1;
+            if f >= foot {
+                return None;
+            }
+            body + f
+        } else {
             return None;
-        }
+        };
         if abs != self.menu_sel {
             self.menu_sel = abs;
             self.dirty = true;
@@ -807,9 +834,23 @@ impl App {
             .map(|(_, idx)| *idx)
     }
 
+    /// unified nav index space: scrollable body rows, then sticky footer
+    /// rows. Selection and activation run on this; scrolling only on body.
+    pub(super) fn menu_len(&self) -> usize {
+        self.menu_rows.len() + self.menu_sticky_footer.len()
+    }
+
+    pub(super) fn menu_row_at(&self, idx: usize) -> Option<&(Line<'static>, MenuAction)> {
+        if idx < self.menu_rows.len() {
+            self.menu_rows.get(idx)
+        } else {
+            self.menu_sticky_footer.get(idx - self.menu_rows.len())
+        }
+    }
+
     /// id of the session row currently highlighted in the sessions menu
     pub(super) fn selected_session_id(&self) -> Option<String> {
-        match &self.menu_rows.get(self.menu_sel)?.1 {
+        match &self.menu_row_at(self.menu_sel)?.1 {
             MenuAction::OpenSession(id) => Some(id.clone()),
             _ => None,
         }
@@ -826,7 +867,7 @@ impl App {
         };
         // confirmation prompts: honor the exact row clicked (label/cancel/confirm)
         if let Some(Menu::ConfirmDelete { .. }) = self.cur_menu() {
-            let Some((_, action)) = self.menu_rows.get(sel) else {
+            let Some((_, action)) = self.menu_row_at(sel) else {
                 return;
             };
             self.run_action(action.clone());
@@ -835,7 +876,7 @@ impl App {
         // approval: a click selects the option, it never commits — commit
         // is Enter only, so a stray click cannot approve a command
         if matches!(self.cur_menu(), Some(Menu::Approval { .. })) {
-            if let Some((_, MenuAction::DecideApproval(_))) = self.menu_rows.get(sel) {
+            if let Some((_, MenuAction::DecideApproval(_))) = self.menu_row_at(sel) {
                 self.menu_sel = sel;
                 self.dirty = true;
             }
@@ -849,6 +890,7 @@ impl App {
         let act = self
             .menu_rows
             .iter()
+            .chain(self.menu_sticky_footer.iter())
             .find(|(_, a)| matches!(a, MenuAction::Confirm(_)))
             .map(|(_, a)| a.clone());
         if let Some(a) = act {
@@ -873,7 +915,7 @@ impl App {
         }
         // ask_user: enter submits the selected option (or free text)
         if let Some(Menu::AskUser { .. }) = self.cur_menu() {
-            if let Some((_, action)) = self.menu_rows.get(self.menu_sel) {
+            if let Some((_, action)) = self.menu_row_at(self.menu_sel) {
                 self.run_action(action.clone());
             }
             return;
@@ -888,14 +930,13 @@ impl App {
             {
                 return;
             }
-            if let Some((_, MenuAction::DecideApproval(decision))) =
-                self.menu_rows.get(self.menu_sel)
+            if let Some((_, MenuAction::DecideApproval(decision))) = self.menu_row_at(self.menu_sel)
             {
                 self.run_action(MenuAction::DecideApproval(*decision));
             }
             return;
         }
-        let Some((_, action)) = self.menu_rows.get(self.menu_sel) else {
+        let Some((_, action)) = self.menu_row_at(self.menu_sel) else {
             return;
         };
         self.run_action(action.clone());
@@ -1735,6 +1776,7 @@ impl App {
 
     pub(super) fn build_menu_rows(&mut self) {
         self.menu_rows.clear();
+        self.menu_sticky_footer.clear();
         self.menu_table_header = None;
         self.menu_footer_text = None;
         let Some(menu) = self.cur_menu().cloned() else {
@@ -2522,18 +2564,20 @@ impl App {
                         MenuAction::OpenModels(name.clone()),
                     ));
                 }
-                self.menu_rows.push(row(
+                // actions live in the sticky footer: always visible,
+                // navigable, never scrolled with the provider rows
+                self.menu_sticky_footer.push(row(
                     Line::from(vec![Span::styled(" + add provider", Theme::FG())]),
                     MenuAction::AddProvider,
                 ));
-                self.menu_rows.push(row(
+                self.menu_sticky_footer.push(row(
                     Line::from(vec![Span::styled(
                         " · update built-in providers",
                         Theme::FG(),
                     )]),
                     MenuAction::UpdateBuiltins,
                 ));
-                self.menu_rows.push(row(
+                self.menu_sticky_footer.push(row(
                     Line::from(vec![Span::styled(
                         format!(" {}", crate::config::catalog_status_line()),
                         Theme::meta(),
@@ -3003,7 +3047,7 @@ impl App {
                     ));
                     self.menu_footer_text = Some("esc: close".into());
                     // fall through to sel clamp
-                    self.menu_sel = self.menu_sel.min(self.menu_rows.len().saturating_sub(1));
+                    self.menu_sel = self.menu_sel.min(self.menu_len().saturating_sub(1));
                     return;
                 };
                 let status = match plan.status {
@@ -3028,8 +3072,8 @@ impl App {
                 self.menu_footer_text = Some("up/down: scroll · esc: back".into());
             }
         }
-        if self.menu_sel >= self.menu_rows.len() {
-            self.menu_sel = self.menu_rows.len().saturating_sub(1);
+        if self.menu_sel >= self.menu_len() {
+            self.menu_sel = self.menu_len().saturating_sub(1);
         }
     }
 }

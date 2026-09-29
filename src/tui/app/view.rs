@@ -3007,6 +3007,8 @@ impl App {
         // Chrome takes its rows from the window budget, never on top of it:
         // in a short terminal the panel is capped by max_h, and an extra
         // row would land under the hint line.
+        // The sticky footer (separator rule + pinned action rows) is chrome
+        // too: it never scrolls, so the body window shrinks by its size.
         let chrome_h = if is_form {
             usize::from(has_hints)
         } else {
@@ -3014,20 +3016,28 @@ impl App {
         };
         let avail_inner = (area.height.saturating_sub(6)).max(3) as usize;
         let max_h = area.height.saturating_sub(4).max(4);
+        // sticky footer rows (plus separator) are chrome like the header:
+        // they shrink the body window instead of overflowing the panel
+        let foot_len = self.menu_sticky_footer.len();
+        let foot_total = foot_len + usize::from(foot_len > 0);
+        let full_chrome = chrome_h + foot_total;
         let max_items = (max_h as usize)
             .saturating_sub(2)
-            .saturating_sub(chrome_h)
+            .saturating_sub(full_chrome)
             .max(1);
         let content_rows: usize = if is_form {
             self.form_fields.len() + 1
         } else {
-            // scrollable window; never smaller than what fits
-            self.menu_rows
+            // scrollable body window; the sticky footer keeps its rows
+            // outside of it. Empty body stays empty (no forced blank row).
+            let body = self
+                .menu_rows
                 .len()
-                .min(avail_inner.saturating_sub(chrome_h).max(1))
-                .min(max_items)
+                .min(avail_inner.saturating_sub(full_chrome).max(1))
+                .min(max_items);
+            body.max(usize::from(!self.menu_rows.is_empty()))
         };
-        let inner = content_rows + chrome_h;
+        let inner = content_rows + full_chrome;
         let h = (inner as u16 + 2).clamp(4, max_h);
         // Width cap order matters: the 30-column minimum must not win over
         // the terminal's real width — in a 20..29-column terminal that would
@@ -3212,6 +3222,42 @@ impl App {
             {
                 let abs = self.menu_scroll + n;
                 if abs == self.menu_sel {
+                    let mut out = Line::from(
+                        line.spans
+                            .iter()
+                            .map(|s| {
+                                Span::styled(
+                                    s.content.to_string(),
+                                    s.style.patch(Theme::selection()),
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    );
+                    let pad = content_w.saturating_sub(cols(&line_text(&out)));
+                    if pad > 0 {
+                        out.spans.push(Span::styled(
+                            " ".repeat(pad),
+                            Style::new().bg(Theme::SELECTION_BG()),
+                        ));
+                    }
+                    rows.push(out);
+                } else {
+                    rows.push(line.clone());
+                }
+            }
+        }
+        // sticky footer: separator rule, then pinned action rows. Same
+        // selection band as body rows; the indices continue the body.
+        if !is_form && !self.menu_sticky_footer.is_empty() {
+            let sep_w = rect.width.saturating_sub(2) as usize;
+            rows.push(Line::from(vec![Span::styled(
+                "─".repeat(sep_w),
+                Theme::rule_color(),
+            )]));
+            let content_w = rect.width.saturating_sub(2) as usize;
+            let base = self.menu_rows.len();
+            for (f, (line, _)) in self.menu_sticky_footer.iter().enumerate() {
+                if base + f == self.menu_sel {
                     let mut out = Line::from(
                         line.spans
                             .iter()
