@@ -2368,15 +2368,9 @@ impl App {
                 // once on mismatch (also covers an empty pinned section).
                 let budget = table_budget(self.menu_rect.width);
                 self.table_built_w = budget as u16;
-                // lead 1 + 3 gaps of 2 + time 5 + tokens 7 (the number
-                // rides inside the title cell, one space off the title)
+                // lead 1 + 3 gaps of 2 + time 5 + tokens 7
                 let title_w = budget.saturating_sub(19 + 16).clamp(8, 28);
                 let model_w = budget.saturating_sub(19 + title_w).clamp(8, 16);
-                // number column width follows the row count, so 1..9 never
-                // pay for two columns and titles never drift at 10+
-                let rows_total =
-                    pinned.len() + mine.iter().filter(|s| !s.pinned).count() + foreign.len();
-                let num_w = rows_total.to_string().len().max(1);
                 self.menu_table_header = Some(table_header(
                     vec![
                         tcell("TITLE", title_w, false, Theme::dim()),
@@ -2386,19 +2380,15 @@ impl App {
                     ],
                     budget,
                 ));
-                let mut row_no = 0usize;
                 if !pinned.is_empty() {
                     self.menu_rows.push(row(
                         Line::from(vec![Span::styled("  pinned".to_string(), Theme::section())]),
                         MenuAction::None,
                     ));
                     for s in &pinned {
-                        row_no += 1;
                         self.menu_rows.push(session_row(
                             s,
                             s.id.to_string() == cur_id,
-                            row_no,
-                            num_w,
                             title_w,
                             model_w,
                             budget,
@@ -2420,12 +2410,9 @@ impl App {
                             MenuAction::None,
                         ));
                     }
-                    row_no += 1;
                     self.menu_rows.push(session_row(
                         s,
                         s.id.to_string() == cur_id,
-                        row_no,
-                        num_w,
                         title_w,
                         model_w,
                         budget,
@@ -2440,12 +2427,9 @@ impl App {
                         MenuAction::None,
                     ));
                     for s in foreign {
-                        row_no += 1;
                         self.menu_rows.push(session_row(
                             s,
                             s.id.to_string() == cur_id,
-                            row_no,
-                            num_w,
                             title_w,
                             model_w,
                             budget,
@@ -3243,8 +3227,6 @@ fn plan_rows(
 fn session_row(
     s: &SessionHeader,
     is_current: bool,
-    row_no: usize,
-    num_w: usize,
     title_w: usize,
     model_w: usize,
     pad_w: usize,
@@ -3253,12 +3235,8 @@ fn session_row(
     const TIME_W: usize = 5;
     let action = MenuAction::OpenSession(s.id.to_string());
     let mark = if is_current { " *" } else { "" };
-    // number glued to the title with one space (opencode-style):
-    // right-aligned so titles stay in one column, truncation eats the
-    // title tail first and never the number
-    let titled = format!("{:>num_w$} {}{mark}", row_no, s.title);
     let line = table_line(vec![
-        tcell(&titled, title_w, false, Theme::FG()),
+        tcell(&format!("{}{mark}", s.title), title_w, false, Theme::FG()),
         tcell(&fmt_time(s.last_activity()), TIME_W, false, Theme::dim()),
         tcell(&s.model_key, model_w, false, Theme::meta()),
         tcell(&fmt_k(s.context_tokens), TOK_W, true, Theme::dim()),

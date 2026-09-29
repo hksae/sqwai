@@ -665,10 +665,10 @@ fn pinned_sessions_frame_stays_dim() {
         Some(Color::DarkGray),
         "time stays dim"
     );
-    // row number rides glued to the title (opencode-style), one space off
+    // title carries no marker column: pinned-ness reads from the section
     assert!(
-        row.spans[1].content.as_ref().starts_with("1 "),
-        "first row must carry its number: {:?}",
+        row.spans[1].content.as_ref().starts_with("new session"),
+        "row starts with the title: {:?}",
         row.spans[1].content.as_ref()
     );
 }
@@ -766,11 +766,8 @@ fn sessions_rows_share_date_model_token_columns() {
         .filter(|(_, act)| matches!(act, MenuAction::OpenSession(_)))
         .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
-    assert!(texts[0].starts_with(" 1 hi"), "{texts:?}");
-    assert!(
-        texts[1].starts_with(" 2 a medium length title!"),
-        "{texts:?}"
-    );
+    assert!(texts[0].starts_with(" hi"), "{texts:?}");
+    assert!(texts[1].starts_with(" a medium length title!"), "{texts:?}");
 }
 
 fn project_session(title: &str, project: Option<std::path::PathBuf>) -> Session {
