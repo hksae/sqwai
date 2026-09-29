@@ -403,6 +403,57 @@ pub(super) fn strip_row_chrome(line: &str) -> String {
 }
 
 impl App {
+    /// Bottom working line (Codex-style status row above the composer):
+    /// one live aggregate — current tool, completed calls, elapsed — while
+    /// the turn runs, nothing when idle. The transcript groups keep the
+    /// details; this row never scrolls and never takes layout space beyond
+    /// its single ex-rule row.
+    pub(super) fn working_line(&self) -> Option<Line<'static>> {
+        if !self.streaming {
+            return None;
+        }
+        let from = self.turn_user_index.unwrap_or(0);
+        let mut done = 0usize;
+        let mut errors = 0usize;
+        let mut current: Option<String> = None;
+        for (i, seg) in self.segments.iter().enumerate() {
+            if i < from {
+                continue;
+            }
+            if let Segment::Tool { name, ok, .. } = seg {
+                match ok {
+                    None => {
+                        current = Some(name.clone());
+                    }
+                    Some(true) => done += 1,
+                    Some(false) => {
+                        done += 1;
+                        errors += 1;
+                    }
+                }
+            }
+        }
+        let secs = self
+            .turn_started
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0);
+        let mut spans = vec![
+            Span::styled("▲ ".to_string(), Theme::accent()),
+            Span::styled("Working".to_string(), Theme::base()),
+        ];
+        if let Some(tool) = current {
+            spans.push(Span::styled(format!(" · {tool}"), Theme::meta()));
+        }
+        spans.push(Span::styled(
+            format!(" · {done} calls · {secs}s"),
+            Theme::dim(),
+        ));
+        if errors > 0 {
+            spans.push(Span::styled(format!(" · {errors} error"), Theme::err()));
+        }
+        Some(Line::from(spans))
+    }
+
     // ---------- mouse ----------
 
     /// screen row -> absolute row in cache_lines
@@ -2668,6 +2719,12 @@ impl App {
                 }
             }
         }
+        // bottom working line in the ex-rule row: live aggregate while
+        // busy, blank when idle (no layout shift either way)
+        if let Some(line) = self.working_line() {
+            Paragraph::new(super::menus::fit_line_width(line, area.width as usize))
+                .render(layout[3], buf);
+        }
 
         self.status_y = layout[4].y;
         let sb = self.status_bar(area.width);
@@ -4083,7 +4140,6 @@ pub(super) fn activity_header_line(g: &ActivityGroup, live_tick: Option<usize>) 
     Line::from(spans)
 }
 
-/// Shift a rendered line right by `n` columns without touching its styles.
 fn indent_line(l: Line<'static>, n: usize) -> Line<'static> {
     if n == 0 {
         return l;

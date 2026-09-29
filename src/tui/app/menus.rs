@@ -3365,7 +3365,7 @@ fn model_cols(budget: usize) -> (usize, usize) {
 
 /// cut or pad a styled line to exactly `width` display columns, keeping
 /// span styles on the surviving fragments
-fn fit_line_width(line: Line<'static>, width: usize) -> Line<'static> {
+pub(super) fn fit_line_width(line: Line<'static>, width: usize) -> Line<'static> {
     let mut out = Vec::new();
     let mut used = 0usize;
     for s in line.spans {

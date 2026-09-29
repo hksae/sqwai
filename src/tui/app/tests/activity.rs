@@ -1,6 +1,90 @@
 use super::*;
 
 #[test]
+fn working_line_mirrors_live_turn_without_args() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    // idle: no line at all
+    assert!(app.working_line().is_none());
+    app.streaming = true;
+    let ev = |e: AgentEvent, app: &mut App| match e {
+        AgentEvent::ToolStart {
+            name,
+            summary,
+            call_id,
+        } => app.handle_tool_start(name, summary, Some(call_id)),
+        AgentEvent::ToolNotice {
+            name,
+            summary,
+            ok,
+            diff,
+            call_id,
+        } => app.handle_tool_notice(name, summary, ok, diff, Some(call_id)),
+        _ => {}
+    };
+    // one done, one failed, one running: name only, red error kept
+    ev(
+        AgentEvent::ToolStart {
+            name: "read".into(),
+            summary: "a.rs".into(),
+            call_id: "c1".into(),
+        },
+        &mut app,
+    );
+    ev(
+        AgentEvent::ToolNotice {
+            name: "read".into(),
+            summary: String::new(),
+            ok: true,
+            diff: None,
+            call_id: "c1".into(),
+        },
+        &mut app,
+    );
+    ev(
+        AgentEvent::ToolStart {
+            name: "bash".into(),
+            summary: "cargo test --lib".into(),
+            call_id: "c2".into(),
+        },
+        &mut app,
+    );
+    let text: String = app
+        .working_line()
+        .expect("streaming turn must show the line")
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(text.contains("▲ Working · bash · 1 calls"), "{text:?}");
+    assert!(
+        !text.contains("cargo test"),
+        "args stay in the transcript: {text:?}"
+    );
+    ev(
+        AgentEvent::ToolNotice {
+            name: "bash".into(),
+            summary: String::new(),
+            ok: false,
+            diff: None,
+            call_id: "c2".into(),
+        },
+        &mut app,
+    );
+    let line = app.working_line().expect("still streaming");
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(
+        text.contains("2 calls") && text.contains("1 error"),
+        "{text:?}"
+    );
+    assert!(
+        line.spans
+            .iter()
+            .any(|s| s.content.contains("error") && s.style.fg == Some(ratatui::style::Color::Red)),
+        "error reads red: {text:?}"
+    );
+}
+
+#[test]
 fn thinking_segments_stay_in_event_order() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     // Simulate an agent stream: think, two tools, think again.
