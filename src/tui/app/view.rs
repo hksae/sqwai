@@ -1679,7 +1679,11 @@ impl App {
                     format!("{}s", elapsed_ms / 1000)
                 };
                 if !*expanded {
-                    let label = if text.is_empty() {
+                    // a finished block is a thought that was had; only the
+                    // still-streaming one is thinking
+                    let label = if !*live {
+                        format!("  thought · {elapsed}")
+                    } else if text.is_empty() {
                         format!("  thinking… {elapsed}")
                     } else {
                         format!("  thinking · {elapsed}")
@@ -4155,7 +4159,12 @@ pub(super) fn activity_footer_line(
     }
     parts.push(format!("{} calls", g.calls));
     if g.thinking > 0 {
-        parts.push(format!("{} thinking", g.thinking));
+        // finished blocks: the count is of thoughts that were had
+        parts.push(format!(
+            "{} thought{}",
+            g.thinking,
+            if g.thinking == 1 { "" } else { "s" }
+        ));
     }
     parts.push(format!("{}s", g.duration_ms / 1000));
     // the live footer leads with the shimmer word, so the aggregate hangs

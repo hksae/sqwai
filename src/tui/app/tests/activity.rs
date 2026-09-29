@@ -317,7 +317,7 @@ fn activity_group_folds_the_turn_work_and_keeps_the_answer() {
     app.rebuild_cache(80);
     let text = rendered(&app);
     assert!(
-        text.contains("1 calls · 1 thinking"),
+        text.contains("1 calls · 1 thought"),
         "footer missing: {text}"
     );
     assert!(!text.contains("read"), "tool row must be folded: {text}");
@@ -420,7 +420,7 @@ fn abort_remaps_activity_group_ranges_past_dropped_rows() {
     app.rebuild_cache(80);
     let text = rendered(&app);
     assert!(
-        text.contains("1 calls · 1 thinking"),
+        text.contains("1 calls · 1 thought"),
         "footer intact: {text}"
     );
     assert!(!text.contains("read"), "group stays folded: {text}");
@@ -584,7 +584,7 @@ fn abort_drops_subagent_rows_inside_a_group() {
     app.rebuild_cache(80);
     let text = rendered(&app);
     assert!(
-        text.contains("1 calls · 1 thinking"),
+        text.contains("1 calls · 1 thought"),
         "footer stays coherent after the abort: {text}"
     );
     assert!(
@@ -749,7 +749,7 @@ fn activity_group_renders_live_while_the_turn_streams() {
     app.rebuild_cache(80);
     let text = rendered(&app);
     assert!(
-        text.contains("Working · read · 1 calls · 1 thinking"),
+        text.contains("Working · read · 1 calls · 1 thought"),
         "live footer missing: {text}"
     );
     assert!(text.contains("read"), "live work is expanded: {text}");
