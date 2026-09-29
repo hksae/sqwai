@@ -100,7 +100,10 @@ pub fn build_body(req: &ChatRequest) -> Value {
     if let Some(level) = req.effort.filter(|l| *l != EffortLevel::Off)
         && let super::effort::Wire::Level(e) = super::effort::plan(level, req.effort_support).wire
     {
-        body["reasoning"] = json!({"effort": e});
+        // Reasoning text only streams when summaries are asked for: without
+        // `summary` the wire carries reasoning items with empty summaries and
+        // no summary deltas to render.
+        body["reasoning"] = json!({"effort": e, "summary": "auto"});
     }
     if !req.tools.is_empty() {
         body["tools"] = json!(
@@ -529,6 +532,8 @@ mod tests {
         use crate::config::EffortControl;
         let b = build_body(&request_at(EffortLevel::Max, EffortControl::Named));
         assert_eq!(b["reasoning"]["effort"], "max");
+        // without summaries asked for, the wire carries no reasoning text
+        assert_eq!(b["reasoning"]["summary"], "auto");
         let b = build_body(&request_at(EffortLevel::Xhigh, EffortControl::Named));
         assert_eq!(b["reasoning"]["effort"], "xhigh");
         let b = build_body(&request_at(EffortLevel::Low, EffortControl::Named));

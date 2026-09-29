@@ -126,11 +126,13 @@ impl OpenAiProvider {
         // no reasoning text at all. Scoped to gemini model ids (any
         // endpoint) and only when reasoning was requested, so effort off
         // keeps meaning off as far as Gemini allows.
+        // `google` sits at the top level of the wire body: that is where the
+        // OpenAI SDK's `extra_body` parameter flattens to. Sent as a literal
+        // `extra_body` key the config never reaches Gemini — the endpoint
+        // rejects the unknown name, and a tolerant proxy ignores it.
         if body.get("reasoning_effort").is_some() && req.model_id.starts_with("gemini-") {
-            body["extra_body"] = json!({
-                "google": {
-                    "thinking_config": { "include_thoughts": true }
-                }
+            body["google"] = json!({
+                "thinking_config": { "include_thoughts": true }
             });
         }
         let uses_max_completion =
@@ -615,7 +617,7 @@ mod tests {
             context_transport: crate::providers::ContextTransport::Stateless,
         };
         let thinking = |body: &Value| {
-            body.pointer("/extra_body/google/thinking_config/include_thoughts")
+            body.pointer("/google/thinking_config/include_thoughts")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
         };
@@ -623,6 +625,12 @@ mod tests {
             OpenAiProvider::build_body(&req_with("gemini-3.8-flash", Some(EffortLevel::High)));
         assert_eq!(body["reasoning_effort"], "high");
         assert!(thinking(&body), "gemini + effort asks for thoughts: {body}");
+        // `extra_body` is an SDK client parameter, not a wire key: nested
+        // under it the config never reaches Gemini
+        assert!(
+            body.get("extra_body").is_none(),
+            "thinking config must sit at the top level: {body}"
+        );
         let body = OpenAiProvider::build_body(&req_with("gpt-5", Some(EffortLevel::High)));
         assert_eq!(body["reasoning_effort"], "high");
         assert!(!thinking(&body), "other models untouched: {body}");
