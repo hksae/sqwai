@@ -1253,13 +1253,16 @@ impl App {
                 ..
             } => {
                 // content identity is (id, rev); the key carries paint state
-                // only. Elapsed seconds advance while live — a finished block
-                // must not re-render every second for a clock that froze.
+                // only. The live label shows tenths of a second, so the key
+                // must advance at the same rate or the row repaints stale;
+                // a finished block must not re-render for a clock that froze.
                 text.len() * 2
                     + *expanded as usize
                     + usize::from(*live) * 3
                     + if *live {
-                        started.map(|t| t.elapsed().as_secs() as usize).unwrap_or(0)
+                        started
+                            .map(|t| (t.elapsed().as_millis() / 100) as usize)
+                            .unwrap_or(0)
                     } else {
                         0
                     }
@@ -1663,16 +1666,23 @@ impl App {
                 duration_ms,
                 live,
             } => {
-                let elapsed = if *live {
-                    started.map_or(0u64, |t| t.elapsed().as_secs())
+                // thought blocks routinely last under a second; whole-second
+                // math would report every one of them as 0s
+                let elapsed_ms = if *live {
+                    started.map_or(0, |t| t.elapsed().as_millis() as u64)
                 } else {
-                    duration_ms / 1000
+                    *duration_ms
+                };
+                let elapsed = if elapsed_ms < 1000 {
+                    format!("0.{}s", (elapsed_ms % 1000) / 100)
+                } else {
+                    format!("{}s", elapsed_ms / 1000)
                 };
                 if !*expanded {
                     let label = if text.is_empty() {
-                        format!("  thinking… {elapsed}s")
+                        format!("  thinking… {elapsed}")
                     } else {
-                        format!("  thinking · {elapsed}s")
+                        format!("  thinking · {elapsed}")
                     };
                     let spans = vec![Span::styled(label, Theme::dim())];
                     out.push((Line::from(spans), Some(idx)));
@@ -1682,7 +1692,7 @@ impl App {
                     }
                     out.push((
                         Line::from(vec![Span::styled(
-                            format!("  click to collapse · {elapsed}s"),
+                            format!("  click to collapse · {elapsed}"),
                             Style::new().fg(Theme::DIM()).add_modifier(Modifier::ITALIC),
                         )]),
                         Some(idx),

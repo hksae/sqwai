@@ -345,6 +345,10 @@ impl Provider for OpenAiProvider {
                             && !c.is_empty()
                         {
                             if is_thought {
+                                // which requests actually stream thoughts is
+                                // the question every "thinking never shows"
+                                // report boils down to; the log answers it
+                                super::log_http(&format!("openai: thought delta {}B", c.len()));
                                 let c = c.strip_prefix("<thought>").unwrap_or(c);
                                 let c = c.strip_suffix("</thought>").unwrap_or(c);
                                 if !c.is_empty() {
