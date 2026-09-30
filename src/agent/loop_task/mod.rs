@@ -4264,15 +4264,15 @@ mod effort_tests {
                     Ok(crate::providers::StreamEvent::ToolCall(
                         crate::providers::ToolCallReq::new(
                             "c1",
-                            "think",
-                            serde_json::json!({"thought": "one"}),
+                            "git_status",
+                            serde_json::json!({}),
                         ),
                     )),
                     Ok(crate::providers::StreamEvent::ToolCall(
                         crate::providers::ToolCallReq::new(
                             "c2",
-                            "think",
-                            serde_json::json!({"thought": "two"}),
+                            "git_status",
+                            serde_json::json!({}),
                         ),
                     )),
                 ],
@@ -4320,12 +4320,12 @@ mod effort_tests {
         let mut handle = spawn_agent(input);
         // Esc lands while the batch is dispatching (or just before it).
         handle.request_tool_cancel();
-        let mut think_starts = 0;
+        let mut tool_starts = 0;
         let mut outcome_msgs = Vec::new();
         while let Some(ev) = handle.rx.recv().await {
             match ev {
-                AgentEvent::ToolStart { name, .. } if name == "think" => {
-                    think_starts += 1;
+                AgentEvent::ToolStart { name, .. } if name == "git_status" => {
+                    tool_starts += 1;
                 }
                 AgentEvent::Completed(Ok(outcome)) => {
                     outcome_msgs = outcome.messages;
@@ -4336,8 +4336,8 @@ mod effort_tests {
             }
         }
         assert!(
-            think_starts <= 1,
-            "the second call must never run after Esc, started {think_starts}"
+            tool_starts <= 1,
+            "the second call must never run after Esc, started {tool_starts}"
         );
         let results: Vec<&str> = outcome_msgs
             .iter()

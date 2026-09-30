@@ -225,18 +225,6 @@ await its result before dependent changes or reporting success.",
             }),
         },
         ToolDef {
-            name: "think",
-            kind: Kind::ReadOnly,
-            description: "A scratchpad with no effects: record a short approach and the checks that will validate it when that reasoning is worth keeping in history. Routine reasoning stays in the reply. Returns ok; the value is the reasoning itself.",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "thought": {"type": "string", "description": "the reasoning to write down"}
-                },
-                "required": ["thought"]
-            }),
-        },
-        ToolDef {
             name: "git_status",
             kind: Kind::ReadOnly,
             description: "Show the Git branch and worktree status.",
@@ -888,10 +876,6 @@ pub fn call_summary(name: &str, args: &Value) -> String {
         }
         "bash_kill" => format!("job {}", args["id"].as_u64().unwrap_or(0)),
         "sleep" => format!("{}s", args["seconds"].as_u64().unwrap_or(0)),
-        "think" => {
-            let thought: String = s("thought").chars().take(80).collect();
-            thought
-        }
         "git_show" => {
             let commit = s("commit");
             let path = s("path");

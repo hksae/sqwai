@@ -348,7 +348,6 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         "bash_output" => exec::bash_output(ctx, args),
         "bash_kill" => exec::bash_kill(ctx, args),
         "sleep" => exec::sleep(ctx, args),
-        "think" => Outcome::ok("ok — continue with the next step of your plan."),
         "plan" => plan_op(ctx, args),
         "memory_read" => match crate::agent::diary::read_day(
             &ctx.root,

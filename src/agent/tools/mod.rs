@@ -800,8 +800,6 @@ mod tests {
         // host-owned state is not readable through git either
         let blocked = execute(&mut ctx, "git_show", &json!({"path": ".sqwai/plan.json"}));
         assert!(!blocked.ok, "{}", blocked.output);
-        let think = execute(&mut ctx, "think", &json!({"thought": "step one: read"}));
-        assert!(think.ok, "{}", think.output);
     }
 
     #[test]

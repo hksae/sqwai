@@ -129,7 +129,7 @@ mod tests {
         assert_eq!(tool_taint("read", false), Some(TaintClass::Local));
         assert_eq!(tool_taint("bash", false), Some(TaintClass::Local));
         assert_eq!(tool_taint("plan", false), None);
-        assert_eq!(tool_taint("think", false), None);
+        assert_eq!(tool_taint("journal", false), None);
         // an MCP-named tool without the registry flag is host data
         assert_eq!(tool_taint("some-mcp-tool", false), None);
     }
