@@ -3132,6 +3132,8 @@ impl App {
             .saturating_sub(full_chrome)
             .max(1);
         let content_rows: usize = if is_form {
+            // fields + the one air row under the title; the hint line is
+            // chrome, so no spare row is left below the last field
             self.form_fields.len() + 1
         } else {
             // scrollable body window; the sticky footer keeps its rows
@@ -3202,8 +3204,7 @@ impl App {
         }
 
         let mut rows: Vec<Line> = Vec::new();
-        // one air row under the centered title (list menus only; forms
-        // keep their own field geometry and click mapping)
+        // one air row under the centered title, for lists and forms alike
         if !is_form {
             rows.push(Line::default());
         }
@@ -3213,6 +3214,8 @@ impl App {
         }
         let mut focused_field_rect: Option<(usize, Rect)> = None;
         if is_form {
+            // air row under the title, the same chrome list menus get
+            rows.push(Line::default());
             // column layout: " {label:>w$} : " then the value, with the
             // column sized to the longest label so long setting names
             // never collide with the value
@@ -3226,7 +3229,8 @@ impl App {
                     Theme::dim()
                 };
                 let prefix = Span::styled(format!(" {:>inner_w$} : ", field.label()), lstyle);
-                let row_y = rect.y + 1 + n as u16;
+                // title row, then the air row, then the fields
+                let row_y = rect.y + 2 + n as u16;
                 match field {
                     FormField::Text { ta, .. } => {
                         if focused {
