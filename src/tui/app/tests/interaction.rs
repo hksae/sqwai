@@ -131,7 +131,7 @@ fn toast_replaces_previous_notice() {
 }
 
 #[test]
-fn status_bar_summarizes_subagents_and_abort_cancels_running_children() {
+fn status_bar_ignores_subagents_and_abort_cancels_running_children() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.subagents
         .push((1, "one".into(), "running".into(), String::new(), false));
@@ -142,7 +142,8 @@ fn status_bar_summarizes_subagents_and_abort_cancels_running_children() {
         .iter()
         .map(|span| span.content.as_ref())
         .collect();
-    assert!(text.contains("agents:1/2"), "bar: {text}");
+    // children surface in the transcript rows now, never in the bar
+    assert!(!text.contains("agents"), "bar: {text}");
     app.push_segment(Segment::Subagent {
         id: 1,
         task: "one".into(),
@@ -171,19 +172,13 @@ fn status_bar_summarizes_subagents_and_abort_cancels_running_children() {
 }
 
 #[test]
-fn status_bar_hides_completed_subagents() {
+fn status_bar_never_mentions_subagents() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.subagents
         .push((1, "one".into(), "completed".into(), "done".into(), false));
     app.subagents
         .push((2, "two".into(), "completed".into(), "done".into(), false));
-    let text: String = app
-        .status_bar_spans(160)
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect();
-    assert!(!text.contains("agents:"), "stale label must go: {text}");
-    // failures still show — a collapsed block must not hide breakage
+    // failures surface through the transcript rows, never the bar
     app.subagents
         .push((3, "three".into(), "failed".into(), "err".into(), false));
     let text: String = app
@@ -191,7 +186,8 @@ fn status_bar_hides_completed_subagents() {
         .iter()
         .map(|span| span.content.as_ref())
         .collect();
-    assert!(text.contains("1 failed"), "bar: {text}");
+    assert!(!text.contains("agents"), "stale label must go: {text}");
+    assert!(!text.contains("failed"), "bar: {text}");
 }
 
 #[test]
@@ -450,8 +446,10 @@ fn finish_turn_ok_rebases_notes_after_compaction() {
 }
 
 #[test]
-fn subagents_menu_opens_read_only_chat() {
+fn transcript_row_opens_read_only_child_chat() {
+    use crate::tui::app::view::SegMeta;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
     app.subagents.push((
         7,
         "inspect rendering".into(),
@@ -459,14 +457,25 @@ fn subagents_menu_opens_read_only_chat() {
         "read view.rs".into(),
         false,
     ));
-    app.open_menu(Menu::Subagents);
-    assert!(
-        app.menu_rows
-            .iter()
-            .any(|(_, action)| matches!(action, MenuAction::OpenSubagent(7)))
-    );
-    app.run_action(MenuAction::OpenSubagent(7));
-    assert!(app.cur_menu().is_none());
+    app.push_segment(Segment::Subagent {
+        id: 7,
+        task: "inspect rendering".into(),
+        status: "running".into(),
+        output: String::new(),
+        expanded: false,
+    });
+    app.subagent_chats
+        .insert(7, vec![Segment::User("do research".into())]);
+    app.subagent_meta
+        .insert(7, vec![SegMeta { id: 70, rev: 0 }]);
+    render_to_string(&mut app, 100, 30);
+    // the child's own row (no list menu anymore) opens its transcript
+    let row = app
+        .cache_rowseg
+        .iter()
+        .position(|t| *t == Some(0))
+        .expect("child row");
+    app.click(row);
     assert_eq!(app.active_subagent, Some(7));
 }
 

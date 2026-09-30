@@ -171,31 +171,31 @@ fn text_combo_select_all_undo_redo() {
 }
 
 #[test]
-fn subagents_shortcut_remapped_to_ctrl_b_and_ctrl_shift_a() {
+fn subagents_shortcuts_are_freed_ctrl_a_still_selects_all() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let (tx, rx) = std::sync::mpsc::channel();
 
-    // Ctrl+B opens subagents
+    // Ctrl+B opens nothing (the subagents list menu is gone)
     tx.send(crossterm::event::Event::Key(KeyEvent::new(
         KeyCode::Char('b'),
         KeyModifiers::CONTROL,
     )))
     .unwrap();
     app.poll_input(&rx).unwrap();
-    assert!(matches!(app.cur_menu(), Some(Menu::Subagents)));
+    assert!(app.cur_menu().is_none());
     app.menu_back();
     assert!(app.cur_menu().is_none());
 
-    // Ctrl+Shift+A opens subagents
+    // Ctrl+Shift+A opens nothing either
     tx.send(crossterm::event::Event::Key(KeyEvent::new(
         KeyCode::Char('a'),
         KeyModifiers::CONTROL | KeyModifiers::SHIFT,
     )))
     .unwrap();
     app.poll_input(&rx).unwrap();
-    assert!(matches!(app.cur_menu(), Some(Menu::Subagents)));
+    assert!(app.cur_menu().is_none());
     app.menu_back();
     assert!(app.cur_menu().is_none());
 

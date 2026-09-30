@@ -632,16 +632,6 @@ impl App {
                         KeyCode::Char('t') if ctrl && self.menu_stack.is_empty() => {
                             self.open_menu(Menu::Todo)
                         }
-                        KeyCode::Char('b') | KeyCode::Char('B')
-                            if ctrl && self.menu_stack.is_empty() =>
-                        {
-                            self.open_menu(Menu::Subagents);
-                        }
-                        KeyCode::Char('a') | KeyCode::Char('A')
-                            if ctrl && shift && self.menu_stack.is_empty() =>
-                        {
-                            self.open_menu(Menu::Subagents);
-                        }
                         KeyCode::Char('p') | KeyCode::Char('P')
                             if ctrl && self.menu_stack.is_empty() =>
                         {

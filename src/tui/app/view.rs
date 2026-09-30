@@ -589,20 +589,6 @@ impl App {
     }
 
     pub(super) fn mouse_up(&mut self, row: u16, col: u16) {
-        // subagent overview and thinking selector in the status bar
-        if let Some((x0, x1)) = self.agents_click
-            && row == self.status_y
-            && col >= x0
-            && col <= x1
-            && self.menu_stack.is_empty()
-        {
-            self.press = None;
-            self.press_anchor = None;
-            self.dragging = false;
-            self.sel = None;
-            self.open_menu(Menu::Subagents);
-            return;
-        }
         if let Some((x0, x1)) = self.ef_click
             && row == self.status_y
             && col >= x0
@@ -1236,11 +1222,19 @@ impl App {
                 status,
                 output,
                 expanded,
-            } => id
-                .wrapping_add(task.len() as u64)
-                .wrapping_add(status.len() as u64)
-                .wrapping_add(output.len() as u64)
-                .wrapping_add(*expanded as u64) as usize,
+            } => {
+                let mut k = id
+                    .wrapping_add(task.len() as u64)
+                    .wrapping_add(status.len() as u64)
+                    .wrapping_add(output.len() as u64)
+                    .wrapping_add(*expanded as u64) as usize;
+                // running: the spinner frame is part of the key, like tool
+                // rows — without it the cached row freezes mid-spin
+                if !matches!(status.as_str(), "completed" | "failed") {
+                    k = k.wrapping_add(self.spinner_tick * 7);
+                }
+                k
+            }
             Segment::Thinking {
                 text,
                 expanded,
@@ -3967,36 +3961,9 @@ impl App {
         let effort_plan = self.effort_plan();
         let ef_short = effort_plan.short_label();
         let ef_label = format!(" {} ", ef_short.strip_prefix("ef:").unwrap_or(&ef_short));
-        let running = self
-            .subagents
-            .iter()
-            .filter(|(_, _, status, _, _)| status == "running")
-            .count();
-        let waiting = self
-            .subagents
-            .iter()
-            .filter(|(_, _, status, _, _)| status == "waiting")
-            .count();
-        let failed = self
-            .subagents
-            .iter()
-            .filter(|(_, _, status, _, _)| status == "failed")
-            .count();
-        let agents_label = if self.subagents.is_empty() {
-            String::new()
-        } else if running + waiting > 0 {
-            format!(" agents:{running}/{} ", self.subagents.len())
-        } else if failed > 0 {
-            format!(" agents:{} · {failed} failed ", self.subagents.len())
-        } else {
-            // all completed: nothing to show (the Subagents menu keeps the
-            // transcripts, reachable via the shortcut)
-            String::new()
-        };
         self.ef_click = None;
-        self.agents_click = None;
 
-        // right side: [agents] [ctx metrics] [model] [working] [folder] [th:level] [MODE chip]
+        // right side: [ctx metrics] [model] [working] [folder] [th:level] [MODE chip]
         let lsp_label = if self.lsp_diagnostics > 0 {
             format!(" LSP:{} ", self.lsp_diagnostics)
         } else {
@@ -4010,17 +3977,12 @@ impl App {
         let left = format!(" {}  {}", self.mode.label(), plan_label);
         let left_base_cols = cols(&left);
 
-        let mut fixed_len: usize = 1
-            + cols(&agents_label)
-            + cols(&ctx_metrics_label)
-            + cols(&model_label)
-            + cols(&ef_label)
-            + cols(&lsp_label); // mode chip always present
+        let mut fixed_len: usize =
+            1 + cols(&ctx_metrics_label) + cols(&model_label) + cols(&ef_label) + cols(&lsp_label); // mode chip always present
 
         if left_base_cols + fixed_len > w as usize && !ctx_metrics_label.is_empty() {
             ctx_metrics_label.clear();
-            fixed_len =
-                1 + cols(&agents_label) + cols(&model_label) + cols(&ef_label) + cols(&lsp_label);
+            fixed_len = 1 + cols(&model_label) + cols(&ef_label) + cols(&lsp_label);
         }
 
         let lw = left_base_cols as u16;
@@ -4065,21 +4027,9 @@ impl App {
             spans.push(Span::styled(format!("  {plan_label}"), Theme::dim()));
         }
         let pad = (w as usize).saturating_sub(lw as usize + right_len);
-        let agents_x0 = lw + pad as u16;
+        let model_x0 = lw + pad as u16 + cols(&ctx_metrics_label) as u16;
         spans.push(Span::styled(" ".repeat(pad), Theme::base()));
-        if !agents_label.is_empty() {
-            let agents_style = if failed > 0 {
-                Theme::err()
-            } else if running > 0 {
-                Theme::accent()
-            } else {
-                Theme::dim()
-            };
-            spans.push(Span::styled(agents_label.clone(), agents_style));
-            self.agents_click = Some((agents_x0, agents_x0 + cols(&agents_label) as u16));
-        }
         spans.push(Span::styled(ctx_metrics_label.clone(), Theme::dim()));
-        let model_x0 = agents_x0 + cols(&agents_label) as u16 + cols(&ctx_metrics_label) as u16;
         spans.push(Span::styled(model_label, Theme::dim()));
         // click targets are measured from the same numbers, so `ef_x0`
         // accounts for the model group width.

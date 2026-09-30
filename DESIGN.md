@@ -1434,10 +1434,9 @@ Indicators: compacting…, checkpoint hint, background jobs, retries. A retry
 notice is transient: it stands while the turn is unresolved and is retracted
 when the retry recovers — a terminal failure keeps its explanation. Panic hook restores the terminal.
 
-Popups: models (Ctrl+P), sessions (Ctrl+S), subagents (Ctrl+B, read-only
-child chat), help (?), undo (Ctrl+U), todo panel
+Popups: models (Ctrl+P), sessions (Ctrl+S), help (?), undo (Ctrl+U), todo panel
 (Ctrl+T), settings hub (/settings) with Appearance, Providers, MCP, LSP,
-Skills.
+Skills. Child chats open read-only from their transcript rows.
 Todo panel (Ctrl+T): derived view — current step highlighted, counts; selecting
 a step shows its combined diff (all `file_diff` of that step from its first
 checkpoint to the last) and offers `/undo step N` (reverts one step if

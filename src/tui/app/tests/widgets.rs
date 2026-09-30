@@ -31,7 +31,7 @@ fn status_bar_fits_and_keeps_click_targets_inside_a_wide_directory() {
                 "{label:?} at width {w}: status bar is {used} columns: {text:?}"
             );
 
-            for (what, click) in [("model", app.ef_click), ("agents", app.agents_click)] {
+            for (what, click) in [("model", app.ef_click)] {
                 if let Some((from, to)) = click {
                     assert!(
                         to <= w && from <= to,

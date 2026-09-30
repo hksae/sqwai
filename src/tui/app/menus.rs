@@ -217,8 +217,6 @@ pub(super) enum Menu {
     PlanPreview {
         draft: crate::plan::Plan,
     },
-    /// all delegated child agents, opened with Ctrl+A
-    Subagents,
 }
 
 #[derive(Clone)]
@@ -268,7 +266,6 @@ pub(super) enum MenuAction {
     DeletePlan,
     UpdateBuiltins,
     SetEffort(EffortLevel),
-    OpenSubagent(u64),
     /// ask_user: select one option (q, idx)
     AskSelect {
         q: usize,
@@ -1574,10 +1571,6 @@ impl App {
             MenuAction::UpdateBuiltins => {
                 self.start_builtin_update(true);
             }
-            MenuAction::OpenSubagent(id) => {
-                self.menu_home();
-                self.open_subagent_view(id);
-            }
             MenuAction::SetEffort(level) => {
                 self.model_cfg.effort = level;
                 if let Some(m) = self.cfg.models.get_mut(&self.session.model_key) {
@@ -1768,7 +1761,6 @@ impl App {
             Some(Menu::Todo) => " To-do ".into(),
             Some(Menu::Plan) => " Plan ".into(),
             Some(Menu::PlanPreview { .. }) => " Proposed plan ".into(),
-            Some(Menu::Subagents) => " Subagents ".into(),
             None => String::new(),
         }
     }
@@ -1821,7 +1813,6 @@ impl App {
                     ("ctrl+v", "paste"),
                     ("ctrl+s", "sessions"),
                     ("ctrl+t", "todo"),
-                    ("ctrl+b", "subagents"),
                     ("ctrl+p", "providers"),
                     ("ctrl+l", "plan"),
                     ("ctrl+o", "settings"),
@@ -2986,30 +2977,6 @@ impl App {
             | Menu::AddListItem(..)
             | Menu::EditMcpServer { .. }
             | Menu::EditLspServer { .. } => {}
-            Menu::Subagents => {
-                if self.subagents.is_empty() {
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled("  no subagents yet", Theme::dim())]),
-                        MenuAction::None,
-                    ));
-                } else {
-                    for (id, task, status, _, _) in &self.subagents {
-                        let style = match status.as_str() {
-                            "completed" => Theme::ok(),
-                            "failed" => Theme::err(),
-                            _ => Theme::accent(),
-                        };
-                        self.menu_rows.push(row(
-                            Line::from(vec![
-                                Span::styled(format!(" subagent-{id:<3}"), style),
-                                Span::styled(format!(" {status:<10} "), Theme::dim()),
-                                Span::styled(task.clone(), Theme::base()),
-                            ]),
-                            MenuAction::OpenSubagent(*id),
-                        ));
-                    }
-                }
-            }
             Menu::Todo => {
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled(

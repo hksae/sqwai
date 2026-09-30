@@ -504,7 +504,6 @@ pub struct App {
     /// re-anchors from the displayed color — rapid toggles redirect the
     /// blend instead of breaking it. Retired (→ None) past the sweep.
     mode_blend: Option<((u8, u8, u8), Instant)>,
-    agents_click: Option<(u16, u16)>,
     status_y: u16,
 
     // mouse selection
@@ -952,7 +951,6 @@ impl App {
             maintain_rx: None,
             effort_observed_ignored: None,
             mode_blend: None,
-            agents_click: None,
             status_y: 0,
             press: None,
             press_anchor: None,
@@ -3851,9 +3849,6 @@ impl App {
                 }
                 AgentEvent::SubagentStart { id, task } => {
                     self.handle_subagent_start(id, task);
-                    if matches!(self.cur_menu(), Some(Menu::Subagents)) {
-                        self.build_menu_rows();
-                    }
                     self.dirty = true;
                 }
                 AgentEvent::SubagentThinking { id, text } => {
@@ -4022,9 +4017,6 @@ impl App {
                     // land after Done, so the stored indices stay valid
                     self.finalize_sub_group(id);
                     self.sub_touch_all(id);
-                    if matches!(self.cur_menu(), Some(Menu::Subagents)) {
-                        self.build_menu_rows();
-                    }
                     self.dirty = true;
                 }
                 AgentEvent::ToolStart {
@@ -4594,10 +4586,6 @@ impl App {
         }
         self.turn_started = None;
         self.live_group_collapsed = false;
-        if matches!(self.cur_menu(), Some(Menu::Subagents)) {
-            self.menu_home();
-        }
-        self.agents_click = None;
         self.dirty = true;
     }
 
