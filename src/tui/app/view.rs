@@ -3228,7 +3228,7 @@ impl App {
             for (n, field) in self.form_fields.iter().enumerate() {
                 let focused = n == self.form_focus;
                 let lstyle = if focused {
-                    Theme::accent()
+                    Theme::field_label_focused()
                 } else {
                     Theme::dim()
                 };
@@ -3238,7 +3238,9 @@ impl App {
                     FormField::Text { ta, .. } => {
                         if focused {
                             // value + live cursor are drawn later by
-                            // rendering the textarea itself over this row
+                            // rendering the textarea itself over this row;
+                            // the textarea carries the selection band so it
+                            // runs through the value to the card edge
                             focused_field_rect = Some((
                                 n,
                                 Rect {
@@ -3258,15 +3260,24 @@ impl App {
                     }
                     FormField::Choice { options, sel, .. } => {
                         let vstyle = if focused {
-                            Style::new().fg(Theme::FG()).bg(Theme::SURFACE())
+                            Style::new().fg(Theme::FG()).bg(Theme::SELECTION_BG())
                         } else {
                             Theme::base()
                         };
                         let val = options.get(*sel).copied().unwrap_or("");
-                        rows.push(Line::from(vec![
-                            prefix,
-                            Span::styled(format!("‹{val}›"), vstyle),
-                        ]));
+                        let mut spans = vec![prefix, Span::styled(format!("‹{val}›"), vstyle)];
+                        if focused {
+                            // the full-width selection band, like list rows
+                            let used = cols(&line_text(&Line::from(spans.clone())));
+                            let pad = (rect.width as usize).saturating_sub(2).saturating_sub(used);
+                            if pad > 0 {
+                                spans.push(Span::styled(
+                                    " ".repeat(pad),
+                                    Style::new().bg(Theme::SELECTION_BG()),
+                                ));
+                            }
+                        }
+                        rows.push(Line::from(spans));
                     }
                 }
             }
@@ -3494,6 +3505,9 @@ impl App {
         if let Some((idx, field_rect)) = focused_field_rect
             && let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(idx)
         {
+            // the textarea paints its own cells, so the selection band has to
+            // ride its style or the band would stop at the label
+            ta.set_style(Style::new().fg(Theme::FG()).bg(Theme::SELECTION_BG()));
             ta.as_ref().render(field_rect, buf);
         }
     }

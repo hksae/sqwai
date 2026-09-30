@@ -129,6 +129,13 @@ impl Theme {
         Style::new().fg(Self::effort_color(level))
     }
 
+    /// Focused form field: the label reads calm white on the same selection
+    /// band list rows get — focus is position, not the cyan accent, which
+    /// next to values reads as a link color.
+    pub fn field_label_focused() -> Style {
+        Style::new().fg(Color::White).patch(Self::selection())
+    }
+
     pub fn base() -> Style {
         Style::new()
     }
