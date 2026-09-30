@@ -2694,9 +2694,13 @@ impl App {
 
         // queued follow-ups keep their row above the composer (layout
         // unchanged); the separator lines are gone, the composer is a
-        // filled band instead
+        // filled band instead. Transient messages (retry, toast,
+        // checkpoint) take the same row at full width when the queue is
+        // empty — the status bar squeezed them against its metric block.
         if !self.pending_queue.is_empty() {
             Paragraph::new(self.queue_line(area.width)).render(layout[1], buf);
+        } else if let Some(line) = self.notice_line(area.width) {
+            Paragraph::new(line).render(layout[1], buf);
         }
         self.input.set_block(Self::input_block());
         // the cursor is rendered by tui-textarea; the input has no frame.
@@ -3863,35 +3867,50 @@ impl App {
         ))
     }
 
-    pub(super) fn status_bar(&mut self, w: u16) -> Paragraph<'static> {
-        let spans = self.status_bar_spans(w);
-        Paragraph::new(Line::from(spans)).style(Theme::base())
-    }
-
-    pub(super) fn status_bar_spans(&mut self, w: u16) -> Vec<Span<'static>> {
-        // a live retry overrides everything else on the left side, then the
-        // 3s toast (any notice, errors included), then the checkpoint hint
-        let plan_label = self.plan_step_label.clone();
-        let (activity, activity_style) = if let Some(line) = &self.retry_line {
-            (format!(" {line}"), Theme::warn())
-        } else if let Some((text, kind)) = self.live_toast() {
+    /// transient messages for the rule row above the composer: a live retry
+    /// first, then the 3s toast, then the checkpoint hint. Full row width —
+    /// the status bar used to squeeze them against its metric block and cut
+    /// them off. Queued follow-ups take precedence (see render_into); the
+    /// row stays blank only when neither has anything to say.
+    pub(super) fn notice_line(&mut self, w: u16) -> Option<Line<'static>> {
+        let width = w as usize;
+        if let Some(line) = self.retry_line.clone() {
+            return Some(Line::from(Span::styled(
+                truncate_display_width(&format!(" {line}"), width),
+                Theme::warn(),
+            )));
+        }
+        if let Some((text, kind)) = self.live_toast() {
             let st = match kind {
                 StatusKind::Info => Theme::dim(),
                 StatusKind::Ok => Theme::ok(),
                 StatusKind::Warn => Theme::warn(),
                 StatusKind::Err => Theme::err(),
             };
-            (format!(" {}", truncate_chars(&text, 60)), st)
-        } else {
-            match &self.last_checkpoint {
-                // reassurance that the undo insurance exists
-                Some(cp) => (
-                    format!(" checkpoint: {}", truncate_chars(cp, 44)),
-                    Theme::dim(),
-                ),
-                None => (String::new(), Theme::dim()),
-            }
-        };
+            return Some(Line::from(Span::styled(
+                truncate_display_width(&format!(" {text}"), width),
+                st,
+            )));
+        }
+        if let Some(cp) = self.last_checkpoint.clone() {
+            return Some(Line::from(Span::styled(
+                truncate_display_width(&format!(" checkpoint: {cp}"), width),
+                Theme::dim(),
+            )));
+        }
+        None
+    }
+
+    pub(super) fn status_bar(&mut self, w: u16) -> Paragraph<'static> {
+        let spans = self.status_bar_spans(w);
+        Paragraph::new(Line::from(spans)).style(Theme::base())
+    }
+
+    pub(super) fn status_bar_spans(&mut self, w: u16) -> Vec<Span<'static>> {
+        // transient messages (retry, toast, checkpoint) live in the notice
+        // row above the composer now; the bar keeps metrics only, so nothing
+        // here is ever squeezed or cut.
+        let plan_label = self.plan_step_label.clone();
         let dir = self.cwd_label.clone();
 
         let context_used = self.session.context_tokens_used();
@@ -3974,16 +3993,7 @@ impl App {
                 1 + cols(&agents_label) + cols(&model_label) + cols(&ef_label) + cols(&lsp_label);
         }
 
-        let avail_for_act = (w as usize).saturating_sub(left_base_cols + fixed_len);
-        let activity = if avail_for_act < 8 {
-            String::new()
-        } else if cols(&activity) > avail_for_act {
-            truncate_display_width(&activity, avail_for_act)
-        } else {
-            activity
-        };
-
-        let lw = (left_base_cols + cols(&activity)) as u16;
+        let lw = left_base_cols as u16;
 
         // Everything except the directory, which is the least important item
         // and therefore the one that yields when the row is too narrow. `pad`
@@ -4024,7 +4034,6 @@ impl App {
         if !plan_label.is_empty() {
             spans.push(Span::styled(format!("  {plan_label}"), Theme::dim()));
         }
-        spans.push(Span::styled(activity, activity_style));
         let pad = (w as usize).saturating_sub(lw as usize + right_len);
         let agents_x0 = lw + pad as u16;
         spans.push(Span::styled(" ".repeat(pad), Theme::base()));

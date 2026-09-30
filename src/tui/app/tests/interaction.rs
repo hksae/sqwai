@@ -93,12 +93,17 @@ fn debug_perf_log_toggle_writes_frame_lines_to_temp_file() {
 }
 
 #[test]
-fn error_status_shows_in_bar() {
+fn error_status_shows_in_notice_row() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.status("provider boom", StatusKind::Err);
-    let spans = app.status_bar_spans(120);
-    let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(text.contains("provider boom"), "bar: {text}");
+    let text: String = app
+        .notice_line(120)
+        .expect("notice row")
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(text.contains("provider boom"), "notice: {text}");
     assert!(
         !app.segments
             .iter()
@@ -118,12 +123,10 @@ fn toast_replaces_previous_notice() {
             .as_ref()
             .is_some_and(|t| t.kind == StatusKind::Warn)
     );
-    // expired toasts vanish from the bar
+    // expired toasts vanish from the notice row
     app.toast.as_mut().expect("toast").until =
         std::time::Instant::now() - std::time::Duration::from_secs(1);
-    let spans = app.status_bar_spans(120);
-    let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(!text.contains("second"), "expired toast hidden: {text}");
+    assert!(app.notice_line(120).is_none(), "expired toast hidden");
     assert!(app.toast.is_none(), "expired toast dropped");
 }
 

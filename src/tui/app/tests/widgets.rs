@@ -45,33 +45,64 @@ fn status_bar_fits_and_keeps_click_targets_inside_a_wide_directory() {
 }
 
 #[test]
-fn status_bar_with_activity_respects_width_and_click_targets() {
-    for activity_setup in [
-        |app: &mut App| app.last_checkpoint = Some("edit src/main.rs".into()),
-        |app: &mut App| app.status("network timeout 408", StatusKind::Err),
-        |app: &mut App| app.retry_line = Some("retrying in 2s (1/3)".into()),
-    ] {
+fn notice_row_fits_width_and_queue_wins() {
+    let setups: [(fn(&mut App), &str); 3] = [
+        (
+            |app: &mut App| app.last_checkpoint = Some("edit src/main.rs".into()),
+            "edit src/main.rs",
+        ),
+        (
+            |app: &mut App| app.status("network timeout 408", StatusKind::Err),
+            "network timeout 408",
+        ),
+        (
+            |app: &mut App| app.retry_line = Some("retrying in 2s (1/3)".into()),
+            "retrying in 2s",
+        ),
+    ];
+    for (notice_setup, needle) in setups {
         for w in [60u16, 80, 100, 120] {
             let mut app = test_app("http://127.0.0.1:9/v1".into());
             app.startup = false;
-            app.cwd_label = "my-project".into();
-            app.plan_step_label = "step 1/3".into();
-            activity_setup(&mut app);
-            let spans = app.status_bar_spans(w);
-            let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+            notice_setup(&mut app);
+            let line = app.notice_line(w).expect("a notice must fill the row");
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.contains(needle), "notice shown: {text:?}");
             let used = unicode_width::UnicodeWidthStr::width(text.as_str());
             assert!(
                 used <= w as usize,
-                "at width {w}: status bar is {used} columns: {text:?}"
+                "at width {w}: notice row is {used} columns: {text:?}"
             );
-            if let Some((from, to)) = app.ef_click {
-                assert!(
-                    to <= w && from <= to,
-                    "click target out of bounds: {from}..{to} at {w}"
-                );
-            }
+            // queued follow-ups take the row; the notice waits
+            app.pending_queue.push("later".into());
+            let s = render_to_string(&mut app, w, 30);
+            assert!(s.contains("queued (1)"), "queue wins the row: {s}");
+            assert!(!s.contains(needle), "notice hidden behind queue: {s}");
         }
     }
+    // priority inside the row: retry first, then toast, then checkpoint
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.last_checkpoint = Some("cp".into());
+    app.status("boom", StatusKind::Err);
+    app.retry_line = Some("retrying".into());
+    let text: String = app
+        .notice_line(100)
+        .expect("notice")
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(text.contains("retrying"), "retry first: {text:?}");
+    app.retry_line = None;
+    let text: String = app
+        .notice_line(100)
+        .expect("notice")
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(text.contains("boom"), "toast next: {text:?}");
 }
 #[test]
 fn running_tool_name_shimmers_like_activity_header() {
