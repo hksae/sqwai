@@ -3912,9 +3912,12 @@ impl App {
         let mut ctx_metrics_label = format!(" cache {cp}% · {ctx_pct}% · {tok_str} ·");
 
         let model_label = format!(" {} ", self.session.model_key);
-        // reports the effective mapping, not the raw selection (§5.1)
+        // reports the effective mapping, not the raw selection (§5.1).
+        // No "ef:" prefix: the models table and the effort menu already
+        // dropped it, so the bar matches them.
         let effort_plan = self.effort_plan();
-        let ef_label = format!(" {} ", effort_plan.short_label());
+        let ef_short = effort_plan.short_label();
+        let ef_label = format!(" {} ", ef_short.strip_prefix("ef:").unwrap_or(&ef_short));
         let running = self
             .subagents
             .iter()

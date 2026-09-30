@@ -726,7 +726,7 @@ fn the_status_bar_reports_the_sent_level_verbatim() {
         .map(|s| s.content.as_ref())
         .collect();
     assert!(
-        text.contains("ef:max") && !text.contains("ef:max→"),
+        text.contains(" max ") && !text.contains("max→"),
         "status bar: {text:?}"
     );
 
@@ -737,7 +737,7 @@ fn the_status_bar_reports_the_sent_level_verbatim() {
         .iter()
         .map(|s| s.content.as_ref())
         .collect();
-    assert!(text.contains("ef:max (ignored)"), "status bar: {text:?}");
+    assert!(text.contains("max (ignored)"), "status bar: {text:?}");
 }
 
 /// The effort menu is the one place with room for the reason, so it must

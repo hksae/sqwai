@@ -17,8 +17,8 @@ fn status_bar_fits_and_keeps_click_targets_inside_a_wide_directory() {
             app.startup = false;
             app.cwd_label = label.to_string();
             app.plan_step_label = plan.to_string();
-            // The widest effort label there is: `ef:max (ignored)` spends
-            // ten more columns than `ef:off`, and the row must still fit
+            // The widest effort label there is: `max (ignored)` spends
+            // ten more columns than `off`, and the row must still fit
             // with the directory budget absorbing the difference.
             app.model_cfg.effort = EffortLevel::Max;
             app.model_cfg.effort_control = Some(crate::config::EffortControl::None);
