@@ -1040,9 +1040,12 @@ impl App {
             _ => None,
         };
         let Some(v) = toggle else { return };
-        // anchor BEFORE mutating so the header keeps its screen line
-        if let Some(tag) = self.cache_rowseg.iter().position(|t| *t == Some(idx)) {
-            self.capture_anchor_for_view(Some(id), tag, screen);
+        // anchor BEFORE mutating so the row keeps its screen line. The
+        // anchor wants the row's TAG (segment index), never its position:
+        // passing the position re-anchored to whatever row later sat
+        // there and yanked the viewport to the bottom on expand.
+        if self.cache_rowseg.contains(&Some(idx)) {
+            self.capture_anchor_for_view(Some(id), idx, screen);
         } else {
             self.pause_follow_for_inspection();
         }
@@ -1703,25 +1706,42 @@ impl App {
             }
             Segment::Subagent {
                 id,
-                task: _,
+                task,
                 status,
                 output,
                 expanded,
             } => {
+                // same three-part geometry as a tool row: state marker,
+                // quiet name, dim summary. No accent anywhere: running
+                // reads from the spinner, done from ✓, failed from ✗.
+                let failed = status == "failed";
                 let marker = match status.as_str() {
-                    "completed" => "✓",
-                    "failed" => "✗",
-                    _ => "→",
+                    "completed" => ("  ✓ ".to_string(), Theme::tool_head_bold()),
+                    "failed" => ("  ✗ ".to_string(), Theme::err()),
+                    _ => (
+                        format!(
+                            "  {} ",
+                            WORKING_SPINNER[self.spinner_tick % WORKING_SPINNER.len()]
+                        ),
+                        Theme::tool_head(),
+                    ),
+                };
+                let name = format!("subagent-{id}");
+                let summary_width = usize::from(w)
+                    .saturating_sub(4 + name.len() + 2)
+                    // same mid-window cap as tool calls
+                    .min(usize::from(w) / 2);
+                let summary = if task.is_empty() || summary_width == 0 {
+                    String::new()
+                } else {
+                    format!("  {}", truncate_display_width(task, summary_width))
                 };
                 out.push((
-                    Line::from(vec![Span::styled(
-                        format!("  {marker} subagent-{id}"),
-                        if status == "failed" {
-                            Theme::err()
-                        } else {
-                            Theme::accent()
-                        },
-                    )]),
+                    Line::from(vec![
+                        Span::styled(marker.0, marker.1),
+                        Span::styled(name, if failed { Theme::err() } else { Theme::meta() }),
+                        Span::styled(summary, Theme::dim()),
+                    ]),
                     Some(idx),
                 ));
                 if *expanded {
@@ -4288,7 +4308,9 @@ pub(super) fn activity_footer_line(
         ));
     }
     if g.errors > 0 {
-        spans.push(Span::styled(format!(" · {} error", g.errors), Theme::err()));
+        // the aggregate stays quiet: the failed rows themselves carry the
+        // red, the footer only counts
+        spans.push(Span::styled(format!(" · {} error", g.errors), Theme::dim()));
     }
     if g.rejected > 0 {
         spans.push(Span::styled(

@@ -95,7 +95,8 @@ fn footer_line_sits_under_the_tools_and_folds_them() {
         },
         &mut app,
     );
-    // finished group: static aggregate, no lead word, red error kept
+    // finished group: static aggregate, quiet error count (the red
+    // lives on the failed rows, the footer only counts)
     let g = app.build_activity_group((0, app.segments.len()));
     let line = activity_footer_line(&g, None, None);
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -107,8 +108,9 @@ fn footer_line_sits_under_the_tools_and_folds_them() {
     assert!(
         line.spans
             .iter()
-            .any(|s| s.content.contains("error") && s.style.fg == Some(ratatui::style::Color::Red)),
-        "error reads red: {text:?}"
+            .any(|s| s.content.contains("error")
+                && s.style.fg == Some(ratatui::style::Color::DarkGray)),
+        "error count stays quiet: {text:?}"
     );
 }
 

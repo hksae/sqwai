@@ -661,6 +661,129 @@ fn subagent_chat_click_expands_its_tool_without_switching_chat() {
 }
 
 #[test]
+fn subagent_rows_read_as_tool_rows_without_accent() {
+    use crate::tui::theme::Theme;
+    let app = test_app("http://127.0.0.1:9/v1".into());
+    let chat = vec![
+        Segment::Subagent {
+            id: 1,
+            task: "look".into(),
+            status: "running".into(),
+            output: String::new(),
+            expanded: false,
+        },
+        Segment::Subagent {
+            id: 2,
+            task: "look".into(),
+            status: "completed".into(),
+            output: String::new(),
+            expanded: false,
+        },
+        Segment::Subagent {
+            id: 3,
+            task: "look".into(),
+            status: "failed".into(),
+            output: String::new(),
+            expanded: false,
+        },
+    ];
+    let line = |i: usize| app.render_segment(&chat, i, 80, false)[0].0.clone();
+    let name_style = |line: &ratatui::text::Line| {
+        line.spans
+            .iter()
+            .find(|s| s.content.contains("subagent-"))
+            .map(|s| s.style)
+    };
+    // running: spinner marker like bash, gray name, no arrow anywhere
+    let running = line(0);
+    let text: String = running.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(!text.contains('→'), "arrow gone: {text:?}");
+    assert_eq!(running.spans[0].style, Theme::tool_head());
+    assert_eq!(name_style(&running), Some(Theme::meta()));
+    assert!(text.contains("look"), "task rides along: {text:?}");
+    // done: quiet check, gray name
+    let done = line(1);
+    assert!(done.spans[0].content.contains('✓'));
+    assert_eq!(done.spans[0].style, Theme::tool_head_bold());
+    assert_eq!(name_style(&done), Some(Theme::meta()));
+    // failed: red keeps screaming, like before
+    let failed = line(2);
+    assert!(failed.spans[0].content.contains('✗'));
+    assert_eq!(failed.spans[0].style, Theme::err());
+    assert_eq!(name_style(&failed), Some(Theme::err()));
+}
+
+/// Expanding a tool inside a subagent chat must keep the viewport: the
+/// anchor resolves the row's tag, never its position. Before the fix the
+/// position leaked in as the tag, re-anchored to a row further down and
+/// yanked the view to the bottom.
+#[test]
+fn expanding_a_tool_in_subagent_view_keeps_the_viewport() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.active_subagent = Some(7);
+    let tool = |output: &str| Segment::Tool {
+        call_id: None,
+        name: "read".into(),
+        args: "a.rs".into(),
+        ok: Some(true),
+        output: output.into(),
+        diff: None,
+        preview: Vec::new(),
+        preview_total: 0,
+        expanded: false,
+        flash: None,
+    };
+    app.subagent_chats.insert(
+        7,
+        vec![
+            Segment::Assistant {
+                text: "word ".repeat(60),
+                live: false,
+            },
+            tool(""),
+            tool("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10"),
+            Segment::Commentary("filler one".into()),
+            Segment::Commentary("filler two".into()),
+            Segment::Commentary("filler three".into()),
+            Segment::Commentary("filler four".into()),
+        ],
+    );
+    app.subagent_meta.insert(
+        7,
+        (0..7)
+            .map(|i| crate::tui::app::view::SegMeta {
+                id: 100 + i,
+                rev: 0,
+            })
+            .collect(),
+    );
+    // short viewport: the expanded tool alone overflows it, so a wrong
+    // anchor visibly yanks the view (a tall viewport would clamp the
+    // jump back to zero and hide the bug)
+    render_to_string(&mut app, 100, 16);
+    app.follow = false;
+    app.view_top = 0;
+    // head row of the tool with the long output (segment 2)
+    let head = app
+        .cache_rowseg
+        .iter()
+        .position(|t| *t == Some(2))
+        .expect("tool head row");
+    app.click(head);
+    assert!(
+        matches!(
+            app.subagent_chats.get(&7).and_then(|c| c.get(2)),
+            Some(Segment::Tool { expanded: true, .. })
+        ),
+        "tool unfolded"
+    );
+    render_to_string(&mut app, 100, 16);
+    assert_eq!(app.view_top, 0, "viewport must not jump");
+    assert!(!app.follow, "inspection keeps follow off");
+}
+
+#[test]
 fn new_session_clears_active_subagent_and_subagent_chats() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.active_subagent = Some(7);
