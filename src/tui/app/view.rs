@@ -3630,10 +3630,11 @@ impl App {
         };
         let ink = Style::new().fg(ink);
 
-        // card geometry: 1 pad + n columns; labels + track + one air row
+        // card geometry: 1 pad + n columns; air row under the centered
+        // title (like every other menu), then labels + track + one air row
         let inner_w = 1 + COL_W * n as u16;
         let w = (inner_w + 2).clamp(30, area.width.saturating_sub(4).max(30));
-        let h: u16 = 5;
+        let h: u16 = 6;
         let rect = Rect {
             x: area.x + (area.width.saturating_sub(w)) / 2,
             y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -3659,6 +3660,7 @@ impl App {
         }
 
         let block = Block::default()
+            .title_alignment(Alignment::Center)
             .title(Span::styled(
                 format!(" {} ", self.menu_title()),
                 Style::new()
@@ -3694,12 +3696,12 @@ impl App {
             height: rect.height.saturating_sub(2),
         };
         block.render(rect, buf);
-        if inner.height < 3 || inner.width < inner_w {
+        if inner.height < 4 || inner.width < inner_w {
             return;
         }
 
-        let labels_y = inner.y;
-        let track_y = inner.y + 1;
+        let labels_y = inner.y + 1;
+        let track_y = inner.y + 2;
         let base_x = inner.x + 1;
 
         // labels row + hit rects (label cell and dot cell share one target)

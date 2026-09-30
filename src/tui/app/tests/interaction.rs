@@ -931,6 +931,21 @@ fn effort_slider_opens_on_current_level_with_hits() {
     app.menu_sel = 0;
     app.draw_menu(&mut buf, area);
     assert_eq!(app.effort_blend_sel, Some(0));
+    // title centered like every other menu, air row under it
+    let title_y = app.menu_rect.y as usize;
+    let title: String = (0..100)
+        .map(|x| buf[(x, title_y as u16)].symbol().to_string())
+        .collect();
+    let pos = title.find("Effort").expect("title row: {title:?}");
+    let end = pos + "Effort".len();
+    assert!(
+        (pos as i32 - (100 - end) as i32).abs() <= 2,
+        "title centered: {title:?}"
+    );
+    let air: String = (0..100)
+        .map(|x| buf[(x, title_y as u16 + 1)].symbol().to_string())
+        .collect();
+    assert!(air.trim().is_empty(), "air row under title: {air:?}");
     assert!(
         app.effort_blend.is_some(),
         "level change must arm the sweep"
