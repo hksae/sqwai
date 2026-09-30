@@ -3232,7 +3232,19 @@ impl App {
                 // title row, then the air row, then the fields
                 let row_y = rect.y + 2 + n as u16;
                 match field {
-                    FormField::Text { ta, .. } => {
+                    FormField::Text {
+                        ta,
+                        secret,
+                        revealed,
+                        ..
+                    } => {
+                        // secrets stay bullets unless revealed; the stored
+                        // text is always real, this is display-only
+                        let shown = if *secret && !*revealed {
+                            FormField::mask_value(&ta.lines().join(""))
+                        } else {
+                            ta.lines().join("")
+                        };
                         if focused {
                             // value + live cursor are drawn later by
                             // rendering the textarea itself over this row;
@@ -3249,10 +3261,7 @@ impl App {
                             ));
                             rows.push(Line::from(prefix));
                         } else {
-                            rows.push(Line::from(vec![
-                                prefix,
-                                Span::styled(ta.lines().join(""), Theme::base()),
-                            ]));
+                            rows.push(Line::from(vec![prefix, Span::styled(shown, Theme::base())]));
                         }
                     }
                     FormField::Choice { options, sel, .. } => {
@@ -3427,11 +3436,19 @@ impl App {
             );
         } else if matches!(self.cur_menu(), Some(Menu::TestAnims) | Some(Menu::TestArt)) {
             block = block.title_bottom(Theme::hints(&[("enter/esc", "close")]).right_aligned());
+        } else if matches!(self.cur_menu(), Some(Menu::EditProvider { .. })) {
+            block = block.title_bottom(
+                Theme::hints(&[
+                    ("enter", "save"),
+                    ("esc", "cancel"),
+                    ("ctrl+t", "show/hide key"),
+                ])
+                .right_aligned(),
+            );
         } else if matches!(
             self.cur_menu(),
             Some(
-                Menu::EditProvider { .. }
-                    | Menu::EditModel { .. }
+                Menu::EditModel { .. }
                     | Menu::EditSessionTitle { .. }
                     | Menu::EditScalar(..)
                     | Menu::AddListItem(..)
@@ -3498,14 +3515,44 @@ impl App {
         }
 
         // draw the focused text field as a real textarea: same block cursor
-        // and editing behavior as the message input
+        // and editing behavior as the message input. A masked secret draws
+        // bullets by hand instead (same band, block cursor at the real
+        // column — widths match 1:1, so editing feels identical).
         if let Some((idx, field_rect)) = focused_field_rect
-            && let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(idx)
+            && let Some(FormField::Text {
+                ta,
+                secret,
+                revealed,
+                ..
+            }) = self.form_fields.get_mut(idx)
         {
-            // the textarea paints its own cells, so the selection band has to
-            // ride its style or the band would stop at the label
-            ta.set_style(Style::new().fg(Theme::FG()).bg(Theme::SELECTION_BG()));
-            ta.as_ref().render(field_rect, buf);
+            if *secret && !*revealed {
+                use ratatui::style::Color;
+                let masked = FormField::mask_value(&ta.lines().join(""));
+                let count = masked.chars().count();
+                let ccol = ta.cursor().1.min(count);
+                let band = Style::new().fg(Theme::FG()).bg(Theme::SELECTION_BG());
+                let cursor_style = Style::new().fg(Color::Black).bg(Color::White);
+                let mut spans = Vec::with_capacity(count + 1);
+                for (i, ch) in masked.chars().enumerate() {
+                    let st = if i == ccol { cursor_style } else { band };
+                    spans.push(Span::styled(ch.to_string(), st));
+                }
+                if ccol == count {
+                    spans.push(Span::styled(" ".to_string(), cursor_style));
+                }
+                let used = count + 1;
+                let pad = (field_rect.width as usize).saturating_sub(used);
+                if pad > 0 {
+                    spans.push(Span::styled(" ".repeat(pad), band));
+                }
+                Paragraph::new(Line::from(spans)).render(field_rect, buf);
+            } else {
+                // the textarea paints its own cells, so the selection band has to
+                // ride its style or the band would stop at the label
+                ta.set_style(Style::new().fg(Theme::FG()).bg(Theme::SELECTION_BG()));
+                ta.as_ref().render(field_rect, buf);
+            }
         }
     }
 

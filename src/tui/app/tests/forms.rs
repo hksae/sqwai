@@ -341,6 +341,140 @@ fn plan_show_alias_is_gone() {
 }
 
 #[test]
+fn provider_key_field_is_secret_and_masked() {
+    use super::super::forms::FormField;
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.open_menu(Menu::EditProvider { name: None });
+    let key_idx = app
+        .form_fields
+        .iter()
+        .position(|f| f.label() == "api key")
+        .expect("api key field");
+    // masked from the start, real value intact underneath
+    assert!(
+        matches!(
+            &app.form_fields[key_idx],
+            FormField::Text {
+                secret: true,
+                revealed: false,
+                ..
+            }
+        ),
+        "key field must be a hidden secret"
+    );
+    // mask is 1:1 per char so cursor columns and layout never shift
+    assert_eq!(FormField::mask_value("sk-abc"), "••••••");
+    let f = FormField::secret("api key", "sk-abc".into());
+    assert_eq!(f.trimmed(), "sk-abc", "save reads the real value");
+    // toggle flips only the focused secret field
+    app.form_focus = key_idx;
+    assert!(app.focused_is_secret());
+    app.toggle_secret_reveal();
+    assert!(
+        matches!(
+            &app.form_fields[key_idx],
+            FormField::Text { revealed: true, .. }
+        ),
+        "toggle reveals"
+    );
+    app.toggle_secret_reveal();
+    assert!(
+        matches!(
+            &app.form_fields[key_idx],
+            FormField::Text {
+                revealed: false,
+                ..
+            }
+        ),
+        "toggle hides again"
+    );
+    // plain fields never react to the toggle
+    app.form_focus = 0;
+    assert!(!app.focused_is_secret());
+    app.toggle_secret_reveal();
+    assert!(
+        matches!(
+            &app.form_fields[0],
+            FormField::Text {
+                revealed: false,
+                ..
+            }
+        ),
+        "plain field untouched"
+    );
+}
+
+#[test]
+fn ctrl_t_reveals_the_key_in_the_provider_form() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.open_menu(Menu::EditProvider { name: None });
+    let key_idx = app
+        .form_fields
+        .iter()
+        .position(|f| f.label() == "api key")
+        .expect("api key field");
+    app.form_focus = key_idx;
+    fn press(app: &mut App, c: char) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Event::Key(KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::CONTROL,
+        )))
+        .unwrap();
+        app.poll_input(&rx).unwrap();
+    }
+    press(&mut app, 't');
+    assert!(
+        matches!(
+            &app.form_fields[key_idx],
+            super::super::forms::FormField::Text { revealed: true, .. }
+        ),
+        "ctrl+t reveals"
+    );
+    // cyrillic layout: same physical key (е) toggles back
+    press(&mut app, 'е');
+    assert!(
+        matches!(
+            &app.form_fields[key_idx],
+            super::super::forms::FormField::Text {
+                revealed: false,
+                ..
+            }
+        ),
+        "ctrl+е hides again"
+    );
+}
+
+#[test]
+fn provider_form_renders_key_as_bullets_until_revealed() {
+    use super::super::forms::FormField;
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.open_menu(Menu::EditProvider { name: None });
+    let key_idx = app
+        .form_fields
+        .iter()
+        .position(|f| f.label() == "api key")
+        .expect("api key field");
+    if let Some(FormField::Text { ta, .. }) = app.form_fields.get_mut(key_idx) {
+        ta.insert_str("sk-secret-value");
+    }
+    app.form_focus = key_idx;
+    let hidden = render_to_string(&mut app, 100, 30);
+    assert!(hidden.contains("••••"), "masked on screen: {hidden}");
+    assert!(
+        !hidden.contains("sk-secret-value"),
+        "real key never painted: {hidden}"
+    );
+    app.toggle_secret_reveal();
+    let shown = render_to_string(&mut app, 100, 30);
+    assert!(
+        shown.contains("sk-secret-value"),
+        "revealed on toggle: {shown}"
+    );
+}
+
+#[test]
 fn form_label_column_fits_long_setting_names() {
     use super::super::menus::ScalarSetting;
     let mut app = test_app("http://127.0.0.1:9/v1".into());

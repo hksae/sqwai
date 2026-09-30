@@ -56,10 +56,14 @@ fn parse_env(raw: &str) -> std::collections::BTreeMap<String, String> {
 }
 
 pub(super) enum FormField {
-    /// free text edited through a real textarea (cursor, word jumps, paste)
+    /// free text edited through a real textarea (cursor, word jumps, paste).
+    /// `secret` masks the value on screen (the stored text is always real);
+    /// `revealed` flips it back while the user holds the toggle.
     Text {
         label: String,
         ta: Box<TextArea<'static>>,
+        secret: bool,
+        revealed: bool,
     },
     /// pick-one value cycled with left/right
     Choice {
@@ -87,7 +91,26 @@ impl FormField {
         Self::Text {
             label: label.into(),
             ta,
+            secret: false,
+            revealed: false,
         }
+    }
+
+    /// a secret text field (api keys): masked with bullets unless revealed.
+    /// The textarea always holds the real value — masking is display-only,
+    /// so save/copy/paste never see bullets.
+    pub(super) fn secret(label: &str, value: String) -> Self {
+        let mut f = Self::text(label, value);
+        if let Self::Text { secret, .. } = &mut f {
+            *secret = true;
+        }
+        f
+    }
+
+    /// bullets, one per char: widths match the real text, so the cursor
+    /// column maps 1:1 and the layout never shifts between states.
+    pub(super) fn mask_value(value: &str) -> String {
+        value.chars().map(|_| '•').collect()
     }
 
     pub(super) fn choice(label: &str, options: &'static [&'static str], sel: usize) -> Self {
@@ -131,7 +154,10 @@ impl App {
                     Some(pc) => {
                         if is_builtin {
                             self.form_fields = vec![
-                                FormField::text("api key", pc.api_key.clone().unwrap_or_default()),
+                                FormField::secret(
+                                    "api key",
+                                    pc.api_key.clone().unwrap_or_default(),
+                                ),
                                 FormField::text(
                                     "key env var",
                                     pc.api_key_env.clone().unwrap_or_default(),
@@ -146,7 +172,10 @@ impl App {
                                 FormField::text("name", name.clone().unwrap_or_default()),
                                 FormField::choice("format", FORMAT_OPTS, fmt_sel),
                                 FormField::text("base url", pc.base_url.clone()),
-                                FormField::text("api key", pc.api_key.clone().unwrap_or_default()),
+                                FormField::secret(
+                                    "api key",
+                                    pc.api_key.clone().unwrap_or_default(),
+                                ),
                                 FormField::text(
                                     "key env var",
                                     pc.api_key_env.clone().unwrap_or_default(),
@@ -159,7 +188,7 @@ impl App {
                             FormField::text("name", String::new()),
                             FormField::choice("format", FORMAT_OPTS, 0),
                             FormField::text("base url", String::new()),
-                            FormField::text("api key", String::new()),
+                            FormField::secret("api key", String::new()),
                             FormField::text("key env var", String::new()),
                         ];
                     }
@@ -330,6 +359,28 @@ impl App {
         }
         if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus) {
             ta.input(k);
+            self.dirty = true;
+        }
+    }
+
+    /// true when the focused field is a masked secret (used by the
+    /// reveal-toggle keybinding, so plain text fields never react to it)
+    pub(super) fn focused_is_secret(&self) -> bool {
+        matches!(
+            self.form_fields.get(self.form_focus),
+            Some(FormField::Text { secret: true, .. })
+        )
+    }
+
+    /// flip the focused secret field between bullets and the real value
+    pub(super) fn toggle_secret_reveal(&mut self) {
+        if let Some(FormField::Text {
+            secret: true,
+            revealed,
+            ..
+        }) = self.form_fields.get_mut(self.form_focus)
+        {
+            *revealed = !*revealed;
             self.dirty = true;
         }
     }
@@ -588,6 +639,18 @@ impl App {
                 {
                     self.status(
                         &format!("model '{new_key}' already exists"),
+                        StatusKind::Err,
+                    );
+                    return;
+                }
+                // A built-in key is its catalog identity: after a rename the
+                // catalog would re-seed the original key on the next load,
+                // leaving a duplicate. Edit `request id` instead.
+                if key.as_deref().is_some_and(|k| self.cfg.is_builtin_model(k))
+                    && key.as_deref() != Some(new_key.as_str())
+                {
+                    self.status(
+                        "built-in model key cannot be renamed — it is the catalog identity",
                         StatusKind::Err,
                     );
                     return;

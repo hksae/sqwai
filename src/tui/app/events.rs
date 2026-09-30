@@ -723,6 +723,15 @@ impl App {
                                 self.dirty = true;
                             }
                         }
+                        // secret fields (api keys) toggle bullets on Ctrl+T;
+                        // anything else keeps the normal typing path
+                        KeyCode::Char('t' | 'T' | 'е' | 'Е') if ctrl && self.is_form_menu() => {
+                            if self.focused_is_secret() {
+                                self.toggle_secret_reveal();
+                            } else {
+                                self.form_edit_key(k);
+                            }
+                        }
                         KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
                             if !self.menu_stack.is_empty() =>
                         {
