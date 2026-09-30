@@ -45,7 +45,7 @@ fn status_bar_fits_and_keeps_click_targets_inside_a_wide_directory() {
 }
 
 #[test]
-fn notice_row_fits_width_and_queue_wins() {
+fn notice_row_fits_width_next_to_queue() {
     #[allow(clippy::type_complexity)]
     let setups: [(fn(&mut App), &str); 3] = [
         (
@@ -74,11 +74,11 @@ fn notice_row_fits_width_and_queue_wins() {
                 used <= w as usize,
                 "at width {w}: notice row is {used} columns: {text:?}"
             );
-            // queued follow-ups take the row; the notice waits
+            // queue and notice live in separate rows now: both visible
             app.pending_queue.push("later".into());
             let s = render_to_string(&mut app, w, 30);
-            assert!(s.contains("queued (1)"), "queue wins the row: {s}");
-            assert!(!s.contains(needle), "notice hidden behind queue: {s}");
+            assert!(s.contains("queued 1:"), "queue in its row: {s}");
+            assert!(s.contains(needle), "notice in its own row: {s}");
         }
     }
     // priority inside the row: retry first, then toast, then checkpoint

@@ -2561,14 +2561,19 @@ impl App {
         // The borderless composer takes exactly its content height: one row
         // until the user enters a newline, then it grows up to six rows.
         let input_h = input_rows;
+        // the queue owns an extra row above the notice row, but only while
+        // non-empty: no queue, no row, no wasted space
         let layout = Layout::vertical([
             Constraint::Min(3),
+            Constraint::Length(if self.pending_queue.is_empty() { 0 } else { 1 }),
             Constraint::Length(1),
             Constraint::Length(input_h),
             Constraint::Length(1),
             Constraint::Length(1),
         ])
         .split(area);
+        // queue?, notice, input, spacer, status
+        let (notice_r, input_r, status_r) = (2, 3, 5);
         let chat = Rect {
             x: area.x + 1,
             y: layout[0].y,
@@ -2599,7 +2604,7 @@ impl App {
             }
         }
         self.last_chat = chat;
-        self.last_input = layout[2];
+        self.last_input = layout[input_r];
         self.apply_pending_anchor(None);
 
         Block::new().style(Theme::base()).render(area, buf);
@@ -2712,15 +2717,15 @@ impl App {
             }
         }
 
-        // queued follow-ups keep their row above the composer (layout
-        // unchanged); the separator lines are gone, the composer is a
-        // filled band instead. Transient messages (retry, toast,
-        // checkpoint) take the same row at full width when the queue is
-        // empty — the status bar squeezed them against its metric block.
+        // the queue sits in its own row above the notice row (which is
+        // always reserved); transient messages take the notice row at full
+        // width. The separator lines are gone, the composer is a filled
+        // band instead.
         if !self.pending_queue.is_empty() {
             Paragraph::new(self.queue_line(area.width)).render(layout[1], buf);
-        } else if let Some(line) = self.notice_line(area.width) {
-            Paragraph::new(line).render(layout[1], buf);
+        }
+        if let Some(line) = self.notice_line(area.width) {
+            Paragraph::new(line).render(layout[notice_r], buf);
         }
         self.input.set_block(Self::input_block());
         // the cursor is rendered by tui-textarea; the input has no frame.
@@ -2728,10 +2733,10 @@ impl App {
         // is shifted right so text aligns under it on every row.
         let marker_w = self.input_marker_w();
         let input_rect = Rect {
-            x: layout[2].x + marker_w,
-            y: layout[2].y,
-            width: layout[2].width.saturating_sub(marker_w),
-            height: layout[2].height,
+            x: layout[input_r].x + marker_w,
+            y: layout[input_r].y,
+            width: layout[input_r].width.saturating_sub(marker_w),
+            height: layout[input_r].height,
         };
         if marker_w > 0 {
             Paragraph::new(Line::from(Span::styled(
@@ -2740,8 +2745,8 @@ impl App {
             )))
             .render(
                 Rect {
-                    x: layout[2].x,
-                    y: layout[2].y,
+                    x: layout[input_r].x,
+                    y: layout[input_r].y,
                     width: marker_w,
                     height: 1,
                 },
@@ -2753,8 +2758,8 @@ impl App {
         // input background (the textarea paints its own rect already).
         // Both None and explicit Reset count as unpainted; real fills
         // (block cursor, text selection) must survive.
-        for y in layout[2].y..layout[2].bottom() {
-            for x in layout[2].x..layout[2].right() {
+        for y in layout[input_r].y..layout[input_r].bottom() {
+            for x in layout[input_r].x..layout[input_r].right() {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     let mut style = cell.style();
                     if matches!(style.bg, None | Some(ratatui::style::Color::Reset)) {
@@ -2764,11 +2769,11 @@ impl App {
                 }
             }
         }
-        self.status_y = layout[4].y;
+        self.status_y = layout[status_r].y;
         let sb = self.status_bar(area.width);
-        sb.render(layout[4], buf);
+        sb.render(layout[status_r], buf);
 
-        self.draw_popup(buf, layout[2]);
+        self.draw_popup(buf, layout[input_r]);
         self.draw_menu(buf, area);
     }
 
@@ -3869,22 +3874,27 @@ impl App {
         }
     }
 
-    /// queued follow-ups preview for the rule row above the composer:
-    /// `queued (2): first words… [+1 more]`, dim and width-capped
+    /// queued follow-ups preview in their own row above the notice row:
+    /// `queued 2: first words… (+1 more)`, head in white, tail dim and
+    /// width-capped. The row exists only while the queue is non-empty.
     fn queue_line(&self, w: u16) -> Line<'static> {
+        use ratatui::style::Color;
+        use unicode_width::UnicodeWidthStr;
         let n = self.pending_queue.len();
         let first = self.pending_queue.first().map(String::as_str).unwrap_or("");
-        let mut head = format!("  queued ({n}): {first}");
+        let head = format!("  queued {n}:");
+        let mut tail = format!(" {first}");
         if n > 1 {
-            head.push_str(&format!(" [+{} more]", n - 1));
+            tail.push_str(&format!(" (+{} more)", n - 1));
         }
         if !self.streaming {
-            head.push_str(" · enter to send");
+            tail.push_str(" · enter to send");
         }
-        Line::from(Span::styled(
-            truncate_display_width(&head, w as usize),
-            Theme::dim(),
-        ))
+        let tail = truncate_display_width(&tail, (w as usize).saturating_sub(head.width()));
+        Line::from(vec![
+            Span::styled(head, Style::new().fg(Color::White)),
+            Span::styled(tail, Theme::dim()),
+        ])
     }
 
     /// transient messages for the rule row above the composer: a live retry

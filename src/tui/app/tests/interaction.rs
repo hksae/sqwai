@@ -1371,9 +1371,14 @@ fn queue_preview_renders_above_input() {
         .collect();
     let input_y = app.last_input.y as usize;
     assert!(
-        lines[input_y - 1].contains("queued (2): fix the typo"),
-        "preview sits right above input: {:?}",
+        lines[input_y - 2].contains("queued 2: fix the typo"),
+        "preview sits in its own row above the notice row: {:?}",
+        lines[input_y - 2]
+    );
+    assert!(lines[input_y - 2].contains("(+1 more)"));
+    assert!(
+        lines[input_y - 1].trim().is_empty(),
+        "notice row stays blank: {:?}",
         lines[input_y - 1]
     );
-    assert!(lines[input_y - 1].contains("[+1 more]"));
 }
