@@ -573,7 +573,6 @@ fn model_menu_row_formats_ctx() {
 /// any row.
 #[test]
 fn idle_draw_skips_transcript_pipeline() {
-    use std::sync::atomic::Ordering;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
     app.push_segment(Segment::User("hello".into()));
@@ -584,7 +583,7 @@ fn idle_draw_skips_transcript_pipeline() {
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
     app.test_renders = 0;
-    crate::tui::markdown::WRAP_TAGGED_CALLS.swap(0, Ordering::SeqCst);
+    crate::tui::markdown::reset_wrap_tagged_calls();
     app.input.insert_str("typing");
     app.scroll(4);
     app.sel = Some(Selection {
@@ -594,7 +593,7 @@ fn idle_draw_skips_transcript_pipeline() {
     terminal.draw(|frame| app.draw(frame)).unwrap();
     assert_eq!(app.test_renders, 0, "idle frame re-rendered segments");
     assert_eq!(
-        crate::tui::markdown::WRAP_TAGGED_CALLS.load(Ordering::SeqCst),
+        crate::tui::markdown::wrap_tagged_calls(),
         0,
         "idle frame wrapped rows"
     );
@@ -709,7 +708,6 @@ fn toggle_keeps_header_on_screen_row() {
 /// rows whole, again with zero renders.
 #[test]
 fn subagent_redraw_reuses_cache_and_switch_restores_whole() {
-    use std::sync::atomic::Ordering;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
     app.push_segment(Segment::User("main q".into()));
@@ -739,11 +737,11 @@ fn subagent_redraw_reuses_cache_and_switch_restores_whole() {
     app.open_subagent_view(7);
     terminal.draw(|frame| app.draw(frame)).unwrap();
     app.test_renders = 0;
-    crate::tui::markdown::WRAP_TAGGED_CALLS.swap(0, Ordering::SeqCst);
+    crate::tui::markdown::reset_wrap_tagged_calls();
     terminal.draw(|frame| app.draw(frame)).unwrap();
     assert_eq!(app.test_renders, 0, "subagent redraw re-rendered rows");
     assert_eq!(
-        crate::tui::markdown::WRAP_TAGGED_CALLS.load(Ordering::SeqCst),
+        crate::tui::markdown::wrap_tagged_calls(),
         0,
         "subagent redraw wrapped rows"
     );

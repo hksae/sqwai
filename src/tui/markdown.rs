@@ -1344,12 +1344,23 @@ fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
     flush(out, text.len(), &mut lit_start);
 }
 
-/// Greedy word wrap preserving span styles and carrying a per-source-line tag
-/// through to every visual row it produces.
-/// Call counter (also feeds the `/debug` perf log); a single relaxed
-/// atomic add, negligible next to the wrap itself.
-pub static WRAP_TAGGED_CALLS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    /// Call counter (also feeds the `/debug` perf log), per thread: the
+    /// idle-frame tests assert "this frame wrapped nothing", and a process-wide
+    /// counter would let any other test thread rendering in parallel trip them.
+    static WRAP_TAGGED_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Wraps counted on this thread.
+pub fn wrap_tagged_calls() -> usize {
+    WRAP_TAGGED_CALLS.with(|c| c.get())
+}
+
+/// Zero the counter on this thread (idle-frame tests).
+#[cfg(test)]
+pub fn reset_wrap_tagged_calls() {
+    WRAP_TAGGED_CALLS.with(|c| c.set(0));
+}
 
 /// Replace control characters with their visible terminal behavior before
 /// any width math runs. Ratatui models them as zero-width cells while the
@@ -1407,7 +1418,7 @@ pub fn wrap_tagged(
     lines: Vec<(Line<'static>, Option<usize>)>,
     width: u16,
 ) -> (Vec<Line<'static>>, Vec<Option<usize>>) {
-    WRAP_TAGGED_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    WRAP_TAGGED_CALLS.with(|c| c.set(c.get() + 1));
     let width = (width as usize).max(1);
     let fallback = Style::new().fg(Theme::rule_color()).bg(Theme::BG());
 

@@ -770,6 +770,43 @@ fn activity_group_renders_live_while_the_turn_streams() {
 }
 
 #[test]
+fn a_turn_with_nothing_visible_yet_still_shows_the_working_line() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.streaming = true;
+    app.push_segment(Segment::User("привет".into()));
+    // no thought, no call, no revealed text: the model is producing its first
+    // token and the screen must not read as a hung app
+    app.rebuild_cache(80);
+    let text = rendered(&app);
+    assert!(
+        text.contains("Working"),
+        "waiting turn must show the working line: {text}"
+    );
+    assert!(
+        !text.contains("0 calls"),
+        "the waiting line carries no stalled counter: {text}"
+    );
+    // an empty live assistant row changes nothing: still waiting
+    app.push_segment(Segment::Assistant {
+        text: String::new(),
+        live: true,
+    });
+    app.rebuild_cache(80);
+    assert!(
+        rendered(&app).contains("Working"),
+        "an unrevealed answer is still waiting"
+    );
+    // once the turn ends without any work, no group and no line survive
+    app.streaming = false;
+    app.rebuild_cache(80);
+    assert!(
+        !rendered(&app).contains("Working"),
+        "a finished turn leaves no working line: {}",
+        rendered(&app)
+    );
+}
+
+#[test]
 fn overscroll_leaves_no_dead_distance() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     // 50 content lines, 10-row viewport -> deepest top = 40

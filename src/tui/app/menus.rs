@@ -1306,8 +1306,7 @@ impl App {
                 // drawn frame plus tool markers, into a fresh temp file
                 let on = !self.perf.enabled();
                 let renders = self.test_renders;
-                let wraps = crate::tui::markdown::WRAP_TAGGED_CALLS
-                    .load(std::sync::atomic::Ordering::Relaxed);
+                let wraps = crate::tui::markdown::wrap_tagged_calls();
                 match self.perf.set_enabled(on, renders, wraps) {
                     Ok(msg) => self.status(&msg, StatusKind::Ok),
                     Err(msg) => self.status(&msg, StatusKind::Err),

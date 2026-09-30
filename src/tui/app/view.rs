@@ -2014,6 +2014,22 @@ impl App {
             let mut live = self.build_activity_group(run);
             live.expanded = !self.live_group_collapsed;
             groups.push(live);
+        } else if self.streaming && self.awaiting_first_token() {
+            // nothing visible yet: an empty live group renders just the
+            // shimmering working line under the user row, until the first
+            // token (or a thought, or a call) gives the turn real content
+            let tail = self.segments.len();
+            groups.push(ActivityGroup {
+                seg_start: tail,
+                seg_end: tail,
+                calls: 0,
+                thinking: 0,
+                duration_ms: 0,
+                errors: 0,
+                rejected: 0,
+                expanded: false,
+                turn_user: None,
+            });
         }
         let mut gi = 0usize; // next group waiting to be opened
         let mut hide_until = 0usize; // collapsed group: skip [seg_start, seg_end)
@@ -2176,6 +2192,18 @@ impl App {
                 .flatten();
             struct_row!(
                 activity_footer_line(g, live.then_some(self.spinner_tick), tool.as_deref()),
+                Some(GROUP_BASE + fgi)
+            );
+        } else if self.streaming
+            && groups.len() == self.activity_groups.len() + 1
+            && groups[self.activity_groups.len()].seg_start == self.segments.len()
+        {
+            // the waiting turn's empty group never opens inside the loop (its
+            // range sits past the tail), so its bare working line goes here
+            let fgi = self.activity_groups.len();
+            struct_row!(blank(), None);
+            struct_row!(
+                activity_footer_line(&groups[fgi], Some(self.spinner_tick), None),
                 Some(GROUP_BASE + fgi)
             );
         }
@@ -4162,27 +4190,33 @@ pub(super) fn activity_footer_line(
             parts.push(t.to_string());
         }
     }
-    parts.push(format!("{} calls", g.calls));
-    if g.thinking > 0 {
-        // finished blocks: the count is of thoughts that were had
-        parts.push(format!(
-            "{} thought{}",
-            g.thinking,
-            if g.thinking == 1 { "" } else { "s" }
+    // a turn that has produced nothing yet carries no aggregate: the shimmer
+    // word alone is the signal that the app is alive, and "0 calls · 0s"
+    // next to it would read as a stalled counter
+    let waiting = live_tick.is_some() && g.calls == 0 && g.thinking == 0 && tool.is_none();
+    if !waiting {
+        parts.push(format!("{} calls", g.calls));
+        if g.thinking > 0 {
+            // finished blocks: the count is of thoughts that were had
+            parts.push(format!(
+                "{} thought{}",
+                g.thinking,
+                if g.thinking == 1 { "" } else { "s" }
+            ));
+        }
+        parts.push(format!("{}s", g.duration_ms / 1000));
+        // the live footer leads with the shimmer word, so the aggregate hangs
+        // off a separator; the done footer IS the aggregate, no dangling "·".
+        let agg = parts.join(" · ");
+        spans.push(Span::styled(
+            if live_tick.is_some() {
+                format!(" · {agg}")
+            } else {
+                agg
+            },
+            Theme::dim(),
         ));
     }
-    parts.push(format!("{}s", g.duration_ms / 1000));
-    // the live footer leads with the shimmer word, so the aggregate hangs
-    // off a separator; the done footer IS the aggregate, no dangling "·".
-    let agg = parts.join(" · ");
-    spans.push(Span::styled(
-        if live_tick.is_some() {
-            format!(" · {agg}")
-        } else {
-            agg
-        },
-        Theme::dim(),
-    ));
     if g.errors > 0 {
         spans.push(Span::styled(format!(" · {} error", g.errors), Theme::err()));
     }

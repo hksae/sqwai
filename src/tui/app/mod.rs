@@ -1485,8 +1485,7 @@ impl App {
                     view: self.active_subagent.unwrap_or(0),
                 };
                 let renders = self.test_renders;
-                let wraps = crate::tui::markdown::WRAP_TAGGED_CALLS
-                    .load(std::sync::atomic::Ordering::Relaxed);
+                let wraps = crate::tui::markdown::wrap_tagged_calls();
                 self.perf.frame(stat, renders, wraps);
             }
         }
@@ -4533,6 +4532,24 @@ impl App {
             .unwrap_or(0)
             .min(self.segments.len());
         Self::trailing_work_run_in(&self.segments, floor)
+    }
+
+    /// True while the running turn has produced nothing visible yet: no
+    /// thought row, no call row, no revealed answer text. The transcript then
+    /// needs a bare working line, or the screen reads as a hung app while the
+    /// model silently produces its first token.
+    pub(super) fn awaiting_first_token(&self) -> bool {
+        self.segments
+            .iter()
+            .rev()
+            .take_while(|s| !matches!(s, Segment::User(_)))
+            .all(|s| match s {
+                Segment::Assistant {
+                    text, live: true, ..
+                } => text.is_empty(),
+                Segment::Status { .. } => true,
+                _ => false,
+            })
     }
 
     /// Same scan over any transcript: subagent chats fold with the same
