@@ -508,12 +508,22 @@ fn builtin_providers_and_models_are_immutable_and_updateable() {
     ));
     assert!(toast_text(&app).contains("cannot be deleted"));
 
-    // 3. Trying to edit built-in model is refused
+    // 3. Editing a built-in model opens the full form: the catalog seeds
+    // absent keys and never overwrites user content, so built-ins are
+    // user-owned for everything but their identity
     app.run_action(MenuAction::EditModel(
         "gemini".into(),
         "gemini-3.8-flash".into(),
     ));
-    assert!(toast_text(&app).contains("cannot be modified"));
+    assert!(
+        matches!(
+            app.cur_menu(),
+            Some(Menu::EditModel { key: Some(k), .. }) if k == "gemini-3.8-flash"
+        ),
+        "built-in model edit must open"
+    );
+    assert_eq!(app.form_fields.len(), 6, "full model form for a built-in");
+    app.menu_home();
 
     // 4. /providers update triggers update status
     app.builtin_update_rx = None; // clear in-flight check from test_app startup

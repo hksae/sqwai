@@ -199,6 +199,31 @@ fn edit_model_form_round_trips_effort_declarations() {
     assert!(m.effort_always_on);
 }
 
+/// A built-in key is the catalog identity: renaming would make the next load
+/// re-seed the original key alongside the renamed copy. The save must refuse.
+#[test]
+fn a_builtin_model_key_cannot_be_renamed() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let (key, mc) = crate::config::BuiltinCatalog::current()
+        .models
+        .into_iter()
+        .find(|(k, _)| k.starts_with("gemini"))
+        .expect("catalog ships gemini models");
+    app.cfg.models.insert(key.clone(), mc);
+    let provider = app.cfg.models[&key].provider.clone();
+    app.open_menu_replace(Menu::EditModel {
+        provider,
+        key: Some(key.clone()),
+    });
+    app.form_fields[0] = super::super::forms::FormField::text("key", "renamed".into());
+    app.form_save();
+    assert!(
+        app.cfg.models.contains_key(&key) && !app.cfg.models.contains_key("renamed"),
+        "rename must be refused: {:?}",
+        app.cfg.models.keys().collect::<Vec<_>>()
+    );
+}
+
 fn wheel_test_app() -> (crate::tui::app::App, usize) {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;

@@ -1203,19 +1203,16 @@ impl App {
                 provider: p,
                 key: None,
             }),
-            MenuAction::EditModel(p, k) => {
-                if self.cfg.is_builtin_model(&k) {
-                    self.status("built-in model cannot be modified", StatusKind::Warn);
-                    return;
-                }
-                self.open_menu(Menu::EditModel {
-                    provider: p,
-                    key: Some(k),
-                });
-            }
+            MenuAction::EditModel(p, k) => self.open_menu(Menu::EditModel {
+                provider: p,
+                key: Some(k),
+            }),
             MenuAction::DeleteModel(p, k) => {
                 if self.cfg.is_builtin_model(&k) {
-                    self.status("built-in model cannot be deleted", StatusKind::Warn);
+                    self.status(
+                        "built-in model cannot be deleted — the catalog refills it on load",
+                        StatusKind::Warn,
+                    );
                     return;
                 }
                 self.open_menu(Menu::ConfirmDelete {
@@ -1409,7 +1406,10 @@ impl App {
                 }
                 if let MenuAction::DeleteModel(_, k) = &inner {
                     if self.cfg.is_builtin_model(k) {
-                        self.status("built-in model cannot be deleted", StatusKind::Warn);
+                        self.status(
+                            "built-in model cannot be deleted — the catalog refills it on load",
+                            StatusKind::Warn,
+                        );
                         return;
                     }
                     self.cfg.models.remove(k);
@@ -2602,11 +2602,9 @@ impl App {
                     if m.provider == provider && m.status.visible_in_picker() {
                         let current = k == &self.session.model_key;
                         let mark = if current { " *" } else { "" };
-                        let action = if is_builtin {
-                            MenuAction::UseModel(k.clone())
-                        } else {
-                            MenuAction::EditModel(provider.clone(), k.clone())
-                        };
+                        // built-in models are user-owned for content: the
+                        // catalog seeds absent keys and never overwrites
+                        let action = MenuAction::EditModel(provider.clone(), k.clone());
                         // each row reports what that model would actually do
                         // with its level
                         let effort = crate::providers::effort::plan(
@@ -2634,12 +2632,12 @@ impl App {
                         ));
                     }
                 }
-                if !is_builtin {
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(" + add model", Theme::FG())]),
-                        MenuAction::AddModel(provider.clone()),
-                    ));
-                }
+                // user-owned models live under built-in providers too: the
+                // catalog never touches keys it did not ship
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(" + add model", Theme::FG())]),
+                    MenuAction::AddModel(provider.clone()),
+                ));
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled(" · switch active model", Theme::FG())]),
                     MenuAction::PickModelList(provider.clone()),
