@@ -2606,8 +2606,10 @@ impl App {
                         // catalog seeds absent keys and never overwrites
                         let action = MenuAction::EditModel(provider.clone(), k.clone());
                         // each row reports what that model would actually do
-                        // with its level
-                        let effort = crate::providers::effort::plan(
+                        // with its level. The column header already says
+                        // EFFORT, so the "ef:" prefix is dropped here (the
+                        // status bar keeps it — there it has no header).
+                        let effort_label = crate::providers::effort::plan(
                             m.effort,
                             m.effort_support(
                                 self.cfg
@@ -2618,13 +2620,14 @@ impl App {
                             ),
                         )
                         .short_label();
+                        let effort = effort_label.strip_prefix("ef:").unwrap_or(&effort_label);
                         self.menu_rows.push(row(
                             fit_line_width(
                                 table_line(vec![
                                     tcell(&format!("{k}{mark}"), name_w, false, Theme::FG()),
                                     tcell(&m.id, id_w, false, Theme::meta()),
                                     tcell(&fmt_ctx(m.context), 8, true, Theme::meta()),
-                                    tcell(&effort, 8, false, Theme::base()),
+                                    tcell(effort, 8, false, Theme::base()),
                                 ]),
                                 budget,
                             ),
