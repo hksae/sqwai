@@ -3,11 +3,11 @@ source: src/tui/app/tests/settings.rs
 expression: s
 ---
 
-
  › What is the plan?
 
-
  See the plan panel.
+
+
 
 
 

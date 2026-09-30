@@ -3,14 +3,14 @@ source: src/tui/app/tests/settings.rs
 expression: s
 ---
 
-
  › Do the thing.
-
 
    ✓ read_file  {"path":"src/main.rs"}
    ✗ bash  {"cmd":"cargo build"}
    ✓ write_file  {"path":"out.txt"}
  Done, though one step failed.
+
+
 
 
 

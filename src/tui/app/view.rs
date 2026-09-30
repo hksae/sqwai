@@ -319,6 +319,8 @@ pub(super) enum BlockKind {
 
 /// Full-width user strip. The quiet surface is the primary distinction; `›`
 /// keeps it legible in terminals that flatten colors and in light themes.
+/// Compact like the composer: no blank padding rows, so a one-line message is
+/// one row; a multi-line message keeps all of its lines.
 fn user_box(text: &str, w: u16, hl: &Highlighter) -> Vec<Line<'static>> {
     let inner_w = w.saturating_sub(2).max(1);
     let inner = wrap_tagged(
@@ -329,33 +331,24 @@ fn user_box(text: &str, w: u16, hl: &Highlighter) -> Vec<Line<'static>> {
         inner_w,
     )
     .0;
-    let surface = Style::new().fg(Theme::FG()).bg(Theme::USER_SURFACE());
+    let surface = Style::new().fg(Theme::FG()).bg(Theme::INPUT_BG());
     // Codex-style marker: bold dim `›` on the band, plain text after it.
     let marker = surface.add_modifier(Modifier::BOLD | Modifier::DIM);
-    let mut out = Vec::with_capacity(inner.len() + 2);
-    // One blank surface line above and below keeps the message from adhering to
-    // the strip's edge. `›` marks only the first line; continuation lines
-    // align under it with blank space of the same width.
-    out.push(Line::from(Span::styled(
-        " ".repeat(usize::from(w)),
-        surface,
-    )));
-    for (index, line) in inner.into_iter().enumerate() {
-        let text = line_text(&line);
-        let used = UnicodeWidthStr::width(text.as_str());
-        let pad = " ".repeat(usize::from(inner_w).saturating_sub(used));
-        let prefix = if index == 0 { "› " } else { "  " };
-        out.push(Line::from(vec![
-            Span::styled(prefix.to_string(), marker),
-            Span::styled(text, surface),
-            Span::styled(pad, surface),
-        ]));
-    }
-    out.push(Line::from(Span::styled(
-        " ".repeat(usize::from(w)),
-        surface,
-    )));
-    out
+    inner
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let text = line_text(&line);
+            let used = UnicodeWidthStr::width(text.as_str());
+            let pad = " ".repeat(usize::from(inner_w).saturating_sub(used));
+            let prefix = if index == 0 { "› " } else { "  " };
+            Line::from(vec![
+                Span::styled(prefix.to_string(), marker),
+                Span::styled(text, surface),
+                Span::styled(pad, surface),
+            ])
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -2611,7 +2604,7 @@ impl App {
                         height: 1,
                     };
                     Paragraph::new(" ".repeat(area.width as usize))
-                        .style(Style::new().bg(Theme::USER_SURFACE()))
+                        .style(Style::new().bg(Theme::INPUT_BG()))
                         .render(strip, buf);
                 }
             }
@@ -2652,7 +2645,7 @@ impl App {
                 })
                 .collect();
             // Lines carry their own styles. Do not apply the base background at
-            // widget level: it would override USER_SURFACE on user-strip rows.
+            // widget level: it would override INPUT_BG on user-strip rows.
             Paragraph::new(visible).render(chat, buf);
             // Empty session mark: static lines at the top of the chat area.
             if self.segments.is_empty() && !self.streaming {
@@ -2676,7 +2669,7 @@ impl App {
                     .is_some_and(|idx| matches!(self.segments.get(idx), Some(Segment::User(_))));
                 if is_user {
                     let y = chat.y + screen_row as u16;
-                    let fill = Paragraph::new(" ").style(Style::new().bg(Theme::USER_SURFACE()));
+                    let fill = Paragraph::new(" ").style(Style::new().bg(Theme::INPUT_BG()));
                     fill.clone().render(
                         Rect {
                             x: area.x,

@@ -3,12 +3,12 @@ source: src/tui/app/tests/settings.rs
 expression: s
 ---
 
-
  › Run the tests.
-
 
      ◜ bash  {"cmd":"cargo test"}
    ▾ Working · bash · 1 calls · 0s
+
+
 
 
 

@@ -586,7 +586,7 @@ fn expanded_tool_output_uses_left_rail_and_truncates() {
     );
 }
 #[test]
-fn user_prompt_is_a_padded_full_width_surface_strip() {
+fn user_prompt_is_a_compact_full_width_surface_strip() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.push_segment(Segment::User("one\ntwo".into()));
     let rows = app.render_segment(&app.segments, 0, 30, true);
@@ -599,11 +599,10 @@ fn user_prompt_is_a_padded_full_width_surface_strip() {
                 .collect()
         })
         .collect();
-    assert_eq!(text.len(), 4, "one blank row above and below");
-    assert!(text[0].trim().is_empty() && text[3].trim().is_empty());
-    assert!(text[1].starts_with("› "), "first line carries the marker");
+    assert_eq!(text.len(), 2, "no padding rows: one row per message line");
+    assert!(text[0].starts_with("› "), "first line carries the marker");
     assert!(
-        text[2].starts_with("  ") && !text[2].starts_with("›"),
+        text[1].starts_with("  ") && !text[1].starts_with("›"),
         "continuation aligns under the marker: {text:?}"
     );
     assert!(
@@ -615,13 +614,13 @@ fn user_prompt_is_a_padded_full_width_surface_strip() {
         rows.iter().all(|(line, _)| line
             .spans
             .iter()
-            .all(|s| s.style.bg == Some(Theme::USER_SURFACE()))),
-        "every user-strip cell must use the stronger user-strip background"
+            .all(|s| s.style.bg == Some(Theme::INPUT_BG()))),
+        "every user-strip cell must use the composer-kin background"
     );
 }
 
 #[test]
-fn user_surface_strip_fills_the_entire_terminal_row() {
+fn user_strip_fills_its_rows_without_bleeding_into_neighbors() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
     app.push_segment(Segment::User("full width".into()));
@@ -634,14 +633,21 @@ fn user_surface_strip_fills_the_entire_terminal_row() {
             (0..buffer.area.width).any(|x| buffer.cell((x, *y)).is_some_and(|c| c.symbol() == "›"))
         })
         .expect("user prefix rendered");
-    for y in [user_row - 1, user_row, user_row + 1] {
-        for x in 0..buffer.area.width {
-            assert_eq!(
-                buffer.cell((x, y)).unwrap().bg,
-                Theme::USER_SURFACE(),
-                "row {y}, column {x} must be filled"
-            );
-        }
+    for x in 0..buffer.area.width {
+        assert_eq!(
+            buffer.cell((x, user_row)).unwrap().bg,
+            Theme::INPUT_BG(),
+            "the strip row must be filled end to end"
+        );
+    }
+    // a compact strip has no padding rows: the band must not bleed into the
+    // rows above or below it
+    for y in [user_row - 1, user_row + 1] {
+        assert_ne!(
+            buffer.cell((0, y)).unwrap().bg,
+            Theme::INPUT_BG(),
+            "row {y} must not carry the user band"
+        );
     }
 }
 

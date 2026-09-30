@@ -3,12 +3,12 @@ source: src/tui/app/tests/settings.rs
 expression: s
 ---
 
-
  › Do many things.
-
 
    ▸ 12 calls · 3s
  All done!
+
+
 
 
 

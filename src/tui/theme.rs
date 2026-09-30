@@ -24,22 +24,18 @@ impl Theme {
         Color::Reset
     }
     /// Raised surface for flat modal panels (menus, completion popups):
-    /// one step above the terminal background, one below USER_SURFACE, two
-    /// below the selection fill. Dim-only separation merges on terminals
-    /// with a weak DIM — the surface guarantees depth everywhere.
+    /// one step above the terminal background — the composer band and user
+    /// strip (INPUT_BG) sit one above this, the selection fill two above.
+    /// Dim-only separation merges on terminals with a weak DIM — the surface
+    /// guarantees depth everywhere.
     #[allow(non_snake_case)]
     pub const fn MENU_BG() -> Color {
         Color::Indexed(233)
     }
-    /// User message band: Codex-style white-12%-over-dark (~#262626).
+    /// Composer band and user message strip: Codex-style ~#1c1c1c, one step
+    /// above the menu surface (233). Same family, quieter — your messages and
+    /// your input read as one surface, distinct from the menu chrome.
     /// A 256-color gray (not a custom RGB): present on every modern terminal.
-    #[allow(non_snake_case)]
-    pub const fn USER_SURFACE() -> Color {
-        Color::Indexed(235)
-    }
-    /// Composer band: one step darker than the user-message band (235),
-    /// one above the menu surface (233). Same family, quieter — the input
-    /// reads as kin to your messages without competing with them.
     #[allow(non_snake_case)]
     pub const fn INPUT_BG() -> Color {
         Color::Indexed(234)
@@ -155,7 +151,7 @@ impl Theme {
         Style::new().fg(Self::ACCENT()).add_modifier(Modifier::BOLD)
     }
     /// Selected menu row: subtle fill + bright text. Fill is a 256-color
-    /// gray like USER_SURFACE (no custom RGB, no transparency games), so
+    /// gray like INPUT_BG (no custom RGB, no transparency games), so
     /// the row reads as one band on every dark terminal.
     #[allow(non_snake_case)]
     pub const fn SELECTION_BG() -> Color {
