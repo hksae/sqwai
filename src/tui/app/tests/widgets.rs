@@ -235,8 +235,8 @@ fn provider_check_row_lights_green_or_red() {
         provider: "p".into(),
     });
     let row_style = |app: &App, needle: &str| {
-        app.menu_rows
-            .iter()
+        (0..app.menu_len())
+            .filter_map(|i| app.menu_row_at(i))
             .flat_map(|(line, _)| line.spans.iter())
             .find(|span| span.content.contains(needle))
             .map(|span| span.style)
@@ -260,7 +260,8 @@ fn provider_check_row_lights_green_or_red() {
         "failure lights red"
     );
 
-    let still_button = app.menu_rows.iter().any(|(line, action)| {
+    let still_button = (0..app.menu_len()).any(|i| {
+        let (line, action) = app.menu_row_at(i).expect("unified index space");
         line.spans.iter().any(|s| s.content.contains("connection"))
             && matches!(action, MenuAction::CheckProvider(_))
     });

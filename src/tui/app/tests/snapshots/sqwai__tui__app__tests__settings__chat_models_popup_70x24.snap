@@ -12,13 +12,13 @@ expression: s
 
     NAME                  ID                  CONTEXT  EFFORT
     m *                   test-model               1k  ef:off
+   ────────────────────────────────────────────────────────────────
     + add model
     · switch active model
     · check connection
     · edit provider
     · delete model
     · delete provider
-
 
 
 

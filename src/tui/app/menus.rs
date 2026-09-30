@@ -2632,13 +2632,13 @@ impl App {
                         ));
                     }
                 }
-                // user-owned models live under built-in providers too: the
-                // catalog never touches keys it did not ship
-                self.menu_rows.push(row(
+                // actions live in the sticky footer like the providers menu:
+                // always visible, navigable, never scrolled with the rows
+                self.menu_sticky_footer.push(row(
                     Line::from(vec![Span::styled(" + add model", Theme::FG())]),
                     MenuAction::AddModel(provider.clone()),
                 ));
-                self.menu_rows.push(row(
+                self.menu_sticky_footer.push(row(
                     Line::from(vec![Span::styled(" · switch active model", Theme::FG())]),
                     MenuAction::PickModelList(provider.clone()),
                 ));
@@ -2656,7 +2656,7 @@ impl App {
                 };
                 // keep narrow terminals usable: one line, bounded width
                 let shown: String = check_text.chars().take(64).collect();
-                self.menu_rows.push(row(
+                self.menu_sticky_footer.push(row(
                     Line::from(vec![Span::styled(shown, check_style)]),
                     MenuAction::CheckProvider(provider.clone()),
                 ));
@@ -2665,16 +2665,16 @@ impl App {
                 } else {
                     " · edit provider"
                 };
-                self.menu_rows.push(row(
+                self.menu_sticky_footer.push(row(
                     Line::from(vec![Span::styled(edit_label, Theme::FG())]),
                     MenuAction::EditProvider(provider.clone()),
                 ));
                 if !is_builtin {
-                    self.menu_rows.push(row(
+                    self.menu_sticky_footer.push(row(
                         Line::from(vec![Span::styled(" · delete model", Theme::ERR())]),
                         MenuAction::DeleteModelList(provider.clone()),
                     ));
-                    self.menu_rows.push(row(
+                    self.menu_sticky_footer.push(row(
                         Line::from(vec![Span::styled(" · delete provider", Theme::ERR())]),
                         MenuAction::DeleteProvider(provider.clone()),
                     ));

@@ -18,10 +18,13 @@ fn enter_confirms_provider_deletion() {
     app.open_menu(Menu::Models {
         provider: "p".into(),
     });
-    let del_idx = app
-        .menu_rows
-        .iter()
-        .position(|(_, a)| matches!(a, MenuAction::DeleteProvider(_)))
+    let del_idx = (0..app.menu_len())
+        .position(|i| {
+            matches!(
+                app.menu_row_at(i).map(|(_, a)| a),
+                Some(MenuAction::DeleteProvider(_))
+            )
+        })
         .expect("delete provider row");
     app.menu_sel = del_idx;
     app.menu_activate();
