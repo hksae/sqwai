@@ -195,6 +195,14 @@ type BuiltinUpdateRx = (
     std::sync::mpsc::Receiver<Result<Option<crate::config::BuiltinCatalog>, String>>,
 );
 
+/// State of a `/test churn` fake turn: how many synthetic calls were
+/// emitted, when the last one went out, and which call is still open.
+struct TestChurn {
+    n: usize,
+    last: Instant,
+    open: Option<String>,
+}
+
 pub struct App {
     cfg: Config,
     model_cfg: ModelConfig,
@@ -273,6 +281,10 @@ pub struct App {
     pending_reveal: String,
     thinking_open: bool,
     thinking_idx: Option<usize>,
+    /// `/test churn` fake turn: synthetic tool rows through the real
+    /// handlers (zero tokens, works offline). While `Some`, the frame
+    /// loop emits a row every few seconds; Esc stops it.
+    test_churn: Option<TestChurn>,
     mode: Mode,
     /// true while the current session has no user turns yet: a fresh,
     /// unsaved scratch session (never persisted until the first message)
@@ -837,6 +849,7 @@ impl App {
             streaming: false,
             aborted: false,
             agent: None,
+            test_churn: None,
             why_rx: None,
             todos: Vec::new(),
             subagents: Vec::new(),
@@ -1398,6 +1411,11 @@ impl App {
                 // loop iteration: bursts would otherwise fast-forward it
                 self.spinner_tick = (self.tick_origin.elapsed().as_millis() / 50) as usize;
                 self.dirty = true;
+            }
+            // fake churn turn emits its synthetic rows from here (streaming
+            // keeps `animating` true, so this runs every frame for free)
+            if self.test_churn.is_some() {
+                self.tick_test_churn();
             }
             if self.dirty && last_build.elapsed() >= crate::tui::presenter::MIN_PRESENT_INTERVAL {
                 let area =
@@ -2528,6 +2546,78 @@ impl App {
         self.dirty = true;
     }
 
+    /// `/test churn`: a fake infinite turn for exercising the queue row,
+    /// the footer and folding with no provider and no tokens. Synthetic
+    /// tool rows go through the real handlers, so the transcript cannot
+    /// tell them apart; Esc (or `/test churn` again) stops it.
+    fn start_test_churn(&mut self) {
+        if self.test_churn.is_some() {
+            self.stop_test_churn();
+            return;
+        }
+        if self.streaming {
+            self.show_busy_status();
+            return;
+        }
+        self.streaming = true;
+        self.turn_started = Some(Instant::now());
+        self.live_group_collapsed = false;
+        self.test_churn = Some(TestChurn {
+            n: 0,
+            last: Instant::now(),
+            open: None,
+        });
+        self.status(
+            "test churn running — type to queue, esc stops",
+            StatusKind::Info,
+        );
+    }
+
+    /// one synthetic call every few seconds, called from the frame loop.
+    /// Closes the previous fake row before opening the next, like a model
+    /// that keeps working.
+    fn tick_test_churn(&mut self) {
+        const NAMES: [(&str, &str); 3] = [
+            ("bash", "sleep 30"),
+            ("read", "src/main.rs"),
+            ("grep", "fn handle"),
+        ];
+        let (n, open) = match &self.test_churn {
+            Some(ch) if ch.last.elapsed() >= std::time::Duration::from_millis(2500) => {
+                (ch.n, ch.open.clone())
+            }
+            _ => return,
+        };
+        if let Some(name) = open {
+            self.handle_tool_notice(name, String::new(), true, None, None);
+        }
+        let (name, args) = NAMES[n % NAMES.len()];
+        self.handle_tool_start(name.into(), args.into(), None);
+        if let Some(ch) = self.test_churn.as_mut() {
+            ch.n = n + 1;
+            ch.open = Some(name.into());
+            ch.last = Instant::now();
+        }
+        self.dirty = true;
+    }
+
+    /// Esc (or a second `/test churn`): close the open fake row, fold the
+    /// turn shut like a finished one, stop. Queued follow-ups stay queued.
+    fn stop_test_churn(&mut self) {
+        let Some(ch) = self.test_churn.take() else {
+            return;
+        };
+        if let Some(name) = ch.open {
+            self.handle_tool_notice(name, String::new(), true, None, None);
+        }
+        self.streaming = false;
+        self.finalize_activity_group();
+        self.status(
+            &format!("test churn stopped after {} fake calls", ch.n),
+            StatusKind::Info,
+        );
+    }
+
     /// `/compact`: run the compaction policy over the stored transcript.
     /// Reuses the agent plumbing so the summary request streams like any other
     /// turn and can be aborted with esc.
@@ -2922,8 +3012,10 @@ impl App {
                     self.open_menu(Menu::TestAnims);
                 } else if rest.split_whitespace().nth(1) == Some("art") {
                     self.open_menu(Menu::TestArt);
+                } else if rest.split_whitespace().nth(1) == Some("churn") {
+                    self.start_test_churn();
                 } else {
-                    self.status("/test takes: animations, art", StatusKind::Warn);
+                    self.status("/test takes: animations, art, churn", StatusKind::Warn);
                 }
             }
             "/debug" => self.open_menu(Menu::Debug),

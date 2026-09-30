@@ -46,6 +46,7 @@ fn status_bar_fits_and_keeps_click_targets_inside_a_wide_directory() {
 
 #[test]
 fn notice_row_fits_width_and_queue_wins() {
+    #[allow(clippy::type_complexity)]
     let setups: [(fn(&mut App), &str); 3] = [
         (
             |app: &mut App| app.last_checkpoint = Some("edit src/main.rs".into()),

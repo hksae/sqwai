@@ -389,7 +389,11 @@ impl App {
                                         self.agent.as_ref().is_some_and(|a| a.cancel_requested())
                                     ),
                                 );
-                                if self.tool_running() {
+                                if self.test_churn.is_some() {
+                                    // fake turn, fake stop: there is no agent
+                                    // handle to cancel through
+                                    self.stop_test_churn();
+                                } else if self.tool_running() {
                                     // §3.7 / §7 S: a tool is mid-flight —
                                     // cancel that call cooperatively (it gets
                                     // a normal cancelled tool_result) rather

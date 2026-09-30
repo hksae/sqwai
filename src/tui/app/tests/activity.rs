@@ -154,6 +154,44 @@ fn tool_row_name_is_quiet_gray_and_call_caps_at_half_width() {
 }
 
 #[test]
+fn test_churn_runs_a_fake_turn_until_esc() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.start_test_churn();
+    assert!(app.streaming, "churn streams like a real turn");
+    // cadence is 2.5s: an early tick emits nothing
+    app.tick_test_churn();
+    assert!(app.segments.is_empty(), "no instant rows");
+    fn backdate(app: &mut App) {
+        app.test_churn.as_mut().expect("churn").last =
+            std::time::Instant::now() - std::time::Duration::from_secs(10);
+    }
+    backdate(&mut app);
+    app.tick_test_churn();
+    assert_eq!(app.segments.len(), 1, "first fake tool opens");
+    backdate(&mut app);
+    app.tick_test_churn();
+    assert_eq!(app.segments.len(), 2, "previous closes, next opens");
+    // while it runs, typing queues instead of submitting
+    app.input = App::fresh_input("later".into());
+    app.submit();
+    assert_eq!(app.pending_queue, vec!["later".to_string()]);
+    // Esc stops the fake turn and folds it shut
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(Event::Key(KeyEvent::new(
+        KeyCode::Esc,
+        KeyModifiers::empty(),
+    )))
+    .unwrap();
+    app.poll_input(&rx).unwrap();
+    assert!(!app.streaming, "churn stopped");
+    assert!(app.test_churn.is_none());
+    assert_eq!(app.activity_groups.len(), 1, "turn folded");
+    assert!(!app.activity_groups[0].expanded);
+    assert_eq!(app.activity_groups[0].calls, 2, "both fake calls counted");
+}
+
+#[test]
 fn thinking_segments_stay_in_event_order() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     // Simulate an agent stream: think, two tools, think again.

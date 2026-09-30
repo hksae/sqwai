@@ -61,7 +61,7 @@ pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
         ],
     ),
     ("/undo", &["step"]),
-    ("/test", &["animations", "art"]),
+    ("/test", &["animations", "art", "churn"]),
     ("/providers", &["update"]),
     ("/constraints", &["add", "remove"]),
     ("/mode", &["plan", "act"]),

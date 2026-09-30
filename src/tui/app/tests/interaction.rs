@@ -1060,7 +1060,11 @@ fn test_animations_gated_behind_experimental_flag() {
     app.input = App::fresh_input("/test ".into());
     assert_eq!(
         app.popup_items(),
-        vec!["/test animations".to_string(), "/test art".to_string()]
+        vec![
+            "/test animations".to_string(),
+            "/test art".to_string(),
+            "/test churn".to_string()
+        ]
     );
     app.command("test animations");
     assert!(matches!(app.cur_menu(), Some(Menu::TestAnims)));
