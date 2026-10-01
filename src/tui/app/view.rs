@@ -2013,20 +2013,20 @@ impl App {
         // turns are frozen in `activity_groups`; the running turn is recomputed
         // here, so its footer counts grow while events stream in. The running
         // turn's group sits at index `activity_groups.len()` — which is exactly
-        // where finalize_activity_group will store it.
-        let mut groups = self.activity_groups.clone();
-        if self.streaming
+        // where finalize_activity_group will store it. It is appended
+        // virtually (borrowed per lookup), never cloned into a per-frame list.
+        let live_group = if self.streaming
             && let Some(run) = self.trailing_work_run()
         {
             let mut live = self.build_activity_group(run);
             live.expanded = !self.live_group_collapsed;
-            groups.push(live);
+            Some(live)
         } else if self.streaming && self.awaiting_first_token() {
             // nothing visible yet: an empty live group renders just the
             // shimmering working line under the user row, until the first
             // token (or a thought, or a call) gives the turn real content
             let tail = self.segments.len();
-            groups.push(ActivityGroup {
+            Some(ActivityGroup {
                 seg_start: tail,
                 seg_end: tail,
                 calls: 0,
@@ -2036,8 +2036,12 @@ impl App {
                 rejected: 0,
                 expanded: false,
                 turn_user: None,
-            });
-        }
+            })
+        } else {
+            None
+        };
+        let live_ref = live_group.as_ref();
+        let group_count = self.activity_groups.len() + usize::from(live_ref.is_some());
         let mut gi = 0usize; // next group waiting to be opened
         let mut hide_until = 0usize; // collapsed group: skip [seg_start, seg_end)
         let mut inside_until = 0usize; // expanded group: indent [seg_start, seg_end)
@@ -2048,9 +2052,9 @@ impl App {
             // the scan reaches seg_end every row of the group is emitted.
             // A group running to the tail emits after the loop instead.
             if let Some(fgi) = pending_footer
-                && idx == groups[fgi].seg_end
+                && let Some(g) = self.activity_groups.get(fgi).or(live_ref)
+                && idx == g.seg_end
             {
-                let g = &groups[fgi];
                 // the running turn's group (if any) sits past the finished
                 // ones: only its "Working" word shimmers, the rest is static
                 let live = self.streaming && fgi == self.activity_groups.len();
@@ -2064,8 +2068,10 @@ impl App {
                 );
                 pending_footer = None;
             }
-            if gi < groups.len() && idx == groups[gi].seg_start {
-                let g = &groups[gi];
+            if gi < group_count
+                && let Some(g) = self.activity_groups.get(gi).or(live_ref)
+                && idx == g.seg_start
+            {
                 if !in_group {
                     struct_row!(blank(), None);
                     in_group = true;
@@ -2191,8 +2197,9 @@ impl App {
         }
         // a group running to the tail never meets its seg_end inside the
         // loop: its footer closes the transcript instead.
-        if let Some(fgi) = pending_footer {
-            let g = &groups[fgi];
+        if let Some(fgi) = pending_footer
+            && let Some(g) = self.activity_groups.get(fgi).or(live_ref)
+        {
             let live = self.streaming && fgi == self.activity_groups.len();
             let tool = live
                 .then(|| live_tool_name(&self.segments, g.seg_start, g.seg_end))
@@ -2201,17 +2208,15 @@ impl App {
                 activity_footer_line(g, live.then_some(self.spinner_tick), tool.as_deref()),
                 Some(GROUP_BASE + fgi)
             );
-        } else if self.streaming
-            && groups.len() == self.activity_groups.len() + 1
-            && groups[self.activity_groups.len()].seg_start == self.segments.len()
+        } else if let Some(waiting) = live_ref
+            && waiting.seg_start == self.segments.len()
         {
             // the waiting turn's empty group never opens inside the loop (its
             // range sits past the tail), so its bare working line goes here
-            let fgi = self.activity_groups.len();
             struct_row!(blank(), None);
             struct_row!(
-                activity_footer_line(&groups[fgi], Some(self.spinner_tick), None),
-                Some(GROUP_BASE + fgi)
+                activity_footer_line(waiting, Some(self.spinner_tick), None),
+                Some(GROUP_BASE + self.activity_groups.len())
             );
         }
         let _ = struct_ord;
