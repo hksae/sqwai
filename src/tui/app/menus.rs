@@ -1855,15 +1855,12 @@ impl App {
                     }
                 }
                 self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        " + add server".to_string(),
-                        Theme::ACCENT_SOFT(),
-                    )]),
+                    Line::from(vec![Span::styled("  add server".to_string(), Theme::FG())]),
                     MenuAction::AddMcpServer,
                 ));
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled(
-                        " · delete server".to_string(),
+                        "  delete server".to_string(),
                         Theme::ERR(),
                     )]),
                     MenuAction::DeleteMcpServerList,
@@ -1941,15 +1938,12 @@ impl App {
                     }
                 }
                 self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        " + add server".to_string(),
-                        Theme::ACCENT_SOFT(),
-                    )]),
+                    Line::from(vec![Span::styled("  add server".to_string(), Theme::FG())]),
                     MenuAction::AddLspServer,
                 ));
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled(
-                        " · delete server".to_string(),
+                        "  delete server".to_string(),
                         Theme::ERR(),
                     )]),
                     MenuAction::DeleteLspServerList,
@@ -2031,14 +2025,14 @@ impl App {
                 }
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled(
-                        " + add directory".to_string(),
-                        Theme::ACCENT_SOFT(),
+                        "  add directory".to_string(),
+                        Theme::FG(),
                     )]),
                     MenuAction::AddListItem(ListSection::SkillsDirs),
                 ));
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled(
-                        " · delete directory".to_string(),
+                        "  delete directory".to_string(),
                         Theme::ERR(),
                     )]),
                     MenuAction::DeleteListItems(ListSection::SkillsDirs),
@@ -2198,14 +2192,11 @@ impl App {
                             .push(row(Line::from(format!("  {item}")), MenuAction::None));
                     }
                     self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(
-                            " + add".to_string(),
-                            Theme::ACCENT_SOFT(),
-                        )]),
+                        Line::from(vec![Span::styled("  add".to_string(), Theme::FG())]),
                         MenuAction::AddListItem(section),
                     ));
                     self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(" · delete".to_string(), Theme::ERR())]),
+                        Line::from(vec![Span::styled("  delete".to_string(), Theme::ERR())]),
                         MenuAction::DeleteListItems(section),
                     ));
                 }
@@ -2376,7 +2367,7 @@ impl App {
                     .collect();
                 if !self.startup {
                     self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(" + new session", Theme::FG())]),
+                        Line::from(vec![Span::styled("  new session", Theme::FG())]),
                         MenuAction::NewSession,
                     ));
                 }
@@ -2557,12 +2548,12 @@ impl App {
                 // actions live in the sticky footer: always visible,
                 // navigable, never scrolled with the provider rows
                 self.menu_sticky_footer.push(row(
-                    Line::from(vec![Span::styled(" + add provider", Theme::FG())]),
+                    Line::from(vec![Span::styled("  add provider", Theme::FG())]),
                     MenuAction::AddProvider,
                 ));
                 self.menu_sticky_footer.push(row(
                     Line::from(vec![Span::styled(
-                        " · update built-in providers",
+                        "  update built-in providers",
                         Theme::FG(),
                     )]),
                     MenuAction::UpdateBuiltins,
@@ -2629,23 +2620,23 @@ impl App {
                 // actions live in the sticky footer like the providers menu:
                 // always visible, navigable, never scrolled with the rows
                 self.menu_sticky_footer.push(row(
-                    Line::from(vec![Span::styled(" + add model", Theme::FG())]),
+                    Line::from(vec![Span::styled("  add model", Theme::FG())]),
                     MenuAction::AddModel(provider.clone()),
                 ));
                 self.menu_sticky_footer.push(row(
-                    Line::from(vec![Span::styled(" · switch active model", Theme::FG())]),
+                    Line::from(vec![Span::styled("  switch active model", Theme::FG())]),
                     MenuAction::PickModelList(provider.clone()),
                 ));
                 // Connection probe: lights green with the detail on success,
                 // red with the trimmed reason on failure.
                 let (check_text, check_style) = match self.provider_checks.get(provider.as_str()) {
-                    None => (" · check connection".to_string(), Theme::FG().into()),
-                    Some(ProviderCheck::Checking) => (" · checking…".to_string(), Theme::dim()),
+                    None => ("  check connection".to_string(), Theme::FG().into()),
+                    Some(ProviderCheck::Checking) => ("  checking…".to_string(), Theme::dim()),
                     Some(ProviderCheck::Ok(detail)) => {
-                        (format!(" · connection ok ({detail})"), Theme::ok())
+                        (format!("  connection ok ({detail})"), Theme::ok())
                     }
                     Some(ProviderCheck::Err(reason)) => {
-                        (format!(" · connection failed: {reason}"), Theme::err())
+                        (format!("  connection failed: {reason}"), Theme::err())
                     }
                 };
                 // keep narrow terminals usable: one line, bounded width
@@ -2655,9 +2646,9 @@ impl App {
                     MenuAction::CheckProvider(provider.clone()),
                 ));
                 let edit_label = if is_builtin {
-                    " · set api key"
+                    "  set api key"
                 } else {
-                    " · edit provider"
+                    "  edit provider"
                 };
                 self.menu_sticky_footer.push(row(
                     Line::from(vec![Span::styled(edit_label, Theme::FG())]),
@@ -2665,11 +2656,11 @@ impl App {
                 ));
                 if !is_builtin {
                     self.menu_sticky_footer.push(row(
-                        Line::from(vec![Span::styled(" · delete model", Theme::ERR())]),
+                        Line::from(vec![Span::styled("  delete model", Theme::ERR())]),
                         MenuAction::DeleteModelList(provider.clone()),
                     ));
                     self.menu_sticky_footer.push(row(
-                        Line::from(vec![Span::styled(" · delete provider", Theme::ERR())]),
+                        Line::from(vec![Span::styled("  delete provider", Theme::ERR())]),
                         MenuAction::DeleteProvider(provider.clone()),
                     ));
                 }

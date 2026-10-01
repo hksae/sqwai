@@ -935,7 +935,8 @@ fn providers_footer_stays_pinned_while_body_scrolls() {
         .iter()
         .map(|c| c.symbol())
         .collect();
-    assert!(text.contains("+ add provider"), "footer must stay");
+    assert!(text.contains("add provider"), "footer must stay");
+    assert!(!text.contains("+ add"), "no marker prefix: {text}");
     assert!(
         text.contains("update built-in providers"),
         "footer must stay"
