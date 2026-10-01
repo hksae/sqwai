@@ -119,6 +119,11 @@ impl Highlighter {
 
     /// Highlight a code block; falls back to plain text for unknown languages.
     pub fn highlight_code(&self, code: &str, lang: Option<&str>) -> Vec<Line<'static>> {
+        // syntect cost explodes on huge inputs (a pasted bundle, a minified
+        // single-liner): bound it. Past the caps the text stays fully
+        // visible, just uncolored — never truncated, never dropped.
+        const MAX_HIGHLIGHT_LINES: usize = 400;
+        const MAX_HIGHLIGHT_COLS: usize = 2000;
         let syntax = lang
             .and_then(|l| {
                 self.ps
@@ -128,7 +133,23 @@ impl Highlighter {
             .unwrap_or_else(|| self.ps.find_syntax_plain_text());
         let mut hl = HighlightLines::new(syntax, self.theme());
         let mut out = Vec::new();
-        for line in syntect::util::LinesWithEndings::from(code) {
+        // skipping a line would desync the highlighter state for every
+        // line after it (multiline strings/comments), so the first skip
+        // retires highlighting for the rest of the block
+        let mut plain_rest = false;
+        for (i, line) in syntect::util::LinesWithEndings::from(code).enumerate() {
+            if !plain_rest
+                && (i >= MAX_HIGHLIGHT_LINES || line.chars().count() > MAX_HIGHLIGHT_COLS)
+            {
+                plain_rest = true;
+            }
+            if plain_rest {
+                out.push(Line::from(Span::styled(
+                    line.trim_end_matches('\n').to_string(),
+                    base_style(),
+                )));
+                continue;
+            }
             let Ok(regions) = hl.highlight_line(line, self.ps) else {
                 // never drop source text on a highlighter error: fall back
                 // to the plain line so failures stay visible, not silent
@@ -1704,6 +1725,41 @@ mod tests {
             hl.highlight_wrapped(&format!("let x{i} = {i};\n"), Some("rust"), 80);
         }
         assert_eq!(hl.cache_len(), 32);
+    }
+
+    #[test]
+    fn highlight_caps_lines_and_width_without_dropping_text() {
+        let hl = Highlighter::new();
+        // past 400 lines the block stays fully visible, just uncolored
+        let code = "let x = 1;\n".repeat(500);
+        let t0 = std::time::Instant::now();
+        let lines = hl.highlight_code(&code, Some("rust"));
+        assert_eq!(lines.len(), 500, "1:1 with input lines");
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "bounded: {:?}",
+            t0.elapsed()
+        );
+        let colored = lines[..400]
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.style.fg != Some(Color::Gray)));
+        assert!(colored, "head stays highlighted");
+        assert!(
+            lines[400..]
+                .iter()
+                .all(|l| l.spans.iter().all(|s| s.style.fg == Some(Color::Gray))),
+            "tail falls back to plain"
+        );
+        // a single huge line renders plain, never dropped
+        let wide = "x".repeat(3000) + "\n";
+        let lines = hl.highlight_code(&wide, Some("rust"));
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text.len(), 3000, "full text survives");
+        assert!(
+            lines[0].spans.iter().all(|s| s.style.fg == Some(Color::Gray)),
+            "huge line is plain"
+        );
     }
 
     #[test]
