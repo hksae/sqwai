@@ -2295,6 +2295,19 @@ impl App {
             }
         }
         self.seg_cache.retain(|id, _| live.contains(id));
+        // Long sessions cache every transcript segment forever, and rows own
+        // their strings — a multi-hour chat accumulates them without bound.
+        // Evict the oldest main-transcript entries past the cap: a scroll up
+        // re-renders them on demand (correct, just slower). Subagent chats
+        // are bounded by their own lifetime and keep their entries.
+        const SEG_CACHE_CAP: usize = 2000;
+        if self.seg_cache.len() > SEG_CACHE_CAP {
+            let keep_from = self.seg_meta.len().saturating_sub(SEG_CACHE_CAP);
+            let evict: Vec<u64> = self.seg_meta[..keep_from].iter().map(|m| m.id).collect();
+            for id in evict {
+                self.seg_cache.remove(&id);
+            }
+        }
         self.live_md.retain(|id| live_answers.contains(&id));
     }
 

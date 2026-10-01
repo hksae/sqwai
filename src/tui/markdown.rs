@@ -428,7 +428,13 @@ impl LiveRender {
     }
 
     /// Render `text` at `width`, reusing the cached prefix lines for `id`.
-    pub fn lines(&mut self, id: u64, text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
+    pub fn lines(
+        &mut self,
+        id: u64,
+        text: &str,
+        width: u16,
+        hl: &Highlighter,
+    ) -> Vec<Line<'static>> {
         let entry = self.per_id.get(&id);
         let prefix_ok = match entry {
             Some(prefix) => {
@@ -439,9 +445,7 @@ impl LiveRender {
             }
             None => false,
         };
-        if prefix_ok
-            && let Some(cut) = safe_split(text, self.per_id[&id].cut)
-        {
+        if prefix_ok && let Some(cut) = safe_split(text, self.per_id[&id].cut) {
             let prefix = self.per_id.get_mut(&id).expect("prefix_ok above");
             let mut lines = std::mem::take(&mut prefix.lines);
             let mid = render(&text[prefix.cut..cut], width, hl);
@@ -1717,7 +1721,8 @@ mod tests {
             let incremental = live.lines(7, &text, 60, &hl);
             let full = render(&text, 60, &hl);
             assert_eq!(
-                incremental, full,
+                incremental,
+                full,
                 "mismatch after step {step} at {} bytes",
                 text.len()
             );
@@ -1761,7 +1766,8 @@ mod tests {
 
     #[test]
     fn safe_split_never_lands_inside_fence_or_math() {
-        let doc = "a\n\n```rust\nx\n\ny\n```\n\n| t | u |\n|---|---|\n| v | w |\n\n$$\nk\n\nm\n$$\n\nend";
+        let doc =
+            "a\n\n```rust\nx\n\ny\n```\n\n| t | u |\n|---|---|\n| v | w |\n\n$$\nk\n\nm\n$$\n\nend";
         let hl = Highlighter::new();
         let mut live = LiveRender::new();
         // stream byte-by-byte: every intermediate cut must keep the split
