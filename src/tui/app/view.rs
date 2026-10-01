@@ -1357,6 +1357,41 @@ impl App {
     /// Render one segment. `segs` is the owning transcript (main chat or one
     /// subagent's), `interactive` enables live ask/proposal highlight — only
     /// the main view is interactive; subagent rows always render inactive.
+    /// Segment source lines; the live assistant answer takes the incremental
+    /// path (its completed prefix is parsed once — see markdown::LiveRender),
+    /// everything else goes through the plain renderer.
+    fn render_segment_lines(
+        &mut self,
+        id: u64,
+        idx: usize,
+        w: u16,
+        interactive: bool,
+    ) -> Vec<(Line<'static>, Option<usize>)> {
+        let live = matches!(
+            self.segments.get(idx),
+            Some(Segment::Assistant { live: true, .. })
+        );
+        if !live {
+            return self.render_segment(&self.segments, idx, w, interactive);
+        }
+        // disjoint field borrows: the answer text is read while the prefix
+        // store is updated
+        let Self {
+            segments,
+            live_md,
+            hl,
+            ..
+        } = self;
+        match &segments[idx] {
+            Segment::Assistant { text, .. } => live_md
+                .lines(id, text, w, hl)
+                .into_iter()
+                .map(|line| (line, Some(idx)))
+                .collect(),
+            _ => Vec::new(), // the live check above pins this match
+        }
+    }
+
     pub(super) fn render_segment(
         &self,
         segs: &[Segment],
@@ -2176,7 +2211,7 @@ impl App {
                 continue;
             }
             self.test_renders += 1;
-            let lines = self.render_segment(&self.segments, idx, render_w, true);
+            let lines = self.render_segment_lines(meta.id, idx, render_w, true);
             let chunk: Vec<(Line<'static>, Option<usize>)> = lines
                 .into_iter()
                 .map(|(line, tag)| (indent_line(line, indent), tag))
@@ -2232,15 +2267,35 @@ impl App {
     /// Forget wrapped rows whose segment id is gone from every transcript.
     fn prune_seg_cache(&mut self) {
         let mut live = std::collections::HashSet::new();
-        for meta in &self.seg_meta {
+        // ids whose segment is still a live assistant answer: those are the
+        // only ones keeping an incremental prefix store
+        let mut live_answers = std::collections::HashSet::new();
+        for (idx, meta) in self.seg_meta.iter().enumerate() {
             live.insert(meta.id);
+            if matches!(
+                self.segments.get(idx),
+                Some(Segment::Assistant { live: true, .. })
+            ) {
+                live_answers.insert(meta.id);
+            }
         }
         for chat_meta in self.subagent_meta.values() {
             for meta in chat_meta {
                 live.insert(meta.id);
             }
         }
+        for (chat_id, chat) in &self.subagent_chats {
+            let metas = self.subagent_meta.get(chat_id);
+            for (idx, seg) in chat.iter().enumerate() {
+                if matches!(seg, Segment::Assistant { live: true, .. })
+                    && let Some(meta) = metas.and_then(|m| m.get(idx))
+                {
+                    live_answers.insert(meta.id);
+                }
+            }
+        }
         self.seg_cache.retain(|id, _| live.contains(id));
+        self.live_md.retain(|id| live_answers.contains(&id));
     }
 
     /// Cached rows for one chunk tag, for assembly paths whose fresh rows
@@ -3043,7 +3098,30 @@ impl App {
                 continue;
             }
             self.test_renders += 1;
-            let lines = {
+            let live = matches!(
+                self.subagent_chats.get(&id).and_then(|chat| chat.get(idx)),
+                Some(Segment::Assistant { live: true, .. })
+            );
+            let lines = if live {
+                // disjoint field borrows, same shape as the main transcript
+                // path: the child answer text is read while the prefix store
+                // is updated
+                let Self {
+                    subagent_chats,
+                    live_md,
+                    hl,
+                    ..
+                } = self;
+                let chat = subagent_chats.get(&id).unwrap();
+                match &chat[idx] {
+                    Segment::Assistant { text, .. } => live_md
+                        .lines(mid, text, render_w, hl)
+                        .into_iter()
+                        .map(|line| (line, Some(idx)))
+                        .collect(),
+                    _ => Vec::new(), // the live check above pins this match
+                }
+            } else {
                 // immutable borrow ends before the cache insert below
                 let chat = self.subagent_chats.get(&id).unwrap();
                 self.render_segment(chat, idx, render_w, false)

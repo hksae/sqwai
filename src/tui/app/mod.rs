@@ -350,6 +350,8 @@ pub struct App {
     /// appends and stream updates never invalidate other segments' rows.
     /// Entry holds (revision, width, content key, wrapped rows).
     seg_cache: std::collections::HashMap<u64, view::SegCacheEntry>,
+    /// incremental parser state for the live assistant answer (markdown.rs)
+    live_md: crate::tui::markdown::LiveRender,
     /// identity + revision per segment, aligned 1:1 with `segments`.
     /// Maintained ONLY through the push/insert/remove/set/clear/touch
     /// helpers below so the render cache survives appends and stream updates
@@ -902,6 +904,7 @@ impl App {
             last_chat: Rect::default(),
             last_input: Rect::default(),
             seg_cache: std::collections::HashMap::new(),
+            live_md: crate::tui::markdown::LiveRender::new(),
             seg_meta: Vec::new(),
             next_seg_id: 1,
             theme_rev: 0,

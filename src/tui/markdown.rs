@@ -396,6 +396,127 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
     out.into_iter().map(sanitize_line).collect()
 }
 
+/// Incremental renderer for the one segment that repaints while it renders:
+/// the live assistant answer. The completed part of the text is parsed once
+/// and kept as unwrapped lines; each reveal re-parses only the tail past the
+/// last safe split point. `lines` always returns exactly what
+/// [`render`] returns for the same text — a guard that fails falls back to a
+/// full parse and re-establishes the prefix, never to a stale visual.
+pub struct LiveRender {
+    per_id: std::collections::HashMap<u64, LivePrefix>,
+}
+
+/// Reusable prefix for one live segment: unwrapped lines for `text[..cut]`.
+struct LivePrefix {
+    cut: usize,
+    hash: [u8; 32],
+    width: u16,
+    lines: Vec<Line<'static>>,
+}
+
+impl LiveRender {
+    pub fn new() -> Self {
+        Self {
+            per_id: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Forget entries whose segment no longer renders live (turn finished,
+    /// segment removed).
+    pub fn retain(&mut self, keep: impl Fn(u64) -> bool) {
+        self.per_id.retain(|id, _| keep(*id));
+    }
+
+    /// Render `text` at `width`, reusing the cached prefix lines for `id`.
+    pub fn lines(&mut self, id: u64, text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
+        let entry = self.per_id.get(&id);
+        let prefix_ok = match entry {
+            Some(prefix) => {
+                prefix.width == width
+                    && prefix.cut > 0
+                    && text.len() > prefix.cut
+                    && blake3::hash(&text.as_bytes()[..prefix.cut]).as_bytes() == &prefix.hash
+            }
+            None => false,
+        };
+        if prefix_ok
+            && let Some(cut) = safe_split(text, self.per_id[&id].cut)
+        {
+            let prefix = self.per_id.get_mut(&id).expect("prefix_ok above");
+            let mut lines = std::mem::take(&mut prefix.lines);
+            let mid = render(&text[prefix.cut..cut], width, hl);
+            let tail = render(&text[cut..], width, hl);
+            lines.extend(mid);
+            // the grown prefix is what the next reveal reuses; `tail` rides
+            // on the output only — it is still growing
+            prefix.cut = cut;
+            prefix.hash = *blake3::hash(&text.as_bytes()[..cut]).as_bytes();
+            prefix.width = width;
+            prefix.lines = lines.clone();
+            lines.extend(tail);
+            return lines;
+        }
+        let lines = render(text, width, hl);
+        match safe_split(text, 0) {
+            Some(cut) if cut > 0 => {
+                self.per_id.insert(
+                    id,
+                    LivePrefix {
+                        cut,
+                        hash: *blake3::hash(&text.as_bytes()[..cut]).as_bytes(),
+                        width,
+                        lines: render(&text[..cut], width, hl),
+                    },
+                );
+            }
+            _ => {
+                self.per_id.remove(&id);
+            }
+        }
+        lines
+    }
+}
+
+/// Byte offset of the last line start past `from` where splitting keeps
+/// `render(a) · render(b)` identical to `render(a + b)`: no fenced code or
+/// `$$` math block may be open (their state is the only cross-line renderer
+/// state), the line itself must be non-blank (blank runs collapse), and the
+/// previous and this line may not both carry a pipe (a GFM table never
+/// straddles the cut). `None` when no such boundary exists.
+fn safe_split(text: &str, from: usize) -> Option<usize> {
+    let mut in_code = false;
+    let mut in_math = false;
+    let mut best: Option<usize> = None;
+    let mut prev_pipe = false;
+    let mut offset = 0usize;
+    for line in text.split('\n') {
+        let start = offset;
+        offset += line.len() + 1;
+        let lead = line.trim_start();
+        if start > from && !in_code && !in_math && !lead.is_empty() && !prev_pipe {
+            best = Some(start);
+        }
+        // render's own construct order: a fence line toggles code only
+        // outside math (math consumes lines wholesale), `$$` opens math only
+        // outside code, and a math block closes on `line.trim() == "$$"`
+        if in_math {
+            if line.trim() == "$$" {
+                in_math = false;
+            }
+        } else if in_code {
+            if lead.starts_with("```") {
+                in_code = false;
+            }
+        } else if lead == "$$" {
+            in_math = true;
+        } else if lead.starts_with("```") {
+            in_code = true;
+        }
+        prev_pipe = lead.contains('|');
+    }
+    best
+}
+
 fn is_hr(s: &str) -> bool {
     let compact: Vec<char> = s.chars().filter(|c| !c.is_whitespace()).collect();
     compact.len() >= 3
@@ -1580,6 +1701,82 @@ fn cells_to_line(mut cells: Vec<(Style, char)>, fallback: Style) -> Line<'static
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Streams `doc` into the incremental renderer in small byte chunks and
+    /// requires every step to match a full parse of the same text. This is
+    /// the safety net for `safe_split`: any state the split fails to carry
+    /// (fence, math, table, blank collapse) shows up as a mismatch mid-stream.
+    fn assert_incremental_matches_full(doc: &str) {
+        let hl = Highlighter::new();
+        let mut live = LiveRender::new();
+        let mut text = String::new();
+        let bytes: Vec<&[u8]> = doc.as_bytes().chunks(7).collect();
+        for (step, chunk) in bytes.iter().enumerate() {
+            // ASCII docs only in this test: a chunk never splits a code point
+            text.push_str(std::str::from_utf8(chunk).unwrap());
+            let incremental = live.lines(7, &text, 60, &hl);
+            let full = render(&text, 60, &hl);
+            assert_eq!(
+                incremental, full,
+                "mismatch after step {step} at {} bytes",
+                text.len()
+            );
+        }
+        // replacing the whole answer (finish_turn backfill) must fall back
+        // cleanly: guards fail, full parse, prefix re-established
+        let replaced = format!("{doc}\n\nAuthoritative tail.");
+        let incremental = live.lines(7, &replaced, 60, &hl);
+        assert_eq!(incremental, render(&replaced, 60, &hl));
+    }
+
+    #[test]
+    fn incremental_matches_full_prose_and_code() {
+        assert_incremental_matches_full(
+            "Intro paragraph with **bold** and `inline`.\n\n## Heading two\n\n\
+             A longer paragraph that keeps growing well past one visual row so the\n\
+             wrap has real work to do.\n\n```rust\nfn main() {\n    let x = 1;\n    let y = 2;\n}\n```\n\n\
+             Fence closed, prose again, and a code span `x` with a very long\ncontinuation line.",
+        );
+    }
+
+    #[test]
+    fn incremental_matches_full_constructs() {
+        assert_incremental_matches_full(
+            "| a | b |\n|---|---|\n| 1 | 2 |\n\n$$\nx = y + 1\n$$\n\n> quoted line\n> more quote\n\n\
+             - one\n- two\n  - nested\n\n1. first\n2. second\n\n---\n\n> A quote with a table?\n\n| p | q |\n| :-- | --: |\n| r | s |",
+        );
+    }
+
+    #[test]
+    fn incremental_survives_fence_with_blank_lines() {
+        assert_incremental_matches_full(
+            "Lead text.\n\n```text\nline one\n\nline two after a blank\n\nmore\n```\n\nTrailing prose.",
+        );
+    }
+
+    #[test]
+    fn incremental_survives_math_with_blanks() {
+        assert_incremental_matches_full("$$\na = b\n\nc = d\n$$\n\nAfter math.");
+    }
+
+    #[test]
+    fn safe_split_never_lands_inside_fence_or_math() {
+        let doc = "a\n\n```rust\nx\n\ny\n```\n\n| t | u |\n|---|---|\n| v | w |\n\n$$\nk\n\nm\n$$\n\nend";
+        let hl = Highlighter::new();
+        let mut live = LiveRender::new();
+        // stream byte-by-byte: every intermediate cut must keep the split
+        // identity, which the full-render comparison checks per step
+        let mut text = String::new();
+        for b in doc.bytes() {
+            text.push(b as char);
+            assert_eq!(
+                live.lines(3, &text, 60, &hl),
+                render(&text, 60, &hl),
+                "at byte {}",
+                text.len()
+            );
+        }
+    }
 
     #[test]
     fn wrap_preserves_explicit_newlines() {
