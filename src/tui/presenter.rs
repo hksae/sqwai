@@ -381,6 +381,9 @@ pub fn spawn<W: Write + Send + 'static>(
     stats: mpsc::Sender<FrameReport>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
+        // the presenter is the only terminal writer: it wins the CPU over
+        // the agent's batch work, or the UI visibly hitches under load
+        crate::tui::priority::raise_this_thread();
         let _alive = AliveGuard {
             alive: Arc::clone(&presenter.alive),
         };

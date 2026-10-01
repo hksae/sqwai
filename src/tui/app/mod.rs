@@ -1268,6 +1268,9 @@ impl App {
         let input_notify = std::sync::Arc::new(tokio::sync::Notify::new());
         let input_notify_tx = std::sync::Arc::clone(&input_notify);
         std::thread::spawn(move || {
+            // input latency is the UI: this thread wins the CPU over any
+            // batch work the agent is running
+            crate::tui::priority::raise_this_thread();
             while let Ok(ev) = crossterm::event::read() {
                 crate::tui::event_log::log("READ", crate::tui::event_log::describe(&ev));
                 if ev_tx.send(ev).is_err() {
