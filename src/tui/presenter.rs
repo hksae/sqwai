@@ -42,7 +42,10 @@ pub(crate) const MIN_EL_RUN: usize = 8;
 pub struct FrameData {
     pub seq: u64,
     pub area: Rect,
-    pub buf: Buffer,
+    /// Shared so the UI can ring-reuse buffers: the count on the Arc is the
+    /// handoff proof — the UI only refills a slot once the presenter has
+    /// dropped it (presented or coalesced away).
+    pub buf: Arc<Buffer>,
 }
 
 /// Per-presented-frame report back to the UI thread (perf log).
@@ -277,7 +280,9 @@ impl Drop for AliveGuard {
 pub struct Presenter<W: Write> {
     backend: CrosstermBackend<W>,
     tap: Arc<AtomicU64>,
-    prev: Buffer,
+    /// The previous frame, held by Arc so the UI-side buffer ring can prove
+    /// a slot is free again (`Arc::get_mut`) without copying any cells.
+    prev: Arc<Buffer>,
     area: Rect,
     alive: Arc<AtomicBool>,
     #[cfg(debug_assertions)]
@@ -289,7 +294,7 @@ impl<W: Write> Presenter<W> {
         Self {
             backend,
             tap,
-            prev: Buffer::empty(Rect::default()),
+            prev: Arc::new(Buffer::empty(Rect::default())),
             area: Rect::default(),
             alive,
             #[cfg(debug_assertions)]
@@ -313,7 +318,7 @@ impl<W: Write> Presenter<W> {
         let t0 = Instant::now();
         if frame.area != self.area {
             self.backend.clear()?;
-            self.prev = Buffer::empty(frame.area);
+            self.prev = Arc::new(Buffer::empty(frame.area));
             self.area = frame.area;
         }
         let cells: Vec<(u16, u16, Cell)> = self
@@ -455,7 +460,11 @@ mod tests {
         for (y, line) in lines.iter().enumerate() {
             buf.set_string(0, y as u16, line, Style::default());
         }
-        FrameData { seq, area, buf }
+        FrameData {
+            seq,
+            area,
+            buf: Arc::new(buf),
+        }
     }
 
     fn test_presenter(cap: &CapWriter) -> (Presenter<TapWriter<CapWriter>>, Arc<AtomicU64>) {

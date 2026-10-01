@@ -1286,6 +1286,15 @@ impl App {
         // point rebuilding buffers faster than the presenter can show them.
         // Slow presents coalesce in the mailbox structurally (no EMA needed).
         let mut last_build = Instant::now() - crate::tui::presenter::MIN_PRESENT_INTERVAL;
+        // Frame buffer ring: a frame may be mid-present or still sit in the
+        // presenter mailbox while the next one is built. Slots are reused in
+        // place; `Arc::get_mut` only succeeds once the presenter has dropped
+        // its hold, so an in-flight frame can never be painted through. A
+        // slot still held when the ring wraps around (presenter starved past
+        // the whole ring under CPU load) is replaced, not written.
+        const FRAME_BUF_SLOTS: usize = 8;
+        let mut frame_bufs: Vec<std::sync::Arc<ratatui::buffer::Buffer>> = Vec::new();
+        let mut frame_buf_idx = 0usize;
         while !self.quit {
             // Event-driven wakeup: a mouse/key event wakes the loop instantly
             // instead of waiting up to 50ms for the next tick. The tick stays
@@ -1435,8 +1444,27 @@ impl App {
                     self.last_merge = view::MergeKind::Skip;
                     self.last_rebuild_us = 0;
                     self.last_fresh = 0;
-                    let mut buf = ratatui::buffer::Buffer::empty(area);
-                    self.render_into(&mut buf, area);
+                    if frame_bufs.len() != FRAME_BUF_SLOTS {
+                        frame_bufs = (0..FRAME_BUF_SLOTS)
+                            .map(|_| {
+                                std::sync::Arc::new(ratatui::buffer::Buffer::empty(area))
+                            })
+                            .collect();
+                    }
+                    let slot = frame_buf_idx % FRAME_BUF_SLOTS;
+                    frame_buf_idx = frame_buf_idx.wrapping_add(1);
+                    if std::sync::Arc::strong_count(&frame_bufs[slot]) > 1 {
+                        frame_bufs[slot] = std::sync::Arc::new(ratatui::buffer::Buffer::empty(area));
+                    }
+                    let buf = std::sync::Arc::get_mut(&mut frame_bufs[slot])
+                        .expect("slot refcount is 1 after the replace above");
+                    // resize replaces the slot; same area only clears cells
+                    if buf.area != area {
+                        *buf = ratatui::buffer::Buffer::empty(area);
+                    } else {
+                        buf.reset();
+                    }
+                    self.render_into(buf, area);
                     let render_us = t0.elapsed();
                     self.frame_seq += 1;
                     let seq = self.frame_seq;
@@ -1448,7 +1476,11 @@ impl App {
                         merge: self.last_merge.as_str(),
                         fresh: self.last_fresh,
                     });
-                    frame_tx.submit(crate::tui::presenter::FrameData { seq, area, buf });
+                    frame_tx.submit(crate::tui::presenter::FrameData {
+                        seq,
+                        area,
+                        buf: std::sync::Arc::clone(&frame_bufs[slot]),
+                    });
                 }
                 last_build = Instant::now();
                 // a deferred width rebuild keeps dirty set: the 50ms tick
