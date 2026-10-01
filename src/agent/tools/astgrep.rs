@@ -1,14 +1,20 @@
-//! `ast_grep`: structural code search with ast-grep-style patterns.
+//! Structural pattern search with ast-grep-style patterns (backs the
+//! `ast:` plan constraints; the `ast_grep` model tool was removed).
 //!
-//! A pattern like `Ok($VAL)` or `f($$$ARGS)` is parsed with the same
+//! A pattern like `Ok($VAL)` or `f($$ARGS)` is parsed with the same
 //! tree-sitter grammar as the searched code, then matched structurally:
-//! `$NAME` captures exactly one node (any kind, any size), `$$$NAME`
+//! `$NAME` captures exactly one node (any kind, any size), `$$NAME`
 //! captures zero or more consecutive siblings, uppercase names are
 //! metavariables, everything else must match node-for-node. Comments are
 //! ignored on both sides, so a pattern still matches across a trailing
 //! comment.
+//!
+//! The language registry lives in one place now
+//! ([`crate::agent::graph_lang::TsLang`]); this file keeps only the
+//! matching engine.
 
 use super::{Outcome, ToolCtx};
+use crate::agent::graph_lang::TsLang as Lang;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -21,96 +27,6 @@ const HARD_MAX_MATCHES: usize = 200;
 /// every supported grammar, and unlikely to occur in real code
 fn placeholder(i: usize) -> String {
     format!("ZqMeta{i}Zq")
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) enum Lang {
-    Rust,
-    Python,
-    JavaScript,
-    TypeScript,
-    Tsx,
-    Go,
-    Bash,
-    C,
-    Cpp,
-    CSharp,
-    Java,
-}
-
-impl Lang {
-    pub(crate) fn from_name(name: &str) -> Option<Lang> {
-        Some(match name {
-            "rust" => Lang::Rust,
-            "python" => Lang::Python,
-            "javascript" => Lang::JavaScript,
-            "typescript" => Lang::TypeScript,
-            "tsx" => Lang::Tsx,
-            "go" => Lang::Go,
-            "bash" => Lang::Bash,
-            "c" => Lang::C,
-            "cpp" | "c++" => Lang::Cpp,
-            "csharp" | "c#" | "cs" => Lang::CSharp,
-            "java" => Lang::Java,
-            _ => return None,
-        })
-    }
-
-    pub(crate) fn from_extension(ext: &str) -> Option<Lang> {
-        Some(match ext {
-            "rs" => Lang::Rust,
-            "py" => Lang::Python,
-            "js" | "mjs" | "cjs" | "jsx" => Lang::JavaScript,
-            "ts" | "mts" | "cts" => Lang::TypeScript,
-            "tsx" => Lang::Tsx,
-            "go" => Lang::Go,
-            "sh" | "bash" => Lang::Bash,
-            "c" | "h" => Lang::C,
-            "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Lang::Cpp,
-            "cs" => Lang::CSharp,
-            "java" => Lang::Java,
-            _ => return None,
-        })
-    }
-
-    pub(crate) fn name(&self) -> &'static str {
-        match self {
-            Lang::Rust => "rust",
-            Lang::Python => "python",
-            Lang::JavaScript => "javascript",
-            Lang::TypeScript => "typescript",
-            Lang::Tsx => "tsx",
-            Lang::Go => "go",
-            Lang::Bash => "bash",
-            Lang::C => "c",
-            Lang::Cpp => "cpp",
-            Lang::CSharp => "csharp",
-            Lang::Java => "java",
-        }
-    }
-
-    pub(crate) fn ts(&self) -> tree_sitter::Language {
-        match self {
-            Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
-            Lang::Python => tree_sitter_python::LANGUAGE.into(),
-            Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
-            Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
-            Lang::Go => tree_sitter_go::LANGUAGE.into(),
-            Lang::Bash => tree_sitter_bash::LANGUAGE.into(),
-            Lang::C => tree_sitter_c::LANGUAGE.into(),
-            Lang::Cpp => tree_sitter_cpp::LANGUAGE.into(),
-            Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
-            Lang::Java => tree_sitter_java::LANGUAGE.into(),
-        }
-    }
-
-    pub(crate) fn is_comment(&self, kind: &str) -> bool {
-        match self {
-            Lang::Rust => matches!(kind, "line_comment" | "block_comment"),
-            _ => kind == "comment" || kind == "line_comment" || kind == "block_comment",
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -255,7 +171,7 @@ fn compile_pattern(pattern: &str, lang: Lang) -> Result<PNode, String> {
     let (replaced, metas) = extract_metas(pattern)?;
     let mut parser = tree_sitter::Parser::new();
     parser
-        .set_language(&lang.ts())
+        .set_language(&lang.grammar())
         .map_err(|e| format!("grammar load failed for {}: {e}", lang.name()))?;
     let tree = parser
         .parse(&replaced, None)
@@ -634,7 +550,7 @@ pub fn ast_grep(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             break;
         };
         let mut parser = tree_sitter::Parser::new();
-        if parser.set_language(&lang.ts()).is_err() {
+        if parser.set_language(&lang.grammar()).is_err() {
             files_skipped += 1;
             continue;
         }

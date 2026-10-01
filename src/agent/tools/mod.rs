@@ -3936,9 +3936,8 @@ mod tests {
         .unwrap();
         let mut ctx = ToolCtx::new(dir.path());
         let started = std::time::Instant::now();
-        let o = execute(
+        let o = astgrep::ast_grep(
             &mut ctx,
-            "ast_grep",
             // the trailing literal never matches, so every split point of
             // the three multis is explored and fails — the O(N^3) shape
             &json!({"pattern": "f($$$A, $$$B, $$$C, zzz_no_such_arg)", "lang": "rust"}),
@@ -3993,7 +3992,7 @@ mod tests {
         )
         .unwrap();
         let mut ctx = ToolCtx::new(dir.path());
-        let o = execute(&mut ctx, "ast_grep", &json!({"pattern": "Ok($E)"}));
+        let o = astgrep::ast_grep(&mut ctx, &json!({"pattern": "Ok($E)"}));
         assert!(o.ok, "{}", o.output);
         assert!(o.output.contains("demo.rs"), "{}", o.output);
         assert!(
@@ -4015,7 +4014,7 @@ mod tests {
         let mut ctx = ToolCtx::new(dir.path());
 
         // single metavariable: both Ok(...) calls, not the Err
-        let o = execute(&mut ctx, "ast_grep", &json!({"pattern": "Ok($E)"}));
+        let o = astgrep::ast_grep(&mut ctx, &json!({"pattern": "Ok($E)"}));
         assert!(o.ok, "{}", o.output);
         assert!(o.output.contains("demo.rs:2"), "{}", o.output);
         assert!(o.output.contains("demo.rs:4"), "{}", o.output);
@@ -4024,7 +4023,7 @@ mod tests {
         assert!(o.output.contains("$E"), "{}", o.output);
 
         // structural: the second argument must be there, so no match
-        let o = execute(&mut ctx, "ast_grep", &json!({"pattern": "Ok($A, $B)"}));
+        let o = astgrep::ast_grep(&mut ctx, &json!({"pattern": "Ok($A, $B)"}));
         assert!(o.ok, "{}", o.output);
         assert!(o.output.contains("0 matches"), "{}", o.output);
 
@@ -4034,7 +4033,7 @@ mod tests {
             "fn run() {\n    f(1);\n    f(1, 2);\n    g(3);\n}\n",
         )
         .unwrap();
-        let o = execute(&mut ctx, "ast_grep", &json!({"pattern": "f($$$ARGS)"}));
+        let o = astgrep::ast_grep(&mut ctx, &json!({"pattern": "f($$$ARGS)"}));
         assert!(o.ok, "{}", o.output);
         assert!(o.output.contains("calls.rs:2"), "{}", o.output);
         assert!(o.output.contains("calls.rs:3"), "{}", o.output);
@@ -4058,22 +4057,18 @@ mod tests {
         let mut ctx = ToolCtx::new(dir.path());
 
         // comments do not break a match
-        let o = execute(&mut ctx, "ast_grep", &json!({"pattern": "Ok($E)"}));
+        let o = astgrep::ast_grep(&mut ctx, &json!({"pattern": "Ok($E)"}));
         assert!(o.ok, "{}", o.output);
         assert!(o.output.contains("c.rs:2"), "{}", o.output);
 
         // language inferred per file: the python pattern only sees the .py
-        let o = execute(&mut ctx, "ast_grep", &json!({"pattern": "print($X)"}));
+        let o = astgrep::ast_grep(&mut ctx, &json!({"pattern": "print($X)"}));
         assert!(o.ok, "{}", o.output);
         assert!(o.output.contains("p.py:1"), "{}", o.output);
         assert!(!o.output.contains("p.py:2"), "{}", o.output);
 
         // an explicit lang restricts a directory scan
-        let o = execute(
-            &mut ctx,
-            "ast_grep",
-            &json!({"pattern": "print($X)", "lang": "rust"}),
-        );
+        let o = astgrep::ast_grep(&mut ctx, &json!({"pattern": "print($X)", "lang": "rust"}));
         assert!(o.ok, "{}", o.output);
         assert!(o.output.contains("0 matches"), "{}", o.output);
         fs::remove_dir_all(&dir).ok();
@@ -4083,25 +4078,20 @@ mod tests {
     fn ast_grep_rejects_bad_patterns_and_escapes() {
         let (mut ctx, dir) = proj();
         // unparseable pattern
-        let o = execute(&mut ctx, "ast_grep", &json!({"pattern": "Ok("}));
+        let o = astgrep::ast_grep(&mut ctx, &json!({"pattern": "Ok("}));
         assert!(!o.ok, "{}", o.output);
         assert!(o.output.contains("does not parse"), "{}", o.output);
         // lowercase $name is not a metavariable: it cannot parse in Rust
-        let o = execute(&mut ctx, "ast_grep", &json!({"pattern": "Ok($x)"}));
+        let o = astgrep::ast_grep(&mut ctx, &json!({"pattern": "Ok($x)"}));
         assert!(!o.ok, "{}", o.output);
         // path escapes are rejected like every other tool
-        let o = execute(
+        let o = astgrep::ast_grep(
             &mut ctx,
-            "ast_grep",
             &json!({"pattern": "Ok($E)", "path": "../outside"}),
         );
         assert!(!o.ok, "{}", o.output);
         // unknown lang
-        let o = execute(
-            &mut ctx,
-            "ast_grep",
-            &json!({"pattern": "Ok($E)", "lang": "cobol"}),
-        );
+        let o = astgrep::ast_grep(&mut ctx, &json!({"pattern": "Ok($E)", "lang": "cobol"}));
         assert!(!o.ok, "{}", o.output);
         fs::remove_dir_all(&dir).ok();
     }
@@ -4131,11 +4121,11 @@ mod tests {
         .unwrap();
         let mut ctx = ToolCtx::new(dir.path());
 
-        let c_res = execute(&mut ctx, "ast_grep", &json!({"pattern": "calculate($X)"}));
+        let c_res = astgrep::ast_grep(&mut ctx, &json!({"pattern": "calculate($X)"}));
         assert!(c_res.ok, "{}", c_res.output);
         assert!(c_res.output.contains("main.c:2"), "{}", c_res.output);
 
-        let cpp_res = execute(&mut ctx, "ast_grep", &json!({"pattern": "void start() {}"}));
+        let cpp_res = astgrep::ast_grep(&mut ctx, &json!({"pattern": "void start() {}"}));
         assert!(cpp_res.ok, "{}", cpp_res.output);
         assert!(
             cpp_res.output.contains("service.cpp:1"),
@@ -4143,15 +4133,11 @@ mod tests {
             cpp_res.output
         );
 
-        let cs_res = execute(
-            &mut ctx,
-            "ast_grep",
-            &json!({"pattern": "void SayHello() {}"}),
-        );
+        let cs_res = astgrep::ast_grep(&mut ctx, &json!({"pattern": "void SayHello() {}"}));
         assert!(cs_res.ok, "{}", cs_res.output);
         assert!(cs_res.output.contains("App.cs:1"), "{}", cs_res.output);
 
-        let java_res = execute(&mut ctx, "ast_grep", &json!({"pattern": "void greet() {}"}));
+        let java_res = astgrep::ast_grep(&mut ctx, &json!({"pattern": "void greet() {}"}));
         assert!(java_res.ok, "{}", java_res.output);
         assert!(
             java_res.output.contains("Hello.java:1"),

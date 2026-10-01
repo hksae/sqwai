@@ -5,7 +5,7 @@
 //! Uses tree-sitter AST for 11 languages (Rust, Python, JS, TS, TSX, Go, Bash,
 //! C, C++, C#, Java) and an indentation/keyword fallback for all other files.
 
-use super::astgrep::Lang;
+use super::super::graph_lang::TsLang as Lang;
 use super::{Outcome, ToolCtx};
 use serde_json::Value;
 use tree_sitter::Node;
@@ -125,7 +125,7 @@ pub(crate) fn shape_of(src: &str, ext: &str) -> (String, Vec<String>) {
 
 fn extract_ts(src: &str, lang: Lang, max_depth: usize) -> Vec<OutlineItem> {
     let mut parser = tree_sitter::Parser::new();
-    if parser.set_language(&lang.ts()).is_err() {
+    if parser.set_language(&lang.grammar()).is_err() {
         return Vec::new();
     }
     let Some(tree) = parser.parse(src, None) else {

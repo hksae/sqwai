@@ -541,7 +541,7 @@ stay advisory, never gates):
   case-insensitive substring; host-run acceptance commands never pass
   through that path.
 - `ast: <pattern>` — the tree-sitter pattern must match nowhere (project
-  scope, same engine as the `ast_grep` tool). Uncompilable patterns reject
+  scope, backed by the structural pattern engine). Uncompilable patterns reject
   `plan create`.
 - `path: <roots...>` — the outcome diff (host-attributed `file_diff`
   records of the plan's steps) touches only these roots. Bash-written bytes
@@ -1312,7 +1312,7 @@ The tool reference: what each tool touches and what the host records for it.
 | Tool | Group | Mutates | Journal kinds |
 |---|---|---|---|
 | `read` `ls` `glob` | files | no | tool_call/result |
-| `grep` `ast_grep` | files | no | tool_call/result |
+| `grep` | files | no | tool_call/result |
 | `write` `edit` `multi_edit` `patch` | files | yes | + file_diff, checkpoint; pre-edit graph warning per §2.4.8 |
  | `bash` | exec | yes | + checkpoint (pre/step-boundary), file_diff on tree change, approval; console output decoded as UTF-8 else cp866 (no more ����); identical re-runs get one advisory host note, not a second turn |
  | `bash_output` `bash_kill` | exec | no | tool_call/result; background jobs are registered, reaped on completion; kills end the whole process tree (taskkill /T on Windows, own process group + killpg on Unix); live jobs die on app exit |

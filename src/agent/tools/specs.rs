@@ -137,25 +137,6 @@ unless replace_all is true. Requires reading the file first.",
             }),
         },
         ToolDef {
-            name: "ast_grep",
-            kind: Kind::ReadOnly,
-            description: "Structural code search with AST patterns: finds code by shape, not text. \
-$NAME captures one node (any kind or size), $$$NAME captures zero or more siblings, uppercase names are metavariables, the rest must match exactly; comments are ignored. \
-Examples: `Ok($E)` finds every Ok(...) wrapping; `let $N = $V;` finds bindings; `f($$$ARGS)` finds calls with any argument list. \
-Use instead of grep when whitespace, line breaks or comments vary.",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {"type": "string", "description": "code pattern with $NAME / $$$NAME metavariables"},
-                    "path": {"type": "string", "description": "file or directory, default project root"},
-                    "lang": {"type": "string", "enum": ["rust", "python", "javascript", "typescript", "tsx", "go", "bash", "c", "cpp", "csharp", "java"], "description": "force a language; default is per-file by extension"},
-                    "include": {"type": "string", "description": "path glob filter, e.g. src/**/*.rs"},
-                    "max": {"type": "integer", "description": "max matches (default 50, max 200)"}
-                },
-                "required": ["pattern"]
-            }),
-        },
-        ToolDef {
             name: "outline",
             kind: Kind::ReadOnly,
             description: "Structural outline of a source file showing functions, methods, classes, structs, enums, interfaces, and modules with line numbers. Use to quickly inspect file structure and find definitions before targeted reading. Supports 11 languages via AST (Rust, Python, JS, TS, Go, Bash, C, C++, C#, Java) and universal indentation/keyword fallback for other files.",
@@ -893,15 +874,6 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             }
         }
         "glob" | "grep" => s("pattern"),
-        "ast_grep" => {
-            let pattern = clip(&s("pattern"), 60);
-            let lang = s("lang");
-            if lang.is_empty() {
-                pattern
-            } else {
-                format!("{pattern} @{lang}")
-            }
-        }
         "outline" => {
             let path = s("path");
             if let Some(d) = args["max_depth"].as_u64() {

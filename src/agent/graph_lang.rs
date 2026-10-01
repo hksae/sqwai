@@ -1,5 +1,12 @@
 //! Tree-sitter language adapters (stage C): declarations, scopes, imports
-//! and call occurrences for Rust, Python and TypeScript.
+//! and call occurrences.
+//!
+//! One language registry for every consumer (graph index, outline): eleven
+//! grammars, one extension table, one name table. Rust, Python and
+//! TypeScript/TSX get full walkers (declarations, scopes, imports, call
+//! occurrences); the other seven get a generic declarations walker driven
+//! by per-language node-kind tables — symbols for the index, no invented
+//! imports or calls.
 //!
 //! Deliberately no call-graph resolution: a call site becomes an
 //! `occurrence`, never a guessed `calls` edge. Import mapping is
@@ -19,9 +26,12 @@ use tree_sitter::{Language, Node as TsNode, Parser};
 pub const RUST_ADAPTER_VERSION: &str = "1";
 pub const PYTHON_ADAPTER_VERSION: &str = "2";
 pub const TYPESCRIPT_ADAPTER_VERSION: &str = "1";
+pub const GENERIC_ADAPTER_VERSION: &str = "1";
 
-/// Syntactic capabilities every adapter in this module offers.
+/// Syntactic capabilities every full adapter in this module offers.
 pub const TS_CAPABILITIES: &[&str] = &["declarations", "imports"];
+/// Generic declaration walkers offer symbols only — no imports, no calls.
+pub const DECL_CAPABILITIES: &[&str] = &["declarations"];
 
 /// Guards against pathological nesting (generated or adversarial files).
 const MAX_WALK_DEPTH: usize = 128;
@@ -32,27 +42,113 @@ const MAX_NAME_CHARS: usize = 256;
 pub enum TsLang {
     Rust,
     Python,
+    JavaScript,
     TypeScript,
     Tsx,
+    Go,
+    Bash,
+    C,
+    Cpp,
+    CSharp,
+    Java,
 }
 
 impl TsLang {
     pub fn for_path(path: &Path) -> Option<Self> {
-        match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
-            "rs" => Some(TsLang::Rust),
-            "py" => Some(TsLang::Python),
-            "ts" | "mts" | "cts" => Some(TsLang::TypeScript),
-            "tsx" => Some(TsLang::Tsx),
-            _ => None,
-        }
+        Self::from_extension(path.extension()?.to_str()?)
     }
 
-    fn grammar(&self) -> Language {
+    /// Extension table shared by every consumer (graph index, outline).
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        Some(match ext.to_ascii_lowercase().as_str() {
+            "rs" => TsLang::Rust,
+            "py" => TsLang::Python,
+            "js" | "mjs" | "cjs" | "jsx" => TsLang::JavaScript,
+            "ts" | "mts" | "cts" => TsLang::TypeScript,
+            "tsx" => TsLang::Tsx,
+            "go" => TsLang::Go,
+            "sh" | "bash" => TsLang::Bash,
+            "c" | "h" => TsLang::C,
+            "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => TsLang::Cpp,
+            "cs" => TsLang::CSharp,
+            "java" => TsLang::Java,
+            _ => return None,
+        })
+    }
+
+    /// Language-name table shared by every consumer (pattern engine,
+    /// outline parser tags).
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "rust" => TsLang::Rust,
+            "python" => TsLang::Python,
+            "javascript" => TsLang::JavaScript,
+            "typescript" => TsLang::TypeScript,
+            "tsx" => TsLang::Tsx,
+            "go" => TsLang::Go,
+            "bash" => TsLang::Bash,
+            "c" => TsLang::C,
+            "cpp" | "c++" => TsLang::Cpp,
+            "csharp" | "c#" | "cs" => TsLang::CSharp,
+            "java" => TsLang::Java,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn grammar(&self) -> Language {
         match self {
             TsLang::Rust => tree_sitter_rust::LANGUAGE.into(),
             TsLang::Python => tree_sitter_python::LANGUAGE.into(),
+            TsLang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             TsLang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             TsLang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            TsLang::Go => tree_sitter_go::LANGUAGE.into(),
+            TsLang::Bash => tree_sitter_bash::LANGUAGE.into(),
+            TsLang::C => tree_sitter_c::LANGUAGE.into(),
+            TsLang::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+            TsLang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            TsLang::Java => tree_sitter_java::LANGUAGE.into(),
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            TsLang::Rust => "rust",
+            TsLang::Python => "python",
+            TsLang::JavaScript => "javascript",
+            TsLang::TypeScript => "typescript",
+            TsLang::Tsx => "tsx",
+            TsLang::Go => "go",
+            TsLang::Bash => "bash",
+            TsLang::C => "c",
+            TsLang::Cpp => "cpp",
+            TsLang::CSharp => "csharp",
+            TsLang::Java => "java",
+        }
+    }
+
+    /// Comment node kinds for pattern matching (comments never match code).
+    pub fn is_comment(&self, kind: &str) -> bool {
+        match self {
+            TsLang::Rust => matches!(kind, "line_comment" | "block_comment"),
+            _ => kind == "comment" || kind == "line_comment" || kind == "block_comment",
+        }
+    }
+
+    /// Full walkers (declarations, imports, calls) exist for these; the
+    /// rest get the generic declarations walker.
+    fn has_full_walker(&self) -> bool {
+        matches!(
+            self,
+            TsLang::Rust | TsLang::Python | TsLang::TypeScript | TsLang::Tsx
+        )
+    }
+
+    pub fn capabilities(&self) -> &'static [&'static str] {
+        if self.has_full_walker() {
+            TS_CAPABILITIES
+        } else {
+            DECL_CAPABILITIES
         }
     }
 
@@ -61,6 +157,7 @@ impl TsLang {
             TsLang::Rust => "rust",
             TsLang::Python => "python",
             TsLang::TypeScript | TsLang::Tsx => "typescript",
+            other => other.name(),
         }
     }
 
@@ -69,6 +166,7 @@ impl TsLang {
             TsLang::Rust => RUST_ADAPTER_VERSION,
             TsLang::Python => PYTHON_ADAPTER_VERSION,
             TsLang::TypeScript | TsLang::Tsx => TYPESCRIPT_ADAPTER_VERSION,
+            _ => GENERIC_ADAPTER_VERSION,
         }
     }
 
@@ -77,6 +175,7 @@ impl TsLang {
             TsLang::Rust => "rust",
             TsLang::Python => "python",
             TsLang::TypeScript | TsLang::Tsx => "typescript",
+            other => other.name(),
         }
     }
 }
@@ -397,6 +496,9 @@ pub fn analyze(lang: TsLang, relative_path: &str, bytes: &[u8]) -> Result<TsAnal
         TsLang::Rust => walk_rust(tree.root_node(), &mut ctx, 0),
         TsLang::Python => walk_python(tree.root_node(), &mut ctx, 0),
         TsLang::TypeScript | TsLang::Tsx => walk_ts(tree.root_node(), &mut ctx, 0),
+        // declarations only: symbols for the index, no invented imports
+        // or calls (see `walk_generic`)
+        other => walk_generic(tree.root_node(), &mut ctx, 0, other),
     }
     Ok(TsAnalysis {
         decls: ctx.decls,
@@ -432,6 +534,331 @@ fn scoped_body(
         }
     }
     ctx.pop_scope();
+}
+
+// ---------------------------------------------------------------------------
+// Generic declarations walker (all languages without a full walker)
+// ---------------------------------------------------------------------------
+
+/// One declaration shape: tree-sitter node kind, graph kind, key word,
+/// and whether nested functions count as its methods. `declarator` marks
+/// bodiless C++ member declarations (`void show();` parses as a plain
+/// `declaration`): only shapes whose declarator child is a function
+/// declarator match, so `int x;` never becomes a function.
+struct DeclShape {
+    kind: &'static str,
+    node_kind: NodeKind,
+    word: &'static str,
+    type_scope: bool,
+    declarator: bool,
+}
+
+/// Node-kind tables for the seven declaration-only languages. Names come
+/// from the `name` field with a first-identifier fallback (same as the
+/// full walkers); a wrong table degrades to fewer symbols, verified per
+/// language by the `generic_walker_finds_declarations` test.
+fn decl_shapes(lang: TsLang) -> &'static [DeclShape] {
+    match lang {
+        TsLang::JavaScript => &[
+            DeclShape {
+                kind: "function_declaration",
+                node_kind: NodeKind::Function,
+                word: "fn",
+                type_scope: false,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "generator_function_declaration",
+                node_kind: NodeKind::Function,
+                word: "fn",
+                type_scope: false,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "class_declaration",
+                node_kind: NodeKind::Class,
+                word: "class",
+                type_scope: true,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "method_definition",
+                node_kind: NodeKind::Method,
+                word: "fn",
+                type_scope: false,
+                declarator: false,
+            },
+        ],
+        TsLang::Go => &[
+            DeclShape {
+                kind: "function_declaration",
+                node_kind: NodeKind::Function,
+                word: "fn",
+                type_scope: false,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "method_declaration",
+                node_kind: NodeKind::Method,
+                word: "fn",
+                type_scope: false,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "type_spec",
+                node_kind: NodeKind::Type,
+                word: "type",
+                type_scope: true,
+                declarator: false,
+            },
+        ],
+        TsLang::Bash => &[DeclShape {
+            kind: "function_definition",
+            node_kind: NodeKind::Function,
+            word: "fn",
+            type_scope: false,
+            declarator: false,
+        }],
+        TsLang::C => &[
+            DeclShape {
+                kind: "function_definition",
+                node_kind: NodeKind::Function,
+                word: "fn",
+                type_scope: false,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "struct_specifier",
+                node_kind: NodeKind::Struct,
+                word: "struct",
+                type_scope: true,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "union_specifier",
+                node_kind: NodeKind::Struct,
+                word: "union",
+                type_scope: true,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "enum_specifier",
+                node_kind: NodeKind::Enum,
+                word: "enum",
+                type_scope: true,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "type_definition",
+                node_kind: NodeKind::Type,
+                word: "type",
+                type_scope: false,
+                declarator: false,
+            },
+        ],
+        TsLang::Cpp => &[
+            DeclShape {
+                kind: "function_definition",
+                node_kind: NodeKind::Function,
+                word: "fn",
+                type_scope: false,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "declaration",
+                node_kind: NodeKind::Function,
+                word: "fn",
+                type_scope: false,
+                declarator: true,
+            },
+            DeclShape {
+                kind: "field_declaration",
+                node_kind: NodeKind::Function,
+                word: "fn",
+                type_scope: false,
+                declarator: true,
+            },
+            DeclShape {
+                kind: "class_specifier",
+                node_kind: NodeKind::Class,
+                word: "class",
+                type_scope: true,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "struct_specifier",
+                node_kind: NodeKind::Struct,
+                word: "struct",
+                type_scope: true,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "enum_specifier",
+                node_kind: NodeKind::Enum,
+                word: "enum",
+                type_scope: true,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "namespace_definition",
+                node_kind: NodeKind::Namespace,
+                word: "namespace",
+                type_scope: true,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "type_definition",
+                node_kind: NodeKind::Type,
+                word: "type",
+                type_scope: false,
+                declarator: false,
+            },
+        ],
+        TsLang::CSharp => &[
+            DeclShape {
+                kind: "method_declaration",
+                node_kind: NodeKind::Method,
+                word: "fn",
+                type_scope: false,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "constructor_declaration",
+                node_kind: NodeKind::Method,
+                word: "fn",
+                type_scope: false,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "class_declaration",
+                node_kind: NodeKind::Class,
+                word: "class",
+                type_scope: true,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "interface_declaration",
+                node_kind: NodeKind::Interface,
+                word: "interface",
+                type_scope: true,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "struct_declaration",
+                node_kind: NodeKind::Struct,
+                word: "struct",
+                type_scope: true,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "enum_declaration",
+                node_kind: NodeKind::Enum,
+                word: "enum",
+                type_scope: true,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "namespace_declaration",
+                node_kind: NodeKind::Namespace,
+                word: "namespace",
+                type_scope: true,
+                declarator: false,
+            },
+        ],
+        TsLang::Java => &[
+            DeclShape {
+                kind: "method_declaration",
+                node_kind: NodeKind::Method,
+                word: "fn",
+                type_scope: false,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "constructor_declaration",
+                node_kind: NodeKind::Method,
+                word: "fn",
+                type_scope: false,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "class_declaration",
+                node_kind: NodeKind::Class,
+                word: "class",
+                type_scope: true,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "interface_declaration",
+                node_kind: NodeKind::Interface,
+                word: "interface",
+                type_scope: true,
+                declarator: false,
+            },
+            DeclShape {
+                kind: "enum_declaration",
+                node_kind: NodeKind::Enum,
+                word: "enum",
+                type_scope: true,
+                declarator: false,
+            },
+        ],
+        _ => &[],
+    }
+}
+
+/// Declarations-only walk: emit a symbol per table hit, nest scopes for
+/// depth, never invent imports or calls. Unknown kinds are skipped, so a
+/// wrong table entry costs symbols, never false facts.
+fn walk_generic(node: TsNode, ctx: &mut Ctx, depth: usize, lang: TsLang) {
+    if depth >= MAX_WALK_DEPTH {
+        return;
+    }
+    if let Some(shape) = decl_shapes(lang).iter().find(|s| s.kind == node.kind()) {
+        // bodiless member declarations share the `declaration` kind with
+        // variables: only function declarators count
+        if shape.declarator {
+            let mut cursor = node.walk();
+            let is_fn = node.children(&mut cursor).any(|c| {
+                c.kind() == "function_declarator"
+                    || (c.kind() == "pointer_declarator"
+                        && c.children(&mut c.walk())
+                            .any(|g| g.kind() == "function_declarator"))
+            });
+            if !is_fn {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    walk_generic(child, ctx, depth + 1, lang);
+                }
+                return;
+            }
+        }
+        let name = child_text(node, ctx.bytes, "name")
+            .or_else(|| first_ident(node, ctx.bytes))
+            .unwrap_or("")
+            .to_string();
+        if !name.trim().is_empty() {
+            let body = node.child_by_field_name("body");
+            ctx.push_decl(
+                shape.node_kind.clone(),
+                shape.word,
+                name.clone(),
+                Vec::new(),
+                node,
+                body,
+            );
+            ctx.push_scope(name, shape.type_scope, false, true);
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                walk_generic(child, ctx, depth + 1, lang);
+            }
+            ctx.pop_scope();
+            return;
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_generic(child, ctx, depth + 1, lang);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1445,7 +1872,7 @@ impl SourceAdapter for TsAdapter {
             Some(self.0.file_language()),
             adapter,
             version,
-            TS_CAPABILITIES,
+            self.0.capabilities(),
         ));
         for decl in &analysis.decls {
             batch.nodes.push(Node {
@@ -1765,7 +2192,16 @@ mod inner {
             Some(TsLang::TypeScript)
         );
         assert_eq!(TsLang::for_path(Path::new("a.tsx")), Some(TsLang::Tsx));
-        assert_eq!(TsLang::for_path(Path::new("a.go")), None);
+        assert_eq!(
+            TsLang::for_path(Path::new("a.js")),
+            Some(TsLang::JavaScript)
+        );
+        assert_eq!(TsLang::for_path(Path::new("a.go")), Some(TsLang::Go));
+        assert_eq!(TsLang::for_path(Path::new("a.sh")), Some(TsLang::Bash));
+        assert_eq!(TsLang::for_path(Path::new("a.c")), Some(TsLang::C));
+        assert_eq!(TsLang::for_path(Path::new("a.cpp")), Some(TsLang::Cpp));
+        assert_eq!(TsLang::for_path(Path::new("a.cs")), Some(TsLang::CSharp));
+        assert_eq!(TsLang::for_path(Path::new("a.java")), Some(TsLang::Java));
         assert_eq!(TsLang::for_path(Path::new("a.md")), None);
         for lang in [TsLang::Rust, TsLang::TypeScript, TsLang::Tsx] {
             assert_eq!(lang.adapter_version(), "1");
@@ -1773,5 +2209,69 @@ mod inner {
         // bumped for semantic references (decorators, bases, submodule
         // imports, lambdas, call-name order): old graphs reindex
         assert_eq!(TsLang::Python.adapter_version(), "2");
+    }
+
+    /// The seven declaration-only languages: symbols land in the index,
+    /// imports and calls stay empty (never invented).
+    #[test]
+    fn generic_walker_finds_declarations() {
+        let cases = [
+            (
+                TsLang::JavaScript,
+                "app.js",
+                "function boot() {}\nclass App {\n  run() {}\n}\n",
+                vec!["boot", "App", "run"],
+            ),
+            (
+                TsLang::Go,
+                "main.go",
+                "package main\n\nfunc main() {}\n\ntype Server struct {}\n\nfunc (s *Server) Run() {}\n",
+                vec!["main", "Server", "Run"],
+            ),
+            (
+                TsLang::Bash,
+                "run.sh",
+                "deploy() {\n  echo hi\n}\n",
+                vec!["deploy"],
+            ),
+            (
+                TsLang::C,
+                "main.c",
+                "struct Point { int x; };\n\nint main() { return 0; }\n",
+                vec!["Point", "main"],
+            ),
+            (
+                TsLang::Cpp,
+                "app.cpp",
+                "namespace util {\nclass Widget {\n public:\n  void show();\n};\n}\n",
+                vec!["util", "Widget", "show"],
+            ),
+            (
+                TsLang::CSharp,
+                "App.cs",
+                "namespace Demo {\nclass App {\n  void Run() {}\n}\n}\n",
+                vec!["Demo", "App", "Run"],
+            ),
+            (
+                TsLang::Java,
+                "App.java",
+                "package demo;\npublic class App {\n  public static void main(String[] a) {}\n}\n",
+                vec!["App", "main"],
+            ),
+        ];
+        for (lang, path, src, want) in cases {
+            let analysis = analyze_str(lang, path, src);
+            assert!(
+                analysis.imports.is_empty() && analysis.calls.is_empty(),
+                "{path}: generic walker invents nothing"
+            );
+            for name in want {
+                assert!(
+                    analysis.decls.iter().any(|d| d.name == name),
+                    "{path}: missing {name}: {:?}",
+                    analysis.decls.iter().map(|d| &d.name).collect::<Vec<_>>()
+                );
+            }
+        }
     }
 }

@@ -336,7 +336,6 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         "git_stage" => git::stage(ctx, args),
         "git_branch" => git::branch(ctx, args),
         "patch" => git::patch(ctx, args),
-        "ast_grep" => astgrep::ast_grep(ctx, args),
         "outline" => outline::outline(ctx, args),
         "webfetch" | "websearch" => Outcome::err("web tools must run through the async dispatcher"),
         "bash" => exec::bash(
