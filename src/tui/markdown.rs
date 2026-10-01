@@ -1757,7 +1757,10 @@ mod tests {
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text.len(), 3000, "full text survives");
         assert!(
-            lines[0].spans.iter().all(|s| s.style.fg == Some(Color::Gray)),
+            lines[0]
+                .spans
+                .iter()
+                .all(|s| s.style.fg == Some(Color::Gray)),
             "huge line is plain"
         );
     }

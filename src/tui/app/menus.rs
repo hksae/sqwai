@@ -2540,13 +2540,13 @@ impl App {
                         } else if let Some(env) = pc.key_env_name(name) {
                             (format!("key ${env}"), Theme::dim())
                         } else {
-                            ("no key".to_string(), Theme::dim())
+                            ("—".to_string(), Theme::dim())
                         };
                     self.menu_rows.push(row(
                         fit_line_width(
                             table_line(vec![
                                 tcell(name, name_w, false, Theme::FG()),
-                                tcell(&format!("{models} models"), COUNT_W, true, Theme::meta()),
+                                tcell(&models.to_string(), COUNT_W, true, Theme::meta()),
                                 tcell(&key_state, KEY_W, false, key_style),
                             ]),
                             budget,
