@@ -179,6 +179,15 @@ const MODE_PLAN_RGB: (u8, u8, u8) = (110, 165, 255);
 
 const WORKING_SPINNER: [char; 6] = ['◜', '◠', '◝', '◞', '◡', '◟'];
 
+/// Typewriter flush window: chars move from the reveal queue into the live
+/// answer at most once per interval. Each flush bumps the live segment's rev
+/// and a rev bump re-renders (wraps, highlights) the whole growing answer, so
+/// this window is the direct cap on the streaming render cost — the pace the
+/// reader sees comes out identical because the step is due-based.
+const REVEAL_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(90);
+/// Reveal speed in chars/s: the old 12-chars-per-50ms-tick pace, unchanged.
+const REVEAL_RATE: usize = 240;
+
 /// Connection-check state for one provider, rendered on its menu rows.
 #[derive(Clone)]
 pub(super) enum ProviderCheck {
@@ -300,6 +309,8 @@ pub struct App {
     prev_turn_ok: bool,
     /// already toasted for the current retry cycle
     retry_notified: bool,
+    /// last typewriter flush: reveal batches once per REVEAL_FLUSH_INTERVAL
+    last_reveal: Option<Instant>,
     /// live retry indicator rendered in the status bar (single updating line)
     retry_line: Option<String>,
     /// the next request may carry the resume notice once, then it disarms:
@@ -878,6 +889,7 @@ impl App {
             pending_queue: Vec::new(),
             prev_turn_ok: false,
             retry_notified: true, // no toast for the very first turn
+            last_reveal: None,
             retry_line: None,
             resume_notice_armed: false,
             last_checkpoint: None,
@@ -1323,15 +1335,30 @@ impl App {
             // the queue grows faster than the reveal speed
             if !self.pending_reveal.is_empty() {
                 let step = if self.cfg.ui.typewriter {
-                    let queued = self.pending_reveal.chars().count();
-                    // Reveal at a steady pace while the provider streams. The
-                    // old queue-based catch-up could dump the whole answer in
-                    // one tick when a chunk arrived faster than the TUI.
-                    if queued > 96 { 12 } else { 2 }
+                    // One full re-render per flush window, not per loop pass:
+                    // the reveal bumps the live segment's rev, and every rev
+                    // bump re-renders the whole growing answer. The step is
+                    // due-based, so the visible pace stays at REVEAL_RATE
+                    // chars/s while the number of full re-renders drops with
+                    // the flush interval.
+                    let since = self
+                        .last_reveal
+                        .map(|t0| t0.elapsed())
+                        .unwrap_or(REVEAL_FLUSH_INTERVAL);
+                    if since < REVEAL_FLUSH_INTERVAL {
+                        0
+                    } else {
+                        self.last_reveal = Some(Instant::now());
+                        let queued = self.pending_reveal.chars().count();
+                        (since.as_millis() as usize * REVEAL_RATE / 1000)
+                            .clamp(2, queued)
+                    }
                 } else {
                     usize::MAX
                 };
-                self.dirty |= self.reveal_chars(step);
+                if step > 0 {
+                    self.dirty |= self.reveal_chars(step);
+                }
             }
             if self
                 .toast
