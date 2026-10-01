@@ -514,7 +514,8 @@ work that changes things: read-only inspection needs no plan — just look. \
 For a write, create with goal + steps; acceptance is optional at create \
 and required only as executable or human-settled criteria for \
 real mutations: cmd: for a check that fails before the change and passes after, manual: for \
-anything a human eyeballs. Advanced rung kinds (snapshot:/differential:/signatures:) are \
+anything a human eyeballs. A cmd: criterion must be an executable shell \
+command, never prose. Advanced rung kinds (snapshot:/differential:/signatures:) are \
 host-suggested after the first run, never written by hand. Call \
 show first if you are unsure of the current step ids. The host owns the goal, the constraints, \
 acceptance status, validation and evidence; to change the goal, propose the full updated plan with \
@@ -1158,6 +1159,21 @@ fn cp866_char(byte: u8) -> char {
 /// Decode check: cp866 "Привет" (П=0x8F, р=0xE0, и=0xA8, в=0xA2,
 /// е=0xA5, т=0xE2) must round-trip, valid UTF-8 (emoji included) passes
 /// through untouched, and mixed lines decode each in its own encoding.
+/// A `cmd:` acceptance written as prose gets executed as a command and
+/// fails confusingly — the tool text must demand an executable outright.
+#[test]
+fn plan_tool_description_demands_executable_acceptance() {
+    let plan = tool_specs(false)
+        .into_iter()
+        .find(|s| s.name == "plan")
+        .expect("plan tool");
+    assert!(
+        plan.description.contains("executable shell command"),
+        "plan description must rule out prose acceptance: {}",
+        &plan.description[..plan.description.len().min(200)]
+    );
+}
+
 #[test]
 fn decode_child_output_handles_console_codepage() {
     assert_eq!(

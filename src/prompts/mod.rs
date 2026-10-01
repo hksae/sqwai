@@ -126,12 +126,16 @@ pub fn plan_block(root: &std::path::Path, session_id: Option<&str>) -> Option<St
 
 /// The moving half of the plan: status, acceptance validation, steps.
 /// Rebuilt every turn — a volatile tail part, never the cached prefix.
+/// Carries its own usage note: the state below is already in the model's
+/// context, so re-reading it with `plan show` or re-creating an active
+/// plan is wasted work. (Kept out of `render_status`, which also paints
+/// the user-facing `/plan` panel.)
 pub fn plan_status_block(root: &std::path::Path, session_id: Option<&str>) -> Option<String> {
     let plan = crate::plan::open_active_for_session(root, session_id)
         .ok()
         .flatten()?;
     Some(format!(
-        "<plan_status>\n{}\n</plan_status>",
+        "<plan_status>\n{}\nDo not call `plan show` to re-read this state — it is already in your context; call ops directly with the step ids above. If a plan id is listed, do not `create` — continue it.\n</plan_status>",
         crate::plan::render_status(&plan)
     ))
 }
@@ -364,5 +368,46 @@ mod tests {
         // per-turn runtime context is empty to preserve prompt cache
         let v = runtime_context();
         assert!(v.is_empty());
+    }
+
+    #[test]
+    fn plan_status_block_tells_the_model_not_to_reread() {
+        use crate::plan;
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-note-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut plan = plan::create(
+            "prove the checks".to_string(),
+            Vec::new(),
+            vec!["cmd: exit 0".to_string()],
+            vec![plan::NewStep {
+                title: "do the work".to_string(),
+                refs: Vec::new(),
+            }],
+            0,
+            &plan::Limits::default(),
+        )
+        .unwrap();
+        plan.sessions.push("sess".to_string());
+        plan::commit(
+            &dir,
+            "sess",
+            &mut plan,
+            "create",
+            "model",
+            true,
+            serde_json::json!({}),
+        )
+        .unwrap();
+        let block = plan_status_block(&dir, Some("sess")).expect("active plan");
+        assert!(
+            block.contains("Do not call `plan show`"),
+            "usage note missing: {block:.300}"
+        );
+        assert!(
+            block.contains("do not `create`"),
+            "no-recreate note missing: {block:.300}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
