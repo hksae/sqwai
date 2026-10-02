@@ -2560,15 +2560,21 @@ impl App {
         }
     }
 
-    /// Empty-session mark: version + MCP count + next action.
+    /// Empty-session mark: gradient wordmark + MCP count + next action.
     /// Everything here is already in memory (binary version, loaded
     /// config, linked plan id) — no background collection, ever.
+    /// Too narrow for the banner: plain dim line instead (same responsive
+    /// rule as gemini-cli).
     pub(super) fn empty_mark_lines(&self) -> Vec<Line<'static>> {
         let mcp = self.cfg.mcp.servers.iter().filter(|s| s.enabled).count();
-        let mut out = vec![Line::from(Span::styled(
-            format!("  sqwai v{}", env!("CARGO_PKG_VERSION")),
-            Theme::dim(),
-        ))];
+        let mut out = if self.last_chat.width >= 69 {
+            crate::tui::art::sqwai_gradient_lines()
+        } else {
+            vec![Line::from(Span::styled(
+                format!("  sqwai v{}", env!("CARGO_PKG_VERSION")),
+                Theme::dim(),
+            ))]
+        };
         let mut second = vec![Span::styled("  ".to_string(), Theme::base())];
         if mcp > 0 {
             second.push(Span::styled(format!("{mcp} MCP"), Theme::meta()));
