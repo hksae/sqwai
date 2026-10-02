@@ -10,6 +10,8 @@
 //! Moods are deliberately NOT split: one face everywhere, animation only
 //! over time (the sleep cycle). Meaning rides on the neighbouring text.
 
+use unicode_width::UnicodeWidthStr;
+
 /// w/ω render style. The default is [`FaceStyle::Omega`] (softer, on-brand);
 /// [`FaceStyle::W`] is the fallback for terminals without the glyph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +66,14 @@ pub const FACES: &[FaceDef] = &[
 /// the animation, so (unlike the static faces) uniformity is not required.
 pub const SLEEP_FRAMES: &[&str] = &["UwU", "-w- z", "-w- zZ", "-w- zZz"];
 
+/// Wait-loop frames: the sleep cycle without the waking head — loops
+/// forever while a tool waits (bash_output, sleep). Padded to
+/// [`SLEEP_WIDTH`] by [`wait_frame`] so the row never jitters.
+pub const WAIT_FRAMES: &[&str] = &["-w- z", "-w- zZ", "-w- zZz"];
+
+/// Column width of the footer face slot: every face pads to this.
+pub const SLEEP_WIDTH: usize = 7;
+
 /// Ticks per sleep frame at the 50ms spinner cadence (half a second).
 pub const SLEEP_TICKS_PER_FRAME: usize = 10;
 
@@ -84,10 +94,18 @@ pub fn sleep_frame(tick: usize, style: FaceStyle) -> String {
     render(frame, style)
 }
 
+/// Current wait-loop frame, padded to [`SLEEP_WIDTH`] with trailing
+/// spaces so the verb next to it never shifts while the Z's grow.
+pub fn wait_frame(tick: usize, style: FaceStyle) -> String {
+    let frame = WAIT_FRAMES[(tick / SLEEP_TICKS_PER_FRAME) % WAIT_FRAMES.len()];
+    let rendered = render(frame, style);
+    let pad = SLEEP_WIDTH.saturating_sub(unicode_width::UnicodeWidthStr::width(rendered.as_str()));
+    format!("{rendered}{}", " ".repeat(pad))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use unicode_width::UnicodeWidthStr;
 
     /// every static face occupies the same columns in both styles, or rows
     /// using them inline would jitter
@@ -112,6 +130,25 @@ mod tests {
         assert_eq!(render("UwU", FaceStyle::Omega), "UωU");
         assert_eq!(render("-w- zZz", FaceStyle::Omega), "-ω- zZz");
         assert_eq!(render("UwU", FaceStyle::W), "UwU");
+    }
+
+    #[test]
+    fn wait_loop_has_no_waking_head_and_never_jitters() {
+        use unicode_width::UnicodeWidthStr;
+        // no UwU frame: pure sleep, looped
+        assert_eq!(WAIT_FRAMES, &["-w- z", "-w- zZ", "-w- zZz"]);
+        for tick in [0, 10, 20, 30, 40] {
+            let frame = wait_frame(tick, FaceStyle::W);
+            assert_eq!(
+                UnicodeWidthStr::width(frame.as_str()),
+                SLEEP_WIDTH,
+                "padded slot: {frame:?}"
+            );
+        }
+        assert_eq!(wait_frame(0, FaceStyle::W), "-w- z  ");
+        assert_eq!(wait_frame(20, FaceStyle::W), "-w- zZz");
+        assert_eq!(wait_frame(30, FaceStyle::W), "-w- z  ");
+        assert_eq!(wait_frame(10, FaceStyle::Omega), "-ω- zZ ");
     }
 
     #[test]

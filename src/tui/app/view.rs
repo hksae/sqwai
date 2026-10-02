@@ -4424,6 +4424,19 @@ pub(super) fn activity_footer_line(
     let mut spans = vec![Span::styled(format!("  {arrow} "), Theme::dim())];
     let mut parts: Vec<String> = Vec::new();
     if let Some(tick) = live_tick {
+        // brand face, quiet gray: static UwU, or the wait cycle (no
+        // waking head) while a tool waits. The slot is always SLEEP_WIDTH
+        // wide so the verb never shifts as frames grow.
+        use crate::tui::faces::{self, FaceStyle};
+        let face = match tool {
+            Some("bash_output" | "sleep") => faces::wait_frame(tick, FaceStyle::Omega),
+            _ => format!(
+                "{:<width$}",
+                faces::render("UwU", FaceStyle::Omega),
+                width = faces::SLEEP_WIDTH
+            ),
+        };
+        spans.push(Span::styled(format!("{face} "), Theme::meta()));
         // the verb carries the action, the tool name stays in the
         // transcript rows above — no duplication
         spans.extend(crate::tui::shimmer::shimmer_spans(

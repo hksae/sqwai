@@ -187,10 +187,11 @@ fn live_activity_footer_shimmers_finished_stays_dim() {
         "done footer is static text: {text:?}"
     );
     // the 7 "Working" letters carry more than one brightness step
+    // (spans 0-1 are the arrow and the face)
     let word: String = live
         .spans
         .iter()
-        .skip(1)
+        .skip(2)
         .take(7)
         .map(|s| s.content.as_ref())
         .collect();
@@ -198,7 +199,7 @@ fn live_activity_footer_shimmers_finished_stays_dim() {
     let styles: std::collections::HashSet<String> = live
         .spans
         .iter()
-        .skip(1)
+        .skip(2)
         .take(7)
         .map(|s| format!("{:?}", s.style))
         .collect();
