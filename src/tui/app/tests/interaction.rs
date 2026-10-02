@@ -656,7 +656,7 @@ fn sub_group_live_while_running() {
         *ok = None;
     }
     let s = render_to_string(&mut app, 100, 30);
-    assert!(s.contains("Working"), "live footer shows:\n{s}");
+    assert!(s.contains("Reading"), "live footer shows:\n{s}");
     assert!(s.contains("a.rs"), "running rows stay visible:\n{s}");
 }
 

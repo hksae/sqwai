@@ -4052,18 +4052,9 @@ impl App {
         let ctx_pct = (self.session.context_percent() as u64).min(100);
         let tok_str = fmt_k(context_used);
 
-        let cached_tokens = self
-            .session
-            .last_usage
-            .and_then(|u| u.cached_tokens)
-            .or(self.session.usage.cached_tokens)
-            .unwrap_or(0);
-        let cp = cached_tokens
-            .saturating_mul(100)
-            .checked_div(context_used)
-            .unwrap_or(0)
-            .min(100);
-        let mut ctx_label = format!("{ctx_pct}% ({tok_str}) cache {cp}%");
+        // cache hit rate is collected in usage for later surfaces, but not
+        // shown here: it drives no action, unlike context fullness
+        let ctx_label = format!("{ctx_pct}% ({tok_str})");
 
         let model_label = self.session.model_key.clone();
         // reports the effective mapping, not the raw selection (§5.1).
@@ -4091,22 +4082,10 @@ impl App {
         let left = format!(" {}  {}", self.mode.label(), plan_label);
         let left_base_cols = cols(&left);
 
-        // one space between blocks; the cache half yields first — context
-        // fullness outranks it. Trailing +1 reserves the gap before an
+        // one space between blocks. Trailing +1 reserves the gap before an
         // optional LSP/dir tail (at most one column of slack when absent).
-        let mut fixed_len: usize =
+        let fixed_len: usize =
             cols(&ctx_label) + 1 + cols(&model_label) + 1 + cols(&ef_label) + cols(&lsp_label) + 1;
-
-        if left_base_cols + fixed_len > w as usize {
-            ctx_label = format!("{ctx_pct}% ({tok_str})");
-            fixed_len = cols(&ctx_label)
-                + 1
-                + cols(&model_label)
-                + 1
-                + cols(&ef_label)
-                + cols(&lsp_label)
-                + 1;
-        }
 
         let lw = left_base_cols as u16;
 
