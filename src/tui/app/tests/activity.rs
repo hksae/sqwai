@@ -68,7 +68,7 @@ fn footer_line_sits_under_the_tools_and_folds_them() {
     assert!(tool_row < footer, "footer sits under the tools");
     let foot = line_text(footer);
     assert!(
-        foot.contains("Working · bash · 2 calls"),
+        foot.contains("Running · 2 calls"),
         "live aggregate: {foot:?}"
     );
     assert!(
@@ -83,7 +83,7 @@ fn footer_line_sits_under_the_tools_and_folds_them() {
     // the tool row (with its args) is gone; the collapsed footer keeps
     // the aggregate and the current tool name
     assert!(!text.contains("cargo test"), "folded tools hide: {text}");
-    assert!(text.contains("▸ Working · bash"), "footer stays: {text}");
+    assert!(text.contains("▸ Running"), "footer stays: {text}");
 
     ev(
         AgentEvent::ToolNotice {
@@ -191,6 +191,98 @@ fn test_churn_runs_a_fake_turn_until_esc() {
     assert_eq!(app.activity_groups.len(), 1, "turn folded");
     assert!(!app.activity_groups[0].expanded);
     assert_eq!(app.activity_groups[0].calls, 2, "both fake calls counted");
+}
+
+#[test]
+fn footer_verbs_are_plain_words_with_a_working_fallback() {
+    use super::super::view::tool_verb;
+    for (tool, verb) in [
+        ("read", "Reading"),
+        ("edit", "Editing"),
+        ("bash", "Running"),
+        ("bash_output", "Waiting"),
+        ("grep", "Searching"),
+        ("subagent", "Delegating"),
+        ("plan", "Planning"),
+        ("ask_user", "Asking"),
+        ("think", "Thinking"),
+        ("git_commit", "Committing"),
+        ("outline", "Reading"),
+        ("git_diff", "Reading"),
+        ("ls", "Reading"),
+        ("git_branch", "Reading"),
+        ("graph_query", "Searching"),
+        ("memory_read", "Reading"),
+        ("memory_propose", "Writing"),
+        ("whatever", "Working"),
+        ("", "Working"),
+    ] {
+        assert_eq!(tool_verb(tool), verb, "tool {tool:?}");
+    }
+    // small closed set, no coined verbs
+    for tool in [
+        "read",
+        "outline",
+        "ls",
+        "grep",
+        "glob",
+        "graph_query",
+        "resolve_ref",
+        "edit",
+        "write",
+        "multi_edit",
+        "patch",
+        "bash",
+        "bash_output",
+        "bash_kill",
+        "sleep",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "git_show",
+        "git_commit",
+        "git_stage",
+        "git_branch",
+        "webfetch",
+        "websearch",
+        "subagent",
+        "plan",
+        "propose_plan",
+        "propose_reset",
+        "ask_user",
+        "think",
+        "memory_read",
+        "memory_propose",
+        "note",
+        "journal",
+    ] {
+        let verb = tool_verb(tool);
+        assert!(
+            [
+                "Reading",
+                "Searching",
+                "Resolving",
+                "Editing",
+                "Patching",
+                "Running",
+                "Waiting",
+                "Stopping",
+                "Checking",
+                "Committing",
+                "Staging",
+                "Fetching",
+                "Delegating",
+                "Planning",
+                "Proposing",
+                "Asking",
+                "Thinking",
+                "Writing",
+                "Working"
+            ]
+            .contains(&verb),
+            "no fancy verbs: {tool} -> {verb}"
+        );
+    }
 }
 
 #[test]
@@ -789,7 +881,7 @@ fn activity_group_renders_live_while_the_turn_streams() {
     app.rebuild_cache(80);
     let text = rendered(&app);
     assert!(
-        text.contains("Working · read · 1 calls · 1 thought"),
+        text.contains("Reading · 1 calls · 1 thought"),
         "live footer missing: {text}"
     );
     assert!(text.contains("read"), "live work is expanded: {text}");

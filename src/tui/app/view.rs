@@ -4346,6 +4346,34 @@ pub(super) fn blank() -> Line<'static> {
     Line::from(vec![Span::styled(String::new(), Theme::base())])
 }
 
+/// Lead verb for the live footer: what the running tool is doing, in
+/// plain words (no coined verbs like "Outlining"). Unknown and internal
+/// tools fall back to Working.
+pub(super) fn tool_verb(tool: &str) -> &'static str {
+    match tool {
+        "read" | "outline" | "git_log" | "git_show" | "git_diff" | "ls" | "memory_read"
+        | "git_branch" => "Reading",
+        "grep" | "glob" | "websearch" | "graph_query" => "Searching",
+        "resolve_ref" => "Resolving",
+        "edit" | "write" | "multi_edit" => "Editing",
+        "patch" => "Patching",
+        "bash" => "Running",
+        "bash_output" | "sleep" => "Waiting",
+        "bash_kill" => "Stopping",
+        "git_status" => "Checking",
+        "git_commit" => "Committing",
+        "git_stage" => "Staging",
+        "webfetch" => "Fetching",
+        "subagent" => "Delegating",
+        "plan" => "Planning",
+        "propose_plan" | "propose_reset" => "Proposing",
+        "ask_user" => "Asking",
+        "think" => "Thinking",
+        "memory_propose" | "note" | "journal" => "Writing",
+        _ => "Working",
+    }
+}
+
 /// The one-line summary of a turn's working content. Failures are spelled out
 /// here: a collapsed block must never hide the fact that something broke.
 /// While the turn runs (`live_tick` set), the "activity" word shimmers
@@ -4364,10 +4392,12 @@ pub(super) fn activity_footer_line(
     let mut spans = vec![Span::styled(format!("  {arrow} "), Theme::dim())];
     let mut parts: Vec<String> = Vec::new();
     if let Some(tick) = live_tick {
-        spans.extend(crate::tui::shimmer::shimmer_spans("Working", tick));
-        if let Some(t) = tool {
-            parts.push(t.to_string());
-        }
+        // the verb carries the action, the tool name stays in the
+        // transcript rows above — no duplication
+        spans.extend(crate::tui::shimmer::shimmer_spans(
+            tool.map_or("Working", tool_verb),
+            tick,
+        ));
     }
     // a turn that has produced nothing yet carries no aggregate: the shimmer
     // word alone is the signal that the app is alive, and "0 calls · 0s"
