@@ -4042,7 +4042,9 @@ impl App {
     pub(super) fn status_bar_spans(&mut self, w: u16) -> Vec<Span<'static>> {
         // transient messages (retry, toast, checkpoint) live in the notice
         // row above the composer now; the bar keeps metrics only, so nothing
-        // here is ever squeezed or cut.
+        // here is ever squeezed or cut. Right side, single-space rhythm:
+        // `6% (62k) cache 37% model effort ~/dir` — context first, details
+        // in parens, model and dir in quiet white.
         let plan_label = self.plan_step_label.clone();
         let dir = self.cwd_label.clone();
 
@@ -4061,20 +4063,23 @@ impl App {
             .checked_div(context_used)
             .unwrap_or(0)
             .min(100);
-        let mut ctx_metrics_label = format!(" cache {cp}% · {ctx_pct}% · {tok_str} ·");
+        let mut ctx_label = format!("{ctx_pct}% ({tok_str}) cache {cp}%");
 
-        let model_label = format!(" {} ", self.session.model_key);
+        let model_label = self.session.model_key.clone();
         // reports the effective mapping, not the raw selection (§5.1).
         // No "ef:" prefix: the models table and the effort menu already
         // dropped it, so the bar matches them.
         let effort_plan = self.effort_plan();
         let ef_short = effort_plan.short_label();
-        let ef_label = format!(" {} ", ef_short.strip_prefix("ef:").unwrap_or(&ef_short));
+        let ef_label = ef_short
+            .strip_prefix("ef:")
+            .unwrap_or(&ef_short)
+            .to_string();
         self.ef_click = None;
 
-        // right side: [ctx metrics] [model] [working] [folder] [th:level] [MODE chip]
+        // right side: [ctx] [model] [effort] [folder] [MODE chip]
         let lsp_label = if self.lsp_diagnostics > 0 {
-            format!(" LSP:{} ", self.lsp_diagnostics)
+            format!("LSP:{} ", self.lsp_diagnostics)
         } else {
             String::new()
         };
@@ -4086,12 +4091,21 @@ impl App {
         let left = format!(" {}  {}", self.mode.label(), plan_label);
         let left_base_cols = cols(&left);
 
+        // one space between blocks; the cache half yields first — context
+        // fullness outranks it. Trailing +1 reserves the gap before an
+        // optional LSP/dir tail (at most one column of slack when absent).
         let mut fixed_len: usize =
-            1 + cols(&ctx_metrics_label) + cols(&model_label) + cols(&ef_label) + cols(&lsp_label); // mode chip always present
+            cols(&ctx_label) + 1 + cols(&model_label) + 1 + cols(&ef_label) + cols(&lsp_label) + 1;
 
-        if left_base_cols + fixed_len > w as usize && !ctx_metrics_label.is_empty() {
-            ctx_metrics_label.clear();
-            fixed_len = 1 + cols(&model_label) + cols(&ef_label) + cols(&lsp_label);
+        if left_base_cols + fixed_len > w as usize {
+            ctx_label = format!("{ctx_pct}% ({tok_str})");
+            fixed_len = cols(&ctx_label)
+                + 1
+                + cols(&model_label)
+                + 1
+                + cols(&ef_label)
+                + cols(&lsp_label)
+                + 1;
         }
 
         let lw = left_base_cols as u16;
@@ -4105,11 +4119,15 @@ impl App {
         let dir_budget = (w as usize)
             .saturating_sub(lw as usize + fixed_len)
             .min(DIR_MAX_COLS);
-        let dir_label = if dir.is_empty() || dir_budget == 0 {
+        let dir_label = if dir.is_empty() || dir_budget < 2 {
             String::new()
         } else {
-            // one trailing space, so the label itself gets one column less
-            format!("{} ", truncate_display_width(&dir, dir_budget - 1))
+            // leading gap + one trailing space, so the label itself gets
+            // two columns less
+            format!(
+                " {} ",
+                truncate_display_width(&dir, dir_budget.saturating_sub(2))
+            )
         };
         let right_len = fixed_len + cols(&dir_label);
         // mode chip: green ACT, blue PLAN, with a quick RGB sweep between
@@ -4136,13 +4154,15 @@ impl App {
             spans.push(Span::styled(format!("  {plan_label}"), Theme::dim()));
         }
         let pad = (w as usize).saturating_sub(lw as usize + right_len);
-        let model_x0 = lw + pad as u16 + cols(&ctx_metrics_label) as u16;
+        let model_x0 = lw + pad as u16 + cols(&ctx_label) as u16 + 1;
         spans.push(Span::styled(" ".repeat(pad), Theme::base()));
-        spans.push(Span::styled(ctx_metrics_label.clone(), Theme::dim()));
-        spans.push(Span::styled(model_label, Theme::dim()));
+        spans.push(Span::styled(ctx_label.clone(), Theme::dim()));
+        spans.push(Span::styled(" ".to_string(), Theme::base()));
+        spans.push(Span::styled(model_label, Theme::meta()));
+        spans.push(Span::styled(" ".to_string(), Theme::base()));
         // click targets are measured from the same numbers, so `ef_x0`
         // accounts for the model group width.
-        let ef_x0 = model_x0 + cols(&self.session.model_key) as u16 + 2;
+        let ef_x0 = model_x0 + cols(&self.session.model_key) as u16 + 1;
         let ef_style = if self.model_cfg.effort == EffortLevel::Off || !effort_plan.is_honoured() {
             // a level the model will not act on must not be lit up as if it
             // were doing work
@@ -4156,7 +4176,7 @@ impl App {
             spans.push(Span::styled(lsp_label, Theme::warn()));
         }
         if !dir_label.is_empty() {
-            spans.push(Span::styled(dir_label, Theme::dim()));
+            spans.push(Span::styled(dir_label, Theme::meta()));
         }
         spans
     }

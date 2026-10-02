@@ -838,10 +838,16 @@ impl App {
             // (§2.1.4, §3.7) before any plan read. No-op on a clean tree.
             let _ = crate::plan::replay(&project_root);
         }
-        let cwd_label = project_root
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        // display form of the project root: home-relative (~/sqwai),
+        // full path outside home
+        let cwd_label = match std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            Ok(home) => project_root
+                .strip_prefix(std::path::PathBuf::from(home))
+                .ok()
+                .map(|rel| format!("~/{}", rel.display()).replace('\\', "/"))
+                .unwrap_or_else(|| project_root.display().to_string()),
+            Err(_) => project_root.display().to_string(),
+        };
 
         // stamp an unstamped empty session (fresh stub): resumed sessions
         // keep the project they were born in, legacy ones stay universal
