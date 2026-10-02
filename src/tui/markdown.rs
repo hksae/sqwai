@@ -484,9 +484,11 @@ impl LiveRender {
 /// Byte offset of the last line start past `from` where splitting keeps
 /// `render(a) · render(b)` identical to `render(a + b)`: no fenced code or
 /// `$$` math block may be open (their state is the only cross-line renderer
-/// state), the line itself must be non-blank (blank runs collapse), and the
+/// state), the line itself must be non-blank (blank runs collapse), the
 /// previous and this line may not both carry a pipe (a GFM table never
-/// straddles the cut). `None` when no such boundary exists.
+/// straddles the cut), and the line must not be a setext underline (it would
+/// reinterpret the paragraph above the cut — see [`is_setext_underline`]).
+/// `None` when no such boundary exists.
 fn safe_split(text: &str, from: usize) -> Option<usize> {
     let mut in_code = false;
     let mut in_math = false;
@@ -497,7 +499,13 @@ fn safe_split(text: &str, from: usize) -> Option<usize> {
         let start = offset;
         offset += line.len() + 1;
         let lead = line.trim_start();
-        if start > from && !in_code && !in_math && !lead.is_empty() && !prev_pipe {
+        if start > from
+            && !in_code
+            && !in_math
+            && !lead.is_empty()
+            && !prev_pipe
+            && !is_setext_underline(line)
+        {
             best = Some(start);
         }
         // render's own construct order: a fence line toggles code only
@@ -519,6 +527,18 @@ fn safe_split(text: &str, from: usize) -> Option<usize> {
         prev_pipe = lead.contains('|');
     }
     best
+}
+
+/// A line of only `-` or `=`: a potential setext underline. The renderer has
+/// no setext headings today (an all-`-` line is an HR, an all-`=` line is
+/// inline text), so a cut before one happens to render identically — but the
+/// cached prefix only grows within a turn, so if the renderer ever learns
+/// setext, every such cut would freeze a paragraph-shaped prefix while the
+/// tail re-renders the same bytes as a heading, until the turn ends. Split
+/// only where the next line cannot reinterpret the paragraph above it.
+fn is_setext_underline(line: &str) -> bool {
+    let t = line.trim();
+    !t.is_empty() && (t.bytes().all(|b| b == b'=') || t.bytes().all(|b| b == b'-'))
 }
 
 fn is_hr(s: &str) -> bool {
@@ -1748,7 +1768,8 @@ mod tests {
     fn incremental_matches_full_constructs() {
         assert_incremental_matches_full(
             "| a | b |\n|---|---|\n| 1 | 2 |\n\n$$\nx = y + 1\n$$\n\n> quoted line\n> more quote\n\n\
-             - one\n- two\n  - nested\n\n1. first\n2. second\n\n---\n\n> A quote with a table?\n\n| p | q |\n| :-- | --: |\n| r | s |",
+             - one\n- two\n  - nested\n\n1. first\n2. second\n\n---\n\n> A quote with a table?\n\n| p | q |\n| :-- | --: |\n| r | s |\n\n\
+             setext shaped: alpha\n---\n\nbeta\n===\n\ngamma\n------",
         );
     }
 
@@ -1762,6 +1783,15 @@ mod tests {
     #[test]
     fn incremental_survives_math_with_blanks() {
         assert_incremental_matches_full("$$\na = b\n\nc = d\n$$\n\nAfter math.");
+    }
+
+    #[test]
+    fn incremental_survives_setext_shaped_lines() {
+        // "foo\n---" / "bar\n===" — a cut between the text and its underline
+        // would freeze a paragraph-shaped prefix in the store while the tail
+        // re-renders the same bytes differently, so the split must never land
+        // there. Streamed byte-by-byte to hit every intermediate state.
+        assert_incremental_matches_full("Lead.\n\nfoo\n---\n\nbar\n===\n\nbaz\n-\n\ntail");
     }
 
     #[test]
