@@ -483,16 +483,12 @@ fn empty_mark_lines_cover_mcp_plan_and_plain_states() {
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect()
     };
-    // plain: no MCP, no linked plan → logo + version ("type to start"
-    // is obvious and stays out)
+    // plain: no MCP, no linked plan → version line only ("type to
+    // start" is obvious and stays out)
     let app = test_app("http://127.0.0.1:9/v1".into());
     let lines = text(&app);
-    assert!(lines.len() > 10, "small logo block: {lines:?}");
-    assert!(
-        lines.iter().any(|l| l.contains('█')),
-        "block art: {lines:?}"
-    );
-    assert!(lines.contains(&format!("  sqwai v{}", env!("CARGO_PKG_VERSION"))));
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains("sqwai v"), "{lines:?}");
     // linked plan: enter hint instead
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.session.plan_id = Some("p1".into());

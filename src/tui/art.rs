@@ -8,18 +8,6 @@ use ratatui::text::{Line, Span};
 
 use crate::tui::theme::Theme;
 
-/// The big sqwai mark (rounded square with the S-slash) as block art,
-/// embedded from assets at compile time. White, plain, no animation.
-pub const MARK_BIG: &str = include_str!("../../assets/ascii-mark.txt");
-
-/// Big-mark rows as white Lines for the empty state.
-pub fn mark_big_lines() -> Vec<Line<'static>> {
-    MARK_BIG
-        .lines()
-        .map(|l| Line::from(Span::styled(l.to_string(), Style::new().fg(Color::White))))
-        .collect()
-}
-
 /// 5-wide × 5-tall block capitals, one space gap added when joining.
 /// Squat on purpose: tall thin letters read stretched on terminal cells.
 /// Every row is exactly 5 display columns (plain ASCII blocks).

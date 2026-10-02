@@ -2560,16 +2560,15 @@ impl App {
         }
     }
 
-    /// Empty-session mark: big logo + version + MCP count + next action.
+    /// Empty-session mark: version + MCP count + next action.
     /// Everything here is already in memory (binary version, loaded
     /// config, linked plan id) — no background collection, ever.
     pub(super) fn empty_mark_lines(&self) -> Vec<Line<'static>> {
         let mcp = self.cfg.mcp.servers.iter().filter(|s| s.enabled).count();
-        let mut out = crate::tui::art::mark_big_lines();
-        out.push(Line::from(Span::styled(
+        let mut out = vec![Line::from(Span::styled(
             format!("  sqwai v{}", env!("CARGO_PKG_VERSION")),
             Theme::dim(),
-        )));
+        ))];
         let mut second = vec![Span::styled("  ".to_string(), Theme::base())];
         if mcp > 0 {
             second.push(Span::styled(format!("{mcp} MCP"), Theme::meta()));
