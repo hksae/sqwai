@@ -487,7 +487,7 @@ fn empty_mark_lines_cover_mcp_plan_and_plain_states() {
     // is obvious and stays out)
     let app = test_app("http://127.0.0.1:9/v1".into());
     let lines = text(&app);
-    assert!(lines.len() > 20, "big logo: {lines:?}");
+    assert!(lines.len() > 10, "small logo block: {lines:?}");
     assert!(
         lines.iter().any(|l| l.contains('█')),
         "block art: {lines:?}"
