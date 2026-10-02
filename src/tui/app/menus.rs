@@ -596,6 +596,12 @@ impl App {
         self.prefill_form();
         // rows are ready immediately, not on the next frame
         self.build_menu_rows();
+        // a menu that opens on an info row (section divider) starts on the
+        // first actionable row instead of painting a dead band
+        self.menu_skip_none(1);
+        // a fresh menu opens at the top: the skip above may have pulled the
+        // view after the selection for a window that does not exist yet
+        self.menu_scroll = 0;
         if matches!(self.cur_menu(), Some(Menu::Approval { .. })) {
             // deny is preselected, and the clock starts for the Enter guard
             self.menu_sel = self
@@ -691,6 +697,35 @@ impl App {
         }
     }
 
+    /// info rows (MenuAction::None: section dividers, the catalog status
+    /// line) never take the band — step past them in `dir`, giving up back
+    /// at the start when nothing is actionable. View-following stays with
+    /// the caller (nav/page/jump pull, open resets to top). Galleries are
+    /// all-None content rows, never info: skipping is disabled there.
+    fn menu_skips_none(&self) -> bool {
+        !matches!(self.cur_menu(), Some(Menu::TestAnims) | Some(Menu::TestArt))
+    }
+
+    fn menu_skip_none(&mut self, dir: i32) {
+        if !self.menu_skips_none() {
+            return;
+        }
+        let n = self.menu_len();
+        if n == 0 {
+            return;
+        }
+        let step = if dir < 0 { n - 1 } else { 1 };
+        for _ in 0..n {
+            if !matches!(
+                self.menu_row_at(self.menu_sel).map(|(_, a)| a),
+                Some(MenuAction::None)
+            ) {
+                break;
+            }
+            self.menu_sel = (self.menu_sel + step) % n;
+        }
+    }
+
     pub(super) fn menu_nav(&mut self, dir: i32) {
         let is_form = self.is_form_menu();
         if is_form {
@@ -722,6 +757,7 @@ impl App {
                 } else {
                     (self.menu_sel + step).min(n - 1)
                 };
+                self.menu_skip_none(dir);
                 self.menu_follow_sel();
             }
         } else {
@@ -732,6 +768,7 @@ impl App {
                 } else {
                     (self.menu_sel + 1) % n
                 };
+                self.menu_skip_none(dir);
                 self.menu_follow_sel();
             }
         }
@@ -745,6 +782,7 @@ impl App {
         }
         if self.menu_len() > 0 {
             self.menu_sel = if to_end { self.menu_len() - 1 } else { 0 };
+            self.menu_skip_none(if to_end { -1 } else { 1 });
             self.menu_follow_sel();
         }
         self.dirty = true;
@@ -811,6 +849,16 @@ impl App {
         } else {
             return None;
         };
+        // info rows take no band and no click: hovering them changes nothing
+        // (galleries exempt: their None rows are the content)
+        if self.menu_skips_none()
+            && matches!(
+                self.menu_row_at(abs).map(|(_, a)| a),
+                Some(MenuAction::None)
+            )
+        {
+            return None;
+        }
         if abs != self.menu_sel {
             self.menu_sel = abs;
             self.dirty = true;

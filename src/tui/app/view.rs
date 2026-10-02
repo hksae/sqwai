@@ -2147,6 +2147,10 @@ impl App {
                         in_group = true;
                     } else if last_block == BlockKind::ThoughtExpanded {
                         struct_row!(blank(), None);
+                    } else if last_block == BlockKind::Activity {
+                        // the group footer closes the work above; the answer
+                        // gets its own air instead of sticking to it
+                        struct_row!(blank(), None);
                     }
                     last_block = BlockKind::Answer;
                 }
@@ -3070,6 +3074,13 @@ impl App {
                     Some(GROUP_BASE + fgi)
                 );
                 pending_footer = None;
+                // the answer right below the footer gets its own air
+                // instead of sticking to it (same as the main transcript)
+                if let Some(chat) = self.subagent_chats.get(&id)
+                    && let Some(Segment::Assistant { .. }) = chat.get(idx)
+                {
+                    struct_row!(blank(), None);
+                }
             }
             if gi < groups.len() && idx == groups[gi].seg_start {
                 let g = &groups[gi];

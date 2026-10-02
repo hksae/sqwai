@@ -897,6 +897,62 @@ fn providers_table_has_frozen_header() {
 }
 
 #[test]
+fn info_rows_take_no_selection() {
+    use crate::config::{ProviderConfig, WireFormat};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    for i in 0..3 {
+        app.cfg.providers.insert(
+            format!("prov-{i:02}"),
+            ProviderConfig {
+                format: WireFormat::Openai,
+                base_url: "https://api.example.com/v1".into(),
+                api_key: None,
+                api_key_env: None,
+                continuation: false,
+            },
+        );
+    }
+    app.open_menu(Menu::Providers);
+    // the catalog status line is the last row and carries no action
+    let last = app.menu_len() - 1;
+    assert!(
+        matches!(
+            app.menu_row_at(last).map(|(_, a)| a),
+            Some(MenuAction::None)
+        ),
+        "catalog line is info"
+    );
+    // arrows step over it in both directions
+    for _ in 0..app.menu_len() + 2 {
+        app.menu_nav(1);
+        assert_ne!(app.menu_sel, last, "forward must skip the info row");
+    }
+    for _ in 0..app.menu_len() + 2 {
+        app.menu_nav(-1);
+        assert_ne!(app.menu_sel, last, "backward must skip the info row");
+    }
+    // End lands on the last actionable row, never the info line
+    app.menu_jump(true);
+    assert_ne!(app.menu_sel, last);
+    assert!(
+        !matches!(
+            app.menu_row_at(app.menu_sel).map(|(_, a)| a),
+            Some(MenuAction::None)
+        ),
+        "jump lands actionable"
+    );
+    // Home lands on the first actionable row
+    app.menu_jump(false);
+    assert!(
+        !matches!(
+            app.menu_row_at(app.menu_sel).map(|(_, a)| a),
+            Some(MenuAction::None)
+        ),
+        "home lands actionable"
+    );
+}
+
+#[test]
 fn providers_footer_stays_pinned_while_body_scrolls() {
     use crate::config::{ProviderConfig, WireFormat};
     use ratatui::{Terminal, backend::TestBackend};
