@@ -726,6 +726,18 @@ impl App {
                                 self.form_edit_key(k);
                             }
                         }
+                        // uwu gallery: w flips the face style (latin + cyrillic
+                        // physical key); faces paint live at draw time
+                        KeyCode::Char('w' | 'W' | 'ц' | 'Ц')
+                            if !ctrl && !alt && matches!(self.cur_menu(), Some(Menu::TestUwu)) =>
+                        {
+                            use crate::tui::faces::FaceStyle;
+                            self.uwu_style = match self.uwu_style {
+                                FaceStyle::W => FaceStyle::Omega,
+                                FaceStyle::Omega => FaceStyle::W,
+                            };
+                            self.dirty = true;
+                        }
                         KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
                             if !self.menu_stack.is_empty() =>
                         {

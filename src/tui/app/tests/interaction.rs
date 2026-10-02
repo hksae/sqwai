@@ -1231,7 +1231,8 @@ fn test_animations_gated_behind_experimental_flag() {
         vec![
             "/test animations".to_string(),
             "/test art".to_string(),
-            "/test churn".to_string()
+            "/test churn".to_string(),
+            "/test uwu".to_string()
         ]
     );
     app.command("test animations");
@@ -1267,6 +1268,65 @@ fn test_art_opens_numbered_gallery() {
             "variant {i} must carry its number: {label:?}"
         );
     }
+}
+
+#[test]
+fn test_uwu_gallery_shows_faces_and_toggles_style() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{buffer::Buffer, layout::Rect};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.cfg.ui.experimental_test = true;
+    app.command("test uwu");
+    assert!(matches!(
+        app.cur_menu(),
+        Some(crate::tui::app::menus::Menu::TestUwu)
+    ));
+    assert_eq!(
+        app.menu_rows.len(),
+        crate::tui::faces::FACES.len() + 1,
+        "one row per face plus the live sleep row"
+    );
+    // default style is omega
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    app.draw_menu(&mut buf, area);
+    let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+    assert!(text.contains("UωU"), "omega by default: {text:?}");
+    assert!(text.contains("sleep"), "live sleep row: {text:?}");
+    // sleep cycle advances with the tick
+    app.spinner_tick = 0;
+    let mut buf = Buffer::empty(area);
+    app.draw_menu(&mut buf, area);
+    let before: String = buf.content().iter().map(|c| c.symbol()).collect();
+    app.spinner_tick = 30;
+    let mut buf = Buffer::empty(area);
+    app.draw_menu(&mut buf, area);
+    let after: String = buf.content().iter().map(|c| c.symbol()).collect();
+    assert_ne!(before, after, "sleep frames must advance");
+    assert!(after.contains("-ω- zZz"), "third sleep frame: {after:?}");
+    // w flips the style (latin and cyrillic physical key)
+    let press = |app: &mut App, c: char| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Event::Key(KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::empty(),
+        )))
+        .unwrap();
+        app.poll_input(&rx).unwrap();
+    };
+    press(&mut app, 'w');
+    let mut buf = Buffer::empty(area);
+    app.draw_menu(&mut buf, area);
+    let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+    assert!(
+        text.contains("UwU") && !text.contains("UωU"),
+        "w style: {text:?}"
+    );
+    press(&mut app, 'ц');
+    let mut buf = Buffer::empty(area);
+    app.draw_menu(&mut buf, area);
+    let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+    assert!(text.contains("UωU"), "back to omega: {text:?}");
 }
 
 #[test]

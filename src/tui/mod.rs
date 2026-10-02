@@ -1,6 +1,7 @@
 pub mod app;
 pub mod art;
 mod event_log;
+pub mod faces;
 pub mod markdown;
 pub mod presenter;
 mod priority;
