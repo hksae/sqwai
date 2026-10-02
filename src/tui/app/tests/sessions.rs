@@ -488,7 +488,7 @@ fn empty_mark_lines_cover_mcp_plan_and_plain_states() {
     let app = test_app("http://127.0.0.1:9/v1".into());
     let lines = text(&app);
     assert_eq!(lines.len(), 1);
-    assert!(lines[0].contains("UwU sqwai (v"), "{lines:?}");
+    assert!(lines[0].contains("UωU sqwai (v"), "{lines:?}");
     // linked plan: enter hint instead
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.session.plan_id = Some("p1".into());

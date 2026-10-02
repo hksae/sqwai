@@ -10,8 +10,6 @@
 //! Moods are deliberately NOT split: one face everywhere, animation only
 //! over time (the sleep cycle). Meaning rides on the neighbouring text.
 
-use unicode_width::UnicodeWidthStr;
-
 /// w/ω render style. The default is [`FaceStyle::Omega`] (softer, on-brand);
 /// [`FaceStyle::W`] is the fallback for terminals without the glyph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,46 +18,22 @@ pub enum FaceStyle {
     Omega,
 }
 
-/// One gallery face: display name plus the single source art.
+/// One gallery face: the single source art. Gallery rows are numbered,
+/// the art is self-labeling.
 pub struct FaceDef {
-    pub name: &'static str,
     pub art: &'static str,
 }
 
 /// Static gallery faces, each exactly 3 columns wide in both styles.
 pub const FACES: &[FaceDef] = &[
-    FaceDef {
-        name: "UwU",
-        art: "UwU",
-    },
-    FaceDef {
-        name: "uwu",
-        art: "uwu",
-    },
-    FaceDef {
-        name: ">w<",
-        art: ">w<",
-    },
-    FaceDef {
-        name: "~w~",
-        art: "~w~",
-    },
-    FaceDef {
-        name: "≧w≦",
-        art: "≧w≦",
-    },
-    FaceDef {
-        name: "^w^",
-        art: "^w^",
-    },
-    FaceDef {
-        name: "^w~",
-        art: "^w~",
-    },
-    FaceDef {
-        name: "~w^",
-        art: "~w^",
-    },
+    FaceDef { art: "UwU" },
+    FaceDef { art: "uwu" },
+    FaceDef { art: ">w<" },
+    FaceDef { art: "~w~" },
+    FaceDef { art: "≧w≦" },
+    FaceDef { art: "^w^" },
+    FaceDef { art: "^w~" },
+    FaceDef { art: "~w^" },
 ];
 
 /// Sleep animation frames, in order. Width grows with the Z's — that is
@@ -106,6 +80,7 @@ pub fn wait_frame(tick: usize, style: FaceStyle) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_width::UnicodeWidthStr;
 
     /// every static face occupies the same columns in both styles, or rows
     /// using them inline would jitter

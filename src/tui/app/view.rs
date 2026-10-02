@@ -2572,7 +2572,10 @@ impl App {
         }
         let first = Line::from(vec![
             Span::styled("  ".to_string(), Theme::base()),
-            Span::styled("UwU".to_string(), Theme::accent_bold()),
+            Span::styled(
+                crate::tui::faces::render("UwU", crate::tui::faces::FaceStyle::Omega),
+                Theme::meta(),
+            ),
             Span::styled(" ".to_string(), Theme::base()),
             Span::styled(
                 "sqwai".to_string(),
