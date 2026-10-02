@@ -167,7 +167,7 @@ fn live_activity_footer_shimmers_finished_stays_dim() {
         turn_user: None,
     };
     // finished footer: static dim text
-    let still = activity_footer_line(&g, None, None, "UwU", crate::tui::faces::FaceStyle::Omega);
+    let still = activity_footer_line(&g, None, None);
     let text: String = still.spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(text.contains("3 calls"), "{text:?}");
     assert!(
@@ -179,8 +179,6 @@ fn live_activity_footer_shimmers_finished_stays_dim() {
         &g,
         Some(crate::tui::shimmer::SHIMMER_PERIOD_TICKS / 4),
         None,
-        "UwU",
-        crate::tui::faces::FaceStyle::Omega,
     );
     let live_text: String = live.spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(live_text.contains("Working · 3 calls"), "{live_text:?}");

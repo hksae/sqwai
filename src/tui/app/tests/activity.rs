@@ -98,7 +98,7 @@ fn footer_line_sits_under_the_tools_and_folds_them() {
     // finished group: static aggregate, quiet error count (the red
     // lives on the failed rows, the footer only counts)
     let g = app.build_activity_group((0, app.segments.len()));
-    let line = activity_footer_line(&g, None, None, "UwU", crate::tui::faces::FaceStyle::Omega);
+    let line = activity_footer_line(&g, None, None);
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(
         text.contains("2 calls") && text.contains("1 error"),
