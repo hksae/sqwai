@@ -769,13 +769,6 @@ pub struct UiConfig {
     /// unlock /test ... commands (off by default, /settings -> Experimental)
     #[serde(default)]
     pub experimental_test: bool,
-    /// brand face: index into the face registry (out of range falls back
-    /// to the first face)
-    #[serde(default)]
-    pub face: usize,
-    /// omega rendering of the face (w/ω switch)
-    #[serde(default = "default_true")]
-    pub face_omega: bool,
 }
 
 impl Default for UiConfig {
@@ -784,8 +777,6 @@ impl Default for UiConfig {
             typewriter: true,
             http_log: false,
             experimental_test: false,
-            face: 0,
-            face_omega: true,
         }
     }
 }
@@ -1077,8 +1068,6 @@ struct UiOverride {
     typewriter: Option<bool>,
     http_log: Option<bool>,
     experimental_test: Option<bool>,
-    face: Option<usize>,
-    face_omega: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1120,16 +1109,7 @@ struct MemoryOverride {
 /// ignored and reported. Keep in sync with the `*Override` structs above.
 const PROJECT_ALLOWLIST: &[(&str, &[&str])] = &[
     ("diary", &["token_budget", "effort", "timeout_secs"]),
-    (
-        "ui",
-        &[
-            "typewriter",
-            "http_log",
-            "experimental_test",
-            "face",
-            "face_omega",
-        ],
-    ),
+    ("ui", &["typewriter", "http_log", "experimental_test"]),
     (
         "compaction",
         &["threshold", "keep_turns", "anchor_ratio", "summary"],
@@ -1512,12 +1492,6 @@ impl Config {
         }
         if let Some(v) = o.experimental_test {
             ui.experimental_test = v;
-        }
-        if let Some(v) = o.face {
-            ui.face = v;
-        }
-        if let Some(v) = o.face_omega {
-            ui.face_omega = v;
         }
         let compaction = &mut self.compaction;
         let o = &overrides.compaction;

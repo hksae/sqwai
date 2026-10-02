@@ -81,10 +81,9 @@ fn footer_line_sits_under_the_tools_and_folds_them() {
     app.rebuild_cache(80);
     let text = rendered(&app);
     // the tool row (with its args) is gone; the collapsed footer keeps
-    // the brand face and the current verb
+    // the aggregate and the current tool name
     assert!(!text.contains("cargo test"), "folded tools hide: {text}");
-    assert!(text.contains("UωU"), "face stays: {text}");
-    assert!(text.contains("Running"), "verb stays: {text}");
+    assert!(text.contains("▸ Running"), "footer stays: {text}");
 
     ev(
         AgentEvent::ToolNotice {
@@ -284,44 +283,6 @@ fn footer_verbs_are_plain_words_with_a_working_fallback() {
             "no fancy verbs: {tool} -> {verb}"
         );
     }
-}
-
-#[test]
-fn live_footer_shows_uwu_or_wait_cycle() {
-    use super::super::view::{ActivityGroup, activity_footer_line};
-    let g = ActivityGroup {
-        seg_start: 0,
-        seg_end: 1,
-        calls: 1,
-        thinking: 0,
-        duration_ms: 2000,
-        errors: 0,
-        rejected: 0,
-        expanded: true,
-        turn_user: None,
-    };
-    let text_of = |tool: Option<&str>| {
-        activity_footer_line(
-            &g,
-            Some(0),
-            tool,
-            "UwU",
-            crate::tui::faces::FaceStyle::Omega,
-        )
-        .spans
-        .iter()
-        .map(|s| s.content.as_ref())
-        .collect::<String>()
-    };
-    // working tool: static brand face, gray slot
-    let read = text_of(Some("read"));
-    assert!(read.contains("UωU"), "brand face: {read:?}");
-    assert!(read.contains("Reading"), "verb: {read:?}");
-    // waiting tool: sleep cycle without the waking head, padded slot
-    let sleep = text_of(Some("sleep"));
-    assert!(sleep.contains("-ω- z"), "wait frame: {sleep:?}");
-    assert!(!sleep.contains("UωU"), "no waking head: {sleep:?}");
-    assert!(sleep.contains("Waiting"), "verb: {sleep:?}");
 }
 
 #[test]

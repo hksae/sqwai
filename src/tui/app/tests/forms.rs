@@ -1227,53 +1227,6 @@ fn ctrl_v_does_not_submit_following_enter() {
 }
 
 #[test]
-fn appearance_cycles_face_and_toggles_letter() {
-    use crate::tui::faces;
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.open_menu(Menu::Appearance);
-    assert_eq!(app.cfg.ui.face, 0);
-    assert!(app.cfg.ui.face_omega);
-    // cycle wraps around the whole registry
-    for _ in 0..faces::FACES.len() {
-        app.run_action(MenuAction::CycleFace);
-    }
-    assert_eq!(app.cfg.ui.face, 0, "wraps around");
-    app.run_action(MenuAction::CycleFace);
-    assert_eq!(app.cfg.ui.face, 1);
-    // letter toggles
-    app.run_action(MenuAction::ToggleFaceLetter);
-    assert!(!app.cfg.ui.face_omega);
-    app.run_action(MenuAction::ToggleFaceLetter);
-    assert!(app.cfg.ui.face_omega);
-    assert!(matches!(app.cur_menu(), Some(Menu::Appearance)));
-    // rows show the live face with no number
-    let texts: Vec<String> = app
-        .menu_rows
-        .iter()
-        .map(|(line, _)| {
-            line.spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>()
-        })
-        .collect();
-    let face_row = texts.iter().find(|t| t.contains("Face")).expect("face row");
-    assert!(
-        face_row.contains(&faces::render(faces::by_index(1), faces::FaceStyle::Omega)),
-        "live face, no number: {face_row:?}"
-    );
-}
-
-#[test]
-fn face_falls_back_to_first_on_bad_index() {
-    use crate::tui::faces;
-    assert_eq!(faces::by_index(0), "UwU");
-    assert_eq!(faces::by_index(999), "UwU");
-    assert_eq!(faces::style(true), faces::FaceStyle::Omega);
-    assert_eq!(faces::style(false), faces::FaceStyle::W);
-}
-
-#[test]
 fn appearance_toggles_ui_settings() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::Appearance);
