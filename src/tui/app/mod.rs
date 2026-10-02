@@ -188,6 +188,13 @@ const REVEAL_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_mil
 /// Reveal speed in chars/s: the old 12-chars-per-50ms-tick pace, unchanged.
 const REVEAL_RATE: usize = 240;
 
+/// Chars to reveal in one flush: due at REVEAL_RATE since the window opened,
+/// at least 2, capped by the queue. The upper bound is pre-clamped — `queued`
+/// can be 1 on a slow stream, and `clamp` panics when min > max.
+fn reveal_step(since_ms: u128, queued: usize) -> usize {
+    (since_ms as usize * REVEAL_RATE / 1000).clamp(2, queued.max(2))
+}
+
 /// Connection-check state for one provider, rendered on its menu rows.
 #[derive(Clone)]
 pub(super) enum ProviderCheck {
@@ -1350,8 +1357,7 @@ impl App {
                     } else {
                         self.last_reveal = Some(Instant::now());
                         let queued = self.pending_reveal.chars().count();
-                        (since.as_millis() as usize * REVEAL_RATE / 1000)
-                            .clamp(2, queued)
+                        reveal_step(since.as_millis(), queued)
                     }
                 } else {
                     usize::MAX
@@ -1359,6 +1365,12 @@ impl App {
                 if step > 0 {
                     self.dirty |= self.reveal_chars(step);
                 }
+            }
+            // a drained queue resets the flush window: the next turn's first
+            // reveal must be paced by the window, not dump whatever a stale
+            // one accumulated while nothing was streaming
+            if self.pending_reveal.is_empty() {
+                self.last_reveal = None;
             }
             if self
                 .toast
@@ -1473,15 +1485,14 @@ impl App {
                     self.last_fresh = 0;
                     if frame_bufs.len() != FRAME_BUF_SLOTS {
                         frame_bufs = (0..FRAME_BUF_SLOTS)
-                            .map(|_| {
-                                std::sync::Arc::new(ratatui::buffer::Buffer::empty(area))
-                            })
+                            .map(|_| std::sync::Arc::new(ratatui::buffer::Buffer::empty(area)))
                             .collect();
                     }
                     let slot = frame_buf_idx % FRAME_BUF_SLOTS;
                     frame_buf_idx = frame_buf_idx.wrapping_add(1);
                     if std::sync::Arc::strong_count(&frame_bufs[slot]) > 1 {
-                        frame_bufs[slot] = std::sync::Arc::new(ratatui::buffer::Buffer::empty(area));
+                        frame_bufs[slot] =
+                            std::sync::Arc::new(ratatui::buffer::Buffer::empty(area));
                     }
                     let buf = std::sync::Arc::get_mut(&mut frame_bufs[slot])
                         .expect("slot refcount is 1 after the replace above");

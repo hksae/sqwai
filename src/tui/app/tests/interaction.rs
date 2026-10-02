@@ -210,6 +210,27 @@ fn typewriter_reveals_gradually_and_drains() {
     assert!(!app.reveal_chars(10), "empty queue must report no progress");
 }
 
+#[test]
+fn reveal_flush_of_one_char_does_not_panic() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.push_segment(Segment::Assistant {
+        text: String::new(),
+        live: true,
+    });
+    // one queued char with the flush window long due: the step must come out
+    // usable instead of tripping clamp's min<=max assert (queued == 1)
+    app.pending_reveal = "x".into();
+    let interval = crate::tui::app::REVEAL_FLUSH_INTERVAL.as_millis();
+    let step = crate::tui::app::reveal_step(interval, 1);
+    assert_eq!(step, 2);
+    assert!(app.reveal_chars(step));
+    assert_eq!(app.assistant_buf, "x");
+    assert_eq!(live_assistant_text(&app), "x");
+    // a stale window (no reveal for a long time) is capped by the queue
+    assert_eq!(crate::tui::app::reveal_step(3_600_000, 2), 2);
+    assert_eq!(crate::tui::app::reveal_step(3_600_000, 500), 500);
+}
+
 fn live_assistant_text(app: &App) -> String {
     app.segments
         .iter()
