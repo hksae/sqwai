@@ -483,18 +483,25 @@ fn empty_mark_lines_cover_mcp_plan_and_plain_states() {
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect()
     };
-    // plain: no MCP, no linked plan → brand only ("type to start"
+    // plain: no MCP, no linked plan → logo + version ("type to start"
     // is obvious and stays out)
     let app = test_app("http://127.0.0.1:9/v1".into());
     let lines = text(&app);
-    assert_eq!(lines.len(), 1);
-    assert!(lines[0].contains("UwU sqwai (v"), "{lines:?}");
+    assert!(lines.len() > 20, "big logo: {lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains('█')),
+        "block art: {lines:?}"
+    );
+    assert!(lines.contains(&format!("  sqwai v{}", env!("CARGO_PKG_VERSION"))));
     // linked plan: enter hint instead
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.session.plan_id = Some("p1".into());
     let lines = text(&app);
     assert!(
-        lines[1].contains("enter: continue next plan step"),
+        lines
+            .last()
+            .expect("hint row")
+            .contains("enter: continue next plan step"),
         "{lines:?}"
     );
     // MCP: enabled servers counted, disabled skipped
@@ -520,7 +527,10 @@ fn empty_mark_lines_cover_mcp_plan_and_plain_states() {
         },
     ];
     let lines = text(&app);
-    assert!(lines[1].contains("1 MCP"), "{lines:?}");
+    assert!(
+        lines.last().expect("hint row").contains("1 MCP"),
+        "{lines:?}"
+    );
 }
 
 #[test]

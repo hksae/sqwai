@@ -2560,32 +2560,22 @@ impl App {
         }
     }
 
-    /// Empty-session mark: static brand + MCP count + next action.
+    /// Empty-session mark: big logo + version + MCP count + next action.
     /// Everything here is already in memory (binary version, loaded
     /// config, linked plan id) — no background collection, ever.
     pub(super) fn empty_mark_lines(&self) -> Vec<Line<'static>> {
         let mcp = self.cfg.mcp.servers.iter().filter(|s| s.enabled).count();
+        let mut out = crate::tui::art::mark_big_lines();
+        out.push(Line::from(Span::styled(
+            format!("  sqwai v{}", env!("CARGO_PKG_VERSION")),
+            Theme::dim(),
+        )));
         let mut second = vec![Span::styled("  ".to_string(), Theme::base())];
         if mcp > 0 {
             second.push(Span::styled(format!("{mcp} MCP"), Theme::meta()));
             second.push(Span::styled(" · ".to_string(), Theme::dim()));
         }
-        let first = Line::from(vec![
-            Span::styled("  ".to_string(), Theme::base()),
-            Span::styled("UwU".to_string(), Theme::accent_bold()),
-            Span::styled(" ".to_string(), Theme::base()),
-            Span::styled(
-                "sqwai".to_string(),
-                Style::new()
-                    .fg(ratatui::style::Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!(" (v{})", env!("CARGO_PKG_VERSION")), Theme::dim()),
-        ]);
         if self.session.plan_id.is_some() {
-            // matches Enter-continue (linked plan); a session-scoped but
-            // unlinked legacy plan still continues on Enter while the mark
-            // stays quiet — rare, accepted (no per-frame plan I/O)
             second.push(Span::styled(
                 "enter".to_string(),
                 Theme::base().add_modifier(Modifier::BOLD),
@@ -2594,15 +2584,14 @@ impl App {
                 ": continue next plan step".to_string(),
                 Theme::dim(),
             ));
-            vec![first, Line::from(second)]
+            out.push(Line::from(second));
         } else if mcp > 0 {
             // no plan hint ("type to start" is obvious); MCP alone still
             // earns its row
-            vec![first, Line::from(second)]
-        } else {
-            // brand only
-            vec![first]
+            out.push(Line::from(second));
         }
+        // logo + version always; the hint row only when it says something
+        out
     }
 
     /// Test/compat entry: production renders via [`Self::render_into`]
@@ -2743,17 +2732,22 @@ impl App {
             // Lines carry their own styles. Do not apply the base background at
             // widget level: it would override INPUT_BG on user-strip rows.
             Paragraph::new(visible).render(chat, buf);
-            // Empty session mark: static lines at the top of the chat area.
+            // Empty session mark: logo at the top of the chat area.
             if self.segments.is_empty() && !self.streaming {
-                Paragraph::new(self.empty_mark_lines()).render(
-                    Rect {
-                        x: chat.x,
-                        y: chat.y + 1,
-                        width: chat.width,
-                        height: 2,
-                    },
-                    buf,
-                );
+                let mark = self.empty_mark_lines();
+                // the mark is taller than a short viewport: clip, never panic
+                let h = (mark.len() as u16).min(chat.bottom().saturating_sub(chat.y + 1));
+                if h > 0 {
+                    Paragraph::new(mark).render(
+                        Rect {
+                            x: chat.x,
+                            y: chat.y + 1,
+                            width: chat.width,
+                            height: h,
+                        },
+                        buf,
+                    );
+                }
             }
             // The transcript widget repaints its own rectangle, so apply the
             // full-width fill again afterwards to restore the two outer gutters.
