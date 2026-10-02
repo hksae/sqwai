@@ -3483,20 +3483,26 @@ impl App {
                 .enumerate()
             {
                 let abs = self.menu_scroll + n;
+                // numbered rows (the TestArt convention): the face is
+                // self-labeling, so no name column duplicating it — only
+                // the live sleep row carries a label
                 let mut spans = if abs < faces::FACES.len() {
-                    let face = &faces::FACES[abs];
                     vec![
+                        Span::styled(format!(" {:02}  ", abs + 1), Theme::dim()),
                         Span::styled(
-                            format!(" {}  ", faces::render(face.art, style)),
-                            Theme::accent_bold(),
+                            format!("{}  ", faces::render(faces::FACES[abs].art, style)),
+                            Theme::meta(),
                         ),
-                        Span::styled(face.name.to_string(), Theme::dim()),
                     ]
                 } else if abs < total {
                     vec![
                         Span::styled(
-                            format!(" {}  ", faces::sleep_frame(self.spinner_tick, style)),
-                            Theme::accent_bold(),
+                            format!(
+                                " {:02}  {}  ",
+                                abs + 1,
+                                faces::sleep_frame(self.spinner_tick, style)
+                            ),
+                            Theme::meta(),
                         ),
                         Span::styled("sleep · live".to_string(), Theme::dim()),
                     ]

@@ -1392,7 +1392,7 @@ impl App {
             let animating = self.streaming
                 || self.tool_running()
                 || self.toast.is_some()
-                || matches!(self.cur_menu(), Some(Menu::TestAnims))
+                || matches!(self.cur_menu(), Some(Menu::TestAnims) | Some(Menu::TestUwu))
                 // live mode-chip sweep gets its 250ms even past streaming
                 // end, or the chip would freeze mid-blend on the toggle
                 || self.mode_blend.is_some_and(|(_, t0)| {
