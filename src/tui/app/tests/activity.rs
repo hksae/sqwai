@@ -99,7 +99,7 @@ fn footer_line_sits_under_the_tools_and_folds_them() {
     // finished group: static aggregate, quiet error count (the red
     // lives on the failed rows, the footer only counts)
     let g = app.build_activity_group((0, app.segments.len()));
-    let line = activity_footer_line(&g, None, None);
+    let line = activity_footer_line(&g, None, None, "UwU", crate::tui::faces::FaceStyle::Omega);
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(
         text.contains("2 calls") && text.contains("1 error"),
@@ -301,11 +301,17 @@ fn live_footer_shows_uwu_or_wait_cycle() {
         turn_user: None,
     };
     let text_of = |tool: Option<&str>| {
-        activity_footer_line(&g, Some(0), tool)
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect::<String>()
+        activity_footer_line(
+            &g,
+            Some(0),
+            tool,
+            "UwU",
+            crate::tui::faces::FaceStyle::Omega,
+        )
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect::<String>()
     };
     // working tool: static brand face, gray slot
     let read = text_of(Some("read"));

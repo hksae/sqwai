@@ -1,5 +1,3 @@
-![sqwai](assets/sqwai_header.png)
-
 A terminal coding agent built for long tasks. sqwai keeps the goal fixed across
 context compaction, requires evidence before a step can be closed, and answers
 "what did you do?" from a record of what actually happened — not from memory.
