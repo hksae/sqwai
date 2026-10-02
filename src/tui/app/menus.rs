@@ -61,7 +61,7 @@ pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
         ],
     ),
     ("/undo", &["step"]),
-    ("/test", &["animations", "art", "churn", "uwu"]),
+    ("/test", &["animations", "art", "churn"]),
     ("/providers", &["update"]),
     ("/constraints", &["add", "remove"]),
     ("/mode", &["plan", "act"]),
@@ -191,8 +191,6 @@ pub(super) enum Menu {
     TestAnims,
     /// /test art: numbered static logo variants for picking the empty-state mark
     TestArt,
-    /// /test uwu: UwU face gallery (static faces + live sleep cycle)
-    TestUwu,
     /// the model asked the user structured questions (ask_user)
     /// legacy modal path; live asks render inline in the chat instead
     #[allow(dead_code)]
@@ -705,10 +703,7 @@ impl App {
     /// the caller (nav/page/jump pull, open resets to top). Galleries are
     /// all-None content rows, never info: skipping is disabled there.
     fn menu_skips_none(&self) -> bool {
-        !matches!(
-            self.cur_menu(),
-            Some(Menu::TestAnims) | Some(Menu::TestArt) | Some(Menu::TestUwu)
-        )
+        !matches!(self.cur_menu(), Some(Menu::TestAnims) | Some(Menu::TestArt))
     }
 
     fn menu_skip_none(&mut self, dir: i32) {
@@ -954,10 +949,7 @@ impl App {
             return;
         }
         // galleries are showcases: any commit just closes them
-        if matches!(
-            self.cur_menu(),
-            Some(Menu::TestAnims) | Some(Menu::TestArt) | Some(Menu::TestUwu)
-        ) {
+        if matches!(self.cur_menu(), Some(Menu::TestAnims) | Some(Menu::TestArt)) {
             self.menu_back();
             return;
         }
@@ -1811,7 +1803,6 @@ impl App {
             Some(Menu::Effort) => " Effort ".into(),
             Some(Menu::TestAnims) => " Test ".into(),
             Some(Menu::TestArt) => " Art ".into(),
-            Some(Menu::TestUwu) => " Uwu ".into(),
             Some(Menu::AskUser { .. }) => " Ask ".into(),
             Some(Menu::Approval { .. }) => " Confirm command ".into(),
             Some(Menu::AskFree { .. }) => " Answer ".into(),
@@ -2840,16 +2831,6 @@ impl App {
                     for line in lines {
                         self.menu_rows.push(row(line, MenuAction::None));
                     }
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(String::new(), Theme::base())]),
-                        MenuAction::None,
-                    ));
-                }
-            }
-            Menu::TestUwu => {
-                // faces paint live at draw time (style toggle + sleep
-                // cycle), so rows only reserve the count, like TestAnims
-                for _ in 0..crate::tui::faces::FACES.len() + 1 {
                     self.menu_rows.push(row(
                         Line::from(vec![Span::styled(String::new(), Theme::base())]),
                         MenuAction::None,

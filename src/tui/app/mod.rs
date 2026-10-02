@@ -495,8 +495,6 @@ pub struct App {
     /// past the sweep, and cleared whenever the popup opens fresh.
     effort_blend: Option<((u8, u8, u8), Instant)>,
     effort_blend_sel: Option<usize>,
-    /// /test uwu gallery render style (w/ω toggle, default Omega)
-    uwu_style: crate::tui::faces::FaceStyle,
     form_fields: Vec<FormField>,
     form_focus: usize,
     /// cached session list for the sessions menus (headers only — see
@@ -970,7 +968,6 @@ impl App {
             effort_hits: Vec::new(),
             effort_blend: None,
             effort_blend_sel: None,
-            uwu_style: crate::tui::faces::FaceStyle::Omega,
             form_fields: Vec::new(),
             form_focus: 0,
             sessions: Vec::new(),
@@ -1392,7 +1389,7 @@ impl App {
             let animating = self.streaming
                 || self.tool_running()
                 || self.toast.is_some()
-                || matches!(self.cur_menu(), Some(Menu::TestAnims) | Some(Menu::TestUwu))
+                || matches!(self.cur_menu(), Some(Menu::TestAnims))
                 // live mode-chip sweep gets its 250ms even past streaming
                 // end, or the chip would freeze mid-blend on the toggle
                 || self.mode_blend.is_some_and(|(_, t0)| {
@@ -3095,12 +3092,10 @@ impl App {
                     self.open_menu(Menu::TestAnims);
                 } else if rest.split_whitespace().nth(1) == Some("art") {
                     self.open_menu(Menu::TestArt);
-                } else if rest.split_whitespace().nth(1) == Some("uwu") {
-                    self.open_menu(Menu::TestUwu);
                 } else if rest.split_whitespace().nth(1) == Some("churn") {
                     self.start_test_churn();
                 } else {
-                    self.status("/test takes: animations, art, churn, uwu", StatusKind::Warn);
+                    self.status("/test takes: animations, art, churn", StatusKind::Warn);
                 }
             }
             "/debug" => self.open_menu(Menu::Debug),

@@ -3468,55 +3468,6 @@ impl App {
                 }
                 rows.push(Line::from(spans));
             }
-        } else if matches!(self.cur_menu(), Some(Menu::TestUwu)) {
-            // uwu gallery: static faces plus the live sleep cycle. Faces
-            // paint here (not in build_menu_rows) so the w/ω toggle and
-            // the sleep frames need no rebuild — every frame is current.
-            use crate::tui::faces;
-            let style = self.uwu_style;
-            let total = faces::FACES.len() + 1;
-            for (n, _) in self
-                .menu_rows
-                .iter()
-                .skip(self.menu_scroll)
-                .take(content_rows)
-                .enumerate()
-            {
-                let abs = self.menu_scroll + n;
-                // numbered rows (the TestArt convention): the face is
-                // self-labeling, so no name column duplicating it — only
-                // the live sleep row carries a label
-                let mut spans = if abs < faces::FACES.len() {
-                    vec![
-                        Span::styled(format!(" {:02}  ", abs + 1), Theme::dim()),
-                        Span::styled(
-                            format!("{}  ", faces::render(faces::FACES[abs].art, style)),
-                            Theme::meta(),
-                        ),
-                    ]
-                } else if abs < total {
-                    vec![
-                        Span::styled(
-                            format!(
-                                " {:02}  {}  ",
-                                abs + 1,
-                                faces::sleep_frame(self.spinner_tick, style)
-                            ),
-                            Theme::meta(),
-                        ),
-                        Span::styled("sleep · live".to_string(), Theme::dim()),
-                    ]
-                } else {
-                    vec![Span::styled(String::new(), Theme::base())]
-                };
-                if abs == self.menu_sel {
-                    spans = spans
-                        .into_iter()
-                        .map(|s| Span::styled(s.content.to_string(), Theme::accent_bold()))
-                        .collect();
-                }
-                rows.push(Line::from(spans));
-            }
         } else {
             // render only the visible window of the list. Selection is one
             // fill band across the content width (Crush dialog style): the
@@ -3615,10 +3566,6 @@ impl App {
             );
         } else if matches!(self.cur_menu(), Some(Menu::TestAnims) | Some(Menu::TestArt)) {
             block = block.title_bottom(Theme::hints(&[("enter/esc", "close")]).right_aligned());
-        } else if matches!(self.cur_menu(), Some(Menu::TestUwu)) {
-            block = block.title_bottom(
-                Theme::hints(&[("w", "w/ω"), ("enter/esc", "close")]).right_aligned(),
-            );
         } else if matches!(self.cur_menu(), Some(Menu::EditProvider { .. })) {
             block = block.title_bottom(
                 Theme::hints(&[
