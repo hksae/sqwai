@@ -62,6 +62,22 @@ pub fn render(art: &str, style: FaceStyle) -> String {
     }
 }
 
+/// Art by registry index, falling back to the first face when the
+/// stored index points past the table (hand-edited config, reordered
+/// registry).
+pub fn by_index(idx: usize) -> &'static str {
+    FACES.get(idx).map(|f| f.art).unwrap_or(FACES[0].art)
+}
+
+/// Style from the w/ω switch.
+pub fn style(omega: bool) -> FaceStyle {
+    if omega {
+        FaceStyle::Omega
+    } else {
+        FaceStyle::W
+    }
+}
+
 /// Current sleep-animation frame for a spinner tick.
 pub fn sleep_frame(tick: usize, style: FaceStyle) -> String {
     let frame = SLEEP_FRAMES[(tick / SLEEP_TICKS_PER_FRAME) % SLEEP_FRAMES.len()];

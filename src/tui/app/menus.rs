@@ -254,6 +254,8 @@ pub(super) enum MenuAction {
     DeleteSession(String),
     ToggleTypewriter,
     ToggleHttpLog,
+    CycleFace,
+    ToggleFaceLetter,
     ToggleExperimentalTest,
     TogglePerfLog,
     TogglePlanStrict,
@@ -1326,6 +1328,16 @@ impl App {
                 self.status(&format!("typewriter: {}", on_off(on)), StatusKind::Ok);
                 self.build_menu_rows();
             }
+            MenuAction::CycleFace => {
+                self.cfg.ui.face = (self.cfg.ui.face + 1) % crate::tui::faces::FACES.len().max(1);
+                self.cfg.save().ok();
+                self.build_menu_rows();
+            }
+            MenuAction::ToggleFaceLetter => {
+                self.cfg.ui.face_omega = !self.cfg.ui.face_omega;
+                self.cfg.save().ok();
+                self.build_menu_rows();
+            }
             MenuAction::ToggleHttpLog => {
                 self.cfg.ui.http_log = !self.cfg.ui.http_log;
                 self.cfg.save().ok();
@@ -2126,6 +2138,19 @@ impl App {
                     "Typewriter",
                     on_off(self.cfg.ui.typewriter).as_str(),
                     MenuAction::ToggleTypewriter,
+                ));
+                self.menu_rows.push(setting(
+                    "Face",
+                    &crate::tui::faces::render(
+                        crate::tui::faces::by_index(self.cfg.ui.face),
+                        crate::tui::faces::style(self.cfg.ui.face_omega),
+                    ),
+                    MenuAction::CycleFace,
+                ));
+                self.menu_rows.push(setting(
+                    "Letter",
+                    if self.cfg.ui.face_omega { "ω" } else { "w" },
+                    MenuAction::ToggleFaceLetter,
                 ));
                 self.menu_footer_text = Some("enter: open/toggle · esc: back".into());
             }

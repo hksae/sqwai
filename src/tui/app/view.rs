@@ -2098,7 +2098,13 @@ impl App {
                     .flatten();
                 last_block = BlockKind::Activity;
                 struct_row!(
-                    activity_footer_line(g, live.then_some(self.spinner_tick), tool.as_deref()),
+                    activity_footer_line(
+                        g,
+                        live.then_some(self.spinner_tick),
+                        tool.as_deref(),
+                        &face_art(&self.cfg),
+                        crate::tui::faces::style(self.cfg.ui.face_omega)
+                    ),
                     Some(GROUP_BASE + fgi)
                 );
                 pending_footer = None;
@@ -2244,7 +2250,13 @@ impl App {
                 .then(|| live_tool_name(&self.segments, g.seg_start, g.seg_end))
                 .flatten();
             struct_row!(
-                activity_footer_line(g, live.then_some(self.spinner_tick), tool.as_deref()),
+                activity_footer_line(
+                    g,
+                    live.then_some(self.spinner_tick),
+                    tool.as_deref(),
+                    &face_art(&self.cfg),
+                    crate::tui::faces::style(self.cfg.ui.face_omega)
+                ),
                 Some(GROUP_BASE + fgi)
             );
         } else if let Some(waiting) = live_ref
@@ -2254,7 +2266,13 @@ impl App {
             // range sits past the tail), so its bare working line goes here
             struct_row!(blank(), None);
             struct_row!(
-                activity_footer_line(waiting, Some(self.spinner_tick), None),
+                activity_footer_line(
+                    waiting,
+                    Some(self.spinner_tick),
+                    None,
+                    &face_art(&self.cfg),
+                    crate::tui::faces::style(self.cfg.ui.face_omega)
+                ),
                 Some(GROUP_BASE + self.activity_groups.len())
             );
         }
@@ -2572,10 +2590,7 @@ impl App {
         }
         let first = Line::from(vec![
             Span::styled("  ".to_string(), Theme::base()),
-            Span::styled(
-                crate::tui::faces::render("UwU", crate::tui::faces::FaceStyle::Omega),
-                Theme::meta(),
-            ),
+            Span::styled(face_art(&self.cfg), Theme::meta()),
             Span::styled(" ".to_string(), Theme::base()),
             Span::styled(
                 "sqwai".to_string(),
@@ -3073,7 +3088,13 @@ impl App {
                     })
                     .flatten();
                 struct_row!(
-                    activity_footer_line(g, live.then_some(self.spinner_tick), tool.as_deref()),
+                    activity_footer_line(
+                        g,
+                        live.then_some(self.spinner_tick),
+                        tool.as_deref(),
+                        &face_art(&self.cfg),
+                        crate::tui::faces::style(self.cfg.ui.face_omega)
+                    ),
                     Some(GROUP_BASE + fgi)
                 );
                 pending_footer = None;
@@ -3184,7 +3205,13 @@ impl App {
                 })
                 .flatten();
             struct_row!(
-                activity_footer_line(g, live.then_some(self.spinner_tick), tool.as_deref()),
+                activity_footer_line(
+                    g,
+                    live.then_some(self.spinner_tick),
+                    tool.as_deref(),
+                    &face_art(&self.cfg),
+                    crate::tui::faces::style(self.cfg.ui.face_omega)
+                ),
                 Some(GROUP_BASE + fgi)
             );
         }
@@ -4409,6 +4436,15 @@ pub(super) fn tool_verb(tool: &str) -> &'static str {
     }
 }
 
+/// Brand face from settings (registry index + w/ω switch), read live so
+/// the Appearance picker applies everywhere in the same frame.
+fn face_art(cfg: &crate::config::Config) -> String {
+    crate::tui::faces::render(
+        crate::tui::faces::by_index(cfg.ui.face),
+        crate::tui::faces::style(cfg.ui.face_omega),
+    )
+}
+
 /// The one-line summary of a turn's working content. Failures are spelled out
 /// here: a collapsed block must never hide the fact that something broke.
 /// While the turn runs (`live_tick` set), the "activity" word shimmers
@@ -4422,18 +4458,20 @@ pub(super) fn activity_footer_line(
     g: &ActivityGroup,
     live_tick: Option<usize>,
     tool: Option<&str>,
+    face_art: &str,
+    style: crate::tui::faces::FaceStyle,
 ) -> Line<'static> {
     let arrow = if g.expanded { "▾" } else { "▸" };
     let mut spans = vec![Span::styled(format!("  {arrow} "), Theme::dim())];
     let mut parts: Vec<String> = Vec::new();
     if let Some(tick) = live_tick {
-        // brand face, quiet gray: static UwU, or the wait cycle (no
-        // waking head) while a tool waits. Only the cycle pads to a
+        // brand face, quiet gray: the configured face, or the wait cycle
+        // (no waking head) while a tool waits. Only the cycle pads to a
         // fixed slot — a static face needs none.
-        use crate::tui::faces::{self, FaceStyle};
+        use crate::tui::faces;
         let face = match tool {
-            Some("bash_output" | "sleep") => faces::wait_frame(tick, FaceStyle::Omega),
-            _ => faces::render("UwU", FaceStyle::Omega),
+            Some("bash_output" | "sleep") => faces::wait_frame(tick, style),
+            _ => faces::render(face_art, style),
         };
         spans.push(Span::styled(format!("{face} "), Theme::meta()));
         // the verb carries the action, the tool name stays in the
