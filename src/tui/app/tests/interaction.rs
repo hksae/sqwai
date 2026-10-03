@@ -1291,16 +1291,14 @@ fn held_tab_toggles_mode_only_once() {
     send(&mut app, KeyEventKind::Repeat);
     assert_ne!(app.mode, before, "repeat must not toggle");
     // terminals without repeat events send held Tab as rapid Press:
-    // inside the 250ms blend window that is a hold, not a press
+    // without an intervening Release that is a hold, not presses
     send(&mut app, KeyEventKind::Press);
-    assert_ne!(app.mode, before, "rapid press must not toggle back");
-    // past the window the same press toggles again
-    app.mode_blend = Some((
-        (0, 0, 0),
-        std::time::Instant::now() - std::time::Duration::from_secs(5),
-    ));
     send(&mut app, KeyEventKind::Press);
-    assert_eq!(app.mode, before, "settled press must toggle");
+    assert_ne!(app.mode, before, "held presses must not toggle back");
+    // Release ends the hold: the next press toggles instantly, no window
+    send(&mut app, KeyEventKind::Release);
+    send(&mut app, KeyEventKind::Press);
+    assert_eq!(app.mode, before, "fresh press must toggle at once");
 }
 
 fn queue_test_app() -> crate::tui::app::App {

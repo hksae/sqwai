@@ -135,6 +135,15 @@ impl App {
             }
             match ev {
                 Event::Key(k) => {
+                    // Tab hold tracking lives here, before the kind gate:
+                    // terminals without repeat events send a held Tab as
+                    // repeated Press, and only the Release tells a hold
+                    // apart from real presses. No Tab arm below ever sees
+                    // a Release, so their matching is unchanged.
+                    if matches!(k.code, KeyCode::Tab) && k.kind == KeyEventKind::Release {
+                        self.tab_held = false;
+                        continue;
+                    }
                     if k.kind != KeyEventKind::Press {
                         continue;
                     }
@@ -566,16 +575,11 @@ impl App {
                         KeyCode::Tab
                             if self.menu_stack.is_empty() && self.active_ask_seg().is_none() =>
                         {
-                            // held Tab arrives as repeated Press on terminals
-                            // without key-repeat events (Repeat never reaches
-                            // us — dropped at the poll gate), so a kind check
-                            // cannot stop the flapping. A toggle arms a 250ms
-                            // blend; a second toggle inside its window is a
-                            // hold, not a press.
-                            let cooling = self.mode_blend.is_some_and(|(_, t0)| {
-                                t0.elapsed() < std::time::Duration::from_millis(MODE_BLEND_MS)
-                            });
-                            if !cooling {
+                            // first Press after a Release toggles instantly —
+                            // no debounce window, no delay. Repeats while
+                            // held are ignored outright via tab_held.
+                            if !self.tab_held {
+                                self.tab_held = true;
                                 let next = self.mode.toggle();
                                 self.set_mode(next);
                             }

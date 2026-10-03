@@ -306,6 +306,9 @@ pub struct App {
     /// unsaved scratch session (never persisted until the first message)
     startup: bool,
     pub(super) last_ctrl_c: Option<Instant>,
+    /// Tab is physically held down (seen Press without Release): repeats
+    /// while held must not toggle the mode, only a fresh press does
+    tab_held: bool,
     /// transient bottom-bar notice (3s): every status/error lands here, the
     /// chat stays clean. A new notice replaces the current one.
     toast: Option<Toast>,
@@ -897,6 +900,7 @@ impl App {
             mode: Mode::Act,
             startup,
             last_ctrl_c: None,
+            tab_held: false,
             read_only,
             toast: None,
             pending_queue: Vec::new(),
