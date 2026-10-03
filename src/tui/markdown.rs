@@ -969,8 +969,8 @@ fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
         }
     }
     // Headings: h1 wears the brand gradient (no underline anymore — the
-    // ramp carries the level), h2 muted coral, h3 light coral, h4-h6 dim
-    // italic. h3/h4+ deliberately do not rely on italic alone: terminals
+    // ramp carries the level), h2 muted coral, h3 light coral, h4 white,
+    // h5-h6 dim italic. h3/h4+ deliberately do not rely on italic alone: terminals
     // without italic support (conhost) would render them as plain text.
     // The `#` markers are syntax, not content: they are never printed,
     // the heading style alone carries the level.
@@ -1006,6 +1006,9 @@ fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
                     .add_modifier(Modifier::BOLD | Modifier::ITALIC)
             }
         }
+        4 => Style::new()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD | Modifier::ITALIC),
         _ => Style::new().fg(Theme::DIM()).add_modifier(Modifier::ITALIC),
     };
     Some(inline(rest, style))
@@ -2132,9 +2135,10 @@ mod tests {
             h4[0]
                 .spans
                 .iter()
-                .all(|s| s.style.add_modifier.contains(Modifier::ITALIC)
-                    && s.style.fg == Some(Theme::DIM())),
-            "h4 must be dim italic: {:?}",
+                .all(|s| s.style.add_modifier.contains(Modifier::BOLD)
+                    && s.style.add_modifier.contains(Modifier::ITALIC)
+                    && s.style.fg == Some(ratatui::style::Color::White)),
+            "h4 must be white bold+italic: {:?}",
             h4[0]
         );
         // `#Foo` is a paragraph, not a heading: the marker stays visible
