@@ -161,6 +161,9 @@ pub const TINT_OCEAN: [(u8, u8, u8); 2] = [(24, 80, 130), (130, 225, 255)];
 pub const TINT_EMBER: [(u8, u8, u8); 2] = [(135, 65, 25), (255, 185, 95)];
 pub const TINT_MINT: [(u8, u8, u8); 2] = [(30, 115, 70), (150, 255, 195)];
 pub const TINT_DUSK: [(u8, u8, u8); 2] = [(235, 200, 60), (90, 140, 255)];
+/// House coral for the Working wave: dim ember base (readable, never muddy
+/// on dark ground) breathing up to bright warm orange at the crest.
+pub const TINT_CORAL: [(u8, u8, u8); 2] = [(150, 75, 60), (255, 180, 110)];
 
 /// Tinted wave: the same travelling band as [`shimmer_spans`], but sweeping
 /// from `base` to `crest` — a color-to-color transition. Truecolor only;
@@ -177,6 +180,13 @@ pub fn shimmer_tint_spans(
     } else {
         shimmer_ansi(text, tick)
     }
+}
+
+/// The Working wave: the travelling band in house coral, dim ember breathing
+/// up to bright orange. Every surface that signals running work shares this
+/// one animation, so the pulse reads as a single heartbeat.
+pub fn shimmer_coral_spans(text: &str, tick: usize) -> Vec<Span<'static>> {
+    shimmer_tint_spans(text, tick, TINT_CORAL[0], TINT_CORAL[1])
 }
 
 /// Whole-text breathing pulse (no travel): every char shares one phase that
@@ -208,6 +218,7 @@ pub fn shimmer_named(text: &str, tick: usize, name: &str) -> Vec<Span<'static>> 
         "shimmer-ember" => shimmer_tint_spans(text, tick, TINT_EMBER[0], TINT_EMBER[1]),
         "shimmer-mint" => shimmer_tint_spans(text, tick, TINT_MINT[0], TINT_MINT[1]),
         "shimmer-dusk" => shimmer_tint_spans(text, tick, TINT_DUSK[0], TINT_DUSK[1]),
+        "shimmer-coral" => shimmer_coral_spans(text, tick),
         "shimmer-pulse" => shimmer_pulse_spans(text, tick),
         _ => shimmer_spans(text, tick),
     }
@@ -418,6 +429,38 @@ mod tests {
     }
 
     #[test]
+    fn coral_wave_travels_within_the_ramp() {
+        // env-independent core: the rgb tint directly, past the truecolor gate
+        let (base, crest) = (TINT_CORAL[0], TINT_CORAL[1]);
+        let at0 = shimmer_rgb_tint("Working", 0, base, crest);
+        assert!(
+            at0.iter()
+                .all(|s| s.style.fg == Some(Color::Rgb(base.0, base.1, base.2))),
+            "band starts off the text: all ember base"
+        );
+        let mid = shimmer_rgb_tint("Working", SHIMMER_PERIOD_TICKS / 4, base, crest);
+        assert!(
+            mid.iter()
+                .any(|s| s.style.fg != Some(Color::Rgb(base.0, base.1, base.2))),
+            "band must leave the ember base mid-sweep"
+        );
+        // every mid-sweep letter stays inside the ramp: no muddy
+        // out-of-gamut frames between ember and bright orange
+        for s in &mid {
+            let fg = s.style.fg;
+            assert!(
+                matches!(fg, Some(Color::Rgb(r, g, b)) if r >= base.0 && r <= crest.0 && g >= base.1 && g <= crest.1 && b >= base.2 && b <= crest.2),
+                "frame stays on the ramp: {fg:?}"
+            );
+        }
+        let text: String = shimmer_coral_spans("Working", 9)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(text, "Working");
+    }
+
+    #[test]
     fn named_dispatch_covers_the_gallery() {
         // dispatch only: colors depend on the terminal, text must not
         for name in [
@@ -426,6 +469,7 @@ mod tests {
             "shimmer-ember",
             "shimmer-mint",
             "shimmer-dusk",
+            "shimmer-coral",
             "shimmer-pulse",
         ] {
             let text: String = shimmer_named("Working", 9, name)

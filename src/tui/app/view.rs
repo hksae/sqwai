@@ -1961,11 +1961,11 @@ impl App {
                         spans
                     }
                     // a running tool shimmers exactly like the live footer:
-                    // same wave function, same tick — one animation
+                    // same coral wave, same tick — one animation
                     // everywhere work runs
                     None if ok.is_none() => {
                         let mut spans = vec![Span::styled(marker.0, marker.1)];
-                        spans.extend(crate::tui::shimmer::shimmer_spans(
+                        spans.extend(crate::tui::shimmer::shimmer_coral_spans(
                             &shown_name,
                             self.spinner_tick,
                         ));
@@ -4467,8 +4467,7 @@ pub(super) fn tool_verb(tool: &str) -> &'static str {
 /// Footer line of an activity group: the live aggregate sits UNDER the
 /// tool rows it summarizes, not above them. Clicking it folds the tools
 /// above (it carries the same GROUP_BASE tag the header used to). While
-/// the turn streams, the lead word runs the same shimmer the header's
-/// "activity" word used to run — `shimmer_spans` itself is untouched.
+/// the turn streams, the lead word runs the house-coral shimmer.
 pub(super) fn activity_footer_line(
     g: &ActivityGroup,
     live_tick: Option<usize>,
@@ -4480,7 +4479,7 @@ pub(super) fn activity_footer_line(
     if let Some(tick) = live_tick {
         // the verb carries the action, the tool name stays in the
         // transcript rows above — no duplication
-        spans.extend(crate::tui::shimmer::shimmer_spans(
+        spans.extend(crate::tui::shimmer::shimmer_coral_spans(
             tool.map_or("Working", tool_verb),
             tick,
         ));

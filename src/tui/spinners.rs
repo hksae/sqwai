@@ -117,6 +117,7 @@ pub const ALL: &[Spin] = &[
     spin!("shimmer-ember", ["◌"]),
     spin!("shimmer-mint", ["◌"]),
     spin!("shimmer-dusk", ["◌"]),
+    spin!("shimmer-coral", ["◌"]),
     spin!("shimmer-pulse", ["◌"]),
     spin!(
         "clock-wide",
