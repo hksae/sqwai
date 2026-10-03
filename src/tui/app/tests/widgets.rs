@@ -26,9 +26,9 @@ fn status_bar_fits_and_keeps_click_targets_inside_a_wide_directory() {
             let spans = app.status_bar_spans(w);
             let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
             let used = unicode_width::UnicodeWidthStr::width(text.as_str());
-            assert!(
-                used <= w as usize,
-                "{label:?} at width {w}: status bar is {used} columns: {text:?}"
+            assert_eq!(
+                used, w as usize,
+                "{label:?} at width {w}: bar must fill exactly: {text:?}"
             );
 
             for (what, click) in [("model", app.ef_click)] {

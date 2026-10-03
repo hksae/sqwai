@@ -4095,13 +4095,15 @@ impl App {
         // — a project directory such as `~/仕事/proj` made the padding too
         // wide, pushed the right-hand group past the edge and shifted every
         // click target computed below.
-        let left = format!(" {}  {}", self.mode.label(), plan_label);
-        let left_base_cols = cols(&left);
+        // the plan gap only exists when a plan label follows the chip —
+        // counting phantom spaces shortens the row (bigger right margin)
+        let left_base_cols = cols(&format!(" {} ", self.mode.label()))
+            + (!plan_label.is_empty() as usize * (2 + cols(&plan_label)));
 
-        // one space between blocks. Trailing +1 reserves the gap before an
-        // optional LSP/dir tail (at most one column of slack when absent).
+        // one space between blocks, counted exactly like the spans below:
+        // no slack anywhere, the row must fill the terminal edge to edge
         let fixed_len: usize =
-            cols(&ctx_label) + 1 + cols(&model_label) + 1 + cols(&ef_label) + cols(&lsp_label) + 1;
+            cols(&ctx_label) + 1 + cols(&model_label) + 1 + cols(&ef_label) + cols(&lsp_label);
 
         let lw = left_base_cols as u16;
 
@@ -4117,8 +4119,8 @@ impl App {
         let dir_label = if dir.is_empty() || dir_budget < 2 {
             String::new()
         } else {
-            // leading gap + one trailing space, so the label itself gets
-            // two columns less
+            // leading gap + one trailing space: the gap is part of the
+            // label, so fixed_len stays exact whether the tail shows or not
             format!(
                 " {} ",
                 truncate_display_width(&dir, dir_budget.saturating_sub(2))
