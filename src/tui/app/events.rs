@@ -566,9 +566,16 @@ impl App {
                         KeyCode::Tab
                             if self.menu_stack.is_empty() && self.active_ask_seg().is_none() =>
                         {
-                            // held Tab auto-repeats: toggle once per press,
-                            // or it flaps act/plan while held
-                            if k.kind == KeyEventKind::Press {
+                            // held Tab arrives as repeated Press on terminals
+                            // without key-repeat events (Repeat never reaches
+                            // us — dropped at the poll gate), so a kind check
+                            // cannot stop the flapping. A toggle arms a 250ms
+                            // blend; a second toggle inside its window is a
+                            // hold, not a press.
+                            let cooling = self.mode_blend.is_some_and(|(_, t0)| {
+                                t0.elapsed() < std::time::Duration::from_millis(MODE_BLEND_MS)
+                            });
+                            if !cooling {
                                 let next = self.mode.toggle();
                                 self.set_mode(next);
                             }
