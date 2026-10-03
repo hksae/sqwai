@@ -1028,12 +1028,13 @@ fn try_list(s: &str) -> Option<(String, &str)> {
         {
             let after = &rest[3..];
             if after.is_empty() || after.starts_with(' ') || after.starts_with('\t') {
-                // U+FE0E forces text presentation: a bare U+2611 draws
-                // as a color emoji on Windows Terminal
+                // ASCII boxes only: the prettiest glyphs (U+2610/U+2611)
+                // fall back to the color-emoji font on Windows Terminal,
+                // and even U+FE0E does not stop it
                 let mark = if rest.as_bytes()[1] == b' ' {
-                    "☐"
+                    "[ ]"
                 } else {
-                    "☑\u{FE0E}"
+                    "[x]"
                 };
                 return Some((mark.to_string(), after.trim_start_matches([' ', '\t'])));
             }
@@ -2391,8 +2392,8 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(all.contains('☐'), "{all:?}");
-        assert!(all.contains('☑'), "{all:?}");
+        assert!(all.contains("[ ]"), "{all:?}");
+        assert!(all.contains("[x]"), "{all:?}");
         assert!(
             all.contains("1)"),
             "`)` delimiter must be preserved: {all:?}"
