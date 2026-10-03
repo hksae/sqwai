@@ -16,6 +16,8 @@ pub const SQWAI_TEXT: &str = include_str!("../../assets/ascii-sqwai.txt");
 /// top-left `#ff9a5c` → bottom-right `#f43f5e`.
 pub const CORAL_START: (u8, u8, u8) = (255, 154, 92);
 pub const CORAL_END: (u8, u8, u8) = (244, 63, 94);
+/// Muted middle of the ramp, for H2 and other quiet brand ink.
+pub const CORAL_MUTED: (u8, u8, u8) = (250, 108, 93);
 /// Solid warm fallback where truecolor is unavailable (salmon-ish).
 const CORAL_FALLBACK: Color = Color::Indexed(209);
 
@@ -75,6 +77,32 @@ fn push_span(spans: &mut Vec<Span>, buf: &mut String, buf_style: &mut Option<Sty
             buf_style.take().unwrap_or_else(Theme::base),
         ));
     }
+}
+
+/// Repaint a per-character coral ramp over spans (for H1), preserving
+/// every other modifier. One span per char — headings are short, and the
+/// ramp moves every column. Without truecolor the run falls back to one
+/// solid warm color instead of garbage escapes.
+pub fn gradient_spans(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+    use crate::tui::shimmer::has_truecolor;
+    let truecolor = has_truecolor();
+    let total: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let mut x = 0usize;
+    let mut out = Vec::with_capacity(total);
+    for s in spans {
+        for ch in s.content.chars() {
+            let mut style = s.style;
+            style.fg = Some(if truecolor {
+                let (r, g, b) = coral_at(x, total);
+                Color::Rgb(r, g, b)
+            } else {
+                CORAL_FALLBACK
+            });
+            out.push(Span::styled(ch.to_string(), style));
+            x += 1;
+        }
+    }
+    out
 }
 
 /// 5-wide × 5-tall block capitals, one space gap added when joining.

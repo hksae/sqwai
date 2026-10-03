@@ -966,14 +966,31 @@ fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
             rest = rest[..end].trim_end();
         }
     }
-    // Headings: h1 bold+underlined, h2 bold, h3 bold+white, h4-h6 dim
+    // Headings: h1 wears the brand gradient (no underline anymore — the
+    // ramp carries the level), h2 muted coral, h3 bold+white, h4-h6 dim
     // italic. h3/h4+ deliberately do not rely on italic alone: terminals
     // without italic support (conhost) would render them as plain text.
     // The `#` markers are syntax, not content: they are never printed,
     // the heading style alone carries the level.
+    if level == 1 {
+        return Some(crate::tui::art::gradient_spans(inline(
+            rest,
+            Style::new().add_modifier(Modifier::BOLD),
+        )));
+    }
     let style = match level {
-        1 => Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        2 => Style::new().add_modifier(Modifier::BOLD),
+        2 => {
+            let (r, g, b) = crate::tui::art::CORAL_MUTED;
+            if crate::tui::shimmer::has_truecolor() {
+                Style::new()
+                    .fg(Color::Rgb(r, g, b))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::new()
+                    .fg(Color::Indexed(209))
+                    .add_modifier(Modifier::BOLD)
+            }
+        }
         3 => Style::new()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD | Modifier::ITALIC),
@@ -2045,13 +2062,21 @@ mod tests {
                 .iter()
                 .any(|s| s.style.add_modifier.contains(Modifier::BOLD))
         );
-        // h1 is underlined, deeper levels are not.
+        // h1 wears the brand gradient, no underline; deeper levels are not.
+        let h1fg: Vec<Option<ratatui::style::Color>> =
+            lines[0].spans.iter().map(|s| s.style.fg).collect();
+        assert!(
+            h1fg.iter()
+                .all(|fg| !matches!(fg, Some(ratatui::style::Color::Reset) | None)),
+            "h1 must be painted: {:?}",
+            lines[0]
+        );
         assert!(
             lines[0]
                 .spans
                 .iter()
-                .all(|s| s.style.add_modifier.contains(Modifier::UNDERLINED)),
-            "h1 must be underlined: {:?}",
+                .all(|s| !s.style.add_modifier.contains(Modifier::UNDERLINED)),
+            "h1 has no underline: {:?}",
             lines[0]
         );
         let h2 = render("## Sub", 80, &hl);
