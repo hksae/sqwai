@@ -1,8 +1,8 @@
 # Monotonic freshness stamp, bumped by .github/scripts/update_providers.py on
 # every content change (never by hand). The client compares serials, not
 # dates: a replayed old file never wins, and missing serial reads as 0.
-serial = 3
-updated_at = "2026-09-27"
+serial = 4
+updated_at = "2026-10-03"
 
 # Gemini
 [providers.gemini]
@@ -134,7 +134,7 @@ effort = "off"
 [models."gemini-robotics-er-2-streaming-preview"]
 provider = "gemini"
 id = "gemini-robotics-er-2-streaming-preview"
-context = 1000000
+context = 131072
 effort = "off"
 
 [models."gemma-4-26b-a4b-it"]
@@ -164,7 +164,7 @@ effort = "medium"
 [models."lyria-3.5"]
 provider = "gemini"
 id = "lyria-3.5"
-context = 1048576
+context = 131072
 effort = "medium"
 
 # Anthropic
@@ -186,15 +186,15 @@ id = "claude-opus-5"
 context = 1000000
 effort = "high"
 
-[models."claude-sonnet-5"]
+[models."claude-sonnet-5-5"]
 provider = "anthropic"
-id = "claude-sonnet-5"
+id = "claude-sonnet-5-5"
 context = 1000000
 effort = "medium"
 
-[models."claude-sonnet-4-6"]
+[models."claude-sonnet-5"]
 provider = "anthropic"
-id = "claude-sonnet-4-6"
+id = "claude-sonnet-5"
 context = 1000000
 effort = "medium"
 
@@ -239,6 +239,12 @@ provider = "anthropic"
 id = "claude-opus-4-8"
 context = 1000000
 effort = "high"
+
+[models."claude-sonnet-4-6"]
+provider = "anthropic"
+id = "claude-sonnet-4-6"
+context = 1000000
+effort = "medium"
 
 # OpenAI
 [providers.openai]
@@ -295,9 +301,9 @@ id = "gpt-5.5"
 context = 1050000
 effort = "high"
 
-[models."gpt-6-sol"]
+[models."gpt-6.1-sol"]
 provider = "openai"
-id = "gpt-6-sol"
+id = "gpt-6.1-sol"
 context = 922000
 effort = "medium"
 
@@ -322,12 +328,6 @@ effort = "medium"
 [models."gpt-3.5-turbo-0125"]
 provider = "openai"
 id = "gpt-3.5-turbo-0125"
-context = 16385
-effort = "medium"
-
-[models."gpt-3.5-turbo-1106"]
-provider = "openai"
-id = "gpt-3.5-turbo-1106"
 context = 16385
 effort = "medium"
 
@@ -439,6 +439,12 @@ id = "gpt-6-luna"
 context = 922000
 effort = "low"
 
+[models."gpt-6-sol"]
+provider = "openai"
+id = "gpt-6-sol"
+context = 922000
+effort = "medium"
+
 [models."o1"]
 provider = "openai"
 id = "o1"
@@ -463,18 +469,6 @@ format = "openai"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 continuation = true
-
-[models."deepseek-chat"]
-provider = "deepseek"
-id = "deepseek-chat"
-context = 131072
-effort = "off"
-
-[models."deepseek-reasoner"]
-provider = "deepseek"
-id = "deepseek-reasoner"
-context = 131072
-effort = "high"
 
 [models."deepseek-v4-pro"]
 provider = "deepseek"
