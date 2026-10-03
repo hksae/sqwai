@@ -4114,9 +4114,9 @@ impl App {
             )
         };
         let right_len = fixed_len + cols(&dir_label);
-        // mode chip: green ACT, blue PLAN, with a quick RGB sweep between
-        // them on toggle (truecolor only). Same text and width either way,
-        // so the padding and click targets below are unaffected.
+        // mode chip: soft effort hues, with a quick RGB sweep between
+        // them on toggle (truecolor only). Same text, weight and width
+        // either way, so the padding and click targets below are unaffected.
         let chip_settled = match self.mode {
             Mode::Act => Theme::mode_chip_act(),
             Mode::Plan => Theme::mode_chip_plan(),
@@ -4127,9 +4127,7 @@ impl App {
                     && crate::tui::shimmer::has_truecolor() =>
             {
                 let (r, g, b) = self.mode_chip_rgb(std::time::Instant::now());
-                Style::new()
-                    .fg(Color::Rgb(r, g, b))
-                    .add_modifier(Modifier::BOLD)
+                Style::new().fg(Color::Rgb(r, g, b))
             }
             _ => chip_settled,
         };
