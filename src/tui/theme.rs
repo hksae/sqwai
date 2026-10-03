@@ -202,19 +202,14 @@ impl Theme {
     pub fn border_dim() -> Style {
         Style::new().fg(Self::BORDER_DIM())
     }
-    /// ACT mode chip: bold bright-green ("go/active"). Yellow read as a
-    /// permanent warning; green states the mode without shouting. Plain
-    /// Green is too dark on black terminals — LightGreen carries it.
+    /// ACT mode chip: the effort Low hue, never bold — same soft treatment
+    /// as the effort palette it mirrors.
     pub fn mode_chip_act() -> Style {
-        Style::new()
-            .fg(Color::LightGreen)
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(Self::effort_color(EffortLevel::Low))
     }
-    /// PLAN mode chip: bold light-blue, mirrors the yellow ACT chip.
+    /// PLAN mode chip: the effort High hue, never bold.
     pub fn mode_chip_plan() -> Style {
-        Style::new()
-            .fg(Self::LIGHT_BLUE())
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(Self::effort_color(EffortLevel::High))
     }
     /// Tool call head rows: calm white, so calls scan as one list. State
     /// lives in the marker shape (✓/✗/spinner) and the finish wave —
