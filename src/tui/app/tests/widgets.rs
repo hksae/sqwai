@@ -206,6 +206,18 @@ fn live_activity_footer_shimmers_finished_stays_dim() {
         styles.len() > 1,
         "live footer must shade the word differently: {styles:?}"
     );
+    // the live footer reads as one orange unit: arrow and aggregate wear
+    // the house accent next to the coral word, no gray leftovers
+    assert_eq!(
+        live.spans[0].style.fg,
+        Some(crate::tui::theme::Theme::ACCENT()),
+        "live arrow is accent: {live:?}"
+    );
+    assert_eq!(
+        live.spans.last().map(|s| s.style.fg),
+        Some(Some(crate::tui::theme::Theme::ACCENT())),
+        "live aggregate is accent: {live:?}"
+    );
 }
 
 /// Bottom spinner is removed for now (a replacement from the

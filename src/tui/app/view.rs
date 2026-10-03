@@ -4474,7 +4474,12 @@ pub(super) fn activity_footer_line(
     tool: Option<&str>,
 ) -> Line<'static> {
     let arrow = if g.expanded { "▾" } else { "▸" };
-    let mut spans = vec![Span::styled(format!("  {arrow} "), Theme::dim())];
+    // the live footer reads as one orange unit: arrow, verb and aggregate
+    // share the house accent while work runs. The done footer stays dim —
+    // finished work rests, only running work pops.
+    let live = live_tick.is_some();
+    let static_ink = if live { Theme::accent() } else { Theme::dim() };
+    let mut spans = vec![Span::styled(format!("  {arrow} "), static_ink)];
     let mut parts: Vec<String> = Vec::new();
     if let Some(tick) = live_tick {
         // the verb carries the action, the tool name stays in the
@@ -4503,18 +4508,14 @@ pub(super) fn activity_footer_line(
         // off a separator; the done footer IS the aggregate, no dangling "·".
         let agg = parts.join(" · ");
         spans.push(Span::styled(
-            if live_tick.is_some() {
-                format!(" · {agg}")
-            } else {
-                agg
-            },
-            Theme::dim(),
+            if live { format!(" · {agg}") } else { agg },
+            static_ink,
         ));
     }
     if g.errors > 0 {
         // the aggregate stays quiet: the failed rows themselves carry the
         // red, the footer only counts
-        spans.push(Span::styled(format!(" · {} error", g.errors), Theme::dim()));
+        spans.push(Span::styled(format!(" · {} error", g.errors), static_ink));
     }
     if g.rejected > 0 {
         spans.push(Span::styled(
