@@ -276,12 +276,11 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
             continue;
         }
 
-        // display math block ($$ ... $$). Models also habitually write
-        // lone `$` lines as delimiters: accept them the same way.
-        if trimmed_start == "$$" || trimmed_start == "$" {
+        // display math block ($$ ... $$)
+        if trimmed_start == "$$" {
             let mut math_lines = Vec::new();
             for ml in lines.by_ref() {
-                if ml.trim() == "$$" || ml.trim() == "$" {
+                if ml.trim() == "$$" {
                     break;
                 }
                 math_lines.push(ml);
@@ -519,18 +518,17 @@ fn safe_split(text: &str, from: usize) -> Option<usize> {
             best = Some(start);
         }
         // render's own construct order: a fence line toggles code only
-        // outside math (math consumes lines wholesale), `$$` (or a lone
-        // `$` line, which models use as the same delimiter) opens math only
-        // outside code, and a math block closes on either delimiter
+        // outside math (math consumes lines wholesale), `$$` opens math only
+        // outside code, and a math block closes on `line.trim() == "$$"`
         if in_math {
-            if line.trim() == "$$" || line.trim() == "$" {
+            if line.trim() == "$$" {
                 in_math = false;
             }
         } else if in_code {
             if lead.starts_with("```") {
                 in_code = false;
             }
-        } else if lead == "$$" || lead == "$" {
+        } else if lead == "$$" {
             in_math = true;
         } else if lead.starts_with("```") {
             in_code = true;
@@ -969,7 +967,7 @@ fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
         }
     }
     // Headings: h1 wears the brand gradient (no underline anymore — the
-    // ramp carries the level), h2 muted coral, h3 light coral, h4-h6 dim
+    // ramp carries the level), h2 muted coral, h3 bold+white, h4-h6 dim
     // italic. h3/h4+ deliberately do not rely on italic alone: terminals
     // without italic support (conhost) would render them as plain text.
     // The `#` markers are syntax, not content: they are never printed,
@@ -993,19 +991,9 @@ fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
                     .add_modifier(Modifier::BOLD)
             }
         }
-        3 => {
-            // light coral: headings stay one family (gradient, muted,
-            // light), brightness falling with depth
-            if crate::tui::shimmer::has_truecolor() {
-                Style::new()
-                    .fg(Color::Rgb(255, 180, 130))
-                    .add_modifier(Modifier::BOLD | Modifier::ITALIC)
-            } else {
-                Style::new()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD | Modifier::ITALIC)
-            }
-        }
+        3 => Style::new()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD | Modifier::ITALIC),
         _ => Style::new().fg(Theme::DIM()).add_modifier(Modifier::ITALIC),
     };
     Some(inline(rest, style))
@@ -1028,12 +1016,10 @@ fn try_list(s: &str) -> Option<(String, &str)> {
         {
             let after = &rest[3..];
             if after.is_empty() || after.starts_with(' ') || after.starts_with('\t') {
-                // U+FE0E forces text presentation: a bare U+2611 draws
-                // as a color emoji on Windows Terminal
                 let mark = if rest.as_bytes()[1] == b' ' {
                     "☐"
                 } else {
-                    "☑\u{FE0E}"
+                    "☑"
                 };
                 return Some((mark.to_string(), after.trim_start_matches([' ', '\t'])));
             }
@@ -2114,8 +2100,8 @@ mod tests {
                 .iter()
                 .all(|s| s.style.add_modifier.contains(Modifier::BOLD)
                     && s.style.add_modifier.contains(Modifier::ITALIC)
-                    && !matches!(s.style.fg, Some(ratatui::style::Color::Gray) | None)),
-            "h3 must be bright bold+italic, never body gray: {:?}",
+                    && s.style.fg == Some(ratatui::style::Color::White)),
+            "h3 must be bold+italic white: {:?}",
             h3[0]
         );
         // closed ATX (`### Deep ###`) drops the closing run too
@@ -2552,20 +2538,6 @@ mod tests {
             .expect("link");
         assert_eq!(link.style.fg, Some(Theme::ACCENT()));
         assert!(link.style.add_modifier.contains(Modifier::UNDERLINED));
-    }
-
-    #[test]
-    fn lone_dollar_lines_delimit_math_like_double() {
-        let hl = Highlighter::new();
-        // models habitually write lone `$` delimiters: same collapse
-        let lines = render("$\nx + y\n$", 80, &hl);
-        let text: String = lines
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!text.contains('$'), "delimiters collapse: {text:?}");
-        assert!(text.contains("x + y"), "{text:?}");
     }
 
     #[test]
