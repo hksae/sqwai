@@ -195,7 +195,7 @@ impl Highlighter {
 }
 
 /// Prose base: dim gray, not terminal-default white. Emphasis goes brighter
-/// (white), links stay the only blue — the antigravity recipe: mostly gray
+/// (white), links take the house accent — the antigravity recipe: mostly gray
 /// text, sparse color, readable answers.
 fn base_style() -> Style {
     Style::new().fg(Color::Gray)
@@ -341,19 +341,19 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
             }
             let level = level.min(4);
             let rail = "▐ ".repeat(level);
-            let quote = Style::new().fg(Theme::GREEN()).bg(Theme::QUOTE_BG());
+            let quote = Style::new().fg(Theme::GREEN());
             // Wrap the quoted text to what fits beside the rail, then put
             // the rail on EVERY visual row: the outer wrapper would
             // otherwise split long quotes and leave continuation rows bare.
-            // Rows are padded to the full width in the quote bg so the band
-            // reads as one translucent stripe, like the user strip.
+            // Rows pad with the base background — no band, the green text
+            // and rail carry the quote alone.
             let rail_cols = level * 2;
             let avail = (width as usize).saturating_sub(rail_cols).max(1);
             let (rows, _) =
                 wrap_tagged(vec![(Line::from(inline(rest, quote)), None)], avail as u16);
             for row in rows {
-                // the rail glyph stays on the default background; the green
-                // band covers the quoted text (and its padding) only
+                // the rail glyph stays on the default background; rows pad
+                // plain like any other text
                 let mut spans = vec![Span::styled(rail.clone(), Style::new().fg(Theme::GREEN()))];
                 spans.extend(row.spans);
                 let used: usize = spans
@@ -362,7 +362,7 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
                     .sum();
                 let pad = (width as usize).saturating_sub(used);
                 if pad > 0 {
-                    spans.push(Span::styled(" ".repeat(pad), quote));
+                    spans.push(Span::styled(" ".repeat(pad), Theme::base()));
                 }
                 out.push(Line::from(spans));
             }
@@ -377,9 +377,9 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
                 .map(|c| if c == '\t' { 4 } else { 1 })
                 .sum();
             let nest = (indent_cols / 2).min(3);
-            // Ordered markers get light blue, unordered stay default.
+            // Ordered markers get the house accent, unordered stay default.
             let marker_style = if marker.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-                Style::new().fg(Theme::LIGHT_BLUE())
+                Style::new().fg(Theme::ACCENT())
             } else {
                 Style::new()
             };
@@ -1026,7 +1026,8 @@ fn try_list(s: &str) -> Option<(String, &str)> {
     None
 }
 
-/// Inline markdown: **bold**, *italic*, ***both***, ~~struck~~, `code`
+/// Inline markdown: **bold**, *italic*, ***bold*** (folded — italic over
+/// bold is invisible in terminals), ~~struck~~, `code`
 /// (minimal recursive scanner).
 pub fn inline(text: &str, base: Style) -> Vec<Span<'static>> {
     let mut out = Vec::new();
@@ -1404,8 +1405,8 @@ fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
             };
             if let Some(kind) = parsed {
                 flush(out, i, &mut lit_start);
-                // links are the sparse blue: classic link color, underlined.
-                let link_style = style.fg(Color::Blue).add_modifier(Modifier::UNDERLINED);
+                // links are the sparse accent: house orange, underlined.
+                let link_style = style.fg(Theme::ACCENT()).add_modifier(Modifier::UNDERLINED);
                 let url_style = Style::new().fg(Theme::DIM()).bg(ambient_bg);
                 match kind {
                     InlineLink::Md {
@@ -1503,11 +1504,7 @@ fn push_inline(text: &str, style: Style, out: &mut Vec<Span<'static>>) {
                 let rendered = render_math(inner);
                 out.push(Span::styled(rendered, style));
             }
-            "***" | "___" => push_inline(
-                inner,
-                with_emphasis(style, Modifier::BOLD | Modifier::ITALIC),
-                out,
-            ),
+            "***" | "___" => push_inline(inner, with_emphasis(style, Modifier::BOLD), out),
             "**" | "__" => push_inline(inner, with_emphasis(style, Modifier::BOLD), out),
             "*" | "_" => push_inline(inner, style.add_modifier(Modifier::ITALIC), out),
             "~~" => push_inline(inner, style.add_modifier(Modifier::CROSSED_OUT), out),
@@ -2309,7 +2306,10 @@ mod tests {
         assert_eq!(text, "*literal* and both and gone", "{text:?}");
         let both = spans.iter().find(|s| s.content == "both").unwrap();
         assert!(both.style.add_modifier.contains(Modifier::BOLD));
-        assert!(both.style.add_modifier.contains(Modifier::ITALIC));
+        assert!(
+            !both.style.add_modifier.contains(Modifier::ITALIC),
+            "*** folds to bold: {both:?}"
+        );
         let gone = spans.iter().find(|s| s.content == "gone").unwrap();
         assert!(gone.style.add_modifier.contains(Modifier::CROSSED_OUT));
         // double backticks span greedily across single ones
@@ -2429,52 +2429,50 @@ mod tests {
     }
 
     #[test]
-    fn quote_band_covers_full_width_in_green_bg() {
+    fn quote_text_stays_green_without_band() {
         let hl = Highlighter::new();
         let lines = render("> hi", 10, &hl);
         assert_eq!(lines.len(), 1);
         let text = line_text_pub(&lines[0]);
         assert_eq!(text, "▐ hi      ", "{text:?}");
-        // rail glyph itself is transparent; the band starts right of it
+        // rail glyph itself is transparent; the body pads plain too —
+        // no band, the green text and rail carry the quote alone
         assert_eq!(lines[0].spans[0].style.bg, None);
         assert!(
-            lines[0].spans[1..]
-                .iter()
-                .all(|s| s.style.bg == Some(Theme::QUOTE_BG())),
-            "quote body carries the band bg: {:?}",
+            lines[0].spans[1..].iter().all(|s| s.style.bg.is_none()),
+            "quote body has no band bg: {:?}",
             lines[0]
         );
     }
 
     #[test]
-    fn quote_inline_markup_keeps_band_bg() {
+    fn quote_inline_markup_stays_green_without_band() {
         use ratatui::style::Color;
         let hl = Highlighter::new();
         let lines = render("> use `read` and **bold** here", 60, &hl);
         assert_eq!(lines.len(), 1);
         let spans = &lines[0].spans;
-        // inline code inside a colored band takes the band color (monochrome
-        // strip) but inherits the quote band bg
+        // inline code inside a quote takes the green fg, no band bg
         let code = spans
             .iter()
             .find(|s| s.content == "read")
             .expect("code span");
         assert_eq!(code.style.fg, Some(Color::Green));
-        assert_eq!(code.style.bg, Some(Theme::QUOTE_BG()));
-        // bold keeps the green fg and the band bg
+        assert_eq!(code.style.bg, None);
+        // bold keeps the green fg, no band bg
         let bold = spans
             .iter()
             .find(|s| s.content == "bold")
             .expect("bold span");
         assert_eq!(bold.style.fg, Some(Color::Green));
-        assert_eq!(bold.style.bg, Some(Theme::QUOTE_BG()));
+        assert_eq!(bold.style.bg, None);
         // top-level code stays transparent (no ambient bg to inherit)
         let plain = inline("`x`", Theme::base());
         assert_eq!(plain[0].style.bg, None);
     }
 
     #[test]
-    fn antigravity_recipe_gray_prose_white_emphasis_blue_links() {
+    fn antigravity_recipe_gray_prose_white_emphasis_accent_links() {
         use ratatui::style::Color;
         let hl = Highlighter::new();
         // prose is dim gray
@@ -2506,14 +2504,14 @@ mod tests {
                 .fg,
             Some(Color::White)
         );
-        // links are the sparse blue, underlined
+        // links are the sparse accent, underlined
         let lines = render("see [docs](https://example.com) now", 60, &hl);
         let link = lines[0]
             .spans
             .iter()
             .find(|s| s.content == "docs")
             .expect("link");
-        assert_eq!(link.style.fg, Some(Color::Blue));
+        assert_eq!(link.style.fg, Some(Theme::ACCENT()));
         assert!(link.style.add_modifier.contains(Modifier::UNDERLINED));
     }
 
