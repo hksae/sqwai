@@ -981,18 +981,7 @@ fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
         )));
     }
     let style = match level {
-        2 => {
-            let (r, g, b) = crate::tui::art::CORAL_MUTED;
-            if crate::tui::shimmer::has_truecolor() {
-                Style::new()
-                    .fg(Color::Rgb(r, g, b))
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::new()
-                    .fg(Color::Indexed(209))
-                    .add_modifier(Modifier::BOLD)
-            }
-        }
+        2 => crate::tui::art::h2_style(),
         3 => {
             // light coral: headings stay one family (gradient, muted,
             // light), brightness falling with depth

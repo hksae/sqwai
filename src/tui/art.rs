@@ -21,6 +21,19 @@ pub const CORAL_MUTED: (u8, u8, u8) = (250, 108, 93);
 /// Solid warm fallback where truecolor is unavailable (salmon-ish).
 const CORAL_FALLBACK: Color = Color::Indexed(209);
 
+/// Quiet brand ink: muted coral bold, the H2 look. Menu titles and day
+/// sections share it so headers read as one family across surfaces.
+pub fn h2_style() -> Style {
+    if crate::tui::shimmer::has_truecolor() {
+        let (r, g, b) = CORAL_MUTED;
+        Style::new()
+            .fg(Color::Rgb(r, g, b))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(CORAL_FALLBACK).add_modifier(Modifier::BOLD)
+    }
+}
+
 /// Ramp position of column `x` across `width`: 0.0 at the left edge.
 pub fn coral_at(x: usize, width: usize) -> (u8, u8, u8) {
     let t = if width <= 1 {

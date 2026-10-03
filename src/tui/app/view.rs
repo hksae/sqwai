@@ -3649,9 +3649,7 @@ impl App {
             .title_alignment(Alignment::Center)
             .title(Span::styled(
                 format!(" {} ", self.menu_title()),
-                Style::new()
-                    .fg(ratatui::style::Color::White)
-                    .add_modifier(Modifier::BOLD),
+                crate::tui::art::h2_style(),
             ));
         if matches!(self.cur_menu(), Some(Menu::Sessions)) {
             block = block.title_bottom(
@@ -3874,9 +3872,7 @@ impl App {
             .title_alignment(Alignment::Center)
             .title(Span::styled(
                 format!(" {} ", self.menu_title()),
-                Style::new()
-                    .fg(ratatui::style::Color::White)
-                    .add_modifier(Modifier::BOLD),
+                crate::tui::art::h2_style(),
             ))
             .title_bottom(
                 Line::from(vec![

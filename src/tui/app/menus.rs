@@ -4,7 +4,7 @@ use super::*;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tui_textarea::TextArea;
@@ -3349,16 +3349,7 @@ fn day_section(last: chrono::DateTime<chrono::Utc>) -> String {
 /// Day-section header style: muted coral like H2 (bold), same truecolor
 /// fallback to the indexed house accent.
 fn day_section_style() -> Style {
-    if crate::tui::shimmer::has_truecolor() {
-        let (r, g, b) = crate::tui::art::CORAL_MUTED;
-        Style::new()
-            .fg(Color::Rgb(r, g, b))
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::new()
-            .fg(Color::Indexed(209))
-            .add_modifier(Modifier::BOLD)
-    }
+    crate::tui::art::h2_style()
 }
 
 /// One grid cell: truncated/padded, left- or right-aligned.
