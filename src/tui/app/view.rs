@@ -2229,7 +2229,14 @@ impl App {
                     last_block = BlockKind::None;
                     struct_row!(blank(), None);
                 }
-                Segment::Assistant { .. } => {
+                Segment::Assistant { text, live } => {
+                    // an unrevealed live answer is air, not content: zero
+                    // rows and no separator blank for them. The waiting
+                    // working line below already left air of its own — a
+                    // second blank here stacks into a visible hole.
+                    if *live && text.trim().is_empty() {
+                        continue;
+                    }
                     if !in_group {
                         struct_row!(blank(), None);
                         in_group = true;

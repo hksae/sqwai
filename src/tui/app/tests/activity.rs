@@ -918,16 +918,34 @@ fn a_turn_with_nothing_visible_yet_still_shows_the_working_line() {
         !text.contains("0 calls"),
         "the waiting line carries no stalled counter: {text}"
     );
+    // one air row between the user message and the working line, never
+    // two: with no content yet the group's own blank would stack on the
+    // user's and read as a hole in the transcript
+    let air = |text: &str| {
+        let lines: Vec<&str> = text.lines().collect();
+        let hi = lines
+            .iter()
+            .position(|l| l.contains("привет"))
+            .expect("user row");
+        let work = lines
+            .iter()
+            .position(|l| l.contains("Working"))
+            .expect("working row");
+        work - hi
+    };
+    assert_eq!(air(&text), 2, "single air row, got:\n{text}");
     // an empty live assistant row changes nothing: still waiting
     app.push_segment(Segment::Assistant {
         text: String::new(),
         live: true,
     });
     app.rebuild_cache(80);
+    let text = rendered(&app);
     assert!(
-        rendered(&app).contains("Working"),
+        text.contains("Working"),
         "an unrevealed answer is still waiting"
     );
+    assert_eq!(air(&text), 2, "single air row, got:\n{text}");
     // once the turn ends without any work, no group and no line survive
     app.streaming = false;
     app.rebuild_cache(80);
