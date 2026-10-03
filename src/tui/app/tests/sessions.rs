@@ -812,6 +812,34 @@ fn pinned_session_frame_aligns_columns_and_respects_narrow_terminal() {
 }
 
 #[test]
+fn wide_card_table_fills_no_dead_margin() {
+    use crate::providers::Role;
+    use unicode_width::UnicodeWidthStr;
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let mut s = Session::new("m".into(), 1000);
+    s.push(Role::User, "hi");
+    app.sessions = vec![SessionHeader::from_session(&s)];
+    app.menu_rect.width = 120;
+    app.cache_w = 120;
+    app.open_menu(Menu::Sessions);
+    // 120-col card → 114-col budget: the title absorbs every spare
+    // column past the fixed model 16, rows span the budget exactly
+    let line = app
+        .menu_rows
+        .iter()
+        .find(|(_, a)| matches!(a, MenuAction::OpenSession(_)))
+        .map(|(l, _)| l)
+        .expect("content row");
+    let widths: Vec<usize> = line
+        .spans
+        .iter()
+        .map(|sp| unicode_width::UnicodeWidthStr::width(sp.content.as_ref()))
+        .collect();
+    assert_eq!(&widths[..8], &[1, 79, 2, 5, 2, 16, 2, 7], "{line:?}");
+    assert_eq!(widths.iter().sum::<usize>(), 114, "{line:?}");
+}
+
+#[test]
 fn sessions_rows_share_date_model_token_columns() {
     use crate::providers::Role;
     use unicode_width::UnicodeWidthStr;
@@ -825,9 +853,9 @@ fn sessions_rows_share_date_model_token_columns() {
         SessionHeader::from_session(&b),
     ];
     app.open_menu(Menu::Sessions);
-    // grid geometry asserted per span: lead 1 + title 28 (number glued
+    // grid geometry asserted per span: lead 1 + title 37 (number glued
     // to the title, one space off) + gap 2 + time 5 + gap 2 + model 16
-    // + gap 2 + tokens 7 = 63 content cols, exact-fit to the 72 budget.
+    // + gap 2 + tokens 7 = 72 content cols, exact-fit to the 72 budget.
     // The section carries the date, rows keep HH:MM.
     let rows: Vec<&ratatui::text::Line> = app
         .menu_rows
@@ -842,8 +870,8 @@ fn sessions_rows_share_date_model_token_columns() {
             .iter()
             .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
             .collect();
-        // exact-fit pads the 67 content cols to the 72 budget
-        assert_eq!(&widths[..8], &[1, 28, 2, 5, 2, 16, 2, 7], "{line:?}");
+        // exact-fit pads the 72 content cols to the 72 budget
+        assert_eq!(&widths[..8], &[1, 37, 2, 5, 2, 16, 2, 7], "{line:?}");
         assert_eq!(widths.iter().sum::<usize>(), 72, "{line:?}");
         assert_eq!(&line.spans[3].content.as_ref()[2..3], ":");
     }

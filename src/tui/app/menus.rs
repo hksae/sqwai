@@ -2443,15 +2443,16 @@ impl App {
                                 &self.project_root,
                             )
                     });
-                // grid geometry, shared by the header and every row: title
-                // takes priority, model clamps, time/tokens are fixed.
+                // grid geometry, shared by the header and every row: the
+                // title absorbs every spare column, the model keeps its 16
+                // whenever they fit, time/tokens are fixed.
                 // Resolved width travels in table_built_w: draw_menu rebuilds
                 // once on mismatch (also covers an empty pinned section).
                 let budget = table_budget(self.menu_rect.width);
                 self.table_built_w = budget as u16;
                 // lead 1 + 3 gaps of 2 + time 5 + tokens 7
-                let title_w = budget.saturating_sub(19 + 16).clamp(8, 28);
-                let model_w = budget.saturating_sub(19 + title_w).clamp(8, 16);
+                let model_w = budget.saturating_sub(19 + 8).clamp(8, 16);
+                let title_w = budget.saturating_sub(19 + model_w).max(8);
                 self.menu_table_header = Some(table_header(
                     vec![
                         tcell("TITLE", title_w, false, Theme::dim()),
@@ -2569,7 +2570,7 @@ impl App {
                 // counts and key stay fixed on the right
                 const COUNT_W: usize = 9;
                 const KEY_W: usize = 12;
-                let name_w = budget.saturating_sub(1 + 4 + COUNT_W + KEY_W).clamp(12, 46);
+                let name_w = budget.saturating_sub(1 + 4 + COUNT_W + KEY_W).max(12);
                 self.menu_table_header = Some(table_header(
                     vec![
                         tcell("PROVIDER", name_w, false, Theme::dim()),
@@ -3384,15 +3385,17 @@ fn table_line(cells: Vec<Span<'static>>) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Content width for table menus: the card minus chrome, clamped so narrow
-/// terminals shrink columns instead of clipping rows. An undrawn menu
-/// (zero rect) builds at full width — the draw-time re-resolve in
+/// Content width for table menus: the card minus chrome, floored so
+/// narrow terminals shrink columns instead of clipping rows. No ceiling:
+/// the elastic column of every table absorbs the slack, so wide cards
+/// fill edge to edge instead of leaving a dead right margin. An undrawn
+/// menu (zero rect) builds at full width — the draw-time re-resolve in
 /// draw_menu shrinks it once the real card is known.
 pub(super) fn table_budget(menu_rect_w: u16) -> usize {
     if menu_rect_w == 0 {
         return 72;
     }
-    (menu_rect_w as usize).saturating_sub(6).clamp(30, 72)
+    (menu_rect_w as usize).saturating_sub(6).max(30)
 }
 
 /// NAME | ID | CONTEXT | EFFORT geometry for the model tables: fixed
@@ -3407,7 +3410,7 @@ fn model_cols(budget: usize) -> (usize, usize) {
     );
     let id_w = budget
         .saturating_sub(1 + 6 + name_w + CTX_W + EFFORT_W)
-        .clamp(10, 30);
+        .max(10);
     (name_w, id_w)
 }
 
