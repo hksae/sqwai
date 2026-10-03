@@ -483,12 +483,22 @@ fn empty_mark_lines_cover_mcp_plan_and_plain_states() {
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect()
     };
-    // plain: no MCP, no linked plan → version line only ("type to
-    // start" is obvious and stays out)
-    let app = test_app("http://127.0.0.1:9/v1".into());
+    // plain: no MCP, no linked plan → banner + version ("type to
+    // start" is obvious and stays out). Draw once so the mark sees a
+    // wide chat area; narrow terminals get the plain line instead.
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    let _ = render_to_string(&mut app, 100, 30);
     let lines = text(&app);
-    assert_eq!(lines.len(), 1);
-    assert!(lines[0].contains("sqwai v"), "{lines:?}");
+    assert!(lines.len() >= 9, "wordmark block: {lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains('█')),
+        "block art: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.trim_start().starts_with('v')),
+        "version under the S: {lines:?}"
+    );
     // linked plan: enter hint instead
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.session.plan_id = Some("p1".into());

@@ -2568,7 +2568,13 @@ impl App {
     pub(super) fn empty_mark_lines(&self) -> Vec<Line<'static>> {
         let mcp = self.cfg.mcp.servers.iter().filter(|s| s.enabled).count();
         let mut out = if self.last_chat.width >= 69 {
-            crate::tui::art::sqwai_gradient_lines()
+            let mut mark = crate::tui::art::sqwai_gradient_lines();
+            // version sits under the S, quiet gray
+            mark.push(Line::from(Span::styled(
+                format!("  v{}", env!("CARGO_PKG_VERSION")),
+                Theme::dim(),
+            )));
+            mark
         } else {
             vec![Line::from(Span::styled(
                 format!("  sqwai v{}", env!("CARGO_PKG_VERSION")),
