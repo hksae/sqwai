@@ -4,7 +4,7 @@ use super::*;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tui_textarea::TextArea;
@@ -247,7 +247,6 @@ pub(super) enum MenuAction {
     DeleteModelList(String),
     UseModel(String),
     OpenSession(String),
-    NewSession,
     RenameSession(String),
     PinSession(String),
     /// kept for future use; deletion now goes through the `d` key
@@ -1295,9 +1294,6 @@ impl App {
                         Err(e) => self.status(&format!("load session: {e:#}"), StatusKind::Err),
                     }
                 }
-            }
-            MenuAction::NewSession => {
-                self.start_new_session();
             }
             MenuAction::RenameSession(id) => {
                 self.open_menu(Menu::EditSessionTitle { id });
@@ -2431,12 +2427,8 @@ impl App {
                             || s.model_key.to_lowercase().contains(&q)
                     })
                     .collect();
-                if !self.startup {
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled("  new session", Theme::FG())]),
-                        MenuAction::NewSession,
-                    ));
-                }
+                // new sessions start from `/new`: no dead action row here
+                // (it would only eat wheel steps and hover targets)
                 let cur_id = self.session.id.to_string();
                 let pinned: Vec<&SessionHeader> =
                     visible.iter().filter(|s| s.pinned).copied().collect();
@@ -2493,9 +2485,11 @@ impl App {
                     }
                     let section = day_section(s.last_activity());
                     if section != day {
-                        day = section;
+                        day = section.clone();
+                        // flush left, past the rows' lead space: the header
+                        // stands apart instead of mimicking a row
                         self.menu_rows.push(row(
-                            Line::from(vec![Span::styled(format!("  {day}"), Theme::section())]),
+                            Line::from(vec![Span::styled(section, day_section_style())]),
                             MenuAction::None,
                         ));
                     }
@@ -3338,17 +3332,32 @@ fn session_row(
     (fit_line_width(line, pad_w), action)
 }
 
-/// Section label for a session's activity day: today, yesterday, or the
+/// Section label for a session's activity day: Today, Yesterday, or the
 /// calendar date. Rows arrive newest-first, so labels change rarely.
 fn day_section(last: chrono::DateTime<chrono::Utc>) -> String {
     let day = last.with_timezone(&chrono::Local).date_naive();
     let today = chrono::Local::now().date_naive();
     if day == today {
-        "today".to_string()
+        "Today".to_string()
     } else if day == today - chrono::Duration::days(1) {
-        "yesterday".to_string()
+        "Yesterday".to_string()
     } else {
         day.format("%d.%m").to_string()
+    }
+}
+
+/// Day-section header style: muted coral like H2 (bold), same truecolor
+/// fallback to the indexed house accent.
+fn day_section_style() -> Style {
+    if crate::tui::shimmer::has_truecolor() {
+        let (r, g, b) = crate::tui::art::CORAL_MUTED;
+        Style::new()
+            .fg(Color::Rgb(r, g, b))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::new()
+            .fg(Color::Indexed(209))
+            .add_modifier(Modifier::BOLD)
     }
 }
 

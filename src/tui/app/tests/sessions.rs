@@ -932,12 +932,58 @@ fn sessions_menu_groups_rows_by_day_sections() {
             .unwrap_or_else(|| panic!("missing {needle:?} in {all:?}"))
     };
     // sections newest-first, rows under their own divider
-    let today = pos("today");
-    let yesterday = pos("yesterday");
+    let today = pos("Today");
+    let yesterday = pos("Yesterday");
     assert!(pos("today one") > today);
     assert!(pos("yesterday one") > yesterday);
     assert!(yesterday > today, "{all:?}");
     assert!(pos("old one") > yesterday, "{all:?}");
+}
+
+// day sections read as headers: capitalized, muted-coral bold like H2
+#[test]
+fn session_day_sections_wear_h2_coral_flush_left() {
+    use ratatui::style::{Color, Modifier};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let now = chrono::Utc::now();
+    let header_at = |title: &str, at| crate::session::SessionHeader {
+        id: uuid::Uuid::new_v4(),
+        title: title.into(),
+        pinned: false,
+        created_at: at,
+        last_message_at: None,
+        model_key: "m".into(),
+        plan_id: None,
+        context_tokens: 0,
+        calls: 0,
+        errors: 0,
+        project: Some(app.project_root.clone()),
+    };
+    app.sessions = vec![header_at("today one", now)];
+    app.open_menu(Menu::Sessions);
+    let (line, action) = app
+        .menu_rows
+        .iter()
+        .find(|(l, _)| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+                == "Today"
+        })
+        .expect("Today divider row");
+    assert!(
+        matches!(action, MenuAction::None),
+        "divider is not selectable"
+    );
+    assert!(
+        line.spans.iter().all(|sp| {
+            sp.style.add_modifier.contains(Modifier::BOLD)
+                && (sp.style.fg == Some(Color::Indexed(209))
+                    || matches!(sp.style.fg, Some(Color::Rgb(_, _, _))))
+        }),
+        "divider wears H2 muted coral: {line:?}"
+    );
 }
 
 #[test]
