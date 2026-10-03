@@ -102,13 +102,6 @@ pub(super) enum ClickTarget {
         seg: u64,
         screen: u16,
     },
-    /// `start` is the group's `seg_start`, not its position in
-    /// `activity_groups`: a turn can finalize between press and release,
-    /// shifting indices — toggling by position could fold the wrong turn.
-    Group {
-        start: usize,
-        screen: u16,
-    },
     OpenSubagent {
         seg: u64,
     },
@@ -290,7 +283,8 @@ pub(super) enum Segment {
 
 /// A finished (or still-streaming) agent turn's working content — the
 /// contiguous run of `Thinking`/`Tool` segments that precedes the turn's final
-/// answer. Collapsed behind one summary line; expanded on click/Enter.
+/// answer. Data only (session summaries re-attach through it); the flat
+/// transcript never folds rows behind it.
 ///
 /// `seg_start..seg_end` indexes into `App.segments` and covers the run up to
 /// (but excluding) the final `Assistant` answer of that turn.
@@ -303,17 +297,11 @@ pub(super) struct ActivityGroup {
     pub duration_ms: u64,
     pub errors: usize,
     pub rejected: usize,
-    pub expanded: bool,
     /// Index of the user message that started this group's turn. Saved into
     /// `ActivitySummary::user_index` so a restore can re-attach summaries to
     /// the right group even after stopped/failed turns.
     pub turn_user: Option<usize>,
 }
-
-/// Click-tag offset for an activity-group footer line inside `cache_rowseg`.
-/// Real segment indices never reach this range, so it cleanly separates a
-/// group footer (toggle the whole block) from a normal segment (toggle itself).
-pub(super) const GROUP_BASE: usize = 1 << 40;
 
 /// One interactive row inside an inline AskUser segment, used for mouse
 /// hover/click mapping. Headers, questions and separators are not targets.
@@ -331,10 +319,6 @@ pub(super) enum ProposalRow {
     Accept,
     Decline,
 }
-
-/// Indent applied to segments nested inside an activity group. Tool rows are
-/// already inset by two, so they read as grouped content above the footer.
-const GROUP_INDENT: u16 = 2;
 
 fn edit_change_counts(diff: &str) -> (usize, usize) {
     diff.lines().fold((0, 0), |(added, removed), line| {
@@ -354,10 +338,7 @@ fn edit_change_counts(diff: &str) -> (usize, usize) {
 pub(super) enum BlockKind {
     None,
     ThoughtCollapsed,
-    ThoughtExpanded,
     Answer,
-    /// the footer line of an activity group
-    Activity,
 }
 
 /// Full-width user strip. The quiet surface is the primary distinction; `›`
@@ -496,10 +477,10 @@ impl App {
         });
         // semantic drag anchor alongside the raw row: if rows shift before
         // the drag continues (streaming), the segment id + intra-run offset
-        // still names the pressed content. Group headers and structural
-        // blanks keep the raw row (today's behavior).
+        // still names the pressed content. Structural blanks keep the raw
+        // row (today's behavior).
         let tag = self.cache_rowseg.get(abs_r).copied().flatten();
-        self.press_anchor = tag.filter(|t| *t < GROUP_BASE).and_then(|idx| {
+        self.press_anchor = tag.and_then(|idx| {
             let (_, meta) = self.view_transcript();
             let id = meta.get(idx).map(|m| m.id)?;
             let mut start = abs_r;
@@ -564,27 +545,6 @@ impl App {
             }
         }
         let tag = self.cache_rowseg.get(abs).copied()??;
-        if tag >= GROUP_BASE {
-            let gi = tag - GROUP_BASE;
-            // resolve the positional index to a stable group identity now:
-            // the live turn's start, or the frozen group's seg_start
-            if let Some(id) = self.active_subagent {
-                // subagent view folds the child's own groups: stored ones
-                // resolve, the live one is untoggleable and resolves nowhere
-                let start = self
-                    .sub_groups
-                    .get(&id)
-                    .and_then(|groups| groups.get(gi))
-                    .map(|g| g.seg_start)?;
-                return Some(ClickTarget::Group { start, screen });
-            }
-            let start = if gi < self.activity_groups.len() {
-                self.activity_groups[gi].seg_start
-            } else {
-                self.trailing_work_run().map(|run| run.0)?
-            };
-            return Some(ClickTarget::Group { start, screen });
-        }
         let (segs, meta) = self.view_transcript();
         let id = meta.get(tag).map(|m| m.id)?;
         // code lives in assistant text only: probe the wrapped rows solely
@@ -987,35 +947,6 @@ impl App {
                     self.dirty = true;
                 }
             }
-            ClickTarget::Group { start, screen } => {
-                // re-resolve by seg_start against the CURRENT groups: a stale
-                // index is ignored instead of folding the wrong turn
-                if let Some(id) = self.active_subagent {
-                    // subagent view folds the child's own groups, never the
-                    // main transcript's; the live group stays expanded
-                    if let Some(groups) = self.sub_groups.get_mut(&id)
-                        && let Some(gi) = groups.iter().position(|g| g.seg_start == start)
-                    {
-                        groups[gi].expanded = !groups[gi].expanded;
-                        self.capture_anchor_for_view(Some(id), GROUP_BASE + gi, screen);
-                        self.dirty = true;
-                    }
-                    return;
-                }
-                let gi = self
-                    .activity_groups
-                    .iter()
-                    .position(|g| g.seg_start == start)
-                    .or_else(|| {
-                        (self.streaming
-                            && self.trailing_work_run().is_some_and(|run| run.0 == start))
-                        .then_some(self.activity_groups.len())
-                    });
-                let Some(gi) = gi else { return };
-                if self.toggle_activity_group(gi) {
-                    self.capture_anchor_for_view(None, GROUP_BASE + gi, screen);
-                }
-            }
             ClickTarget::OpenSubagent { seg } => {
                 let Some(idx) = self.index_of_seg(seg) else {
                     return;
@@ -1051,23 +982,6 @@ impl App {
                 }
             }
         }
-    }
-
-    /// Fold or unfold one activity group. Index `activity_groups.len()` is the
-    /// running turn: its state lives in `live_group_collapsed` until the turn
-    /// ends and the group is frozen. Returns false (no anchor, no scroll
-    /// change) when the index no longer addresses a live group.
-    fn toggle_activity_group(&mut self, g: usize) -> bool {
-        if g < self.activity_groups.len() {
-            self.activity_groups[g].expanded = !self.activity_groups[g].expanded;
-        } else if g == self.activity_groups.len() && self.streaming {
-            self.live_group_collapsed = !self.live_group_collapsed;
-        } else {
-            // stale tag from a turn that has since ended
-            return false;
-        }
-        self.dirty = true;
-        true
     }
 
     /// Toggle one subagent-chat row by stable id. No cache is cleared: the
@@ -2132,90 +2046,11 @@ impl App {
         let mut in_group = false; // inside one "agent" turn
         let mut last_block = BlockKind::None;
 
-        // A turn's working content is wrapped in one activity group. Finished
-        // turns are frozen in `activity_groups`; the running turn is recomputed
-        // here, so its footer counts grow while events stream in. The running
-        // turn's group sits at index `activity_groups.len()` — which is exactly
-        // where finalize_activity_group will store it. It is appended
-        // virtually (borrowed per lookup), never cloned into a per-frame list.
-        let live_group = if self.streaming
-            && let Some(run) = self.trailing_work_run()
-        {
-            let mut live = self.build_activity_group(run);
-            live.expanded = !self.live_group_collapsed;
-            Some(live)
-        } else if self.streaming && self.awaiting_first_token() {
-            // nothing visible yet: an empty live group renders just the
-            // shimmering working line under the user row, until the first
-            // token (or a thought, or a call) gives the turn real content
-            let tail = self.segments.len();
-            Some(ActivityGroup {
-                seg_start: tail,
-                seg_end: tail,
-                calls: 0,
-                thinking: 0,
-                duration_ms: 0,
-                errors: 0,
-                rejected: 0,
-                expanded: false,
-                turn_user: None,
-            })
-        } else {
-            None
-        };
-        let live_ref = live_group.as_ref();
-        let group_count = self.activity_groups.len() + usize::from(live_ref.is_some());
-        let mut gi = 0usize; // next group waiting to be opened
-        let mut hide_until = 0usize; // collapsed group: skip [seg_start, seg_end)
-        let mut inside_until = 0usize; // expanded group: indent [seg_start, seg_end)
-        let mut pending_footer: Option<usize> = None; // group whose footer emits at seg_end
-
+        // Flat transcript (Claude-style): every segment renders its own
+        // rows, newest last, no collapsing. Groups still exist as data
+        // (session summaries re-attach through them), but the view never
+        // hides rows behind footers anymore.
         for idx in 0..self.segments.len() {
-            // the footer closes the group UNDER its tool rows: by the time
-            // the scan reaches seg_end every row of the group is emitted.
-            // A group running to the tail emits after the loop instead.
-            if let Some(fgi) = pending_footer
-                && let Some(g) = self.activity_groups.get(fgi).or(live_ref)
-                && idx == g.seg_end
-            {
-                // the running turn's group (if any) sits past the finished
-                // ones: only its "Working" word shimmers, the rest is static
-                let live = self.streaming && fgi == self.activity_groups.len();
-                let tool = live
-                    .then(|| live_tool_name(&self.segments, g.seg_start, g.seg_end))
-                    .flatten();
-                last_block = BlockKind::Activity;
-                struct_row!(
-                    activity_footer_line(g, live.then_some(self.spinner_tick), tool.as_deref()),
-                    Some(GROUP_BASE + fgi)
-                );
-                pending_footer = None;
-            }
-            if gi < group_count
-                && let Some(g) = self.activity_groups.get(gi).or(live_ref)
-                && idx == g.seg_start
-            {
-                if !in_group {
-                    struct_row!(blank(), None);
-                    in_group = true;
-                }
-                if g.expanded {
-                    inside_until = g.seg_end;
-                } else {
-                    hide_until = g.seg_end;
-                }
-                pending_footer = Some(gi);
-                gi += 1;
-            }
-            if idx < hide_until {
-                continue;
-            }
-            let indent = if idx < inside_until {
-                usize::from(GROUP_INDENT)
-            } else {
-                0
-            };
-
             let seg = &self.segments[idx];
             // group spacing rules (cheap, done per assembly pass)
             match seg {
@@ -2231,21 +2066,15 @@ impl App {
                 }
                 Segment::Assistant { text, live } => {
                     // an unrevealed live answer is air, not content: zero
-                    // rows and no separator blank for them. The waiting
-                    // working line below already left air of its own — a
-                    // second blank here stacks into a visible hole.
+                    // rows and no separator blank for them. The tail status
+                    // row below already left air of its own — a second blank
+                    // here stacks into a visible hole.
                     if *live && text.trim().is_empty() {
                         continue;
                     }
                     if !in_group {
                         struct_row!(blank(), None);
                         in_group = true;
-                    } else if last_block == BlockKind::ThoughtExpanded {
-                        struct_row!(blank(), None);
-                    } else if last_block == BlockKind::Activity {
-                        // the group footer closes the work above; the answer
-                        // gets its own air instead of sticking to it
-                        struct_row!(blank(), None);
                     }
                     last_block = BlockKind::Answer;
                 }
@@ -2255,18 +2084,20 @@ impl App {
                         in_group = true;
                     }
                 }
-                Segment::Thinking { expanded, .. } => {
+                Segment::Thinking { live, .. } => {
+                    // finished thoughts stay out of the transcript: the rows
+                    // around them already show what was done. A live thought
+                    // renders its one-liner below while it streams.
+                    if !live {
+                        continue;
+                    }
                     if !in_group {
                         struct_row!(blank(), None);
                         in_group = true;
                     } else if last_block == BlockKind::Answer {
                         struct_row!(blank(), None);
                     }
-                    last_block = if *expanded {
-                        BlockKind::ThoughtExpanded
-                    } else {
-                        BlockKind::ThoughtCollapsed
-                    };
+                    last_block = BlockKind::ThoughtCollapsed;
                 }
                 Segment::Subagent { .. } => {
                     if !in_group {
@@ -2288,19 +2119,14 @@ impl App {
             // segment changed. Entries are keyed by stable segment id, so an
             // append or a stream update to one segment never invalidates the
             // others; only (id, rev, width, interactive key) all matching
-            // reuses the cached rows. Indent goes in before wrapping, same
-            // as a whole-list pass would do (wrapping is per-line
-            // independent, so chunks concatenate exactly).
+            // reuses the cached rows.
             let key = self.seg_key(seg);
             let meta = self
                 .seg_meta
                 .get(idx)
                 .copied()
                 .unwrap_or(SegMeta { id: 0, rev: 0 });
-            // nested rows render narrower so the indent cannot push them past
-            // the chat width; the width is part of the cache check so a segment
-            // that moves in or out of a group is repainted at the right size.
-            let render_w = w.saturating_sub(indent as u16);
+            let render_w = w;
             let hit = matches!(self.seg_cache.get(&meta.id), Some(entry)
                 if entry.rev == meta.rev && entry.width == render_w && entry.key == key);
             if hit {
@@ -2310,11 +2136,7 @@ impl App {
                 continue;
             }
             self.test_renders += 1;
-            let lines = self.render_segment_lines(meta.id, idx, render_w, true);
-            let chunk: Vec<(Line<'static>, Option<usize>)> = lines
-                .into_iter()
-                .map(|(line, tag)| (indent_line(line, indent), tag))
-                .collect();
+            let chunk = self.render_segment_lines(meta.id, idx, render_w, true);
             let (rows, tags) = wrap_tagged(chunk, w);
             let rows: Vec<(Line<'static>, Option<usize>)> = rows.into_iter().zip(tags).collect();
             self.seg_cache.insert(
@@ -2329,29 +2151,31 @@ impl App {
             chunks.push((AsmTag::Seg(meta.id), rows));
             fresh.push(true);
         }
-        // a group running to the tail never meets its seg_end inside the
-        // loop: its footer closes the transcript instead.
-        if let Some(fgi) = pending_footer
-            && let Some(g) = self.activity_groups.get(fgi).or(live_ref)
-        {
-            let live = self.streaming && fgi == self.activity_groups.len();
-            let tool = live
-                .then(|| live_tool_name(&self.segments, g.seg_start, g.seg_end))
-                .flatten();
-            struct_row!(
-                activity_footer_line(g, live.then_some(self.spinner_tick), tool.as_deref()),
-                Some(GROUP_BASE + fgi)
-            );
-        } else if let Some(waiting) = live_ref
-            && waiting.seg_start == self.segments.len()
-        {
-            // the waiting turn's empty group never opens inside the loop (its
-            // range sits past the tail), so its bare working line goes here
-            struct_row!(blank(), None);
-            struct_row!(
-                activity_footer_line(waiting, Some(self.spinner_tick), None),
-                Some(GROUP_BASE + self.activity_groups.len())
-            );
+        // flat transcript: while streaming, a live status row closes the
+        // chat — coral Working, no aggregate, no folding. The rows above
+        // already say everything; when the turn ends the row just goes away.
+        // Exactly one air row above it: content rows leave none of their
+        // own, a trailing blank is reused instead of doubled (cache-hit
+        // placeholders resolve through the segment cache).
+        if self.streaming {
+            let last_line = chunks.last().and_then(|(tag, rows)| {
+                if let Some((line, _)) = rows.last() {
+                    return Some(line);
+                }
+                if let AsmTag::Seg(id) = tag {
+                    return self
+                        .seg_cache
+                        .get(id)
+                        .and_then(|e| e.rows.last().map(|(line, _)| line));
+                }
+                None
+            });
+            let airy =
+                last_line.is_some_and(|line| line.spans.iter().all(|s| s.content.is_empty()));
+            if !airy {
+                struct_row!(blank(), None);
+            }
+            struct_row!(working_tail_line(self.spinner_tick), None);
         }
         let _ = struct_ord;
         // Drop cache entries for segments that no longer exist anywhere (main
@@ -2589,20 +2413,6 @@ impl App {
             m.id.hash(&mut h);
             m.rev.hash(&mut h);
         }
-        self.activity_groups.len().hash(&mut h);
-        for g in &self.activity_groups {
-            g.expanded.hash(&mut h);
-        }
-        // subagent folds share the gate: a toggle must rebuild even though
-        // no segment revision moves (cached rows are reused as-is)
-        for (id, groups) in &self.sub_groups {
-            id.hash(&mut h);
-            groups.len().hash(&mut h);
-            for g in groups {
-                g.expanded.hash(&mut h);
-            }
-        }
-        self.live_group_collapsed.hash(&mut h);
         self.spinner_tick.hash(&mut h);
         self.ask_hover.hash(&mut h);
         self.proposal_hover.hash(&mut h);
@@ -3017,13 +2827,6 @@ impl App {
             self.sub_stores.insert(id, parked);
             let main = std::mem::take(&mut self.main_store);
             self.load_active_store(main);
-            // a closed chat folds shut: reopening lands on the summary line,
-            // never on stale expanded rows
-            if let Some(groups) = self.sub_groups.get_mut(&id) {
-                for g in groups.iter_mut() {
-                    g.expanded = false;
-                }
-            }
         }
         if let Some((top, follow)) = self.stashed_main_scroll.take() {
             self.view_top = top;
@@ -3114,105 +2917,23 @@ impl App {
             .unwrap_or(0);
         let mut chunks: Vec<RowChunk> = Vec::new();
         let mut fresh: Vec<bool> = Vec::new();
-        let mut struct_ord = 0u64;
-        macro_rules! struct_row {
-            ($line:expr, $tag:expr) => {{
-                chunks.push(struct_chunk(struct_ord, $line, $tag, w));
-                fresh.push(true);
-                struct_ord += 1;
-            }};
-        }
-        // finished turns are frozen in `sub_groups`; the running turn is
-        // recomputed here, so its footer counts grow while events stream in
-        let mut groups: Vec<ActivityGroup> = self.sub_groups.get(&id).cloned().unwrap_or_default();
-        let running = self
-            .subagents
-            .iter()
-            .any(|(sid, _, status, _, _)| *sid == id && status == "running");
-        if running && let Some(chat) = self.subagent_chats.get(&id) {
-            let floor = groups
-                .iter()
-                .map(|g| g.seg_end)
-                .max()
-                .unwrap_or(0)
-                .min(chat.len());
-            if let Some(run) = Self::trailing_work_run_in(chat, floor) {
-                let duration_ms = self
-                    .sub_started
-                    .get(&id)
-                    .map(|t| t.elapsed().as_millis() as u64)
-                    .unwrap_or(0);
-                let mut live = Self::build_activity_group_in(chat, run, duration_ms, None);
-                live.expanded = true;
-                groups.push(live);
-            }
-        }
-        let stored = self.sub_groups.get(&id).map(|g| g.len()).unwrap_or(0);
-        let mut gi = 0usize; // next group waiting to be opened
-        let mut hide_until = 0usize; // collapsed group: skip [seg_start, seg_end)
-        let mut inside_until = 0usize; // expanded group: indent [seg_start, seg_end)
-        let mut pending_footer: Option<usize> = None; // group whose footer emits at seg_end
+        // flat transcript, same as the main one: every segment renders its
+        // own rows, no collapsing. Finished turns are frozen in `sub_groups`
+        // as data (kept for symmetry with the main transcript), but the
+        // view never hides rows behind footers anymore.
         for idx in 0..count {
-            // the footer closes the group UNDER its tool rows; a group
-            // running to the tail emits after the loop instead.
-            if let Some(fgi) = pending_footer
-                && idx == groups[fgi].seg_end
-            {
-                let g = &groups[fgi];
-                // only a running turn's group shimmers; finished footers
-                // stay static dim — same as the main transcript
-                let live = running && fgi >= stored;
-                let tool = live
-                    .then(|| {
-                        self.subagent_chats
-                            .get(&id)
-                            .and_then(|chat| live_tool_name(chat, g.seg_start, g.seg_end))
-                    })
-                    .flatten();
-                struct_row!(
-                    activity_footer_line(g, live.then_some(self.spinner_tick), tool.as_deref()),
-                    Some(GROUP_BASE + fgi)
-                );
-                pending_footer = None;
-                // the answer right below the footer gets its own air
-                // instead of sticking to it (same as the main transcript)
-                if let Some(chat) = self.subagent_chats.get(&id)
-                    && let Some(Segment::Assistant { .. }) = chat.get(idx)
-                {
-                    struct_row!(blank(), None);
-                }
-            }
-            if gi < groups.len() && idx == groups[gi].seg_start {
-                let g = &groups[gi];
-                struct_row!(blank(), None);
-                if g.expanded {
-                    inside_until = g.seg_end;
-                } else {
-                    hide_until = g.seg_end;
-                }
-                pending_footer = Some(gi);
-                gi += 1;
-            }
-            if idx < hide_until {
-                continue;
-            }
-            let indent = if idx < inside_until {
-                usize::from(GROUP_INDENT)
-            } else {
-                0
-            };
             let (mid, mrev, key) = match (self.subagent_chats.get(&id), self.subagent_meta.get(&id))
             {
                 (Some(chat), Some(meta)) => match (chat.get(idx), meta.get(idx)) {
+                    // finished thoughts stay out of the transcript, same as
+                    // the main one; live thoughts render their one-liner
+                    (Some(Segment::Thinking { live: false, .. }), _) => continue,
                     (Some(seg), Some(m)) => (m.id, m.rev, self.seg_key(seg)),
                     _ => continue,
                 },
                 _ => continue,
             };
-            // nested rows render narrower so the indent cannot push them
-            // past the chat width; the width is part of the cache check so
-            // a segment that moves in or out of a group repaints correctly
-            let render_w = w.saturating_sub(indent as u16);
+            let render_w = w;
             let hit = matches!(self.seg_cache.get(&mid), Some(entry)
                 if entry.rev == mrev && entry.width == render_w && entry.key == key);
             if hit {
@@ -3250,10 +2971,7 @@ impl App {
                 let chat = self.subagent_chats.get(&id).unwrap();
                 self.render_segment(chat, idx, render_w, false)
             };
-            let chunk: Vec<(Line<'static>, Option<usize>)> = lines
-                .into_iter()
-                .map(|(line, tag)| (indent_line(line, indent), tag))
-                .collect();
+            let chunk = lines;
             let (rows, tags) = wrap_tagged(chunk, w);
             let rows: Vec<(Line<'static>, Option<usize>)> = rows.into_iter().zip(tags).collect();
             self.seg_cache.insert(
@@ -3268,24 +2986,6 @@ impl App {
             chunks.push((AsmTag::Seg(mid), rows));
             fresh.push(true);
         }
-        // a group running to the tail never meets its seg_end inside the
-        // loop: its footer closes the transcript instead.
-        if let Some(fgi) = pending_footer {
-            let g = &groups[fgi];
-            let live = running && fgi >= stored;
-            let tool = live
-                .then(|| {
-                    self.subagent_chats
-                        .get(&id)
-                        .and_then(|chat| live_tool_name(chat, g.seg_start, g.seg_end))
-                })
-                .flatten();
-            struct_row!(
-                activity_footer_line(g, live.then_some(self.spinner_tick), tool.as_deref()),
-                Some(GROUP_BASE + fgi)
-            );
-        }
-        let _ = struct_ord;
         self.prune_seg_cache();
         self.merge_chunks(chunks, fresh);
         self.cache_w = width;
@@ -4432,120 +4132,11 @@ pub(super) fn blank() -> Line<'static> {
     Line::from(vec![Span::styled(String::new(), Theme::base())])
 }
 
-/// Lead verb for the live footer: what the running tool is doing, in
-/// plain words (no coined verbs like "Outlining"). Unknown and internal
-/// tools fall back to Working.
-pub(super) fn tool_verb(tool: &str) -> &'static str {
-    match tool {
-        "read" | "outline" | "git_log" | "git_show" | "git_diff" | "ls" | "memory_read"
-        | "git_branch" => "Reading",
-        "grep" | "glob" | "websearch" | "graph_query" => "Searching",
-        "resolve_ref" => "Resolving",
-        "edit" | "write" | "multi_edit" => "Editing",
-        "patch" => "Patching",
-        "bash" => "Running",
-        "bash_output" | "sleep" => "Waiting",
-        "bash_kill" => "Stopping",
-        "git_status" => "Checking",
-        "git_commit" => "Committing",
-        "git_stage" => "Staging",
-        "webfetch" => "Fetching",
-        "subagent" => "Delegating",
-        "plan" => "Planning",
-        "propose_plan" | "propose_reset" => "Proposing",
-        "ask_user" => "Asking",
-        "think" => "Thinking",
-        "memory_propose" | "note" | "journal" => "Writing",
-        _ => "Working",
-    }
-}
-
-/// The one-line summary of a turn's working content. Failures are spelled out
-/// here: a collapsed block must never hide the fact that something broke.
-/// While the turn runs (`live_tick` set), the "activity" word shimmers
-/// Codex-style; finished headers stay static dim.
-/// Footer line of an activity group: the live aggregate sits UNDER the
-/// tool rows it summarizes, not above them. Clicking it folds the tools
-/// above (it carries the same GROUP_BASE tag the header used to). While
-/// the turn streams, the lead word runs the house-coral shimmer.
-pub(super) fn activity_footer_line(
-    g: &ActivityGroup,
-    live_tick: Option<usize>,
-    tool: Option<&str>,
-) -> Line<'static> {
-    let arrow = if g.expanded { "▾" } else { "▸" };
-    // the live footer reads as one orange unit: arrow, verb and aggregate
-    // share the house accent while work runs. The done footer stays dim —
-    // finished work rests, only running work pops.
-    let live = live_tick.is_some();
-    let static_ink = if live { Theme::accent() } else { Theme::dim() };
-    let mut spans = vec![Span::styled(format!("  {arrow} "), static_ink)];
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(tick) = live_tick {
-        // the verb carries the action, the tool name stays in the
-        // transcript rows above — no duplication
-        spans.extend(crate::tui::shimmer::shimmer_coral_spans(
-            tool.map_or("Working", tool_verb),
-            tick,
-        ));
-    }
-    // a turn that has produced nothing yet carries no aggregate: the shimmer
-    // word alone is the signal that the app is alive, and "0 calls · 0s"
-    // next to it would read as a stalled counter
-    let waiting = live_tick.is_some() && g.calls == 0 && g.thinking == 0 && tool.is_none();
-    if !waiting {
-        parts.push(format!("{} calls", g.calls));
-        if g.thinking > 0 {
-            // finished blocks: the count is of thoughts that were had
-            parts.push(format!(
-                "{} thought{}",
-                g.thinking,
-                if g.thinking == 1 { "" } else { "s" }
-            ));
-        }
-        parts.push(format!("{}s", g.duration_ms / 1000));
-        // the live footer leads with the shimmer word, so the aggregate hangs
-        // off a separator; the done footer IS the aggregate, no dangling "·".
-        let agg = parts.join(" · ");
-        spans.push(Span::styled(
-            if live { format!(" · {agg}") } else { agg },
-            static_ink,
-        ));
-    }
-    if g.errors > 0 {
-        // the aggregate stays quiet: the failed rows themselves carry the
-        // red, the footer only counts
-        spans.push(Span::styled(format!(" · {} error", g.errors), static_ink));
-    }
-    if g.rejected > 0 {
-        spans.push(Span::styled(
-            format!(" · {} rejected", g.rejected),
-            Theme::warn(),
-        ));
-    }
-    Line::from(spans)
-}
-
-/// Name of the tool still running inside a live group, if any — the
-/// footer's "now" half. Counted calls (ok or failed) are already in the
-/// aggregate; only `ok: None` is live.
-fn live_tool_name(segs: &[Segment], start: usize, end: usize) -> Option<String> {
-    segs.get(start..end.min(segs.len()))?
-        .iter()
-        .filter_map(|s| match s {
-            Segment::Tool { name, ok: None, .. } => Some(name.clone()),
-            _ => None,
-        })
-        .next_back()
-}
-
-fn indent_line(l: Line<'static>, n: usize) -> Line<'static> {
-    if n == 0 {
-        return l;
-    }
-    let mut spans = Vec::with_capacity(l.spans.len() + 1);
-    spans.push(Span::styled(" ".repeat(n), Theme::base()));
-    spans.extend(l.spans);
+/// Live status row closing the flat transcript while the turn streams:
+/// coral Working, no aggregate, no folding, no click target.
+pub(super) fn working_tail_line(tick: usize) -> Line<'static> {
+    let mut spans = vec![Span::styled("  ".to_string(), Theme::base())];
+    spans.extend(crate::tui::shimmer::shimmer_coral_spans("Working", tick));
     Line::from(spans)
 }
 

@@ -153,39 +153,14 @@ fn running_tool_name_shimmers_like_activity_header() {
 }
 
 #[test]
-fn live_activity_footer_shimmers_finished_stays_dim() {
-    use super::super::view::{ActivityGroup, activity_footer_line};
-    let g = ActivityGroup {
-        seg_start: 0,
-        seg_end: 0,
-        calls: 3,
-        thinking: 0,
-        duration_ms: 5000,
-        errors: 0,
-        rejected: 0,
-        expanded: true,
-        turn_user: None,
-    };
-    // finished footer: static dim text
-    let still = activity_footer_line(&g, None, None);
-    let text: String = still.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(text.contains("3 calls"), "{text:?}");
-    assert!(
-        still.spans.iter().all(|s| s.style == Theme::dim()),
-        "finished footer must stay dim: {still:?}"
-    );
-    // live footer at mid-sweep: the same aggregate led by the shimmer word
-    let live = activity_footer_line(
-        &g,
-        Some(crate::tui::shimmer::SHIMMER_PERIOD_TICKS / 4),
-        None,
-    );
+fn working_tail_line_shimmers_coral() {
+    use super::super::view::working_tail_line;
+    // the flat transcript closes a streaming turn with a bare coral word:
+    // no aggregate, no folding, no click target
+    let live = working_tail_line(crate::tui::shimmer::SHIMMER_PERIOD_TICKS / 4);
     let live_text: String = live.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(live_text.contains("Working · 3 calls"), "{live_text:?}");
-    assert!(
-        !text.contains("Working"),
-        "done footer is static text: {text:?}"
-    );
+    assert!(live_text.contains("Working"), "{live_text:?}");
+    assert!(!live_text.contains("calls"), "no aggregate: {live_text:?}");
     // the 7 "Working" letters carry more than one brightness step
     let word: String = live
         .spans
@@ -204,19 +179,7 @@ fn live_activity_footer_shimmers_finished_stays_dim() {
         .collect();
     assert!(
         styles.len() > 1,
-        "live footer must shade the word differently: {styles:?}"
-    );
-    // the live footer reads as one orange unit: arrow and aggregate wear
-    // the house accent next to the coral word, no gray leftovers
-    assert_eq!(
-        live.spans[0].style.fg,
-        Some(crate::tui::theme::Theme::ACCENT()),
-        "live arrow is accent: {live:?}"
-    );
-    assert_eq!(
-        live.spans.last().map(|s| s.style.fg),
-        Some(Some(crate::tui::theme::Theme::ACCENT())),
-        "live aggregate is accent: {live:?}"
+        "tail must shade the word differently: {styles:?}"
     );
 }
 
@@ -832,11 +795,10 @@ fn inline_ask_lands_before_the_answer_inside_activity() {
     );
     // the work run covers tools and the question together…
     let (start, end) = app.trailing_work_run().expect("a work run must exist");
-    assert!(start <= ask && ask < end, "ask must fold into activity");
-    // …and a successful turn folds it collapsed, not below the answer
+    assert!(start <= ask && ask < end, "ask joins the work run");
+    // …and a successful turn summarizes it the same way
     app.finalize_activity_group();
     let g = app.activity_groups.last().expect("group must be frozen");
-    assert!(!g.expanded, "successful turns fold by default");
     assert!(
         g.seg_start <= ask && ask < g.seg_end,
         "ask must be inside the group"
@@ -1158,7 +1120,7 @@ fn preamble_before_tool_becomes_commentary_row_in_activity() {
         other => panic!("expected assistant answer, got {other:?}"),
     }
 
-    // Verify activity group encompasses commentary + 2 real tool calls.
+    // Verify the turn summarizes commentary + 2 real tool calls.
     // Commentary never counts as a call.
     assert_eq!(app.activity_groups.len(), 1);
     let g = &app.activity_groups[0];
@@ -1166,14 +1128,19 @@ fn preamble_before_tool_becomes_commentary_row_in_activity() {
     assert_eq!(g.seg_end, 5);
     assert_eq!(g.calls, 2);
 
-    // Rendering check: collapsed activity footer under the folded tools
+    // Rendering check, flat: every row visible, no footer
     app.rebuild_cache(80);
     let screen = rendered(&app);
-    assert!(screen.contains("▸ 2 calls"), "footer: {screen}");
+    assert!(
+        screen.contains("Let me inspect the file."),
+        "preamble: {screen}"
+    );
+    assert!(screen.contains("a.rs"), "tool row: {screen}");
     assert!(
         screen.contains("I have finished the fix."),
         "answer: {screen}"
     );
+    assert!(!screen.contains("calls"), "no aggregate: {screen}");
 }
 
 #[test]
@@ -1198,8 +1165,7 @@ fn commentary_renders_inside_activity_without_toggle() {
         .position(|s| matches!(s, Segment::Commentary(_)))
         .expect("commentary segment must exist");
 
-    // Expand activity group so rows are rendered
-    app.activity_groups[0].expanded = true;
+    // rows render flat: no unfolding step anymore
     app.rebuild_cache(80);
     let screen = rendered(&app);
     assert!(!screen.contains("talking"), "no pseudo-tool: {screen}");
@@ -1374,10 +1340,9 @@ fn aborted_turn_during_tool_preserves_commentary_row() {
             .any(|s| matches!(s, Segment::Assistant { .. }))
     );
 
-    // Activity group folds shut like any finished turn; the abort
+    // Activity summarized like any finished turn; the abort
     // surfaces through the status row, not an open block
     assert_eq!(app.activity_groups.len(), 1);
-    assert!(!app.activity_groups[0].expanded);
 }
 
 #[test]

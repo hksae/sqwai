@@ -1428,8 +1428,10 @@ mode at spawn. The mode indicator is always visible.
 ### 5.4 TUI
 ratatui + crossterm; ASCII/box-drawing only, no emoji; English UI strings
 centralized. Header: model, mode, tokens and context %, cache reads.
-Streaming markdown with syntect highlighting; tool calls collapse on
-completion (Enter expands); diffs shown post hoc; thinking collapsed.
+Streaming markdown with syntect highlighting; flat transcript, no folding:
+tool calls read as one-liners (click expands output, diffs shown post hoc);
+finished thoughts stay hidden; a live Working tail closes the chat while
+the turn streams.
 Indicators: compacting…, checkpoint hint, background jobs, retries. A retry
 notice is transient: it stands while the turn is unresolved and is retracted
 when the retry recovers — a terminal failure keeps its explanation. Panic hook restores the terminal.

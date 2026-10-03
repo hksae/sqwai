@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 use super::menus::{Menu, MenuAction};
-use super::view::{GROUP_BASE, blank};
+use super::view::blank;
 use super::*;
 
 use super::*;

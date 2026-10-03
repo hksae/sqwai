@@ -1,8 +1,7 @@
 use super::*;
 
 #[test]
-fn footer_line_sits_under_the_tools_and_folds_them() {
-    use super::super::view::activity_footer_line;
+fn tool_rows_read_as_flat_one_liners_with_live_tail() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.streaming = true;
     let ev = |e: AgentEvent, app: &mut App| match e {
@@ -20,7 +19,7 @@ fn footer_line_sits_under_the_tools_and_folds_them() {
         } => app.handle_tool_notice(name, summary, ok, diff, Some(call_id)),
         _ => {}
     };
-    // one done, one failed, one running: name only, red error kept
+    // one done, one running: every row stays visible, no folding
     ev(
         AgentEvent::ToolStart {
             name: "read".into(),
@@ -48,42 +47,37 @@ fn footer_line_sits_under_the_tools_and_folds_them() {
         &mut app,
     );
     app.rebuild_cache(80);
-    let line_text = |row: usize| -> String {
-        app.cache_lines[row]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect()
-    };
-    // the footer closes the group UNDER its rows: the earliest tool row
-    // sits above the tagged footer row
-    let footer = app
-        .cache_rowseg
-        .iter()
-        .position(|t| *t == Some(GROUP_BASE))
-        .expect("footer row tagged as group 0");
-    let tool_row = (0..app.cache_lines.len())
-        .find(|&r| r != footer && line_text(r).contains("bash"))
-        .expect("tool row visible");
-    assert!(tool_row < footer, "footer sits under the tools");
-    let foot = line_text(footer);
-    assert!(
-        foot.contains("Running · 2 calls"),
-        "live aggregate: {foot:?}"
-    );
-    assert!(
-        !foot.contains("cargo test"),
-        "args stay in the transcript: {foot:?}"
-    );
-    // clicking the footer folds the tools above it; the turn keeps running
-    app.click(footer);
-    assert!(app.streaming);
-    app.rebuild_cache(80);
     let text = rendered(&app);
-    // the tool row (with its args) is gone; the collapsed footer keeps
-    // the aggregate and the current tool name
-    assert!(!text.contains("cargo test"), "folded tools hide: {text}");
-    assert!(text.contains("▸ Running"), "footer stays: {text}");
+    assert!(text.contains("read"), "done row visible: {text}");
+    assert!(text.contains("cargo test"), "running args visible: {text}");
+    assert!(
+        text.contains("Working"),
+        "live tail closes the chat: {text}"
+    );
+    assert!(
+        !text.contains("calls"),
+        "no aggregate in a flat transcript: {text}"
+    );
+    // clicking the done row expands its output instead of folding anything
+    let row = app
+        .cache_lines
+        .iter()
+        .position(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+                .contains("cargo test")
+        })
+        .expect("running tool row");
+    app.click(row);
+    assert!(app.streaming, "click never stops the turn");
+    app.rebuild_cache(80);
+    assert!(
+        rendered(&app).contains("cargo test"),
+        "rows stay put: {}",
+        rendered(&app)
+    );
 
     ev(
         AgentEvent::ToolNotice {
@@ -95,23 +89,19 @@ fn footer_line_sits_under_the_tools_and_folds_them() {
         },
         &mut app,
     );
-    // finished group: static aggregate, quiet error count (the red
-    // lives on the failed rows, the footer only counts)
+    app.rebuild_cache(80);
+    let text = rendered(&app);
+    assert!(text.contains("bash"), "failed row stays: {text}");
+    assert!(!text.contains("calls"), "still no aggregate: {text}");
+}
+
+#[test]
+fn activity_summary_counts_calls_and_errors() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    finished_turn(&mut app, false);
+    // data layer only: the view never renders these numbers anymore
     let g = app.build_activity_group((0, app.segments.len()));
-    let line = activity_footer_line(&g, None, None);
-    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(
-        text.contains("2 calls") && text.contains("1 error"),
-        "{text:?}"
-    );
-    assert!(!text.contains("Working"), "done footer is static: {text:?}");
-    assert!(
-        line.spans
-            .iter()
-            .any(|s| s.content.contains("error")
-                && s.style.fg == Some(ratatui::style::Color::DarkGray)),
-        "error count stays quiet: {text:?}"
-    );
+    assert_eq!((g.calls, g.thinking, g.errors), (1, 1, 1));
 }
 
 #[test]
@@ -188,101 +178,8 @@ fn test_churn_runs_a_fake_turn_until_esc() {
     app.poll_input(&rx).unwrap();
     assert!(!app.streaming, "churn stopped");
     assert!(app.test_churn.is_none());
-    assert_eq!(app.activity_groups.len(), 1, "turn folded");
-    assert!(!app.activity_groups[0].expanded);
+    assert_eq!(app.activity_groups.len(), 1, "turn summarized");
     assert_eq!(app.activity_groups[0].calls, 2, "both fake calls counted");
-}
-
-#[test]
-fn footer_verbs_are_plain_words_with_a_working_fallback() {
-    use super::super::view::tool_verb;
-    for (tool, verb) in [
-        ("read", "Reading"),
-        ("edit", "Editing"),
-        ("bash", "Running"),
-        ("bash_output", "Waiting"),
-        ("grep", "Searching"),
-        ("subagent", "Delegating"),
-        ("plan", "Planning"),
-        ("ask_user", "Asking"),
-        ("think", "Thinking"),
-        ("git_commit", "Committing"),
-        ("outline", "Reading"),
-        ("git_diff", "Reading"),
-        ("ls", "Reading"),
-        ("git_branch", "Reading"),
-        ("graph_query", "Searching"),
-        ("memory_read", "Reading"),
-        ("memory_propose", "Writing"),
-        ("whatever", "Working"),
-        ("", "Working"),
-    ] {
-        assert_eq!(tool_verb(tool), verb, "tool {tool:?}");
-    }
-    // small closed set, no coined verbs
-    for tool in [
-        "read",
-        "outline",
-        "ls",
-        "grep",
-        "glob",
-        "graph_query",
-        "resolve_ref",
-        "edit",
-        "write",
-        "multi_edit",
-        "patch",
-        "bash",
-        "bash_output",
-        "bash_kill",
-        "sleep",
-        "git_status",
-        "git_diff",
-        "git_log",
-        "git_show",
-        "git_commit",
-        "git_stage",
-        "git_branch",
-        "webfetch",
-        "websearch",
-        "subagent",
-        "plan",
-        "propose_plan",
-        "propose_reset",
-        "ask_user",
-        "think",
-        "memory_read",
-        "memory_propose",
-        "note",
-        "journal",
-    ] {
-        let verb = tool_verb(tool);
-        assert!(
-            [
-                "Reading",
-                "Searching",
-                "Resolving",
-                "Editing",
-                "Patching",
-                "Running",
-                "Waiting",
-                "Stopping",
-                "Checking",
-                "Committing",
-                "Staging",
-                "Fetching",
-                "Delegating",
-                "Planning",
-                "Proposing",
-                "Asking",
-                "Thinking",
-                "Writing",
-                "Working"
-            ]
-            .contains(&verb),
-            "no fancy verbs: {tool} -> {verb}"
-        );
-    }
 }
 
 #[test]
@@ -436,7 +333,7 @@ fn thinking_duration_freezes_when_block_closes() {
 }
 
 #[test]
-fn activity_group_folds_the_turn_work_and_keeps_the_answer() {
+fn finished_turn_renders_every_row_flat() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     finished_turn(&mut app, true);
     app.finalize_activity_group();
@@ -446,57 +343,30 @@ fn activity_group_folds_the_turn_work_and_keeps_the_answer() {
     assert_eq!((g.seg_start, g.seg_end), (1, 3));
     assert_eq!((g.calls, g.thinking, g.errors), (1, 1, 0));
 
+    // flat transcript: tool row and answer both visible, thinking hidden,
+    // no aggregate anywhere
     app.rebuild_cache(80);
     let text = rendered(&app);
-    assert!(
-        text.contains("1 calls · 1 thought"),
-        "footer missing: {text}"
-    );
-    assert!(!text.contains("read"), "tool row must be folded: {text}");
-    assert!(!text.contains("hmm"), "thinking must be folded: {text}");
+    assert!(text.contains("read"), "tool row visible: {text}");
+    assert!(!text.contains("hmm"), "finished thought hidden: {text}");
     assert!(text.contains("done"), "the answer stays visible: {text}");
-
-    // clicking the footer unfolds the whole block
-    let footer = app
-        .cache_rowseg
-        .iter()
-        .position(|t| *t == Some(GROUP_BASE))
-        .expect("footer row tagged as group 0");
-    app.click(footer);
-    assert!(app.activity_groups[0].expanded);
-    app.rebuild_cache(80);
-    let text = rendered(&app);
-    assert!(text.contains("read"), "unfolded block shows tools: {text}");
-    assert!(text.contains("done"), "answer still visible: {text}");
+    assert!(!text.contains("calls"), "no aggregate: {text}");
 }
 
 #[test]
-fn failed_turn_folds_its_activity_group_shut() {
+fn failed_turn_shows_failed_rows_flat() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     finished_turn(&mut app, false);
     app.finalize_activity_group();
 
     let g = &app.activity_groups[0];
     assert_eq!(g.errors, 1);
-    assert!(!g.expanded, "even a failed turn folds shut at finish");
 
     app.rebuild_cache(80);
     let text = rendered(&app);
-    assert!(text.contains("1 error"), "error marker missing: {text}");
-    assert!(!text.contains("read"), "the failed call folds away: {text}");
-    // clicking the footer unfolds the block on demand
-    let footer = app
-        .cache_rowseg
-        .iter()
-        .position(|t| *t == Some(GROUP_BASE))
-        .expect("footer row tagged as group 0");
-    app.click(footer);
-    assert!(app.activity_groups[0].expanded);
-    app.rebuild_cache(80);
-    assert!(
-        rendered(&app).contains("read"),
-        "unfolded block shows the failed call"
-    );
+    assert!(text.contains("read"), "the failed call stays: {text}");
+    assert!(text.contains("done"), "the answer stays: {text}");
+    assert!(!text.contains("calls"), "no aggregate: {text}");
 }
 
 #[test]
@@ -549,15 +419,13 @@ fn abort_remaps_activity_group_ranges_past_dropped_rows() {
     let g = &app.activity_groups[0];
     assert_eq!((g.seg_start, g.seg_end), (1, 3), "end pulled in by one");
 
+    // flat view: every surviving row visible, no aggregate
     app.rebuild_cache(80);
     let text = rendered(&app);
-    assert!(
-        text.contains("1 calls · 1 thought"),
-        "footer intact: {text}"
-    );
-    assert!(!text.contains("read"), "group stays folded: {text}");
+    assert!(text.contains("read"), "tool row visible: {text}");
     assert!(!text.contains("subagent"), "subagent row removed: {text}");
     assert!(text.contains("done"), "answer stays visible: {text}");
+    assert!(!text.contains("calls"), "no aggregate: {text}");
 }
 
 /// A compact `Subagent` row is a tool call like any other: it must join
@@ -598,21 +466,19 @@ fn subagent_row_joins_the_turn_activity_group() {
     assert_eq!(
         app.activity_groups.len(),
         1,
-        "the turn folds into one group"
+        "the turn summarizes into one group"
     );
     let g = &app.activity_groups[0];
     assert_eq!((g.seg_start, g.seg_end), (1, 4));
     assert_eq!(g.calls, 3, "grep + read + subagent are three calls");
 
+    // flat view: child row and tools all visible, no footer
     app.rebuild_cache(80);
     let text = rendered(&app);
-    assert!(text.contains("3 calls"), "footer missing: {text}");
-    assert!(
-        !text.contains("subagent-1"),
-        "the child row folds away with the rest: {text}"
-    );
-    assert!(!text.contains("grep"), "tool rows fold away: {text}");
+    assert!(text.contains("subagent-1"), "child row visible: {text}");
+    assert!(text.contains("grep"), "tool rows visible: {text}");
     assert!(text.contains("done"), "the answer stays visible: {text}");
+    assert!(!text.contains("calls"), "no aggregate: {text}");
 }
 
 /// End to end over the real handlers: the event sequence a delegated call
@@ -653,9 +519,9 @@ fn delegated_call_paints_one_row_and_folds_with_the_turn() {
 
     app.rebuild_cache(80);
     let text = rendered(&app);
-    assert!(text.contains("1 calls"), "footer: {text}");
-    assert!(!text.contains("subagent-1"), "child row folds away: {text}");
+    assert!(text.contains("subagent-1"), "child row visible: {text}");
     assert!(text.contains("done"), "the answer stays visible: {text}");
+    assert!(!text.contains("calls"), "no aggregate: {text}");
 }
 
 /// Stopping mid-turn drops the subagent rows from *inside* a group: the
@@ -715,14 +581,13 @@ fn abort_drops_subagent_rows_inside_a_group() {
 
     app.rebuild_cache(80);
     let text = rendered(&app);
-    assert!(
-        text.contains("1 calls · 1 thought"),
-        "footer stays coherent after the abort: {text}"
-    );
+    assert!(text.contains("read"), "tool row visible: {text}");
     assert!(
         !text.contains("subagent"),
         "no subagent row survives: {text}"
     );
+    assert!(text.contains("done"), "answer visible: {text}");
+    assert!(!text.contains("calls"), "no aggregate: {text}");
 }
 
 /// A provider dump must not flood the chat: multi-line errors arrive
@@ -810,22 +675,12 @@ fn failed_turn_without_an_answer_still_groups_its_tools() {
     assert_eq!(app.activity_groups.len(), 1);
     let g = &app.activity_groups[0];
     assert_eq!((g.seg_start, g.seg_end), (1, 3));
-    assert!(!g.expanded, "a failed turn folds shut");
 
-    // and the footer unfolds the block on click
+    // flat view: both tool rows visible, no footer to unfold
     app.rebuild_cache(80);
-    let footer = app
-        .cache_rowseg
-        .iter()
-        .position(|t| *t == Some(GROUP_BASE))
-        .expect("footer row tagged");
-    app.click(footer);
-    assert!(app.activity_groups[0].expanded);
-    app.rebuild_cache(80);
-    assert!(
-        rendered(&app).contains("a.rs"),
-        "unfolded group shows tool rows"
-    );
+    let text = rendered(&app);
+    assert!(text.contains("a.rs"), "tool rows visible: {text}");
+    assert!(!text.contains("calls"), "no aggregate: {text}");
 }
 
 /// A group must never overlap the previous one: before the fix, an error
@@ -866,7 +721,7 @@ fn activity_groups_never_overlap_previous_ranges() {
 }
 
 #[test]
-fn activity_group_renders_live_while_the_turn_streams() {
+fn live_turn_shows_tool_rows_and_working_tail() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.streaming = true;
     app.push_segment(Segment::Assistant {
@@ -880,25 +735,12 @@ fn activity_group_renders_live_while_the_turn_streams() {
     assert!(app.activity_groups.is_empty());
     app.rebuild_cache(80);
     let text = rendered(&app);
+    assert!(text.contains("read"), "live work is visible: {text}");
     assert!(
-        text.contains("Reading · 1 calls · 1 thought"),
-        "live footer missing: {text}"
+        text.contains("Working"),
+        "live tail closes the chat: {text}"
     );
-    assert!(text.contains("read"), "live work is expanded: {text}");
-
-    // clicking the live footer folds it; the turn stays running
-    let footer = app
-        .cache_rowseg
-        .iter()
-        .position(|t| *t == Some(GROUP_BASE))
-        .expect("live footer row");
-    app.click(footer);
-    assert!(app.streaming);
-    app.rebuild_cache(80);
-    assert!(
-        !rendered(&app).contains("a.rs"),
-        "live group folds on click"
-    );
+    assert!(!text.contains("calls"), "no aggregate: {text}");
 }
 
 #[test]

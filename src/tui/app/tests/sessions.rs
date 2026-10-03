@@ -125,27 +125,31 @@ fn load_history_restores_tool_calls_and_results() {
     );
     assert!(matches!(app.segments[2], Segment::Assistant { ref text, .. } if text == "done"));
     assert_eq!(app.activity_groups.len(), 1, "tool turn is grouped");
-    assert!(
-        !app.activity_groups[0].expanded,
-        "restored groups are folded by default"
-    );
 
+    // flat view: restored tool row and answer both visible, no footer
     app.rebuild_cache(80);
     let text = rendered(&app);
-    assert!(text.contains("▸ 1 calls"), "footer restored: {text}");
-    assert!(!text.contains("read"), "tool is folded: {text}");
+    assert!(text.contains("read"), "tool visible: {text}");
     assert!(text.contains("done"), "answer remains visible: {text}");
+    assert!(!text.contains("calls"), "no aggregate: {text}");
 
-    let footer = app
-        .cache_rowseg
+    // clicking the tool row unfolds its output instead of any group
+    let row = app
+        .cache_lines
         .iter()
-        .position(|tag| *tag == Some(GROUP_BASE))
-        .expect("restored activity footer");
-    app.click(footer);
+        .position(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+                .contains("read")
+        })
+        .expect("tool row");
+    app.click(row);
     app.rebuild_cache(80);
     assert!(
-        rendered(&app).contains("read"),
-        "restored group can be unfolded"
+        rendered(&app).contains("file contents"),
+        "tool output unfolds on click"
     );
 }
 
@@ -199,25 +203,14 @@ fn restored_session_rebuilds_thought_rows_in_order() {
         vec!["weighing the options", "one more consideration"]
     );
 
-    // a restored row carries no clock: it must not invent a duration
+    // a restored row carries no clock; restored thoughts stay hidden,
+    // the tool row and answer read flat with no aggregate
     app.rebuild_cache(80);
     let text = rendered(&app);
-    assert!(
-        text.contains("2 thoughts"),
-        "aggregate counts restored rows: {text}"
-    );
-    let footer = app
-        .cache_rowseg
-        .iter()
-        .position(|tag| *tag == Some(GROUP_BASE))
-        .expect("restored activity footer");
-    app.click(footer);
-    app.rebuild_cache(80);
-    let text = rendered(&app);
-    assert!(
-        !text.contains("thought ·") && !text.contains("thought…"),
-        "no invented duration on restored rows: {text}"
-    );
+    assert!(text.contains("read"), "tool visible: {text}");
+    assert!(text.contains("done"), "answer visible: {text}");
+    assert!(!text.contains("thought"), "thoughts hidden: {text}");
+    assert!(!text.contains("calls"), "no aggregate: {text}");
 }
 
 #[test]
@@ -269,10 +262,8 @@ fn restore_keeps_stopped_turns_out_of_later_groups() {
     let (g1, g2) = (&app.activity_groups[0], &app.activity_groups[1]);
     assert_eq!(g1.turn_user, Some(0));
     assert_eq!((g1.calls, g1.errors), (1, 1));
-    assert!(!g1.expanded, "a stopped turn's group restores folded");
     assert_eq!(g2.turn_user, Some(2));
     assert_eq!((g2.calls, g2.errors), (2, 0));
-    assert!(!g2.expanded);
 
     // the second user message must sit between the groups, visible
     let user_two = app

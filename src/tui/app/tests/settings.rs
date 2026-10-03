@@ -639,11 +639,10 @@ fn snap_chat_three_tool_calls_one_failed() {
 }
 
 #[test]
-fn snap_chat_twelve_successful_tool_calls_collapsed() {
+fn snap_chat_twelve_successful_tool_calls() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
     app.push_segment(Segment::User("Do many things.".into()));
-    let seg_start = app.segments.len();
     for i in 0..12 {
         app.push_segment(Segment::Tool {
             call_id: None,
@@ -658,28 +657,13 @@ fn snap_chat_twelve_successful_tool_calls_collapsed() {
             flash: None,
         });
     }
-    let seg_end = app.segments.len();
-    app.activity_groups.push(ActivityGroup {
-        seg_start,
-        seg_end,
-        calls: 12,
-        thinking: 0,
-        duration_ms: 3000,
-        errors: 0,
-        rejected: 0,
-        turn_user: None,
-        expanded: false,
-    });
     app.push_segment(Segment::Assistant {
         text: "All done!".into(),
         live: false,
     });
     for w_h in [(100u16, 30u16), (70, 24)] {
         let s = render_to_string(&mut app, w_h.0, w_h.1);
-        snap!(
-            format!("chat_twelve_tools_collapsed_{}x{}", w_h.0, w_h.1),
-            s
-        );
+        snap!(format!("chat_twelve_tools_{}x{}", w_h.0, w_h.1), s);
     }
 }
 
@@ -716,12 +700,12 @@ fn snap_chat_bash_tool_still_running() {
 }
 
 #[test]
-fn snap_chat_activity_group_collapsed() {
-    // Activity group: 6 calls, 2 thinking blocks, 1 error — collapsed by default
+fn snap_chat_many_tools_flat() {
+    // Flat transcript: 6 calls (one failed), finished thoughts hidden,
+    // every tool row visible, no footer
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
     app.push_segment(Segment::User("Complex task.".into()));
-    let seg_start = app.segments.len();
     app.push_segment(Segment::Thinking {
         text: "Let me think about this carefully.".into(),
         expanded: false,
@@ -774,28 +758,13 @@ fn snap_chat_activity_group_collapsed() {
         expanded: false,
         flash: None,
     });
-    let seg_end = app.segments.len();
-    app.activity_groups.push(ActivityGroup {
-        seg_start,
-        seg_end,
-        calls: 6,
-        thinking: 2,
-        duration_ms: 5200,
-        errors: 1,
-        rejected: 0,
-        turn_user: None,
-        expanded: false, // collapsed by default
-    });
     app.push_segment(Segment::Assistant {
         text: "Completed with one error.".into(),
         live: false,
     });
     for w_h in [(100u16, 30u16), (70, 24)] {
         let s = render_to_string(&mut app, w_h.0, w_h.1);
-        snap!(
-            format!("chat_activity_group_collapsed_{}x{}", w_h.0, w_h.1),
-            s
-        );
+        snap!(format!("chat_many_tools_flat_{}x{}", w_h.0, w_h.1), s);
     }
 }
 

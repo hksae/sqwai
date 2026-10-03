@@ -264,12 +264,6 @@ pub struct App {
     subagents: Vec<(u64, String, String, String, bool)>,
     /// full read-only transcripts for each child agent
     subagent_chats: std::collections::BTreeMap<u64, Vec<Segment>>,
-    /// finished activity groups per child chat: same folding as the main
-    /// transcript, so child chats read identically. Ephemeral like the
-    /// chats; cleared with them.
-    sub_groups: std::collections::BTreeMap<u64, Vec<ActivityGroup>>,
-    /// start time per running child, for its live group header
-    sub_started: std::collections::BTreeMap<u64, std::time::Instant>,
     /// child transcript currently replacing the main chat on screen
     active_subagent: Option<u64>,
     /// checked options in the current multi-select ask_user, per question
@@ -449,9 +443,6 @@ pub struct App {
     /// Wall-clock start of the turn currently streaming, used to freeze the
     /// activity duration once the turn completes.
     turn_started: Option<Instant>,
-    /// The running turn's group is expanded by default; the user can fold it
-    /// manually before the turn ends.
-    live_group_collapsed: bool,
 
     // command popup
     hover: Option<String>,
@@ -884,8 +875,6 @@ impl App {
             todos: Vec::new(),
             subagents: Vec::new(),
             subagent_chats: std::collections::BTreeMap::new(),
-            sub_groups: std::collections::BTreeMap::new(),
-            sub_started: std::collections::BTreeMap::new(),
             active_subagent: None,
             ask_picked: Vec::new(),
             ask_custom: Vec::new(),
@@ -999,7 +988,6 @@ impl App {
             activity_groups: Vec::new(),
             announced_stale: std::collections::HashSet::new(),
             turn_started: None,
-            live_group_collapsed: false,
         };
         if !startup {
             app.load_history_segments();
@@ -1229,7 +1217,6 @@ impl App {
             duration_ms: saved.duration_ms,
             errors: saved.errors,
             rejected: saved.rejected,
-            expanded: false,
             turn_user: saved.user_index.or(turn_user),
         });
     }
@@ -2605,7 +2592,6 @@ impl App {
         self.pending_reveal.clear();
         // the activity header shows how long the turn took; measure from here
         self.turn_started = Some(Instant::now());
-        self.live_group_collapsed = false;
         // no thinking placeholder up front: the row appears only when real
         // reasoning deltas arrive (handle_thinking_delta builds it lazily),
         // so an empty "thinking... 0s" never flashes on turns that do not
@@ -2648,7 +2634,6 @@ impl App {
         }
         self.streaming = true;
         self.turn_started = Some(Instant::now());
-        self.live_group_collapsed = false;
         self.test_churn = Some(TestChurn {
             n: 0,
             last: Instant::now(),
@@ -2819,8 +2804,6 @@ impl App {
         self.subagents.clear();
         self.subagent_chats.clear();
         self.subagent_meta.clear();
-        self.sub_groups.clear();
-        self.sub_started.clear();
         self.sub_views.clear();
         self.announced_stale.clear();
         // live + parked rows belong to the old transcript: drop them whole
@@ -2934,8 +2917,6 @@ impl App {
         self.subagents.clear();
         self.subagent_chats.clear();
         self.subagent_meta.clear();
-        self.sub_groups.clear();
-        self.sub_started.clear();
         self.sub_views.clear();
         self.announced_stale.clear();
         self.stashed_main_scroll = None;
@@ -4109,9 +4090,9 @@ impl App {
                             }
                         }
                     }
-                    // fold the finished chat like a main turn; no more rows
-                    // land after Done, so the stored indices stay valid
-                    self.finalize_sub_group(id);
+                    // the finished child needs no folding anymore: the flat
+                    // transcript shows every row, stored indices stay valid
+                    // because no more rows land after Done
                     self.sub_touch_all(id);
                     self.dirty = true;
                 }
@@ -4440,7 +4421,6 @@ impl App {
             });
         }
         self.subagent_meta.insert(id, meta);
-        self.sub_started.insert(id, std::time::Instant::now());
         let pos = self
             .segments
             .iter()
@@ -4681,7 +4661,6 @@ impl App {
             }
         }
         self.turn_started = None;
-        self.live_group_collapsed = false;
         self.dirty = true;
     }
 
@@ -4708,24 +4687,6 @@ impl App {
             .unwrap_or(0)
             .min(self.segments.len());
         Self::trailing_work_run_in(&self.segments, floor)
-    }
-
-    /// True while the running turn has produced nothing visible yet: no
-    /// thought row, no call row, no revealed answer text. The transcript then
-    /// needs a bare working line, or the screen reads as a hung app while the
-    /// model silently produces its first token.
-    pub(super) fn awaiting_first_token(&self) -> bool {
-        self.segments
-            .iter()
-            .rev()
-            .take_while(|s| !matches!(s, Segment::User(_)))
-            .all(|s| match s {
-                Segment::Assistant {
-                    text, live: true, ..
-                } => text.is_empty(),
-                Segment::Status { .. } => true,
-                _ => false,
-            })
     }
 
     /// Same scan over any transcript: subagent chats fold with the same
@@ -4814,7 +4775,7 @@ impl App {
                 Segment::Tool { .. } => calls += 1,
                 // a question and a plan proposal are tool calls awaiting the
                 // user; a delegated child is a tool call awaiting its answer.
-                // All three fold with the rest of the turn's work.
+                // All three count with the rest of the turn's work.
                 Segment::AskUser { .. }
                 | Segment::PlanProposal { .. }
                 | Segment::Subagent { .. } => calls += 1,
@@ -4844,54 +4805,21 @@ impl App {
             duration_ms,
             errors,
             rejected: 0,
-            expanded: true,
             turn_user,
         }
     }
 
-    /// Fold one finished child chat into an activity group, like the main
-    /// transcript does per turn. Runs once, on SubagentDone, when the chat
-    /// stops changing so the stored indices stay valid. Always collapsed:
-    /// failures surface through the status row, not an open block.
-    fn finalize_sub_group(&mut self, id: u64) {
-        let Some(chat) = self.subagent_chats.get(&id) else {
-            return;
-        };
-        let floor = self
-            .sub_groups
-            .get(&id)
-            .map(|groups| groups.iter().map(|g| g.seg_end).max().unwrap_or(0))
-            .unwrap_or(0)
-            .min(chat.len());
-        let Some(run) = Self::trailing_work_run_in(chat, floor) else {
-            self.sub_started.remove(&id);
-            return;
-        };
-        let duration_ms = self
-            .sub_started
-            .remove(&id)
-            .map(|t| t.elapsed().as_millis() as u64)
-            .unwrap_or(0);
-        let mut group = Self::build_activity_group_in(chat, run, duration_ms, None);
-        group.expanded = false;
-        self.sub_groups.entry(id).or_default().push(group);
-    }
-
     /// Freeze the turn that just finished into a group. Called once the
-    /// segments are final, so the stored indices stay valid.
+    /// segments are final, so the stored indices stay valid. The view never
+    /// folds anymore — groups survive purely as session-summary data.
     fn finalize_activity_group(&mut self) {
         let Some(run) = self.trailing_work_run() else {
             self.turn_started = None;
-            self.live_group_collapsed = false;
             return;
         };
-        let mut group = self.build_activity_group(run);
-        // the finished answer always folds shut — failures surface through
-        // the turn note / error status row, never an open block.
-        group.expanded = false;
+        let group = self.build_activity_group(run);
         self.activity_groups.push(group);
         self.turn_started = None;
-        self.live_group_collapsed = false;
     }
 
     fn finish_turn(&mut self, res: Result<(), String>) {

@@ -580,41 +580,39 @@ fn stale_acceptance_announces_one_durable_row() {
 }
 
 #[test]
-fn sub_group_folds_finished_chat_like_main() {
+fn sub_chat_renders_every_row_flat() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
     open_sub_chat(&mut app, 7, "completed");
-    app.finalize_sub_group(7);
-    let groups = app.sub_groups.get(&7).expect("folded group");
-    assert_eq!(groups.len(), 1);
-    assert_eq!((groups[0].seg_start, groups[0].seg_end), (1, 3));
-    assert!(!groups[0].expanded, "ok child folds shut");
     let s = render_to_string(&mut app, 100, 30);
-    assert!(s.contains("▸ 1 calls"), "footer shows:\n{s}");
     assert!(s.contains("found it"), "answer stays visible:\n{s}");
-    assert!(!s.contains("a.rs"), "tool row folds away:\n{s}");
+    assert!(s.contains("a.rs"), "tool row stays visible:\n{s}");
+    assert!(!s.contains("calls"), "no aggregate:\n{s}");
+    assert!(!s.contains("hmm"), "finished thought hidden:\n{s}");
 }
 
 #[test]
-fn sub_group_header_click_toggles() {
-    use crate::tui::app::view::GROUP_BASE;
+fn sub_chat_tool_click_expands_output() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
     open_sub_chat(&mut app, 7, "completed");
-    app.finalize_sub_group(7);
     render_to_string(&mut app, 100, 30);
+    // click the tool row itself: output unfolds inline, nothing folds
     let abs = app
-        .cache_rowseg
+        .cache_lines
         .iter()
-        .position(|t| *t == Some(GROUP_BASE))
-        .expect("footer row");
+        .position(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+                .contains("a.rs")
+        })
+        .expect("tool row");
     app.click(abs);
-    assert!(
-        app.sub_groups[&7][0].expanded,
-        "footer click unfolds the child turn"
-    );
     let s = render_to_string(&mut app, 100, 30);
-    assert!(s.contains("a.rs"), "tool row is back:\n{s}");
+    assert!(s.contains("contents"), "output unfolded:\n{s}");
+    assert!(s.contains("found it"), "answer stays:\n{s}");
 }
 
 #[test]
@@ -657,35 +655,21 @@ fn chat_link_click_resolves_and_fires_gracefully() {
 }
 
 #[test]
-fn close_subagent_view_folds_expanded_child_groups() {
-    use crate::tui::app::view::GROUP_BASE;
+fn close_subagent_view_returns_to_main() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
     open_sub_chat(&mut app, 7, "completed");
-    app.finalize_sub_group(7);
     render_to_string(&mut app, 100, 30);
-    // unfold while viewing, then close the chat
-    let abs = app
-        .cache_rowseg
-        .iter()
-        .position(|t| *t == Some(GROUP_BASE))
-        .expect("footer row");
-    app.click(abs);
-    assert!(app.sub_groups[&7][0].expanded);
     app.close_subagent_view();
-    assert!(
-        !app.sub_groups[&7][0].expanded,
-        "closing the chat folds its groups shut"
-    );
     assert_eq!(app.active_subagent, None);
+    assert!(app.follow, "closing restores follow");
 }
 
 #[test]
-fn sub_group_live_while_running() {
+fn sub_chat_live_while_running() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
     open_sub_chat(&mut app, 7, "running");
-    app.sub_started.insert(7, std::time::Instant::now());
     // reopen the tool row: the running turn is still open
     if let Some(Segment::Tool { ok, .. }) = app
         .subagent_chats
@@ -695,8 +679,8 @@ fn sub_group_live_while_running() {
         *ok = None;
     }
     let s = render_to_string(&mut app, 100, 30);
-    assert!(s.contains("Reading"), "live footer shows:\n{s}");
     assert!(s.contains("a.rs"), "running rows stay visible:\n{s}");
+    assert!(!s.contains("calls"), "no aggregate:\n{s}");
 }
 
 #[test]

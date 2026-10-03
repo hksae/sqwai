@@ -5,13 +5,13 @@ expression: s
 
  › Complex task.
 
-   ▸ 6 calls · 2 thoughts · 5s · 1 error
-
+   ✓ tool_0  {}
+   ✓ tool_1  {}
+   ✓ tool_2  {}
+   ✓ tool_3  {}
+   ✗ risky_tool  {"x":1}
+   ✓ cleanup  {}
  Completed with one error.
-
-
-
-
 
 
 

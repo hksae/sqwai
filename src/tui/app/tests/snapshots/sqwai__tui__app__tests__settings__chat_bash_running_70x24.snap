@@ -5,9 +5,9 @@ expression: s
 
  › Run the tests.
 
-     ◜ bash  {"cmd":"cargo test"}
-   ▾ Running · 1 calls · 0s
+   ◜ bash  {"cmd":"cargo test"}
 
+   Working
 
 
 
