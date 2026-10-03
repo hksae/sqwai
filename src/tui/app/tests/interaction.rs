@@ -618,6 +618,45 @@ fn sub_group_header_click_toggles() {
 }
 
 #[test]
+fn chat_link_click_resolves_and_fires_gracefully() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.push_segment(Segment::Assistant {
+        text: "see [docs](https://example.com/x) now".into(),
+        live: false,
+    });
+    render_to_string(&mut app, 100, 30);
+    let abs = app
+        .cache_lines
+        .iter()
+        .position(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+                .contains("docs")
+        })
+        .expect("link row");
+    let row_text: String = app.cache_lines[abs]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    let label_col = row_text.find("docs").unwrap();
+    // plain text: no target, no toast
+    app.click_at(abs, 0);
+    assert!(app.toast.is_none(), "click off the link stays silent");
+    // the label: resolves the pinned URL; the test opener refuses to
+    // spawn a browser, so firing lands on the graceful error toast
+    app.click_at(abs, label_col);
+    assert_eq!(
+        toast_text(&app),
+        "open failed: no browser in tests",
+        "link click fires the opener"
+    );
+}
+
+#[test]
 fn close_subagent_view_folds_expanded_child_groups() {
     use crate::tui::app::view::GROUP_BASE;
     let mut app = test_app("http://127.0.0.1:9/v1".into());

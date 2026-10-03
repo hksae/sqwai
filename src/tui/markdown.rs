@@ -1170,6 +1170,123 @@ fn parse_autolink(s: &str) -> Option<InlineLink> {
     })
 }
 
+/// The render-side link signature: accent + underline. Nothing else in
+/// chat rows wears exactly this combination (markers are bare accent,
+/// code tokens never use the indexed accent), so hit-testing can trust it.
+fn is_link_style(style: Style) -> bool {
+    style.fg == Some(Theme::ACCENT()) && style.add_modifier.contains(Modifier::UNDERLINED)
+}
+
+/// URL under a cursor inside one wrapped row. Styles carry no URLs, so the
+/// cursor must sit on a link-styled run and the target must be adjacent:
+/// an `<autolink>` URL under the cursor, or `(url)` parens right after the
+/// label (same row, or opening the next one when the label fills its row).
+/// Anything ambiguous — two links one row, a URL cut at the row edge, a
+/// bare URL in code text — resolves to nothing: a click must never open
+/// the wrong address. Only `http(s)` targets resolve, so exotic schemes
+/// from untrusted model output cannot reach the opener.
+pub fn link_url_at(row: &[Span<'_>], next: Option<&[Span<'_>]>, char_col: usize) -> Option<String> {
+    let text: String = row.iter().map(|s| s.content.as_ref()).collect();
+    let chars: Vec<char> = text.chars().collect();
+    // per-char link mask over the row
+    let mut mask = vec![false; chars.len()];
+    let mut i = 0;
+    for span in row {
+        let link = is_link_style(span.style);
+        for _ in span.content.chars() {
+            if i < mask.len() {
+                mask[i] = link;
+            }
+            i += 1;
+        }
+    }
+    if char_col >= mask.len() || !mask[char_col] {
+        return None;
+    }
+    // maximal link-styled run around the cursor (a label with nested
+    // emphasis is several spans, all link-styled)
+    let mut start = char_col;
+    while start > 0 && mask[start - 1] {
+        start -= 1;
+    }
+    let mut end = char_col;
+    while end + 1 < mask.len() && mask[end + 1] {
+        end += 1;
+    }
+    let run: String = chars[start..=end].iter().collect();
+    // autolink: the run IS the URL. A run cut at the row edge may continue
+    // on the next row — gluing is a guess either way, so abstain.
+    if run.starts_with("http://") || run.starts_with("https://") {
+        if end + 1 == chars.len()
+            && next.is_some_and(|n| {
+                n.iter()
+                    .flat_map(|s| s.content.chars())
+                    .next()
+                    .is_some_and(|c| !c.is_whitespace())
+            })
+        {
+            return None;
+        }
+        return clean_url(&run);
+    }
+    // label: ` (url)` follows on this row, or opens the next one when the
+    // label runs to the row edge (wrap eats the separating space)
+    let after: String = chars[end + 1..].iter().collect();
+    let after = after.trim_start();
+    if let Some(rest) = after.strip_prefix('(') {
+        return paren_url(rest).and_then(|u| clean_url(&u));
+    }
+    if !after.is_empty() {
+        return None;
+    }
+    let ahead: String = next?.iter().map(|s| s.content.as_ref()).collect();
+    let rest = ahead.trim_start().strip_prefix('(')?;
+    paren_url(rest).and_then(|u| clean_url(&u))
+}
+
+/// Balanced `(...)` scan: nested parens in the URL survive, the match ends
+/// at the paren that closes the opener.
+fn paren_url(s: &str) -> Option<String> {
+    let mut depth = 1u32;
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '(' => {
+                depth += 1;
+                out.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(out);
+                }
+                out.push(c);
+            }
+            '\\' => {
+                // an escaped char is literal text, never a delimiter
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    None
+}
+
+/// Second lock (the first is adjacency above): only web targets resolve.
+fn clean_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    if rest.is_empty() || rest.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    Some(url.to_string())
+}
+
 /// Longest emphasis marker starting at `bytes[i]`, if any. Order matters:
 /// on equal positions the longer marker wins (`**` over `*`).
 fn marker_at(bytes: &[u8], i: usize) -> Option<&'static str> {
@@ -2360,6 +2477,85 @@ mod tests {
         let code = inline("``a ` b``", Theme::base());
         let code_text: String = code.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(code_text, "a ` b", "{code_text:?}");
+    }
+
+    /// char index where `needle` starts in rendered span text.
+    fn col_of(spans: &[Span<'_>], needle: &str) -> usize {
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        text.find(needle)
+            .map(|b| text[..b].chars().count())
+            .unwrap_or(usize::MAX)
+    }
+
+    #[test]
+    fn link_hit_resolves_label_parens_and_autolinks() {
+        // md link: click on the label opens the adjacent parens URL
+        let row = inline("see [docs](https://example.com/x) now", Theme::base());
+        assert_eq!(
+            link_url_at(&row, None, col_of(&row, "docs")),
+            Some("https://example.com/x".to_string())
+        );
+        // click on plain text: nothing
+        assert_eq!(link_url_at(&row, None, 0), None);
+        // click on the dim parens (not link-styled): nothing
+        assert_eq!(link_url_at(&row, None, col_of(&row, "(https")), None);
+        // autolink: click on the URL itself
+        let auto = inline("go <https://example.com> ok", Theme::base());
+        assert_eq!(
+            link_url_at(&auto, None, col_of(&auto, "https")),
+            Some("https://example.com".to_string())
+        );
+        // bare URL in code text is literal, never a link
+        let code = inline("run `https://example.com` ok", Theme::base());
+        assert_eq!(link_url_at(&code, None, col_of(&code, "https")), None);
+    }
+
+    #[test]
+    fn link_hit_never_guesses_across_links_or_rows() {
+        // two links one row: each label binds its own parens
+        let row = inline(
+            "[a](https://a.example/1) [b](https://b.example/2)",
+            Theme::base(),
+        );
+        let text: String = row.iter().map(|s| s.content.as_ref()).collect();
+        let a_col = text.find('a').unwrap();
+        let b_col = text.find(" b (").unwrap() + 1;
+        assert_eq!(
+            link_url_at(&row, None, a_col),
+            Some("https://a.example/1".to_string())
+        );
+        assert_eq!(
+            link_url_at(&row, None, b_col),
+            Some("https://b.example/2".to_string())
+        );
+        // label at the row edge, parens opening the next row (wrap ate the space)
+        let full = inline("[long label](https://example.com/deep)", Theme::base());
+        let full_text: String = full.iter().map(|s| s.content.as_ref()).collect();
+        let cut = full_text.find("(https").unwrap();
+        let (h1, h2) = full_text.split_at(cut);
+        let top = vec![Span::styled(
+            h1.to_string(),
+            Style::new()
+                .fg(Theme::ACCENT())
+                .add_modifier(Modifier::UNDERLINED),
+        )];
+        let bottom = vec![Span::styled(h2.to_string(), Theme::base())];
+        assert_eq!(
+            link_url_at(&top, Some(&bottom), col_of(&top, "label")),
+            Some("https://example.com/deep".to_string())
+        );
+        // autolink cut at the row edge with text ahead: abstain, never glue
+        let edge = vec![Span::styled(
+            "https://example.com".to_string(),
+            Style::new()
+                .fg(Theme::ACCENT())
+                .add_modifier(Modifier::UNDERLINED),
+        )];
+        let ahead = vec![Span::styled("more text".to_string(), Theme::base())];
+        assert_eq!(link_url_at(&edge, Some(&ahead), 8), None);
+        // exotic schemes never resolve, even when styled as links
+        let evil = inline("[x](javascript:alert(1))", Theme::base());
+        assert_eq!(link_url_at(&evil, None, 0), None);
     }
 
     #[test]

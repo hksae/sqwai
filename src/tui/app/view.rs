@@ -87,7 +87,8 @@ impl MergeKind {
 /// Semantic click target resolved at mouse-down against the shown frame.
 /// Re-validated at mouse-up by segment id, so a layout shift between press
 /// and release cannot fire a stale row number at the wrong control.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Not `Copy`: the Link arm pins an owned URL at press time.
+#[derive(Debug, Clone, PartialEq)]
 pub(super) enum ClickTarget {
     Proposal {
         seg: u64,
@@ -117,6 +118,12 @@ pub(super) enum ClickTarget {
     Code {
         seg: u64,
         block: usize,
+    },
+    /// Chat link URL resolved at press (see `link_at_row`): firing opens it
+    /// in the system browser. The URL is pinned, never re-resolved, so a
+    /// streaming shift between press and release cannot retarget the open.
+    Link {
+        url: String,
     },
 }
 
@@ -154,6 +161,42 @@ pub(super) fn code_blocks(text: &str) -> Vec<String> {
         }
     }
     blocks
+}
+
+/// Open a clicked chat link in the system browser, detached (never blocks
+/// the frame). The hit-test only resolves `http(s)` targets, so nothing
+/// else can arrive here from a click.
+fn open_browser_url(url: &str) -> std::io::Result<()> {
+    #[cfg(test)]
+    {
+        // clicks in tests must never escape to a real browser: resolution
+        // is covered by unit tests, firing only needs the graceful path
+        let _ = url;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "no browser in tests",
+        ))
+    }
+    #[cfg(not(test))]
+    {
+        #[cfg(target_os = "windows")]
+        {
+            // `start` takes the first quoted arg as the window title: the empty
+            // title keeps the URL in the command slot, quoted whole by spawn
+            std::process::Command::new("cmd")
+                .args(["/C", "start", "", url])
+                .spawn()?;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open").arg(url).spawn()?;
+        }
+        #[cfg(all(not(test), not(any(target_os = "windows", target_os = "macos"))))]
+        {
+            std::process::Command::new("xdg-open").arg(url).spawn()?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -465,7 +508,7 @@ impl App {
             }
             Some((self.active_subagent, id, abs_r - start))
         });
-        self.press_target = self.resolve_target(row, abs_r);
+        self.press_target = self.resolve_target(row, abs_r, char_col);
         self.dragging = false;
     }
 
@@ -500,8 +543,9 @@ impl App {
 
     /// Semantic target under a chat row, resolved against the shown frame.
     /// `screen` is the press row for anchoring; `abs` indexes the layout
-    /// this frame was painted from.
-    fn resolve_target(&self, screen: u16, abs: usize) -> Option<ClickTarget> {
+    /// this frame was painted from; `char_col` is the press column mapped
+    /// into the row's characters (for link hit-testing).
+    fn resolve_target(&self, screen: u16, abs: usize, char_col: usize) -> Option<ClickTarget> {
         // Proposal/ask rows only exist in the main view; in a subagent view
         // the same absolute rows belong to a different transcript.
         if self.active_subagent.is_none() && self.menu_stack.is_empty() {
@@ -549,6 +593,12 @@ impl App {
             && let Some(block) = self.code_block_index(id, abs)
         {
             return Some(ClickTarget::Code { seg: id, block });
+        }
+        // links the same: assistant rows only, URL pinned at press time
+        if matches!(segs.get(tag), Some(Segment::Assistant { .. }))
+            && let Some(url) = self.link_at_row(tag, abs, char_col)
+        {
+            return Some(ClickTarget::Link { url });
         }
         match segs.get(tag) {
             Some(Segment::Subagent { .. }) => Some(ClickTarget::OpenSubagent { seg: id }),
@@ -796,10 +846,18 @@ impl App {
     /// layout shift can intervene.
     #[cfg(test)]
     pub(super) fn click(&mut self, abs_row: usize) {
+        // out of range: existing fold/copy targets never depend on the
+        // column, and links must not resolve without a real press column
+        self.click_at(abs_row, usize::MAX);
+    }
+
+    /// Same, with a character column (for link hit-testing).
+    #[cfg(test)]
+    pub(super) fn click_at(&mut self, abs_row: usize, char_col: usize) {
         let screen = self.last_chat.y.saturating_add(
             (abs_row.saturating_sub(self.chat_top(self.last_chat.height.max(1)))) as u16,
         );
-        if let Some(target) = self.resolve_target(screen, abs_row) {
+        if let Some(target) = self.resolve_target(screen, abs_row, char_col) {
             self.fire_target(target);
         }
     }
@@ -984,6 +1042,14 @@ impl App {
                     }
                 }
             }
+            ClickTarget::Link { url } => {
+                // the URL was pinned (and scheme-gated) at press time; the
+                // opener is the last step, never a resolver
+                match open_browser_url(&url) {
+                    Ok(()) => self.status("opened in browser", StatusKind::Info),
+                    Err(e) => self.status(&format!("open failed: {e}"), StatusKind::Err),
+                }
+            }
         }
     }
 
@@ -1071,6 +1137,28 @@ impl App {
     /// borders (`╭` opens, `╰` closes). Tables use `┌`-corners, so a `│`
     /// heuristic can no longer mistake a table row for code.
     /// View-aware: resolves the id in the currently shown transcript.
+    /// URL under a cursor inside one assistant row, if the cursor sits on a
+    /// link. Geometry only: the row must belong to this segment (a wrapped
+    /// label may spill parens onto the next row, but never into the next
+    /// segment), the rest is the renderer's adjacency rule — see
+    /// `markdown::link_url_at`.
+    pub(super) fn link_at_row(
+        &self,
+        seg_idx: usize,
+        abs_row: usize,
+        char_col: usize,
+    ) -> Option<String> {
+        if self.cache_rowseg.get(abs_row) != Some(&Some(seg_idx)) {
+            return None;
+        }
+        let row = self.cache_lines.get(abs_row)?;
+        let same_seg = self.cache_rowseg.get(abs_row + 1) == Some(&Some(seg_idx));
+        let next = same_seg
+            .then(|| self.cache_lines.get(abs_row + 1))
+            .flatten();
+        crate::tui::markdown::link_url_at(&row.spans, next.map(|l| l.spans.as_slice()), char_col)
+    }
+
     fn code_block_index(&self, seg: u64, abs_row: usize) -> Option<usize> {
         let (_, meta) = self.view_transcript();
         let idx = meta.iter().position(|m| m.id == seg)?;
