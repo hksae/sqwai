@@ -239,9 +239,9 @@ mod tests {
 
     #[test]
     fn gradient_ramp_spans_the_brand_coral() {
-        assert_eq!(coral_at(0, 67), CORAL_START);
-        assert_eq!(coral_at(66, 67), CORAL_END);
-        let mid = coral_at(33, 67);
+        assert_eq!(coral_at(0, 65), CORAL_START);
+        assert_eq!(coral_at(64, 65), CORAL_END);
+        let mid = coral_at(32, 65);
         assert!(
             mid.0 > CORAL_END.0 && mid.0 < CORAL_START.0,
             "midpoint interpolates: {mid:?}"
@@ -254,7 +254,7 @@ mod tests {
         use unicode_width::UnicodeWidthStr;
         let rows: Vec<&str> = SQWAI_TEXT.lines().collect();
         assert_eq!(rows.len(), 8, "pixel wordmark is 8 rows");
-        assert!(rows.iter().all(|r| r.width() == 67), "uniform source rows");
+        assert!(rows.iter().all(|r| r.width() == 65), "uniform source rows");
         let lines = sqwai_gradient_lines();
         assert_eq!(lines.len(), 8);
         for (line, src) in lines.iter().zip(rows) {
