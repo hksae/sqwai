@@ -136,6 +136,29 @@ pub(super) fn tool_preview(diff: Option<&str>, output: &str) -> (Vec<String>, us
     (lines, total)
 }
 
+/// Codex-style state dot for tool rows: soft green / soft red, truecolor
+/// RGB with an indexed fallback so the dot reads on any terminal.
+fn tool_dot_style(done_ok: bool) -> Style {
+    if crate::tui::shimmer::has_truecolor() {
+        let (r, g, b) = if done_ok {
+            (135, 200, 145)
+        } else {
+            (220, 150, 145)
+        };
+        Style::new()
+            .fg(Color::Rgb(r, g, b))
+            .add_modifier(Modifier::BOLD)
+    } else if done_ok {
+        Style::new()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::new()
+            .fg(Color::Red)
+            .add_modifier(Modifier::BOLD)
+    }
+}
+
 /// Fenced code blocks in assistant source text, in order.
 pub(super) fn code_blocks(text: &str) -> Vec<String> {
     let mut blocks = Vec::new();
@@ -332,13 +355,6 @@ fn edit_change_counts(diff: &str) -> (usize, usize) {
             (added, removed)
         }
     })
-}
-
-#[derive(Clone, Copy, PartialEq)]
-pub(super) enum BlockKind {
-    None,
-    ThoughtCollapsed,
-    Answer,
 }
 
 /// Full-width user strip. The quiet surface is the primary distinction; `›`
@@ -1727,13 +1743,6 @@ impl App {
                     for l in render(text, w, &self.hl) {
                         out.push((dim_all(l), Some(idx)));
                     }
-                    out.push((
-                        Line::from(vec![Span::styled(
-                            format!("  click to collapse{time}"),
-                            Style::new().fg(Theme::DIM()).add_modifier(Modifier::ITALIC),
-                        )]),
-                        Some(idx),
-                    ));
                 }
             }
             Segment::Subagent {
@@ -1743,16 +1752,17 @@ impl App {
                 output,
                 expanded,
             } => {
-                // same three-part geometry as a tool row: state marker,
-                // quiet name, dim summary. No accent anywhere: running
-                // reads from the spinner, done from ✓, failed from ✗.
+                // same three-part geometry as a tool row: state dot, quiet
+                // name, dim summary, flush left. No accent anywhere: running
+                // reads from the spinner, done from the soft green dot,
+                // failed from the soft red one.
                 let failed = status == "failed";
                 let marker = match status.as_str() {
-                    "completed" => ("  ✓ ".to_string(), Theme::tool_head_bold()),
-                    "failed" => ("  ✗ ".to_string(), Theme::err()),
+                    "completed" => ("• ".to_string(), tool_dot_style(true)),
+                    "failed" => ("• ".to_string(), tool_dot_style(false)),
                     _ => (
                         format!(
-                            "  {} ",
+                            "{} ",
                             WORKING_SPINNER[self.spinner_tick % WORKING_SPINNER.len()]
                         ),
                         Theme::tool_head(),
@@ -1760,13 +1770,13 @@ impl App {
                 };
                 let name = format!("subagent-{id}");
                 let summary_width = usize::from(w)
-                    .saturating_sub(4 + name.len() + 2)
+                    .saturating_sub(2 + name.len() + 2)
                     // same mid-window cap as tool calls
                     .min(usize::from(w) / 2);
                 let summary = if task.is_empty() || summary_width == 0 {
                     String::new()
                 } else {
-                    format!("  {}", truncate_display_width(task, summary_width))
+                    format!(" ({})", truncate_display_width(task, summary_width))
                 };
                 out.push((
                     Line::from(vec![
@@ -1805,24 +1815,23 @@ impl App {
                 flash,
                 ..
             } => {
-                // Every tool uses the same three-part row: state marker, tool
-                // name, and a quiet one-line argument summary. The name is
-                // the markdown base gray (white, but a touch silver); state
-                // reads from the marker shape and the finish wave, not from
-                // row colors. Keeping the geometry identical makes running,
-                // successful, and failed calls scan as one list.
+                // Every tool uses the same three-part row: state dot, tool
+                // name, and a quiet one-line argument summary (Codex-style:
+                // flush left, no indent). State reads from the dot color and
+                // the finish wave, not from row colors. Keeping the geometry
+                // identical makes running, successful, and failed calls scan
+                // as one list.
                 let marker = match ok {
                     None => (
                         format!(
-                            "  {} ",
+                            "{} ",
                             WORKING_SPINNER[self.spinner_tick % WORKING_SPINNER.len()]
                         ),
                         Theme::tool_head(),
                     ),
-                    Some(true) => ("  ✓ ".to_string(), Theme::tool_head_bold()),
-                    Some(false) => ("  ✗ ".to_string(), Theme::tool_head_bold()),
+                    Some(done) => ("• ".to_string(), tool_dot_style(*done)),
                 };
-                let marker_width = 4usize;
+                let marker_width = 2usize;
                 let name_width = name
                     .width()
                     .min(usize::from(w).saturating_sub(marker_width));
@@ -1846,7 +1855,7 @@ impl App {
                 let summary = if args.is_empty() || summary_width == 0 {
                     String::new()
                 } else {
-                    format!("  {}", truncate_display_width(args, summary_width))
+                    format!(" ({})", truncate_display_width(args, summary_width))
                 };
                 // one-shot finish wave: green/red sweep over marker+name,
                 // then the static row. Truecolor only; elsewhere the row
@@ -1874,12 +1883,12 @@ impl App {
                         spans.push(Span::styled(summary, Theme::dim()));
                         spans
                     }
-                    // a running tool shimmers exactly like the live footer:
-                    // same coral wave, same tick — one animation
+                    // a running tool shimmers exactly like the live status:
+                    // same wave function, same tick — one animation
                     // everywhere work runs
                     None if ok.is_none() => {
                         let mut spans = vec![Span::styled(marker.0, marker.1)];
-                        spans.extend(crate::tui::shimmer::shimmer_coral_spans(
+                        spans.extend(crate::tui::shimmer::shimmer_spans(
                             &shown_name,
                             self.spinner_tick,
                         ));
@@ -1936,15 +1945,10 @@ impl App {
                     } else {
                         preview_total
                     };
-                    let border = Theme::border_dim();
-                    let width = usize::from(w).saturating_sub(6).max(1);
-                    // Expanded output has no surrounding box. Keep one quiet
-                    // left rail so the body remains visibly attached to the
-                    // tool row while every line stays within the chat width.
-                    out.push((
-                        Line::from(vec![Span::styled("    │".to_string(), border)]),
-                        Some(idx),
-                    ));
+                    let width = usize::from(w).saturating_sub(2).max(1);
+                    // Expanded output has no surrounding box and no rail:
+                    // a quiet two-space indent keeps the body attached to
+                    // the tool row while every line stays in the chat width.
                     for l in &shown {
                         let st = if l.starts_with('+') && !l.starts_with("+++") {
                             Theme::ok()
@@ -1959,7 +1963,7 @@ impl App {
                         // not re-truncate the truncated result
                         out.push((
                             Line::from(vec![
-                                Span::styled("    │ ", border),
+                                Span::styled("  ".to_string(), Theme::base()),
                                 Span::styled(truncate_display_width(l, width), st),
                             ]),
                             Some(idx),
@@ -1969,7 +1973,7 @@ impl App {
                         let more = format!("… {} more lines", total - shown.len());
                         out.push((
                             Line::from(vec![
-                                Span::styled("    │ ", border),
+                                Span::styled("  ".to_string(), Theme::base()),
                                 Span::styled(truncate_display_width(&more, width), Theme::dim()),
                             ]),
                             Some(idx),
@@ -2043,76 +2047,43 @@ impl App {
                 struct_ord += 1;
             }};
         }
-        let mut in_group = false; // inside one "agent" turn
-        let mut last_block = BlockKind::None;
-
         // Flat transcript (Claude-style): every segment renders its own
         // rows, newest last, no collapsing. Groups still exist as data
         // (session summaries re-attach through them), but the view never
-        // hides rows behind footers anymore.
+        // hides rows behind footers anymore. Every block breathes: exactly
+        // one air row before each segment's rows.
         for idx in 0..self.segments.len() {
             let seg = &self.segments[idx];
-            // group spacing rules (cheap, done per assembly pass)
             match seg {
                 Segment::AskUser { .. } | Segment::PlanProposal { .. } => {
-                    in_group = false;
-                    last_block = BlockKind::None;
                     struct_row!(blank(), None);
                 }
                 Segment::User(_) => {
-                    in_group = false;
-                    last_block = BlockKind::None;
                     struct_row!(blank(), None);
                 }
                 Segment::Assistant { text, live } => {
                     // an unrevealed live answer is air, not content: zero
-                    // rows and no separator blank for them. The tail status
-                    // row below already left air of its own — a second blank
-                    // here stacks into a visible hole.
+                    // rows and no separator blank for them.
                     if *live && text.trim().is_empty() {
                         continue;
                     }
-                    if !in_group {
-                        struct_row!(blank(), None);
-                        in_group = true;
-                    }
-                    last_block = BlockKind::Answer;
+                    struct_row!(blank(), None);
                 }
                 Segment::Commentary(_) => {
-                    if !in_group {
-                        struct_row!(blank(), None);
-                        in_group = true;
-                    }
+                    struct_row!(blank(), None);
                 }
-                Segment::Thinking { live, .. } => {
-                    // finished thoughts stay out of the transcript: the rows
-                    // around them already show what was done. A live thought
-                    // renders its one-liner below while it streams.
-                    if !live {
-                        continue;
-                    }
-                    if !in_group {
-                        struct_row!(blank(), None);
-                        in_group = true;
-                    } else if last_block == BlockKind::Answer {
-                        struct_row!(blank(), None);
-                    }
-                    last_block = BlockKind::ThoughtCollapsed;
+                Segment::Thinking { .. } => {
+                    struct_row!(blank(), None);
                 }
                 Segment::Subagent { .. } => {
-                    if !in_group {
-                        struct_row!(blank(), None);
-                        in_group = true;
-                    }
+                    struct_row!(blank(), None);
                 }
                 Segment::Tool { .. } => {
-                    // tool rows belong to the agent's turn, keep them grouped
-                    if !in_group {
-                        struct_row!(blank(), None);
-                        in_group = true;
-                    }
+                    struct_row!(blank(), None);
                 }
-                Segment::Status { .. } => {}
+                Segment::Status { .. } => {
+                    struct_row!(blank(), None);
+                }
             }
 
             // expensive part: reuse rendered AND wrapped lines unless the
@@ -2150,32 +2121,6 @@ impl App {
             );
             chunks.push((AsmTag::Seg(meta.id), rows));
             fresh.push(true);
-        }
-        // flat transcript: while streaming, a live status row closes the
-        // chat — coral Working, no aggregate, no folding. The rows above
-        // already say everything; when the turn ends the row just goes away.
-        // Exactly one air row above it: content rows leave none of their
-        // own, a trailing blank is reused instead of doubled (cache-hit
-        // placeholders resolve through the segment cache).
-        if self.streaming {
-            let last_line = chunks.last().and_then(|(tag, rows)| {
-                if let Some((line, _)) = rows.last() {
-                    return Some(line);
-                }
-                if let AsmTag::Seg(id) = tag {
-                    return self
-                        .seg_cache
-                        .get(id)
-                        .and_then(|e| e.rows.last().map(|(line, _)| line));
-                }
-                None
-            });
-            let airy =
-                last_line.is_some_and(|line| line.spans.iter().all(|s| s.content.is_empty()));
-            if !airy {
-                struct_row!(blank(), None);
-            }
-            struct_row!(working_tail_line(self.spinner_tick), None);
         }
         let _ = struct_ord;
         // Drop cache entries for segments that no longer exist anywhere (main
@@ -2537,19 +2482,32 @@ impl App {
         // The borderless composer takes exactly its content height: one row
         // until the user enters a newline, then it grows up to six rows.
         let input_h = input_rows;
-        // the queue owns an extra row above the notice row, but only while
-        // non-empty: no queue, no row, no wasted space
-        let layout = Layout::vertical([
+        // the queue owns an extra row above the input zone, but only while
+        // non-empty: no queue, no row, no wasted space. Same for the single
+        // status row above the input: notice and working share it (dots,
+        // then the notice text), and it exists only with content.
+        let notice = self.notice_line(area.width);
+        let working = self.streaming;
+        let mut constraints = vec![
             Constraint::Min(3),
             Constraint::Length(if self.pending_queue.is_empty() { 0 } else { 1 }),
-            Constraint::Length(1),
-            Constraint::Length(input_h),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(area);
-        // queue?, notice, input, spacer, status
-        let (notice_r, input_r, status_r) = (2, 3, 5);
+        ];
+        // one air row above the input zone, but only when the status row
+        // is absent: otherwise the air stacks into a hole
+        if notice.is_none() && !working {
+            constraints.push(Constraint::Length(1));
+        }
+        let live_r = if notice.is_some() || working {
+            constraints.push(Constraint::Length(1));
+            Some(constraints.len() - 1)
+        } else {
+            None
+        };
+        constraints.push(Constraint::Length(input_h));
+        let input_r = constraints.len() - 1;
+        constraints.push(Constraint::Length(1));
+        let status_r = constraints.len() - 1;
+        let layout = Layout::vertical(constraints).split(area);
         let chat = Rect {
             x: area.x + 1,
             y: layout[0].y,
@@ -2705,8 +2663,23 @@ impl App {
         if !self.pending_queue.is_empty() {
             Paragraph::new(self.queue_line(area.width)).render(layout[1], buf);
         }
-        if let Some(line) = self.notice_line(area.width) {
-            Paragraph::new(line).render(layout[notice_r], buf);
+        // one status row above the input, shared: travelling dots while
+        // the turn streams, then the notice text to their right. Empty
+        // without either — the row itself only exists with content.
+        if let Some(r) = live_r
+            && (notice.is_some() || working)
+        {
+            let mut spans = Vec::new();
+            if working {
+                spans.extend(working_tail_line(self.spinner_tick).spans);
+                if notice.is_some() {
+                    spans.push(Span::styled("  ".to_string(), Theme::base()));
+                }
+            }
+            if let Some(line) = notice {
+                spans.extend(line.spans);
+            }
+            Paragraph::new(Line::from(spans)).render(layout[r], buf);
         }
         self.input.set_block(Self::input_block());
         // the cursor is rendered by tui-textarea; the input has no frame.
@@ -2925,9 +2898,6 @@ impl App {
             let (mid, mrev, key) = match (self.subagent_chats.get(&id), self.subagent_meta.get(&id))
             {
                 (Some(chat), Some(meta)) => match (chat.get(idx), meta.get(idx)) {
-                    // finished thoughts stay out of the transcript, same as
-                    // the main one; live thoughts render their one-liner
-                    (Some(Segment::Thinking { live: false, .. }), _) => continue,
                     (Some(seg), Some(m)) => (m.id, m.rev, self.seg_key(seg)),
                     _ => continue,
                 },
@@ -4132,12 +4102,19 @@ pub(super) fn blank() -> Line<'static> {
     Line::from(vec![Span::styled(String::new(), Theme::base())])
 }
 
-/// Live status row closing the flat transcript while the turn streams:
-/// coral Working, no aggregate, no folding, no click target.
+/// Live status row above the input while the turn streams: travelling
+/// dot (`cli-point-wide`, plain white) plus the classic gray-to-white
+/// shimmer word. No aggregate, no folding, no click target.
 pub(super) fn working_tail_line(tick: usize) -> Line<'static> {
-    let mut spans = vec![Span::styled("  ".to_string(), Theme::base())];
-    spans.extend(crate::tui::shimmer::shimmer_coral_spans("Working", tick));
-    Line::from(spans)
+    use crate::tui::spinners;
+    // one dot frame per 100ms, each dot shaded by the traveling
+    // brightness wave on top of the frame animation
+    let dots = spinners::ALL
+        .iter()
+        .find(|e| e.name == "cli-point-wide")
+        .map(|e| spinners::frame(e, tick / 2))
+        .unwrap_or("···");
+    Line::from(crate::tui::shimmer::shimmer_spans(dots, tick))
 }
 
 fn dim_all(l: Line<'static>) -> Line<'static> {
