@@ -61,7 +61,7 @@ pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
         ],
     ),
     ("/undo", &["step"]),
-    ("/test", &["animations", "art", "churn"]),
+    ("/test", &["animations", "art", "churn", "colors", "md"]),
     ("/providers", &["update"]),
     ("/constraints", &["add", "remove"]),
     ("/mode", &["plan", "act"]),
@@ -191,6 +191,10 @@ pub(super) enum Menu {
     TestAnims,
     /// /test art: numbered static logo variants for picking the empty-state mark
     TestArt,
+    /// /test colors: every Theme color in one list, duplicates visible
+    TestColors,
+    /// /test md: the markdown showcase, rendered live
+    TestMd,
     /// the model asked the user structured questions (ask_user)
     /// legacy modal path; live asks render inline in the chat instead
     #[allow(dead_code)]
@@ -703,7 +707,13 @@ impl App {
     /// the caller (nav/page/jump pull, open resets to top). Galleries are
     /// all-None content rows, never info: skipping is disabled there.
     fn menu_skips_none(&self) -> bool {
-        !matches!(self.cur_menu(), Some(Menu::TestAnims) | Some(Menu::TestArt))
+        !matches!(
+            self.cur_menu(),
+            Some(Menu::TestAnims)
+                | Some(Menu::TestArt)
+                | Some(Menu::TestColors)
+                | Some(Menu::TestMd)
+        )
     }
 
     fn menu_skip_none(&mut self, dir: i32) {
@@ -949,7 +959,13 @@ impl App {
             return;
         }
         // galleries are showcases: any commit just closes them
-        if matches!(self.cur_menu(), Some(Menu::TestAnims) | Some(Menu::TestArt)) {
+        if matches!(
+            self.cur_menu(),
+            Some(Menu::TestAnims)
+                | Some(Menu::TestArt)
+                | Some(Menu::TestColors)
+                | Some(Menu::TestMd)
+        ) {
             self.menu_back();
             return;
         }
@@ -1803,6 +1819,8 @@ impl App {
             Some(Menu::Effort) => " Effort ".into(),
             Some(Menu::TestAnims) => " Test ".into(),
             Some(Menu::TestArt) => " Art ".into(),
+            Some(Menu::TestColors) => " Colors ".into(),
+            Some(Menu::TestMd) => " Md ".into(),
             Some(Menu::AskUser { .. }) => " Ask ".into(),
             Some(Menu::Approval { .. }) => " Confirm command ".into(),
             Some(Menu::AskFree { .. }) => " Answer ".into(),
@@ -2835,6 +2853,30 @@ impl App {
                         Line::from(vec![Span::styled(String::new(), Theme::base())]),
                         MenuAction::None,
                     ));
+                }
+            }
+            Menu::TestColors => {
+                // one row per palette entry: name plus a live sample in the
+                // style itself. All dead rows, like the other galleries.
+                for (name, style) in crate::tui::theme::Theme::palette() {
+                    self.menu_rows.push(row(
+                        Line::from(vec![
+                            Span::styled(format!(" {name:<14}"), Theme::dim()),
+                            Span::styled("AaBbCc 0123".to_string(), style),
+                        ]),
+                        MenuAction::None,
+                    ));
+                }
+            }
+            Menu::TestMd => {
+                // the showcase, rendered once with the live highlighter.
+                // Static rows afterwards (no streaming here to re-render).
+                for line in crate::tui::markdown::render(
+                    crate::tui::markdown::SHOWCASE,
+                    self.menu_rect.width.max(20),
+                    &self.hl,
+                ) {
+                    self.menu_rows.push(row(line, MenuAction::None));
                 }
             }
             Menu::AskUser { questions, .. } => {

@@ -234,4 +234,55 @@ impl Theme {
     pub fn rule_color() -> Color {
         Self::BORDER_DIM()
     }
+
+    /// Every color the UI uses, in one list for `/test colors`: name plus
+    /// the style as used. New colors land here or they do not land at
+    /// all — the gallery is how duplicates get spotted (ACCENT and
+    /// ACCENT_SOFT are already the same cyan; BG/SURFACE/FG all Reset).
+    pub fn palette() -> Vec<(&'static str, Style)> {
+        let mut out = vec![
+            ("FG", Style::new().fg(Self::FG())),
+            ("DIM", Self::dim()),
+            ("META", Self::meta()),
+            ("ACCENT", Self::accent()),
+            ("ACCENT_SOFT", Style::new().fg(Self::ACCENT_SOFT())),
+            ("OK", Self::ok()),
+            ("ERR", Self::err()),
+            ("WARN", Self::warn()),
+            ("LIGHT_BLUE", Style::new().fg(Self::LIGHT_BLUE())),
+            ("GREEN", Style::new().fg(Self::GREEN())),
+            ("MENU_BG", Style::new().bg(Self::MENU_BG())),
+            ("INPUT_BG", Style::new().bg(Self::INPUT_BG())),
+            ("SELECTION_BG", Style::new().bg(Self::SELECTION_BG())),
+            ("QUOTE_BG", Style::new().bg(Self::QUOTE_BG())),
+            ("RULE", Style::new().fg(Self::rule_color())),
+            ("SECTION", Self::section()),
+            ("MARKER", Self::marker()),
+            ("MODE_ACT", Self::mode_chip_act()),
+            ("MODE_PLAN", Self::mode_chip_plan()),
+            ("TOOL_HEAD", Self::tool_head()),
+            ("FIELD_FOCUSED", Self::field_label_focused()),
+            ("SELECTION", Self::selection()),
+            (
+                "CORAL_START",
+                Style::new().fg(Color::Rgb(
+                    crate::tui::art::CORAL_START.0,
+                    crate::tui::art::CORAL_START.1,
+                    crate::tui::art::CORAL_START.2,
+                )),
+            ),
+            (
+                "CORAL_END",
+                Style::new().fg(Color::Rgb(
+                    crate::tui::art::CORAL_END.0,
+                    crate::tui::art::CORAL_END.1,
+                    crate::tui::art::CORAL_END.2,
+                )),
+            ),
+        ];
+        for level in EffortLevel::SELECTABLE {
+            out.push((level.as_str(), Self::effort(level)));
+        }
+        out
+    }
 }

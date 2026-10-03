@@ -1231,7 +1231,9 @@ fn test_animations_gated_behind_experimental_flag() {
         vec![
             "/test animations".to_string(),
             "/test art".to_string(),
-            "/test churn".to_string()
+            "/test churn".to_string(),
+            "/test colors".to_string(),
+            "/test md".to_string()
         ]
     );
     app.command("test animations");
@@ -1266,6 +1268,48 @@ fn test_art_opens_numbered_gallery() {
             label.starts_with(&format!(" {:02} · ", i + 1)),
             "variant {i} must carry its number: {label:?}"
         );
+    }
+}
+
+#[test]
+fn test_galleries_open_with_content() {
+    use ratatui::{buffer::Buffer, layout::Rect};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.cfg.ui.experimental_test = true;
+    // colors: one row per palette entry
+    app.command("test colors");
+    assert!(matches!(
+        app.cur_menu(),
+        Some(crate::tui::app::menus::Menu::TestColors)
+    ));
+    assert_eq!(
+        app.menu_rows.len(),
+        crate::tui::theme::Theme::palette().len()
+    );
+    assert!(!app.menu_rows.is_empty());
+    // md: the showcase renders to real rows
+    app.command("test md");
+    assert!(matches!(
+        app.cur_menu(),
+        Some(crate::tui::app::menus::Menu::TestMd)
+    ));
+    assert!(
+        app.menu_rows.len() > 15,
+        "showcase must span: {}",
+        app.menu_rows.len()
+    );
+    let text: String = app
+        .menu_rows
+        .iter()
+        .flat_map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()))
+        .collect();
+    for needle in ["Title", "bold", "quoted line", "first", "fn main", "x + y"] {
+        assert!(text.contains(needle), "showcase shows {needle}: {text:?}");
+    }
+    // draws without panic at both widths
+    for (w, h) in [(100u16, 30u16), (70, 24)] {
+        let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
+        app.draw_menu(&mut buf, Rect::new(0, 0, w, h));
     }
 }
 

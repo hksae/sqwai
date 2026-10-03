@@ -489,6 +489,8 @@ pub struct App {
     /// draw_menu rebuilds once when the real card disagrees, so a stale
     /// rect never desyncs header from content
     table_built_w: u16,
+    /// card width the md showcase was wrapped for (same rebuild rule)
+    md_built_w: u16,
     /// click/hover targets of the effort slider (rect → SELECTABLE index),
     /// rebuilt on every slider draw; empty when another menu is open
     effort_hits: Vec<(Rect, usize)>,
@@ -969,6 +971,7 @@ impl App {
             approval_opened_at: None,
             menu_rect: Rect::default(),
             table_built_w: 0,
+            md_built_w: 0,
             effort_hits: Vec::new(),
             effort_blend: None,
             effort_blend_sel: None,
@@ -3096,10 +3099,17 @@ impl App {
                     self.open_menu(Menu::TestAnims);
                 } else if rest.split_whitespace().nth(1) == Some("art") {
                     self.open_menu(Menu::TestArt);
+                } else if rest.split_whitespace().nth(1) == Some("colors") {
+                    self.open_menu(Menu::TestColors);
+                } else if rest.split_whitespace().nth(1) == Some("md") {
+                    self.open_menu(Menu::TestMd);
                 } else if rest.split_whitespace().nth(1) == Some("churn") {
                     self.start_test_churn();
                 } else {
-                    self.status("/test takes: animations, art, churn", StatusKind::Warn);
+                    self.status(
+                        "/test takes: animations, art, churn, colors, md",
+                        StatusKind::Warn,
+                    );
                 }
             }
             "/debug" => self.open_menu(Menu::Debug),

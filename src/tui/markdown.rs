@@ -214,6 +214,15 @@ fn with_emphasis(style: Style, m: Modifier) -> Style {
     }
 }
 
+/// Showcase document for `/test md`: small, exercises every renderer
+/// branch (headings, inline styles, quote, lists, table, rule, fences,
+/// math, links) so the render can be eyeballed in one place.
+pub const SHOWCASE: &str = "# Title\n\n## Section\n\nText with **bold**, *italic*, \
+***both***, ~~struck~~, `code` and [link](https://example.com).\n\n\
+> quoted line\n\n- one\n- two\n  - nested\n\n1. first\n2. second\n\n\
+| a | b |\n|---|---|\n| 1 | 2 |\n\n---\n\n```rust\nfn main() {}\n```\n\n\
+```python\nprint(\"hi\")\n```\n\n$\nx + y\n$\n";
+
 /// Render markdown text into styled lines. Width is used only by tables.
 pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();

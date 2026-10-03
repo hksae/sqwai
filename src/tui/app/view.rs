@@ -3310,6 +3310,11 @@ impl App {
                 self.table_built_w = want;
             }
         }
+        // The md showcase wraps at the card width: same rebuild-once rule.
+        if matches!(menu, Some(Menu::TestMd)) && self.md_built_w != rect.width {
+            self.build_menu_rows();
+            self.md_built_w = rect.width;
+        }
 
         // Menus are modal surfaces: dim the already-rendered screen while
         // preserving its text AND colors, then paint the menu at normal
@@ -3569,7 +3574,13 @@ impl App {
                 ])
                 .right_aligned(),
             );
-        } else if matches!(self.cur_menu(), Some(Menu::TestAnims) | Some(Menu::TestArt)) {
+        } else if matches!(
+            self.cur_menu(),
+            Some(Menu::TestAnims)
+                | Some(Menu::TestArt)
+                | Some(Menu::TestColors)
+                | Some(Menu::TestMd)
+        ) {
             block = block.title_bottom(Theme::hints(&[("enter/esc", "close")]).right_aligned());
         } else if matches!(self.cur_menu(), Some(Menu::EditProvider { .. })) {
             block = block.title_bottom(
