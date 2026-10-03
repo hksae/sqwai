@@ -21,8 +21,15 @@ use super::theme::Theme;
 /// Ticks per full sweep at the 50ms UI tick (2 seconds).
 pub const SHIMMER_PERIOD_TICKS: usize = 40;
 
-/// One-shot finish-wave length for tool rows: green/red sweep, then static.
-pub const FLASH_MS: u64 = 700;
+/// One-shot finish-wave lengths for tool rows: success reads fast,
+/// failure lingers — a failure must not be missable.
+pub const FLASH_OK_MS: u64 = 1200;
+pub const FLASH_ERR_MS: u64 = 1800;
+
+/// Finish-wave duration for a tool row by outcome.
+pub fn flash_ms(done_ok: bool) -> u64 {
+    if done_ok { FLASH_OK_MS } else { FLASH_ERR_MS }
+}
 
 /// Band base (outside the wave) and crest. Base sits high (180) so the
 /// trough reads bright, not muddy, on dark terminals; the crest still pops.
@@ -256,19 +263,21 @@ fn shimmer_ansi(text: &str, tick: usize) -> Vec<Span<'static>> {
         .collect()
 }
 
-/// One-shot finish wave for a tool head row: a soft green (ok) or soft red
-/// (failed) band sweeps from the marker across the name over `progress`
-/// 0.0..1.0. Pastel by design — the row itself is calm white, so the wave
-/// whispers instead of shouting.
+/// One-shot finish wave for a tool head row: a saturated green (ok) or
+/// muted red (failed) band sweeps from the marker across the name over
+/// `progress` 0.0..1.0, then the static row. Saturated by design — the old
+/// pastel whisper was invisible on white text; the sweep is brief, so it
+/// reads instead of shouting.
 /// The base is exactly the static row's styles (white marker + name),
 /// so the frozen end frame equals the normal render (no pop).
 /// Caller gates on [`has_truecolor`]; without RGB there is no wave, just
 /// the static row.
 pub fn flash_spans(marker: &str, name: &str, done_ok: bool, progress: f64) -> Vec<Span<'static>> {
-    const BAND: f64 = 3.0;
-    // softened status hues: readable on dark ground, quiet next to white
-    const GREEN: (u8, u8, u8) = (140, 205, 155);
-    const RED: (u8, u8, u8) = (230, 160, 155);
+    const BAND: f64 = 6.0;
+    // act-chip green for success, slightly muted red for failure: readable
+    // on dark ground, loud enough to notice mid-sweep
+    const GREEN: (u8, u8, u8) = (80, 200, 120);
+    const RED: (u8, u8, u8) = (225, 110, 105);
     let target = if done_ok { GREEN } else { RED };
     let marker_w: f64 = marker
         .chars()
@@ -493,19 +502,19 @@ mod tests {
             at0.iter().all(|s| s.style.fg != GRAY),
             "no gray phase at the start"
         );
-        // mid-sweep: the soft green band travels over the white name
+        // mid-sweep: the act green band travels over the white name
         let mid = flash_spans("  ✓ ", "read", true, 0.5);
         assert!(
             mid.iter()
-                .any(|s| s.style.fg == Some(Color::Rgb(140, 205, 155))),
-            "soft green band must ride mid-sweep"
+                .any(|s| s.style.fg == Some(Color::Rgb(80, 200, 120))),
+            "act green band must ride mid-sweep"
         );
         let mid_err = flash_spans("  ✗ ", "bash", false, 0.5);
         assert!(
             mid_err
                 .iter()
-                .any(|s| s.style.fg == Some(Color::Rgb(230, 160, 155))),
-            "soft red band must ride mid-sweep"
+                .any(|s| s.style.fg == Some(Color::Rgb(225, 110, 105))),
+            "muted red band must ride mid-sweep"
         );
         assert!(
             mid.iter().all(|s| s.style.fg != GRAY) && mid_err.iter().all(|s| s.style.fg != GRAY),

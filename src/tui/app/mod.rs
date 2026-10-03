@@ -1407,17 +1407,17 @@ impl App {
                 || self.effort_blend.is_some_and(|(_, t0)| {
                     t0.elapsed().as_millis() < MODE_BLEND_MS as u128
                 })
-                // finish waves get their 700ms even past streaming end,
+                // finish waves get their outcome span even past streaming end,
                 // or the sweep would freeze mid-row on the last tool
                 || self.segments.iter().any(|s| {
-                    matches!(s, Segment::Tool { flash: Some(t0), .. } if t0.elapsed().as_millis() < crate::tui::shimmer::FLASH_MS as u128)
+                    matches!(s, Segment::Tool { flash: Some(t0), ok: Some(done), .. } if t0.elapsed().as_millis() < crate::tui::shimmer::flash_ms(*done) as u128)
                 });
             // Retire expired finish waves: the row renders its static style
             // again, and the rev bump forces the one final repaint even when
             // the wave was the only thing animating (turn ended exactly on
             // the tool finish) — otherwise the last wave frame would stick.
             for i in 0..self.segments.len() {
-                let expired = matches!(self.segments.get(i), Some(Segment::Tool { flash: Some(t0), .. }) if t0.elapsed().as_millis() >= crate::tui::shimmer::FLASH_MS as u128);
+                let expired = matches!(self.segments.get(i), Some(Segment::Tool { flash: Some(t0), ok: Some(done), .. }) if t0.elapsed().as_millis() >= crate::tui::shimmer::flash_ms(*done) as u128);
                 if expired {
                     if let Some(Segment::Tool { flash, .. }) = self.segments.get_mut(i) {
                         *flash = None;
@@ -1431,7 +1431,7 @@ impl App {
                 let mut done = Vec::new();
                 if let Some(chat) = self.subagent_chats.get(&id) {
                     for (pos, seg) in chat.iter().enumerate() {
-                        if matches!(seg, Segment::Tool { flash: Some(t0), .. } if t0.elapsed().as_millis() >= crate::tui::shimmer::FLASH_MS as u128)
+                        if matches!(seg, Segment::Tool { flash: Some(t0), ok: Some(done), .. } if t0.elapsed().as_millis() >= crate::tui::shimmer::flash_ms(*done) as u128)
                         {
                             done.push(pos);
                         }

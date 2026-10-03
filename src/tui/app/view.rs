@@ -1373,7 +1373,8 @@ impl App {
                 // expiry drops the term (and the sweep retires flash), so the
                 // key settles back to the static one.
                 if let Some(t0) = flash
-                    && t0.elapsed().as_millis() < crate::tui::shimmer::FLASH_MS as u128
+                    && let Some(done) = ok
+                    && t0.elapsed().as_millis() < crate::tui::shimmer::flash_ms(*done) as u128
                     && crate::tui::shimmer::has_truecolor()
                 {
                     k = k.wrapping_add(1_000_000 + self.spinner_tick.wrapping_mul(13));
@@ -1939,14 +1940,13 @@ impl App {
                 let wave = match (ok, flash) {
                     (Some(done), Some(t0)) => {
                         let el = t0.elapsed().as_millis();
-                        if el < crate::tui::shimmer::FLASH_MS as u128
-                            && crate::tui::shimmer::has_truecolor()
-                        {
+                        let span = crate::tui::shimmer::flash_ms(*done) as u128;
+                        if el < span && crate::tui::shimmer::has_truecolor() {
                             Some(crate::tui::shimmer::flash_spans(
                                 &marker.0,
                                 &shown_name,
                                 *done,
-                                el as f64 / crate::tui::shimmer::FLASH_MS as f64,
+                                el as f64 / span as f64,
                             ))
                         } else {
                             None
