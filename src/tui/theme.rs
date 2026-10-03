@@ -55,13 +55,17 @@ impl Theme {
     pub const fn META() -> Color {
         Color::Gray
     }
+    /// House accent: warm orange from the brand gradient's start
+    /// (`#ff9a5c`, xterm 209). Blue vibrated on black terminals and fought
+    /// the coral identity everywhere; links keep their own blue.
+    /// Indexed, not RGB — renders on terminals without truecolor.
     #[allow(non_snake_case)]
     pub const fn ACCENT() -> Color {
-        Color::Cyan
+        Color::Indexed(209)
     }
     #[allow(non_snake_case)]
     pub const fn ACCENT_SOFT() -> Color {
-        Color::Cyan
+        Color::Indexed(209)
     }
     #[allow(non_snake_case)]
     #[allow(dead_code)]
