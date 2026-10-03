@@ -384,12 +384,29 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
             } else {
                 Style::new()
             };
-            let mut spans = vec![
-                Span::styled("  ".repeat(nest + 1), base_style()),
-                Span::styled(format!("{marker} "), marker_style),
-            ];
-            spans.extend(inline(rest, base_style()));
-            out.push(Line::from(spans));
+            // hanging indent: wrap the body to what fits beside the marker,
+            // then put the marker on the first visual row and blank space of
+            // the same width on every continuation — same shape as the quote
+            // rail above, or wrapped rows would start at column zero.
+            let prefix_cols = 2 * (nest + 1) + marker.len() + 1;
+            let avail = (width as usize).saturating_sub(prefix_cols).max(1);
+            let (rows, _) = wrap_tagged(
+                vec![(Line::from(inline(rest, base_style())), None)],
+                avail as u16,
+            );
+            for (i, row) in rows.into_iter().enumerate() {
+                let head = if i == 0 {
+                    format!("{marker} ")
+                } else {
+                    " ".repeat(marker.len() + 1)
+                };
+                let mut spans = vec![
+                    Span::styled("  ".repeat(nest + 1), base_style()),
+                    Span::styled(head, marker_style.clone()),
+                ];
+                spans.extend(row.spans);
+                out.push(Line::from(spans));
+            }
             continue;
         }
 
@@ -2756,6 +2773,40 @@ mod tests {
             .join("\n");
         assert!(!text.contains('$'), "delimiters collapse: {text:?}");
         assert!(text.contains("x + y"), "{text:?}");
+    }
+
+    #[test]
+    fn list_continuations_hang_under_the_text() {
+        let hl = Highlighter::new();
+        // narrow frame forces a wrap: continuation rows align under the
+        // body, never under the marker or at column zero
+        let lines = render("- alpha beta gamma delta epsilon", 20, &hl);
+        assert!(lines.len() >= 2, "must wrap: {lines:?}");
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+            .collect();
+        assert!(text[0].starts_with("  - alpha"), "{text:?}");
+        for row in &text[1..] {
+            assert!(
+                row.starts_with("    ") && row[4..].starts_with(|c: char| !c.is_whitespace()),
+                "hanging indent under the body: {text:?}"
+            );
+        }
+        // ordered markers: wider head, same rule
+        let lines = render("1. alpha beta gamma delta epsilon", 20, &hl);
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+            .collect();
+        assert!(lines.len() >= 2, "must wrap: {text:?}");
+        assert!(text[0].starts_with("  1. alpha"), "{text:?}");
+        for row in &text[1..] {
+            assert!(
+                row.starts_with("     ") && row[5..].starts_with(|c: char| !c.is_whitespace()),
+                "hanging indent under the body: {text:?}"
+            );
+        }
     }
 
     #[test]
