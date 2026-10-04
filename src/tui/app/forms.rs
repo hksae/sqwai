@@ -22,13 +22,11 @@ const FORMAT_OPTS: &[&str] = &["openai", "anthropic", "responses"];
 /// here once dropped `xhigh`, showing `off` for xhigh models and clobbering
 /// the level on save.
 const EFFORT_OPTS: &[&str] = &EffortLevel::STRS;
-/// Per-model effort-control options: `auto` (derive from the wire format)
-///
-/// leads, then every declared control in cycle order (see
-/// `CycleEffortControl`). `ALWAYS_OPTS` is the on/off switch beside it.
-/// The `[1..]` tail must stay equal to `EffortControl::STRS` — pinned by
-/// `edit_model_form_options_match_control_cycle` — so the form can never
-/// lag behind a new control variant again.
+/// Legacy option lists, kept for the config-file round-trip tests: effort
+/// control and always-on left the UI (auto by wire format), but stored
+/// values must survive edits. The `[1..]` tail must stay equal to
+/// `EffortControl::STRS`.
+#[allow(dead_code)]
 pub(super) const EFFORT_CONTROL_OPTS: &[&str] = &[
     "auto",
     EffortControl::STRS[0],
@@ -36,6 +34,7 @@ pub(super) const EFFORT_CONTROL_OPTS: &[&str] = &[
     EffortControl::STRS[2],
     EffortControl::STRS[3],
 ];
+#[allow(dead_code)]
 pub(super) const ALWAYS_OPTS: &[&str] = &["off", "on"];
 const MCP_TRANSPORT_OPTS: &[&str] = &["stdio", "http"];
 
@@ -201,25 +200,11 @@ impl App {
                             .iter()
                             .position(|s| *s == mc.effort.as_str())
                             .unwrap_or(0);
-                        let ctl_sel = match mc.effort_control {
-                            None => 0,
-                            Some(c) => EffortControl::ALL
-                                .iter()
-                                .position(|x| *x == c)
-                                .map(|i| i + 1)
-                                .unwrap_or(0),
-                        };
                         self.form_fields = vec![
                             FormField::text("key", key.clone().unwrap_or_default()),
                             FormField::text("request id", mc.id.clone()),
                             FormField::text("context", mc.context.to_string()),
                             FormField::choice("effort", EFFORT_OPTS, ef_sel),
-                            FormField::choice("effort control", EFFORT_CONTROL_OPTS, ctl_sel),
-                            FormField::choice(
-                                "effort always on",
-                                ALWAYS_OPTS,
-                                usize::from(mc.effort_always_on),
-                            ),
                         ];
                     }
                     _ => {
@@ -233,8 +218,6 @@ impl App {
                             FormField::text("request id", String::new()),
                             FormField::text("context", "128000".into()),
                             FormField::choice("effort", EFFORT_OPTS, ef_sel),
-                            FormField::choice("effort control", EFFORT_CONTROL_OPTS, 0),
-                            FormField::choice("effort always on", ALWAYS_OPTS, 0),
                         ];
                     }
                 }
@@ -346,14 +329,26 @@ impl App {
         }
     }
 
-    /// left/right/home/end: choices cycle their values, text fields move the cursor
+    /// left/right/home/end: choices cycle their values, text fields move the cursor.
+    /// The effort row never cycles: it opens the Effort menu instead (arrows
+    /// would silently fight the menu as the source of truth).
     pub(super) fn form_nav_key(&mut self, k: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
         if self.focused_is_choice() {
-            match k.code {
-                KeyCode::Left => self.choice_cycle(-1),
-                KeyCode::Right => self.choice_cycle(1),
-                _ => {}
+            let is_effort = matches!(
+                self.form_fields.get(self.form_focus),
+                Some(FormField::Choice { .. })
+                    if self.form_fields[self.form_focus].label() == "effort"
+            ) && matches!(
+                self.cur_menu(),
+                Some(Menu::EditModel { key: Some(_), .. })
+            );
+            if !is_effort {
+                match k.code {
+                    KeyCode::Left => self.choice_cycle(-1),
+                    KeyCode::Right => self.choice_cycle(1),
+                    _ => {}
+                }
             }
             return;
         }
@@ -426,8 +421,42 @@ impl App {
         }
     }
 
+    /// Stash text drafts before a submenu detour, restore them on return.
+    /// `prefill_form` rebuilds fields from config — without the stash an
+    /// Effort-menu detour would eat unsaved typing.
+    pub(super) fn stash_form_text(&mut self) {
+        self.form_draft = self
+            .form_fields
+            .iter()
+            .filter_map(|f| match f {
+                FormField::Text { .. } => Some((f.label().to_string(), f.trimmed())),
+                _ => None,
+            })
+            .collect();
+    }
+
+    pub(super) fn restore_form_text(&mut self) {
+        if self.form_draft.is_empty() {
+            return;
+        }
+        for (label, text) in std::mem::take(&mut self.form_draft) {
+            if let Some(FormField::Text { ta, .. }) = self
+                .form_fields
+                .iter_mut()
+                .find(|f| f.label() == label)
+            {
+                // select-all + insert replaces the prefilled value in place:
+                // styles, secrecy and cursor setup survive the round trip
+                ta.select_all();
+                ta.insert_str(text);
+            }
+        }
+        self.dirty = true;
+    }
+
     pub(super) fn form_mouse_down(&mut self, row: u16, col: u16) {
-        let top_y = self.menu_rect.y + 1;
+        // fields start past the title row and the air row under it
+        let top_y = self.menu_rect.y + 2;
         if row >= top_y {
             let idx = (row - top_y) as usize;
             if idx < self.form_fields.len() {
@@ -441,6 +470,20 @@ impl App {
                 }
                 let label_w = self.form_label_w();
                 let text_x = self.menu_rect.x + 1 + label_w;
+                // the effort row opens its menu instead of cycling (arrows
+                // would silently fight the menu as the source of truth).
+                // Decided before the field borrow below; new (unsaved)
+                // models have no menu target yet, so their row still
+                // cycles locally.
+                let effort_target: Option<String> = match self.cur_menu() {
+                    Some(Menu::EditModel { key: Some(k), .. }) => Some(k.clone()),
+                    _ => None,
+                };
+                let open_effort = matches!(
+                    self.form_fields.get(idx),
+                    Some(FormField::Choice { .. })
+                        if self.form_fields[idx].label() == "effort"
+                ) && effort_target.is_some();
                 match self.form_fields.get_mut(idx) {
                     Some(FormField::Text { ta, .. }) => {
                         if col >= text_x {
@@ -451,6 +494,12 @@ impl App {
                             ta.cancel_selection();
                             ta.move_cursor(tui_textarea::CursorMove::End);
                         }
+                    }
+                    Some(FormField::Choice { .. }) if open_effort => {
+                        self.stash_form_text();
+                        self.open_menu(Menu::Effort {
+                            model: effort_target,
+                        });
                     }
                     Some(FormField::Choice { .. }) if col >= text_x => {
                         self.choice_cycle(1);
@@ -615,13 +664,10 @@ impl App {
             }
             Some(Menu::EditModel { provider, key }) => {
                 let vals: Vec<String> = self.form_fields.iter().map(|f| f.trimmed()).collect();
-                let (new_key, id, ctx, th, ctl, always) = (
+                let (new_key, id, ctx) = (
                     vals.first().cloned().unwrap_or_default(),
                     vals.get(1).cloned().unwrap_or_default(),
                     vals.get(2).cloned().unwrap_or_default(),
-                    vals.get(3).cloned().unwrap_or_default(),
-                    vals.get(4).cloned().unwrap_or_default(),
-                    vals.get(5).cloned().unwrap_or_default(),
                 );
                 if new_key.is_empty() || id.is_empty() {
                     self.status("key and request id are required", StatusKind::Err);
@@ -631,9 +677,6 @@ impl App {
                     self.status("context must be a number", StatusKind::Err);
                     return;
                 };
-                let effort = EffortLevel::from_str(&th).unwrap_or(EffortLevel::Off);
-                let effort_control = EffortControl::from_str(&ctl);
-                let effort_always_on = always == "on";
                 if key.as_deref() != Some(new_key.as_str())
                     && self.cfg.models.contains_key(&new_key)
                 {
@@ -664,19 +707,35 @@ impl App {
                     }
                 }
                 // Fields the form does not show must survive an edit.
-                // Effort control and always-on come from the form now.
+                // Effort lives in the Effort menu now (current model); the
+                // form keeps identity only. New models take the row's choice.
                 let previous = key
                     .as_ref()
                     .and_then(|k| self.cfg.models.get(k))
                     .cloned()
                     .or_else(|| self.cfg.models.get(&new_key).cloned());
+                let form_effort = self
+                    .form_fields
+                    .iter()
+                    .filter_map(|f| match f {
+                        FormField::Choice { options, sel, .. }
+                            if f.label() == "effort" =>
+                        {
+                            options.get(*sel).copied()
+                        }
+                        _ => None,
+                    })
+                    .next();
+                let effort = previous.as_ref().map(|p| p.effort).or_else(|| {
+                    form_effort.and_then(|s| crate::config::EffortLevel::from_str(s))
+                }).unwrap_or(crate::config::EffortLevel::Medium);
                 let updated = ModelConfig {
                     provider: provider.clone(),
                     id,
                     context,
                     effort,
-                    effort_control,
-                    effort_always_on,
+                    effort_control: previous.as_ref().and_then(|p| p.effort_control),
+                    effort_always_on: previous.as_ref().is_some_and(|p| p.effort_always_on),
                     fallback: previous.as_ref().and_then(|p| p.fallback.clone()),
                     status: previous
                         .as_ref()

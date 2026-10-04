@@ -477,7 +477,7 @@ impl App {
                         KeyCode::PageUp if !self.menu_stack.is_empty() => self.menu_nav(-2),
                         KeyCode::PageDown if !self.menu_stack.is_empty() => self.menu_nav(2),
                         KeyCode::Left | KeyCode::Right if !self.menu_stack.is_empty() => {
-                            if matches!(self.cur_menu(), Some(Menu::Effort)) {
+                            if matches!(self.cur_menu(), Some(Menu::Effort { .. })) {
                                 self.menu_nav(if k.code == KeyCode::Left { -1 } else { 1 })
                             } else {
                                 self.form_nav_key(k)
@@ -661,7 +661,14 @@ impl App {
                         KeyCode::Char('e') | KeyCode::Char('E')
                             if ctrl && self.menu_stack.is_empty() =>
                         {
-                            self.open_menu(Menu::Effort);
+                            self.open_menu(Menu::Effort { model: None });
+                        }
+                        KeyCode::Char('g') | KeyCode::Char('G')
+                            if ctrl && self.menu_stack.is_empty() =>
+                        {
+                            // quick switch: models of the current provider
+                            let provider = self.model_cfg.provider.clone();
+                            self.open_menu(Menu::PickModel { provider });
                         }
                         // Sessions actions live on Ctrl combos so plain letters
                         // (including r/p/d) always reach the type-to-filter
@@ -905,6 +912,7 @@ impl App {
                         }
                     }
                     MouseEventKind::Down(MouseButton::Left) if !self.menu_stack.is_empty() => {
+                        self.press_menu_depth = Some(self.menu_stack.len());
                         if self.is_form_menu() {
                             if self.in_menu_rect(m.row, m.column) {
                                 self.form_mouse_down(m.row, m.column);
@@ -923,6 +931,15 @@ impl App {
                         }
                     }
                     MouseEventKind::Up(MouseButton::Left) if !self.menu_stack.is_empty() => {
+                        // the press opened a submenu (form effort row): its
+                        // paired release belongs to the old menu, never to
+                        // the fresh card — consume it, or it instantly
+                        // closes (or misfires on) the new menu
+                        if self.press_menu_depth.is_some_and(|d| d != self.menu_stack.len()) {
+                            self.press_menu_depth = None;
+                            continue;
+                        }
+                        self.press_menu_depth = None;
                         if self.is_form_menu() {
                             if !self.in_menu_rect(m.row, m.column) {
                                 self.sel = None;
@@ -933,7 +950,7 @@ impl App {
                         } else {
                             // inside: pick a row; outside: act like esc
                             if self.in_menu_rect(m.row, m.column) {
-                                if matches!(self.cur_menu(), Some(Menu::Effort))
+                                if matches!(self.cur_menu(), Some(Menu::Effort { .. }))
                                     && !self.effort_hits.is_empty()
                                 {
                                     // slider card: click moves the preview, the

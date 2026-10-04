@@ -138,6 +138,10 @@ pub enum EffortControl {
 }
 
 impl EffortControl {
+    // `ALL`/`as_str`/`STRS`/`from_str` survive for config-file back-compat
+    // (stored overrides are still honoured) and tests; the UI derives
+    // control from the wire format now.
+    #[allow(dead_code)]
     pub const ALL: [EffortControl; 4] = [
         EffortControl::None,
         EffortControl::Toggle,
@@ -145,6 +149,7 @@ impl EffortControl {
         EffortControl::Budget,
     ];
 
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::None => "none",
@@ -155,8 +160,10 @@ impl EffortControl {
     }
 
     /// Option strings for pick-one UI, same order as `ALL`.
+    #[allow(dead_code)]
     pub const STRS: [&'static str; 4] = ["none", "toggle", "named", "budget"];
 
+    #[allow(dead_code)]
     pub fn from_str(s: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|c| c.as_str() == s)
     }

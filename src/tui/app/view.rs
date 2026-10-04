@@ -621,7 +621,7 @@ impl App {
             self.press_anchor = None;
             self.dragging = false;
             self.sel = None;
-            self.open_menu(Menu::Effort);
+            self.open_menu(Menu::Effort { model: None });
             return;
         }
         let _pressed = self.press.take();
@@ -2955,6 +2955,34 @@ impl App {
         self.last_rebuild_us = t0.elapsed().as_micros();
     }
 
+/// Hover band for a form row under the mouse: same fill as list hover,
+/// padded to the row end. Focus (typing, cursor) still follows clicks
+/// and arrows only — the focused row itself carries no band.
+fn form_hover_band(line: Line<'static>, hovered: bool, content_w: usize) -> Line<'static> {
+    if !hovered {
+        return line;
+    }
+    let mut out = Line::from(
+        line.spans
+            .into_iter()
+            .map(|s| {
+                Span::styled(
+                    s.content.to_string(),
+                    s.style.patch(Style::new().bg(Theme::SELECTION_BG())),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    let pad = content_w.saturating_sub(cols(&line_text(&out)));
+    if pad > 0 {
+        out.spans.push(Span::styled(
+            " ".repeat(pad),
+            Style::new().bg(Theme::SELECTION_BG()),
+        ));
+    }
+    out
+}
+
     pub(super) fn draw_menu(&mut self, buf: &mut Buffer, area: Rect) {
         let menu = self.cur_menu().cloned();
         if menu.is_none() || area.height < 8 || area.width < 20 {
@@ -2977,7 +3005,7 @@ impl App {
 
         // Effort gets a horizontal slider card instead of the generic
         // row list (narrow terminals fall back to the list below).
-        if matches!(menu, Some(Menu::Effort)) && area.width >= 56 {
+        if matches!(menu, Some(Menu::Effort { .. })) && area.width >= 56 {
             self.draw_effort_slider(buf, area);
             return;
         }
@@ -3123,11 +3151,12 @@ impl App {
             let inner_w = (label_w as usize).saturating_sub(4);
             for (n, field) in self.form_fields.iter().enumerate() {
                 let focused = n == self.form_focus;
-                let lstyle = if focused {
-                    Theme::field_label_focused()
-                } else {
-                    Theme::dim()
-                };
+                // model edit form only: hover lights the row under the
+                // mouse; with the mouse away, the clicked (focused) row
+                // keeps the band instead — one highlighted row, always
+                let hovered = matches!(self.cur_menu(), Some(Menu::EditModel { .. }))
+                    && Some(n) == self.form_hover_row;
+                let lstyle = Style::new().fg(Color::White);
                 let prefix = Span::styled(format!(" {:>inner_w$} : ", field.label()), lstyle);
                 // title row, then the air row, then the fields
                 let row_y = rect.y + 2 + n as u16;
@@ -3161,29 +3190,21 @@ impl App {
                             ));
                             rows.push(Line::from(prefix));
                         } else {
-                            rows.push(Line::from(vec![prefix, Span::styled(shown, Theme::base())]));
+                            rows.push(Self::form_hover_band(
+                                Line::from(vec![prefix, Span::styled(shown, Theme::base())]),
+                                hovered,
+                                rect.width.saturating_sub(2) as usize,
+                            ));
                         }
                     }
                     FormField::Choice { options, sel, .. } => {
-                        let vstyle = if focused {
-                            Style::new().fg(Theme::FG()).bg(Theme::SELECTION_BG())
-                        } else {
-                            Theme::base()
-                        };
                         let val = options.get(*sel).copied().unwrap_or("");
-                        let mut spans = vec![prefix, Span::styled(format!("‹{val}›"), vstyle)];
-                        if focused {
-                            // the full-width selection band, like list rows
-                            let used = cols(&line_text(&Line::from(spans.clone())));
-                            let pad = (rect.width as usize).saturating_sub(2).saturating_sub(used);
-                            if pad > 0 {
-                                spans.push(Span::styled(
-                                    " ".repeat(pad),
-                                    Style::new().bg(Theme::SELECTION_BG()),
-                                ));
-                            }
-                        }
-                        rows.push(Line::from(spans));
+                        let spans = vec![prefix, Span::styled(val.to_string(), Theme::base())];
+                        rows.push(Self::form_hover_band(
+                            Line::from(spans),
+                            hovered,
+                            rect.width.saturating_sub(2) as usize,
+                        ));
                     }
                 }
             }
@@ -3434,26 +3455,33 @@ impl App {
                 let masked = FormField::mask_value(&ta.lines().join(""));
                 let count = masked.chars().count();
                 let ccol = ta.cursor().1.min(count);
-                let band = Style::new().fg(Theme::FG()).bg(Theme::SELECTION_BG());
+                // no band on the focused row itself: the block cursor alone
+                // marks the position — unless the mouse sits here too, then
+                // the hover band covers the whole row like everywhere else
+                let mut plain = Style::new().fg(Theme::FG());
+                if Some(idx) == self.form_hover_row {
+                    plain = plain.bg(Theme::SELECTION_BG());
+                }
                 let cursor_style = Style::new().fg(Color::Black).bg(Color::White);
                 let mut spans = Vec::with_capacity(count + 1);
                 for (i, ch) in masked.chars().enumerate() {
-                    let st = if i == ccol { cursor_style } else { band };
+                    let st = if i == ccol { cursor_style } else { plain };
                     spans.push(Span::styled(ch.to_string(), st));
                 }
                 if ccol == count {
                     spans.push(Span::styled(" ".to_string(), cursor_style));
                 }
-                let used = count + 1;
-                let pad = (field_rect.width as usize).saturating_sub(used);
-                if pad > 0 {
-                    spans.push(Span::styled(" ".repeat(pad), band));
-                }
                 Paragraph::new(Line::from(spans)).render(field_rect, buf);
             } else {
-                // the textarea paints its own cells, so the selection band has to
-                // ride its style or the band would stop at the label
-                ta.set_style(Style::new().fg(Theme::FG()).bg(Theme::SELECTION_BG()));
+                // the textarea paints its own cells: plain ink, the block
+                // cursor marks the position — plus the hover band when the
+                // mouse sits on this row (or is away: the focused row keeps
+                // the band instead), like every other row
+                let mut style = Style::new().fg(Theme::FG());
+                if Some(idx) == self.form_hover_row {
+                    style = style.bg(Theme::SELECTION_BG());
+                }
+                ta.set_style(style);
                 ta.as_ref().render(field_rect, buf);
             }
         }
@@ -3737,7 +3765,7 @@ impl App {
             let bx = rect.right().saturating_sub(1);
             for i in 0..track {
                 if let Some(cell) =
-                    buf.cell_mut(ratatui::layout::Position::new(bx, rect.y + 1 + i as u16))
+                    buf.cell_mut(ratatui::layout::Position::new(bx, rect.y + i as u16))
                     && i >= pos
                     && i < pos + thumb
                 {

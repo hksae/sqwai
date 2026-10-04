@@ -458,6 +458,8 @@ pub struct App {
     // providers/models menu (Ctrl+P)
     menu_stack: Vec<Menu>,
     menu_sel: usize,
+    /// hovered form row: highlight only, focus stays on click
+    form_hover_row: Option<usize>,
     /// scroll offset for long list menus
     menu_scroll: usize,
     /// list-window height from the last draw: wheel/nav clamp against it
@@ -493,6 +495,10 @@ pub struct App {
     effort_blend_sel: Option<usize>,
     form_fields: Vec<FormField>,
     form_focus: usize,
+    /// stashed text drafts surviving a submenu detour (e.g. form → Effort
+    /// menu → back): prefill rebuilds fields from config, which would eat
+    /// unsaved typing. Restored once on return, then cleared.
+    form_draft: Vec<(String, String)>,
     /// cached session list for the sessions menus (headers only — see
     /// `Session::list_visible_headers`)
     sessions: Vec<SessionHeader>,
@@ -524,6 +530,11 @@ pub struct App {
 
     // mouse selection
     press: Option<CellPos>,
+    /// menu stack depth at mouse-down: a press that opens a submenu (form
+    /// effort row → Effort menu) must not let its paired mouse-up act on
+    /// the new menu — the up lands outside the fresh card and would close
+    /// (or misfire) it instantly.
+    press_menu_depth: Option<usize>,
     /// semantic drag anchor: (view, segment id, offset within the segment's
     /// contiguous row run). Rows shift under a press while streaming; the id
     /// + offset still names the pressed content when the drag continues.
@@ -951,6 +962,7 @@ impl App {
             mention_files: None,
             menu_stack: Vec::new(),
             menu_sel: 0,
+            form_hover_row: None,
             menu_scroll: 0,
             menu_visible_rows: 0,
             menu_footer_text: None,
@@ -966,6 +978,7 @@ impl App {
             effort_blend_sel: None,
             form_fields: Vec::new(),
             form_focus: 0,
+            form_draft: Vec::new(),
             sessions: Vec::new(),
             sessions_filter: String::new(),
             ef_click: None,
@@ -977,6 +990,7 @@ impl App {
             mode_blend: None,
             status_y: 0,
             press: None,
+            press_menu_depth: None,
             press_anchor: None,
             dragging: false,
             sel: None,
@@ -2337,6 +2351,32 @@ impl App {
 
     pub(super) fn effort_plan_for(&self, level: EffortLevel) -> crate::providers::effort::Plan {
         crate::providers::effort::plan(level, self.effort_support())
+    }
+
+    /// Model key the open Effort menu acts on: scoped from the edit form,
+    /// else the session model.
+    pub(super) fn effort_target_key(&self) -> String {
+        match self.cur_menu() {
+            Some(crate::tui::app::menus::Menu::Effort { model }) => {
+                model.clone().unwrap_or_else(|| self.session.model_key.clone())
+            }
+            _ => self.session.model_key.clone(),
+        }
+    }
+
+    /// Effort support for an arbitrary model key (the Effort menu can be
+    /// scoped to a model that is not the session one).
+    pub(super) fn effort_support_for(&self, key: &str) -> crate::config::EffortSupport {
+        if let Some(m) = self.cfg.models.get(key) {
+            let format = self
+                .cfg
+                .providers
+                .get(&m.provider)
+                .map(|p| p.format)
+                .unwrap_or(crate::config::WireFormat::Openai);
+            return m.effort_support(format);
+        }
+        self.effort_support()
     }
 
     /// The plan for the level in force, with anything the *provider* told us

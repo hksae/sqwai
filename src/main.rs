@@ -61,6 +61,7 @@ fn main() -> Result<()> {
         // TUI is not active yet here (presenter starts inside run()); a plain
         // direct restore is correct. The in-TUI hook installed in run()
         // replaces this one and drains through the presenter first.
+        disable_any_motion();
         let _ = crossterm::execute!(
             std::io::stdout(),
             crossterm::event::DisableMouseCapture,
@@ -137,6 +138,23 @@ async fn run(cfg: config::Config, resume_id: Option<String>, read_only: bool) ->
 }
 
 /// Start raw mode + alternate screen, then hand the terminal to the
+/// Any-motion mouse tracking (DECSET 1003): plain hover reports, not just
+/// drags. crossterm only enables click+drag (1000+1002), so the escape goes
+/// raw. Terminals that do not know the private mode ignore it — safe by
+/// default. Always paired (enable on start, disable on every exit path),
+/// or the shell keeps flooding motion events after we quit.
+fn enable_any_motion() {
+    use std::io::Write as _;
+    let _ = write!(std::io::stdout(), "\x1b[?1003h");
+    let _ = std::io::stdout().flush();
+}
+
+fn disable_any_motion() {
+    use std::io::Write as _;
+    let _ = write!(std::io::stdout(), "\x1b[?1003l");
+    let _ = std::io::stdout().flush();
+}
+
 /// dedicated presenter thread. One `terminal::size()` call per session here;
 /// steady-state sizes arrive via Resize events. Returns the UI-side handles
 /// plus the join handle (joined before restore, so no frame can interleave
@@ -150,6 +168,7 @@ fn init_presenter() -> Result<PresenterHandles> {
         crossterm::event::EnableMouseCapture,
         crossterm::cursor::Hide
     )?;
+    enable_any_motion();
     let (cols, rows) = crossterm::terminal::size()?;
     // BufWriter coalesces the hundreds of small per-cell writes of a frame
     // into one or two syscalls; every frame still ends with an explicit
@@ -175,6 +194,7 @@ fn init_presenter() -> Result<PresenterHandles> {
 }
 
 fn restore_terminal() -> Result<()> {
+    disable_any_motion();
     crossterm::execute!(
         io::stdout(),
         crossterm::event::DisableMouseCapture,

@@ -186,7 +186,12 @@ pub(super) enum Menu {
     DeleteModelList {
         provider: String,
     },
-    Effort,
+    /// effort picker scoped to one model (`None` = the session model).
+    /// Opened from the model form it writes back into that model;
+    /// from anywhere else it acts on the session model.
+    Effort {
+        model: Option<String>,
+    },
     /// /test animations: spinner/animation showcase gallery (eye candy, picks welcome)
     TestAnims,
     /// /test art: numbered static logo variants for picking the empty-state mark
@@ -229,6 +234,7 @@ pub(super) enum MenuAction {
     Back,
     OpenModels(String),
     OpenAppearance,
+    OpenEffort,
     OpenProviders,
     OpenMcp,
     OpenLsp,
@@ -258,11 +264,6 @@ pub(super) enum MenuAction {
     ToggleExperimentalTest,
     TogglePerfLog,
     TogglePlanStrict,
-    CycleModelEffort,
-    /// cycle what the current model is declared to do with the slider
-    CycleEffortControl,
-    /// toggle "this model always reasons, `off` cannot be honoured"
-    ToggleEffortAlwaysOn,
     ToggleMode,
     OpenSessions,
     Confirm(Box<MenuAction>),
@@ -560,6 +561,7 @@ impl App {
     pub(super) fn open_menu(&mut self, menu: Menu) {
         self.menu_stack.push(menu);
         self.menu_sel = 0;
+        self.form_hover_row = None;
         self.form_fields.clear();
         self.form_focus = 0;
         if let Some(Menu::AskUser { questions, .. }) = self.cur_menu().cloned() {
@@ -575,11 +577,20 @@ impl App {
         if matches!(self.cur_menu(), Some(Menu::ConfirmDelete { .. })) && self.menu_sel == 0 {
             self.menu_sel = 1;
         }
-        // effort slider opens on the current level, not on `off`
-        if matches!(self.cur_menu(), Some(Menu::Effort)) {
+        // effort slider opens on the target level, not on `off`
+        let effort_scoped: Option<Option<String>> = match self.cur_menu() {
+            Some(Menu::Effort { model }) => Some(model.clone()),
+            _ => None,
+        };
+        if let Some(model) = effort_scoped {
+            let want = model
+                .as_ref()
+                .and_then(|k| self.cfg.models.get(k))
+                .map(|m| m.effort)
+                .unwrap_or(self.model_cfg.effort);
             self.menu_sel = EffortLevel::SELECTABLE
                 .iter()
-                .position(|l| *l == self.model_cfg.effort)
+                .position(|l| *l == want)
                 .unwrap_or(0);
             // a fresh open is a first sighting: it must land on the level's own
             // color, not sweep from wherever an earlier popup left the slider
@@ -638,10 +649,14 @@ impl App {
         }
         self.menu_stack.pop();
         self.menu_sel = 0;
+        self.form_hover_row = None;
         self.form_fields.clear();
         self.form_focus = 0;
         // a form below the popped one needs its fields back
         self.prefill_form();
+        // a submenu detour (form → Effort menu) must not eat unsaved
+        // typing: prefill rebuilds from config, the stash restores drafts
+        self.restore_form_text();
         self.build_menu_rows();
         self.dirty = true;
     }
@@ -649,6 +664,7 @@ impl App {
     pub(super) fn menu_home(&mut self) {
         self.menu_stack.clear();
         self.menu_sel = 0;
+        self.form_hover_row = None;
         self.form_fields.clear();
         self.form_focus = 0;
         self.menu_rows.clear();
@@ -818,8 +834,24 @@ impl App {
         // previews nothing — but only while the slider card is actually
         // drawn (wide terminal). The narrow fallback list hovers by row
         // like every other menu.
-        if matches!(self.cur_menu(), Some(Menu::Effort)) && !self.effort_hits.is_empty() {
+        if matches!(self.cur_menu(), Some(Menu::Effort { .. })) && !self.effort_hits.is_empty() {
             return Some(self.menu_sel);
+        }
+        // model edit form only: hover lights the row, focus (typing)
+        // moves on click only. Other forms keep the old behavior.
+        if matches!(self.cur_menu(), Some(Menu::EditModel { .. })) {
+            let top = self.menu_rect.y.saturating_add(2);
+            let hov = (row >= top)
+                .then(|| (row - top) as usize)
+                .filter(|idx| *idx < self.form_fields.len());
+            if hov != self.form_hover_row {
+                self.form_hover_row = hov;
+                self.dirty = true;
+            }
+            return None;
+        }
+        if self.is_form_menu() {
+            return None;
         }
         let r = self.menu_rect;
         // list rows start after title + air row (+ frozen table header):
@@ -879,7 +911,7 @@ impl App {
     /// index. Pure lookup, no side effects: hovering previews nothing, only
     /// a click (or arrows + Enter) changes the selection.
     pub(super) fn effort_index_at(&self, row: u16, col: u16) -> Option<usize> {
-        if !matches!(self.cur_menu(), Some(Menu::Effort)) {
+        if !matches!(self.cur_menu(), Some(Menu::Effort { .. })) {
             return None;
         }
         self.effort_hits
@@ -1063,6 +1095,7 @@ impl App {
             MenuAction::Back => self.menu_back(),
             MenuAction::DecideApproval(decision) => self.approval_decide(decision),
             MenuAction::OpenAppearance => self.open_menu(Menu::Appearance),
+            MenuAction::OpenEffort => self.open_menu(Menu::Effort { model: None }),
             MenuAction::OpenProviders => self.open_menu(Menu::Providers),
             MenuAction::OpenMcp => self.open_menu(Menu::Mcp),
             MenuAction::OpenLsp => self.open_menu(Menu::Lsp),
@@ -1367,51 +1400,6 @@ impl App {
                 }
                 self.build_menu_rows();
             }
-            MenuAction::CycleModelEffort => {
-                let all = EffortLevel::ALL;
-                let cur = all
-                    .iter()
-                    .position(|l| *l == self.model_cfg.effort)
-                    .unwrap_or(0);
-                let next = all[(cur + 1) % all.len()];
-                self.model_cfg.effort = next;
-                if let Some(m) = self.cfg.models.get_mut(&self.session.model_key) {
-                    m.effort = next;
-                }
-                self.cfg.save().ok();
-                self.build_menu_rows();
-            }
-            MenuAction::CycleEffortControl => {
-                // `None` means "derive from the wire format", and it leads the
-                // cycle: the declaration is an override, not a requirement.
-                let cycle: Vec<Option<crate::config::EffortControl>> = std::iter::once(None)
-                    .chain(crate::config::EffortControl::ALL.into_iter().map(Some))
-                    .collect();
-                let cur = cycle
-                    .iter()
-                    .position(|c| *c == self.model_cfg.effort_control)
-                    .unwrap_or(0);
-                let next = cycle[(cur + 1) % cycle.len()];
-                self.model_cfg.effort_control = next;
-                if let Some(m) = self.cfg.models.get_mut(&self.session.model_key) {
-                    m.effort_control = next;
-                }
-                self.cfg.save().ok();
-                let plan = self.effort_plan();
-                self.status(&plan.label(), StatusKind::Ok);
-                self.build_menu_rows();
-            }
-            MenuAction::ToggleEffortAlwaysOn => {
-                let next = !self.model_cfg.effort_always_on;
-                self.model_cfg.effort_always_on = next;
-                if let Some(m) = self.cfg.models.get_mut(&self.session.model_key) {
-                    m.effort_always_on = next;
-                }
-                self.cfg.save().ok();
-                let plan = self.effort_plan();
-                self.status(&plan.label(), StatusKind::Ok);
-                self.build_menu_rows();
-            }
             MenuAction::ToggleMode => {
                 let next = self.mode.toggle();
                 self.set_mode(next);
@@ -1632,13 +1620,19 @@ impl App {
                 self.start_builtin_update(true);
             }
             MenuAction::SetEffort(level) => {
-                self.model_cfg.effort = level;
-                if let Some(m) = self.cfg.models.get_mut(&self.session.model_key) {
+                let target = self.effort_target_key();
+                if let Some(m) = self.cfg.models.get_mut(&target) {
                     m.effort = level;
                 }
+                if target == self.session.model_key {
+                    self.model_cfg.effort = level;
+                }
                 self.cfg.save().ok();
-                self.menu_home();
-                let plan = self.effort_plan();
+                // back one level (not home): from a form the fields rebuild
+                // from the saved config, so the effort row shows the pick
+                // with no lost text edits
+                self.menu_back();
+                let plan = crate::providers::effort::plan(level, self.effort_support_for(&target));
                 let kind = if plan.is_honoured() {
                     StatusKind::Ok
                 } else {
@@ -1812,7 +1806,10 @@ impl App {
             Some(Menu::DeleteLspServer) => " Delete LSP server ".into(),
             Some(Menu::EditSessionTitle { .. }) => " Rename session ".into(),
             Some(Menu::ConfirmDelete { .. }) => " Confirm ".into(),
-            Some(Menu::Effort) => " Effort ".into(),
+            Some(Menu::Effort { model }) => match model {
+                Some(key) => format!(" Effort · {key} "),
+                None => " Effort ".into(),
+            },
             Some(Menu::TestAnims) => " Test ".into(),
             Some(Menu::TestArt) => " Art ".into(),
             Some(Menu::TestColors) => " Colors ".into(),
@@ -1879,6 +1876,7 @@ impl App {
                     ("ctrl+l", "plan"),
                     ("ctrl+o", "settings"),
                     ("ctrl+e", "effort"),
+                    ("ctrl+g", "switch model"),
                     ("y / n", "confirm · cancel"),
                     ("a / d", "allow always · deny"),
                     ("1-9", "pick inline option"),
@@ -2367,21 +2365,7 @@ impl App {
                 self.menu_rows.push(setting(
                     "effort",
                     self.model_cfg.effort.as_str().to_string(),
-                    MenuAction::CycleModelEffort,
-                ));
-                self.menu_rows.push(setting(
-                    "effort control",
-                    match self.model_cfg.effort_control {
-                        Some(c) => c.as_str().to_string(),
-                        // show what it resolved to, so "auto" is not a mystery
-                        None => format!("auto ({})", self.effort_support().control.as_str()),
-                    },
-                    MenuAction::CycleEffortControl,
-                ));
-                self.menu_rows.push(setting(
-                    "always reasons",
-                    on_off(self.model_cfg.effort_always_on),
-                    MenuAction::ToggleEffortAlwaysOn,
+                    MenuAction::OpenEffort,
                 ));
                 self.menu_rows.push(setting(
                     "mode",
@@ -2578,7 +2562,7 @@ impl App {
                     vec![
                         tcell("PROVIDER", name_w, false, Theme::dim()),
                         tcell("MODELS", COUNT_W, true, Theme::dim()),
-                        tcell("KEY", KEY_W, false, Theme::dim()),
+                        tcell("KEY", KEY_W, true, Theme::dim()),
                     ],
                     budget,
                 ));
@@ -2591,7 +2575,7 @@ impl App {
                         .count();
                     let (key_state, key_style) =
                         if pc.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
-                            ("key".to_string(), Theme::ok())
+                            ("key".to_string(), Theme::effort(EffortLevel::Low))
                         } else if let Some(env) = pc.key_env_name(name) {
                             (format!("key ${env}"), Theme::dim())
                         } else {
@@ -2602,7 +2586,7 @@ impl App {
                             table_line(vec![
                                 tcell(name, name_w, false, Theme::FG()),
                                 tcell(&models.to_string(), COUNT_W, true, Theme::meta()),
-                                tcell(&key_state, KEY_W, false, key_style),
+                                tcell(&key_state, KEY_W, true, key_style),
                             ]),
                             budget,
                         ),
@@ -2633,12 +2617,12 @@ impl App {
             Menu::Models { provider } => {
                 let is_builtin = self.cfg.is_builtin_provider(&provider);
                 let budget = table_budget(self.menu_rect.width);
-                let (name_w, id_w) = model_cols(budget);
+                // lead 1 + 2 gaps of 2; name flexes, context/effort fixed
+                let name_w = budget.saturating_sub(1 + 4 + 8 + 8).max(10);
                 self.table_built_w = budget as u16;
                 self.menu_table_header = Some(table_header(
                     vec![
                         tcell("NAME", name_w, false, Theme::dim()),
-                        tcell("ID", id_w, false, Theme::dim()),
                         tcell("CONTEXT", 8, true, Theme::dim()),
                         tcell("EFFORT", 8, false, Theme::dim()),
                     ],
@@ -2647,7 +2631,6 @@ impl App {
                 for (k, m) in &self.cfg.models {
                     if m.provider == provider && m.status.visible_in_picker() {
                         let current = k == &self.session.model_key;
-                        let mark = if current { " *" } else { "" };
                         // built-in models are user-owned for content: the
                         // catalog seeds absent keys and never overwrites
                         let action = MenuAction::EditModel(provider.clone(), k.clone());
@@ -2667,18 +2650,16 @@ impl App {
                         )
                         .short_label();
                         let effort = effort_label.strip_prefix("ef:").unwrap_or(&effort_label);
-                        self.menu_rows.push(row(
-                            fit_line_width(
-                                table_line(vec![
-                                    tcell(&format!("{k}{mark}"), name_w, false, Theme::FG()),
-                                    tcell(&m.id, id_w, false, Theme::meta()),
-                                    tcell(&fmt_ctx(m.context), 8, true, Theme::meta()),
-                                    tcell(effort, 8, false, Theme::base()),
-                                ]),
-                                budget,
-                            ),
-                            action,
-                        ));
+                        let mut line = table_line(vec![
+                            tcell(k, name_w, false, Theme::FG()),
+                            tcell(&fmt_ctx(m.context), 8, true, Theme::meta()),
+                            tcell(effort, 8, false, Theme::base()),
+                        ]);
+                        if current && !line.spans.is_empty() {
+                            line.spans[0] =
+                                Span::styled("*".to_string(), Theme::accent());
+                        }
+                        self.menu_rows.push(row(fit_line_width(line, budget), action));
                     }
                 }
                 // actions live in the sticky footer like the providers menu:
@@ -2705,10 +2686,6 @@ impl App {
                 };
                 // keep narrow terminals usable: one line, bounded width
                 let shown: String = check_text.chars().take(64).collect();
-                self.menu_sticky_footer.push(row(
-                    Line::from(vec![Span::styled(shown, check_style)]),
-                    MenuAction::CheckProvider(provider.clone()),
-                ));
                 let edit_label = if is_builtin {
                     "  set api key"
                 } else {
@@ -2717,6 +2694,10 @@ impl App {
                 self.menu_sticky_footer.push(row(
                     Line::from(vec![Span::styled(edit_label, Theme::FG())]),
                     MenuAction::EditProvider(provider.clone()),
+                ));
+                self.menu_sticky_footer.push(row(
+                    Line::from(vec![Span::styled(shown, check_style)]),
+                    MenuAction::CheckProvider(provider.clone()),
                 ));
                 if !is_builtin {
                     self.menu_sticky_footer.push(row(
@@ -2731,27 +2712,29 @@ impl App {
             }
             Menu::PickModel { provider } => {
                 let budget = table_budget(self.menu_rect.width);
-                let (name_w, id_w) = model_cols(budget);
+                // lead 1 + 1 gap of 2; name flexes, context fixed
+                let name_w = budget.saturating_sub(1 + 2 + 8).max(10);
                 self.table_built_w = budget as u16;
                 self.menu_table_header = Some(table_header(
                     vec![
                         tcell("NAME", name_w, false, Theme::dim()),
-                        tcell("ID", id_w, false, Theme::dim()),
+                        tcell("CONTEXT", 8, true, Theme::dim()),
                     ],
                     budget,
                 ));
                 for (k, m) in &self.cfg.models {
                     if m.provider == provider && m.status.visible_in_picker() {
                         let current = k == &self.session.model_key;
-                        let mark = if current { " *current" } else { "" };
+                        let mut line = table_line(vec![
+                            tcell(k, name_w, false, Theme::FG()),
+                            tcell(&fmt_ctx(m.context), 8, true, Theme::meta()),
+                        ]);
+                        if current && !line.spans.is_empty() {
+                            line.spans[0] =
+                                Span::styled("*".to_string(), Theme::accent());
+                        }
                         self.menu_rows.push(row(
-                            fit_line_width(
-                                table_line(vec![
-                                    tcell(k, name_w, false, Theme::FG()),
-                                    tcell(&format!("{}{mark}", m.id), id_w, false, Theme::meta()),
-                                ]),
-                                budget,
-                            ),
+                            fit_line_width(line, budget),
                             MenuAction::UseModel(k.clone()),
                         ));
                     }
@@ -2784,17 +2767,26 @@ impl App {
                     MenuAction::Back,
                 ));
             }
-            Menu::Effort => {
+            Menu::Effort { model } => {
                 // The menu has room for the whole truth: what each level does
-                // on *this* model, not just its name.
+                // on the target model, not just its name.
+                let target = model.unwrap_or_else(|| self.session.model_key.clone());
+                let target_effort = self
+                    .cfg
+                    .models
+                    .get(&target)
+                    .map(|m| m.effort)
+                    .unwrap_or(self.model_cfg.effort);
+                let support = self.effort_support_for(&target);
                 let plans: Vec<(EffortLevel, crate::providers::effort::Plan)> =
                     EffortLevel::SELECTABLE
                         .iter()
-                        .map(|lvl| (*lvl, self.effort_plan_for(*lvl)))
+                        .map(|lvl| {
+                            (*lvl, crate::providers::effort::plan(*lvl, support))
+                        })
                         .collect();
                 for (lvl, plan) in plans {
-                    let current = lvl == self.model_cfg.effort;
-                    let mark = if current { " *current" } else { "" };
+                    let current = lvl == target_effort;
                     let note = match plan.status {
                         crate::providers::effort::Status::Applied => String::new(),
                         crate::providers::effort::Status::Clamped { to } => {
@@ -2809,10 +2801,12 @@ impl App {
                     } else {
                         Theme::dim()
                     };
+                    // current level marks the lead column like session rows
+                    let lead = if current { "*" } else { " " };
                     self.menu_rows.push(row(
                         Line::from(vec![
+                            Span::styled(lead.to_string(), Theme::accent()),
                             Span::styled(format!(" {}", lvl.as_str()), name_style),
-                            Span::styled(mark.to_string(), Theme::dim()),
                             Span::styled(note, Theme::dim()),
                         ]),
                         MenuAction::SetEffort(lvl),
@@ -3324,13 +3318,17 @@ fn session_row(
     const TOK_W: usize = 7;
     const TIME_W: usize = 5;
     let action = MenuAction::OpenSession(s.id.to_string());
-    let mark = if is_current { " *" } else { "" };
-    let line = table_line(vec![
-        tcell(&format!("{}{mark}", s.title), title_w, false, Theme::FG()),
+    let mut line = table_line(vec![
+        tcell(&s.title, title_w, false, Theme::FG()),
         tcell(&fmt_time(s.last_activity()), TIME_W, false, Theme::dim()),
         tcell(&s.model_key, model_w, false, Theme::meta()),
         tcell(&fmt_k(s.context_tokens), TOK_W, true, Theme::dim()),
     ]);
+    // the current session marks the lead column instead of trailing the
+    // title: grid stays aligned, the eye lands on the left edge
+    if is_current && !line.spans.is_empty() {
+        line.spans[0] = Span::styled("*".to_string(), Theme::accent());
+    }
     // exact fit: every row matches the header column-wise, narrow frames
     // truncate (never shift) via fit_line_width
     (fit_line_width(line, pad_w), action)
@@ -3399,22 +3397,6 @@ pub(super) fn table_budget(menu_rect_w: u16) -> usize {
         return 72;
     }
     (menu_rect_w as usize).saturating_sub(6).max(30)
-}
-
-/// NAME | ID | CONTEXT | EFFORT geometry for the model tables: fixed
-/// name/context/effort, the id absorbs the slack (min 10 so narrow
-/// terminals degrade to truncation, never to column drift).
-fn model_cols(budget: usize) -> (usize, usize) {
-    const CTX_W: usize = 8;
-    const EFFORT_W: usize = 8;
-    let name_w = 20usize.clamp(
-        10,
-        budget.saturating_sub(1 + 6 + CTX_W + EFFORT_W + 10).max(10),
-    );
-    let id_w = budget
-        .saturating_sub(1 + 6 + name_w + CTX_W + EFFORT_W)
-        .max(10);
-    (name_w, id_w)
 }
 
 /// cut or pad a styled line to exactly `width` display columns, keeping
