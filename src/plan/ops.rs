@@ -656,7 +656,7 @@ pub fn apply(
                     PlanStatus::Active => "active",
                 }
             ),
-            "closed plans are read-only; start a new plan with /plan",
+            "closed plans are read-only; start a new plan with op=create",
         );
     }
     match op {
@@ -664,7 +664,7 @@ pub fn apply(
             plan,
             "plan_exists",
             format!("an active plan already exists: {}", plan.id),
-            "use /plan to continue, complete or abandon it first",
+            "work that plan instead: start/finish its steps, do not create another one. The current plan is in your context above",
         ),
         Op::Show => {
             plan.rejections_in_a_row = 0;
@@ -757,7 +757,7 @@ fn unknown_step(plan: &mut Plan, id: &str) -> Result<Applied, Rejection> {
         plan,
         "unknown_step",
         format!("no step {id} in this plan"),
-        "call plan show to see the current steps",
+        "the current steps with their ids are in your context above",
     )
 }
 
@@ -984,7 +984,7 @@ fn add(
                         plan,
                         "unknown_step",
                         format!("no step {after_id} to add after"),
-                        "call plan show to see the current steps",
+                        "the current steps with their ids are in your context above",
                     );
                 }
             }
@@ -1066,7 +1066,7 @@ fn split(
                 plan,
                 "unknown_step",
                 format!("no step {id} to split"),
-                "call plan show to see the current steps",
+                "the current steps with their ids are in your context above",
             );
         }
     };

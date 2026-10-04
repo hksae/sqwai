@@ -734,23 +734,15 @@ impl App {
         if !self.session_environment.is_empty() {
             parts.push(SystemPart::cached(self.session_environment.clone()));
         }
+        // Plan state rides every request (built in the turn loop, not
+        // here): a turn-start snapshot would predate this turn's plan
+        // mutations, leaving the model two plans — one live, one stale.
         // G0 baseline (§8.2): no plan block, no host anchor, no resume
         // notice — the model gets the stable prefix and volatile tail only.
         if crate::bench::baseline() {
             return parts;
         }
         let root = std::env::current_dir().unwrap_or_default();
-        if let Some(plan) = crate::prompts::plan_block(&root, Some(&self.session.id.to_string())) {
-            parts.push(SystemPart::cached(plan));
-        }
-        // Plan step state churns every turn (start/finish/verify), so it
-        // rides the volatile tail: only goal and constraints — which change
-        // when the plan is rewritten — may sit in the cached prefix above.
-        if let Some(status) =
-            crate::prompts::plan_status_block(&root, Some(&self.session.id.to_string()))
-        {
-            parts.push(SystemPart::volatile(status));
-        }
         // The model is never told its mode elsewhere: without this line it
         // learns Plan vs Act from the first refusal, burning a turn.
         parts.push(SystemPart::volatile(format!(

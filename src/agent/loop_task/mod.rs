@@ -885,6 +885,20 @@ async fn run_agent(
         {
             turn_system.push(crate::providers::SystemPart::volatile(nudge));
         }
+        // The plan is the model's only plan source, rebuilt live on every
+        // request: a turn-start snapshot would predate this turn's plan
+        // mutations. Same content keeps the provider prefix cache hot, so
+        // freshness costs nothing until the plan actually changes.
+        // Goal + constraints churn only on rewrite (cached); step state
+        // churns every turn (volatile tail). Skipped on the G0 baseline.
+        if !crate::bench::baseline() {
+            if let Some(plan) = crate::prompts::plan_block(&root, Some(&session_id)) {
+                turn_system.push(crate::providers::SystemPart::cached(plan));
+            }
+            if let Some(status) = crate::prompts::plan_status_block(&root, Some(&session_id)) {
+                turn_system.push(crate::providers::SystemPart::volatile(status));
+            }
+        }
         // claim-lint repetition removed with Y: no nag block rides here
         // Decided per request, not once per turn: a request that carries tool
         // results must never rely on the provider holding the calls they

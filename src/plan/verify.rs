@@ -374,7 +374,7 @@ pub fn verify_acceptance(
             plan,
             "unknown_acceptance",
             format!("no acceptance item {index}"),
-            "call plan show to see the acceptance list",
+            "the acceptance list is in your context above with the plan",
         );
     }
     match plan.acceptance[index].kind() {

@@ -86,8 +86,7 @@ fn constraint_covers(constraints: &[String], lower_directive: &str) -> bool {
 /// Preformatted durable-plan block for the restricted summary (§3.3.2):
 /// the summarizer can only exclude what it can see. Empty when no plan is
 /// active — then every user ask counts as uncovered.
-pub(crate) fn plan_hint_for_summary(root: &std::path::Path, session_id: &str) -> String {
-    let Some(plan) = crate::plan::open_active_for_session(root, Some(session_id))
+pub(crate) fn plan_hint_for_summary(root: &std::path::Path, session_id: &str) -> String {    let Some(plan) = crate::plan::open_active_for_session(root, Some(session_id))
         .ok()
         .flatten()
     else {

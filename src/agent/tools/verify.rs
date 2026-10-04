@@ -748,7 +748,7 @@ pub(crate) fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool)
         return rejection(plan::Rejection {
             code: "unknown_acceptance",
             reason: format!("no acceptance item {index}"),
-            hint: "call plan show to see the acceptance list".to_string(),
+            hint: "the acceptance list is in your context above with the plan".to_string(),
         });
     };
 

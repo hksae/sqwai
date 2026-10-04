@@ -24,106 +24,11 @@ use crate::providers::{Message, Role};
 /// model never writes or rewrites this block.
 pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     let mut out =
-        String::from("ANCHOR (host-generated working memo; current host state, not a summary)\n");
-    // Finished work must stay visible: when no plan is active, fall back to
-    // the session's latest completed plan — "none" would lie about done work
-    // (every G0 matrix anchor printed empty for exactly this reason).
-    let plan = crate::plan::open_active_for_session(root, Some(session_id))
-        .ok()
-        .flatten()
-        .or_else(|| {
-            let mut done: Vec<_> = crate::plan::list(root)
-                .into_iter()
-                .filter(|p| {
-                    p.status == crate::plan::PlanStatus::Completed
-                        && p.sessions.iter().any(|s| s == session_id)
-                })
-                .collect();
-            done.sort_by(|a, b| b.created.cmp(&a.created));
-            done.into_iter().next()
-        });
-    if let Some(plan) = plan {
-        out.push_str(&format!("goal: {}\n", bounded(&plan.goal.text, 500)));
-        if plan.constraints.is_empty() {
-            out.push_str("constraints: none\n");
-        } else {
-            out.push_str("constraints: ");
-            out.push_str(
-                &plan
-                    .constraints
-                    .iter()
-                    .map(|constraint| bounded(constraint, 240))
-                    .collect::<Vec<_>>()
-                    .join(" · "),
-            );
-            out.push('\n');
-        }
-        if plan.acceptance.is_empty() {
-            out.push_str("acceptance: none\n");
-        } else {
-            out.push_str("acceptance: ");
-            out.push_str(
-                &plan
-                    .acceptance
-                    .iter()
-                    .enumerate()
-                    .map(|(index, item)| {
-                        format!(
-                            "[{index}] {}{}",
-                            item.status.as_str(),
-                            item.evidence
-                                .last()
-                                .map(|reference| format!(
-                                    " j#{}:{}",
-                                    reference.session, reference.seq
-                                ))
-                                .unwrap_or_default()
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" · "),
-            );
-            out.push('\n');
-        }
-        let counts = plan.counts();
-        out.push_str(&format!(
-            "plan {} rev {}: {} done · {} in_progress · {} blocked · {} pending · {} cancelled\n",
-            bounded(&plan.id, 80),
-            plan.revision,
-            counts.done,
-            counts.in_progress,
-            counts.blocked,
-            counts.pending,
-            counts.cancelled
-        ));
-        for step in plan
-            .steps
-            .iter()
-            .filter(|step| {
-                matches!(
-                    step.status,
-                    crate::plan::StepStatus::InProgress
-                        | crate::plan::StepStatus::Blocked
-                        | crate::plan::StepStatus::Pending
-                        | crate::plan::StepStatus::Reopened
-                )
-            })
-            .take(8)
-        {
-            out.push_str(&format!(
-                "  step {} {} {}\n",
-                bounded(&step.id, 40),
-                step.status.as_str(),
-                bounded(&step.title, 240)
-            ));
-        }
-        for folded in plan.folded.iter().take(8) {
-            out.push_str(&format!("  folded: {}\n", bounded(&folded.text, 240)));
-        }
-    } else {
-        out.push_str("goal: none\nconstraints: none\nacceptance: none\nplan: none\n");
-    }
-
+        String::from("ANCHOR (host-generated working memo; journal facts, not a summary)\n");
+    // No plan content here by design: goal/constraints/step state ride
+    // live on every request (rebuilt per request, cache-hot when
+    // unchanged), so a turn-start snapshot would only resurrect the
+    // two-plan problem. The anchor keeps what the journal proves got done.
     let mut changed = Vec::new();
     let mut last_verification = None;
     if let Ok(records) = crate::agent::journal::Journal::records_for(root, session_id) {

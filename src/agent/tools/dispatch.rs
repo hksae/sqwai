@@ -599,7 +599,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
                     Outcome::ok(format!("note recorded: {kind}, resolves j#{resolves}"))
                 } else {
                     Outcome::err(format!(
-                        "j#{resolves} is not an open assumption — call plan show or note without \
+                        "j#{resolves} is not an open assumption — note without \
                          `resolves` to record this on its own"
                     ))
                 }
@@ -950,6 +950,23 @@ fn validate_plan_refs(
         match step_ref.intent {
             crate::plan::RefIntent::Modify | crate::plan::RefIntent::Remove => match res {
                 crate::agent::graph::ResolveRefResult::NotFound { candidates, .. } => {
+                    // a bare directory (often with a trailing slash) is never
+                    // a precise ref: say so directly instead of the nonsense
+                    // "X not found in X" the generic branch prints below
+                    if step_ref.symbol.is_none()
+                        && root
+                            .join(step_ref.path.trim_end_matches('/'))
+                            .is_dir()
+                    {
+                        return Err(plan::Rejection::new(
+                            "ref_is_directory",
+                            format!(
+                                "ref '{}' is a directory, not a file or symbol",
+                                step_ref.path
+                            ),
+                            "name a file or symbol inside it (drop any trailing slash)",
+                        ));
+                    }
                     let hint = if candidates.is_empty() {
                         "verify the file path and symbol name or check resolve_ref".to_string()
                     } else {
@@ -1109,7 +1126,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         Ok(op) => op,
         Err(e) => {
             return Outcome::err(format!(
-                "plan op rejected: {e} — call plan show to see the current plan"
+                "plan op rejected: {e} — the current plan with its valid ops is in your context above"
             ));
         }
     };
@@ -1118,6 +1135,14 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     if matches!(op, plan::Op::Join { .. }) {
         return Outcome::err(
             "plan op rejected: join is host-only — sessions join a plan via plan start, not this op",
+        );
+    }
+    // experiment: `show` is not a model tool — the current plan always
+    // rides in the request context, there is nothing to re-read. Kept in
+    // the schema types for compat; the model must never see it succeed.
+    if matches!(op, plan::Op::Show) {
+        return Outcome::err(
+            "no plan show tool: the current plan with its step ids is in your context above — use those ids, never re-read the plan",
         );
     }
     // Read-only step diffs bypass validator, journal and store: nothing is
@@ -1164,7 +1189,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             Ok(Some(existing)) => rejection(plan::Rejection {
                 code: "plan_exists",
                 reason: format!("an active plan already exists: {}", existing.id),
-                hint: "use /plan to continue, complete or abandon it first".to_string(),
+                hint: "work that plan instead: start/finish its steps, do not create another one. The current plan is in your context above".to_string(),
             }),
             Ok(None) => {
                 // Host value, from the model's context and [plan].budget_ratio.

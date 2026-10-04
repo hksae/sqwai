@@ -489,7 +489,7 @@ for an impossible task use plan block_plan.",
             name: "plan",
             kind: Kind::Mutating,
             description: "Work the structured plan, one operation per call. Ops: create, start, \
-finish, block, unblock, cancel, add, split, verify, complete, show, block_plan. To abandon \
+finish, block, unblock, cancel, add, split, verify, complete, block_plan. To abandon \
 a wrong plan, use propose_reset (user-confirmed), never cancel-and-recreate around it. Plans are for \
 work that changes things: read-only inspection needs no plan — just look. \
 For a write, create with goal + steps; acceptance is optional at create \
@@ -497,8 +497,9 @@ and required only as executable or human-settled criteria for \
 real mutations: cmd: for a check that fails before the change and passes after, manual: for \
 anything a human eyeballs. A cmd: criterion must be an executable shell \
 command, never prose. Advanced rung kinds (snapshot:/differential:/signatures:) are \
-host-suggested after the first run, never written by hand. Call \
-show first if you are unsure of the current step ids. The host owns the goal, the constraints, \
+host-suggested after the first run, never written by hand. The current plan, \
+with its step ids, is always in your context above — use those ids, never \
+guess them and never re-read the plan through tools. The host owns the goal, the constraints, \
 acceptance status, validation and evidence; to change the goal, propose the full updated plan with \
 propose_plan instead. finish records completion of the step's work with a summary and does not \
 by itself establish that acceptance criteria passed; rejections return a code and hint to follow. \
@@ -513,7 +514,7 @@ Never invent evidence identifiers.",
                 "properties": {
                     "op": {"type": "string", "enum": [
                         "create", "start", "finish", "block", "unblock", "cancel",
-                        "add", "split", "verify", "complete", "show", "block_plan",
+                        "add", "split", "verify", "complete", "block_plan",
                         "add_acceptance", "step_diff"
                     ]},
                     "id": {"type": "string", "description": "step id"},
