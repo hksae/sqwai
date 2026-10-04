@@ -939,7 +939,7 @@ fn the_status_bar_reports_the_sent_level_verbatim() {
 fn the_effort_menu_annotates_every_level_it_offers() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.model_cfg.effort_control = Some(crate::config::EffortControl::Named);
-    app.open_menu(crate::tui::app::menus::Menu::Effort);
+    app.open_menu(crate::tui::app::menus::Menu::Effort { model: None });
     let rows: Vec<String> = app
         .menu_rows
         .iter()
@@ -970,7 +970,7 @@ fn effort_slider_opens_on_current_level_with_hits() {
     use ratatui::layout::Rect;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.model_cfg.effort = EffortLevel::High;
-    app.open_menu(crate::tui::app::menus::Menu::Effort);
+    app.open_menu(crate::tui::app::menus::Menu::Effort { model: None });
     // slider opens on the current level, not on `off`
     let want = EffortLevel::SELECTABLE
         .iter()
@@ -1050,7 +1050,7 @@ fn effort_narrow_fallback_list_hovers_and_clicks_by_row() {
     use ratatui::layout::Rect;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.model_cfg.effort = EffortLevel::Low;
-    app.open_menu(crate::tui::app::menus::Menu::Effort);
+    app.open_menu(crate::tui::app::menus::Menu::Effort { model: None });
     // narrow terminal: slider card stays off, plain row list instead
     let area = Rect::new(0, 0, 40, 20);
     let mut buf = Buffer::empty(area);
@@ -1124,14 +1124,14 @@ fn effort_menu_reopens_without_a_stale_sweep() {
     let area = Rect::new(0, 0, 100, 30);
     let mut buf = Buffer::empty(area);
     app.model_cfg.effort = EffortLevel::High;
-    app.open_menu(Menu::Effort);
+    app.open_menu(Menu::Effort { model: None });
     app.draw_menu(&mut buf, area);
     app.menu_sel = EffortLevel::SELECTABLE.len() - 1;
     app.draw_menu(&mut buf, area);
     assert!(app.effort_blend.is_some(), "a level change sweeps");
     app.menu_home();
     app.model_cfg.effort = EffortLevel::Low;
-    app.open_menu(Menu::Effort);
+    app.open_menu(Menu::Effort { model: None });
     assert!(
         app.effort_blend.is_none() && app.effort_blend_sel.is_none(),
         "opening must clear the old popup's blend state"
@@ -1150,7 +1150,7 @@ fn effort_card_dims_painted_backgrounds() {
     use ratatui::style::{Color, Style};
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.model_cfg.effort = EffortLevel::Max;
-    app.open_menu(Menu::Effort);
+    app.open_menu(Menu::Effort { model: None });
     let area = Rect::new(0, 0, 100, 30);
     let mut buf = Buffer::empty(area);
     // well outside the centered card, so only the modal dim can reach it

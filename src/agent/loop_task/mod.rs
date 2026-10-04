@@ -3302,6 +3302,47 @@ mod effort_tests {
         report("alone", &u);
     }
 
+    /// No pressure, no touch (Codex shape): a long history of large tool
+    /// results passes through compact_history unchanged — no silent
+    /// per-turn rewrite. Regression test: the old stage-1 prune cut every
+    /// aged-out output to a head stub and trained the model to re-read the
+    /// same files in circles.
+    #[tokio::test]
+    async fn compact_history_leaves_full_history_alone_without_pressure() {
+        let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(Vec::new()),
+        });
+        let policy = context::Policy::with_compaction(1_000_000, 0.08, 4, 0.5, false);
+        let mut messages = Vec::new();
+        for i in 0..30 {
+            messages.push(Message::new(Role::User, format!("task {i}")));
+            messages.push(Message::new(Role::Assistant, format!("work {i}")));
+            messages.push(Message::tool_result(
+                format!("c{i}"),
+                "r".repeat(6_000),
+                false,
+            ));
+        }
+        assert_eq!(messages.len(), 90);
+        let snapshot: Vec<String> = messages.iter().map(|m| m.content.clone()).collect();
+        let mut summary = None;
+        let out = compact_history(
+            &provider,
+            "m",
+            &mut messages,
+            &mut summary,
+            &policy,
+            false,
+            "",
+            None,
+        )
+        .await;
+        assert!(out.is_none(), "no pressure → no compaction: {out:?}");
+        assert!(summary.is_none());
+        let after: Vec<String> = messages.iter().map(|m| m.content.clone()).collect();
+        assert_eq!(snapshot, after, "history must pass through byte-identical");
+    }
+
     /// Prod-shape replication: 95 mixed messages (~46k tokens, like the
     /// T1 shakedown transcript), 1M limit, 0.01 threshold, summary off.
     /// compact_history must shrink and report — not silently pass through.

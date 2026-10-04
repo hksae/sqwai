@@ -222,26 +222,9 @@ const RECENT_MESSAGE_COUNT: usize = 8;
 const MAX_TOOL_OUTPUT_CHARS: usize = 12_000;
 const SUMMARY_SNIPPET_CHARS: usize = 420;
 
-/// tool results of the last N messages survive pruning untouched
-const PRUNE_KEEP_RECENT: usize = 6;
-/// older tool results are cut down to this
-const PRUNE_TOOL_CHARS: usize = 2_000;
-/// older tool results larger than this are reduced to a short head
-const PRUNE_DROP_CHARS: usize = 20_000;
-const PRUNE_HEAD_CHARS: usize = 800;
-/// successful tool results older than this many messages are masked to a
-/// stub: at ~10 past turns the output has either been used or superseded.
-/// Error results stay at the prune tier — a masked error invites retrying a
-/// dead end (Manus: errors are not deleted).
-const MASK_KEEP_RECENT: usize = 24;
-
 pub const PRUNE_NOTE: &str =
     "…(old tool output compacted; rerun the tool to see the full result again)";
 
-/// Stub replacing a masked tool result. Starts with the marker so a second
-/// pass is a no-op and the cache is not re-keyed by re-masking.
-pub const MASK_STUB: &str =
-    "…(output masked at compaction; rerun the tool to see the full result again)";
 /// messages kept verbatim after a summarization
 const SUMMARY_KEEP_RECENT: usize = 6;
 /// share of the context kept free for the answer
@@ -397,48 +380,6 @@ pub fn estimated_tokens(messages: &[Message]) -> u64 {
             .div_ceil(4)
         })
         .sum()
-}
-
-/// Stage 1: shrink tool output that has aged out of the working set.
-/// Two tiers: recent-old results are cut to a head (prune), long-past
-/// successful results are masked to a stub. Error results never mask.
-/// Returns the messages plus whether anything actually changed; both tiers
-/// converge, so repeated passes are no-ops.
-pub fn prune(messages: &[Message]) -> (Vec<Message>, bool) {
-    let keep_from = messages.len().saturating_sub(PRUNE_KEEP_RECENT);
-    let mask_from = messages.len().saturating_sub(MASK_KEEP_RECENT);
-    let mut out = Vec::with_capacity(messages.len());
-    let mut changed = false;
-    for (idx, message) in messages.iter().enumerate() {
-        let mut copy = message.clone();
-        if message.role == Role::Tool && !message.content.starts_with(MASK_STUB) {
-            if idx < mask_from && !message.is_error {
-                copy.content = MASK_STUB.to_string();
-                changed = true;
-            } else if idx < keep_from {
-                let chars = message.content.chars().count();
-                let replacement = if chars > PRUNE_DROP_CHARS {
-                    let head: String = message.content.chars().take(PRUNE_HEAD_CHARS).collect();
-                    Some(format!("{head}\n{PRUNE_NOTE}"))
-                } else if chars > PRUNE_TOOL_CHARS {
-                    let head: String = message.content.chars().take(PRUNE_TOOL_CHARS).collect();
-                    Some(format!("{head}\n{PRUNE_NOTE}"))
-                } else {
-                    None
-                };
-                if let Some(next) = replacement {
-                    // only flag a change when the content truly differs, so a second
-                    // pass over already-pruned history is a no-op
-                    if next != message.content {
-                        copy.content = next;
-                        changed = true;
-                    }
-                }
-            }
-        }
-        out.push(copy);
-    }
-    (out, changed)
 }
 
 /// Stage 2: split the history into (to_summarize, keep_verbatim).
@@ -837,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn anchor_preserves_plan_state_and_journal_facts() {
+    fn anchor_keeps_journal_facts_not_plan_state() {
         let root = temp_root("anchor");
         let mut plan = crate::plan::create(
             "ship the anchor".into(),
@@ -880,9 +821,12 @@ mod tests {
             .unwrap();
 
         let rendered = anchor(&root, "anchor-session");
-        assert!(rendered.contains("goal: ship the anchor"));
-        assert!(rendered.contains("constraints: keep the goal host-owned"));
-        assert!(rendered.contains("step 1 in_progress implement anchor"));
+        // plan state rides live per request, never in the anchor: a
+        // turn-start snapshot would resurrect the two-plan problem
+        assert!(!rendered.contains("goal: ship the anchor"), "{rendered}");
+        assert!(!rendered.contains("keep the goal host-owned"), "{rendered}");
+        assert!(!rendered.contains("implement anchor"), "{rendered}");
+        // journal facts stay
         assert!(rendered.contains("files changed this session: src/main.rs"));
         assert!(rendered.contains("last verification: successful exec j#2"));
         std::fs::remove_dir_all(root).ok();
@@ -951,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    fn anchor_prefers_session_plan_over_newer_global_plan() {
+    fn anchor_carries_no_plan_goals_for_any_session() {
         let root = temp_root("anchor-session-scope");
         let limits = crate::plan::Limits::default();
         let mut plan_a = crate::plan::create(
@@ -986,13 +930,15 @@ mod tests {
         plan_b.sessions = vec!["session-b".to_string()];
         crate::plan::store(&root, &plan_b).unwrap();
 
+        // plans ride live per request now: no session's anchor renders
+        // any goal, so scopes cannot leak or go stale mid-turn
         let rendered_a = anchor(&root, "session-a");
-        assert!(rendered_a.contains("goal: session A goal"));
-        assert!(!rendered_a.contains("goal: session B goal"));
+        assert!(!rendered_a.contains("goal:"), "{rendered_a}");
+        assert!(!rendered_a.contains("session B goal"));
 
         let rendered_b = anchor(&root, "session-b");
-        assert!(rendered_b.contains("goal: session B goal"));
-        assert!(!rendered_b.contains("goal: session A goal"));
+        assert!(!rendered_b.contains("goal:"), "{rendered_b}");
+        assert!(!rendered_b.contains("session A goal"));
 
         std::fs::remove_dir_all(root).ok();
     }
@@ -1059,12 +1005,12 @@ mod tests {
     fn anchor_degrades_without_plan_or_journal() {
         let root = temp_root("empty");
         let rendered = anchor(&root, "missing-session");
-        assert!(rendered.contains("goal: none"));
+        assert!(rendered.contains("ANCHOR"), "{rendered}");
         assert!(rendered.contains("files changed this session: none"));
     }
 
     #[test]
-    fn anchor_shows_latest_completed_plan() {
+    fn anchor_ignores_completed_plans() {
         let root = temp_root("done-plan");
         std::fs::create_dir_all(root.join(".sqwai/plans")).unwrap();
         std::fs::write(
@@ -1080,11 +1026,13 @@ mod tests {
         )
         .unwrap();
         let rendered = anchor(&root, "s1");
-        assert!(rendered.contains("ship it"), "{rendered}");
-        assert!(rendered.contains("keep it green"), "{rendered}");
+        // completed plans surface nowhere in the anchor: done work stays
+        // visible through the journal (file_diff records), not a plan echo
+        assert!(!rendered.contains("ship it"), "{rendered}");
+        assert!(!rendered.contains("keep it green"), "{rendered}");
         assert!(!rendered.contains("plan: none"), "{rendered}");
-        // a foreign session still sees nothing
-        assert!(anchor(&root, "other").contains("goal: none"));
+        // a foreign session still sees nothing of it
+        assert!(!anchor(&root, "other").contains("ship it"));
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -1180,10 +1128,15 @@ mod tests {
         );
     }
 
+    /// Full fidelity by design (Codex shape): aged-out tool output is
+    /// never rewritten mid-session. History shrinks only on real
+    /// pressure, via summary or hard trim — never silently per turn.
+    /// This test pins the absence of the old prune tiers: even a long
+    /// history of large tool results passes through untouched.
     #[test]
-    fn prune_only_touches_aged_out_tool_output() {
+    fn old_tool_output_is_never_rewritten() {
         let mut messages: Vec<Message> = Vec::new();
-        for i in 0..10 {
+        for i in 0..15 {
             messages.push(user(&format!("turn {i}")));
             messages.push(Message::tool_result(
                 format!("call{i}"),
@@ -1191,67 +1144,16 @@ mod tests {
                 false,
             ));
         }
-        let (pruned, changed) = prune(&messages);
-        assert!(changed);
-        assert_eq!(pruned.len(), messages.len(), "pruning drops no message");
-        // the newest tool results keep their full payload
-        assert!(
-            pruned[pruned.len() - 1]
-                .content
-                .contains(&"y".repeat(6_000))
-        );
-        // the oldest ones were cut down
-        assert!(pruned[1].content.len() < 6_000);
-        assert!(pruned[1].content.contains(PRUNE_NOTE));
-
-        // pruning is idempotent
-        let (again, changed_again) = prune(&pruned);
-        assert!(!changed_again);
-        assert_eq!(again.len(), pruned.len());
-    }
-
-    /// Long-past successful results mask to a stub; errors stay readable
-    /// (a masked error invites retrying a dead end); masking converges.
-    #[test]
-    fn prune_masks_aged_out_successes_but_not_errors() {
-        let mut messages: Vec<Message> = Vec::new();
-        for i in 0..15 {
-            messages.push(user(&format!("turn {i}")));
-            let mut result = Message::tool_result(format!("call{i}"), "y".repeat(6_000), false);
-            if i == 2 {
-                result.is_error = true;
-            }
-            messages.push(result);
-        }
         assert_eq!(messages.len(), 30);
-        let (pruned, changed) = prune(&messages);
-        assert!(changed);
-        assert_eq!(pruned.len(), 30, "masking drops no message");
-        // idx 1 (turn 0): past the mask window → stub
-        assert_eq!(pruned[1].content, MASK_STUB, "{}", pruned[1].content);
-        // idx 5 (turn 2): error → prune tier, never the stub
-        assert!(
-            pruned[5].content.contains(PRUNE_NOTE),
-            "{}",
-            pruned[5].content
-        );
-        assert!(
-            !pruned[5].content.contains("masked"),
-            "{}",
-            pruned[5].content
-        );
-        // newest results keep their full payload
-        assert!(pruned[29].content.contains(&"y".repeat(6_000)));
-        // pairs stay paired: masking touches results, never calls
-        for pair in pruned.chunks(2) {
+        // no rewrite pass exists anymore: the oldest payload is intact
+        assert!(messages[1].content.contains(&"y".repeat(6_000)));
+        assert!(!messages[1].content.contains(PRUNE_NOTE));
+        assert!(messages[29].content.contains(&"y".repeat(6_000)));
+        // pairs stay paired
+        for pair in messages.chunks(2) {
             assert_eq!(pair[0].role, Role::User);
             assert_eq!(pair[1].role, Role::Tool);
         }
-        // masking is idempotent
-        let (again, changed_again) = prune(&pruned);
-        assert!(!changed_again);
-        assert_eq!(again.len(), pruned.len());
-        assert_eq!(again[1].content, MASK_STUB);
     }
 
     #[test]

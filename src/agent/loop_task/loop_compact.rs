@@ -86,7 +86,8 @@ fn constraint_covers(constraints: &[String], lower_directive: &str) -> bool {
 /// Preformatted durable-plan block for the restricted summary (§3.3.2):
 /// the summarizer can only exclude what it can see. Empty when no plan is
 /// active — then every user ask counts as uncovered.
-pub(crate) fn plan_hint_for_summary(root: &std::path::Path, session_id: &str) -> String {    let Some(plan) = crate::plan::open_active_for_session(root, Some(session_id))
+pub(crate) fn plan_hint_for_summary(root: &std::path::Path, session_id: &str) -> String {
+    let Some(plan) = crate::plan::open_active_for_session(root, Some(session_id))
         .ok()
         .flatten()
     else {
@@ -234,11 +235,11 @@ pub(crate) async fn compact_history(
     let measured = |m: &[Message]| context::estimated_tokens(m);
     let before = measured(messages);
 
-    // stage 1: prune. Cheap, lossless in structure, runs every turn.
-    let (pruned, pruned_changed) = context::prune(messages);
-    if pruned_changed {
-        *messages = pruned;
-    }
+    // No per-turn pruning by design (Codex shape): what the model read
+    // stays verbatim until real pressure. Silently rewriting old tool
+    // output taught the model to re-read the same files in circles —
+    // the prune note even instructed it to. History shrinks only below,
+    // on pressure, via summary or hard trim.
     if std::env::var("SQWAI_BENCH_DEBUG").is_ok() {
         let measured_now = measured(messages);
         eprintln!(
@@ -256,10 +257,7 @@ pub(crate) async fn compact_history(
         );
     }
     if !force && policy.pressure(measured(messages)) == context::Pressure::Ok {
-        // Pressure is fine, so no summarization or hard trim will run.
-        // Stage-1 `prune` may have shrunk the chat history; its effect is
-        // already visible inline via PRUNE_NOTE on the trimmed tool result,
-        // so stay silent instead of lying about the token count.
+        // Pressure is fine: history is untouched, report nothing.
         return None;
     }
 
