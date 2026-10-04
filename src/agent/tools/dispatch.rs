@@ -954,9 +954,7 @@ fn validate_plan_refs(
                     // a precise ref: say so directly instead of the nonsense
                     // "X not found in X" the generic branch prints below
                     if step_ref.symbol.is_none()
-                        && root
-                            .join(step_ref.path.trim_end_matches('/'))
-                            .is_dir()
+                        && root.join(step_ref.path.trim_end_matches('/')).is_dir()
                     {
                         return Err(plan::Rejection::new(
                             "ref_is_directory",

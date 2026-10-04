@@ -2349,9 +2349,9 @@ impl App {
     /// else the session model.
     pub(super) fn effort_target_key(&self) -> String {
         match self.cur_menu() {
-            Some(crate::tui::app::menus::Menu::Effort { model }) => {
-                model.clone().unwrap_or_else(|| self.session.model_key.clone())
-            }
+            Some(crate::tui::app::menus::Menu::Effort { model }) => model
+                .clone()
+                .unwrap_or_else(|| self.session.model_key.clone()),
             _ => self.session.model_key.clone(),
         }
     }

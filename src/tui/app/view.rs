@@ -2955,33 +2955,33 @@ impl App {
         self.last_rebuild_us = t0.elapsed().as_micros();
     }
 
-/// Hover band for a form row under the mouse: same fill as list hover,
-/// padded to the row end. Focus (typing, cursor) still follows clicks
-/// and arrows only — the focused row itself carries no band.
-fn form_hover_band(line: Line<'static>, hovered: bool, content_w: usize) -> Line<'static> {
-    if !hovered {
-        return line;
+    /// Hover band for a form row under the mouse: same fill as list hover,
+    /// padded to the row end. Focus (typing, cursor) still follows clicks
+    /// and arrows only — the focused row itself carries no band.
+    fn form_hover_band(line: Line<'static>, hovered: bool, content_w: usize) -> Line<'static> {
+        if !hovered {
+            return line;
+        }
+        let mut out = Line::from(
+            line.spans
+                .into_iter()
+                .map(|s| {
+                    Span::styled(
+                        s.content.to_string(),
+                        s.style.patch(Style::new().bg(Theme::SELECTION_BG())),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        let pad = content_w.saturating_sub(cols(&line_text(&out)));
+        if pad > 0 {
+            out.spans.push(Span::styled(
+                " ".repeat(pad),
+                Style::new().bg(Theme::SELECTION_BG()),
+            ));
+        }
+        out
     }
-    let mut out = Line::from(
-        line.spans
-            .into_iter()
-            .map(|s| {
-                Span::styled(
-                    s.content.to_string(),
-                    s.style.patch(Style::new().bg(Theme::SELECTION_BG())),
-                )
-            })
-            .collect::<Vec<_>>(),
-    );
-    let pad = content_w.saturating_sub(cols(&line_text(&out)));
-    if pad > 0 {
-        out.spans.push(Span::styled(
-            " ".repeat(pad),
-            Style::new().bg(Theme::SELECTION_BG()),
-        ));
-    }
-    out
-}
 
     pub(super) fn draw_menu(&mut self, buf: &mut Buffer, area: Rect) {
         let menu = self.cur_menu().cloned();

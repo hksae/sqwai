@@ -335,14 +335,12 @@ impl App {
     pub(super) fn form_nav_key(&mut self, k: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
         if self.focused_is_choice() {
-            let is_effort = matches!(
-                self.form_fields.get(self.form_focus),
-                Some(FormField::Choice { .. })
-                    if self.form_fields[self.form_focus].label() == "effort"
-            ) && matches!(
-                self.cur_menu(),
-                Some(Menu::EditModel { key: Some(_), .. })
-            );
+            let is_effort =
+                matches!(
+                    self.form_fields.get(self.form_focus),
+                    Some(FormField::Choice { .. })
+                        if self.form_fields[self.form_focus].label() == "effort"
+                ) && matches!(self.cur_menu(), Some(Menu::EditModel { key: Some(_), .. }));
             if !is_effort {
                 match k.code {
                     KeyCode::Left => self.choice_cycle(-1),
@@ -440,10 +438,8 @@ impl App {
             return;
         }
         for (label, text) in std::mem::take(&mut self.form_draft) {
-            if let Some(FormField::Text { ta, .. }) = self
-                .form_fields
-                .iter_mut()
-                .find(|f| f.label() == label)
+            if let Some(FormField::Text { ta, .. }) =
+                self.form_fields.iter_mut().find(|f| f.label() == label)
             {
                 // select-all + insert replaces the prefilled value in place:
                 // styles, secrecy and cursor setup survive the round trip
@@ -718,17 +714,17 @@ impl App {
                     .form_fields
                     .iter()
                     .filter_map(|f| match f {
-                        FormField::Choice { options, sel, .. }
-                            if f.label() == "effort" =>
-                        {
+                        FormField::Choice { options, sel, .. } if f.label() == "effort" => {
                             options.get(*sel).copied()
                         }
                         _ => None,
                     })
                     .next();
-                let effort = previous.as_ref().map(|p| p.effort).or_else(|| {
-                    form_effort.and_then(|s| crate::config::EffortLevel::from_str(s))
-                }).unwrap_or(crate::config::EffortLevel::Medium);
+                let effort = previous
+                    .as_ref()
+                    .map(|p| p.effort)
+                    .or_else(|| form_effort.and_then(|s| crate::config::EffortLevel::from_str(s)))
+                    .unwrap_or(crate::config::EffortLevel::Medium);
                 let updated = ModelConfig {
                     provider: provider.clone(),
                     id,

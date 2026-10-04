@@ -2656,10 +2656,10 @@ impl App {
                             tcell(effort, 8, false, Theme::base()),
                         ]);
                         if current && !line.spans.is_empty() {
-                            line.spans[0] =
-                                Span::styled("*".to_string(), Theme::accent());
+                            line.spans[0] = Span::styled("*".to_string(), Theme::accent());
                         }
-                        self.menu_rows.push(row(fit_line_width(line, budget), action));
+                        self.menu_rows
+                            .push(row(fit_line_width(line, budget), action));
                     }
                 }
                 // actions live in the sticky footer like the providers menu:
@@ -2730,8 +2730,7 @@ impl App {
                             tcell(&fmt_ctx(m.context), 8, true, Theme::meta()),
                         ]);
                         if current && !line.spans.is_empty() {
-                            line.spans[0] =
-                                Span::styled("*".to_string(), Theme::accent());
+                            line.spans[0] = Span::styled("*".to_string(), Theme::accent());
                         }
                         self.menu_rows.push(row(
                             fit_line_width(line, budget),
@@ -2781,9 +2780,7 @@ impl App {
                 let plans: Vec<(EffortLevel, crate::providers::effort::Plan)> =
                     EffortLevel::SELECTABLE
                         .iter()
-                        .map(|lvl| {
-                            (*lvl, crate::providers::effort::plan(*lvl, support))
-                        })
+                        .map(|lvl| (*lvl, crate::providers::effort::plan(*lvl, support)))
                         .collect();
                 for (lvl, plan) in plans {
                     let current = lvl == target_effort;

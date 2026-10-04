@@ -935,7 +935,10 @@ impl App {
                         // paired release belongs to the old menu, never to
                         // the fresh card — consume it, or it instantly
                         // closes (or misfires on) the new menu
-                        if self.press_menu_depth.is_some_and(|d| d != self.menu_stack.len()) {
+                        if self
+                            .press_menu_depth
+                            .is_some_and(|d| d != self.menu_stack.len())
+                        {
                             self.press_menu_depth = None;
                             continue;
                         }
