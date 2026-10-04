@@ -5,9 +5,7 @@ expression: s
 
  › Run the tests.
 
-   ◜ bash  {"cmd":"cargo test"}
-
-   Working
+ ◜ bash ({"cmd":"cargo test"})
 
 
 
@@ -29,6 +27,8 @@ expression: s
 
 
 
+
+
+Working
 ›
-
  ACT                                                                             0% (0) m off [CWD]

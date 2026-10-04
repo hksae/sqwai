@@ -5,9 +5,12 @@ expression: s
 
  › Do the thing.
 
-   ✓ read_file  {"path":"src/main.rs"}
-   ✗ bash  {"cmd":"cargo build"}
-   ✓ write_file  {"path":"out.txt"}
+ • read_file ({"path":"src/main.rs"})
+
+ • bash ({"cmd":"cargo build"})
+
+ • write_file ({"path":"out.txt"})
+
  Done, though one step failed.
 
 
@@ -27,8 +30,5 @@ expression: s
 
 
 
-
-
 ›
-
  ACT                                                                             0% (0) m off [CWD]

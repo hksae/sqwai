@@ -837,7 +837,7 @@ fn selection_orders_whole_points_before_columns() {
 #[test]
 fn strip_row_chrome_preserves_code_indent() {
     use super::super::view::strip_row_chrome;
-    assert_eq!(strip_row_chrome("    │ body"), "body");
+    assert_eq!(strip_row_chrome("  │ body"), "body");
     assert_eq!(strip_row_chrome("│ code"), "code");
     assert_eq!(strip_row_chrome("› hi"), "hi");
     assert_eq!(strip_row_chrome("      indented"), "      indented");
@@ -988,10 +988,10 @@ fn toggled_tool_with_tabbed_output_leaves_no_control_cells() {
     terminal.draw(|frame| app.draw(frame)).unwrap();
     assert_clean_buffer(&terminal, "expanded");
     let rows = screen_text(&terminal);
-    // tab stops are absolute to the row start: the 6-cell tool rail
-    // pushes the content tab to column 16, i.e. four spaces here
+    // tab stops are absolute to the row start: the 2-cell indent pushes
+    // the content tab to column 8, i.e. eight spaces here
     assert!(
-        rows.iter().any(|r| r.contains("1    [package]")),
+        rows.iter().any(|r| r.contains("1        [package]")),
         "tab stop lost: {rows:?}"
     );
     assert!(

@@ -51,13 +51,12 @@ fn tool_rows_read_as_flat_one_liners_with_live_tail() {
     assert!(text.contains("read"), "done row visible: {text}");
     assert!(text.contains("cargo test"), "running args visible: {text}");
     assert!(
-        text.contains("Working"),
-        "live tail closes the chat: {text}"
-    );
-    assert!(
         !text.contains("calls"),
         "no aggregate in a flat transcript: {text}"
     );
+    // the live status lives above the input, never in the transcript
+    let frame = render_to_string(&mut app, 100, 30);
+    assert!(frame.contains("Working"), "status row works: {frame}");
     // clicking the done row expands its output instead of folding anything
     let row = app
         .cache_lines
@@ -122,11 +121,8 @@ fn tool_row_name_is_quiet_gray_and_call_caps_at_half_width() {
     let rows = app.render_segment(&app.segments, 0, 80, true);
     assert_eq!(rows.len(), 1, "one head row: {rows:?}");
     let head = &rows[0].0;
-    // marker keeps its state style, the name is the markdown base gray
-    assert!(
-        head.spans[0].content.contains('✓'),
-        "marker as-is: {head:?}"
-    );
+    // state dot, quiet gray name, parenthesized summary
+    assert_eq!(head.spans[0].content.as_ref(), "• ", "{head:?}");
     let name = head
         .spans
         .iter()
@@ -137,10 +133,13 @@ fn tool_row_name_is_quiet_gray_and_call_caps_at_half_width() {
         Some(ratatui::style::Color::Gray),
         "white, but a touch silver: {head:?}"
     );
-    // the call never runs past mid-window (4 marker + name + 2 gap + w/2)
+    let text: String = head.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(text.contains("(xxx"), "summary in parens: {text:?}");
+    // the call never runs past mid-window (2 marker + name + space + 2
+    // parens + w/2)
     let width: usize = head.spans.iter().map(|s| s.content.chars().count()).sum();
     assert!(
-        width <= 4 + "bash".len() + 2 + 40,
+        width <= 2 + "bash".len() + 3 + 40,
         "call capped at half of 80: {width}"
     );
 }
@@ -736,11 +735,11 @@ fn live_turn_shows_tool_rows_and_working_tail() {
     app.rebuild_cache(80);
     let text = rendered(&app);
     assert!(text.contains("read"), "live work is visible: {text}");
-    assert!(
-        text.contains("Working"),
-        "live tail closes the chat: {text}"
-    );
     assert!(!text.contains("calls"), "no aggregate: {text}");
+    // the live status lives in the row above the input, never in the
+    // transcript: full-frame render carries it while streaming
+    let frame = render_to_string(&mut app, 100, 30);
+    assert!(frame.contains("Working"), "status row works: {frame}");
 }
 
 #[test]
@@ -753,29 +752,12 @@ fn a_turn_with_nothing_visible_yet_still_shows_the_working_line() {
     app.rebuild_cache(80);
     let text = rendered(&app);
     assert!(
-        text.contains("Working"),
-        "waiting turn must show the working line: {text}"
+        !text.contains("Working"),
+        "transcript carries no status row: {text}"
     );
-    assert!(
-        !text.contains("0 calls"),
-        "the waiting line carries no stalled counter: {text}"
-    );
-    // one air row between the user message and the working line, never
-    // two: with no content yet the group's own blank would stack on the
-    // user's and read as a hole in the transcript
-    let air = |text: &str| {
-        let lines: Vec<&str> = text.lines().collect();
-        let hi = lines
-            .iter()
-            .position(|l| l.contains("привет"))
-            .expect("user row");
-        let work = lines
-            .iter()
-            .position(|l| l.contains("Working"))
-            .expect("working row");
-        work - hi
-    };
-    assert_eq!(air(&text), 2, "single air row, got:\n{text}");
+    // the status row above the input does: full-frame render while streaming
+    let frame = render_to_string(&mut app, 100, 30);
+    assert!(frame.contains("Working"), "status row works: {frame}");
     // an empty live assistant row changes nothing: still waiting
     app.push_segment(Segment::Assistant {
         text: String::new(),
@@ -784,17 +766,66 @@ fn a_turn_with_nothing_visible_yet_still_shows_the_working_line() {
     app.rebuild_cache(80);
     let text = rendered(&app);
     assert!(
-        text.contains("Working"),
-        "an unrevealed answer is still waiting"
+        !text.contains("Working"),
+        "still no status in the transcript: {text}"
     );
-    assert_eq!(air(&text), 2, "single air row, got:\n{text}");
-    // once the turn ends without any work, no group and no line survive
+    // once the turn ends without any work, no status row survives
     app.streaming = false;
     app.rebuild_cache(80);
     assert!(
         !rendered(&app).contains("Working"),
         "a finished turn leaves no working line: {}",
         rendered(&app)
+    );
+    let frame = render_to_string(&mut app, 100, 30);
+    assert!(
+        !frame.contains("Working"),
+        "status row gone with the turn: {frame}"
+    );
+}
+
+#[test]
+fn finish_retires_unfinished_tool_and_subagent_rows() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.push_segment(Segment::User("go".into()));
+    app.push_segment(Segment::Tool {
+        call_id: None,
+        name: "bash".into(),
+        args: String::new(),
+        ok: None,
+        output: String::new(),
+        diff: None,
+        preview: Vec::new(),
+        preview_total: 0,
+        expanded: false,
+        flash: None,
+    });
+    app.push_segment(Segment::Subagent {
+        id: 1,
+        task: "look".into(),
+        status: "running".into(),
+        output: String::new(),
+        expanded: false,
+    });
+    app.retire_unfinished_rows();
+    assert!(matches!(
+        app.segments[1],
+        Segment::Tool {
+            ok: Some(false),
+            ..
+        }
+    ));
+    assert!(matches!(
+        app.segments[2],
+        Segment::Subagent { ref status, .. } if status == "failed"
+    ));
+    // settled rows are done: a second pass changes nothing
+    let revs: Vec<u64> = app.seg_meta.iter().map(|m| m.rev).collect();
+    app.retire_unfinished_rows();
+    assert_eq!(
+        revs,
+        app.seg_meta.iter().map(|m| m.rev).collect::<Vec<_>>(),
+        "idempotent"
     );
 }
 

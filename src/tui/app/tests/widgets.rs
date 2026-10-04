@@ -155,8 +155,8 @@ fn running_tool_name_shimmers_like_activity_header() {
 #[test]
 fn working_tail_line_shimmers_coral() {
     use super::super::view::working_tail_line;
-    // the flat transcript closes a streaming turn with a bare coral word:
-    // no aggregate, no folding, no click target
+    // the status row above the input while streaming: the bare word with
+    // the classic shimmer. No aggregate, no folding, no click target.
     let live = working_tail_line(crate::tui::shimmer::SHIMMER_PERIOD_TICKS / 4);
     let live_text: String = live.spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(live_text.contains("Working"), "{live_text:?}");
@@ -165,7 +165,6 @@ fn working_tail_line_shimmers_coral() {
     let word: String = live
         .spans
         .iter()
-        .skip(1)
         .take(7)
         .map(|s| s.content.as_ref())
         .collect();
@@ -173,7 +172,6 @@ fn working_tail_line_shimmers_coral() {
     let styles: std::collections::HashSet<String> = live
         .spans
         .iter()
-        .skip(1)
         .take(7)
         .map(|s| format!("{:?}", s.style))
         .collect();
@@ -1217,25 +1215,17 @@ fn commentary_left_alignment_matches_tool_call() {
         .collect();
 
     assert!(
-        comm_text.starts_with("  "),
-        "commentary must start with 2 spaces: {comm_text:?}"
+        !comm_text.starts_with(' '),
+        "commentary flush left: {comm_text:?}"
     );
     assert!(
-        !comm_text.starts_with("   "),
-        "commentary must not start with 3 spaces"
-    );
-    assert!(
-        tool_text.starts_with("  "),
-        "tool must start with 2 spaces: {tool_text:?}"
-    );
-    assert!(
-        !tool_text.starts_with("   "),
-        "tool must not start with 3 spaces"
+        !tool_text.starts_with(' '),
+        "tool flush left like commentary: {tool_text:?}"
     );
 }
 
 #[test]
-fn commentary_wrapped_rows_keep_indent_and_dim() {
+fn commentary_wrapped_rows_flush_left_and_dim() {
     use ratatui::style::Modifier;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.push_segment(Segment::Commentary(
@@ -1249,13 +1239,12 @@ fn commentary_wrapped_rows_keep_indent_and_dim() {
             continue;
         }
         assert!(
-            text.starts_with("  ") && !text.starts_with("   "),
-            "every row indented by 2: {text:?}"
+            !text.starts_with(' '),
+            "every row flush left like tool rows: {text:?}"
         );
         assert!(
             l.spans
                 .iter()
-                .skip(1)
                 .all(|s| s.style.add_modifier.contains(Modifier::DIM)),
             "body spans dimmed, hues kept: {text:?}"
         );

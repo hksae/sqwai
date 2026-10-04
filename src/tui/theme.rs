@@ -166,7 +166,7 @@ impl Theme {
             .bg(Self::SELECTION_BG())
             .add_modifier(Modifier::BOLD)
     }
-    /// Hint chips: `key` bright + `desc` dim, joined with a dim `·`.
+    /// Hint chips: `key` muted white + `desc` dim, joined with a dim `·`.
     /// `(key, desc)` pairs keep one visual language for every footer.
     pub fn hints(pairs: &[(&str, &str)]) -> ratatui::text::Line<'static> {
         use ratatui::text::Span;
@@ -175,10 +175,7 @@ impl Theme {
             if i > 0 {
                 spans.push(Span::styled(" · ", Self::dim()));
             }
-            spans.push(Span::styled(
-                key.to_string(),
-                Style::new().add_modifier(Modifier::BOLD),
-            ));
+            spans.push(Span::styled(key.to_string(), Self::meta()));
             spans.push(Span::styled(format!(": {desc}"), Self::dim()));
         }
         spans.push(Span::styled(" ", Self::dim()));

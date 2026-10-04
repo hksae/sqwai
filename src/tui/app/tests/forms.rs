@@ -116,7 +116,7 @@ fn finish_wave_keeps_geometry_and_settles_static() {
     let rows = app.render_segment(&app.segments, 0, 80, true);
     assert_eq!(rows.len(), 1, "head row only, like static");
     let text: String = rows[0].0.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(text.starts_with("  "), "{text:?}");
+    assert!(text.starts_with("• "), "{text:?}");
     assert!(text.contains("read"), "{text:?}");
 
     // expired flash: byte-identical static row
@@ -124,10 +124,14 @@ fn finish_wave_keeps_geometry_and_settles_static() {
         *flash = Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
     }
     let rows = app.render_segment(&app.segments, 0, 80, true);
-    assert_eq!(rows[0].0.spans[0].content.as_ref(), "  ✓ ");
-    assert_eq!(
-        rows[0].0.spans[0].style,
-        crate::tui::theme::Theme::tool_head_bold()
+    assert_eq!(rows[0].0.spans[0].content.as_ref(), "• ");
+    assert!(
+        rows[0].0.spans[0]
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD),
+        "dot stays bold: {:?}",
+        rows[0].0.spans[0].style
     );
     assert_eq!(rows[0].0.spans[1].content.as_ref(), "read");
 }
@@ -681,7 +685,7 @@ fn edit_row_shows_colored_change_counts() {
 }
 
 #[test]
-fn expanded_tool_output_uses_left_rail_and_truncates() {
+fn expanded_tool_output_indents_and_truncates() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.push_segment(Segment::Tool {
         call_id: None,
@@ -706,17 +710,15 @@ fn expanded_tool_output_uses_left_rail_and_truncates() {
                 .collect()
         })
         .collect();
-    assert!(text.iter().any(|line| line == "    │"));
     assert!(
-        text.iter()
-            .filter(|line| line.contains('│'))
-            .all(|line| line.matches('│').count() == 1)
+        text.iter().all(|line| !line.contains('│')),
+        "no rail left: {text:?}"
     );
     assert!(text.iter().any(|line| line.contains("…")));
     assert!(
         text.iter()
-            .filter(|line| line.starts_with("    │ "))
-            .all(|line| { UnicodeWidthStr::width(line.as_str()) <= 18 })
+            .all(|line| { UnicodeWidthStr::width(line.as_str()) <= 18 }),
+        "every row fits: {text:?}"
     );
 }
 #[test]

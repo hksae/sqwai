@@ -2464,7 +2464,10 @@ impl App {
                 ));
                 if !pinned.is_empty() {
                     self.menu_rows.push(row(
-                        Line::from(vec![Span::styled("  pinned".to_string(), Theme::section())]),
+                        Line::from(vec![Span::styled(
+                            "Pinned".to_string(),
+                            day_section_style(),
+                        )]),
                         MenuAction::None,
                     ));
                     for s in &pinned {
@@ -2505,8 +2508,8 @@ impl App {
                 if !foreign.is_empty() {
                     self.menu_rows.push(row(
                         Line::from(vec![Span::styled(
-                            "  other projects".to_string(),
-                            Theme::section(),
+                            "Other projects".to_string(),
+                            day_section_style(),
                         )]),
                         MenuAction::None,
                     ));

@@ -5,12 +5,22 @@ expression: s
 
  › Complex task.
 
-   ✓ tool_0  {}
-   ✓ tool_1  {}
-   ✓ tool_2  {}
-   ✓ tool_3  {}
-   ✗ risky_tool  {"x":1}
-   ✓ cleanup  {}
+   thought · 0.8s
+
+   thought · 0.4s
+
+ • tool_0 ({})
+
+ • tool_1 ({})
+
+ • tool_2 ({})
+
+ • tool_3 ({})
+
+ • risky_tool ({"x":1})
+
+ • cleanup ({})
+
  Completed with one error.
 
 
@@ -20,15 +30,5 @@ expression: s
 
 
 
-
-
-
-
-
-
-
-
-
 ›
-
  ACT                                                                             0% (0) m off [CWD]

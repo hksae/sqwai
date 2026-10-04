@@ -12,6 +12,11 @@ use crate::tui::theme::Theme;
 /// embedded from assets at compile time. Uniform rows (verified below).
 pub const SQWAI_TEXT: &str = include_str!("../../assets/ascii-sqwai.txt");
 
+/// Compact wordmark for narrow terminals (quadrant-block font, 4 rows).
+/// Source rows may be ragged on the right (editors eat trailing spaces);
+/// `gradient_block` normalizes, so the file can never break the render.
+pub const SQWAI_COMPACT_TEXT: &str = include_str!("../../assets/ascii-sqwai-compact.txt");
+
 /// Coral ramp ends, pipetted off the logo PNG (matches the SVG stops):
 /// top-left `#ff9a5c` → bottom-right `#f43f5e`.
 pub const CORAL_START: (u8, u8, u8) = (255, 154, 92);
@@ -49,8 +54,22 @@ pub fn coral_at(x: usize, width: usize) -> (u8, u8, u8) {
 /// reads as one. Spaces stay unpainted; without truecolor the block falls
 /// back to one solid warm color, never unstyled.
 pub fn sqwai_gradient_lines() -> Vec<Line<'static>> {
-    let rows: Vec<&str> = SQWAI_TEXT.lines().collect();
-    let width = rows.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    gradient_block(SQWAI_TEXT)
+}
+
+/// Same ramp over the compact wordmark for narrow terminals.
+pub fn sqwai_compact_lines() -> Vec<Line<'static>> {
+    gradient_block(SQWAI_COMPACT_TEXT)
+}
+
+/// One coral ramp shared across a whole text block. Source rows are
+/// right-normalized first (trim + pad to the widest), so ragged asset
+/// lines — editors love eating trailing spaces — can never skew the ramp
+/// or the layout.
+fn gradient_block(text: &str) -> Vec<Line<'static>> {
+    let trimmed: Vec<String> = text.lines().map(|l| l.trim_end().to_string()).collect();
+    let width = trimmed.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let rows: Vec<&str> = trimmed.iter().map(String::as_str).collect();
     let truecolor = crate::tui::shimmer::has_truecolor();
     rows.into_iter()
         .map(|row| {
@@ -59,10 +78,18 @@ pub fn sqwai_gradient_lines() -> Vec<Line<'static>> {
             let mut spans = Vec::new();
             let mut buf = String::new();
             let mut buf_style: Option<Style> = None;
-            for (x, ch) in row.chars().enumerate() {
+            let mut chars = row.chars().peekable();
+            let mut x = 0usize;
+            while let Some(ch) = chars.next() {
+                if ch == ' ' && chars.peek().is_none() {
+                    // padding is layout, not content: stop before it so the
+                    // ramp never paints trailing filler
+                    break;
+                }
                 if ch == ' ' {
                     push_span(&mut spans, &mut buf, &mut buf_style);
                     spans.push(Span::styled(" ".to_string(), Theme::base()));
+                    x += 1;
                     continue;
                 }
                 let style = if truecolor {
@@ -76,8 +103,18 @@ pub fn sqwai_gradient_lines() -> Vec<Line<'static>> {
                     buf_style = Some(style);
                 }
                 buf.push(ch);
+                x += 1;
             }
+            // pad the visual row back to the block width with plain spaces
+            let used: usize = spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>()
+                + buf.chars().count();
             push_span(&mut spans, &mut buf, &mut buf_style);
+            for _ in used..width {
+                spans.push(Span::styled(" ".to_string(), Theme::base()));
+            }
             Line::from(spans)
         })
         .collect()
@@ -252,14 +289,24 @@ mod tests {
     #[test]
     fn gradient_lines_preserve_text() {
         use unicode_width::UnicodeWidthStr;
-        let rows: Vec<&str> = SQWAI_TEXT.lines().collect();
+        let rows: Vec<String> = SQWAI_TEXT
+            .lines()
+            .map(|r| r.trim_end().to_string())
+            .collect();
         assert_eq!(rows.len(), 8, "pixel wordmark is 8 rows");
-        assert!(rows.iter().all(|r| r.width() == 65), "uniform source rows");
+        let width = rows.iter().map(|r| r.width()).max().unwrap_or(0);
+        assert_eq!(width, 67, "banner width");
+        // ragged source rows (editors eat trailing spaces) normalize to
+        // the block width: content kept, padded after, ramp unskewed
         let lines = sqwai_gradient_lines();
         assert_eq!(lines.len(), 8);
-        for (line, src) in lines.iter().zip(rows) {
+        for (line, src) in lines.iter().zip(&rows) {
             let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            assert_eq!(text, src, "no char lost or added");
+            assert!(
+                text.starts_with(src.as_str()),
+                "no char lost or added: {text:?}"
+            );
+            assert_eq!(text.width(), width, "every row exact-fit: {text:?}");
         }
         // spaces stay unpainted so the background shows through
         let first = &lines[0].spans;
@@ -269,5 +316,29 @@ mod tests {
                 .any(|s| s.content.contains(' ') && s.style.fg.is_none()),
             "gaps unpainted: {first:?}"
         );
+    }
+
+    #[test]
+    fn compact_wordmark_fits_narrow() {
+        use unicode_width::UnicodeWidthStr;
+        let rows: Vec<String> = SQWAI_COMPACT_TEXT
+            .lines()
+            .map(|r| r.trim_end().to_string())
+            .collect();
+        assert_eq!(rows.len(), 4, "compact wordmark is 4 rows");
+        let width = rows.iter().map(|r| r.width()).max().unwrap_or(0);
+        assert_eq!(width, 27, "compact fits narrow terminals");
+        // ragged source rows normalize to the block width, never skewing
+        // the ramp or dropping middle content
+        let lines = sqwai_compact_lines();
+        assert_eq!(lines.len(), 4);
+        for (line, src) in lines.iter().zip(&rows) {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                text.starts_with(src.as_str()),
+                "content kept, padded after: {text:?}"
+            );
+            assert_eq!(text.width(), width, "every row exact-fit: {text:?}");
+        }
     }
 }

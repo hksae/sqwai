@@ -203,13 +203,13 @@ fn restored_session_rebuilds_thought_rows_in_order() {
         vec!["weighing the options", "one more consideration"]
     );
 
-    // a restored row carries no clock; restored thoughts stay hidden,
-    // the tool row and answer read flat with no aggregate
+    // a restored row carries no clock; restored thoughts read as bare
+    // `thought` rows, the tool row and answer flat with no aggregate
     app.rebuild_cache(80);
     let text = rendered(&app);
     assert!(text.contains("read"), "tool visible: {text}");
     assert!(text.contains("done"), "answer visible: {text}");
-    assert!(!text.contains("thought"), "thoughts hidden: {text}");
+    assert!(text.contains("thought"), "thought rows visible: {text}");
     assert!(!text.contains("calls"), "no aggregate: {text}");
 }
 
@@ -474,21 +474,17 @@ fn empty_mark_lines_cover_mcp_plan_and_plain_states() {
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect()
     };
-    // plain: no MCP, no linked plan → banner + version ("type to
+    // plain: no MCP, no linked plan → banner alone ("type to
     // start" is obvious and stays out). Draw once so the mark sees a
-    // wide chat area; narrow terminals get the plain line instead.
+    // wide chat area; narrow terminals get the compact mark instead.
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
     let _ = render_to_string(&mut app, 100, 30);
     let lines = text(&app);
-    assert!(lines.len() >= 9, "wordmark block: {lines:?}");
+    assert_eq!(lines.len(), 8, "wordmark block: {lines:?}");
     assert!(
         lines.iter().any(|l| l.contains('█')),
         "block art: {lines:?}"
-    );
-    assert!(
-        lines.iter().any(|l| l.trim_start().starts_with('v')),
-        "version under the S: {lines:?}"
     );
     // linked plan: enter hint instead
     let mut app = test_app("http://127.0.0.1:9/v1".into());
@@ -500,6 +496,21 @@ fn empty_mark_lines_cover_mcp_plan_and_plain_states() {
             .expect("hint row")
             .contains("enter: continue next plan step"),
         "{lines:?}"
+    );
+    // narrow terminal: the compact quadrant wordmark instead of the
+    // pixel banner
+    let mut narrow = test_app("http://127.0.0.1:9/v1".into());
+    narrow.startup = false;
+    let _ = render_to_string(&mut narrow, 40, 30);
+    let lines = text(&narrow);
+    assert_eq!(lines.len(), 4, "compact block: {lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains('▀') || l.contains('▄')),
+        "compact art: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains('░')),
+        "no pixel shading when narrow: {lines:?}"
     );
     // MCP: enabled servers counted, disabled skipped
     let mut app = test_app("http://127.0.0.1:9/v1".into());
@@ -712,15 +723,19 @@ fn pinned_sessions_frame_stays_dim() {
     let text = |l: &ratatui::text::Line| -> String {
         l.spans.iter().map(|sp| sp.content.as_ref()).collect()
     };
-    // the pinned divider is a bold bright label, no dash rules
+    // the pinned divider reads as a section header, like Today
     let (div, _) = app
         .menu_rows
         .iter()
-        .find(|(l, _)| text(l).contains("pinned"))
+        .find(|(l, _)| text(l).contains("Pinned"))
         .expect("pinned divider row");
     assert!(
-        div.spans.iter().all(|sp| sp.style.fg == Some(Color::White)),
-        "divider must read as a header"
+        div.spans.iter().all(|sp| sp
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD)
+            && sp.style.fg != Some(Color::White)),
+        "divider wears section coral: {div:?}"
     );
     // data rung (title) bright, meta rung (model) gray, hint rung dim
     let (row, _) = app
@@ -904,10 +919,10 @@ fn sessions_menu_splits_foreign_projects() {
         .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
     let joined = all.join("\n");
-    assert!(joined.contains("other projects"), "{joined:?}");
+    assert!(joined.contains("Other projects"), "{joined:?}");
     let div = all
         .iter()
-        .position(|r| r.contains("other projects"))
+        .position(|r| r.contains("Other projects"))
         .unwrap();
     let pos = |needle: &str| all.iter().position(|r| r.contains(needle)).unwrap();
     // current + legacy above the divider, foreign below it

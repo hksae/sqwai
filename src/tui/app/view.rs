@@ -149,13 +149,9 @@ fn tool_dot_style(done_ok: bool) -> Style {
             .fg(Color::Rgb(r, g, b))
             .add_modifier(Modifier::BOLD)
     } else if done_ok {
-        Style::new()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(Color::Green).add_modifier(Modifier::BOLD)
     } else {
-        Style::new()
-            .fg(Color::Red)
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
     }
 }
 
@@ -417,12 +413,12 @@ impl Selection {
 }
 
 /// Strip UI chrome prefixes/suffixes from a copied row. Only exact known
-/// decorations are removed ("    │ " tool rail, "│ " code rail, "› " user
+/// decorations are removed ("  │ " tool rail, "│ " code rail, "› " user
 /// marker, one trailing " │" frame cap); every other leading space — real
 /// code indent included — survives, unlike a blind trim of lookalike chars.
 pub(super) fn strip_row_chrome(line: &str) -> String {
     let mut s = line;
-    for prefix in ["    │ ", "│ ", "› "] {
+    for prefix in ["  │ ", "│ ", "› "] {
         if let Some(rest) = s.strip_prefix(prefix) {
             s = rest;
             break;
@@ -1431,21 +1427,20 @@ impl App {
                 }
             }
             Segment::Commentary(text) => {
-                // Pre-wrap to the indented budget and put the indent on EVERY
-                // visual row: the outer wrapper would otherwise split long
-                // lines and leave continuation rows at column 0 (same class
-                // of bug the quote rail already fixes). Whole block reads
-                // one notch dimmer than tool rows, hues preserved.
-                let inner_w = w.saturating_sub(2).max(1);
+                // Pre-wrap to the row budget: the outer wrapper would
+                // otherwise split long lines and leave continuation rows
+                // ragged (same class of bug the quote rail already fixes).
+                // Whole block reads one notch dimmer than tool rows, hues
+                // preserved. Flush left like tool rows.
                 let (rows, _) = crate::tui::markdown::wrap_tagged(
-                    render(text, inner_w, &self.hl)
+                    render(text, w, &self.hl)
                         .into_iter()
                         .map(|l| (l, None))
                         .collect(),
-                    inner_w,
+                    w,
                 );
                 for row in rows {
-                    let mut spans = vec![Span::styled("  ".to_string(), Theme::base())];
+                    let mut spans = Vec::new();
                     spans.extend(
                         row.spans
                             .into_iter()
@@ -2418,13 +2413,11 @@ impl App {
     pub(super) fn empty_mark_lines(&self) -> Vec<Line<'static>> {
         let mcp = self.cfg.mcp.servers.iter().filter(|s| s.enabled).count();
         let mut out = if self.last_chat.width >= 69 {
-            let mut mark = crate::tui::art::sqwai_gradient_lines();
-            // version sits under the S, quiet gray
-            mark.push(Line::from(Span::styled(
-                format!("  v{}", env!("CARGO_PKG_VERSION")),
-                Theme::dim(),
-            )));
-            mark
+            crate::tui::art::sqwai_gradient_lines()
+        } else if self.last_chat.width >= 34 {
+            // narrow terminal: the compact quadrant wordmark instead of
+            // the pixel banner (same responsive rule as gemini-cli)
+            crate::tui::art::sqwai_compact_lines()
         } else {
             vec![Line::from(Span::styled(
                 format!("  sqwai v{}", env!("CARGO_PKG_VERSION")),
@@ -3000,6 +2993,8 @@ impl App {
             Some(Menu::Sessions)
                 | Some(Menu::TestAnims)
                 | Some(Menu::TestArt)
+                | Some(Menu::TestColors)
+                | Some(Menu::TestMd)
                 | Some(Menu::EditProvider { .. })
                 | Some(Menu::EditModel { .. })
                 | Some(Menu::EditSessionTitle { .. })
@@ -3373,7 +3368,6 @@ impl App {
         if has_hints {
             rows.push(Line::default());
         }
-
         Clear.render(rect, buf);
         // Raised surface: paint the flat panel one step above the
         // background so it never merges with the dimmed chat behind it.
@@ -4102,19 +4096,11 @@ pub(super) fn blank() -> Line<'static> {
     Line::from(vec![Span::styled(String::new(), Theme::base())])
 }
 
-/// Live status row above the input while the turn streams: travelling
-/// dot (`cli-point-wide`, plain white) plus the classic gray-to-white
-/// shimmer word. No aggregate, no folding, no click target.
+/// Live status row above the input while the turn streams: the bare word
+/// with the classic gray-to-white shimmer. No aggregate, no folding,
+/// no click target.
 pub(super) fn working_tail_line(tick: usize) -> Line<'static> {
-    use crate::tui::spinners;
-    // one dot frame per 100ms, each dot shaded by the traveling
-    // brightness wave on top of the frame animation
-    let dots = spinners::ALL
-        .iter()
-        .find(|e| e.name == "cli-point-wide")
-        .map(|e| spinners::frame(e, tick / 2))
-        .unwrap_or("···");
-    Line::from(crate::tui::shimmer::shimmer_spans(dots, tick))
+    Line::from(crate::tui::shimmer::shimmer_spans("Working", tick))
 }
 
 fn dim_all(l: Line<'static>) -> Line<'static> {

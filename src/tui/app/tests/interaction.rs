@@ -754,15 +754,29 @@ fn subagent_rows_read_as_tool_rows_without_accent() {
     assert_eq!(running.spans[0].style, Theme::tool_head());
     assert_eq!(name_style(&running), Some(Theme::meta()));
     assert!(text.contains("look"), "task rides along: {text:?}");
-    // done: quiet check, gray name
+    // done: soft green dot, gray name
     let done = line(1);
-    assert!(done.spans[0].content.contains('✓'));
-    assert_eq!(done.spans[0].style, Theme::tool_head_bold());
+    assert_eq!(done.spans[0].content.as_ref(), "• ");
+    assert!(
+        done.spans[0]
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD),
+        "dot stays bold: {:?}",
+        done.spans[0].style
+    );
     assert_eq!(name_style(&done), Some(Theme::meta()));
-    // failed: red keeps screaming, like before
+    // failed: soft red dot, red name keeps screaming, like before
     let failed = line(2);
-    assert!(failed.spans[0].content.contains('✗'));
-    assert_eq!(failed.spans[0].style, Theme::err());
+    assert_eq!(failed.spans[0].content.as_ref(), "• ");
+    assert!(
+        failed.spans[0]
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD),
+        "dot stays bold: {:?}",
+        failed.spans[0].style
+    );
     assert_eq!(name_style(&failed), Some(Theme::err()));
 }
 

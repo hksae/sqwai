@@ -4244,6 +4244,29 @@ impl App {
         }
     }
 
+    /// Settle rows left running when their turn ended: a dropped done-event
+    /// must never leave a spinner turning forever. Failed, not vanished —
+    /// the row is the only trace the call existed.
+    fn retire_unfinished_rows(&mut self) {
+        for i in 0..self.segments.len() {
+            let orphaned = matches!(&self.segments[i], Segment::Tool { ok: None, .. })
+                || matches!(
+                    &self.segments[i],
+                    Segment::Subagent { status, .. }
+                        if status.as_str() != "completed" && status.as_str() != "failed"
+                );
+            if !orphaned {
+                continue;
+            }
+            match self.segments.get_mut(i) {
+                Some(Segment::Tool { ok, .. }) => *ok = Some(false),
+                Some(Segment::Subagent { status, .. }) => *status = "failed".into(),
+                _ => {}
+            }
+            self.touch_segment(i);
+        }
+    }
+
     fn freeze_thinking(&mut self, index: usize) {
         if let Some(Segment::Thinking {
             started,
@@ -4894,6 +4917,9 @@ impl App {
                 self.freeze_thinking(i);
             }
         }
+        // a finished turn cannot have running rows: a lost done-event would
+        // spin them forever, so orphaned calls settle as failed here
+        self.retire_unfinished_rows();
         // never render "(0 chars)" ghosts
         let empties: Vec<usize> = self
             .segments

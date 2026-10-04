@@ -2,27 +2,27 @@
 source: src/tui/app/tests/settings.rs
 expression: s
 ---
+ • tool_2 ({})
 
- › Do many things.
+ • tool_3 ({})
 
-   ✓ tool_0  {}
-   ✓ tool_1  {}
-   ✓ tool_2  {}
-   ✓ tool_3  {}
-   ✓ tool_4  {}
-   ✓ tool_5  {}
-   ✓ tool_6  {}
-   ✓ tool_7  {}
-   ✓ tool_8  {}
-   ✓ tool_9  {}
-   ✓ tool_10  {}
-   ✓ tool_11  {}
+ • tool_4 ({})
+
+ • tool_5 ({})
+
+ • tool_6 ({})
+
+ • tool_7 ({})
+
+ • tool_8 ({})
+
+ • tool_9 ({})
+
+ • tool_10 ({})
+
+ • tool_11 ({})
+
  All done!
 
-
-
-
-
 ›
-
  ACT                                               0% (0) m off [CWD]
