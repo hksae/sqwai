@@ -163,6 +163,7 @@ mod tests {
         let root = tempdir().unwrap();
         let first = ProjectLock::acquire(root.path(), false).unwrap();
         assert!(!first.read_only);
+        std::thread::sleep(std::time::Duration::from_millis(50));
         let second = ProjectLock::acquire(root.path(), false).unwrap();
         assert!(second.read_only);
         assert!(second.status_message().unwrap().contains("read-only"));

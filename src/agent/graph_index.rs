@@ -301,7 +301,7 @@ pub fn index_project_excluding(
         }
     }
     let resolve_edge = |edge: &Edge| {
-        !(edge.to.starts_with("file:") && !retained_paths.contains(&edge.to["file:".len()..]))
+        !edge.to.starts_with("file:") || retained_paths.contains(&edge.to["file:".len()..])
     };
 
     let mut walker = WalkBuilder::new(&root);
