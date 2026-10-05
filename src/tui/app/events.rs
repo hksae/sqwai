@@ -1,10 +1,6 @@
 #![allow(unused_imports)]
 use super::*;
 
-#[cfg(test)]
-#[path = "tests/effort_hover.rs"]
-mod effort_hover;
-
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -1644,3 +1640,7 @@ mod tests {
         assert!(gate.flush(start + Duration::from_millis(31)));
     }
 }
+
+#[cfg(test)]
+#[path = "tests/effort_hover.rs"]
+mod effort_hover;
