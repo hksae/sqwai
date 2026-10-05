@@ -853,175 +853,188 @@ impl App {
                     }
                     self.dirty = true;
                 }
-                Event::Mouse(m) => match m.kind {
-                    // wheel moves the menu selection (the view follows it);
-                    // scrolling the bare offset instead would fight hover:
-                    // the draw clamp snaps the view back to the hovered row
-                    // and the wheel looks dead at both ends (forms inert)
-                    MouseEventKind::ScrollUp if !self.menu_stack.is_empty() => {
-                        self.menu_wheel(-3);
-                    }
-                    MouseEventKind::ScrollDown if !self.menu_stack.is_empty() => {
-                        self.menu_wheel(3);
-                    }
-                    MouseEventKind::ScrollUp => {
-                        if self.menu_stack.is_empty()
-                            && m.column >= self.last_input.x
-                            && m.column < self.last_input.right()
-                            && m.row >= self.last_input.y
-                            && m.row < self.last_input.bottom()
-                            && self.input.lines().len() > 1
-                        {
-                            self.input
-                                .scroll(tui_textarea::Scrolling::Delta { rows: -1, cols: 0 });
-                            self.dirty = true;
-                        } else if self.popup_visible() {
-                            let moved = self.popup_scroll_by(-3);
-                            let unhovered = self.hover.is_some();
-                            self.hover = None;
-                            if moved || unhovered {
-                                self.dirty = true;
-                            }
-                        } else {
-                            // 3 lines per notch (was 4): smaller steps read as
-                            // smoother motion now that each notch draws its own
-                            // frame instead of batching into a 50ms tick.
-                            self.scroll(3);
+                Event::Mouse(m) => {
+                    self.last_mouse = Some((m.row, m.column));
+                    match m.kind {
+                        // wheel moves the menu selection (the view follows it);
+                        // scrolling the bare offset instead would fight hover:
+                        // the draw clamp snaps the view back to the hovered row
+                        // and the wheel looks dead at both ends (forms inert)
+                        MouseEventKind::ScrollUp if !self.menu_stack.is_empty() => {
+                            self.menu_wheel(-3);
                         }
-                    }
-                    MouseEventKind::ScrollDown => {
-                        if self.menu_stack.is_empty()
-                            && m.column >= self.last_input.x
-                            && m.column < self.last_input.right()
-                            && m.row >= self.last_input.y
-                            && m.row < self.last_input.bottom()
-                            && self.input.lines().len() > 1
-                        {
-                            self.input
-                                .scroll(tui_textarea::Scrolling::Delta { rows: 1, cols: 0 });
-                            self.dirty = true;
-                        } else if self.popup_visible() {
-                            let moved = self.popup_scroll_by(3);
-                            let unhovered = self.hover.is_some();
-                            self.hover = None;
-                            if moved || unhovered {
-                                self.dirty = true;
-                            }
-                        } else {
-                            self.scroll(-3);
+                        MouseEventKind::ScrollDown if !self.menu_stack.is_empty() => {
+                            self.menu_wheel(3);
                         }
-                    }
-                    MouseEventKind::Down(MouseButton::Left) if !self.menu_stack.is_empty() => {
-                        self.press_menu_depth = Some(self.menu_stack.len());
-                        if self.is_form_menu() {
-                            if self.in_menu_rect(m.row, m.column) {
-                                self.form_mouse_down(m.row, m.column);
+                        MouseEventKind::ScrollUp => {
+                            if self.menu_stack.is_empty()
+                                && m.column >= self.last_input.x
+                                && m.column < self.last_input.right()
+                                && m.row >= self.last_input.y
+                                && m.row < self.last_input.bottom()
+                                && self.input.lines().len() > 1
+                            {
+                                self.input
+                                    .scroll(tui_textarea::Scrolling::Delta { rows: -1, cols: 0 });
+                                self.dirty = true;
+                            } else if self.popup_visible() {
+                                let moved = self.popup_scroll_by(-3);
+                                let unhovered = self.hover.is_some();
+                                self.hover = None;
+                                if moved || unhovered {
+                                    self.dirty = true;
+                                }
                             } else {
-                                if let Some(FormField::Text { ta, .. }) =
-                                    self.form_fields.get_mut(self.form_focus)
-                                {
-                                    ta.cancel_selection();
+                                // 3 lines per notch (was 4): smaller steps read as
+                                // smoother motion now that each notch draws its own
+                                // frame instead of batching into a 50ms tick.
+                                self.scroll(3);
+                            }
+                        }
+                        MouseEventKind::ScrollDown => {
+                            if self.menu_stack.is_empty()
+                                && m.column >= self.last_input.x
+                                && m.column < self.last_input.right()
+                                && m.row >= self.last_input.y
+                                && m.row < self.last_input.bottom()
+                                && self.input.lines().len() > 1
+                            {
+                                self.input
+                                    .scroll(tui_textarea::Scrolling::Delta { rows: 1, cols: 0 });
+                                self.dirty = true;
+                            } else if self.popup_visible() {
+                                let moved = self.popup_scroll_by(3);
+                                let unhovered = self.hover.is_some();
+                                self.hover = None;
+                                if moved || unhovered {
+                                    self.dirty = true;
+                                }
+                            } else {
+                                self.scroll(-3);
+                            }
+                        }
+                        MouseEventKind::Down(MouseButton::Left) if !self.menu_stack.is_empty() => {
+                            self.press_menu_depth = Some(self.menu_stack.len());
+                            if self.is_form_menu() {
+                                if self.in_menu_rect(m.row, m.column) {
+                                    self.form_mouse_down(m.row, m.column);
+                                } else {
+                                    if let Some(FormField::Text { ta, .. }) =
+                                        self.form_fields.get_mut(self.form_focus)
+                                    {
+                                        ta.cancel_selection();
+                                    }
                                 }
                             }
                         }
-                    }
-                    MouseEventKind::Drag(MouseButton::Left) if !self.menu_stack.is_empty() => {
-                        if self.is_form_menu() && self.form_is_selecting() {
-                            self.form_mouse_drag(m.row, m.column);
-                        }
-                    }
-                    MouseEventKind::Up(MouseButton::Left) if !self.menu_stack.is_empty() => {
-                        // the press opened a submenu (form effort row): its
-                        // paired release belongs to the old menu, never to
-                        // the fresh card — consume it, or it instantly
-                        // closes (or misfires on) the new menu
-                        if self
-                            .press_menu_depth
-                            .is_some_and(|d| d != self.menu_stack.len())
-                        {
-                            self.press_menu_depth = None;
-                            continue;
-                        }
-                        self.press_menu_depth = None;
-                        if self.is_form_menu() {
-                            if !self.in_menu_rect(m.row, m.column) {
-                                self.sel = None;
-                                self.menu_back();
-                            } else if self.form_is_selecting() {
-                                self.form_mouse_up();
+                        MouseEventKind::Drag(MouseButton::Left) if !self.menu_stack.is_empty() => {
+                            if self.is_form_menu() && self.form_is_selecting() {
+                                self.form_mouse_drag(m.row, m.column);
                             }
-                        } else {
-                            // inside: pick a row; outside: act like esc
-                            if self.in_menu_rect(m.row, m.column) {
-                                if matches!(self.cur_menu(), Some(Menu::Effort { .. }))
-                                    && !self.effort_hits.is_empty()
-                                {
-                                    // slider card: click moves the preview, the
-                                    // popup stays open; Enter commits, Esc cancels
-                                    if let Some(idx) = self.effort_index_at(m.row, m.column)
-                                        && idx != self.menu_sel
+                        }
+                        MouseEventKind::Up(MouseButton::Left) if !self.menu_stack.is_empty() => {
+                            // the press opened a submenu (form effort row): its
+                            // paired release belongs to the old menu, never to
+                            // the fresh card — consume it, or it instantly
+                            // closes (or misfires on) the new menu
+                            if self
+                                .press_menu_depth
+                                .is_some_and(|d| d != self.menu_stack.len())
+                            {
+                                self.press_menu_depth = None;
+                                continue;
+                            }
+                            self.press_menu_depth = None;
+                            if self.is_form_menu() {
+                                if !self.in_menu_rect(m.row, m.column) {
+                                    self.sel = None;
+                                    self.menu_back();
+                                } else if self.form_is_selecting() {
+                                    self.form_mouse_up();
+                                }
+                            } else {
+                                // inside: pick a row; outside: act like esc
+                                if self.in_menu_rect(m.row, m.column) {
+                                    if matches!(self.cur_menu(), Some(Menu::Effort { .. }))
+                                        && !self.effort_hits.is_empty()
                                     {
-                                        self.menu_sel = idx;
-                                        self.dirty = true;
+                                        // slider card: click moves the preview, the
+                                        // popup stays open; Enter commits, Esc cancels
+                                        if let Some(idx) = self.effort_index_at(m.row, m.column)
+                                            && idx != self.menu_sel
+                                        {
+                                            self.menu_sel = idx;
+                                            self.dirty = true;
+                                        }
+                                    } else {
+                                        self.menu_click(m.row);
                                     }
                                 } else {
-                                    self.menu_click(m.row);
+                                    self.sel = None;
+                                    self.menu_back();
                                 }
-                            } else {
-                                self.sel = None;
-                                self.menu_back();
                             }
                         }
-                    }
-                    MouseEventKind::Moved if !self.menu_stack.is_empty() => {
-                        // the press opened a submenu (form effort row): hover
-                        // between Down and Up belongs to the old gesture, never
-                        // to the fresh card — a 1px jitter would otherwise yank
-                        // the cursor off the selected level at birth, before
-                        // the first paint even built the hit map. Same guard
-                        // as the paired-release consumption below.
-                        if self
-                            .press_menu_depth
-                            .is_some_and(|d| d != self.menu_stack.len())
+                        MouseEventKind::Moved if !self.menu_stack.is_empty() => {
+                            // the press opened a submenu (form effort row): hover
+                            // between Down and Up belongs to the old gesture, never
+                            // to the fresh card — a 1px jitter would otherwise yank
+                            // the cursor off the selected level at birth, before
+                            // the first paint even built the hit map. Same guard
+                            // as the paired-release consumption below.
+                            if self
+                                .press_menu_depth
+                                .is_some_and(|d| d != self.menu_stack.len())
+                            {
+                                continue;
+                            }
+                            // hover deadzone around the position at menu open:
+                            // ambient jitter on a resting mouse (keyboard-opened
+                            // popups never even had a press) must not yank the
+                            // fresh card's cursor either. Deliberate moves outside
+                            // the 1-cell radius pass through normally.
+                            let at_rest = self.menu_open_mouse.is_some_and(|(r, c)| {
+                                m.row.abs_diff(r) <= 1 && m.column.abs_diff(c) <= 1
+                            });
+                            if !at_rest {
+                                let _ = self.menu_hover(m.row);
+                            }
+                        }
+                        MouseEventKind::Down(MouseButton::Left)
+                            if self.in_input_rect(m.row, m.column) =>
                         {
-                            continue;
+                            self.input_mouse_down(m.row, m.column)
                         }
-                        let _ = self.menu_hover(m.row);
-                    }
-                    MouseEventKind::Down(MouseButton::Left)
-                        if self.in_input_rect(m.row, m.column) =>
-                    {
-                        self.input_mouse_down(m.row, m.column)
-                    }
-                    MouseEventKind::Drag(MouseButton::Left)
-                        if self.input_dragging
-                            || (self.in_input_rect(m.row, m.column)
-                                && self.input.is_selecting()) =>
-                    {
-                        self.input_mouse_drag(m.row, m.column)
-                    }
-                    MouseEventKind::Up(MouseButton::Left)
-                        if self.input_dragging || self.input.is_selecting() =>
-                    {
-                        self.input_mouse_up()
-                    }
-                    MouseEventKind::Down(MouseButton::Left) => self.mouse_down(m.row, m.column),
-                    MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(m.row, m.column),
-                    MouseEventKind::Up(MouseButton::Left) => self.mouse_up(m.row, m.column),
-                    MouseEventKind::Moved => {
-                        // Collapse a hover burst into its last position: only
-                        // it affects highlight/hit-testing, the rest would
-                        // each force a full re-render for nothing.
-                        while matches!(
-                            self.pending_events.front(),
-                            Some(Event::Mouse(nm)) if nm.kind == MouseEventKind::Moved
-                        ) {
-                            self.pending_events.pop_front();
+                        MouseEventKind::Drag(MouseButton::Left)
+                            if self.input_dragging
+                                || (self.in_input_rect(m.row, m.column)
+                                    && self.input.is_selecting()) =>
+                        {
+                            self.input_mouse_drag(m.row, m.column)
                         }
-                        self.mouse_move(m.row)
+                        MouseEventKind::Up(MouseButton::Left)
+                            if self.input_dragging || self.input.is_selecting() =>
+                        {
+                            self.input_mouse_up()
+                        }
+                        MouseEventKind::Down(MouseButton::Left) => self.mouse_down(m.row, m.column),
+                        MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(m.row, m.column),
+                        MouseEventKind::Up(MouseButton::Left) => self.mouse_up(m.row, m.column),
+                        MouseEventKind::Moved => {
+                            // Collapse a hover burst into its last position: only
+                            // it affects highlight/hit-testing, the rest would
+                            // each force a full re-render for nothing.
+                            while matches!(
+                                self.pending_events.front(),
+                                Some(Event::Mouse(nm)) if nm.kind == MouseEventKind::Moved
+                            ) {
+                                self.pending_events.pop_front();
+                            }
+                            self.mouse_move(m.row)
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                },
+                }
                 Event::Paste(p) => {
                     let now = Instant::now();
                     let p = normalize_paste(&p);

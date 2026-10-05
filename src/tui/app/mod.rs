@@ -535,6 +535,15 @@ pub struct App {
     /// the new menu — the up lands outside the fresh card and would close
     /// (or misfire) it instantly.
     press_menu_depth: Option<usize>,
+    /// last seen mouse position, updated on every mouse event: opening a
+    /// menu snapshots it (see menu_open_mouse), so hover can tell ambient
+    /// jitter on a resting mouse from a deliberate move.
+    last_mouse: Option<(u16, u16)>,
+    /// mouse position when the top menu opened: hover within a 1-cell
+    /// radius of it is ambient jitter, not intent — a resting mouse must
+    /// never yank a fresh card's cursor (selected level owns it until a
+    /// deliberate move or click).
+    menu_open_mouse: Option<(u16, u16)>,
     /// semantic drag anchor: (view, segment id, offset within the segment's
     /// contiguous row run). Rows shift under a press while streaming; the id
     /// + offset still names the pressed content when the drag continues.
@@ -1030,6 +1039,8 @@ Continue from the pending step, or report to the user if the settled work looks 
             status_y: 0,
             press: None,
             press_menu_depth: None,
+            last_mouse: None,
+            menu_open_mouse: None,
             press_anchor: None,
             dragging: false,
             sel: None,

@@ -561,6 +561,7 @@ impl App {
     pub(super) fn open_menu(&mut self, menu: Menu) {
         self.menu_stack.push(menu);
         self.menu_sel = 0;
+        self.menu_open_mouse = self.last_mouse;
         self.form_hover_row = None;
         self.form_fields.clear();
         self.form_focus = 0;

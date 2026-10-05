@@ -1148,6 +1148,208 @@ fn submenu_open_jitter_does_not_move_effort_cursor() {
     assert_eq!(app.menu_sel, want, "cursor still on the target level");
 }
 
+/// Keyboard-opened popups never had a press: a resting mouse's ambient
+/// jitter must not yank the fresh card's cursor, but a deliberate move
+/// outside the 1-cell deadzone still hovers normally.
+#[test]
+fn keyboard_open_effort_ignores_resting_mouse_jitter() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.cfg.models.get_mut("m").unwrap().effort = EffortLevel::High;
+    app.model_cfg.effort = EffortLevel::High;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let me = |kind: MouseEventKind, row: u16, col: u16| {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        })
+    };
+    let ctrl_e = Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+    let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+    // phase 1 — geometry discovery: open, paint narrow, record the off row
+    tx.send(ctrl_e.clone()).unwrap();
+    app.poll_input(&rx).unwrap();
+    assert!(
+        matches!(
+            app.cur_menu(),
+            Some(crate::tui::app::menus::Menu::Effort { .. })
+        ),
+        "Ctrl+E must open the Effort menu"
+    );
+    let want = EffortLevel::SELECTABLE
+        .iter()
+        .position(|l| *l == EffortLevel::High)
+        .unwrap();
+    assert_eq!(app.menu_sel, want, "fresh card opens on the session level");
+    let area = Rect::new(0, 0, 40, 20);
+    let mut buf = Buffer::empty(area);
+    app.draw_menu(&mut buf, area);
+    assert!(app.effort_hits.is_empty());
+    let off_row = app.menu_rect.y + 2;
+    let col = app.menu_rect.x + 5;
+    // close, park the mouse exactly on the off row (no menu: chat hover)
+    tx.send(esc).unwrap();
+    app.poll_input(&rx).unwrap();
+    assert!(app.cur_menu().is_none());
+    tx.send(me(MouseEventKind::Moved, off_row, col)).unwrap();
+    app.poll_input(&rx).unwrap();
+    // phase 2 — reopen under the resting mouse, paint, jitter ±1 cell
+    tx.send(ctrl_e).unwrap();
+    app.poll_input(&rx).unwrap();
+    assert!(
+        matches!(
+            app.cur_menu(),
+            Some(crate::tui::app::menus::Menu::Effort { .. })
+        ),
+        "Ctrl+E must reopen the Effort menu"
+    );
+    assert_eq!(
+        app.menu_sel, want,
+        "reopened card opens on the session level"
+    );
+    let mut buf2 = Buffer::empty(area);
+    app.draw_menu(&mut buf2, area);
+    tx.send(me(MouseEventKind::Moved, off_row + 1, col))
+        .unwrap();
+    app.poll_input(&rx).unwrap();
+    assert_eq!(
+        app.menu_sel, want,
+        "resting-mouse jitter must not move the cursor"
+    );
+    // a deliberate move far away hovers normally
+    let max_row = app.menu_rect.y + 2 + 5;
+    tx.send(me(MouseEventKind::Moved, max_row, col)).unwrap();
+    app.poll_input(&rx).unwrap();
+    assert_eq!(app.menu_sel, 5, "deliberate moves still hover");
+}
+
+/// Scoped Effort menu follows the target model, never the session one:
+/// title names the target, cursor and star sit on its level, SetEffort
+/// writes the target and leaves the session model alone.
+#[test]
+fn effort_scoped_menu_follows_target_model_not_session() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.cfg.models.get_mut("m").unwrap().effort = EffortLevel::High;
+    app.model_cfg.effort = EffortLevel::High;
+    let mut other = app.cfg.models["m"].clone();
+    other.effort = EffortLevel::Off;
+    app.cfg.models.insert("other".to_string(), other);
+    app.open_menu(crate::tui::app::menus::Menu::Effort {
+        model: Some("other".to_string()),
+    });
+    assert!(
+        app.menu_title().contains("other"),
+        "title names the target: {}",
+        app.menu_title()
+    );
+    let want = EffortLevel::SELECTABLE
+        .iter()
+        .position(|l| *l == EffortLevel::Off)
+        .unwrap();
+    assert_eq!(app.menu_sel, want, "cursor on the target level");
+    let star = app.menu_rows.iter().position(|(line, _)| {
+        line.spans
+            .first()
+            .is_some_and(|s| s.content.as_ref() == "*")
+    });
+    assert_eq!(star, Some(want), "star on the target level");
+    app.run_action(crate::tui::app::menus::MenuAction::SetEffort(
+        EffortLevel::Max,
+    ));
+    assert_eq!(
+        app.cfg.models.get("other").unwrap().effort,
+        EffortLevel::Max,
+        "write lands on the target"
+    );
+    assert_eq!(
+        app.cfg.models.get("m").unwrap().effort,
+        EffortLevel::High,
+        "session model untouched"
+    );
+    assert_eq!(app.model_cfg.effort, EffortLevel::High);
+}
+
+/// Missing scoped key falls back to the session level — cursor and star
+/// agree with each other either way.
+#[test]
+fn effort_scoped_menu_missing_key_falls_back_to_session() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.cfg.models.get_mut("m").unwrap().effort = EffortLevel::High;
+    app.model_cfg.effort = EffortLevel::High;
+    app.open_menu(crate::tui::app::menus::Menu::Effort {
+        model: Some("ghost".to_string()),
+    });
+    let want = EffortLevel::SELECTABLE
+        .iter()
+        .position(|l| *l == EffortLevel::High)
+        .unwrap();
+    assert_eq!(app.menu_sel, want, "cursor falls back to session");
+    let star = app.menu_rows.iter().position(|(line, _)| {
+        line.spans
+            .first()
+            .is_some_and(|s| s.content.as_ref() == "*")
+    });
+    assert_eq!(star, Some(want), "star agrees with cursor on fallback");
+}
+
+/// Full path through the edit form: clicking the effort row opens the
+/// menu scoped to the edited model, cursor and star on its level in both
+/// wide (slider) and narrow (list) paint.
+#[test]
+fn effort_scoped_menu_via_form_click() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.cfg.models.get_mut("m").unwrap().effort = EffortLevel::High;
+    app.model_cfg.effort = EffortLevel::High;
+    let mut other = app.cfg.models["m"].clone();
+    other.effort = EffortLevel::Off;
+    app.cfg.models.insert("other".to_string(), other);
+    app.open_menu(crate::tui::app::menus::Menu::EditModel {
+        provider: "p".into(),
+        key: Some("other".into()),
+    });
+    assert_eq!(app.form_fields.len(), 4);
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    app.draw_menu(&mut buf, area);
+    // click the effort row (title + air row precede the fields)
+    let row = app.menu_rect.y + 2 + 3;
+    let col = app.menu_rect.x + app.menu_rect.width.saturating_sub(2);
+    app.form_mouse_down(row, col);
+    assert!(
+        matches!(
+            app.cur_menu(),
+            Some(crate::tui::app::menus::Menu::Effort { model: Some(k) })
+            if k.as_str() == "other"
+        ),
+        "must open scoped, got title {:?}",
+        app.menu_title()
+    );
+    let want = EffortLevel::SELECTABLE
+        .iter()
+        .position(|l| *l == EffortLevel::Off)
+        .unwrap();
+    assert_eq!(app.menu_sel, want, "cursor after form click");
+    // wide draw keeps the cursor on the target level
+    app.draw_menu(&mut buf, area);
+    assert_eq!(app.menu_sel, want, "cursor after wide draw");
+    assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
+    // narrow draw stars the target level
+    let mut nbuf = Buffer::empty(Rect::new(0, 0, 40, 20));
+    app.draw_menu(&mut nbuf, Rect::new(0, 0, 40, 20));
+    let star = app.menu_rows.iter().position(|(line, _)| {
+        line.spans
+            .first()
+            .is_some_and(|s| s.content.as_ref() == "*")
+    });
+    assert_eq!(star, Some(want), "narrow list star after form click");
+}
+
 #[test]
 fn effort_slider_colors_span_gray_to_magenta() {
     use crate::tui::theme::Theme;
