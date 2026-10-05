@@ -683,6 +683,85 @@ pub(crate) async fn bash_call(
     run_tool_blocking(ctx, "bash", &call.args).await
 }
 
+/// File writes to frozen check inputs: pure additions flow (dispatch
+/// re-freezes the extended file), oracle rewrites need user approval.
+/// Mirrors the bash approval flow; subagents cannot prompt. The verdict is
+/// predicted from the call arguments before anything touches disk, so an
+/// approval dialog always shows the exact proposed diff.
+pub(crate) async fn file_tool_call(
+    call: &ToolCallReq,
+    ctx: &mut ToolCtx,
+    tx: &mpsc::Sender<AgentEvent>,
+    ctl: &mut mpsc::Receiver<ControlMsg>,
+    next_id: &mut u64,
+    subagent_depth: u8,
+    approved_frozen: &mut Vec<String>,
+) -> tools::Outcome {
+    if !matches!(
+        call.name.as_str(),
+        "write" | "edit" | "multi_edit" | "patch"
+    ) {
+        return run_tool_blocking(ctx, &call.name, &call.args).await;
+    }
+    // one-shot approvals must not leak across calls: the per-call list is
+    // rebuilt from session grants every time, RunOnce adds for this call only
+    ctx.approved_frozen.retain(|p| approved_frozen.contains(p));
+    let (path, preview) = match tools::frozen_write_verdict(ctx, &call.name, &call.args) {
+        tools::FrozenVerdict::Clear | tools::FrozenVerdict::Additive { .. } => {
+            return run_tool_blocking(ctx, &call.name, &call.args).await;
+        }
+        tools::FrozenVerdict::Modify { path, preview } => (path, preview),
+    };
+    if approved_frozen.iter().any(|p| p == &path) {
+        ctx.approved_frozen.push(path);
+        return run_tool_blocking(ctx, &call.name, &call.args).await;
+    }
+    if subagent_depth > 0 {
+        return tools::Outcome::err(format!(
+            "frozen check input '{path}': editing it changes the check, not the code under test — subagents cannot prompt for approval"
+        ));
+    }
+    let id = *next_id;
+    *next_id += 1;
+    let reason = format!(
+        "frozen check input '{path}' would change oracle lines (additions flow without asking):\n{preview}\nAllow the edit and re-freeze the file?"
+    );
+    if tx
+        .send(AgentEvent::Approval {
+            id,
+            command: format!("{} {path}", call.name),
+            reason: reason.clone(),
+        })
+        .await
+        .is_err()
+    {
+        return tools::Outcome::err("tui closed awaiting approval");
+    }
+    let decision = loop {
+        match ctl.recv().await {
+            Some(ControlMsg::ApprovalAnswer { id: aid, decision }) if aid == id => {
+                break decision;
+            }
+            Some(_) => continue,
+            None => return tools::Outcome::err("agent cancelled awaiting approval"),
+        }
+    };
+    match decision {
+        ApprovalDecision::Deny => {
+            tools::Outcome::err(format!("frozen check input edit denied by user ({reason})"))
+        }
+        ApprovalDecision::RunOnce => {
+            ctx.approved_frozen.push(path);
+            run_tool_blocking(ctx, &call.name, &call.args).await
+        }
+        ApprovalDecision::AlwaysSession => {
+            approved_frozen.push(path.clone());
+            ctx.approved_frozen.push(path);
+            run_tool_blocking(ctx, &call.name, &call.args).await
+        }
+    }
+}
+
 /// Execute a tool handler on a dedicated blocking thread.
 ///
 /// `tools::execute` can run for a long time (e.g. `bash` up to its timeout), and
@@ -714,6 +793,7 @@ pub(crate) async fn run_tool_blocking(
     });
     ctx.journal = exec_ctx.journal;
     ctx.files_read = exec_ctx.files_read;
+    ctx.read_windows = exec_ctx.read_windows;
     outcome
 }
 

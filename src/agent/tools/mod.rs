@@ -20,8 +20,9 @@ pub(crate) mod web;
 pub(crate) use ctx::{MIN_PLAN_BUDGET_TOKENS, ReadState, ToolCtx};
 pub(crate) use dispatch::{FileDiff, Outcome, bg_running_commands, execute, kill_remaining_jobs};
 pub(crate) use policy::{
-    bash_scope_hit, forbidden_command, frozen_input_command_hit, register_mention_prereads,
-    register_subagent_scope, take_mention_prereads, take_subagent_scope,
+    FrozenVerdict, bash_scope_hit, forbidden_command, frozen_input_command_hit,
+    frozen_write_verdict, register_mention_prereads, register_subagent_scope,
+    take_mention_prereads, take_subagent_scope,
 };
 pub(crate) use specs::{
     Kind, call_args_for_journal, call_path, call_summary, decode_child_output,
@@ -3337,6 +3338,69 @@ mod tests {
             &json!({"file_path": "tests/auth.rs", "old_string": "fn t() {}", "new_string": "fn t() { assert!(true) }"}),
         );
         assert!(allowed.ok, "{}", allowed.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Pure additions to a frozen input flow without asking: appending a
+    /// test extends the check instead of rewriting it, and the host
+    /// re-freezes the extended file. Rewriting oracle lines still refuses.
+    #[test]
+    fn additive_write_to_frozen_input_flows_and_refreezes() {
+        let (mut ctx, dir) = proj();
+        fs::create_dir_all(dir.join("tests")).unwrap();
+        fs::write(dir.join("tests/auth.rs"), "fn t() {}\n").unwrap();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "additive",
+                "acceptance": ["cmd: exit 3"],
+                "steps": [{"title": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let before = plan::open_active(&dir).unwrap().unwrap().acceptance[0].inputs[0]
+            .hash
+            .clone();
+
+        assert!(execute(&mut ctx, "read", &json!({"file_path": "tests/auth.rs"})).ok);
+        let added = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "tests/auth.rs", "old_string": "fn t() {}\n", "new_string": "fn t() {}\n#[test]\nfn u() {}\n"}),
+        );
+        assert!(added.ok, "{}", added.output);
+        assert!(
+            added.output.contains("re-captured"),
+            "must say the baseline moved: {}",
+            added.output
+        );
+        let after = plan::open_active(&dir).unwrap().unwrap().acceptance[0].inputs[0]
+            .hash
+            .clone();
+        assert_ne!(before, after, "extended file becomes the new baseline");
+
+        // rewriting an oracle line still refuses, with a diff preview
+        let refused = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "tests/auth.rs", "old_string": "fn t() {}", "new_string": "fn t() { assert!(true) }"}),
+        );
+        assert!(!refused.ok, "{}", refused.output);
+        assert!(
+            refused.output.contains("frozen_input"),
+            "{}",
+            refused.output
+        );
+
+        // a loop-level approval rides approved_frozen for the call
+        ctx.approved_frozen.push("tests/auth.rs".to_string());
+        let approved = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "tests/auth.rs", "old_string": "fn t() {}", "new_string": "fn t() { assert!(true) }"}),
+        );
+        assert!(approved.ok, "{}", approved.output);
         fs::remove_dir_all(&dir).ok();
     }
 

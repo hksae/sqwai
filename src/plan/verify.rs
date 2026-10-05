@@ -1,7 +1,8 @@
 use super::ops::{accept, reject};
 use super::{
     Acceptance, AcceptanceKind, AcceptanceStatus, Applied, Baseline, CheckInput, EvidenceRef, Plan,
-    PlanStatus, Receipt, Rejection, ShapeFreeze, Snapshot, StepStatus, ValidationStatus,
+    PlanStatus, Receipt, Rejection, ShapeFreeze, Snapshot, StepStatus, ValidationStatus, commit,
+    open_active_for_session,
 };
 use std::path::Path;
 
@@ -256,6 +257,62 @@ pub fn set_inputs(plan: &mut Plan, inputs: Vec<Vec<CheckInput>>) {
     }
 }
 
+/// Re-freeze one path across the session's active plan after an approved
+/// or additive edit: new hash + new blob for every item pinning it, and
+/// Passed validations drop to Stale — the check changed under a green
+/// verdict, so it must run again. Committed journal-first (op
+/// `rebaseline`, actor `host`), like every other plan mutation.
+/// Returns true when anything changed.
+pub fn rebaseline_input(root: &Path, session_id: &str, path: &str) -> bool {
+    let mut plan = match open_active_for_session(root, Some(session_id)) {
+        Ok(Some(plan)) => plan,
+        _ => return false,
+    };
+    let bytes = match std::fs::read(root.join(path)) {
+        Ok(bytes) => bytes,
+        Err(_) => return false,
+    };
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    let blob = (bytes.len() <= CHECK_INPUT_MAX_BLOB_BYTES)
+        .then(|| crate::agent::blobs::put(root, &bytes).ok())
+        .flatten();
+    let mut changed = false;
+    for item in plan.acceptance.iter_mut().filter(|item| {
+        item.status != AcceptanceStatus::Waived
+            && item.inputs.iter().any(|input| input.path == path)
+    }) {
+        let mut item_changed = false;
+        for input in item.inputs.iter_mut().filter(|input| input.path == path) {
+            if input.hash != hash || input.blob != blob {
+                input.hash = hash.clone();
+                input.blob = blob.clone();
+                item_changed = true;
+            }
+        }
+        if item_changed {
+            changed = true;
+            if item.validation.status == ValidationStatus::Passed {
+                item.validation.status = ValidationStatus::Stale;
+            }
+        }
+    }
+    if !changed {
+        return false;
+    }
+    plan.revision += 1;
+    plan.rejections_in_a_row = 0;
+    commit(
+        root,
+        session_id,
+        &mut plan,
+        "rebaseline",
+        "host",
+        true,
+        serde_json::json!({"path": path}),
+    )
+    .is_ok()
+}
+
 /// Directories whose whole subtrees are check inputs by convention.
 const CHECK_INPUT_DIRS: &[&str] = &["tests", "test", "spec", "specs", "fixtures", "snapshots"];
 
@@ -266,6 +323,10 @@ const CHECK_INPUT_SKIPS: &[&str] = &[".git", ".sqwai", "target", "node_modules"]
 /// Caps: freezing is plan-time overhead on every create.
 const CHECK_INPUT_MAX_FILES: usize = 500;
 const CHECK_INPUT_MAX_BYTES: u64 = 2_000_000;
+/// Blob storage cap per input: content over this keeps its hash but no
+/// copy — additive checks need the bytes, so oversized inputs fall back
+/// to refuse rather than a wrong allow.
+const CHECK_INPUT_MAX_BLOB_BYTES: usize = 256 * 1024;
 
 /// Hash the check inputs that exist right now: test and fixture files by
 /// conventional layout. Sorted for determinism. Only pre-existing files
@@ -286,9 +347,13 @@ pub fn freeze_check_inputs(root: &Path) -> Vec<CheckInput> {
             if bytes.len() as u64 > CHECK_INPUT_MAX_BYTES {
                 return None;
             }
+            let blob = (bytes.len() <= CHECK_INPUT_MAX_BLOB_BYTES)
+                .then(|| crate::agent::blobs::put(root, &bytes).ok())
+                .flatten();
             Some(CheckInput {
                 path,
                 hash: blake3::hash(&bytes).to_hex().to_string(),
+                blob,
             })
         })
         .collect()

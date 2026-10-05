@@ -5,8 +5,8 @@ use super::fs;
 use super::git;
 use super::outline;
 use super::policy::{
-    bash_scope_hit, commanded_verify_refs, frozen_input_hit, in_write_scope, mutation_target_paths,
-    step_epoch_current,
+    FrozenVerdict, bash_scope_hit, commanded_verify_refs, frozen_write_verdict, in_write_scope,
+    mutation_target_paths, step_epoch_current,
 };
 use super::specs;
 use super::verify::{
@@ -193,24 +193,40 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         );
     }
     // Frozen check inputs: editing a test/fixture the active plan froze at
-    // create changes the check, not the code. Refuse; the user takes
-    // responsibility by waiving the item (/plan waive) or surrendering a
+    // create changes the check, not the code. Pure additions (new tests,
+    // new fixture rows) flow through and the host re-freezes the extended
+    // file; anything rewriting frozen lines needs user approval (the agent
+    // loop asks), a restore, a waiver (/plan waive) or a surrendered
     // contradictory spec (block_plan). New files stay writable — rung 2
-    // lives on that.
-    if matches!(name, "write" | "edit" | "multi_edit" | "patch")
-        && let Some(path) = frozen_input_hit(ctx, name, args)
-    {
-        return Outcome::err(
-            serde_json::json!({
-                "ok": false,
-                "code": "frozen_input",
-                "reason": format!(
-                    "'{path}' is a frozen check input: editing it changes the check, not the code under test"
-                ),
-                "hint": "restore the file, have the user waive the acceptance item (/plan waive), or surrender a contradictory spec with block_plan",
-            })
-            .to_string(),
-        );
+    // lives on that. An approval granted by the loop rides
+    // `approved_frozen` for this call.
+    let mut pending_refreeze: Option<String> = None;
+    if matches!(name, "write" | "edit" | "multi_edit" | "patch") {
+        match frozen_write_verdict(ctx, name, args) {
+            FrozenVerdict::Clear => {}
+            FrozenVerdict::Additive { path } => {
+                pending_refreeze = Some(path);
+            }
+            FrozenVerdict::Modify { path, .. }
+                if ctx.approved_frozen.iter().any(|p| p == &path) =>
+            {
+                pending_refreeze = Some(path);
+            }
+            FrozenVerdict::Modify { path, preview } => {
+                return Outcome::err(
+                    serde_json::json!({
+                        "ok": false,
+                        "code": "frozen_input",
+                        "reason": format!(
+                            "'{path}' is a frozen check input: editing it changes the check, not the code under test"
+                        ),
+                        "hint": "restore the file, have the user waive the acceptance item (/plan waive), or surrender a contradictory spec with block_plan",
+                        "preview": preview,
+                    })
+                    .to_string(),
+                );
+            }
+        }
     }
     // Writer-subagent scope: a child declared its roots at spawn, and every
     // file mutation must sit inside them. Read-only children never reach
@@ -285,7 +301,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             );
         }
     }
-    match name {
+    let mut outcome = match name {
         "read" => fs::read(ctx, args["file_path"].as_str().unwrap_or_default(), args),
         "write" => fs::write_file(
             ctx,
@@ -615,7 +631,20 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         }
         "journal" => journal_op(ctx, args),
         other => Outcome::err(format!("unknown tool '{other}'")),
+    };
+    // An additive (or approved) write to a frozen input went through: the
+    // extended file becomes the new baseline, and Passed verdicts on it go
+    // Stale — the check changed, so it must run again. Visible in the
+    // outcome; the edit's own file_diff record carries the audit trail.
+    if outcome.ok
+        && let Some(path) = pending_refreeze
+        && plan::rebaseline_input(&ctx.root, &ctx.session_id, &path)
+    {
+        outcome.output.push_str(&format!(
+            "\nfrozen baseline re-captured for {path}: extend, don't rewrite"
+        ));
     }
+    outcome
 }
 
 /// The `journal` tool: a read-only projection of the host journal (§2.2).

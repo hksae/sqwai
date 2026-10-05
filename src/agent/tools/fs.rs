@@ -241,7 +241,12 @@ fn normalize_to_lf(s: &str) -> String {
     s.replace("\r\n", "\n")
 }
 
-fn apply_one(content: &str, old: &str, new: &str, replace_all: bool) -> Result<String, String> {
+pub(super) fn apply_one(
+    content: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+) -> Result<String, String> {
     if old.is_empty() {
         return err("old_string must not be empty");
     }

@@ -82,6 +82,11 @@ pub struct ToolCtx {
     /// model-typed or project-injected via `cmd: $name` — cannot run what
     /// the user explicitly blocked. Empty in unit tests (no policy).
     pub blocked_patterns: Vec<String>,
+    /// Frozen inputs the loop approved for this call after a user approval
+    /// dialog (additive writes never land here — they flow without asking).
+    /// Checked by dispatch; the loop owns the lifetime (one-shot vs session
+    /// grants), so blocking dispatch clones never need merging back.
+    pub approved_frozen: Vec<String>,
 }
 
 impl ToolCtx {
@@ -112,6 +117,7 @@ impl ToolCtx {
             subagent_write_paths: None,
             parent_session: None,
             blocked_patterns: Vec::new(),
+            approved_frozen: Vec::new(),
         }
     }
 

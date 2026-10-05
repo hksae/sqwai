@@ -21,7 +21,8 @@ use crate::agent::context;
 use crate::agent::tools::{self, ToolCtx};
 use crate::plan;
 use loop_ask::{
-    ask_user, bash_call, is_accepted_memory_answer, propose_plan, propose_reset, run_tool_blocking,
+    ask_user, bash_call, file_tool_call, is_accepted_memory_answer, propose_plan, propose_reset,
+    run_tool_blocking,
 };
 use loop_compact::{
     CompactionPrefix, compact_history, effort_ignored_reason, plan_hint_for_summary,
@@ -789,6 +790,9 @@ async fn run_agent(
         })
         .unwrap_or_default();
     let mut always_allow: Vec<String> = Vec::new();
+    // frozen inputs approved for the whole session (AlwaysSession
+    // answers); one-shot approvals ride the call, not this list
+    let mut approved_frozen: Vec<String> = Vec::new();
     let mut memory_proposals_this_turn: u8;
     let mut next_id: u64 = 0;
     // prompt size of the last request, as reported by the provider
@@ -1578,6 +1582,18 @@ async fn run_agent(
                                 }
                                 Err(e) => tools::Outcome::err(format!("MCP call failed: {e:#}")),
                             }
+                        }
+                        "write" | "edit" | "multi_edit" | "patch" => {
+                            file_tool_call(
+                                call,
+                                &mut ctx,
+                                &tx,
+                                &mut ctl,
+                                &mut next_id,
+                                subagent_depth,
+                                &mut approved_frozen,
+                            )
+                            .await
                         }
                         other => run_tool_blocking(&mut ctx, other, &call.args).await,
                     }
@@ -3097,6 +3113,114 @@ mod effort_tests {
         assert_eq!(
             plan::open(&dir, &plan2.id).unwrap().status,
             plan::PlanStatus::Active
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `file_tool_call` on a frozen oracle line: Deny refuses without
+    /// touching the file; RunOnce approves, edits, and re-freezes. The
+    /// approval dialog carries the proposed diff, not just a path.
+    #[tokio::test]
+    async fn file_tool_call_asks_before_rewriting_oracle_lines() {
+        use tokio::sync::mpsc;
+        async fn run_edit(
+            dir: &std::path::Path,
+            session: &str,
+            decision: ApprovalDecision,
+            approved: &mut Vec<String>,
+        ) -> tools::Outcome {
+            let call = ToolCallReq::new(
+                "c1",
+                "edit",
+                serde_json::json!({
+                    "file_path": "tests/auth.rs",
+                    "old_string": "fn t() {}",
+                    "new_string": "fn t() { assert!(true) }",
+                }),
+            );
+            let mut ctx = tools::ToolCtx::new(dir).in_session(session.to_string());
+            // read first: the verdict must be about the freeze, not the guard
+            assert!(
+                tools::execute(
+                    &mut ctx,
+                    "read",
+                    &serde_json::json!({"file_path": "tests/auth.rs"})
+                )
+                .ok
+            );
+            let (tx_agent, mut rx_ui) = mpsc::channel::<AgentEvent>(8);
+            let (tx_ui, mut rx_agent) = mpsc::channel::<ControlMsg>(8);
+            let mut next_id = 0u64;
+            let future = file_tool_call(
+                &call,
+                &mut ctx,
+                &tx_agent,
+                &mut rx_agent,
+                &mut next_id,
+                0,
+                approved,
+            );
+            tokio::pin!(future);
+            loop {
+                tokio::select! {
+                    out = &mut future => break out,
+                    ev = rx_ui.recv() => {
+                        if let Some(AgentEvent::Approval { id, command, reason }) = ev {
+                            assert!(command.contains("tests/auth.rs"), "{command}");
+                            assert!(reason.contains("oracle"), "{reason}");
+                            tx_ui
+                                .send(ControlMsg::ApprovalAnswer { id, decision })
+                                .await
+                                .unwrap();
+                        }
+                    }
+                }
+            }
+        }
+
+        let dir =
+            std::env::temp_dir().join(format!("sqwai-frozen-approval-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("tests/auth.rs"), "fn t() {}\n").unwrap();
+        let session = "frozen-approval";
+        let mut plan = plan::create(
+            "goal".to_string(),
+            Vec::new(),
+            vec!["cmd: exit 3".to_string()],
+            vec![plan::NewStep {
+                title: "work".into(),
+                refs: Vec::new(),
+            }],
+            1000,
+            &plan::Limits::default(),
+        )
+        .unwrap();
+        plan.sessions = vec![session.to_string()];
+        plan::set_inputs(&mut plan, vec![plan::freeze_check_inputs(&dir)]);
+        plan::store(&dir, &plan).unwrap();
+
+        // deny: refused, file untouched
+        let mut approved = Vec::new();
+        let denied = run_edit(&dir, session, ApprovalDecision::Deny, &mut approved).await;
+        assert!(!denied.ok, "{}", denied.output);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("tests/auth.rs")).unwrap(),
+            "fn t() {}\n"
+        );
+
+        // approve once: edits, re-freezes, dialog not shown again for this call
+        let ok = run_edit(&dir, session, ApprovalDecision::RunOnce, &mut approved).await;
+        assert!(ok.ok, "{}", ok.output);
+        assert!(
+            ok.output.contains("re-captured"),
+            "must say the baseline moved: {}",
+            ok.output
+        );
+        assert!(
+            std::fs::read_to_string(dir.join("tests/auth.rs"))
+                .unwrap()
+                .contains("assert!(true)")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

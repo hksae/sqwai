@@ -35,8 +35,8 @@ pub(crate) use verify::{Rung, ladder_top, legacy_passed};
 pub use verify::{
     changed_check_inputs, check_definition_hash, differential_current, digest_paths,
     freeze_check_inputs, frozen_input_paths, ladder_note, ladder_rung, proven_failing,
-    set_baselines, set_inputs, set_shapes, set_snapshots, signatures_current, snapshot_current,
-    state_digest, verify_acceptance,
+    rebaseline_input, set_baselines, set_inputs, set_shapes, set_snapshots, signatures_current,
+    snapshot_current, state_digest, verify_acceptance,
 };
 pub(crate) use verify::{complete, next_id};
 
@@ -415,6 +415,11 @@ pub struct CheckInput {
     pub path: String,
     /// blake3 of the file bytes at capture
     pub hash: String,
+    /// blob id of the content at capture (additive-silent): lets the host
+    /// tell appended lines from rewritten oracle lines. `None` on legacy
+    /// plans and files too large to keep — those fall back to refuse.
+    #[serde(default)]
+    pub blob: Option<String>,
 }
 
 /// One host run of a `cmd:` acceptance item that failed, kept as the item's
@@ -2497,6 +2502,7 @@ mod tests {
         let inputs = vec![CheckInput {
             path: "tests/a.rs".to_string(),
             hash: "h".to_string(),
+            blob: None,
         }];
         set_inputs(&mut plan, vec![inputs.clone(), inputs]);
         assert_eq!(frozen_input_paths(&plan).len(), 2);
@@ -2804,6 +2810,38 @@ mod tests {
             .unwrap()
             .expect("active plan");
         assert_eq!(same.applied_event, cursor);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rebaseline_input_updates_hash_blob_and_stales_passed() {
+        let dir = std::env::temp_dir().join(format!("sqwai-plan-rebase-{}", new_id()));
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("tests/f.rs"), "fn f() {}\n").unwrap();
+        let mut plan = new_plan();
+        plan.sessions = vec!["sess".to_string()];
+        set_inputs(&mut plan, vec![freeze_check_inputs(&dir)]);
+        // pretend the check passed on the frozen content
+        plan.acceptance[0].validation.status = ValidationStatus::Passed;
+        store(&dir, &plan).unwrap();
+        let before = plan.acceptance[0].inputs[0].hash.clone();
+        assert!(plan.acceptance[0].inputs[0].blob.is_some());
+        // pure addition: the extended file becomes the new baseline
+        std::fs::write(dir.join("tests/f.rs"), "fn f() {}\n#[test]\nfn g() {}\n").unwrap();
+        assert!(rebaseline_input(&dir, "sess", "tests/f.rs"));
+        let reloaded = open_active_for_session(&dir, Some("sess"))
+            .unwrap()
+            .expect("active plan");
+        assert_ne!(reloaded.acceptance[0].inputs[0].hash, before);
+        assert_eq!(
+            reloaded.acceptance[0].validation.status,
+            ValidationStatus::Stale,
+            "a check changed under green must run again"
+        );
+        assert!(reloaded.applied_event.is_some(), "rebaseline commits");
+        // unknown path and missing session: silent no-ops
+        assert!(!rebaseline_input(&dir, "sess", "tests/nope.rs"));
+        assert!(!rebaseline_input(&dir, "other", "tests/f.rs"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

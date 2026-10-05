@@ -281,6 +281,150 @@ pub(crate) fn frozen_input_hit(ctx: &ToolCtx, name: &str, args: &Value) -> Optio
         .find(|clean| frozen.iter().any(|f| f == clean))
 }
 
+/// Verdict on a write to a frozen check input: the gate predicts from the
+/// call arguments, before anything touches disk.
+pub(crate) enum FrozenVerdict {
+    /// no frozen input targeted — proceed normally
+    Clear,
+    /// pure addition to the frozen baseline (new test, new fixture rows):
+    /// proceed, the host re-freezes afterwards
+    Additive { path: String },
+    /// existing frozen lines would change: needs user approval. `preview`
+    /// is the frozen-vs-proposed diff for the dialog.
+    Modify { path: String, preview: String },
+}
+
+/// Predict whether a file-writing call extends frozen check inputs or
+/// rewrites them. `write` carries its content; `edit`/`multi_edit` are
+/// simulated against the current file bytes, so the verdict sees exactly
+/// what would land. `patch` cannot be simulated — it always needs approval.
+pub(crate) fn frozen_write_verdict(ctx: &ToolCtx, name: &str, args: &Value) -> FrozenVerdict {
+    let Some(hit) = frozen_input_hit(ctx, name, args) else {
+        return FrozenVerdict::Clear;
+    };
+    let plan = match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
+        Ok(Some(plan)) => plan,
+        _ => {
+            return FrozenVerdict::Modify {
+                path: hit,
+                preview: "plan unreadable — cannot prove the write is additive".into(),
+            };
+        }
+    };
+    let input = plan
+        .acceptance
+        .iter()
+        .filter(|item| item.status != plan::AcceptanceStatus::Waived)
+        .flat_map(|item| item.inputs.iter())
+        .find(|input| input.path == hit);
+    let Some(input) = input else {
+        // raced with a waiver between hit and lookup: nothing frozen now
+        return FrozenVerdict::Clear;
+    };
+    let proposed: Option<String> = match name {
+        "write" => args["content"].as_str().map(str::to_string),
+        "edit" => {
+            let current = std::fs::read_to_string(ctx.root.join(&hit)).ok();
+            current.and_then(|content| {
+                super::fs::apply_one(
+                    &content,
+                    args["old_string"].as_str().unwrap_or_default(),
+                    args["new_string"].as_str().unwrap_or_default(),
+                    args["replace_all"].as_bool().unwrap_or(false),
+                )
+                .ok()
+            })
+        }
+        "multi_edit" => {
+            let Ok(current) = std::fs::read_to_string(ctx.root.join(&hit)) else {
+                return FrozenVerdict::Modify {
+                    path: hit,
+                    preview: "file unreadable — cannot prove the write is additive".into(),
+                };
+            };
+            let Some(edits) = args["edits"].as_array() else {
+                return FrozenVerdict::Modify {
+                    path: hit,
+                    preview: "edits unreadable — cannot prove the write is additive".into(),
+                };
+            };
+            let mut staged = current;
+            let mut failed = false;
+            for edit in edits {
+                match super::fs::apply_one(
+                    &staged,
+                    edit["old_string"].as_str().unwrap_or_default(),
+                    edit["new_string"].as_str().unwrap_or_default(),
+                    edit["replace_all"].as_bool().unwrap_or(false),
+                ) {
+                    Ok(next) => staged = next,
+                    Err(_) => {
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            if failed {
+                return FrozenVerdict::Modify {
+                    path: hit,
+                    preview: "edits do not apply — cannot prove the write is additive".into(),
+                };
+            }
+            Some(staged)
+        }
+        _ => None,
+    };
+    let (Some(proposed), Some(frozen)) = (
+        proposed,
+        input.blob.as_deref().and_then(|id| {
+            crate::agent::blobs::get(&ctx.root, id)
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+        }),
+    ) else {
+        return FrozenVerdict::Modify {
+            path: hit,
+            preview: "no frozen copy to judge against — only the user can allow this".into(),
+        };
+    };
+    match additive_only(&frozen, &proposed) {
+        true => FrozenVerdict::Additive { path: hit },
+        false => FrozenVerdict::Modify {
+            path: hit,
+            preview: compact_diff(&frozen, &proposed),
+        },
+    }
+}
+
+/// Pure-addition check over two texts (frozen baseline first): every
+/// baseline line must survive in order. Extracted so tools can judge a
+/// simulated post-edit text without touching the plan store.
+pub(crate) fn additive_only(frozen: &str, new_content: &str) -> bool {
+    let mut rest = frozen.lines().peekable();
+    for line in new_content.lines() {
+        if rest.peek() == Some(&line) {
+            rest.next();
+        }
+    }
+    rest.next().is_none()
+}
+
+/// First lines of a unified diff for approval dialogs: the user approves
+/// an intent, not a wall of text.
+fn compact_diff(before: &str, after: &str) -> String {
+    const MAX_DIFF_LINES: usize = 40;
+    let diff = super::fs::make_diff(before, after);
+    let lines: Vec<&str> = diff.lines().collect();
+    if lines.len() <= MAX_DIFF_LINES {
+        return diff;
+    }
+    let mut out = lines[..MAX_DIFF_LINES].join("\n");
+    out.push_str(&format!(
+        "\n…({} more diff lines)",
+        lines.len() - MAX_DIFF_LINES
+    ));
+    out
+}
 /// Lexically clean a relative path: drop `.`, resolve `..` against the
 /// stack. No filesystem access — the jail verdict already came from
 /// `resolve`.
@@ -518,4 +662,41 @@ pub(crate) fn forbidden_command(patterns: &[String], command: &str) -> Option<St
         .filter(|p| !p.trim().is_empty())
         .find(|p| lower.contains(&p.to_lowercase()))
         .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn additive_only_accepts_appended_lines() {
+        let frozen = "fn a() {}\nfn b() {}\n";
+        assert!(additive_only(frozen, "fn a() {}\nfn b() {}\nfn c() {}\n"));
+        // identical content is trivially additive
+        assert!(additive_only(frozen, frozen));
+        // prepended lines keep every frozen line in order
+        assert!(additive_only(frozen, "// header\nfn a() {}\nfn b() {}\n"));
+    }
+
+    #[test]
+    fn additive_only_rejects_rewrites_and_deletions() {
+        let frozen = "fn a() {}\nfn b() {}\n";
+        // modified oracle line
+        assert!(!additive_only(
+            frozen,
+            "fn a() {}\nfn b() { assert!(true) }\n"
+        ));
+        // deleted line
+        assert!(!additive_only(frozen, "fn a() {}\n"));
+        // empty replacement
+        assert!(!additive_only(frozen, ""));
+    }
+
+    #[test]
+    fn additive_only_rejects_moved_blocks() {
+        // same lines, different order: reads as delete+insert, correctly
+        // non-additive — order can carry meaning (fixture rows, tests)
+        let frozen = "one\ntwo\nthree\n";
+        assert!(!additive_only(frozen, "three\ntwo\none\n"));
+    }
 }
