@@ -794,38 +794,40 @@ impl App {
         if self.session.prev_turn_aborted {
             self.session.prev_turn_aborted = false;
             self.session.save().ok();
-            let state = crate::plan::open_active_for_session(&root, Some(&self.session.id.to_string()))
-                .ok()
-                .flatten()
-                .map(|plan| {
-                    let done: Vec<String> = plan
-                        .steps
-                        .iter()
-                        .filter(|s| {
-                            matches!(
-                                s.status,
-                                crate::plan::StepStatus::Done | crate::plan::StepStatus::Cancelled
-                            )
-                        })
-                        .map(|s| s.id.clone())
-                        .collect();
-                    let pending: Vec<String> = plan
-                        .steps
-                        .iter()
-                        .filter(|s| {
-                            matches!(
-                                s.status,
-                                crate::plan::StepStatus::InProgress
-                                    | crate::plan::StepStatus::Pending
-                                    | crate::plan::StepStatus::Blocked
-                                    | crate::plan::StepStatus::Reopened
-                            )
-                        })
-                        .map(|s| s.id.clone())
-                        .collect();
-                    format!("done=[{}] pending=[{}]", done.join(","), pending.join(","))
-                })
-                .unwrap_or_else(|| "no active plan".to_string());
+            let state =
+                crate::plan::open_active_for_session(&root, Some(&self.session.id.to_string()))
+                    .ok()
+                    .flatten()
+                    .map(|plan| {
+                        let done: Vec<String> = plan
+                            .steps
+                            .iter()
+                            .filter(|s| {
+                                matches!(
+                                    s.status,
+                                    crate::plan::StepStatus::Done
+                                        | crate::plan::StepStatus::Cancelled
+                                )
+                            })
+                            .map(|s| s.id.clone())
+                            .collect();
+                        let pending: Vec<String> = plan
+                            .steps
+                            .iter()
+                            .filter(|s| {
+                                matches!(
+                                    s.status,
+                                    crate::plan::StepStatus::InProgress
+                                        | crate::plan::StepStatus::Pending
+                                        | crate::plan::StepStatus::Blocked
+                                        | crate::plan::StepStatus::Reopened
+                                )
+                            })
+                            .map(|s| s.id.clone())
+                            .collect();
+                        format!("done=[{}] pending=[{}]", done.join(","), pending.join(","))
+                    })
+                    .unwrap_or_else(|| "no active plan".to_string());
             parts.push(SystemPart::volatile(format!(
                 "The previous turn was stopped by the user mid-work; the transcript above is complete. \
 Steps marked done are settled — do not redo them, do not re-verify them. \
@@ -4951,7 +4953,11 @@ Continue from the pending step, or report to the user if the settled work looks 
     /// the transcript, and a killed task takes it along. Same rebase
     /// discipline as finish_turn_ok — compaction may have replaced the
     /// prefix mid-turn.
-    fn persist_transcript(&mut self, messages: Vec<crate::providers::Message>, summary: Option<String>) {
+    fn persist_transcript(
+        &mut self,
+        messages: Vec<crate::providers::Message>,
+        summary: Option<String>,
+    ) {
         if messages.len() < self.session.messages.len() {
             self.session
                 .rebase_turn_attachments(self.session.messages.len() - messages.len());

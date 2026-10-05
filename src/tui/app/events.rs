@@ -974,6 +974,18 @@ impl App {
                         }
                     }
                     MouseEventKind::Moved if !self.menu_stack.is_empty() => {
+                        // the press opened a submenu (form effort row): hover
+                        // between Down and Up belongs to the old gesture, never
+                        // to the fresh card — a 1px jitter would otherwise yank
+                        // the cursor off the selected level at birth, before
+                        // the first paint even built the hit map. Same guard
+                        // as the paired-release consumption below.
+                        if self
+                            .press_menu_depth
+                            .is_some_and(|d| d != self.menu_stack.len())
+                        {
+                            continue;
+                        }
                         let _ = self.menu_hover(m.row);
                     }
                     MouseEventKind::Down(MouseButton::Left)

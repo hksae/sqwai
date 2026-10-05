@@ -1067,6 +1067,87 @@ fn effort_narrow_fallback_list_hovers_and_clicks_by_row() {
     assert!(app.menu_stack.is_empty(), "menu must close on commit");
 }
 
+/// A press that opens a submenu owns the whole gesture: a 1px jitter
+/// between Down and Up must not hover-yank the fresh card's cursor off
+/// the selected level — and it must work even before the first paint
+/// built the slider hit map (the narrow list path).
+#[test]
+fn submenu_open_jitter_does_not_move_effort_cursor() {
+    use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    // session model "m" sits on Off: the fresh card must open there
+    app.open_menu(crate::tui::app::menus::Menu::EditModel {
+        provider: "p".into(),
+        key: Some("m".into()),
+    });
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    app.draw_menu(&mut buf, area);
+    // click the effort row: Down opens the scoped Effort submenu
+    let effort_row = app.menu_rect.y + 2 + 3;
+    let effort_col = app.menu_rect.x + app.menu_rect.width.saturating_sub(2);
+    let want = EffortLevel::SELECTABLE
+        .iter()
+        .position(|l| *l == EffortLevel::Off)
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let me = |kind: MouseEventKind, row: u16, col: u16| {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        })
+    };
+    tx.send(me(
+        MouseEventKind::Down(MouseButton::Left),
+        effort_row,
+        effort_col,
+    ))
+    .unwrap();
+    app.poll_input(&rx).unwrap();
+    assert!(
+        matches!(
+            app.cur_menu(),
+            Some(crate::tui::app::menus::Menu::Effort { .. })
+        ),
+        "Down on the effort row must open the submenu"
+    );
+    assert_eq!(app.menu_sel, want, "fresh card opens on the target level");
+    // one paint tick: the popup now owns the geometry (narrow list, no
+    // slider hits) — then the 1px jitter lands on the max row
+    let narea = Rect::new(0, 0, 40, 20);
+    let mut nbuf = Buffer::empty(narea);
+    app.draw_menu(&mut nbuf, narea);
+    assert!(app.effort_hits.is_empty());
+    let max_row = app.menu_rect.y + 2 + 5;
+    tx.send(me(MouseEventKind::Moved, max_row, effort_col))
+        .unwrap();
+    app.poll_input(&rx).unwrap();
+    assert_eq!(
+        app.menu_sel, want,
+        "mid-gesture hover must not yank the cursor"
+    );
+    // the paired release belongs to the old gesture: consumed, menu stays
+    tx.send(me(
+        MouseEventKind::Up(MouseButton::Left),
+        max_row,
+        effort_col,
+    ))
+    .unwrap();
+    app.poll_input(&rx).unwrap();
+    assert!(
+        matches!(
+            app.cur_menu(),
+            Some(crate::tui::app::menus::Menu::Effort { .. })
+        ),
+        "paired Up must not close or misfire the fresh card"
+    );
+    assert_eq!(app.menu_sel, want, "cursor still on the target level");
+}
+
 #[test]
 fn effort_slider_colors_span_gray_to_magenta() {
     use crate::tui::theme::Theme;

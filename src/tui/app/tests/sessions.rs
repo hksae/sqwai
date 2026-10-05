@@ -1197,7 +1197,8 @@ fn successful_finish_retracts_transient_retry_notice() {
 /// Recovery clears mid-turn: the first delta after a retry means the next
 /// request is flowing, so both failure rows go now — not at turn end.
 #[test]
-fn retry_rows_clear_on_first_progress_after_retry() {    let mut app = test_app("http://127.0.0.1:9/v1".into());
+fn retry_rows_clear_on_first_progress_after_retry() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.push_segment(Segment::Status {
         text: "request failed — retrying with backoff: boom".into(),
         kind: StatusKind::Err,
@@ -1237,7 +1238,11 @@ fn transcript_sync_persists_loop_messages() {
         None,
     );
     assert_eq!(app.session.messages.len(), 3);
-    assert!(app.session.messages[1].content.contains("tool output bytes"));
+    assert!(
+        app.session.messages[1]
+            .content
+            .contains("tool output bytes")
+    );
 }
 
 /// An aborted turn arms the one-shot resume notice and bootstraps the next
@@ -1261,8 +1266,9 @@ fn aborted_turn_arms_resume_notice_and_bootstraps() {
         .map(|p| p.text.clone())
         .collect();
     assert!(
-        texts.iter().any(|t| t.contains("stopped by the user")
-            && t.contains("do not redo them")),
+        texts
+            .iter()
+            .any(|t| t.contains("stopped by the user") && t.contains("do not redo them")),
         "resume notice must name the rule: {texts:?}"
     );
     assert!(
