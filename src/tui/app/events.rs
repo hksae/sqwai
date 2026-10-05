@@ -1002,13 +1002,37 @@ impl App {
                             let is_effort = matches!(self.cur_menu(), Some(Menu::Effort { .. }));
                             if is_effort && self.menu_open_mouse.is_none() {
                                 self.menu_open_mouse = Some((m.row, m.column));
+                                crate::tui::event_log::log(
+                                    "HOVER",
+                                    format!("first-move rest at {}:{}", m.row, m.column),
+                                );
                                 continue;
                             }
                             let at_rest = self.menu_open_mouse.is_some_and(|(r, c)| {
                                 m.row.abs_diff(r) <= 1 && m.column.abs_diff(c) <= 1
                             });
                             if !at_rest {
+                                let before = self.menu_sel;
                                 let _ = self.menu_hover(m.row);
+                                crate::tui::event_log::log(
+                                    "HOVER",
+                                    format!(
+                                        "hover {}:{} open={:?} sel {}->{}",
+                                        m.row,
+                                        m.column,
+                                        self.menu_open_mouse,
+                                        before,
+                                        self.menu_sel,
+                                    ),
+                                );
+                            } else {
+                                crate::tui::event_log::log(
+                                    "HOVER",
+                                    format!(
+                                        "deadzone {}:{} open={:?} sel={}",
+                                        m.row, m.column, self.menu_open_mouse, self.menu_sel,
+                                    ),
+                                );
                             }
                         }
                         MouseEventKind::Down(MouseButton::Left)
