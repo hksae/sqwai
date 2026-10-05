@@ -359,6 +359,8 @@ fn undo_refuses_an_argument_that_is_not_a_count() {
 /// `/undo step N` reverts through layer 1, so it must reach that path
 /// rather than the checkpoint one — with no journal records for the step
 /// there is nothing to put back, and saying so is the correct answer.
+/// Runs hermetic in a temp dir: the unscoped fallback scans every journal
+/// under the root, so the repo root would pick up live agent sessions.
 #[test]
 fn undo_step_reports_a_step_with_no_recorded_writes() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
@@ -367,7 +369,8 @@ fn undo_step_reports_a_step_with_no_recorded_writes() {
         .checkpoints
         .push(("deadbeef".into(), "write src/a.rs".into()));
 
-    app.command("undo step 3");
+    let dir = tempfile::tempdir().unwrap();
+    app.undo_step_in(dir.path(), "3");
     let status = app
         .toast
         .as_ref()

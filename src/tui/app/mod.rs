@@ -5501,6 +5501,15 @@ Continue from the pending step, or report to the user if the settled work looks 
     /// because putting the old bytes back would undo that later step too.
     fn undo_step(&mut self, step: &str) {
         let root = std::env::current_dir().unwrap_or_default();
+        self.undo_step_in(&root, step);
+    }
+
+    /// `undo_step` against an explicit root. Production passes the project
+    /// root; tests pass a temp dir — the unscoped fallback scans every
+    /// journal under the root, so running this against the repo while an
+    /// agent session is active reverts (or deletes!) that session's live
+    /// files. Hermetic by construction, never ambient.
+    fn undo_step_in(&mut self, root: &std::path::Path, step: &str) {
         // resolve the session's own plan first: step numbers restart per
         // plan, so the revert must be scoped to this plan, not scanned
         // project-wide (no plan → the old unscoped scan, nothing better)
