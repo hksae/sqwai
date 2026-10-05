@@ -299,6 +299,7 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
         plan_mode: false,
         context_limit,
         enable_tools: true,
+        background_baselines: false,
         read_only: false,
         previous_response_id: None,
         summary: None,

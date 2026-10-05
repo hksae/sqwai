@@ -3261,6 +3261,13 @@ fn plan_rows(
                 plan::ValidationStatus::Waived => (st, " [waived]"),
                 plan::ValidationStatus::Pending => (st, ""),
             };
+            // slow proof still capturing in the background: visible live
+            // marker so the item never reads as silently stuck
+            let suffix = if a.capture_pending {
+                format!("{suffix} [capturing…]")
+            } else {
+                suffix.to_string()
+            };
             let prefix = format!("    [{i}] {} ", a.status.as_str());
             push_wrapped(
                 &mut rows,

@@ -541,7 +541,7 @@ Never invent evidence identifiers.",
                     "acceptance": {
                         "type": ["array", "integer"],
                         "items": {"type": "string"},
-                        "description": "create: criteria (cmd:/manual:); verify: index"
+                        "description": "create: criteria (cmd:/manual:); verify: index. One cmd: check is enough — filtered runs don't save compile time, and every extra cmd: costs minutes of capture"
                     },
                     "checklist": {
                         "type": "array",
@@ -551,7 +551,7 @@ Never invent evidence identifiers.",
                     "items": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "add_acceptance: criteria to append (cmd:/manual:; free text refused like at create)"
+                        "description": "add_acceptance: criteria to append (cmd:/manual:; free text refused like at create). One cmd: check is enough"
                     },
                     "steps": {
                         "type": "array",

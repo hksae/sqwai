@@ -537,6 +537,9 @@ pub(crate) async fn run_subagent(
         plan_mode,
         context_limit,
         enable_tools: true,
+        // subagent baselines stay synchronous: short tasks, and progress
+        // events would land on the parent's channel out of context
+        background_baselines: false,
         read_only: child_read_only,
         previous_response_id: None,
         summary: None,

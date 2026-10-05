@@ -10,8 +10,8 @@ use super::policy::{
 };
 use super::specs;
 use super::verify::{
-    capture_baselines, rejection, validate_complete, validate_evidence, verify_acceptance,
-    with_assumption_warning, with_blast_radius, with_evidence_ts_warning,
+    capture_baselines, capture_baselines_fast, rejection, validate_complete, validate_evidence,
+    verify_acceptance, with_assumption_warning, with_blast_radius, with_evidence_ts_warning,
 };
 use crate::agent::graph::GraphStore;
 use crate::plan;
@@ -1281,7 +1281,20 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         created.checklist = checklist;
                         // §12.12: prove the cmd: checks discriminate, before
                         // anything has changed. Rung 4 freezes beside them.
-                        let proof = capture_baselines(ctx, &created);
+                        // Interactive runs defer the slow executions to a
+                        // background worker (the tool call returns now);
+                        // tests and headless runs capture synchronously.
+                        let proof = if ctx.background_baselines {
+                            let proof = capture_baselines_fast(ctx, &created);
+                            for index in &proof.pending {
+                                if let Some(item) = created.acceptance.get_mut(*index) {
+                                    item.capture_pending = true;
+                                }
+                            }
+                            proof
+                        } else {
+                            capture_baselines(ctx, &created)
+                        };
                         plan::set_baselines(&mut created, proof.slots.clone());
                         plan::set_snapshots(&mut created, proof.frozen.clone());
                         plan::set_shapes(&mut created, proof.shapes.clone());
@@ -1608,7 +1621,11 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     if adding_acceptance && active.acceptance.len() > prev_acceptance_len {
                         let mut probe = active.clone();
                         probe.acceptance = probe.acceptance.split_off(prev_acceptance_len);
-                        let proof = capture_baselines(ctx, &probe);
+                        let proof = if ctx.background_baselines {
+                            capture_baselines_fast(ctx, &probe)
+                        } else {
+                            capture_baselines(ctx, &probe)
+                        };
                         let proven = proof.slots.iter().filter(|slot| slot.is_some()).count();
                         let added = active.acceptance.len() - prev_acceptance_len;
                         for (offset, item) in active
@@ -1622,6 +1639,9 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             item.snapshot = proof.frozen.get(slot).cloned().flatten();
                             item.shape = proof.shapes.get(slot).cloned().flatten();
                             item.inputs = proof.inputs.get(slot).cloned().unwrap_or_default();
+                            if proof.pending.contains(&slot) {
+                                item.capture_pending = true;
+                            }
                         }
                         if let Some(record) = op_value.as_object_mut() {
                             record.insert(

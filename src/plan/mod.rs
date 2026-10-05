@@ -399,6 +399,13 @@ pub struct Acceptance {
     /// without commands.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<CheckInput>,
+    /// Slow capture (baselines, snapshots, differentials) runs in the
+    /// background after create/add_acceptance instead of blocking the tool
+    /// call: while set, the slow proof for this item is not in yet. The
+    /// background worker clears it when it commits; verify captures it
+    /// synchronously as a fallback if it arrives first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub capture_pending: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2364,6 +2371,7 @@ mod tests {
                 snapshot: None,
                 shape: None,
                 inputs: Vec::new(),
+                capture_pending: false,
                 by: None,
                 reason: None,
             };
@@ -2521,6 +2529,7 @@ mod tests {
             snapshot: None,
             shape: None,
             inputs: Vec::new(),
+            capture_pending: false,
             by: None,
             reason: None,
         })

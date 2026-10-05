@@ -215,6 +215,13 @@ pub enum AgentEvent {
         messages: Vec<Message>,
         summary: Option<String>,
     },
+    /// a background baseline capture started/finished for one acceptance
+    /// item (slow proofs leave the tool call immediately; this is how the
+    /// user learns they are running at all)
+    BaselineProgress {
+        command: String,
+        done: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -311,6 +318,11 @@ pub struct AgentInput {
     pub context_limit: u64,
     /// Whether this request may use agent tools.
     pub enable_tools: bool,
+    /// Slow baseline capture runs in the background instead of blocking
+    /// plan create/add_acceptance. True on the interactive TUI path only —
+    /// bench, tests and subagents keep the synchronous capture so results
+    /// stay deterministic.
+    pub background_baselines: bool,
     /// Whether this project instance may perform mutations or write durable state.
     pub read_only: bool,
     /// Optional provider-native continuation from the previous completed turn.
@@ -500,6 +512,7 @@ async fn run_agent(
         plan_mode,
         mut context_limit,
         enable_tools,
+        background_baselines,
         read_only,
         mut previous_response_id,
         mut summary,
@@ -704,6 +717,9 @@ async fn run_agent(
         .with_plan_limits(plan_limits, context_limit)
         .with_blocked_patterns(blocked_patterns.clone())
         .with_cancel(cancel_tool);
+    // slow baseline capture defers to the background worker on interactive
+    // turns; everywhere else the tool call captures synchronously
+    ctx.background_baselines = background_baselines;
     // @-mention bytes already in the opening message count as read, so an
     // edit afterwards needs no redundant read (and goes stale the same
     // way when the file moves underneath).
@@ -1558,6 +1574,21 @@ async fn run_agent(
                                     .collect();
                                 let _ = tx.send(AgentEvent::Todos(plan_todos.clone())).await;
                             }
+                            // deferred slow captures leave the tool call
+                            // immediately; the worker fills them in behind
+                            // the turn (bench/tests keep sync capture, so
+                            // this only fires on interactive runs)
+                            if outcome.ok
+                                && background_baselines
+                                && baseline_work_pending(&root, &session_id)
+                            {
+                                spawn_baseline_worker(
+                                    root.clone(),
+                                    session_id.clone(),
+                                    ctx.cancel.clone(),
+                                    tx.clone(),
+                                );
+                            }
                             outcome
                         }
                         other
@@ -2044,6 +2075,182 @@ async fn run_agent(
         .await;
     if let Some(manager) = lsp_manager {
         let _ = manager.shutdown().await;
+    }
+}
+
+/// True when the session's active plan still has slow baseline captures
+/// in flight (marked at create/add_acceptance, cleared on commit).
+fn baseline_work_pending(root: &std::path::Path, session_id: &str) -> bool {
+    plan::open_active_for_session(root, Some(session_id))
+        .ok()
+        .flatten()
+        .is_some_and(|plan| plan.acceptance.iter().any(|item| item.capture_pending))
+}
+
+/// Run deferred slow captures without blocking the turn: for every pending
+/// item, progress events bracket the run and the result commits
+/// journal-first. Commit races with the model (plan_moved) retry a few
+/// times, then leave the item pending — verify captures it lazily.
+fn spawn_baseline_worker(
+    root: std::path::PathBuf,
+    session_id: String,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    tx: mpsc::Sender<AgentEvent>,
+) {
+    tokio::spawn(async move {
+        run_baseline_worker(&root, &session_id, &cancel, &tx).await;
+    });
+}
+
+async fn run_baseline_worker(
+    root: &std::path::Path,
+    session_id: &str,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    tx: &mpsc::Sender<AgentEvent>,
+) {
+    use std::sync::atomic::Ordering;
+    let pending: Vec<(usize, String)> = match plan::open_active_for_session(root, Some(session_id))
+    {
+        Ok(Some(plan)) => plan
+            .acceptance
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.capture_pending)
+            .map(|(index, item)| (index, item.text.clone()))
+            .collect(),
+        _ => return,
+    };
+    if pending.is_empty() {
+        return;
+    }
+    for (index, text) in pending {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let _ = tx
+            .send(AgentEvent::BaselineProgress {
+                command: text.clone(),
+                done: false,
+            })
+            .await;
+        capture_pending_item(root, session_id, index, &text, cancel.clone()).await;
+        let _ = tx
+            .send(AgentEvent::BaselineProgress {
+                command: text,
+                done: true,
+            })
+            .await;
+    }
+}
+
+/// Capture one pending item's slow proof and commit it: re-reads the plan
+/// fresh (the model may have moved it), skips items that changed or
+/// cleared meanwhile, and retries commit races a few times. Anything left
+/// pending is picked up lazily by verify.
+async fn capture_pending_item(
+    root: &std::path::Path,
+    session_id: &str,
+    index: usize,
+    expected_text: &str,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    enum Captured {
+        Command(Option<plan::Baseline>),
+        Frozen(Option<plan::Snapshot>),
+    }
+    enum SlowKind {
+        Command,
+        Snapshot,
+        Differential,
+    }
+    // everything the blocking half needs crosses as owned data
+    let prepared: Option<(SlowKind, String, Vec<String>)> =
+        match plan::open_active_for_session(root, Some(session_id)) {
+            Ok(Some(plan)) => match plan.acceptance.get(index) {
+                Some(item) if item.capture_pending && item.text == expected_text => {
+                    let paths = plan::digest_paths(&plan);
+                    match item.kind() {
+                        plan::AcceptanceKind::Command(command) => {
+                            Some((SlowKind::Command, command.to_string(), paths))
+                        }
+                        plan::AcceptanceKind::Snapshot(command) => {
+                            Some((SlowKind::Snapshot, command.to_string(), paths))
+                        }
+                        plan::AcceptanceKind::Differential(command) => {
+                            Some((SlowKind::Differential, command.to_string(), paths))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+    let Some((kind, command, paths)) = prepared else {
+        return;
+    };
+    // the commit receipt needs the command after the move below
+    let command_for_receipt = command.clone();
+    let root_buf = root.to_path_buf();
+    let session = session_id.to_string();
+    let captured = tokio::task::spawn_blocking(move || -> (Captured, Vec<String>) {
+        let mut ctx = tools::ToolCtx::new(&root_buf)
+            .in_session(session)
+            .with_cancel(cancel);
+        let mut notes = Vec::new();
+        match kind {
+            SlowKind::Command => {
+                let result = tools::capture_command_baseline(&mut ctx, &command, &paths, index);
+                (Captured::Command(result.slot), vec![result.note])
+            }
+            SlowKind::Snapshot | SlowKind::Differential => {
+                let frozen = if matches!(kind, SlowKind::Differential) {
+                    tools::freeze_differential(&mut ctx, &paths, index, &command, &mut notes)
+                } else {
+                    tools::freeze_snapshot(&mut ctx, &paths, index, &command, &mut notes)
+                };
+                let snapshot = match frozen {
+                    tools::Frozen::Kept(snapshot) => Some(snapshot),
+                    // refused/empty: terminal, nothing to wait for.
+                    // Cancelled: the worker stops anyway (cancel flag).
+                    _ => None,
+                };
+                (Captured::Frozen(snapshot), notes)
+            }
+        }
+    })
+    .await;
+    let Ok((captured, notes)) = captured else {
+        return;
+    };
+    // attach to a fresh plan (the model may have edited it meanwhile):
+    // same index, same text, still pending — otherwise leave it alone
+    for _ in 0..3 {
+        let mut plan = match plan::open_active_for_session(root, Some(session_id)) {
+            Ok(Some(plan)) => plan,
+            _ => return,
+        };
+        let Some(item) = plan.acceptance.get_mut(index) else {
+            return;
+        };
+        if !item.capture_pending || item.text != expected_text {
+            return;
+        }
+        match &captured {
+            Captured::Command(slot) => item.baseline = slot.clone(),
+            Captured::Frozen(snapshot) => item.snapshot = snapshot.clone(),
+        }
+        item.capture_pending = false;
+        let args = serde_json::json!({
+            "index": index,
+            "command": command_for_receipt,
+            "notes": notes,
+        });
+        match plan::commit(root, session_id, &mut plan, "baseline", "host", true, args) {
+            Ok(_) => return,
+            Err(e) if e.to_string().contains("plan_moved") => continue,
+            Err(_) => return,
+        }
     }
 }
 
@@ -2744,6 +2951,7 @@ mod effort_tests {
             snapshot: None,
             shape: None,
             inputs: Vec::new(),
+            capture_pending: false,
             by: None,
             reason: None,
         });
@@ -2814,6 +3022,7 @@ mod effort_tests {
             plan_mode: false,
             context_limit: 10000,
             enable_tools: false,
+            background_baselines: false,
             read_only: false,
             previous_response_id: None,
             summary: None,
@@ -2902,6 +3111,7 @@ mod effort_tests {
             plan_mode: false,
             context_limit: 10000,
             enable_tools: false,
+            background_baselines: false,
             read_only: false,
             previous_response_id: None,
             summary: None,
@@ -3222,6 +3432,69 @@ mod effort_tests {
                 .unwrap()
                 .contains("assert!(true)")
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Background worker: pending slow captures commit without blocking
+    /// the turn, with progress events bracketing each run.
+    #[tokio::test]
+    async fn baseline_worker_captures_pending_and_commits() {
+        use tokio::sync::mpsc;
+        let dir =
+            std::env::temp_dir().join(format!("sqwai-baseline-worker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("tests/f.rs"), "fn f() {}\n").unwrap();
+        let session = "baseline-worker";
+        let mut plan = plan::create(
+            "goal".to_string(),
+            Vec::new(),
+            vec!["cmd: exit 3".to_string()],
+            vec![plan::NewStep {
+                title: "w".into(),
+                refs: Vec::new(),
+            }],
+            1000,
+            &plan::Limits::default(),
+        )
+        .unwrap();
+        plan.sessions = vec![session.to_string()];
+        plan::set_inputs(&mut plan, vec![plan::freeze_check_inputs(&dir)]);
+        plan.acceptance[0].capture_pending = true;
+        plan::store(&dir, &plan).unwrap();
+        assert!(baseline_work_pending(&dir, session));
+
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(8);
+        run_baseline_worker(&dir, session, &cancel, &tx).await;
+
+        let first = rx.recv().await.expect("started event");
+        let second = rx.recv().await.expect("finished event");
+        match (&first, &second) {
+            (
+                AgentEvent::BaselineProgress {
+                    command: start,
+                    done: false,
+                },
+                AgentEvent::BaselineProgress {
+                    command: finish,
+                    done: true,
+                },
+            ) => {
+                assert!(start.contains("exit 3"), "{start}");
+                assert_eq!(start, finish);
+            }
+            _ => panic!("expected Started then Finished, got {first:?} then {second:?}"),
+        }
+        let plan = plan::open_active_for_session(&dir, Some(session))
+            .unwrap()
+            .expect("active plan");
+        assert!(!plan.acceptance[0].capture_pending);
+        assert!(
+            plan.acceptance[0].baseline.is_some(),
+            "exit 3 fails: baseline must attach"
+        );
+        assert!(!baseline_work_pending(&dir, session));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3945,6 +4218,7 @@ mod effort_tests {
             plan_mode: false,
             context_limit: 10000,
             enable_tools: true,
+            background_baselines: false,
             read_only: false,
             previous_response_id: None,
             summary: None,
@@ -4035,6 +4309,7 @@ mod effort_tests {
                 plan_mode: false,
                 context_limit: 10000,
                 enable_tools: true,
+                background_baselines: false,
                 read_only: false,
                 previous_response_id: None,
                 summary: None,
@@ -4109,6 +4384,7 @@ mod effort_tests {
             snapshot: None,
             shape: None,
             inputs: Vec::new(),
+            capture_pending: false,
             by: None,
             reason: None,
         });
@@ -4218,6 +4494,7 @@ mod effort_tests {
             plan_mode: false,
             context_limit: 10000,
             enable_tools: true,
+            background_baselines: false,
             read_only: false,
             previous_response_id: None,
             summary: None,
@@ -4313,6 +4590,7 @@ mod effort_tests {
             plan_mode: false,
             context_limit: 10000,
             enable_tools: true,
+            background_baselines: false,
             read_only: false,
             previous_response_id: None,
             summary: None,
@@ -4409,6 +4687,7 @@ mod effort_tests {
             plan_mode: false,
             context_limit: 10000,
             enable_tools: true,
+            background_baselines: false,
             read_only: false,
             previous_response_id: None,
             summary: None,
@@ -4501,6 +4780,7 @@ mod effort_tests {
             plan_mode: false,
             context_limit: 10000,
             enable_tools: true,
+            background_baselines: false,
             read_only: false,
             previous_response_id: None,
             summary: None,
@@ -4952,6 +5232,7 @@ mod effort_tests {
             plan_mode: false,
             context_limit: 10000,
             enable_tools: true,
+            background_baselines: false,
             read_only: false,
             previous_response_id: None,
             summary: None,
@@ -5040,6 +5321,7 @@ mod effort_tests {
             plan_mode: false,
             context_limit: 10000,
             enable_tools: true,
+            background_baselines: false,
             read_only: false,
             previous_response_id: None,
             summary: None,

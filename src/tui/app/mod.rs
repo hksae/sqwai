@@ -2642,6 +2642,9 @@ Continue from the pending step, or report to the user if the settled work looks 
             plan_mode: self.mode == Mode::Plan,
             context_limit: self.session.context_limit,
             enable_tools: true,
+            // interactive TUI turns defer slow baseline capture to the
+            // background worker instead of blocking the tool call
+            background_baselines: true,
             read_only: self.read_only,
             mcp: self.cfg.mcp.clone(),
             lsp: self.cfg.lsp.clone(),
@@ -2803,6 +2806,7 @@ Continue from the pending step, or report to the user if the settled work looks 
             plan_mode: false,
             context_limit: self.session.context_limit,
             enable_tools: false,
+            background_baselines: false,
             read_only: self.read_only,
             mcp: Default::default(),
             lsp: Default::default(),
@@ -3993,6 +3997,22 @@ Continue from the pending step, or report to the user if the settled work looks 
                     before,
                     after,
                 } => self.note_compaction(summarized, before, after),
+                AgentEvent::BaselineProgress { command, done } => {
+                    // slow baseline captures run behind the turn: the start
+                    // toast says what is running (no more silent minutes),
+                    // the finish toast says it landed (the plan panel shows
+                    // live [capturing…] markers meanwhile)
+                    let (text, kind) = if done {
+                        (format!("baseline captured: {command}"), StatusKind::Ok)
+                    } else {
+                        (
+                            format!("capturing baseline in background: {command}"),
+                            StatusKind::Info,
+                        )
+                    };
+                    self.status(&text, kind);
+                    self.dirty = true;
+                }
                 AgentEvent::TranscriptSync { messages, summary } => {
                     self.persist_transcript(messages, summary)
                 }

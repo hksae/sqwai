@@ -458,6 +458,7 @@ pub fn create(
                 snapshot: None,
                 shape: None,
                 inputs: Vec::new(),
+                capture_pending: false,
                 by: None,
                 reason: None,
             })
@@ -1036,6 +1037,7 @@ pub(crate) fn add_acceptance(plan: &mut Plan, items: Vec<String>) -> Result<Appl
             snapshot: None,
             shape: None,
             inputs: Vec::new(),
+            capture_pending: false,
             by: None,
             reason: None,
         });

@@ -29,7 +29,9 @@ pub(crate) use specs::{
     is_multi_file_mutation, is_mutating_call, is_readonly_bash, merge_specs, tool_names,
     tool_specs, trim_middle,
 };
-pub(crate) use verify::capture_baselines;
+pub(crate) use verify::{
+    Frozen, capture_baselines, capture_command_baseline, freeze_differential, freeze_snapshot,
+};
 
 #[cfg(test)]
 mod tests {
@@ -3276,6 +3278,51 @@ mod tests {
             vec!["tests/auth.rs".to_string()]
         );
         assert!(plan::render(&plan).contains("[inputs: 1]"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Background capture: with the flag set, create marks slow items
+    /// pending and returns without running anything; without it, the same
+    /// create captures synchronously. `exit 3` distinguishes the paths
+    /// without timing games (sync attaches a baseline, fast leaves none).
+    #[test]
+    fn background_create_marks_pending_instead_of_running() {
+        let (mut ctx, dir) = proj();
+        fs::create_dir_all(dir.join("tests")).unwrap();
+        fs::write(dir.join("tests/auth.rs"), "fn t() {}\n").unwrap();
+        ctx.background_baselines = true;
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "background",
+                "acceptance": ["cmd: exit 3"],
+                "steps": [{"title": "verify"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        assert!(
+            created.output.contains("background"),
+            "must say capture continues behind: {}",
+            created.output
+        );
+        let plan = plan::open_active(&dir).unwrap().unwrap();
+        assert!(plan.acceptance[0].capture_pending);
+        assert!(plan.acceptance[0].baseline.is_none());
+        assert!(
+            plan.acceptance[0]
+                .inputs
+                .iter()
+                .any(|i| i.path == "tests/auth.rs")
+        );
+
+        // verify falls back to a synchronous capture when the worker
+        // hasn't landed: the same exit-3 run attaches a baseline now
+        let verified = plan_op(&mut ctx, &json!({"op": "verify", "acceptance": 0}));
+        let _ = verified;
+        let plan = plan::open_active(&dir).unwrap().unwrap();
+        assert!(plan.acceptance[0].baseline.is_some());
+        assert!(!plan.acceptance[0].capture_pending);
         fs::remove_dir_all(&dir).ok();
     }
 

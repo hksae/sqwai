@@ -38,6 +38,10 @@ pub(crate) struct BaselineProof {
     pub(crate) inputs: Vec<Vec<plan::CheckInput>>,
     /// one line per item, prefixed with `\n` so they can be appended raw
     pub(crate) notes: Vec<String>,
+    /// indices whose slow proof (baselines, snapshots, differentials) was
+    /// deferred to the background worker instead of running now. The caller
+    /// marks them `capture_pending` on the plan.
+    pub(crate) pending: Vec<usize>,
 }
 
 /// Exit codes that mean the shell never ran the check at all: a typo or a
@@ -410,6 +414,143 @@ pub(crate) fn read_shapes(
         .collect()
 }
 
+/// Outcome of one `cmd:` baseline run: the slot (kept only when the run
+/// failed pre-change and survived every check), the note line, and whether
+/// the user stopped the turn mid-capture (later items must not start).
+pub(crate) struct CommandBaseline {
+    pub slot: Option<plan::Baseline>,
+    pub note: String,
+    pub cancelled: bool,
+}
+
+/// Run one `cmd:` acceptance item and keep the run iff it failed: the
+/// shared slow body behind the synchronous capture, the background worker
+/// and the verify-time fallback. All host-run rules (policy gates,
+/// classifier, typo guard, raced-run guard) live here, so every path
+/// enforces the same ones.
+pub(crate) fn capture_command_baseline(
+    ctx: &mut ToolCtx,
+    command: &str,
+    paths: &[String],
+    index: usize,
+) -> CommandBaseline {
+    // The command text arrives from the model and is about to be run
+    // without asking, so anything that would need approval is skipped
+    // rather than run — the same refusal `plan verify` makes, moved to
+    // where the model can still rewrite the item.
+    // User hard blocks and the exfil gate refuse first (a project-
+    // injected `cmd: $name` faces the same list as a typed command).
+    if let Some(hit) = acceptance_policy_hit(ctx, command) {
+        return CommandBaseline {
+            slot: None,
+            note: format!("\nacceptance {index}: not run — {}: {command}", hit.reason),
+            cancelled: false,
+        };
+    }
+    match safety::classify(command) {
+        safety::Verdict::Safe => {}
+        safety::Verdict::Blocked(reason) => {
+            return CommandBaseline {
+                slot: None,
+                note: format!("\nacceptance {index}: not run — touches protected path ({reason})"),
+                cancelled: false,
+            };
+        }
+        safety::Verdict::NeedsApproval(reason) => {
+            return CommandBaseline {
+                slot: None,
+                note: format!(
+                    "\nacceptance {index}: not run — would need approval ({reason}); \
+                     acceptance commands run unattended, so they must be safe"
+                ),
+                cancelled: false,
+            };
+        }
+    }
+    let state_before = plan::state_digest(&ctx.root, paths, command);
+    let run = exec::bash(ctx, command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
+    if run.cancelled {
+        return CommandBaseline {
+            slot: None,
+            note: format!("\nacceptance {index}: cancelled"),
+            cancelled: true,
+        };
+    }
+    let state_after = plan::state_digest(&ctx.root, paths, command);
+    let Some(exit) = run.exit_code else {
+        return CommandBaseline {
+            slot: None,
+            note: format!(
+                "\nacceptance {index}: could not be run — {}",
+                run.output.lines().next().unwrap_or("no result")
+            ),
+            cancelled: false,
+        };
+    };
+    if exit == 0 {
+        return CommandBaseline {
+            slot: None,
+            note: format!(
+                "\nacceptance {index}: passes already — that makes it a regression \
+                 guard, not acceptance, and it will never settle this item"
+            ),
+            cancelled: false,
+        };
+    }
+    // The shell saying the check never started, rather than the check
+    // failing. Recording one of those as a baseline would make the proof
+    // meaningless, so a typo stays a typo instead of becoming evidence.
+    if check_never_started(exit) {
+        return CommandBaseline {
+            slot: None,
+            note: format!(
+                "\nacceptance {index}: could not be run (exit {exit}) — check the command text"
+            ),
+            cancelled: false,
+        };
+    }
+    if state_before != state_after {
+        return CommandBaseline {
+            slot: None,
+            note: format!("\nacceptance {index}: ran while tracked state moved; no baseline taken"),
+            cancelled: false,
+        };
+    }
+    let output_hash = blake3::hash(run.output.as_bytes()).to_hex().to_string();
+    let head: String = run
+        .output
+        .lines()
+        .filter(|line| !line.starts_with("(exit code"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .chars()
+        .take(BASELINE_HEAD_CHARS)
+        .collect();
+    // The reason travels with the verdict: on a shell that reports a typo
+    // as an ordinary failure, this line is the only thing that separates
+    // "the feature is missing" from "the command does not exist".
+    let first_line: String = head
+        .lines()
+        .next()
+        .unwrap_or("no output")
+        .trim()
+        .chars()
+        .take(BASELINE_REASON_CHARS)
+        .collect();
+    CommandBaseline {
+        slot: Some(plan::Baseline {
+            at: plan::now(),
+            exit,
+            check_definition_hash: plan::check_definition_hash(command),
+            output_hash,
+            head,
+            state_digest: state_after,
+        }),
+        note: format!("\nacceptance {index}: fails before the change (exit {exit}) — {first_line}"),
+        cancelled: false,
+    }
+}
+
 /// §12.12: run every `cmd:` acceptance item once and keep the runs that
 /// failed. Called at plan creation — the only moment the pre-change tree is
 /// still the current one. Once the work starts there is nothing left to prove
@@ -429,6 +570,7 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
         shapes: vec![None; plan.acceptance.len()],
         inputs: vec![Vec::new(); plan.acceptance.len()],
         notes: Vec::new(),
+        pending: Vec::new(),
     };
     // check inputs freeze once, before any check runs: hashing is
     // read-only, identical for every item, and the tree is pre-change
@@ -479,112 +621,184 @@ pub(crate) fn capture_baselines(ctx: &mut ToolCtx, plan: &plan::Plan) -> Baselin
         let plan::AcceptanceKind::Command(command) = item.kind() else {
             continue;
         };
-        let command = command.to_string();
-        // The command text arrives from the model and is about to be run
-        // without asking, so anything that would need approval is skipped
-        // rather than run — the same refusal `plan verify` makes, moved to
-        // where the model can still rewrite the item.
-        // User hard blocks and the exfil gate refuse first (a project-
-        // injected `cmd: $name` faces the same list as a typed command).
-        if let Some(hit) = acceptance_policy_hit(ctx, &command) {
-            proof.notes.push(format!(
-                "\nacceptance {index}: not run — {}: {command}",
-                hit.reason
-            ));
-            continue;
+        let result = capture_command_baseline(ctx, &command.to_string(), &paths, index);
+        if let Some(slot) = result.slot {
+            proof.slots[index] = Some(slot);
         }
-        match safety::classify(&command) {
-            safety::Verdict::Safe => {}
-            safety::Verdict::Blocked(reason) => {
-                proof.notes.push(format!(
-                    "\nacceptance {index}: not run — touches protected path ({reason})"
-                ));
-                continue;
-            }
-            safety::Verdict::NeedsApproval(reason) => {
-                proof.notes.push(format!(
-                    "\nacceptance {index}: not run — would need approval ({reason}); \
-                     acceptance commands run unattended, so they must be safe"
-                ));
-                continue;
-            }
-        }
-        let state_before = plan::state_digest(&ctx.root, &paths, &command);
-        let run = exec::bash(ctx, &command, Some(ACCEPTANCE_TIMEOUT_SECS), false);
-        if run.cancelled {
-            proof.notes.push(format!("\nacceptance {index}: cancelled"));
-            // the user is stopping the turn; later items keep their
-            // pre-sized empty slots
+        proof.notes.push(result.note);
+        if result.cancelled {
             break;
         }
-        let state_after = plan::state_digest(&ctx.root, &paths, &command);
-        let Some(exit) = run.exit_code else {
-            proof.notes.push(format!(
-                "\nacceptance {index}: could not be run — {}",
-                run.output.lines().next().unwrap_or("no result")
-            ));
-            continue;
-        };
-        if exit == 0 {
-            proof.notes.push(format!(
-                "\nacceptance {index}: passes already — that makes it a regression \
-                 guard, not acceptance, and it will never settle this item"
-            ));
-            continue;
-        }
-        // The shell saying the check never started, rather than the check
-        // failing. Recording one of those as a baseline would make the proof
-        // meaningless, so a typo stays a typo instead of becoming evidence.
-        if check_never_started(exit) {
-            proof.notes.push(format!(
-                "\nacceptance {index}: could not be run (exit {exit}) — check the command text"
-            ));
-            continue;
-        }
-        if state_before != state_after {
-            proof.notes.push(format!(
-                "\nacceptance {index}: ran while tracked state moved; no baseline taken"
-            ));
-            continue;
-        }
-        let output_hash = blake3::hash(run.output.as_bytes()).to_hex().to_string();
-        let head: String = run
-            .output
-            .lines()
-            .filter(|line| !line.starts_with("(exit code"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .chars()
-            .take(BASELINE_HEAD_CHARS)
-            .collect();
-        // The reason travels with the verdict: on a shell that reports a typo
-        // as an ordinary failure, this line is the only thing that separates
-        // "the feature is missing" from "the command does not exist".
-        let first_line: String = head
-            .lines()
-            .next()
-            .unwrap_or("no output")
-            .trim()
-            .chars()
-            .take(BASELINE_REASON_CHARS)
-            .collect();
-        proof.slots[index] = Some(plan::Baseline {
-            at: plan::now(),
-            exit,
-            check_definition_hash: plan::check_definition_hash(&command),
-            output_hash,
-            head,
-            state_digest: state_after,
-        });
-        proof.notes.push(format!(
-            "\nacceptance {index}: fails before the change (exit {exit}) — {first_line}"
-        ));
     }
     // ladder walk (§12.12): one trailing line saying where on the ladder
     // this plan stands. Rides every create/accept message for free, since
     // both append these notes raw.
     proof.notes.push(plan::ladder_note(plan));
     proof
+}
+
+/// Fast half of [`capture_baselines`]: everything that never executes a
+/// command (input hashes, shapes, policy pre-checks). Slow items
+/// (`cmd:` runs, `snapshot:`/`differential:` freezes) are listed in
+/// `pending` instead of running — the caller marks them `capture_pending`
+/// on the plan and a background worker (or a later verify) fills them in.
+/// Policy and safety refusals still land immediately, so the model can
+/// rewrite an un-runnable item without waiting for anything.
+pub(crate) fn capture_baselines_fast(ctx: &mut ToolCtx, plan: &plan::Plan) -> BaselineProof {
+    let mut proof = BaselineProof {
+        slots: vec![None; plan.acceptance.len()],
+        frozen: vec![None; plan.acceptance.len()],
+        shapes: vec![None; plan.acceptance.len()],
+        inputs: vec![Vec::new(); plan.acceptance.len()],
+        notes: Vec::new(),
+        pending: Vec::new(),
+    };
+    let frozen_inputs = plan::freeze_check_inputs(&ctx.root);
+    for (index, item) in plan.acceptance.iter().enumerate() {
+        if matches!(
+            item.kind(),
+            plan::AcceptanceKind::Command(_)
+                | plan::AcceptanceKind::Snapshot(_)
+                | plan::AcceptanceKind::Differential(_)
+        ) {
+            proof.inputs[index] = frozen_inputs.clone();
+        }
+        // rung 5 shapes never execute: freeze inline like the sync path
+        if let plan::AcceptanceKind::Signatures(signatures) = item.kind() {
+            let joined = signatures.join(", ");
+            match freeze_shapes(ctx, index, &joined, &mut proof.notes) {
+                Shaped::Kept(shape) => proof.shapes[index] = Some(shape),
+                Shaped::Empty => {}
+            }
+            continue;
+        }
+        match item.kind() {
+            plan::AcceptanceKind::Snapshot(command)
+            | plan::AcceptanceKind::Differential(command) => {
+                let command = command.to_string();
+                // fast gates only: a command that could never run is
+                // refused now, not after minutes of silence
+                if let Some(hit) = acceptance_policy_hit(ctx, &command) {
+                    proof.notes.push(format!(
+                        "\nacceptance {index}: not run — {}: {command}",
+                        hit.reason
+                    ));
+                    continue;
+                }
+                if !matches!(safety::classify(&command), safety::Verdict::Safe) {
+                    proof.notes.push(format!(
+                        "\nacceptance {index}: not run — unsafe, must be safe to run unattended"
+                    ));
+                    continue;
+                }
+                proof.pending.push(index);
+                proof.notes.push(format!(
+                    "\nacceptance {index}: capturing in background — {command}"
+                ));
+            }
+            plan::AcceptanceKind::Command(command) => {
+                let command = command.to_string();
+                if let Some(hit) = acceptance_policy_hit(ctx, &command) {
+                    proof.notes.push(format!(
+                        "\nacceptance {index}: not run — {}: {command}",
+                        hit.reason
+                    ));
+                    continue;
+                }
+                match safety::classify(&command) {
+                    safety::Verdict::Safe => {}
+                    safety::Verdict::Blocked(reason) => {
+                        proof.notes.push(format!(
+                            "\nacceptance {index}: not run — touches protected path ({reason})"
+                        ));
+                        continue;
+                    }
+                    safety::Verdict::NeedsApproval(_) => {
+                        proof.notes.push(format!(
+                            "\nacceptance {index}: not run — would need approval; \
+                             acceptance commands run unattended, so they must be safe"
+                        ));
+                        continue;
+                    }
+                }
+                proof.pending.push(index);
+                proof.notes.push(format!(
+                    "\nacceptance {index}: capturing in background — {command}"
+                ));
+            }
+            _ => {}
+        }
+    }
+    proof.notes.push(plan::ladder_note(plan));
+    proof
+}
+
+/// Background worker hasn't landed (or this run never spawned one):
+/// capture a pending item's slow proof synchronously and commit it, so
+/// verify never dead-ends on a flag. A cancelled capture leaves the flag
+/// set — the flow continues to the honest refusal below.
+pub(crate) fn capture_pending_now(ctx: &mut ToolCtx, active: &mut plan::Plan, index: usize) {
+    let kind = match active.acceptance.get(index) {
+        Some(item) if item.capture_pending => item.kind(),
+        _ => return,
+    };
+    let paths = plan::digest_paths(active);
+    let mut notes = Vec::new();
+    let attached = match kind {
+        plan::AcceptanceKind::Command(command) => {
+            let result = capture_command_baseline(ctx, &command, &paths, index);
+            if result.cancelled {
+                return;
+            }
+            notes.push(result.note);
+            result
+                .slot
+                .map(|slot| {
+                    active.acceptance[index].baseline = Some(slot);
+                })
+                .is_some()
+        }
+        plan::AcceptanceKind::Snapshot(command) => {
+            match freeze_snapshot(ctx, &paths, index, &command, &mut notes) {
+                Frozen::Kept(snapshot) => {
+                    active.acceptance[index].snapshot = Some(snapshot);
+                    true
+                }
+                Frozen::Empty => true,
+                Frozen::Cancelled => return,
+            }
+        }
+        plan::AcceptanceKind::Differential(command) => {
+            match freeze_differential(ctx, &paths, index, &command, &mut notes) {
+                Frozen::Kept(snapshot) => {
+                    active.acceptance[index].snapshot = Some(snapshot);
+                    true
+                }
+                Frozen::Empty => true,
+                Frozen::Cancelled => return,
+            }
+        }
+        _ => return,
+    };
+    let _ = attached;
+    active.acceptance[index].capture_pending = false;
+    let args = serde_json::json!({
+        "index": index,
+        "notes": notes,
+    });
+    if plan::commit(
+        &ctx.root,
+        &ctx.session_id,
+        active,
+        "baseline",
+        "host",
+        true,
+        args,
+    )
+    .is_err()
+    {
+        active.acceptance[index].capture_pending = true;
+    }
 }
 
 /// §12.12 three states: same check, prior green receipt, same digest,
@@ -744,6 +958,24 @@ pub(crate) fn verify_acceptance(ctx: &mut ToolCtx, index: usize, supplied: bool)
         Ok(None) => return Outcome::err("no active plan: create one with op=create first"),
         Err(e) => return Outcome::err(format!("plan store unreadable: {e:#}")),
     };
+    if active.acceptance.get(index).is_none() {
+        return rejection(plan::Rejection {
+            code: "unknown_acceptance",
+            reason: format!("no acceptance item {index}"),
+            hint: "the acceptance list is in your context above with the plan".to_string(),
+        });
+    }
+
+    // Slow proof still in flight (or never spawned on this run): capture it
+    // synchronously now, so verify never dead-ends on a flag. A cancelled
+    // capture leaves the flag set and the flow refuses honestly below.
+    if active
+        .acceptance
+        .get(index)
+        .is_some_and(|item| item.capture_pending)
+    {
+        capture_pending_now(ctx, &mut active, index);
+    }
     let Some(item) = active.acceptance.get(index) else {
         return rejection(plan::Rejection {
             code: "unknown_acceptance",
