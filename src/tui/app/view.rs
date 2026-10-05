@@ -3819,12 +3819,6 @@ impl App {
                 st,
             )));
         }
-        if let Some(cp) = self.last_checkpoint.clone() {
-            return Some(Line::from(Span::styled(
-                truncate_display_width(&format!(" checkpoint: {cp}"), width),
-                Theme::dim(),
-            )));
-        }
         None
     }
 

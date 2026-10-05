@@ -1,6 +1,10 @@
 #![allow(unused_imports)]
 use super::*;
 
+#[cfg(test)]
+#[path = "tests/effort_hover.rs"]
+mod effort_hover;
+
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -993,6 +997,17 @@ impl App {
                             // popups never even had a press) must not yank the
                             // fresh card's cursor either. Deliberate moves outside
                             // the 1-cell radius pass through normally.
+                            // Pure-keyboard open has no prior mouse position
+                            // (`menu_open_mouse` is None): the first Moved only
+                            // reports where the resting mouse already sits, so
+                            // it establishes rest and never yanks the cursor.
+                            // The next jitter within 1 cell stays inside the
+                            // deadzone; a deliberate far move still hovers.
+                            let is_effort = matches!(self.cur_menu(), Some(Menu::Effort { .. }));
+                            if is_effort && self.menu_open_mouse.is_none() {
+                                self.menu_open_mouse = Some((m.row, m.column));
+                                continue;
+                            }
                             let at_rest = self.menu_open_mouse.is_some_and(|(r, c)| {
                                 m.row.abs_diff(r) <= 1 && m.column.abs_diff(c) <= 1
                             });

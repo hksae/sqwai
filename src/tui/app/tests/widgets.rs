@@ -47,11 +47,7 @@ fn status_bar_fits_and_keeps_click_targets_inside_a_wide_directory() {
 #[test]
 fn notice_row_fits_width_next_to_queue() {
     #[allow(clippy::type_complexity)]
-    let setups: [(fn(&mut App), &str); 3] = [
-        (
-            |app: &mut App| app.last_checkpoint = Some("edit src/main.rs".into()),
-            "edit src/main.rs",
-        ),
+    let setups: [(fn(&mut App), &str); 2] = [
         (
             |app: &mut App| app.status("network timeout 408", StatusKind::Err),
             "network timeout 408",
@@ -81,10 +77,10 @@ fn notice_row_fits_width_next_to_queue() {
             assert!(s.contains(needle), "notice in its own row: {s}");
         }
     }
-    // priority inside the row: retry first, then toast, then checkpoint
+    // priority inside the row: retry first, then toast (checkpoint hints
+    // moved out — the status bar already shows step n/m)
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
-    app.last_checkpoint = Some("cp".into());
     app.status("boom", StatusKind::Err);
     app.retry_line = Some("retrying".into());
     let text: String = app

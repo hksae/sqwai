@@ -321,8 +321,6 @@ pub struct App {
     /// armed when a session with history is loaded or a compaction changed
     /// something — the only genuine restores
     resume_notice_armed: bool,
-    /// label of the last shadow checkpoint (design §10 indicator)
-    last_checkpoint: Option<String>,
     /// user message index pushed for the active turn, if any
     turn_user_index: Option<usize>,
 
@@ -959,7 +957,6 @@ Continue from the pending step, or report to the user if the settled work looks 
             last_reveal: None,
             retry_line: None,
             resume_notice_armed: false,
-            last_checkpoint: None,
             turn_user_index: None,
             lsp_diagnostics: 0,
             follow: true,
@@ -2504,7 +2501,6 @@ Continue from the pending step, or report to the user if the settled work looks 
         self.toast = None;
         self.retry_notified = false;
         self.retry_line = None;
-        self.last_checkpoint = None;
         let mut text = self.input_text().trim().to_string();
         if text.is_empty() {
             if self.startup {
@@ -2929,7 +2925,6 @@ Continue from the pending step, or report to the user if the settled work looks 
         // verdict must not leak into the new session's chrome
         self.effort_observed_ignored = None;
         self.retry_line = None;
-        self.last_checkpoint = None;
         self.prev_turn_ok = false;
         self.retry_notified = true;
         self.active_ask_id = None;
@@ -3033,7 +3028,6 @@ Continue from the pending step, or report to the user if the settled work looks 
         // verdict must not leak into the new session's chrome
         self.effort_observed_ignored = None;
         self.retry_line = None;
-        self.last_checkpoint = None;
         self.prev_turn_ok = false;
         self.retry_notified = true;
         self.active_ask_id = None;
@@ -4224,7 +4218,10 @@ Continue from the pending step, or report to the user if the settled work looks 
                     self.handle_tool_notice(name, summary, ok, diff, Some(call_id));
                 }
                 AgentEvent::Checkpoint { label } => {
-                    self.last_checkpoint = Some(label);
+                    // checkpoint hint removed from the notice row (the status
+                    // bar already shows step n/m): kept in the event log,
+                    // journaled by the loop itself
+                    crate::tui::event_log::log("CHECKPOINT", label);
                     self.dirty = true;
                 }
                 AgentEvent::Todos(items) => {
