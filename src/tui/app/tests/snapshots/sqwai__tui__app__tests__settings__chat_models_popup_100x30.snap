@@ -1,5 +1,6 @@
 ---
 source: src/tui/app/tests/settings.rs
+assertion_line: 786
 expression: s
 ---
 
@@ -13,13 +14,13 @@ expression: s
 
                                              Models · p
 
-             NAME                  ID                              CONTEXT  EFFORT
-             m *                   test-model                           1k  off
+             NAME                                                  CONTEXT  EFFORT
+            *m                                                          1k  off
             ────────────────────────────────────────────────────────────────────────────
               add model
               switch active model
-              check connection
               edit provider
+              check connection
               delete model
               delete provider
 

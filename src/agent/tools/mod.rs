@@ -1576,16 +1576,20 @@ mod tests {
             }),
         );
         assert!(created.ok, "{}", created.output);
+        // `show` is not a model tool (the live plan rides every request):
+        // the dispatcher refuses, state is read from the plan file instead
         let shown = plan_op(&mut ctx, &json!({"op": "show"}));
+        assert!(!shown.ok);
+        assert!(shown.output.contains("no plan show tool"), "{}", shown.output);
+        let plan = plan::open_active(&dir).unwrap().unwrap();
+        let rendered = plan::render(&plan);
         assert!(
-            shown.output.contains("checklist (non-blocking)"),
-            "{}",
-            shown.output
+            rendered.contains("checklist (non-blocking)"),
+            "{rendered}"
         );
         assert!(
-            shown.output.contains("ask Anna about scope"),
-            "{}",
-            shown.output
+            rendered.contains("ask Anna about scope"),
+            "{rendered}"
         );
         assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
         assert!(
@@ -1718,16 +1722,16 @@ mod tests {
         );
 
         let shown = plan_op(&mut ctx, &json!({"op": "show"}));
-        assert!(shown.ok, "{}", shown.output);
+        assert!(!shown.ok, "show is not a model tool: {}", shown.output);
+        let plan = plan::open_active(&dir).unwrap().unwrap();
+        let rendered = plan::render(&plan);
         assert!(
-            shown.output.contains("goal: wire the plan tool"),
-            "{}",
-            shown.output
+            rendered.contains("goal: wire the plan tool"),
+            "{rendered}"
         );
         assert!(
-            shown.output.contains("[x] 1"),
-            "step 1 should read as done:\n{}",
-            shown.output
+            rendered.contains("[x] 1"),
+            "step 1 should read as done:\n{rendered}"
         );
         fs::remove_dir_all(&dir).ok();
     }

@@ -195,8 +195,11 @@ fn edit_model_form_round_trips_effort_declarations() {
         provider: "p".into(),
         key: Some("m".into()),
     });
-    assert_eq!(app.form_fields[4].trimmed(), "budget");
-    assert_eq!(app.form_fields[5].trimmed(), "on");
+    // control/always_on are config-only now (auto by provider format):
+    // the form offers key, request id, context, effort — and must not
+    // clobber the stored declarations on save
+    assert_eq!(app.form_fields.len(), 4);
+    assert_eq!(app.form_fields[3].trimmed(), "off");
     app.form_save();
     let m = app.cfg.models.get("m").unwrap();
     assert_eq!(m.effort_control, Some(EffortControl::Budget));

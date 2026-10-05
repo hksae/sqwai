@@ -93,22 +93,23 @@ fn form_popup_titles_have_no_parentheses_and_support_mouse_selection() {
     };
     assert_eq!(app.form_focus, 0);
 
-    // Click on row 12 (field index 1: request id)
-    app.form_mouse_down(12, 15);
+    // Click on row 13 (field index 1: request id — title row, then the
+    // air row, then the fields at rect.y + 2 + n)
+    app.form_mouse_down(13, 15);
     assert_eq!(app.form_focus, 1);
 
     // Click inside the text area of field 1
     let text_x = app.menu_rect.x + 1 + app.form_label_w();
-    app.form_mouse_down(12, text_x + 2);
+    app.form_mouse_down(13, text_x + 2);
     assert!(app.form_is_selecting());
 
     // Drag to select text
-    app.form_mouse_drag(12, text_x + 5);
+    app.form_mouse_drag(13, text_x + 5);
     assert!(app.form_is_selecting());
     app.form_mouse_up();
 
     // Click on field 2 (context)
-    app.form_mouse_down(13, 15);
+    app.form_mouse_down(14, 15);
     assert_eq!(app.form_focus, 2);
 }
 
