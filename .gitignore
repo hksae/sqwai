@@ -1,6 +1,9 @@
 /target
 **/*.rs.bk
 
+# spilled (truncated) tool output for agents to grep/page instead of
+# re-reading; retention-pruned after 7 days, never committed
+/sqwai-spill/
 .sqwai/
 .zig-cache/
 

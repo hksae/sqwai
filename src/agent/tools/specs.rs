@@ -34,10 +34,13 @@ fn defs() -> Vec<ToolDef> {
         ToolDef {
             name: "read",
             kind: Kind::ReadOnly,
-            description: "Read a file from the project. Returns numbered lines. \
-Must be called once before edit/write on an existing file — one read per session is enough: the host \
-tracks freshness and refuses the edit with a stale warning if the file moved underneath, so never \
-re-read defensively. Prefer offset/limit windows over full re-reads, and outline for structure \
+            description: "Read a file from the project. Returns numbered lines \
+with totals (use offset/limit windows for the rest; truncated output spills \
+to a file — grep it instead of re-reading). Must be called once before \
+replace_all edits and overwrites of existing files — one read per session \
+is enough: the host tracks freshness and refuses the edit with a stale \
+warning if the file moved underneath, so never re-read defensively. \
+Prefer offset/limit windows over full re-reads, and outline for structure \
 before targeted reading.",
             parameters: json!({
                 "type": "object",
@@ -54,7 +57,7 @@ before targeted reading.",
             kind: Kind::Mutating,
             description: "Create a new file or completely overwrite an existing one. \
 Overwriting an existing file requires a prior read (one per session is enough unless the host \
-reported the file stale).",
+reported the file stale); new files need none.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -68,8 +71,8 @@ reported the file stale).",
             name: "edit",
             kind: Kind::Mutating,
             description: "Replace exact text inside a file. old_string must appear exactly once \
-unless replace_all is true. Requires a prior read of the file — one read per session is enough \
-unless the host reported the file stale.",
+unless replace_all is true. A single exact edit needs no prior read (it fails safe on \
+mismatch); replace_all needs one. Never edit on a stale read — the host refuses.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -1211,4 +1214,25 @@ fn call_args_for_journal_cuts_long_strings() {
     let body = kept["content"].as_str().unwrap();
     assert!(body.contains("chars total"), "{body}");
     assert!(body.len() < 600);
+}
+
+/// Wire weight of the tool surface: every request carries all specs, so
+/// this number is the static per-request overhead. Pinned so schema
+/// growth stays a conscious decision, not drift.
+#[test]
+fn tool_specs_wire_weight() {
+    let specs = tool_specs(false);
+    let wire: String = specs
+        .iter()
+        .map(|s| serde_json::to_string(&s.parameters).unwrap_or_default())
+        .collect();
+    let bytes = wire.len() + specs.iter().map(|s| s.description.len()).sum::<usize>();
+    eprintln!(
+        "tool specs wire weight: {bytes} bytes across {} tools",
+        specs.len()
+    );
+    assert!(
+        bytes < 120_000,
+        "tool surface grew past budget: {bytes} bytes"
+    );
 }

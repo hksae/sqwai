@@ -23,7 +23,43 @@ fn existing(ctx: &ToolCtx, p: &str) -> Result<PathBuf, String> {
     Ok(p)
 }
 
-/// guard shared by write-over-existing / edit / multi_edit
+/// Spilled tool output: oversized results land in a gitignored sidecar dir
+/// instead of dying in a truncation marker. The model gets the path plus a
+/// standing instruction to grep it or page it — never to re-read it whole.
+pub(super) fn spill_output(root: &Path, tool: &str, text: &str) -> Option<String> {
+    const RETENTION_SECS: u64 = 7 * 24 * 3600;
+    static SPILL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = root.join("sqwai-spill");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return None;
+    }
+    // best-effort retention: drop week-old spills on every write
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let now = std::time::SystemTime::now();
+        for entry in entries.flatten() {
+            let old = entry
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|mtime| now.duration_since(mtime).ok())
+                .is_some_and(|age| age.as_secs() > RETENTION_SECS);
+            if old {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let id = SPILL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = format!("{tool}-{}-{id}.txt", std::process::id());
+    let path = dir.join(&name);
+    if std::fs::write(&path, text).is_err() {
+        return None;
+    }
+    Some(format!("sqwai-spill/{name}"))
+}
+
+/// guard shared by destructive writes: overwriting an existing file and
+/// replace_all edits proceed only on a fresh read — blind mass changes
+/// are the one failure exact matching cannot catch.
 fn require_read(ctx: &ToolCtx, p: &Path) -> Result<(), String> {
     match ctx.read_state(p) {
         super::ReadState::Current => Ok(()),
@@ -36,6 +72,21 @@ fn require_read(ctx: &ToolCtx, p: &Path) -> Result<(), String> {
              or the edit will be based on content that is gone",
             p.display()
         )),
+    }
+}
+
+/// freshness-only gate for self-validating writes: single exact edits and
+/// atomic multi_edits match-or-error before touching disk, so they need no
+/// prior read — but working from a stale read is still refused, stale
+/// knowledge pointing at moved code.
+fn require_fresh(ctx: &ToolCtx, p: &Path) -> Result<(), String> {
+    match ctx.read_state(p) {
+        super::ReadState::Stale => err(format!(
+            "edit denied: {} changed since you read it — read it again before editing, \
+             or the edit will be based on content that is gone",
+            p.display()
+        )),
+        super::ReadState::Current | super::ReadState::Unread => Ok(()),
     }
 }
 
@@ -125,9 +176,6 @@ pub(super) fn read(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Ou
         Ok(p) => p,
         Err(e) => return Outcome::err(e),
     };
-    if !p.is_file() {
-        return Outcome::err(format!("not a file: {}", p.display()));
-    }
     let bytes = match fs::read(&p) {
         Ok(b) => b,
         Err(e) => return Outcome::err(format!("read failed: {e}")),
@@ -151,16 +199,34 @@ pub(super) fn read(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Ou
             offset,
         ));
     }
+    let total_lines = text.lines().count();
     let mut out = String::new();
-    for (emitted, (i, line)) in text.lines().enumerate().skip(offset - 1).enumerate() {
+    let mut emitted = 0usize;
+    let first_no = offset;
+    let mut last_no = offset.saturating_sub(1);
+    let mut truncated = false;
+    for (i, line) in text.lines().enumerate().skip(offset - 1) {
         if emitted >= limit || out.len() > 300_000 {
-            out.push_str("\n…(output truncated)");
+            truncated = true;
             break;
         }
         out.push_str(&format!("{:>6}\t{line}\n", i + 1));
+        last_no = i + 1;
+        emitted += 1;
     }
-    if text.lines().count() == 0 {
+    if total_lines == 0 {
         out.push_str("(empty file)\n");
+    } else if truncated {
+        match spill_output(&ctx.root, "read", &text) {
+            Some(rel) => out.push_str(&format!(
+                "\n…(showing lines {first_no}–{last_no} of {total_lines} total — full output saved to {rel}: use grep to search it or read with offset/limit for specific sections, do not re-read the whole file)"
+            )),
+            None => out.push_str("\n…(output truncated)"),
+        }
+    } else {
+        out.push_str(&format!(
+            "\n(showing lines {first_no}–{last_no} of {total_lines} total)"
+        ));
     }
     ctx.mark_read(&p);
     ctx.note_read_window(&p, offset, limit, window_hash);
@@ -339,7 +405,14 @@ pub(super) fn edit(
         Ok(p) => p,
         Err(e) => return Outcome::err(e),
     };
-    if let Err(e) = require_read(ctx, &p) {
+    // mass replacement without a fresh read is blind destruction; a single
+    // exact edit is self-validating (match-or-error before touching disk)
+    // and only needs the file to be non-stale
+    if replace_all {
+        if let Err(e) = require_read(ctx, &p) {
+            return Outcome::err(e);
+        }
+    } else if let Err(e) = require_fresh(ctx, &p) {
         return Outcome::err(e);
     }
     let content = match fs::read_to_string(&p) {
@@ -387,7 +460,11 @@ pub(super) fn multi_edit(
         Ok(p) => p,
         Err(e) => return Outcome::err(e),
     };
-    if let Err(e) = require_read(ctx, &p) {
+    if edits.iter().any(|(_, _, all)| *all) {
+        if let Err(e) = require_read(ctx, &p) {
+            return Outcome::err(e);
+        }
+    } else if let Err(e) = require_fresh(ctx, &p) {
         return Outcome::err(e);
     }
     let mut content = match fs::read_to_string(&p) {
@@ -606,7 +683,12 @@ pub(super) fn grep(
                 hits.push(i);
                 matches += 1;
                 if matches >= 200 {
-                    out.push_str("…(more matches truncated)\n");
+                    match spill_output(&ctx.root, "grep", &out) {
+                        Some(rel) => out.push_str(&format!(
+                            "…(more matches truncated: first 200 shown, full list in {rel} — grep it with a narrower pattern instead of re-running broad)\n"
+                        )),
+                        None => out.push_str("…(more matches truncated)\n"),
+                    }
                     break 'outer;
                 }
             }

@@ -535,31 +535,141 @@ mod tests {
     fn read_then_edit_flow_and_guards() {
         let (mut ctx, dir) = proj();
 
-        // edit before read is denied
+        // overwriting an existing file without a read stays refused:
+        // blind destruction is what exact matching cannot catch
+        let o = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": "src/main.rs", "content": "wiped\n"}),
+        );
+        assert!(!o.ok, "overwrite must require a prior read");
+        assert!(o.output.contains("was not read"), "{}", o.output);
+
+        // mass replacement without a read stays refused for the same reason
+        let o = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "src/main.rs", "old_string": "fn", "new_string": "FN", "replace_all": true}),
+        );
+        assert!(!o.ok, "replace_all must require a prior read");
+
+        // a single exact edit is self-validating: no prior read needed
         let o = execute(
             &mut ctx,
             "edit",
             &json!({"file_path": "src/main.rs", "old_string": "TODO", "new_string": "DONE"}),
         );
-        assert!(!o.ok, "edit must require prior read");
-
-        // read marks the file
-        let o = execute(&mut ctx, "read", &json!({"file_path": "src/main.rs"}));
-        assert!(o.ok && o.output.contains("TODO"), "{}", o.output);
-
-        // now edit succeeds and content changes
-        let o = execute(
-            &mut ctx,
-            "edit",
-            &json!({"file_path": "src/main.rs", "old_string": "TODO", "new_string": "DONE"}),
-        );
-        assert!(o.ok, "{}", o.output);
+        assert!(o.ok, "exact edit needs no prior read: {}", o.output);
         assert_eq!(
             fs::read_to_string(dir.join("src/main.rs")).unwrap(),
             "fn main() {}\n// DONE\n"
         );
-        // checkpoint journal got an entry from the mutation
-        assert_eq!(ctx.journal.len(), 1);
+
+        // ...but a blind guess fails safe instead of writing
+        let o = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "src/main.rs", "old_string": "NOPE", "new_string": "DONE"}),
+        );
+        assert!(!o.ok, "mismatch must fail safe");
+        assert_eq!(
+            fs::read_to_string(dir.join("src/main.rs")).unwrap(),
+            "fn main() {}\n// DONE\n"
+        );
+
+        // read marks the file; working from a stale read still refuses
+        // even exact edits — the file moved underneath
+        let o = execute(&mut ctx, "read", &json!({"file_path": "src/main.rs"}));
+        assert!(o.ok, "{}", o.output);
+        fs::write(dir.join("src/main.rs"), "fn main() {}\n// EXTERNAL\n").unwrap();
+        let o = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "src/main.rs", "old_string": "EXTERNAL", "new_string": "DONE"}),
+        );
+        assert!(!o.ok, "stale read must refuse even exact edits");
+        assert!(
+            o.output.contains("changed since you read it"),
+            "{}",
+            o.output
+        );
+        // checkpoint journal got entries from the mutation above
+        assert!(!ctx.journal.is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn multi_edit_without_read_is_atomic_and_allowed() {
+        let (mut ctx, dir) = proj();
+        // all legs valid: applies without any prior read (validated
+        // against the evolving text before touching disk)
+        let o = execute(
+            &mut ctx,
+            "multi_edit",
+            &json!({"file_path": "src/main.rs", "edits": [
+                {"old_string": "TODO", "new_string": "DONE"},
+                {"old_string": "fn main() {}", "new_string": "fn main() { /* x */ }"},
+            ]}),
+        );
+        assert!(o.ok, "atomic multi_edit needs no prior read: {}", o.output);
+        // one bad leg aborts the whole batch: nothing lands on disk
+        let o = execute(
+            &mut ctx,
+            "multi_edit",
+            &json!({"file_path": "src/main.rs", "edits": [
+                {"old_string": "DONE", "new_string": "DONE2"},
+                {"old_string": "MISSING", "new_string": "X"},
+            ]}),
+        );
+        assert!(!o.ok, "bad leg must abort the batch");
+        assert_eq!(
+            fs::read_to_string(dir.join("src/main.rs")).unwrap(),
+            "fn main() { /* x */ }\n// DONE\n"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_output_reports_totals_and_spills_when_truncated() {
+        let (mut ctx, dir) = proj();
+        // small file: totals footer, no spill
+        let o = execute(&mut ctx, "read", &json!({"file_path": "src/main.rs"}));
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("of 2 total"), "{}", o.output);
+        assert!(!o.output.contains("sqwai-spill"), "{}", o.output);
+
+        // big file: truncated with totals, full text spilled to a file the
+        // tools themselves can grep and page
+        let big: String = (0..2500).map(|i| format!("line {i}\n")).collect();
+        fs::write(dir.join("big.rs"), &big).unwrap();
+        let o = execute(&mut ctx, "read", &json!({"file_path": "big.rs"}));
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("of 2500 total"), "{}", o.output);
+        assert!(o.output.contains("sqwai-spill/read-"), "{}", o.output);
+        assert!(
+            o.output.contains("do not re-read the whole file"),
+            "{}",
+            o.output
+        );
+        let spill = o
+            .output
+            .lines()
+            .find_map(|line| {
+                let start = line.find("sqwai-spill/read-")?;
+                Some(
+                    line[start..]
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or_default()
+                        .trim_end_matches([':', ',', '.'])
+                        .to_string(),
+                )
+            })
+            .expect("spill path in output");
+        let back = execute(&mut ctx, "read", &json!({"file_path": spill, "limit": 5}));
+        assert!(back.ok, "spill must be readable: {}", back.output);
+        assert!(back.output.contains("line 0"), "{}", back.output);
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
