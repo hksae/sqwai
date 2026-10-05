@@ -319,7 +319,13 @@ await its result before dependent changes or reporting success.",
              checkpoints). Every line carries j#<seq>, the stable reference used by plan \
              evidence and note resolves. Times are UTC. Use it to find what evidence exists \
              or what was already tried. Output is newest-first and always capped: \
-             narrow with kind/step/from/to/after/query instead of dumping everything.",
+             narrow with kind/step/from/to/after/query instead of dumping everything. \
+             Ground-truth discipline: your context memory is lossy (early history gets \
+             compacted away), the journal is not. Before asserting anything about past \
+             actions — who changed, moved or deleted what — query it (query=<filename> \
+             usually finds it in one call). Claims about history without journal evidence \
+             are forbidden; your own earlier calls are the first suspect. Never blame \
+             external forces for something the journal attributes to you.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -585,7 +591,7 @@ Never invent evidence identifiers.",
         ToolDef {
             name: "ask_user",
             kind: Kind::ReadOnly,
-            description: "Ask the user structured questions (1-4) with 2-5 answer options each. Use only for decisions that materially change the outcome (approach, library, schema), never for trivial clarification. The user can pick options (single or multiple per question) and/or type a custom answer per question.",
+            description: "Ask the user structured questions (1-4) with 2-5 answer options each. Use only for decisions that materially change the outcome (approach, library, schema), never for trivial clarification. The user can pick options (single or multiple per question) and/or type a custom answer per question. Evidence before escalation: never ask the user to resolve a question of fact about the past (what changed, who deleted what) — query the journal first; ask only when the journal cannot answer.",
             parameters: json!({
                 "type": "object",
                 "properties": {
