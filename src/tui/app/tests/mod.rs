@@ -304,12 +304,10 @@ fn rendered(app: &App) -> String {
 /// The status bar labels are pinned here so fixtures never read the
 /// checkout they happen to run in: `cwd_label` would otherwise render
 /// the real directory name — including its width, which no output
-/// filter can normalise back — and `plan_step_label` would leak an
-/// active plan from the checkout's live `.sqwai/` state. The literal
-/// `sqwai` keeps the layout byte-identical to the committed snapshots.
+/// filter can normalise back. The literal `sqwai` keeps the layout
+/// byte-identical to the committed snapshots.
 fn render_to_string(app: &mut App, w: u16, h: u16) -> String {
     app.cwd_label = "sqwai".to_string();
-    app.plan_step_label = String::new();
     let backend = TestBackend::new(w, h);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| app.draw(f)).unwrap();

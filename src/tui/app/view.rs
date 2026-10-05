@@ -3819,6 +3819,12 @@ impl App {
                 st,
             )));
         }
+        if let Some(cp) = self.last_checkpoint.clone() {
+            return Some(Line::from(Span::styled(
+                truncate_display_width(&format!(" checkpoint: {cp}"), width),
+                Theme::dim(),
+            )));
+        }
         None
     }
 
@@ -3833,7 +3839,6 @@ impl App {
         // here is ever squeezed or cut. Right side, single-space rhythm:
         // `6% (62k) cache 37% model effort ~/dir` — context first, details
         // in parens, model and dir in quiet white.
-        let plan_label = self.plan_step_label.clone();
         let dir = self.cwd_label.clone();
 
         let context_used = self.session.context_tokens_used();
@@ -3867,10 +3872,7 @@ impl App {
         // — a project directory such as `~/仕事/proj` made the padding too
         // wide, pushed the right-hand group past the edge and shifted every
         // click target computed below.
-        // the plan gap only exists when a plan label follows the chip —
-        // counting phantom spaces shortens the row (bigger right margin)
-        let left_base_cols = cols(&format!(" {} ", self.mode.label()))
-            + (!plan_label.is_empty() as usize * (2 + cols(&plan_label)));
+        let left_base_cols = cols(&format!(" {} ", self.mode.label()));
 
         // one space between blocks, counted exactly like the spans below:
         // no slack anywhere, the row must fill the terminal edge to edge
@@ -3917,9 +3919,6 @@ impl App {
             _ => chip_settled,
         };
         let mut spans = vec![Span::styled(format!(" {} ", self.mode.label()), chip_style)];
-        if !plan_label.is_empty() {
-            spans.push(Span::styled(format!("  {plan_label}"), Theme::dim()));
-        }
         let pad = (w as usize).saturating_sub(lw as usize + right_len);
         let model_x0 = lw + pad as u16 + cols(&ctx_label) as u16 + 1;
         spans.push(Span::styled(" ".repeat(pad), Theme::base()));

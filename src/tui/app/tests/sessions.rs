@@ -1059,11 +1059,13 @@ fn session_switch_drops_stale_notices() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.effort_observed_ignored = Some(("m".into(), EffortLevel::High, "nope".into()));
     app.retry_line = Some("retry #1 in 5s — boom".into());
+    app.last_checkpoint = Some("cp".into());
     app.prev_turn_ok = true;
     app.retry_notified = false;
     app.apply_session(Session::new("m".into(), 1000));
     assert!(app.effort_observed_ignored.is_none());
     assert!(app.retry_line.is_none());
+    assert!(app.last_checkpoint.is_none());
     assert!(!app.prev_turn_ok);
     assert!(app.retry_notified);
 }

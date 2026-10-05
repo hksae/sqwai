@@ -1566,7 +1566,6 @@ impl App {
                                         None => "plan deleted; no active plan".to_string(),
                                     };
                                     self.status(&note, StatusKind::Ok);
-                                    self.refresh_plan_label();
                                 }
                                 Ok(()) => self.status(
                                     &format!(
@@ -1582,7 +1581,6 @@ impl App {
                         None => {
                             self.session.plan_id = None;
                             self.session.save().ok();
-                            self.refresh_plan_label();
                             self.status("no active plan", StatusKind::Info);
                         }
                     }

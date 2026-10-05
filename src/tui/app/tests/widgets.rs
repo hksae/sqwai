@@ -1,22 +1,18 @@
 use super::*;
 
 /// The status bar is laid out in terminal columns and its click targets are
-/// derived from the same numbers. Now that the directory label and the plan
-/// label are state rather than calls into the environment, the layout can
-/// be driven from a test — including with a wide-character project
-/// directory, which is what actually broke it.
+/// derived from the same numbers. Now that the directory label is state
+/// rather than a call into the environment, the layout can be driven from
+/// a test — including with a wide-character project directory, which is
+/// what actually broke it. Plan progress stays out of the bar (the
+/// checkpoint row already carries it); the bar keeps metrics only.
 #[test]
 fn status_bar_fits_and_keeps_click_targets_inside_a_wide_directory() {
-    for (label, plan) in [
-        ("sqwai", ""),
-        ("仕事プロジェクト", "step 2/5"),
-        ("Проекты-агента", "step 12/12"),
-    ] {
+    for label in ["sqwai", "仕事プロジェクト", "Проекты-агента"] {
         for w in [70u16, 100, 120] {
             let mut app = test_app("http://127.0.0.1:9/v1".into());
             app.startup = false;
             app.cwd_label = label.to_string();
-            app.plan_step_label = plan.to_string();
             // The widest effort label there is: `max (ignored)` spends
             // ten more columns than `off`, and the row must still fit
             // with the directory budget absorbing the difference.
@@ -25,6 +21,10 @@ fn status_bar_fits_and_keeps_click_targets_inside_a_wide_directory() {
 
             let spans = app.status_bar_spans(w);
             let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                !text.contains("step "),
+                "no plan progress in the bar: {text:?}"
+            );
             let used = unicode_width::UnicodeWidthStr::width(text.as_str());
             assert_eq!(
                 used, w as usize,
@@ -47,7 +47,11 @@ fn status_bar_fits_and_keeps_click_targets_inside_a_wide_directory() {
 #[test]
 fn notice_row_fits_width_next_to_queue() {
     #[allow(clippy::type_complexity)]
-    let setups: [(fn(&mut App), &str); 2] = [
+    let setups: [(fn(&mut App), &str); 3] = [
+        (
+            |app: &mut App| app.last_checkpoint = Some("edit src/main.rs".into()),
+            "edit src/main.rs",
+        ),
         (
             |app: &mut App| app.status("network timeout 408", StatusKind::Err),
             "network timeout 408",
@@ -77,10 +81,10 @@ fn notice_row_fits_width_next_to_queue() {
             assert!(s.contains(needle), "notice in its own row: {s}");
         }
     }
-    // priority inside the row: retry first, then toast (checkpoint hints
-    // moved out — the status bar already shows step n/m)
+    // priority inside the row: retry first, then toast, then checkpoint
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
+    app.last_checkpoint = Some("cp".into());
     app.status("boom", StatusKind::Err);
     app.retry_line = Some("retrying".into());
     let text: String = app

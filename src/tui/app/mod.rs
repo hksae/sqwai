@@ -244,10 +244,6 @@ pub struct App {
     pub(super) project_root: PathBuf,
     /// Name of the project directory as shown in the status bar.
     pub(super) cwd_label: String,
-    /// `step N/M` for the active plan, or empty when there is none. Refreshed
-    /// when the plan can have changed (see `refresh_plan_label`) rather than
-    /// re-read and re-parsed from disk on every redraw.
-    pub(super) plan_step_label: String,
 
     input: TextArea<'static>,
     segments: Vec<Segment>,
@@ -321,6 +317,8 @@ pub struct App {
     /// armed when a session with history is loaded or a compaction changed
     /// something — the only genuine restores
     resume_notice_armed: bool,
+    /// label of the last shadow checkpoint (design §10 indicator)
+    last_checkpoint: Option<String>,
     /// user message index pushed for the active turn, if any
     turn_user_index: Option<usize>,
 
@@ -848,24 +846,6 @@ Continue from the pending step, or report to the user if the settled work looks 
         parts
     }
 
-    /// Recompute the plan label from disk.
-    ///
-    /// Called where the active plan can have changed — construction, a plan
-    /// operation reported by the agent, the end of a turn, `/undo`, and any
-    /// slash command — instead of on every frame from inside the renderer.
-    pub(super) fn refresh_plan_label(&mut self) {
-        self.plan_step_label = self
-            .session_plan()
-            .and_then(|plan| {
-                let current = plan
-                    .steps
-                    .iter()
-                    .position(|step| step.status == plan::StepStatus::InProgress)?;
-                Some(format!("step {}/{}", current + 1, plan.steps.len()))
-            })
-            .unwrap_or_default();
-    }
-
     pub fn new(cfg: Config, session: Session, startup: bool, read_only: bool) -> Result<Self> {
         let model_key = session.model_key.clone();
         let model_cfg = cfg
@@ -912,7 +892,6 @@ Continue from the pending step, or report to the user if the settled work looks 
         let mut app = Self {
             project_root,
             cwd_label,
-            plan_step_label: String::new(),
             input: Self::fresh_input(String::new()),
             model_cfg,
             provider,
@@ -1038,6 +1017,7 @@ Continue from the pending step, or report to the user if the settled work looks 
             press_menu_depth: None,
             last_mouse: None,
             menu_open_mouse: None,
+            last_checkpoint: None,
             press_anchor: None,
             dragging: false,
             sel: None,
@@ -1071,7 +1051,6 @@ Continue from the pending step, or report to the user if the settled work looks 
             .flatten()
             .map(|plan| plan.id);
         }
-        app.refresh_plan_label();
         app.stable_prefix = app.stable_prefix();
         app.rebuild_session_environment();
         app.context_bootstrap_pending = true;
@@ -2501,6 +2480,7 @@ Continue from the pending step, or report to the user if the settled work looks 
         self.toast = None;
         self.retry_notified = false;
         self.retry_line = None;
+        self.last_checkpoint = None;
         let mut text = self.input_text().trim().to_string();
         if text.is_empty() {
             if self.startup {
@@ -2925,6 +2905,7 @@ Continue from the pending step, or report to the user if the settled work looks 
         // verdict must not leak into the new session's chrome
         self.effort_observed_ignored = None;
         self.retry_line = None;
+        self.last_checkpoint = None;
         self.prev_turn_ok = false;
         self.retry_notified = true;
         self.active_ask_id = None;
@@ -3028,6 +3009,7 @@ Continue from the pending step, or report to the user if the settled work looks 
         // verdict must not leak into the new session's chrome
         self.effort_observed_ignored = None;
         self.retry_line = None;
+        self.last_checkpoint = None;
         self.prev_turn_ok = false;
         self.retry_notified = true;
         self.active_ask_id = None;
@@ -3403,10 +3385,6 @@ Continue from the pending step, or report to the user if the settled work looks 
             "" => {}
             other => self.status(&format!("unknown command {other}"), StatusKind::Warn),
         }
-        // /plan, /goal, /constraints, /init, /undo and /new can all change the
-        // active plan; refreshing once per command is cheaper than the
-        // per-frame read this replaces.
-        self.refresh_plan_label();
         self.dirty = true;
     }
 
@@ -4218,15 +4196,11 @@ Continue from the pending step, or report to the user if the settled work looks 
                     self.handle_tool_notice(name, summary, ok, diff, Some(call_id));
                 }
                 AgentEvent::Checkpoint { label } => {
-                    // checkpoint hint removed from the notice row (the status
-                    // bar already shows step n/m): kept in the event log,
-                    // journaled by the loop itself
-                    crate::tui::event_log::log("CHECKPOINT", label);
+                    self.last_checkpoint = Some(label);
                     self.dirty = true;
                 }
                 AgentEvent::Todos(items) => {
                     self.todos = items;
-                    self.refresh_plan_label();
                     self.dirty = true;
                 }
                 AgentEvent::AskUser { id, questions } => {
@@ -4244,7 +4218,6 @@ Continue from the pending step, or report to the user if the settled work looks 
                     // the loop stored the accepted draft: re-link the session
                     // so fork copies the new plan instead of the abandoned one
                     self.session.plan_id = Some(id);
-                    self.refresh_plan_label();
                     self.dirty = true;
                 }
                 AgentEvent::StepCurrent { step } => {
@@ -4721,7 +4694,6 @@ Continue from the pending step, or report to the user if the settled work looks 
         if !outcome.plan_todos.is_empty() {
             self.todos = outcome.plan_todos;
         }
-        self.refresh_plan_label();
         self.session.checkpoints.extend(outcome.journal);
         self.finish_turn_inner(Ok(()), advanced);
     }
@@ -5574,7 +5546,6 @@ Continue from the pending step, or report to the user if the settled work looks 
                     {
                         reopened.push(step.to_string());
                     }
-                    self.refresh_plan_label();
                 }
                 if let Ok(mut journal) =
                     crate::agent::journal::Journal::open(&root, &self.session.id.to_string())
