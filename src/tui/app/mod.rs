@@ -787,6 +787,51 @@ impl App {
                 parts.push(SystemPart::volatile(notice));
             }
         }
+        // One-shot stopped-turn notice: the previous turn was killed by the
+        // user mid-work. The transcript survived via live syncs and the plan
+        // rides live, so no details here — just the rule that matters: done
+        // steps are settled, continue from the pending one or report.
+        if self.session.prev_turn_aborted {
+            self.session.prev_turn_aborted = false;
+            self.session.save().ok();
+            let state = crate::plan::open_active_for_session(&root, Some(&self.session.id.to_string()))
+                .ok()
+                .flatten()
+                .map(|plan| {
+                    let done: Vec<String> = plan
+                        .steps
+                        .iter()
+                        .filter(|s| {
+                            matches!(
+                                s.status,
+                                crate::plan::StepStatus::Done | crate::plan::StepStatus::Cancelled
+                            )
+                        })
+                        .map(|s| s.id.clone())
+                        .collect();
+                    let pending: Vec<String> = plan
+                        .steps
+                        .iter()
+                        .filter(|s| {
+                            matches!(
+                                s.status,
+                                crate::plan::StepStatus::InProgress
+                                    | crate::plan::StepStatus::Pending
+                                    | crate::plan::StepStatus::Blocked
+                                    | crate::plan::StepStatus::Reopened
+                            )
+                        })
+                        .map(|s| s.id.clone())
+                        .collect();
+                    format!("done=[{}] pending=[{}]", done.join(","), pending.join(","))
+                })
+                .unwrap_or_else(|| "no active plan".to_string());
+            parts.push(SystemPart::volatile(format!(
+                "The previous turn was stopped by the user mid-work; the transcript above is complete. \
+Steps marked done are settled — do not redo them, do not re-verify them. \
+Continue from the pending step, or report to the user if the settled work looks wrong. ({state})"
+            )));
+        }
         let runtime = crate::prompts::runtime_context();
         if !runtime.is_empty() {
             parts.push(SystemPart::volatile(runtime));
@@ -3963,6 +4008,9 @@ impl App {
                     before,
                     after,
                 } => self.note_compaction(summarized, before, after),
+                AgentEvent::TranscriptSync { messages, summary } => {
+                    self.persist_transcript(messages, summary)
+                }
                 AgentEvent::RequestBreakdown(b) => {
                     crate::providers::log_http(&format!(
                         "request breakdown: system={}B history={}B user={}B tools={}B total={}B",
@@ -4899,6 +4947,23 @@ impl App {
         self.finish_turn_inner(res, true);
     }
 
+    /// Live transcript persistence for hard-abort survival: the loop owns
+    /// the transcript, and a killed task takes it along. Same rebase
+    /// discipline as finish_turn_ok — compaction may have replaced the
+    /// prefix mid-turn.
+    fn persist_transcript(&mut self, messages: Vec<crate::providers::Message>, summary: Option<String>) {
+        if messages.len() < self.session.messages.len() {
+            self.session
+                .rebase_turn_attachments(self.session.messages.len() - messages.len());
+        }
+        self.session.messages = messages;
+        if summary.is_some() {
+            self.session.summary = summary;
+        }
+        self.session.refresh_estimate();
+        self.session.save().ok();
+    }
+
     /// Push one durable chat row per newly-stale acceptance item, if a plan
     /// is active. Split out for tests: production passes the loaded plan,
     /// tests pass constructed ones (no disk involved).
@@ -5046,6 +5111,19 @@ impl App {
         self.agent = None;
         self.retry_line = None;
         self.prev_turn_ok = matches!(res, Ok(()));
+        // A turn that did not finish cleanly leaves the provider holding a
+        // history the host no longer vouches for (§3.3): bootstrap the next
+        // request instead of continuing it. An aborted turn additionally
+        // arms the resume notice — the next turn must continue the plan,
+        // not silently redo settled steps.
+        if res.is_err() {
+            self.context_bootstrap_pending = true;
+        }
+        let aborted_turn = matches!(&res, Err(e) if e == "aborted");
+        if aborted_turn || res.is_ok() {
+            self.session.prev_turn_aborted = aborted_turn;
+            self.session.save().ok();
+        }
         let turn_note = match &res {
             Ok(()) => None,
             Err(e) if e == "tui closed" => None,

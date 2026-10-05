@@ -205,6 +205,15 @@ pub enum AgentEvent {
         to: String,
     },
     Completed(Result<AgentOutcome, String>),
+    /// live transcript sync: the full conversation so far, sent at the top
+    /// of every turn-loop iteration (main agent only). A hard abort kills
+    /// the task mid-request, so without this the whole turn's tool traffic
+    /// dies with it and resume starts amnesiac — the TUI persists every
+    /// sync, keeping at most one in-flight request unrecorded.
+    TranscriptSync {
+        messages: Vec<Message>,
+        summary: Option<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -797,6 +806,18 @@ async fn run_agent(
     let mut zero_reasoning_turns: u32 = 0;
 
     loop {
+        // Transcript sync for hard-abort survival (main agent only — a
+        // child's transcript must never overwrite its parent's): every
+        // iteration persists the conversation so far, so killing the task
+        // loses at most the in-flight request.
+        if subagent_depth == 0 {
+            let _ = tx
+                .send(AgentEvent::TranscriptSync {
+                    messages: messages.clone(),
+                    summary: summary.clone(),
+                })
+                .await;
+        }
         // The proposal limit applies to one model request/turn, not the whole
         // session. A new request gets a fresh allowance.
         memory_proposals_this_turn = 0;

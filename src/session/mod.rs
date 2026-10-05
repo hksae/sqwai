@@ -147,6 +147,12 @@ pub struct Session {
     /// Terminal outcomes for agent turns that have no normal final answer.
     #[serde(default)]
     pub turn_notes: Vec<TurnNote>,
+    /// the previous turn was stopped by the user mid-work (Esc abort): its
+    /// transcript survives via live syncs, but the turn never completed, so
+    /// the next turn gets a resume notice instead of a cold start. Cleared
+    /// when a turn completes; consumed one-shot like resume_notice_armed.
+    #[serde(default)]
+    pub prev_turn_aborted: bool,
     /// project root this session was born in; stamped by the host on
     /// creation. Plans, journals and undo chains live under this root, so
     /// opening the session elsewhere dangles those links (the UI warns).
@@ -178,6 +184,7 @@ impl Session {
             checkpoints: Vec::new(),
             activity: Vec::new(),
             turn_notes: Vec::new(),
+            prev_turn_aborted: false,
             project: None,
         }
     }

@@ -1197,8 +1197,7 @@ fn successful_finish_retracts_transient_retry_notice() {
 /// Recovery clears mid-turn: the first delta after a retry means the next
 /// request is flowing, so both failure rows go now — not at turn end.
 #[test]
-fn retry_rows_clear_on_first_progress_after_retry() {
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
+fn retry_rows_clear_on_first_progress_after_retry() {    let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.push_segment(Segment::Status {
         text: "request failed — retrying with backoff: boom".into(),
         kind: StatusKind::Err,
@@ -1220,4 +1219,68 @@ fn retry_rows_clear_on_first_progress_after_retry() {
         )),
         "transient chat notice must go"
     );
+}
+
+/// A hard-aborted turn keeps its transcript: live syncs persist the loop's
+/// messages, so resume continues instead of starting amnesiac.
+#[test]
+fn transcript_sync_persists_loop_messages() {
+    use crate::providers::{Message, Role};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    assert!(app.session.messages.is_empty());
+    app.persist_transcript(
+        vec![
+            Message::new(Role::User, "do it"),
+            Message::tool_result("c1", "tool output bytes", false),
+            Message::new(Role::Assistant, "working"),
+        ],
+        None,
+    );
+    assert_eq!(app.session.messages.len(), 3);
+    assert!(app.session.messages[1].content.contains("tool output bytes"));
+}
+
+/// An aborted turn arms the one-shot resume notice and bootstraps the next
+/// request (the provider copy is stale now); a completed turn disarms it.
+#[test]
+fn aborted_turn_arms_resume_notice_and_bootstraps() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    assert!(!app.session.prev_turn_aborted);
+    app.finish_turn_inner(Err("aborted".into()), false);
+    assert!(app.session.prev_turn_aborted, "abort must arm the notice");
+    assert!(
+        app.context_bootstrap_pending,
+        "stale provider copy must not be continued"
+    );
+    // system_block carries the notice once, in English, without details —
+    // the live plan already rides every request
+    let first = app.system_block();
+    let texts: Vec<String> = first
+        .iter()
+        .filter(|p| !p.cacheable)
+        .map(|p| p.text.clone())
+        .collect();
+    assert!(
+        texts.iter().any(|t| t.contains("stopped by the user")
+            && t.contains("do not redo them")),
+        "resume notice must name the rule: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("goal:")),
+        "no plan details in the notice: {texts:?}"
+    );
+    let second = app.system_block();
+    let texts2: Vec<String> = second
+        .iter()
+        .filter(|p| !p.cacheable)
+        .map(|p| p.text.clone())
+        .collect();
+    assert!(
+        !texts2.iter().any(|t| t.contains("stopped by the user")),
+        "one-shot means one-shot"
+    );
+    // a completed turn clears the flag
+    app.session.prev_turn_aborted = true;
+    app.finish_turn_inner(Ok(()), false);
+    assert!(!app.session.prev_turn_aborted);
 }
