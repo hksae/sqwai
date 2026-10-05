@@ -137,10 +137,23 @@ pub(super) fn read(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Ou
     }
     let text = String::from_utf8_lossy(&bytes);
     let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
-    let limit = args["limit"].as_u64().unwrap_or(READ_MAX_LINES as u64) as usize;
+    let limit =
+        (args["limit"].as_u64().unwrap_or(READ_MAX_LINES as u64) as usize).min(READ_MAX_LINES);
+    // repeat reads of an unchanged window collapse to a stub: re-reading
+    // the same files in circles was the top context burner, and the
+    // freshness guard (require_read) already forces a fresh read when the
+    // file actually moved.
+    let window_hash = content_hash(&bytes);
+    if ctx.read_window_hit(&p, offset, limit, &window_hash) {
+        return Outcome::ok(format!(
+            "…(unchanged since your last read of this window: {} lines {}+, see above — no need to re-read)",
+            rel_label(&ctx.root, &p),
+            offset,
+        ));
+    }
     let mut out = String::new();
     for (emitted, (i, line)) in text.lines().enumerate().skip(offset - 1).enumerate() {
-        if emitted >= limit.min(READ_MAX_LINES) || out.len() > 300_000 {
+        if emitted >= limit || out.len() > 300_000 {
             out.push_str("\n…(output truncated)");
             break;
         }
@@ -150,6 +163,7 @@ pub(super) fn read(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Ou
         out.push_str("(empty file)\n");
     }
     ctx.mark_read(&p);
+    ctx.note_read_window(&p, offset, limit, window_hash);
     Outcome::ok(out)
 }
 
@@ -511,6 +525,7 @@ pub(super) fn grep(
     pattern: &str,
     path: Option<&str>,
     include: Option<&str>,
+    context: usize,
 ) -> Outcome {
     use ignore::WalkBuilder;
     use std::io::BufRead;
@@ -533,6 +548,20 @@ pub(super) fn grep(
         },
         None => None,
     };
+
+    fn show_line(line: &str) -> String {
+        const MAX_LINE_BYTES: usize = 1024;
+        let trimmed = line.trim_end();
+        if trimmed.len() > MAX_LINE_BYTES {
+            let mut cut = MAX_LINE_BYTES;
+            while cut > 0 && !trimmed.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            format!("{}…(line truncated)", &trimmed[..cut])
+        } else {
+            trimmed.to_string()
+        }
+    }
 
     let mut out = String::new();
     let mut matches = 0usize;
@@ -560,31 +589,49 @@ pub(super) fn grep(
             Err(_) => continue,
         };
         let rd = std::io::BufReader::new(file);
-        for (i, line) in rd.lines().enumerate() {
-            let Ok(line) = line else { break };
-            if line.contains('\0') {
-                continue 'outer; // binary-ish
-            }
-            if re.is_match(&line) {
+        let lines: Vec<String> = rd.lines().collect::<Result<_, _>>().unwrap_or_default();
+        if lines.iter().any(|line| line.contains('\0')) {
+            continue; // binary-ish
+        }
+        let disp = path.strip_prefix(&ctx.root).unwrap_or(path);
+        let shown = disp.display().to_string().replace('\\', "/");
+        let mut hits: Vec<usize> = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if re.is_match(line) {
+                hits.push(i);
                 matches += 1;
-                let disp = path.strip_prefix(&ctx.root).unwrap_or(path);
-                let shown = disp.display().to_string().replace('\\', "/");
-                let trimmed = line.trim_end();
-                const MAX_LINE_BYTES: usize = 1024;
-                let display_line = if trimmed.len() > MAX_LINE_BYTES {
-                    let mut cut = MAX_LINE_BYTES;
-                    while cut > 0 && !trimmed.is_char_boundary(cut) {
-                        cut -= 1;
-                    }
-                    format!("{}…(line truncated)", &trimmed[..cut])
-                } else {
-                    trimmed.to_string()
-                };
-                out.push_str(&format!("{}:{}: {}\n", shown, i + 1, display_line));
                 if matches >= 200 {
                     out.push_str("…(more matches truncated)\n");
                     break 'outer;
                 }
+            }
+        }
+        // grep -C shape: match lines with `:`, context with `-`, `--` between groups
+        let mut last_printed: Option<usize> = None;
+        for &hit in &hits {
+            let start = hit.saturating_sub(context);
+            let end = (hit + context + 1).min(lines.len());
+            if let Some(prev) = last_printed
+                && start > prev + 1
+            {
+                out.push_str("--\n");
+            }
+            for i in start..end {
+                if last_printed.is_some_and(|p| i <= p) {
+                    continue;
+                }
+                let sep = if i == hit { ':' } else { '-' };
+                out.push_str(&format!(
+                    "{}{sep}{}: {}\n",
+                    shown,
+                    i + 1,
+                    show_line(&lines[i])
+                ));
+                last_printed = Some(i);
+            }
+            if out.len() > 300_000 {
+                out.push_str("…(output truncated)\n");
+                break 'outer;
             }
         }
     }
@@ -651,10 +698,40 @@ mod tests {
     }
 
     #[test]
+    fn repeat_read_of_unchanged_window_collapses_to_stub() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        let args = serde_json::json!({});
+        let first = read(&mut ctx, "a.txt", &args);
+        assert!(first.ok);
+        assert!(first.output.contains("one"), "{}", first.output);
+        // same window, unchanged file: stub instead of the bytes again
+        let second = read(&mut ctx, "a.txt", &args);
+        assert!(second.ok);
+        assert!(
+            second.output.contains("unchanged since your last read"),
+            "{}",
+            second.output
+        );
+        // after an edit the window serves fresh again
+        let edited = edit(&mut ctx, "a.txt", "two", "TWO", false);
+        assert!(edited.ok, "{}", edited.output);
+        let third = read(&mut ctx, "a.txt", &args);
+        assert!(third.ok);
+        assert!(third.output.contains("TWO"), "{}", third.output);
+        assert!(
+            !third.output.contains("unchanged since your last read"),
+            "{}",
+            third.output
+        );
+    }
+
+    #[test]
     fn grep_invalid_include_glob_returns_error_instead_of_panicking() {
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = ToolCtx::new(dir.path());
-        let outcome = grep(&mut ctx, "test", None, Some("[unclosed"));
+        let outcome = grep(&mut ctx, "test", None, Some("[unclosed"), 0);
         assert!(!outcome.ok);
         assert!(outcome.output.contains("bad include glob pattern"));
     }
@@ -665,10 +742,35 @@ mod tests {
         let long_line = format!("match_{}", "a".repeat(3000));
         std::fs::write(dir.path().join("long.txt"), &long_line).unwrap();
         let mut ctx = ToolCtx::new(dir.path());
-        let outcome = grep(&mut ctx, "match_", None, None);
+        let outcome = grep(&mut ctx, "match_", None, None, 0);
         assert!(outcome.ok);
         assert!(outcome.output.contains("…(line truncated)"));
         assert!(outcome.output.len() < 2000);
+    }
+
+    #[test]
+    fn grep_context_shows_surrounding_lines_like_grep_c() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("code.txt"),
+            "line one\nline two\nMATCH here\nline four\nline five\n",
+        )
+        .unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        let outcome = grep(&mut ctx, "MATCH", None, None, 1);
+        assert!(outcome.ok);
+        // match line with `:`, context lines with `-`
+        assert!(
+            outcome.output.contains("code.txt:3: MATCH here"),
+            "{}",
+            outcome.output
+        );
+        assert!(outcome.output.contains("code.txt-2:"), "{}", outcome.output);
+        assert!(outcome.output.contains("code.txt-4:"), "{}", outcome.output);
+        // default stays context-free
+        let plain = grep(&mut ctx, "MATCH", None, None, 0);
+        assert!(plain.ok);
+        assert!(!plain.output.contains("code.txt-2:"), "{}", plain.output);
     }
 
     #[test]
@@ -684,7 +786,7 @@ mod tests {
         let mut ctx = ToolCtx::new(dir.path());
         // grep must not match inside host-owned state (pre-fix: leaked on
         // Windows where hidden(true) checks attributes, not dotfiles)
-        let outcome = grep(&mut ctx, "host_secret_marker_xyz", None, None);
+        let outcome = grep(&mut ctx, "host_secret_marker_xyz", None, None, 0);
         assert!(outcome.ok);
         assert!(!outcome.output.contains(".sqwai"), "{}", outcome.output);
         // glob must not list host-owned files either

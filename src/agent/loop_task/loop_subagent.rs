@@ -209,6 +209,7 @@ pub(crate) async fn run_subagent_batch(
                     "tool": call.name,
                     "call_id": call.id,
                     "args_digest": tools::call_summary(&call.name, &call.args),
+                    "args": tools::call_args_for_journal(&call.args),
                     "path": tools::call_path(&call.name, &call.args),
                 }),
             );

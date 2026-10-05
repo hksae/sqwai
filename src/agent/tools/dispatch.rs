@@ -327,6 +327,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             args["pattern"].as_str().unwrap_or_default(),
             args["path"].as_str(),
             args["include"].as_str(),
+            args["context"].as_u64().unwrap_or(0).min(10) as usize,
         ),
         "git_status" => git::status(ctx, args),
         "git_diff" => git::diff(ctx, args),

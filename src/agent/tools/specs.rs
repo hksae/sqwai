@@ -35,7 +35,10 @@ fn defs() -> Vec<ToolDef> {
             name: "read",
             kind: Kind::ReadOnly,
             description: "Read a file from the project. Returns numbered lines. \
-Must be called before edit/write on an existing file.",
+Must be called once before edit/write on an existing file — one read per session is enough: the host \
+tracks freshness and refuses the edit with a stale warning if the file moved underneath, so never \
+re-read defensively. Prefer offset/limit windows over full re-reads, and outline for structure \
+before targeted reading.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -50,7 +53,8 @@ Must be called before edit/write on an existing file.",
             name: "write",
             kind: Kind::Mutating,
             description: "Create a new file or completely overwrite an existing one. \
-Overwriting an existing file requires reading it first.",
+Overwriting an existing file requires a prior read (one per session is enough unless the host \
+reported the file stale).",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -64,7 +68,8 @@ Overwriting an existing file requires reading it first.",
             name: "edit",
             kind: Kind::Mutating,
             description: "Replace exact text inside a file. old_string must appear exactly once \
-unless replace_all is true. Requires reading the file first.",
+unless replace_all is true. Requires a prior read of the file — one read per session is enough \
+unless the host reported the file stale.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -125,13 +130,15 @@ unless replace_all is true. Requires reading the file first.",
         ToolDef {
             name: "grep",
             kind: Kind::ReadOnly,
-            description: "Regex search over file contents. Returns file:line: text matches.",
+            description: "Regex search over file contents. Returns file:line: text matches. \
+Pass context:N for N surrounding lines per match (like grep -C) so a follow-up read is rarely needed.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string"},
                     "path": {"type": "string", "description": "dir or file to search"},
-                    "include": {"type": "string", "description": "filename glob filter, e.g. *.rs"}
+                    "include": {"type": "string", "description": "filename glob filter, e.g. *.rs"},
+                    "context": {"type": "integer", "description": "surrounding lines per match, like grep -C (default 0)"}
                 },
                 "required": ["pattern"]
             }),
@@ -154,6 +161,9 @@ unless replace_all is true. Requires reading the file first.",
             kind: Kind::Mutating,
             description: "Run a shell command in the project directory. Destructive or risky commands \
 (rm -rf, sudo, disk ops, force-push, etc.) require user approval and the model should avoid them. \
+On Windows the shell is cmd.exe/PowerShell: there are no POSIX coreutils, so no `head`, `tail`, `grep`, \
+`sed`, `awk` or `| pipe` chains through them — use `| Select-Object -First/Last N` for trimming and the \
+read/grep tools for searching files. \
 Long output is truncated to a tail and the full log path is returned. Use background=true when the \
 command may outlast the tool timeout; wait on it with bash_output(id, wait_secs) or sleep(seconds); \
 await its result before dependent changes or reporting success.",
@@ -831,6 +841,28 @@ pub fn call_path(name: &str, args: &Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// full call arguments for the journal (forensics): same object the model
+/// sent, with long strings cut to a head so a `write` body cannot bloat
+/// the journal. `args_digest` stays the human skim; this is the audit trail
+/// (e.g. whether a `read` used offset/limit windows or re-read the file).
+pub fn call_args_for_journal(args: &Value) -> Value {
+    const MAX_STR: usize = 500;
+    fn cut(value: &Value) -> Value {
+        match value {
+            Value::String(s) if s.chars().count() > MAX_STR => {
+                let head: String = s.chars().take(MAX_STR).collect();
+                Value::String(format!("{head}…({} chars total)", s.chars().count()))
+            }
+            Value::Array(items) => Value::Array(items.iter().map(cut).collect()),
+            Value::Object(map) => {
+                Value::Object(map.iter().map(|(k, v)| (k.clone(), cut(v))).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    cut(args)
+}
+
 /// one-line description of a call's arguments for the live TUI row
 pub fn call_summary(name: &str, args: &Value) -> String {
     let s = |k: &str| args[k].as_str().unwrap_or_default().to_string();
@@ -1158,4 +1190,19 @@ fn decode_child_output_handles_console_codepage() {
     mixed.extend_from_slice(&[0x8E, 0xE8, 0xA8, 0xA1, 0xAA, 0xA0]); // "Ошибка" in cp866
     assert_eq!(decode_child_output(&mixed), "done\nОшибка");
     assert_eq!(decode_child_output(&[0xB3]), "│");
+}
+
+#[test]
+fn call_args_for_journal_cuts_long_strings() {
+    let args = serde_json::json!({
+        "file_path": "a.txt",
+        "content": "x".repeat(600),
+        "offset": 3,
+    });
+    let kept = call_args_for_journal(&args);
+    assert_eq!(kept["file_path"], serde_json::json!("a.txt"));
+    assert_eq!(kept["offset"], serde_json::json!(3));
+    let body = kept["content"].as_str().unwrap();
+    assert!(body.contains("chars total"), "{body}");
+    assert!(body.len() < 600);
 }

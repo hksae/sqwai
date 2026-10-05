@@ -24,8 +24,9 @@ pub(crate) use policy::{
     register_subagent_scope, take_mention_prereads, take_subagent_scope,
 };
 pub(crate) use specs::{
-    Kind, call_path, call_summary, decode_child_output, is_multi_file_mutation, is_mutating_call,
-    is_readonly_bash, merge_specs, tool_names, tool_specs, trim_middle,
+    Kind, call_args_for_journal, call_path, call_summary, decode_child_output,
+    is_multi_file_mutation, is_mutating_call, is_readonly_bash, merge_specs, tool_names,
+    tool_specs, trim_middle,
 };
 pub(crate) use verify::capture_baselines;
 
@@ -1580,17 +1581,15 @@ mod tests {
         // the dispatcher refuses, state is read from the plan file instead
         let shown = plan_op(&mut ctx, &json!({"op": "show"}));
         assert!(!shown.ok);
-        assert!(shown.output.contains("no plan show tool"), "{}", shown.output);
+        assert!(
+            shown.output.contains("no plan show tool"),
+            "{}",
+            shown.output
+        );
         let plan = plan::open_active(&dir).unwrap().unwrap();
         let rendered = plan::render(&plan);
-        assert!(
-            rendered.contains("checklist (non-blocking)"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("ask Anna about scope"),
-            "{rendered}"
-        );
+        assert!(rendered.contains("checklist (non-blocking)"), "{rendered}");
+        assert!(rendered.contains("ask Anna about scope"), "{rendered}");
         assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
         assert!(
             plan_op(
@@ -1725,10 +1724,7 @@ mod tests {
         assert!(!shown.ok, "show is not a model tool: {}", shown.output);
         let plan = plan::open_active(&dir).unwrap().unwrap();
         let rendered = plan::render(&plan);
-        assert!(
-            rendered.contains("goal: wire the plan tool"),
-            "{rendered}"
-        );
+        assert!(rendered.contains("goal: wire the plan tool"), "{rendered}");
         assert!(
             rendered.contains("[x] 1"),
             "step 1 should read as done:\n{rendered}"

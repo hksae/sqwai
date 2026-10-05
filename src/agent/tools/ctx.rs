@@ -35,6 +35,13 @@ pub struct ToolCtx {
     /// stops `read("src/x.rs")` followed by `edit("./src/x.rs")` from being
     /// refused as unread.
     pub files_read: HashMap<PathBuf, String>,
+    /// Served read windows this session: (canonical path, offset, limit) to
+    /// the content hash that was returned. A repeat read of an unchanged
+    /// window is answered with a stub pointing back at the earlier output
+    /// instead of re-sending thousands of lines — re-reading the same files
+    /// in circles was the top context burner, and the freshness guard below
+    /// already covers the case that actually needs a fresh read.
+    pub read_windows: HashMap<(PathBuf, usize, usize), String>,
     /// journal of checkpoints created by this session's mutations
     pub journal: Vec<(String, String)>,
     /// Host limits on the plan, and the model context they are derived from.
@@ -94,6 +101,7 @@ impl ToolCtx {
             session_id: "shared".into(),
             checkpoint_session: None,
             files_read: HashMap::new(),
+            read_windows: HashMap::new(),
             journal: Vec::new(),
             plan_limits: crate::config::PlanConfig::default(),
             context_limit: 0,
@@ -275,8 +283,27 @@ impl ToolCtx {
             Some(_) => ReadState::Stale,
         }
     }
-}
 
+    /// True when this exact window was already served with identical content:
+    /// the repeat read is answered with a stub, not the bytes again.
+    pub(crate) fn read_window_hit(
+        &self,
+        p: &Path,
+        offset: usize,
+        limit: usize,
+        hash: &str,
+    ) -> bool {
+        self.read_windows
+            .get(&(Self::read_key(p), offset, limit))
+            .is_some_and(|served| served == hash)
+    }
+
+    /// Record a served window so repeats collapse to a stub.
+    pub(crate) fn note_read_window(&mut self, p: &Path, offset: usize, limit: usize, hash: String) {
+        self.read_windows
+            .insert((Self::read_key(p), offset, limit), hash);
+    }
+}
 /// What the read guard knows about a file the model wants to edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadState {
