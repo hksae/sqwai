@@ -2418,6 +2418,22 @@ impl App {
         }
     }
 
+    /// A retried request recovered: the provider is streaming again, so the
+    /// failure rows must go now — not linger until the turn ends. Clears the
+    /// live retry line and retracts the transient chat notice; a later fresh
+    /// failure re-pushes both (retry_notified re-arms).
+    fn clear_retry_state(&mut self) {
+        if self.retry_line.is_some() {
+            self.retry_line = None;
+            self.dirty = true;
+        }
+        if self.retry_notified {
+            self.retry_notified = false;
+            self.retract_transient_status();
+            self.dirty = true;
+        }
+    }
+
     fn submit(&mut self) {
         crate::tui::event_log::log(
             "SUBMIT",
@@ -3915,6 +3931,7 @@ impl App {
             };
             match ev {
                 AgentEvent::TextDelta(t) => {
+                    self.clear_retry_state();
                     self.handle_text_delta(t);
                 }
                 AgentEvent::ThinkingDelta(t) => {
@@ -4133,6 +4150,7 @@ impl App {
                     summary,
                     call_id,
                 } => {
+                    self.clear_retry_state();
                     self.handle_tool_start(name, summary, Some(call_id));
                 }
                 AgentEvent::ToolNotice {

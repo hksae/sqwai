@@ -1193,3 +1193,31 @@ fn successful_finish_retracts_transient_retry_notice() {
         "unfinished answer stays explained: {texts:?}"
     );
 }
+
+/// Recovery clears mid-turn: the first delta after a retry means the next
+/// request is flowing, so both failure rows go now — not at turn end.
+#[test]
+fn retry_rows_clear_on_first_progress_after_retry() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.push_segment(Segment::Status {
+        text: "request failed — retrying with backoff: boom".into(),
+        kind: StatusKind::Err,
+        expanded: false,
+        transient: true,
+    });
+    app.retry_notified = true;
+    app.retry_line = Some("retry #1 in 1s — boom".into());
+    app.clear_retry_state();
+    assert!(app.retry_line.is_none(), "live retry row must go");
+    assert!(!app.retry_notified, "later failures must notify again");
+    assert!(
+        !app.segments.iter().any(|s| matches!(
+            s,
+            Segment::Status {
+                transient: true,
+                ..
+            }
+        )),
+        "transient chat notice must go"
+    );
+}
