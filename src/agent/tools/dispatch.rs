@@ -966,7 +966,7 @@ fn validate_plan_refs(
                             "name a file or symbol inside it (drop any trailing slash)",
                         ));
                     }
-                    let hint = if candidates.is_empty() {
+                    let mut hint = if candidates.is_empty() {
                         "verify the file path and symbol name or check resolve_ref".to_string()
                     } else {
                         format!(
@@ -978,6 +978,12 @@ fn validate_plan_refs(
                                 .join(", ")
                         )
                     };
+                    // scoped names (`Menu::Effort`) that resolve to nothing:
+                    // point at the file fallback instead of letting the
+                    // model restructure the plan around a bad ref
+                    if root.join(&step_ref.path).is_file() {
+                        hint.push_str("; or drop the symbol and reference the file alone");
+                    }
                     let target = step_ref.symbol.as_deref().unwrap_or(&step_ref.path);
                     return Err(plan::Rejection::new(
                         "ref_not_found",

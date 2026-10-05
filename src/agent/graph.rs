@@ -847,6 +847,37 @@ impl SqliteGraphStore {
                 }
             }
 
+            // Scoped names (`Menu::Effort`) usually point at enum variants,
+            // impl members or other non-indexed children: resolve to the
+            // nearest indexed parent and say so, instead of failing while
+            // the parent sits right there.
+            let mut parent_note: Option<String> = None;
+            if exact_matches.is_empty() && sym.contains("::") {
+                let mut scope = sym.clone();
+                while let Some(idx) = scope.rfind("::") {
+                    scope.truncate(idx);
+                    let hits: Vec<_> = nodes
+                        .iter()
+                        .filter(|node| {
+                            node.stable_key == scope
+                                || node.name.as_deref() == Some(scope.as_str())
+                                || node.stable_key.ends_with(&format!("::{scope}"))
+                        })
+                        .cloned()
+                        .collect();
+                    if hits.len() == 1 {
+                        parent_note = Some(format!(
+                            "`{sym}` is not an indexed symbol; resolved to parent `{scope}`"
+                        ));
+                        exact_matches = hits;
+                        break;
+                    }
+                    if hits.len() > 1 {
+                        break; // ambiguous parent: fuzzy candidates below
+                    }
+                }
+            }
+
             if exact_matches.len() == 1 {
                 let node = &exact_matches[0];
                 let source_hash = node
@@ -866,7 +897,7 @@ impl SqliteGraphStore {
                         precision: "ast_declaration".to_string(),
                     },
                     capabilities: caps,
-                    limitations: Vec::new(),
+                    limitations: parent_note.into_iter().collect(),
                 });
             }
 
@@ -2643,6 +2674,38 @@ mod tests {
                 assert_eq!(key, "file:src/lib.rs");
             }
             other => panic!("expected Found file, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_ref_scoped_variant_falls_back_to_parent() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/menu.rs"),
+            "pub enum Menu {\n    Effort { model: Option<String> },\n    Quit,\n}\n",
+        )
+        .unwrap();
+
+        let mut store = SqliteGraphStore::open(dir.path()).unwrap();
+        crate::agent::graph_index::index_project(&mut store, dir.path()).unwrap();
+
+        // `Menu::Effort` is a variant, not an indexed symbol: resolve to
+        // the parent enum and say so, instead of failing while it sits there
+        let res = store
+            .resolve_ref(None, Some("src/menu.rs"), Some("Menu::Effort"))
+            .unwrap();
+        match res {
+            ResolveRefResult::Found {
+                key, limitations, ..
+            } => {
+                assert!(key.contains("Menu"), "parent enum key: {key}");
+                assert!(
+                    limitations.iter().any(|l| l.contains("parent")),
+                    "must disclose the parent fallback: {limitations:?}"
+                );
+            }
+            other => panic!("expected parent Found, got {other:?}"),
         }
     }
 
