@@ -1430,8 +1430,9 @@ impl App {
                 // Pre-wrap to the row budget: the outer wrapper would
                 // otherwise split long lines and leave continuation rows
                 // ragged (same class of bug the quote rail already fixes).
-                // Whole block reads one notch dimmer than tool rows, hues
-                // preserved. Flush left like tool rows.
+                // Body text renders in normal colors like the final answer —
+                // dimming the working narration made it look broken.
+                // Flush left like tool rows.
                 let (rows, _) = crate::tui::markdown::wrap_tagged(
                     render(text, w, &self.hl)
                         .into_iter()
@@ -1440,13 +1441,7 @@ impl App {
                     w,
                 );
                 for row in rows {
-                    let mut spans = Vec::new();
-                    spans.extend(
-                        row.spans
-                            .into_iter()
-                            .map(|s| Span::styled(s.content, s.style.add_modifier(Modifier::DIM))),
-                    );
-                    out.push((Line::from(spans), Some(idx)));
+                    out.push((Line::from(row.spans), Some(idx)));
                 }
             }
             Segment::AskUser {

@@ -1225,7 +1225,7 @@ fn commentary_left_alignment_matches_tool_call() {
 }
 
 #[test]
-fn commentary_wrapped_rows_flush_left_and_dim() {
+fn commentary_wrapped_rows_flush_left_and_plain() {
     use ratatui::style::Modifier;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.push_segment(Segment::Commentary(
@@ -1245,8 +1245,8 @@ fn commentary_wrapped_rows_flush_left_and_dim() {
         assert!(
             l.spans
                 .iter()
-                .all(|s| s.style.add_modifier.contains(Modifier::DIM)),
-            "body spans dimmed, hues kept: {text:?}"
+                .all(|s| !s.style.add_modifier.contains(Modifier::DIM)),
+            "body spans render in normal colors like the final answer: {text:?}"
         );
     }
 }
