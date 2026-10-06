@@ -501,18 +501,18 @@ fn plan_subcommand_popup_filters_and_inserts() {
     assert!(app.popup_visible());
     let items = app.popup_items();
     assert_eq!(items.len(), menus::subcommands_of("/plan").unwrap().len());
-    assert!(items.contains(&"/plan waive".to_string()));
+    assert!(items.contains(&"/plan complete".to_string()));
     // filtering by the typed prefix
-    app.input = App::fresh_input("/plan w".into());
+    app.input = App::fresh_input("/plan com".into());
     assert!(app.popup_visible());
-    assert_eq!(app.popup_items(), vec!["/plan waive".to_string()]);
+    assert_eq!(app.popup_items(), vec!["/plan complete".to_string()]);
     // insert replaces only the subcommand word, keeps typed args
-    app.input = App::fresh_input("/plan wai".into());
-    app.apply_subcommand_insert("/plan", "waive");
-    assert_eq!(app.input_text(), "/plan waive ");
-    app.input = App::fresh_input("/plan waive 2".into());
-    app.apply_subcommand_insert("/plan", "waive");
-    assert_eq!(app.input_text(), "/plan waive 2");
+    app.input = App::fresh_input("/plan comp".into());
+    app.apply_subcommand_insert("/plan", "complete");
+    assert_eq!(app.input_text(), "/plan complete ");
+    app.input = App::fresh_input("/plan complete 2".into());
+    app.apply_subcommand_insert("/plan", "complete");
+    assert_eq!(app.input_text(), "/plan complete 2");
     // other level-2 commands behave the same way
     app.input = App::fresh_input("/mode ".into());
     assert!(app.popup_visible());
@@ -1494,7 +1494,7 @@ fn undo_reopens_only_done_steps_with_reverted_recorded_evidence() {
     let mut active = crate::plan::create(
         "restore evidence".into(),
         Vec::new(),
-        Vec::new(),
+        vec!["note".to_string()],
         vec![
             crate::plan::NewStep {
                 title: "changed file".into(),
@@ -1545,7 +1545,7 @@ fn undo_reopens_step_on_any_partial_revert() {
     let mut active = crate::plan::create(
         "partial revert".into(),
         Vec::new(),
-        Vec::new(),
+        vec!["note".to_string()],
         vec![crate::plan::NewStep {
             title: "two files".into(),
             refs: Vec::new(),
@@ -1592,7 +1592,7 @@ fn undo_reopened_step_ids_matches_across_path_separators() {
     let mut active = crate::plan::create(
         "restore evidence".into(),
         Vec::new(),
-        Vec::new(),
+        vec!["note".to_string()],
         vec![crate::plan::NewStep {
             title: "changed file".into(),
             refs: Vec::new(),

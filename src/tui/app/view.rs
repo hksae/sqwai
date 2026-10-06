@@ -1214,7 +1214,7 @@ impl App {
             }
             Segment::PlanProposal { draft, decided, .. } => {
                 let mut k = draft.goal.text.len() * 3 + draft.steps.len() * 1000;
-                k += draft.constraints.len() * 101 + draft.acceptance.len() * 103;
+                k += draft.constraints.len() * 101 + draft.criteria.len() * 103;
                 for s in &draft.steps {
                     k += s.title.len();
                 }
@@ -1639,9 +1639,9 @@ impl App {
                     Line::from(vec![Span::styled(
                         truncate_display_width(
                             &format!(
-                                "   {} steps · {} acceptance · {} constraints",
+                                "   {} steps · {} criteria · {} constraints",
                                 draft.steps.len(),
-                                draft.acceptance.len(),
+                                draft.criteria.len(),
                                 draft.constraints.len()
                             ),
                             width,

@@ -109,21 +109,6 @@ mod tests {
         .unwrap();
     }
 
-    fn plan_with(acceptance: Vec<&str>) -> plan::Plan {
-        plan::create(
-            "prove the checks".to_string(),
-            Vec::new(),
-            acceptance.into_iter().map(str::to_string).collect(),
-            vec![plan::NewStep {
-                title: "do the work".to_string(),
-                refs: Vec::new(),
-            }],
-            0,
-            &plan::Limits::default(),
-        )
-        .unwrap()
-    }
-
     #[test]
     fn read_only_context_rejects_mutations_but_allows_reads() {
         let (_, dir) = proj();
@@ -563,7 +548,7 @@ mod tests {
         let created = plan_op(
             &mut ctx,
             &json!({"op":"create","goal":"original goal","constraints":["keep the format"],
-                    "acceptance":[],"steps":[{"title":"first"}]}),
+                    "criteria":["note"],"steps":[{"title":"first"}]}),
         );
         assert!(created.ok, "{}", created.output);
         let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
@@ -1053,7 +1038,7 @@ mod tests {
             &json!({
                 "op": "create",
                 "goal": "budget from the host",
-                "acceptance": [],
+                "criteria": ["note"],
                 "steps": [{"title": "one"}],
                 "context_limit": 100_000_000u64,
             }),
@@ -1085,7 +1070,7 @@ mod tests {
         assert!(
             plan_op(
                 &mut ctx,
-                &json!({"op": "create", "goal": "tiny context", "acceptance": [],
+                &json!({"op": "create", "goal": "tiny context", "criteria": ["note"],
                         "steps": [{"title": "one"}]}),
             )
             .ok
@@ -1113,7 +1098,7 @@ mod tests {
             .collect();
         let refused = plan_op(
             &mut ctx,
-            &json!({"op": "create", "goal": "over the limit", "acceptance": [], "steps": steps}),
+            &json!({"op": "create", "goal": "over the limit", "criteria": ["note"], "steps": steps}),
         );
         assert!(!refused.ok, "{}", refused.output);
         assert!(
@@ -1207,7 +1192,7 @@ mod tests {
         let (mut ctx, dir) = proj();
         let created = plan_op(
             &mut ctx,
-            &json!({"op": "create", "goal": "diagnostics as evidence", "acceptance": [],
+            &json!({"op": "create", "goal": "diagnostics as evidence", "criteria": ["note"],
                     "steps": [{"title": "check", "kind": "verify"}]}),
         );
         assert!(created.ok, "{}", created.output);
@@ -1251,7 +1236,7 @@ mod tests {
         let (mut ctx, dir) = proj();
         let created = plan_op(
             &mut ctx,
-            &json!({"op": "create", "goal": "guarded work", "acceptance": [],
+            &json!({"op": "create", "goal": "guarded work", "criteria": ["note"],
                     "steps": [{"title": "change things"}]}),
         );
         assert!(created.ok, "{}", created.output);
@@ -1349,11 +1334,10 @@ mod tests {
     }
 
     /// Plan-lite grows teeth: criteria appended after create land pending,
-    /// baselines are captured for exactly the new positions, empty and
-    /// Free-text checklist rides create, shows in show, and never gates
-    /// complete: walked past, never settled.
+    /// Done-criteria notes ride create, show in the render, and never gate
+    /// complete: they are the agent's own reminders, not checks to settle.
     #[test]
-    fn plan_checklist_is_visible_and_non_blocking() {
+    fn plan_criteria_are_visible_and_non_blocking() {
         let (mut ctx, dir) = proj();
         let created = plan_op(
             &mut ctx,
@@ -1361,8 +1345,7 @@ mod tests {
                 "op": "create",
                 "goal": "lite",
                 "constraints": [],
-                "acceptance": [],
-                "checklist": ["eyeball the diff", "ask Anna about scope"],
+                "criteria": ["eyeball the diff", "ask Anna about scope"],
                 "steps": [{"title": "s"}]
             }),
         );
@@ -1378,7 +1361,6 @@ mod tests {
         );
         let plan = plan::open_active(&dir).unwrap().unwrap();
         let rendered = plan::render(&plan);
-        assert!(rendered.contains("checklist (non-blocking)"), "{rendered}");
         assert!(rendered.contains("ask Anna about scope"), "{rendered}");
         assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
         assert!(
@@ -1391,7 +1373,7 @@ mod tests {
         let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
         assert!(
             completed.ok,
-            "checklist must not block: {}",
+            "criteria must not block: {}",
             completed.output
         );
         fs::remove_dir_all(&dir).ok();
@@ -1464,6 +1446,7 @@ mod tests {
             &json!({
                 "op": "create",
                 "goal": "boundary test",
+                "criteria": ["note"],
                 "steps": [{"title": "step 1", "kind": "research"}]
             }),
         );
@@ -1538,6 +1521,7 @@ mod tests {
             "plan",
             &json!({
                 "op": "create",
+                "criteria": ["note"],
                 "goal": "close the assumption loop",
                 "steps": [{"title": "make the change", "kind": "change"}],
             }),
@@ -1629,6 +1613,7 @@ mod tests {
             &mut ctx,
             &json!({
                 "op": "create",
+                "criteria": ["note"],
                 "goal": "soft close",
                 "steps": [{"title": "think"}]
             }),
@@ -1658,6 +1643,7 @@ mod tests {
             &mut ctx,
             &json!({
                 "op": "create",
+                "criteria": ["note"],
                 "goal": "shared work",
                 "steps": [{"title": "step one"}]
             }),
@@ -1710,45 +1696,26 @@ mod tests {
         );
     }
 
-    /// A `cmd:` acceptance item is settled by the host running the command,
-    /// not by pointing at a journal record. This test used to pass a fabricated
-    /// `bash` result as evidence for `cmd: cargo test` and see the item
-    /// verified — the suite never ran.
-    ///
-    /// §12.12: a check only settles what it could fail. Both probes miss
-    /// before the change (so both take a baseline); one still misses at
-    /// verify and one is fixed first, so the same test covers the red
-    /// The acceptance text comes from the model on `plan create`, so it is
-    /// model-controlled input the host is about to execute. It goes through the
-    /// same classifier as `bash`, and anything that would need approval is
-    /// refused rather than run without asking.
-    ///
-    /// §12.12: an unsafe command never gets a baseline (it is not run to
-    /// prove itself), so `verify` refuses it as unproven first. With a
-    /// forged-in proof the same item must still be refused as unsafe —
-    /// `manual:` items are the user's call. Verify has to refuse them rather
-    /// Untyped acceptance cannot be created: free text settles on whatever
-    /// evidence happens to exist, which is a claim, not a check. The
-    /// rejection names the typed alternatives.
+    /// The one create-time check: a plan must carry at least one done-note.
+    /// Free text is fine (no typing gate); only emptiness is refused.
     #[test]
-    fn create_refuses_untyped_acceptance() {
+    fn create_refuses_empty_criteria() {
         let (mut ctx, dir) = proj();
         let rejected = plan_op(
             &mut ctx,
             &json!({
                 "op": "create",
-                "goal": "vague criteria",
-                "acceptance": ["the suite is green"],
+                "goal": "no notes",
+                "criteria": [],
                 "steps": [{"title": "verify"}]
             }),
         );
         assert!(!rejected.ok, "{}", rejected.output);
         assert!(
-            rejected.output.contains("untyped_acceptance"),
+            rejected.output.contains("empty_criteria"),
             "{}",
             rejected.output
         );
-        assert!(rejected.output.contains("cmd:"), "{}", rejected.output);
         // and nothing was stored
         assert!(plan::open_active(&dir).unwrap().is_none());
         fs::remove_dir_all(&dir).ok();
@@ -1860,69 +1827,12 @@ mod tests {
         }
     }
 
-    /// `forbid-import:` blocks `complete` naming the offending file, and a
-    /// `path:` confines the outcome diff: a recorded write outside the
-    /// `ast:` matches structurally: a `todo!()` in new code blocks
-    /// AGENTS.md mining is advisory: restriction markers with no typed
-    /// `plan verify` on a `cmd:` item records an interval receipt: equal
-    /// before/after digests, exec runner, and a matching journal record.
-    ///
-    /// §12.12: the probe misses before the change (baseline), is fixed,
-    /// then verifies green with a receipt. `gate.txt` exists throughout
-    /// so the step refs validate; the probe watches a second file, which
-    /// A check that races a mutation proves nothing: when the command
-    /// itself moves tracked state mid-run, verify is rejected and no
-    /// receipt is issued.
-    ///
-    /// §12.12: a mutating check can never take a natural baseline (the
-    /// capture sees the state move and records nothing), so the proof is
-    #[test]
-    fn complete_rechecks_stored_evidence() {
-        let (mut ctx, dir) = proj();
-        let created = plan_op(
-            &mut ctx,
-            &json!({
-                "op": "create",
-                "goal": "complete with evidence",
-                "acceptance": ["cmd: cargo test"],
-                "steps": [{"title": "change", "kind": "change"}]
-            }),
-        );
-        assert!(created.ok, "{}", created.output);
-        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
-        assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
-        journal.set_attribution(Some("1".into()), Some(plan_id), "main");
-        journal.append("plan", json!({"op": "start"})).unwrap();
-        let evidence = journal
-            .append_evidence("file_diff", json!({"path": "src/main.rs"}))
-            .unwrap();
-        let finished = plan_op(
-            &mut ctx,
-            &json!({"op": "finish", "id": "1", "summary": "changed", "evidence": [evidence]}),
-        );
-        assert!(finished.ok, "{}", finished.output);
-        let complete = plan_op(&mut ctx, &json!({"op": "complete"}));
-        assert!(!complete.ok);
-        assert!(
-            complete.output.contains("acceptance_pending"),
-            "{}",
-            complete.output
-        );
-        assert!(
-            complete.output.contains("Pending acceptance items without cmd:/manual: prefix require user waiver (/plan waive <index>) or conversion to steps with host evidence."),
-            "{}",
-            complete.output
-        );
-        fs::remove_dir_all(&dir).ok();
-    }
-
     #[test]
     fn plan_rejections_carry_a_code_and_a_hint() {
         let (mut ctx, dir) = proj();
         plan_op(
             &mut ctx,
-            &json!({"op": "create", "goal": "g", "steps": [{"title": "one"}]}),
+            &json!({"op": "create", "goal": "g", "criteria": ["note"], "steps": [{"title": "one"}]}),
         );
         // finishing a step that was never started
         let bad = plan_op(
@@ -1939,7 +1849,7 @@ mod tests {
         // a second create is refused while one is active
         let second = plan_op(
             &mut ctx,
-            &json!({"op": "create", "goal": "h", "steps": [{"title": "two"}]}),
+            &json!({"op": "create", "goal": "h", "criteria": ["note"], "steps": [{"title": "two"}]}),
         );
         assert!(!second.ok);
         assert!(second.output.contains("plan_exists"), "{}", second.output);
@@ -2722,6 +2632,7 @@ end
             &mut ctx,
             &json!({
                 "op": "create",
+                "criteria": ["note"],
                 "goal": "single plan cancel test",
                 "steps": [{"title": "step 1"}]
             }),
@@ -2764,6 +2675,7 @@ end
             &mut ctx_a,
             &json!({
                 "op": "create",
+                "criteria": ["note"],
                 "goal": "race",
                 "steps": [{"title": "one"}, {"title": "two"}]
             }),
@@ -2853,6 +2765,7 @@ end
             &mut ctx,
             &json!({
                 "op": "create",
+                "criteria": ["note"],
                 "goal": "evidence recovery",
                 "steps": [{"title": "step 1"}]
             }),
@@ -2889,9 +2802,6 @@ end
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// A torn plan file rebuilds from the journaled create intent — with the
-    /// frozen riders intact. Pre-fix: rebuild_corrupt restored goal/steps
-    /// but dropped baselines/snapshots/inputs/shapes/checklist, so later
     /// An accept_proposal-born plan whose file tears must rebuild from the
     /// journaled accept intent — not quarantine. Pre-fix: rebuild_corrupt
     /// refused accept-born plans outright (fear of re-running sibling
@@ -2905,6 +2815,7 @@ end
             &json!({
                 "op": "create",
                 "goal": "old plan",
+                "criteria": ["old note"],
                 "steps": [{"title": "old step"}]
             }),
         );
@@ -2914,12 +2825,11 @@ end
         let draft = plan::PlanDraftArgs {
             goal: "new plan".into(),
             constraints: vec![],
-            acceptance: vec![],
+            criteria: vec!["new note".into()],
             steps: vec![plan::NewStep {
                 title: "new step".into(),
                 refs: vec![],
             }],
-            checklist: vec![],
         };
         let mut fresh = draft.build(u64::MAX, &plan::Limits::default()).unwrap();
         let new_id = fresh.id.clone();
@@ -3093,6 +3003,7 @@ end
             &mut ctx,
             &json!({
                 "op": "create",
+                "criteria": ["note"],
                 "goal": "cancel recovery",
                 "steps": [{"title": "step 1"}]
             }),
@@ -3145,6 +3056,7 @@ end
             &mut ctx,
             &json!({
                 "op": "create",
+                "criteria": ["note"],
                 "goal": "first plan",
                 "steps": [{"title": "step 1"}]
             }),
@@ -3224,6 +3136,7 @@ end
             &mut ctx,
             &json!({
                 "op": "create",
+                "criteria": ["note"],
                 "goal": "step diff test",
                 "steps": [
                     {"title": "first step", "kind": "change"},
@@ -3396,6 +3309,7 @@ end
             &mut ctx,
             &json!({
                 "op": "create",
+                "criteria": ["note"],
                 "goal": "test goal",
                 "steps": [{
                     "title": "step 1",
@@ -3412,6 +3326,7 @@ end
             &mut ctx,
             &json!({
                 "op": "create",
+                "criteria": ["note"],
                 "goal": "test goal",
                 "steps": [{
                     "title": "step 1",

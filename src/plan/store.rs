@@ -1,8 +1,6 @@
 use super::{
-    Baseline, EvidenceRef, Limits, NewStep, Op, Plan, PlanDraftArgs, PlanStatus, Receipt,
-    Rejection, ShapeFreeze, Snapshot, add_acceptance, apply, apply_flaky, apply_invalidate,
-    attach_confirmation, create, plans_dir, reopen_for_undo, set_baselines, set_goal, set_shapes,
-    set_snapshots, verify_acceptance, waive,
+    EvidenceRef, Limits, NewStep, Op, Plan, PlanDraftArgs, PlanStatus, Rejection, add_criteria,
+    apply, create, plans_dir, reopen_for_undo, set_goal,
 };
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -370,38 +368,27 @@ fn replay_orphans(root: &Path, ops_applied: &mut usize) -> Vec<String> {
     rebuilt
 }
 
-/// Frozen proof riders on a create intent: baselines (§12.12), rung-4
-/// snapshots, check inputs, rung-5 shapes, and the non-blocking checklist.
-/// Restored, never re-run or re-frozen. Shared by the orphan path and the
-/// corrupt-file path so both rebuilds heal identically — a rebuild that
-/// drops them silently turns proven checks back into smoke tests.
-fn restore_create_riders(plan: &mut Plan, fields: &serde_json::Map<String, serde_json::Value>) {
-    // §12.12: the baselines captured at create ride the intent, so replay
-    // restores the proof instead of re-running the checks.
-    if let Some(value) = fields.get("baselines")
-        && let Ok(baselines) = serde_json::from_value::<Vec<Option<Baseline>>>(value.clone())
-    {
-        set_baselines(plan, baselines);
+/// Done-criteria on a create/accept intent: the plain-text notes, merged
+/// with the legacy non-blocking checklist so an old rebuild lands the same
+/// criteria the live plan carried. Shared by the orphan and corrupt paths.
+fn restore_create_criteria(plan: &mut Plan, fields: &serde_json::Map<String, serde_json::Value>) {
+    let list = |name: &str| -> Vec<String> {
+        fields
+            .get(name)
+            .and_then(|value| value.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut criteria = list("criteria");
+    if criteria.is_empty() {
+        criteria = list("acceptance");
     }
-    // rung 4 rides the same way: frozen outputs are restored, never re-frozen.
-    if let Some(value) = fields.get("snapshots")
-        && let Ok(snapshots) = serde_json::from_value::<Vec<Option<Snapshot>>>(value.clone())
-    {
-        set_snapshots(plan, snapshots);
-    }
-    // rung 5 rides with them: frozen shapes are restored, never re-read.
-    if let Some(value) = fields.get("shapes")
-        && let Ok(shapes) = serde_json::from_value::<Vec<Option<ShapeFreeze>>>(value.clone())
-    {
-        set_shapes(plan, shapes);
-    }
-    // the non-blocking checklist rides the create intent; the dispatcher
-    // sets it post-create, so rebuild assigns it directly the same way
-    if let Some(value) = fields.get("checklist")
-        && let Ok(checklist) = serde_json::from_value::<Vec<String>>(value.clone())
-    {
-        plan.checklist = checklist;
-    }
+    criteria.extend(list("checklist"));
+    plan.criteria = criteria;
 }
 
 fn rebuild_created(
@@ -417,7 +404,8 @@ fn rebuild_created(
         .iter()
         .filter_map(|value| value.as_str().map(str::to_string))
         .collect();
-    let acceptance = get("acceptance")?
+    let criteria = get("criteria")
+        .or_else(|| get("acceptance"))?
         .as_array()?
         .iter()
         .filter_map(|value| value.as_str().map(str::to_string))
@@ -429,13 +417,13 @@ fn rebuild_created(
     let mut plan = create(
         goal,
         constraints,
-        acceptance,
+        criteria,
         steps,
         budget_limit,
         &Limits::default(),
     )
     .ok()?;
-    restore_create_riders(&mut plan, fields);
+    restore_create_criteria(&mut plan, fields);
     plan.id = get("result_id")?.as_str()?.to_string();
     plan.created = get("result_created")?.as_str()?.to_string();
     plan.sessions = get("result_sessions")?
@@ -453,10 +441,9 @@ fn rebuild_created(
 /// corrupt-file path so both construct the identical base.
 fn build_fresh_from_accept(fields: &serde_json::Map<String, serde_json::Value>) -> Option<Plan> {
     let draft: PlanDraftArgs = serde_json::from_value(fields.get("draft")?.clone()).ok()?;
+    // the draft carries its own criteria (aliased from legacy `acceptance`),
+    // so `build` sets them; no top-level restore here or it would wipe them
     let mut fresh = draft.build(u64::MAX, &Limits::default()).ok()?;
-    // §12.12: same as create — the baselines captured on accept ride the
-    // record, so replay never re-runs a check that has since changed.
-    restore_create_riders(&mut fresh, fields);
     fresh.id = fields.get("new_id")?.as_str()?.to_string();
     fresh.created = fields.get("new_created")?.as_str()?.to_string();
     fresh.sessions = fields
@@ -512,37 +499,6 @@ fn apply_record(
     }
     let op_name = fields.get("op").and_then(|value| value.as_str());
     match op_name {
-        Some("verify") => {
-            let index = fields
-                .get("acceptance")
-                .and_then(|value| value.as_u64())
-                .ok_or_else(|| {
-                    Rejection::new("replay_shape", "verify intent without acceptance index", "")
-                })? as usize;
-            let evidence: Vec<EvidenceRef> = fields
-                .get("evidence_refs")
-                .and_then(|value| serde_json::from_value(value.clone()).ok())
-                .unwrap_or_default();
-            // receipts ride the commit args so replay restores validation
-            // without re-running checks; pre-receipt commits replay to the
-            // legacy shape (status, no validation).
-            let receipt: Option<Receipt> = fields
-                .get("receipt")
-                .and_then(|value| serde_json::from_value(value.clone()).ok());
-            verify_acceptance(plan, index, evidence, false, receipt).map(|_| true)
-        }
-        Some("waive") => {
-            let index = fields
-                .get("index")
-                .and_then(|value| value.as_u64())
-                .ok_or_else(|| Rejection::new("replay_shape", "waive intent without index", ""))?
-                as usize;
-            let reason = fields
-                .get("reason")
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
-            waive(plan, index, reason).map(|_| true)
-        }
         Some("set_goal") => {
             let text = fields
                 .get("text")
@@ -580,49 +536,6 @@ fn apply_record(
             plan.revision = plan.revision.saturating_add(1);
             Ok(true)
         }
-        Some("confirm") => {
-            // replay pins the journaled confirmation; it never recomputes
-            // digests or appends records (already accepted when journaled)
-            let index = fields
-                .get("index")
-                .and_then(|value| value.as_u64())
-                .ok_or_else(|| Rejection::new("replay_shape", "confirm intent without index", ""))?
-                as usize;
-            let reason = fields
-                .get("reason")
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
-            let receipt: Receipt = fields
-                .get("receipt")
-                .and_then(|value| serde_json::from_value(value.clone()).ok())
-                .ok_or_else(|| {
-                    Rejection::new("replay_shape", "confirm intent without receipt", "")
-                })?;
-            attach_confirmation(plan, index, reason, receipt).map(|_| true)
-        }
-        Some("invalidate") => {
-            let paths: Vec<String> = fields
-                .get("paths")
-                .and_then(|value| value.as_array())
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|value| value.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            apply_invalidate(plan, &paths);
-            Ok(true)
-        }
-        Some("flaky") => {
-            let index = fields
-                .get("index")
-                .and_then(|value| value.as_u64())
-                .ok_or_else(|| Rejection::new("replay_shape", "flaky intent without index", ""))?
-                as usize;
-            apply_flaky(plan, index);
-            Ok(true)
-        }
         Some("reopen") => {
             let ids: Vec<String> = fields
                 .get("ids")
@@ -645,12 +558,13 @@ fn apply_record(
             }
             Ok(true)
         }
-        Some("add_acceptance") => {
-            // items re-append (cursor discipline prevents double-apply, same
-            // as Add); the proof captured at dispatch rides the record, so
-            // replay restores it instead of re-running checks mid-work
+        Some("add_acceptance") | Some("add_criteria") => {
+            // criteria re-append (cursor discipline prevents double-apply,
+            // same as Add); the retired `add_acceptance` name replays into
+            // the same list so old journals heal without a rewrite.
             let items: Vec<String> = fields
                 .get("items")
+                .or_else(|| fields.get("criteria"))
                 .and_then(|value| value.as_array())
                 .map(|array| {
                     array
@@ -659,41 +573,8 @@ fn apply_record(
                         .collect()
                 })
                 .unwrap_or_default();
-            add_acceptance(plan, items)
-                .map_err(|_| Rejection::new("replay_diverged", "cannot re-add acceptance", ""))?;
-            // proof vectors are probe-relative (new items only): they map
-            // onto the last N acceptance items, which are exactly the ones
-            // this intent appended (nothing ever removes acceptance items)
-            if let Some(value) = fields.get("new_baselines")
-                && let Ok(slots) = serde_json::from_value::<Vec<Option<Baseline>>>(value.clone())
-            {
-                let start = plan.acceptance.len().saturating_sub(slots.len());
-                for (item, slot) in plan.acceptance.iter_mut().skip(start).zip(slots) {
-                    if let Some(baseline) = slot {
-                        item.baseline = Some(baseline);
-                    }
-                }
-            }
-            if let Some(value) = fields.get("new_snapshots")
-                && let Ok(slots) = serde_json::from_value::<Vec<Option<Snapshot>>>(value.clone())
-            {
-                let start = plan.acceptance.len().saturating_sub(slots.len());
-                for (item, slot) in plan.acceptance.iter_mut().skip(start).zip(slots) {
-                    if let Some(snapshot) = slot {
-                        item.snapshot = Some(snapshot);
-                    }
-                }
-            }
-            if let Some(value) = fields.get("new_shapes")
-                && let Ok(slots) = serde_json::from_value::<Vec<Option<ShapeFreeze>>>(value.clone())
-            {
-                let start = plan.acceptance.len().saturating_sub(slots.len());
-                for (item, slot) in plan.acceptance.iter_mut().skip(start).zip(slots) {
-                    if let Some(shape) = slot {
-                        item.shape = Some(shape);
-                    }
-                }
-            }
+            add_criteria(plan, items)
+                .map_err(|_| Rejection::new("replay_diverged", "cannot re-add criteria", ""))?;
             Ok(true)
         }
         Some(
@@ -863,7 +744,8 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
                     .filter_map(|v| v.as_str().map(str::to_string))
                     .collect(),
                 create_fields
-                    .get("acceptance")?
+                    .get("criteria")
+                    .or_else(|| create_fields.get("acceptance"))?
                     .as_array()?
                     .iter()
                     .filter_map(|v| v.as_str().map(str::to_string))
@@ -889,7 +771,7 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
             // the frozen riders ride the create intent here exactly like on
             // the orphan path — without them the rebuilt plan re-runs
             // proven checks
-            restore_create_riders(&mut plan, &create_fields);
+            restore_create_criteria(&mut plan, &create_fields);
             (create_idx, plan)
         }
         Birth::Accepted(accept_idx) => {

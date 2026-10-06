@@ -481,29 +481,21 @@ fn plan_open_steps(root: &Path) -> usize {
 }
 
 fn plan_criteria(plan: &crate::plan::Plan) -> bool {
-    // empty acceptance would pass vacuously: the task requires checkable
-    // acceptance, so a plan without any is unfinished by definition
-    if plan.acceptance.is_empty() {
+    // a plan without any done-criteria notes is unfinished by definition —
+    // the run only scores once it has written down what must be true
+    if plan.criteria.is_empty() {
         return false;
     }
-    let steps_closed = plan.steps.iter().all(|s| {
+    plan.steps.iter().all(|s| {
         matches!(
             s.status,
             crate::plan::StepStatus::Done
                 | crate::plan::StepStatus::Cancelled
-                // waiver (pre-registered): a step blocked with rationale while
-                // acceptance is green is honest evidence discipline, not an
-                // open end — the `complete` ritual must not fail the run (§8.2)
+                // a step blocked with rationale is honest evidence discipline,
+                // not an open end — the `complete` ritual must not fail the run (§8.2)
                 | crate::plan::StepStatus::Blocked
         )
-    });
-    let acceptance_ok = plan.acceptance.iter().all(|a| {
-        matches!(
-            a.validation.status,
-            crate::plan::ValidationStatus::Passed | crate::plan::ValidationStatus::Waived
-        ) || crate::plan::legacy_passed(a)
-    });
-    steps_closed && acceptance_ok
+    })
 }
 
 #[derive(Debug, Default)]
@@ -992,38 +984,35 @@ fn cache_adjusted_cost_rewards_stable_prefixes() {
 }
 
 #[test]
-fn plan_criteria_waives_honest_blocks_but_not_open_steps() {
-    // waiver (pre-registered): a step blocked with rationale while
-    // acceptance is green is evidence discipline, not an open end.
-    let plan_with = |steps: &str, acceptance: &str| {
+fn plan_criteria_blocks_done_plus_honest_block_but_not_open_steps() {
+    // a step blocked with rationale counts as closed; an in-progress step
+    // does not. A plan carrying no criteria note is unfinished by definition.
+    let plan_with = |steps: &str, criteria: &str| {
         serde_json::from_str::<crate::plan::Plan>(&format!(
             r#"{{"version":1,"id":"p","status":"active","created":"t",
                 "goal":{{"text":"g","source":"user","created":"t"}},
                 "budget":{{"tokens":0,"limit":0}},"revision":1,
-                "steps":[{steps}],"acceptance":[{acceptance}]}}"#
+                "steps":[{steps}],"criteria":[{criteria}]}}"#
         ))
         .expect("test plan must parse")
     };
     let done = r#"{"id":"1","title":"a","status":"done"}"#;
     let blocked = r#"{"id":"2","title":"b","status":"blocked"}"#;
     let open = r#"{"id":"2","title":"b","status":"in_progress"}"#;
-    let passed = r#"{"text":"cmd: true","status":"pending","validation":{"status":"passed"}}"#;
+    let note = r#""suite is green after the fix""#;
     assert!(plan_criteria(&plan_with(
         &format!("{done},{blocked}"),
-        passed
+        note
     )));
-    assert!(!plan_criteria(&plan_with(
-        &format!("{done},{open}"),
-        passed
-    )));
-    // empty acceptance passes vacuously — still unfinished by definition
+    assert!(!plan_criteria(&plan_with(&format!("{done},{open}"), note)));
+    // no criteria notes at all — still unfinished by definition
     assert!(!plan_criteria(&plan_with(done, "")));
 }
 
 #[test]
 fn plan_finished_accepts_done_plus_honest_block() {
     // the mechanism+short shakedown shape: 3 done, 1 blocked with
-    // rationale, acceptance passed — finish, not failure.
+    // rationale, a criteria note recorded — finish, not failure.
     let root = std::env::temp_dir().join(format!("sqwai-bench-finish-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join(".sqwai/plans")).unwrap();
@@ -1034,8 +1023,7 @@ fn plan_finished_accepts_done_plus_honest_block() {
             "budget":{"tokens":0,"limit":0},"revision":1,
             "steps":[{"id":"1","title":"a","status":"done"},
                      {"id":"2","title":"b","status":"blocked"}],
-            "acceptance":[{"text":"cmd: true","status":"pending",
-                           "validation":{"status":"passed"}}]}"#,
+            "criteria":["suite is green after the fix"]}"#,
     )
     .unwrap();
     assert!(plan_finished(&root));

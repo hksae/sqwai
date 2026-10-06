@@ -315,7 +315,7 @@ pub(crate) async fn propose_plan(
     }
     let id = *next_id;
     *next_id += 1;
-    let mut draft_args: plan::PlanDraftArgs = match serde_json::from_value(call.args.clone()) {
+    let draft_args: plan::PlanDraftArgs = match serde_json::from_value(call.args.clone()) {
         Ok(args) => args,
         Err(e) => {
             return tools::Outcome::err(format!(
@@ -323,27 +323,6 @@ pub(crate) async fn propose_plan(
             ));
         }
     };
-    // Named verify commands expand here, before the draft is shown: what the
-    // user approves has to be what gets stored, and `plan create` already
-    // expands them at the same point.
-    match plan::substitute_verify_commands(
-        draft_args.acceptance,
-        &crate::config::Config::project_verify_commands(root),
-    ) {
-        Ok(expanded) => draft_args.acceptance = expanded,
-        Err(unknown) => {
-            let hint = if unknown.known.is_empty() {
-                "no verify commands seeded — run /init or write the command out".to_string()
-            } else {
-                format!("known: {}", unknown.known.join(", "))
-            };
-            return tools::Outcome::err(format!(
-                "plan proposal rejected [unknown_verify]: acceptance refers to unknown \
-                 verify command(s): ${} — {hint}",
-                unknown.names.join(", $")
-            ));
-        }
-    }
     let limits = plan::Limits {
         max_steps: plan_limits.max_steps,
     };

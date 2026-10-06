@@ -2,7 +2,9 @@
 //!
 //! A plan is a host-owned document: the model reaches it only through the
 //! `plan` tool operations validated here. The model can never write `goal`,
-//! `constraints`, `acceptance[].status`, `evidence` or `folded` directly.
+//! `constraints`, `evidence` or `folded` directly. `criteria` are the agent's
+//! own plain-text done-notes — the host stores and renders them, but runs and
+//! certifies nothing.
 //!
 
 use anyhow::Result;
@@ -21,25 +23,12 @@ pub use ops::{
     Applied, Limits, NewStep, Op, PlanDraftArgs, Rejection, abandon, apply, create, reset_discards,
     validate_proposal_invariants, validate_surrender_reason,
 };
-pub(crate) use ops::{accept, add_acceptance, reject, step_diff};
-pub use render::{
-    apply_flaky, apply_invalidate, attach_confirmation, confirm, invalidate_on_diff, render,
-    render_goal, render_status, set_goal, stale_announcements, waive,
-};
+pub(crate) use ops::{add_criteria, step_diff};
+pub use render::{render, render_goal, render_status, set_goal};
 pub use store::{
     StepContext, commit, list, list_active, open, open_active, open_active_for_session,
     read_plan_file, replay, store,
 };
-#[cfg(test)]
-pub(crate) use verify::{Rung, legacy_passed};
-pub use verify::{
-    differential_current, digest_paths, ladder_rung, proven_failing, set_baselines, set_shapes,
-    set_snapshots, signatures_current, snapshot_current, state_digest, verify_acceptance,
-};
-// Receipt tests build baselines with the real check-definition hash; the
-// binary itself only reaches it through the matchers above.
-#[cfg(test)]
-pub use verify::check_definition_hash;
 pub(crate) use verify::{complete, next_id};
 
 /// A host-owned journal reference. The session is part of the identity because
@@ -144,114 +133,6 @@ impl StepStatus {
     pub fn is_open(self) -> bool {
         !self.is_closed()
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AcceptanceStatus {
-    Pending,
-    /// A host-run check passed for this item (§2.1.4). Old files say
-    /// `verified`; that stays readable through the alias.
-    #[serde(alias = "verified")]
-    Passed,
-    Waived,
-}
-
-impl AcceptanceStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Passed => "passed",
-            Self::Waived => "waived",
-        }
-    }
-}
-
-/// Validation state of a step or acceptance item, separate from whether the
-/// work was performed (§2.1.2, §2.1.4). `finish` moves a step to `done` and
-/// never touches this; only a host-recorded `verification_receipt` sets
-/// `passed`, and later state changes flip it to `stale`.
-///
-/// `Unknown` is the third ULTRA state (§12.12): repeated runs of the same
-/// check disagreed on the same state, so the item is flaky — neither
-/// verified nor plain failed. It is never retried into `passed` by another
-/// green run; the user waives it or the check is made deterministic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ValidationStatus {
-    #[default]
-    Pending,
-    Passed,
-    Stale,
-    Unknown,
-    Waived,
-}
-
-impl ValidationStatus {
-    /// Text form for the anchor and `/plan` (wired in phase 3/5).
-    #[allow(dead_code)]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Passed => "passed",
-            Self::Stale => "stale",
-            Self::Unknown => "unknown",
-            Self::Waived => "waived",
-        }
-    }
-}
-
-/// One verification run bound to the exact state it checked (§2.1.4).
-/// `session`/`seq` point at the journal `verification_receipt` (or
-/// `manual_confirmation`) record. Phase-3 fields are all optional so plan
-/// files written before receipts keep loading unchanged.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Receipt {
-    pub session: String,
-    pub seq: u64,
-    pub state_digest: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exit: Option<i32>,
-    pub at: String,
-    /// blake3 of the check definition (the command text). Re-running a
-    /// rewritten command is a new check, never a refresh of this receipt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub check_definition_hash: Option<String>,
-    /// "exec" for host-run commands, "manual" for user confirmations.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runner: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub args: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finished_at: Option<String>,
-    /// state digest before/after the run. A passing receipt always has
-    /// `state_before == state_after`: a check that raced a mutation proves
-    /// nothing and is never recorded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state_before: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state_after: Option<String>,
-    /// blake3 of the captured check output.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_hash: Option<String>,
-    /// traversed paths the digest covered. A later `file_diff` on any of
-    /// these marks the receipt (and its item) stale.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub paths: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct Validation {
-    #[serde(default)]
-    pub status: ValidationStatus,
-    #[serde(default)]
-    pub receipts: Vec<Receipt>,
 }
 
 /// What a step intends to touch (§2.1.2, §2.4.8). `modify` and `remove`
@@ -364,274 +245,6 @@ pub struct Goal {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Acceptance {
-    pub text: String,
-    pub status: AcceptanceStatus,
-    #[serde(default)]
-    pub evidence: Vec<EvidenceRef>,
-    #[serde(default)]
-    pub validation: Validation,
-    /// §12.12: proof that the check *discriminates* — a host run of the same
-    /// check that failed on the tree as it stood before the work started.
-    /// Captured at plan time, which is the only moment the pre-change tree is
-    /// still the current one. Absent means the item may be read and shown,
-    /// but a green run can never settle it: a check that has never failed is
-    /// a smoke test, not acceptance.
-    ///
-    /// Deliberately not a [`Receipt`]: a receipt is invalidated when the
-    /// paths it covered change, and a baseline is captured *expecting* them
-    /// to change.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub baseline: Option<Baseline>,
-    /// §12.12, judge ladder rung 4: the output a `snapshot:` check produced
-    /// on the pre-change tree. A later run settles the item iff its output
-    /// is byte-identical. Absent means the item may be read and shown, but
-    /// no run can settle it: unfrozen behavior has nothing to compare to.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot: Option<Snapshot>,
-    /// Rung 5: the declaration shapes a `signatures:` item named on the
-    /// pre-change tree. A later read settles the item iff every shape is
-    /// identical — bodies may move, the structure must not.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shape: Option<ShapeFreeze>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub capture_pending: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub by: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-/// One host run of a `cmd:` acceptance item that failed, kept as the item's
-/// evidence that it can fail at all (§12.12). The host runs the check itself:
-/// a failing run the model reported is a claim, not a proof.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Baseline {
-    pub at: String,
-    /// non-zero by construction — the runs that passed are the ones this
-    /// struct exists to leave unrecorded
-    pub exit: i32,
-    /// blake3 of the check definition the run used. Rewriting the command
-    /// makes a new check, and the old baseline stops applying to it.
-    pub check_definition_hash: String,
-    /// blake3 of the captured output
-    pub output_hash: String,
-    /// first lines of that output, so the reason it failed is inspectable
-    /// without a journal dig — "cannot find function foo" is a baseline,
-    /// "command not found" is a typo wearing a baseline's clothes
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub head: String,
-    /// state digest the failing run observed (before == after: a run that
-    /// raced a mutation proves nothing and is never recorded)
-    pub state_digest: String,
-}
-
-/// Frozen declaration shapes for a `signatures:` acceptance item (judge
-/// ladder rung 5, §12.12). One entry per named file: the normalized shape
-/// (sorted `depth::signature` lines, line numbers dropped) hashed, plus
-/// how it was read. Bodies may move freely; adding, removing, or
-/// re-signing a declaration breaks the freeze.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ShapeFreeze {
-    pub at: String,
-    /// blake3 of the item text (`signatures: ...` paths). Renaming the
-    /// file set makes a new check, and the old shapes stop applying to it.
-    pub check_definition_hash: String,
-    pub files: Vec<ShapeFile>,
-}
-
-/// One frozen file inside a [`ShapeFreeze`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ShapeFile {
-    /// project-relative path as named in the item
-    pub path: String,
-    /// `ts:<lang>` or `fallback` — how the shape was read
-    pub parser: String,
-    /// blake3 of the normalized shape lines joined
-    pub shape_hash: String,
-    /// declaration count, for inspectable notes
-    pub items: usize,
-}
-
-/// Frozen behavior of a `snapshot:` acceptance item (§12.12, judge ladder
-/// rung 4). The host runs the check at plan time and keeps its output: a
-/// later run settles the item iff the output is byte-identical. Unlike a
-/// [`Baseline`], any exit code freezes — erroring the same way is behavior
-/// too — but an empty output never freezes: it discriminates nothing, the
-/// same way an already-passing check proves nothing.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Snapshot {
-    pub at: String,
-    pub exit: Option<i32>,
-    /// blake3 of the check definition the frozen run used. Rewriting the
-    /// command makes a new check, and the old output stops applying to it.
-    pub check_definition_hash: String,
-    /// blake3 of the frozen output
-    pub output_hash: String,
-    /// first lines of that output, so what was frozen stays inspectable
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub head: String,
-    /// state digest the frozen run observed (before == after: a run that
-    /// raced a mutation freezes nothing and is never recorded)
-    pub state_digest: String,
-}
-
-/// How the host is meant to settle an acceptance item (§2.1.2).
-#[derive(Debug, Clone, PartialEq)]
-pub enum AcceptanceKind<'a> {
-    /// `cmd: <command>` — the host runs it and the result is the verification
-    Command(&'a str),
-    /// `snapshot: <command>` — the host froze its output at plan time and
-    /// re-runs it; byte-identical output is the verification
-    Snapshot(&'a str),
-    /// `differential: <command>` — the host froze its output at plan time
-    /// and re-runs it; observably *changed* output is the verification
-    /// (rung 3 of the judge ladder: the same input through the old and
-    /// new code paths, outputs compared)
-    Differential(&'a str),
-    /// `signatures: <path>, ...` — the host froze the declaration shapes
-    /// of the named files at plan time and re-reads them; identical shapes
-    /// are the verification (rung 5: structure holds while bodies move)
-    Signatures(Vec<&'a str>),
-    /// `manual: <text>` — no command can settle it; the user waives it
-    Manual(&'a str),
-    /// free text — settled by host-recorded evidence from a verify step
-    Text(&'a str),
-}
-
-impl Acceptance {
-    /// Classify by prefix. Unprefixed text is `Text`, per §2.1.2.
-    /// `signatures:` paths are comma-separated (`a.rs, b.rs`).
-    pub fn kind(&self) -> AcceptanceKind<'_> {
-        AcceptanceKind::classify(&self.text)
-    }
-}
-
-impl<'a> AcceptanceKind<'a> {
-    /// Classify raw item text without building an [`Acceptance`].
-    pub fn classify(text: &'a str) -> AcceptanceKind<'a> {
-        let text = text.trim();
-        if let Some(command) = text.strip_prefix("cmd:") {
-            AcceptanceKind::Command(command.trim())
-        } else if let Some(command) = text.strip_prefix("snapshot:") {
-            AcceptanceKind::Snapshot(command.trim())
-        } else if let Some(command) = text.strip_prefix("differential:") {
-            AcceptanceKind::Differential(command.trim())
-        } else if let Some(paths) = text.strip_prefix("signatures:") {
-            AcceptanceKind::Signatures(signature_paths(paths))
-        } else if let Some(rest) = text.strip_prefix("manual:") {
-            AcceptanceKind::Manual(rest.trim())
-        } else {
-            AcceptanceKind::Text(text)
-        }
-    }
-}
-
-/// Split a `signatures:` path list (`a.rs, b.rs`) into trimmed names.
-/// Shared by classification and the host, so both read the same set.
-pub fn signature_paths(list: &str) -> Vec<&str> {
-    list.split(',')
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .collect()
-}
-
-/// Expand `$name` / `${name}` in `cmd:` acceptance items against the
-/// project's named verify commands (seeded by `/init`). Non-`cmd:`
-/// items pass through untouched. Unknown names fail the whole create —
-/// a wrong command burned at verify time costs a turn; rejected here it
-/// costs nothing.
-#[derive(Debug)]
-pub struct UnknownVerify {
-    pub names: Vec<String>,
-    pub known: Vec<String>,
-}
-
-pub fn substitute_verify_commands(
-    texts: Vec<String>,
-    commands: &std::collections::BTreeMap<String, String>,
-) -> Result<Vec<String>, UnknownVerify> {
-    let mut unknown: Vec<String> = Vec::new();
-    let out: Vec<String> = texts
-        .into_iter()
-        .map(|text| {
-            if !text.trim_start().starts_with("cmd:") {
-                return text;
-            }
-            expand_refs(&text, commands, &mut unknown)
-        })
-        .collect();
-    if unknown.is_empty() {
-        return Ok(out);
-    }
-    unknown.sort();
-    unknown.dedup();
-    let mut known: Vec<String> = commands.keys().cloned().collect();
-    known.sort();
-    Err(UnknownVerify {
-        names: unknown,
-        known,
-    })
-}
-
-fn expand_refs(
-    text: &str,
-    commands: &std::collections::BTreeMap<String, String>,
-    unknown: &mut Vec<String>,
-) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '$' {
-            out.push(c);
-            continue;
-        }
-        let braced = chars.peek() == Some(&'{');
-        if braced {
-            chars.next();
-        }
-        let mut name = String::new();
-        while let Some(&d) = chars.peek() {
-            if d.is_alphanumeric() || d == '_' || d == '-' {
-                name.push(d);
-                chars.next();
-            } else {
-                break;
-            }
-        }
-        if braced {
-            if chars.peek() == Some(&'}') {
-                chars.next();
-            } else {
-                // unbalanced `${`: leave literally, do not invent
-                out.push_str("${");
-                out.push_str(&name);
-                continue;
-            }
-        }
-        if name.is_empty() {
-            out.push('$');
-            continue;
-        }
-        match commands.get(&name) {
-            Some(cmd) => out.push_str(cmd),
-            None => {
-                unknown.push(name.clone());
-                out.push('$');
-                if braced {
-                    out.push('{');
-                }
-                out.push_str(&name);
-                if braced {
-                    out.push('}');
-                }
-            }
-        }
-    }
-    out
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
     pub id: String,
     pub title: String,
@@ -650,10 +263,6 @@ pub struct Step {
     /// What the step intends to touch (§2.1.2, §2.4.8).
     #[serde(default)]
     pub refs: Vec<StepRef>,
-    /// Check state, separate from step status (§2.1.2). `finish` never
-    /// writes this; the host sets `passed` via receipts (phase 3).
-    #[serde(default)]
-    pub validation: Validation,
     /// Bumped by every host-only reopen; subagent evidence from an older
     /// epoch does not count (§2.2.4, phase 2).
     #[serde(default)]
@@ -701,14 +310,14 @@ pub struct Plan {
     pub goal: Goal,
     #[serde(default)]
     pub constraints: Vec<String>,
+    /// Done-criteria the agent writes for itself: plain-text notes on what
+    /// must be true when the work is done. They survive compaction so the
+    /// post-compaction agent resumes against a stated target, and the host
+    /// never gates on them — no kinds, no prefixes, no settle machinery.
+    /// Replaces the old `acceptance` items and `checklist` (migrated on
+    /// load; see `store::parse_plan`).
     #[serde(default)]
-    pub acceptance: Vec<Acceptance>,
-    /// Non-blocking checklist: free-text notes from create (plan-lite).
-    /// Visible in show and the panel, never gates complete — walked past,
-    /// never settled. Immutable after create (no op touches it), so it
-    /// rides the cached plan block.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub checklist: Vec<String>,
+    pub criteria: Vec<String>,
     #[serde(default)]
     pub steps: Vec<Step>,
     #[serde(default)]
@@ -810,7 +419,6 @@ pub fn reopen_for_undo(plan: &mut Plan, step_id: &str, reason: impl Into<String>
     step.finished = None;
     step.summary = None;
     step.evidence.clear();
-    step.validation = Validation::default();
     step.step_epoch = step.step_epoch.saturating_add(1);
     step.reason = Some(reason.into());
     plan.revision = plan.revision.saturating_add(1);
@@ -858,46 +466,11 @@ mod tests {
         assert!(full.contains("[x] 1 add the model"), "{full}");
     }
 
-    #[test]
-    fn substitute_verify_commands_expands_known() {
-        let mut map = std::collections::BTreeMap::new();
-        map.insert("unit".to_string(), "cargo test --lib".to_string());
-        map.insert("e2e".to_string(), "make test-e2e".to_string());
-        let out = substitute_verify_commands(
-            vec![
-                "cmd: $unit".to_string(),
-                "cmd: run ${e2e} now".to_string(),
-                "manual: ask the user".to_string(),
-                "free text $unit stays".to_string(),
-            ],
-            &map,
-        )
-        .expect("known names expand");
-        assert_eq!(out[0], "cmd: cargo test --lib");
-        assert_eq!(out[1], "cmd: run make test-e2e now");
-        assert_eq!(out[2], "manual: ask the user");
-        assert_eq!(out[3], "free text $unit stays");
-    }
-
-    #[test]
-    fn substitute_verify_commands_rejects_unknown() {
-        let mut map = std::collections::BTreeMap::new();
-        map.insert("unit".to_string(), "cargo test --lib".to_string());
-        let err = substitute_verify_commands(vec!["cmd: $nope and ${missing}".to_string()], &map)
-            .expect_err("unknown names fail");
-        assert_eq!(err.names, vec!["missing".to_string(), "nope".to_string()]);
-        assert_eq!(err.known, vec!["unit".to_string()]);
-        // empty map: still an error (fail fast, not a silent literal)
-        let err = substitute_verify_commands(vec!["cmd: $x".to_string()], &Default::default())
-            .expect_err("no names seeded");
-        assert!(err.known.is_empty());
-    }
-
     fn new_plan() -> Plan {
         create(
             "persist the plan on disk".to_string(),
             vec!["no new dependencies".to_string()],
-            vec!["cmd: cargo test".to_string()],
+            vec!["cargo test must pass".to_string()],
             vec![
                 NewStep {
                     title: "add the model".to_string(),
@@ -947,7 +520,6 @@ mod tests {
             Op::Finish {
                 id: "1".into(),
                 summary: "model added".into(),
-                evidence: vec![42],
             },
             &Limits::default(),
             None,
@@ -1027,8 +599,7 @@ mod tests {
                 &mut plan,
                 Op::Finish {
                     id: "1".into(),
-                    summary: "model added".into(),
-                    evidence: vec![1]
+                    summary: "model added".into()
                 },
                 &Limits::default(),
                 None,
@@ -1046,7 +617,6 @@ mod tests {
             Op::Finish {
                 id: "2".into(),
                 summary: "x".into(),
-                evidence: vec![],
             },
             &Limits::default(),
             None,
@@ -1090,7 +660,6 @@ mod tests {
             Op::Finish {
                 id: "1".into(),
                 summary: "x".into(),
-                evidence: vec![],
             },
             &Limits::default(),
             None,
@@ -1229,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_requires_acceptance() {
+    fn complete_needs_only_closed_steps() {
         let mut plan = new_plan();
         for id in ["1", "2"] {
             apply(
@@ -1247,21 +816,14 @@ mod tests {
                 Op::Finish {
                     id: id.into(),
                     summary: "done".into(),
-                    evidence: vec![1],
                 },
                 &Limits::default(),
                 None,
             )
             .unwrap();
         }
-        let err = apply(&mut plan, Op::Complete, &Limits::default(), None).unwrap_err();
-        assert_eq!(err.code, "acceptance_pending");
-        assert!(
-            err.hint.contains("Pending acceptance items without cmd:/manual: prefix require user waiver (/plan waive <index>) or conversion to steps with host evidence."),
-            "{}",
-            err.hint
-        );
-        waive(&mut plan, 0, "manual check").unwrap();
+        // the acceptance/validation machinery is retired: closing every step
+        // is enough to complete — nothing left for the host to certify.
         assert!(matches!(
             apply(&mut plan, Op::Complete, &Limits::default(), None),
             Ok(Applied::Completed)
@@ -1377,12 +939,11 @@ mod tests {
 
     #[test]
     fn proposal_invariants_reject_dropping_constraints_under_same_goal() {
-        let active = new_plan(); // has constraint: "no new dependencies", acceptance: "cmd: cargo test"
+        let active = new_plan(); // constraint "no new dependencies", criterion "cargo test must pass"
         let mut draft = PlanDraftArgs {
             goal: active.goal.text.clone(),
             constraints: vec![], // dropped!
-            acceptance: vec!["cmd: cargo test".into()],
-            checklist: vec![],
+            criteria: vec!["cargo test must pass".into()],
             steps: vec![NewStep {
                 title: "step 1".into(),
                 refs: vec![],
@@ -1398,16 +959,16 @@ mod tests {
         draft.constraints = active.constraints.clone();
         assert!(validate_proposal_invariants(Some(&active), &draft).is_ok());
 
-        // 3. Dropped acceptance rejected
-        draft.acceptance = vec![];
+        // 3. Dropped criteria rejected
+        draft.criteria = vec![];
         let res = validate_proposal_invariants(Some(&active), &draft);
         assert!(res.is_err());
-        assert_eq!(res.unwrap_err().code, "dropped_acceptance");
+        assert_eq!(res.unwrap_err().code, "dropped_criteria");
 
-        // 4. Changing goal allows new constraints and acceptance
+        // 4. Changing goal allows new constraints and criteria
         draft.goal = "A completely different goal".into();
         draft.constraints = vec!["new constraint".into()];
-        draft.acceptance = vec!["new acceptance".into()];
+        draft.criteria = vec!["new note".into()];
         assert!(validate_proposal_invariants(Some(&active), &draft).is_ok());
     }
 
@@ -1416,7 +977,6 @@ mod tests {
         let mut plan = new_plan();
         plan.steps[0].status = StepStatus::Done;
         plan.steps[1].status = StepStatus::Reopened;
-        plan.acceptance[0].status = AcceptanceStatus::Passed;
         let err = complete(&mut plan).unwrap_err();
         assert_eq!(err.code, "steps_open");
         assert!(err.reason.contains('2'), "reason: {}", err.reason);
@@ -1583,7 +1143,7 @@ mod tests {
             serde_json::json!({
                 "op": "create", "result_id": id, "result_created": "t",
                 "result_sessions": ["aaa"],
-                "goal": "g", "constraints": [], "acceptance": [],
+                "goal": "g", "constraints": [], "criteria": ["note"],
                 "budget_limit": 1000, "steps": [{"title": "s1"}],
                 "by": "model", "ok": true,
             }),
@@ -1618,7 +1178,7 @@ mod tests {
             serde_json::json!({
                 "op": "create", "result_id": "gone", "result_created": "t",
                 "result_sessions": ["aaa"],
-                "goal": "g", "constraints": [], "acceptance": [],
+                "goal": "g", "constraints": [], "criteria": ["note"],
                 "budget_limit": 1000, "steps": [{"title": "s1"}],
                 "by": "model", "ok": true,
             }),
@@ -1755,16 +1315,15 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Late-added criteria survive a crash rebuild with their proof: items
-    /// re-append from the intent, baselines restore from the riding vectors
-    /// instead of re-running checks mid-work.
+    /// Late-added criteria survive a crash rebuild: notes re-append from the
+    /// journaled intent instead of being lost when the store lagged behind.
     #[test]
-    fn replay_restores_added_acceptance_with_proof() {
+    fn replay_restores_added_criteria() {
         let dir = std::env::temp_dir().join(format!("sqwai-plan-repadd-{}", new_id()));
         let mut plan = create(
             "goal".to_string(),
             Vec::new(),
-            Vec::new(),
+            vec!["first note".to_string()],
             vec![NewStep {
                 title: "work".into(),
                 refs: Vec::new(),
@@ -1780,35 +1339,21 @@ mod tests {
             .append(
                 "plan",
                 serde_json::json!({
-                    "op": "add_acceptance",
-                    "items": ["cmd: exit 3", "manual: eyeball it"],
+                    "op": "add_criteria",
+                    "criteria": ["exit 3 first", "eyeball it"],
                     "plan_id": plan.id, "by": "model", "ok": true,
-                    "new_baselines": [
-                        {"at": "t", "exit": 3, "check_definition_hash": "h",
-                         "output_hash": "o", "head": "", "state_digest": "s"},
-                        null
-                    ],
-                    "new_snapshots": [null, null],
-                    "new_shapes": [null, null],
                 }),
             )
             .unwrap();
         // the stored file predates the intent (cursor ra:0, intent at seq
-        // 1): replay must append the items AND restore the riding proof
+        // 1): replay re-appends the notes from the journaled intent.
         let report = replay(&dir).unwrap();
         assert!(report.ops_applied >= 1, "{report:?}");
         let rebuilt = open(&dir, &plan.id).unwrap();
-        assert_eq!(rebuilt.acceptance.len(), 2);
-        assert_eq!(rebuilt.acceptance[0].text, "cmd: exit 3");
-        let baseline = rebuilt.acceptance[0]
-            .baseline
-            .as_ref()
-            .expect("proof restored");
-        assert_eq!(baseline.exit, 3);
-        assert!(
-            rebuilt.acceptance[1].baseline.is_none(),
-            "manual proves nothing"
-        );
+        assert_eq!(rebuilt.criteria.len(), 3);
+        assert_eq!(rebuilt.criteria[0], "first note");
+        assert_eq!(rebuilt.criteria[1], "exit 3 first");
+        assert_eq!(rebuilt.criteria[2], "eyeball it");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1834,50 +1379,6 @@ mod tests {
         assert_eq!(
             open(&dir, &plan.id).unwrap().step("1").unwrap().status,
             StepStatus::Pending
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn replay_applies_verify_with_recorded_evidence() {
-        let dir = std::env::temp_dir().join(format!("sqwai-plan-repver-{}", new_id()));
-        let mut plan = create(
-            "goal".to_string(),
-            Vec::new(),
-            vec!["cmd: check-docs".to_string()],
-            vec![NewStep {
-                title: "verify docs".into(),
-                refs: Vec::new(),
-            }],
-            1000,
-            &Limits::default(),
-        )
-        .unwrap();
-        plan.applied_event = Some("rv:7".to_string());
-        store(&dir, &plan).unwrap();
-        let mut journal = crate::agent::journal::Journal::open(&dir, "rv").unwrap();
-        // Seven filler records so the intent lands on seq 8, past the cursor.
-        for _ in 0..7 {
-            journal
-                .append("note", serde_json::json!({"note": "x", "kind": "decision"}))
-                .unwrap();
-        }
-        journal
-            .append(
-                "plan",
-                serde_json::json!({
-                    "op": "verify", "acceptance": 0,
-                    "evidence_refs": [{"session": "rv", "seq": 3}],
-                    "plan_id": plan.id, "by": "model", "ok": true,
-                }),
-            )
-            .unwrap();
-
-        let report = replay(&dir).unwrap();
-        assert_eq!(report.ops_applied, 1);
-        assert_eq!(
-            open(&dir, &plan.id).unwrap().acceptance[0].status,
-            AcceptanceStatus::Passed
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1941,26 +1442,14 @@ mod tests {
         )
         .unwrap();
         let plan = open(&dir, id).unwrap();
-        // `verified` stays readable and means passed
-        assert_eq!(plan.acceptance[0].status, AcceptanceStatus::Passed);
-        // bare seq evidence keeps the legacy empty-session identity
-        assert_eq!(
-            plan.acceptance[0].evidence,
-            vec![EvidenceRef {
-                session: String::new(),
-                seq: 3
-            }]
-        );
-        // phase-0 fields default without touching the file format
-        assert_eq!(
-            plan.acceptance[0].validation.status,
-            ValidationStatus::Pending
-        );
-        assert!(plan.acceptance[0].validation.receipts.is_empty());
+        // a legacy v1 file still loads: the retired `acceptance` objects are
+        // ignored (no plain-text criteria to migrate from an object shape),
+        // so criteria defaults empty while the step's refs and evidence parse.
+        assert!(plan.criteria.is_empty());
         assert_eq!(plan.applied_event, None);
         let step = &plan.steps[0];
         assert_eq!(step.step_epoch, 0);
-        assert_eq!(step.validation.status, ValidationStatus::Pending);
+        assert_eq!(step.evidence.len(), 2);
         assert_eq!(step.refs.len(), 2);
         assert_eq!(step.refs[0].path, "src/session/mod.rs");
         assert_eq!(step.refs[0].symbol.as_deref(), Some("fn::save"));
@@ -1983,661 +1472,6 @@ mod tests {
             serde_json::from_value(serde_json::json!({"path": "src/x.rs"})).unwrap();
         assert_eq!(plain.intent, RefIntent::Modify);
         assert_eq!(plain.symbol, None);
-    }
-
-    #[test]
-    fn phase0_schema_round_trips() {
-        let dir = std::env::temp_dir().join(format!("sqwai-plan-phase0-{}", new_id()));
-        let mut plan = new_plan();
-        plan.applied_event = Some("sess:41".to_string());
-        plan.steps[0].step_epoch = 3;
-        plan.steps[0].validation = Validation {
-            status: ValidationStatus::Passed,
-            receipts: vec![Receipt {
-                session: "sess".to_string(),
-                seq: 41,
-                state_digest: "abc".to_string(),
-                command: Some("cargo test".to_string()),
-                exit: Some(0),
-                at: "2026-01-01T00:00:00+00:00".to_string(),
-                check_definition_hash: None,
-                runner: None,
-                args: None,
-                cwd: None,
-                started_at: None,
-                finished_at: None,
-                state_before: None,
-                state_after: None,
-                output_hash: None,
-                paths: Vec::new(),
-            }],
-        };
-        plan.acceptance[0].validation = Validation {
-            status: ValidationStatus::Waived,
-            receipts: Vec::new(),
-        };
-        plan.steps[0].refs = vec![StepRef {
-            path: "src/new.rs".to_string(),
-            symbol: Some("Thing".to_string()),
-            intent: RefIntent::Create,
-        }];
-        store(&dir, &plan).unwrap();
-        let loaded = open(&dir, &plan.id).unwrap();
-        assert_eq!(loaded.applied_event.as_deref(), Some("sess:41"));
-        assert_eq!(loaded.steps[0].step_epoch, 3);
-        assert_eq!(loaded.steps[0].validation.status, ValidationStatus::Passed);
-        assert_eq!(loaded.steps[0].validation.receipts.len(), 1);
-        assert_eq!(loaded.steps[0].validation.receipts[0].state_digest, "abc");
-        assert_eq!(
-            loaded.acceptance[0].validation.status,
-            ValidationStatus::Waived
-        );
-        assert_eq!(loaded.steps[0].refs[0].intent, RefIntent::Create);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    fn receipt(paths: &[&str]) -> Receipt {
-        Receipt {
-            session: "sess".to_string(),
-            seq: 7,
-            state_digest: "digest".to_string(),
-            command: Some("cmd: check".to_string()),
-            exit: Some(0),
-            at: now(),
-            check_definition_hash: Some(check_definition_hash("cmd: check")),
-            runner: Some("exec".to_string()),
-            args: None,
-            cwd: None,
-            started_at: None,
-            finished_at: None,
-            state_before: Some("digest".to_string()),
-            state_after: Some("digest".to_string()),
-            output_hash: Some("outhash".to_string()),
-            paths: paths.iter().map(|s| s.to_string()).collect(),
-        }
-    }
-
-    fn close_steps(plan: &mut Plan) {
-        for step in plan.steps.iter_mut() {
-            step.status = StepStatus::Done;
-        }
-    }
-
-    #[test]
-    fn state_digest_tracks_content_and_tombstones() {
-        let dir = std::env::temp_dir().join(format!("sqwai-plan-digest-{}", new_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("a.rs"), "one").unwrap();
-        let d1 = state_digest(&dir, &["a.rs".to_string()], "cmd");
-        // the command text participates: same tree, other check, other digest
-        assert_ne!(d1, state_digest(&dir, &["a.rs".to_string()], "other"));
-        std::fs::write(dir.join("a.rs"), "two").unwrap();
-        let d2 = state_digest(&dir, &["a.rs".to_string()], "cmd");
-        assert_ne!(d1, d2);
-        // deletion is a tombstone, distinct from every content
-        std::fs::remove_file(dir.join("a.rs")).unwrap();
-        let d3 = state_digest(&dir, &["a.rs".to_string()], "cmd");
-        assert_ne!(d2, d3);
-        assert_ne!(d1, d3);
-        assert_eq!(d3, state_digest(&dir, &["a.rs".to_string()], "cmd"));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn verify_attaches_receipt_and_stale_blocks_complete_until_reverified() {
-        let mut plan = new_plan();
-        close_steps(&mut plan);
-        verify_acceptance(&mut plan, 0, vec![], false, Some(receipt(&["x.rs"]))).unwrap();
-        assert_eq!(plan.acceptance[0].status, AcceptanceStatus::Passed);
-        assert_eq!(
-            plan.acceptance[0].validation.status,
-            ValidationStatus::Passed
-        );
-        assert_eq!(plan.acceptance[0].validation.receipts.len(), 1);
-        // an unrelated diff changes nothing
-        assert!(!apply_invalidate(&mut plan, &["other.rs".to_string()]));
-        // a diff on traversed paths stales the item and blocks complete
-        assert!(apply_invalidate(&mut plan, &["x.rs".to_string()]));
-        assert_eq!(
-            plan.acceptance[0].validation.status,
-            ValidationStatus::Stale
-        );
-        assert!(
-            render(&plan).contains("[validation: stale]"),
-            "stale must surface before complete rejects it"
-        );
-        let err = apply(&mut plan, Op::Complete, &Limits::default(), None).unwrap_err();
-        assert_eq!(err.code, "acceptance_stale");
-        // re-verifying heals with a second receipt; history accumulates
-        verify_acceptance(&mut plan, 0, vec![], false, Some(receipt(&["x.rs"]))).unwrap();
-        assert_eq!(plan.acceptance[0].validation.receipts.len(), 2);
-        assert!(matches!(
-            apply(&mut plan, Op::Complete, &Limits::default(), None),
-            Ok(Applied::Completed)
-        ));
-    }
-
-    #[test]
-    fn waived_validation_survives_invalidate() {
-        let mut plan = new_plan();
-        waive(&mut plan, 0, "not now").unwrap();
-        assert_eq!(
-            plan.acceptance[0].validation.status,
-            ValidationStatus::Waived
-        );
-        assert!(!apply_invalidate(&mut plan, &["anything.rs".to_string()]));
-        assert_eq!(
-            plan.acceptance[0].validation.status,
-            ValidationStatus::Waived
-        );
-    }
-
-    /// Mirrors `Acceptance::kind()`: the hash is taken over the *stripped*
-    /// command, which is the text the host actually runs.
-    fn baseline_for(item_text: &str) -> Baseline {
-        let command = item_text.strip_prefix("cmd:").unwrap_or(item_text).trim();
-        Baseline {
-            at: now(),
-            exit: 101,
-            check_definition_hash: check_definition_hash(command),
-            output_hash: "outhash".to_string(),
-            head: "error[E0425]: cannot find function `foo`".to_string(),
-            state_digest: "digest".to_string(),
-        }
-    }
-
-    /// Same stripping rule for `snapshot:` items.
-    fn snapshot_for(item_text: &str) -> Snapshot {
-        let command = item_text
-            .strip_prefix("snapshot:")
-            .unwrap_or(item_text)
-            .trim();
-        Snapshot {
-            at: now(),
-            exit: Some(0),
-            check_definition_hash: check_definition_hash(command),
-            output_hash: "outhash".to_string(),
-            head: "frozen output".to_string(),
-            state_digest: "digest".to_string(),
-        }
-    }
-
-    #[test]
-    fn snapshot_freezes_only_against_the_check_it_was_taken_on() {
-        let mut plan = create(
-            "freeze the output".to_string(),
-            Vec::new(),
-            vec!["snapshot: mycli --version".to_string()],
-            vec![NewStep {
-                title: "do the work".to_string(),
-                refs: Vec::new(),
-            }],
-            0,
-            &Limits::default(),
-        )
-        .unwrap();
-        assert!(!snapshot_current(&plan.acceptance[0]), "nothing frozen yet");
-        assert!(render(&plan).contains("[no snapshot]"));
-        set_snapshots(
-            &mut plan,
-            vec![Some(snapshot_for("snapshot: mycli --version"))],
-        );
-        assert!(snapshot_current(&plan.acceptance[0]));
-        assert!(!render(&plan).contains("[no snapshot]"));
-        // rewriting the command makes a new check: the old output stops
-        // applying to it, the same freeze logic as baselines
-        plan.acceptance[0].text = "snapshot: mycli --help".to_string();
-        assert!(!snapshot_current(&plan.acceptance[0]));
-        assert!(render(&plan).contains("[no snapshot]"));
-    }
-
-    #[test]
-    fn snapshot_never_applies_to_other_kinds() {
-        let mut plan = new_plan(); // acceptance[0] is "cmd: cargo test"
-        set_snapshots(&mut plan, vec![Some(snapshot_for("cmd: cargo test"))]);
-        assert!(!snapshot_current(&plan.acceptance[0]));
-        assert!(!proven_failing(&plan.acceptance[0]));
-    }
-
-    #[test]
-    fn acceptance_kinds_parse_by_prefix() {
-        let kinds = [
-            ("cmd: cargo test", "cmd"),
-            ("snapshot: mycli --version", "snapshot"),
-            ("differential: mycli render fix", "differential"),
-            ("signatures: src/a.rs, src/b.rs", "signatures"),
-            ("manual: eyeball it", "manual"),
-            ("the page renders", "text"),
-        ];
-        for (text, want) in kinds {
-            let item = Acceptance {
-                text: text.to_string(),
-                status: AcceptanceStatus::Pending,
-                evidence: Vec::new(),
-                validation: Validation::default(),
-                baseline: None,
-                snapshot: None,
-                shape: None,
-                capture_pending: false,
-                by: None,
-                reason: None,
-            };
-            let got = match item.kind() {
-                AcceptanceKind::Command(_) => "cmd",
-                AcceptanceKind::Snapshot(_) => "snapshot",
-                AcceptanceKind::Differential(_) => "differential",
-                AcceptanceKind::Signatures(_) => "signatures",
-                AcceptanceKind::Manual(_) => "manual",
-                AcceptanceKind::Text(_) => "text",
-            };
-            assert_eq!(got, want, "{text}");
-        }
-    }
-
-    #[test]
-    fn differential_shares_the_freeze_with_the_inverted_verdict() {
-        let mut plan = create(
-            "move the output".to_string(),
-            Vec::new(),
-            vec!["differential: mycli render fix".to_string()],
-            vec![NewStep {
-                title: "do the work".to_string(),
-                refs: Vec::new(),
-            }],
-            0,
-            &Limits::default(),
-        )
-        .unwrap();
-        assert!(!differential_current(&plan.acceptance[0]));
-        assert!(!snapshot_current(&plan.acceptance[0]));
-        assert!(render(&plan).contains("[no differential]"));
-        // the freeze record is the same shape rung 4 uses
-        set_snapshots(
-            &mut plan,
-            vec![Some(snapshot_for("snapshot: mycli render fix"))],
-        );
-        assert!(differential_current(&plan.acceptance[0]));
-        assert!(!render(&plan).contains("[no differential]"));
-        plan.acceptance[0].text = "differential: mycli render other".to_string();
-        assert!(!differential_current(&plan.acceptance[0]));
-    }
-
-    fn shape_for(paths: &str) -> ShapeFreeze {
-        ShapeFreeze {
-            at: now(),
-            check_definition_hash: check_definition_hash(paths),
-            files: vec![ShapeFile {
-                path: "src/a.rs".to_string(),
-                parser: "ts:rust".to_string(),
-                shape_hash: "shapehash".to_string(),
-                items: 2,
-            }],
-        }
-    }
-
-    #[test]
-    fn signatures_freeze_only_against_the_named_file_set() {
-        let mut plan = create(
-            "hold the shape".to_string(),
-            Vec::new(),
-            vec!["signatures: src/a.rs".to_string()],
-            vec![NewStep {
-                title: "do the work".to_string(),
-                refs: Vec::new(),
-            }],
-            0,
-            &Limits::default(),
-        )
-        .unwrap();
-        assert!(!signatures_current(&plan.acceptance[0]));
-        assert!(render(&plan).contains("[no signatures]"));
-        set_shapes(&mut plan, vec![Some(shape_for("src/a.rs"))]);
-        assert!(signatures_current(&plan.acceptance[0]));
-        assert!(!render(&plan).contains("[no signatures]"));
-        // renaming the file set makes a new check
-        plan.acceptance[0].text = "signatures: src/b.rs".to_string();
-        assert!(!signatures_current(&plan.acceptance[0]));
-    }
-
-    fn rung_of(text: &str) -> Option<Rung> {
-        ladder_rung(&Acceptance {
-            text: text.to_string(),
-            status: AcceptanceStatus::Pending,
-            evidence: Vec::new(),
-            validation: Validation::default(),
-            baseline: None,
-            snapshot: None,
-            shape: None,
-            capture_pending: false,
-            by: None,
-            reason: None,
-        })
-    }
-
-    #[test]
-    fn ladder_classifies_kinds_exactly_and_commands_by_heuristic() {
-        // kinds that name their rung map exactly
-        assert_eq!(rung_of("differential: x"), Some(Rung::Differential));
-        assert_eq!(rung_of("snapshot: x"), Some(Rung::Snapshot));
-        assert_eq!(rung_of("signatures: x"), Some(Rung::Structural));
-        // cmd: reads test-shaped, build-shaped, or fixture-shaped
-        assert_eq!(rung_of("cmd: cargo test"), Some(Rung::Test));
-        assert_eq!(rung_of("cmd: pytest -x"), Some(Rung::Test));
-        assert_eq!(rung_of("cmd: go test ./..."), Some(Rung::Test));
-        assert_eq!(rung_of("cmd: cargo check"), Some(Rung::Build));
-        assert_eq!(rung_of("cmd: tsc --noEmit"), Some(Rung::Build));
-        assert_eq!(rung_of("cmd: npm run build"), Some(Rung::Build));
-        assert_eq!(rung_of("cmd: ./run-fixture.sh"), Some(Rung::Fixture));
-        // manual and free text engage no rung
-        assert_eq!(rung_of("manual: eyeball it"), None);
-        assert_eq!(rung_of("the page renders"), None);
-    }
-
-    #[test]
-    fn baseline_proves_failure_only_against_the_check_it_was_taken_on() {
-        let mut plan = new_plan(); // acceptance[0] is "cmd: cargo test"
-        assert!(!proven_failing(&plan.acceptance[0]), "no baseline yet");
-        set_baselines(&mut plan, vec![Some(baseline_for("cmd: cargo test"))]);
-        assert!(proven_failing(&plan.acceptance[0]));
-        // rewriting the command makes a new check: the old failing run stops
-        // being evidence about it, which is the whole point of freezing it
-        plan.acceptance[0].text = "cmd: cargo test --lib".to_string();
-        assert!(!proven_failing(&plan.acceptance[0]));
-    }
-
-    #[test]
-    fn baseline_never_proves_a_manual_item() {
-        let mut plan = create(
-            "render the page".to_string(),
-            Vec::new(),
-            vec![
-                "manual: eyeball it".to_string(),
-                "manual: read it aloud".to_string(),
-            ],
-            vec![NewStep {
-                title: "do the work".to_string(),
-                refs: Vec::new(),
-            }],
-            0,
-            &Limits::default(),
-        )
-        .unwrap();
-        // even handed the same shape of proof, manual items can never be
-        // settled by a host run: only a command is runnable
-        set_baselines(
-            &mut plan,
-            vec![
-                Some(baseline_for("manual: eyeball it")),
-                Some(baseline_for("manual: read it aloud")),
-            ],
-        );
-        assert!(!proven_failing(&plan.acceptance[0]));
-        assert!(!proven_failing(&plan.acceptance[1]));
-    }
-
-    #[test]
-    fn set_baselines_is_positional_and_a_short_vector_leaves_the_rest_unproven() {
-        let mut plan = create(
-            "two checks".to_string(),
-            Vec::new(),
-            vec![
-                "cmd: cargo test".to_string(),
-                "cmd: cargo clippy".to_string(),
-            ],
-            vec![NewStep {
-                title: "do the work".to_string(),
-                refs: Vec::new(),
-            }],
-            0,
-            &Limits::default(),
-        )
-        .unwrap();
-        set_baselines(&mut plan, vec![Some(baseline_for("cmd: cargo test"))]);
-        assert!(proven_failing(&plan.acceptance[0]));
-        assert!(
-            !proven_failing(&plan.acceptance[1]),
-            "an item past the end of the vector stays unproven"
-        );
-    }
-
-    #[test]
-    fn render_marks_a_cmd_item_that_cannot_settle_anything() {
-        let mut plan = new_plan();
-        assert!(render(&plan).contains("[no baseline]"));
-        set_baselines(&mut plan, vec![Some(baseline_for("cmd: cargo test"))]);
-        assert!(!render(&plan).contains("[no baseline]"));
-    }
-
-    #[test]
-    fn an_acceptance_item_without_a_baseline_still_loads() {
-        // plan files written before §12.12 carry no baseline at all
-        let item: Acceptance = serde_json::from_value(serde_json::json!({
-            "text": "cmd: cargo test",
-            "status": "pending",
-        }))
-        .unwrap();
-        assert!(item.baseline.is_none());
-        assert!(!proven_failing(&item));
-    }
-
-    #[test]
-    fn legacy_passed_without_validation_still_completes() {
-        // plan files written before receipts carry status without validation
-        let mut plan = new_plan();
-        close_steps(&mut plan);
-        plan.acceptance[0].status = AcceptanceStatus::Passed;
-        assert!(matches!(
-            apply(&mut plan, Op::Complete, &Limits::default(), None),
-            Ok(Applied::Completed)
-        ));
-    }
-
-    #[test]
-    fn apply_flaky_needs_a_pass_and_is_idempotent() {
-        let mut plan = new_plan();
-        // a first red run is a failure, not a disagreement
-        assert!(!apply_flaky(&mut plan, 0));
-        assert_eq!(
-            plan.acceptance[0].validation.status,
-            ValidationStatus::Pending
-        );
-        plan.acceptance[0].status = AcceptanceStatus::Passed;
-        assert!(apply_flaky(&mut plan, 0));
-        assert_eq!(
-            plan.acceptance[0].validation.status,
-            ValidationStatus::Unknown
-        );
-        // replay converges: marking twice changes nothing
-        assert!(!apply_flaky(&mut plan, 0));
-        assert!(!apply_flaky(&mut plan, 9));
-    }
-
-    #[test]
-    fn unknown_validation_blocks_complete_until_waived() {
-        let mut plan = new_plan();
-        close_steps(&mut plan);
-        plan.acceptance[0].status = AcceptanceStatus::Passed;
-        assert!(apply_flaky(&mut plan, 0));
-        let err = apply(&mut plan, Op::Complete, &Limits::default(), None).unwrap_err();
-        assert_eq!(err.code, "acceptance_pending");
-        // waiver is the way out of the third state
-        waive(&mut plan, 0, "flaky upstream, tracked separately").unwrap();
-        assert!(matches!(
-            apply(&mut plan, Op::Complete, &Limits::default(), None),
-            Ok(Applied::Completed)
-        ));
-    }
-
-    #[test]
-    fn confirm_manual_records_point_in_time_receipt() {
-        let dir = std::env::temp_dir().join(format!("sqwai-plan-confirm-{}", new_id()));
-        let mut plan = create(
-            "goal".to_string(),
-            Vec::new(),
-            vec!["manual: eyeball it".to_string()],
-            vec![NewStep {
-                title: "t".to_string(),
-                refs: Vec::new(),
-            }],
-            20000,
-            &Limits::default(),
-        )
-        .expect("plan creates");
-        confirm(&dir, "sess", &mut plan, 0, "looks good").unwrap();
-        assert_eq!(plan.acceptance[0].status, AcceptanceStatus::Passed);
-        assert_eq!(
-            plan.acceptance[0].validation.status,
-            ValidationStatus::Passed
-        );
-        let receipts = &plan.acceptance[0].validation.receipts;
-        assert_eq!(receipts.len(), 1);
-        assert_eq!(receipts[0].runner.as_deref(), Some("manual"));
-        assert_eq!(receipts[0].state_before, receipts[0].state_after);
-        // the confirmation itself is journaled
-        let records = crate::agent::journal::Journal::records_for(&dir, "sess").unwrap();
-        assert!(records.iter().any(|r| r.kind == "manual_confirmation"
-            && r.fields.get("acceptance_id").and_then(|v| v.as_u64()) == Some(0)));
-        // commands and evidence-backed text refuse: they have own paths
-        let mut cmd_plan = new_plan();
-        let err = confirm(&dir, "sess", &mut cmd_plan, 0, "trust me").unwrap_err();
-        assert_eq!(err.code, "not_manual");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn stale_announcements_fire_once_per_stale_item() {
-        let plan_with = |statuses: &[&str]| {
-            let items: Vec<String> = statuses
-                .iter()
-                .map(|s| {
-                    format!(
-                        r#"{{"text":"cmd: x","status":"pending","validation":{{"status":"{s}"}}}}"#
-                    )
-                })
-                .collect();
-            serde_json::from_str::<Plan>(&format!(
-                r#"{{"version":1,"id":"p","status":"active","created":"t",
-                    "goal":{{"text":"g","source":"user","created":"t"}},
-                    "budget":{{"tokens":0,"limit":0}},"revision":1,
-                    "steps":[],"acceptance":[{}]}}"#,
-                items.join(",")
-            ))
-            .expect("test plan must parse")
-        };
-        let empty = std::collections::HashSet::new();
-        // item 1 stale, item 0 passed: only 1 announces
-        let (fresh, next) = stale_announcements(&empty, &plan_with(&["passed", "stale"]));
-        assert_eq!(fresh, vec![1]);
-        // same state again: silence (already announced)
-        let (fresh2, next2) = stale_announcements(&next, &plan_with(&["passed", "stale"]));
-        assert!(fresh2.is_empty());
-        // re-verified then stale again: announces again
-        let (_, next3) = stale_announcements(&next2, &plan_with(&["passed", "passed"]));
-        let (fresh4, _) = stale_announcements(&next3, &plan_with(&["passed", "stale"]));
-        assert_eq!(fresh4, vec![1]);
-        // foreign plan entries prune without announcing
-        let mut foreign = std::collections::HashSet::new();
-        foreign.insert(("other".to_string(), 0));
-        let (fresh5, next5) = stale_announcements(&foreign, &plan_with(&["passed"]));
-        assert!(fresh5.is_empty());
-        assert!(next5.is_empty());
-    }
-
-    #[test]
-    fn invalidate_on_diff_commits_only_on_change() {
-        let dir = std::env::temp_dir().join(format!("sqwai-plan-inv-{}", new_id()));
-        let mut plan = new_plan();
-        // #171: resolution is session-strict — the plan must carry the
-        // session under test, as plan_op sets on create in prod
-        plan.sessions = vec!["sess".to_string()];
-        close_steps(&mut plan);
-        plan.steps[0].refs = vec![StepRef::from("x.rs")];
-        verify_acceptance(&mut plan, 0, vec![], false, Some(receipt(&["x.rs"]))).unwrap();
-        store(&dir, &plan).unwrap();
-        assert!(invalidate_on_diff(&dir, "sess", &["x.rs".to_string()]).unwrap());
-        let reloaded = open_active_for_session(&dir, Some("sess"))
-            .unwrap()
-            .expect("active plan");
-        assert_eq!(
-            reloaded.acceptance[0].validation.status,
-            ValidationStatus::Stale
-        );
-        assert!(reloaded.applied_event.is_some(), "invalidation commits");
-        // unrelated paths: no commit, cursor untouched
-        let cursor = reloaded.applied_event.clone();
-        assert!(!invalidate_on_diff(&dir, "sess", &["y.rs".to_string()]).unwrap());
-        let same = open_active_for_session(&dir, Some("sess"))
-            .unwrap()
-            .expect("active plan");
-        assert_eq!(same.applied_event, cursor);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn replay_restores_verify_receipt_from_commit_args() {
-        let dir = std::env::temp_dir().join(format!("sqwai-plan-repreceipt-{}", new_id()));
-        let mut plan = new_plan();
-        close_steps(&mut plan);
-        plan.applied_event = Some("rr:0".to_string());
-        store(&dir, &plan).unwrap();
-        let receipt_value = serde_json::to_value(receipt(&["x.rs"])).unwrap();
-        let mut journal = crate::agent::journal::Journal::open(&dir, "rr").unwrap();
-        journal
-            .append(
-                "plan",
-                serde_json::json!({
-                    "op": "verify", "acceptance": 0, "evidence_refs": [],
-                    "receipt": receipt_value,
-                    "plan_id": plan.id, "by": "model", "ok": true,
-                }),
-            )
-            .unwrap();
-        replay(&dir).unwrap();
-        let healed = open(&dir, &plan.id).unwrap();
-        assert_eq!(
-            healed.acceptance[0].validation.status,
-            ValidationStatus::Passed
-        );
-        assert_eq!(healed.acceptance[0].validation.receipts.len(), 1);
-        assert_eq!(
-            healed.acceptance[0].validation.receipts[0]
-                .runner
-                .as_deref(),
-            Some("exec")
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn finish_leaves_validation_untouched() {
-        let mut plan = new_plan();
-        apply(
-            &mut plan,
-            Op::Start {
-                id: "1".into(),
-                confirm: None,
-            },
-            &Limits::default(),
-            None,
-        )
-        .unwrap();
-        apply(
-            &mut plan,
-            Op::Finish {
-                id: "1".into(),
-                summary: "model added".into(),
-                evidence: vec![],
-            },
-            &Limits::default(),
-            None,
-        )
-        .unwrap();
-        // done means performed, not verified (§2.1.4)
-        assert_eq!(plan.step("1").unwrap().status, StepStatus::Done);
-        assert_eq!(
-            plan.step("1").unwrap().validation.status,
-            ValidationStatus::Pending
-        );
     }
 
     #[test]
@@ -2711,7 +1545,7 @@ mod tests {
     }
 
     #[test]
-    fn reopen_bumps_epoch_and_resets_validation() {
+    fn reopen_bumps_epoch_and_clears_evidence() {
         let mut plan = new_plan();
         apply(
             &mut plan,
@@ -2732,13 +1566,11 @@ mod tests {
             Op::Finish {
                 id: "1".into(),
                 summary: "model added".into(),
-                evidence: vec![42],
             },
             &Limits::default(),
             None,
         )
         .unwrap();
-        plan.step_mut("1").unwrap().validation.status = ValidationStatus::Passed;
         assert_eq!(plan.step("1").unwrap().step_epoch, 0);
 
         reopen_for_undo(&mut plan, "1", "reopened by undo").unwrap();
@@ -2746,8 +1578,6 @@ mod tests {
         let step = plan.step("1").unwrap();
         assert_eq!(step.status, StepStatus::Reopened);
         assert_eq!(step.step_epoch, 1);
-        assert_eq!(step.validation.status, ValidationStatus::Pending);
-        assert!(step.validation.receipts.is_empty());
         assert!(step.evidence.is_empty());
     }
 

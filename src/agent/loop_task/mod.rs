@@ -1707,7 +1707,6 @@ async fn run_agent(
                     } else {
                         outcome.file_diff.as_ref().into_iter().collect()
                     };
-                    let mut invalidated_paths = Vec::new();
                     for metadata in diffs {
                         let _ = writer.append_evidence(
                             "file_diff",
@@ -1726,33 +1725,6 @@ async fn run_agent(
                                 "blob_after": metadata.blob_after,
                             }),
                         );
-                        invalidated_paths.push(
-                            metadata
-                                .path
-                                .replace('\\', "/")
-                                .trim_start_matches("./")
-                                .to_string(),
-                        );
-                    }
-                    // validation invalidation (§2.1.4): a mutation on traversed
-                    // paths stales passed receipts. Best-effort like the
-                    // evidence appends above; only commits when something
-                    // actually went stale.
-                    if !invalidated_paths.is_empty() {
-                        let _ = plan::invalidate_on_diff(&root, &session_id, &invalidated_paths);
-                    }
-                    // audit H4: bash-written bytes leave no file_diff, so a
-                    // `sed -i` on a tracked path left its passed receipt
-                    // reading green. Attribute them through the shadow head
-                    // diff and stale whatever they cover.
-                    if call.name == "bash" && invalidated_paths.is_empty() && !ctx.read_only {
-                        let store = ctx.shadow_store;
-                        let chain = ctx.checkpoint_chain().to_string();
-                        let bash_paths =
-                            crate::agent::checkpoints::changed_since_head(&root, store, &chain);
-                        if !bash_paths.is_empty() {
-                            let _ = plan::invalidate_on_diff(&root, &session_id, &bash_paths);
-                        }
                     }
                     if call.name == "plan" {
                         // `plan_op` journals its own intent records ahead of every
@@ -2941,7 +2913,7 @@ mod effort_tests {
         let mut plan2 = plan::create(
             "goal2".to_string(),
             Vec::new(),
-            Vec::new(),
+            vec!["note".to_string()],
             vec![plan::NewStep {
                 title: "work".into(),
                 refs: Vec::new(),
@@ -3858,7 +3830,7 @@ mod effort_tests {
         let mut plan = plan::create(
             "parent goal".into(),
             Vec::new(),
-            Vec::new(),
+            vec!["note".to_string()],
             vec![plan::NewStep {
                 title: "step".into(),
                 refs: Vec::new(),
@@ -3948,7 +3920,7 @@ mod effort_tests {
         let mut plan = plan::create(
             "goal".into(),
             Vec::new(),
-            Vec::new(),
+            vec!["note".to_string()],
             vec![plan::NewStep {
                 title: "step".into(),
                 refs: Vec::new(),
@@ -3990,7 +3962,7 @@ mod effort_tests {
         let mut plan = plan::create(
             "foreign goal".into(),
             Vec::new(),
-            Vec::new(),
+            vec!["note".to_string()],
             vec![plan::NewStep {
                 title: "step".into(),
                 refs: Vec::new(),

@@ -508,53 +508,38 @@ for an impossible task use plan block_plan.",
             name: "plan",
             kind: Kind::Mutating,
             description: "Work the structured plan, one operation per call. Ops: create, start, \
-finish, block, unblock, cancel, add, split, verify, complete, block_plan. To abandon \
+finish, block, unblock, cancel, add, split, add_criteria, complete, block_plan. To abandon \
 a wrong plan, use propose_reset (user-confirmed), never cancel-and-recreate around it. Plans are for \
 work that changes things: read-only inspection needs no plan — just look. \
-For a write, create with goal + steps; acceptance is optional at create \
-and required only as executable or human-settled criteria for \
-real mutations: cmd: for a check that fails before the change and passes after, manual: for \
-anything a human eyeballs. A cmd: criterion must be an executable shell \
-command, never prose. Advanced rung kinds (snapshot:/differential:/signatures:) are \
-host-suggested after the first run, never written by hand. The current plan, \
+For a write, create with goal + steps + at least one criteria note. criteria are your own \
+plain-text done-notes: what must be true when the work is done. They survive compaction and \
+keep you honest with yourself — the host runs nothing and certifies nothing, so write each one \
+as something you can check yourself (run the command with bash, read its observed result). \
+add_criteria appends more notes as the work reveals them. The current plan, \
 with its step ids, is always in your context above — use those ids, never \
-guess them and never re-read the plan through tools. The host owns the goal, the constraints, \
-acceptance status, validation and evidence; to change the goal, propose the full updated plan with \
-propose_plan instead. finish records completion of the step's work with a summary and does not \
-by itself establish that acceptance criteria passed; rejections return a code and hint to follow. \
-A manual: acceptance can be \
-waived only by the user, never verified by the model. complete requires every step closed and \
-every acceptance validation passed or waived with fresh receipts. block_plan surrenders \
+guess them and never re-read the plan through tools. The host owns the goal and the constraints; \
+to change the goal, propose the full updated plan with propose_plan instead. finish records \
+completion of the step's work with a summary of what changed and any remaining limitations. \
+complete requires every step closed (done, cancelled or blocked with reason). block_plan surrenders \
 an impossible task: use it when the spec contradicts the tests (or itself) instead of gaming \
-either side — quote the conflict in reason. \
-Never invent evidence identifiers.",
+either side — quote the conflict in reason.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "op": {"type": "string", "enum": [
                         "create", "start", "finish", "block", "unblock", "cancel",
-                        "add", "split", "verify", "complete", "block_plan",
-                        "add_acceptance", "step_diff"
+                        "add", "split", "complete", "block_plan",
+                        "add_criteria", "step_diff"
                     ]},
                     "id": {"type": "string", "description": "step id"},
                     "step_id": {"type": "string", "description": "step_diff: plan step id"},
                     "path": {"type": "string", "description": "step_diff: restrict the diff to this path"},
                     "goal": {"type": "string", "description": "create"},
                     "constraints": {"type": "array", "items": {"type": "string"}},
-                    "acceptance": {
-                        "type": ["array", "integer"],
-                        "items": {"type": "string"},
-                        "description": "create: criteria (cmd:/manual:); verify: index. One cmd: check is enough — filtered runs don't save compile time, and every extra cmd: costs minutes of capture"
-                    },
-                    "checklist": {
+                    "criteria": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "create: non-blocking free-text notes (never gate complete)"
-                    },
-                    "items": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "add_acceptance: criteria to append (cmd:/manual:; free text refused like at create). One cmd: check is enough"
+                        "description": "create: at least one done-note. add_criteria: notes to append. Plain text — what must be true when the work is done; the host runs nothing, so phrase each as something you can check yourself"
                     },
                     "steps": {
                         "type": "array",
@@ -1003,24 +988,29 @@ fn cp866_char(byte: u8) -> char {
     }
 }
 
-/// Decode check: cp866 "Привет" (П=0x8F, р=0xE0, и=0xA8, в=0xA2,
-/// е=0xA5, т=0xE2) must round-trip, valid UTF-8 (emoji included) passes
-/// through untouched, and mixed lines decode each in its own encoding.
-/// A `cmd:` acceptance written as prose gets executed as a command and
-/// fails confusingly — the tool text must demand an executable outright.
+/// The plan tool's criteria are the agent's own plain-text done-notes: the
+/// description must present them as notes the host never runs or certifies.
 #[test]
-fn plan_tool_description_demands_executable_acceptance() {
+fn plan_tool_description_describes_criteria_as_notes() {
     let plan = tool_specs(false)
         .into_iter()
         .find(|s| s.name == "plan")
         .expect("plan tool");
     assert!(
-        plan.description.contains("executable shell command"),
-        "plan description must rule out prose acceptance: {}",
+        plan.description.contains("criteria"),
+        "plan description must cover criteria: {}",
+        &plan.description[..plan.description.len().min(200)]
+    );
+    assert!(
+        plan.description.contains("host runs nothing"),
+        "plan description must rule out host verification: {}",
         &plan.description[..plan.description.len().min(200)]
     );
 }
 
+/// Decode check: cp866 "Привет" (П=0x8F, р=0xE0, и=0xA8, в=0xA2,
+/// е=0xA5, т=0xE2) must round-trip, valid UTF-8 (emoji included) passes
+/// through untouched, and mixed lines decode each in its own encoding.
 #[test]
 fn decode_child_output_handles_console_codepage() {
     assert_eq!(

@@ -1003,6 +1003,13 @@ fn validate_plan_refs(
 
 /// The `plan` tool: one operation per call, validated by the host (§2.1.3).
 pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
+    // verify was retired: the host no longer certifies checks. Catch it by
+    // name before parsing so the model gets the reason, not a schema error.
+    if args.get("op").and_then(|v| v.as_str()) == Some("verify") {
+        return Outcome::err(
+            "verify is retired: run the command yourself (bash) and work from its observed result",
+        );
+    }
     let op: plan::Op = match serde_json::from_value(args.clone()) {
         Ok(op) => op,
         Err(e) => {
@@ -1049,9 +1056,8 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         plan::Op::Create {
             goal,
             constraints,
-            acceptance,
+            criteria,
             steps,
-            checklist,
         } => match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
             Ok(Some(existing)) => rejection(plan::Rejection {
                 code: "plan_exists",
@@ -1067,7 +1073,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     .plan_limits
                     .budget_tokens(ctx.context_limit)
                     .max(MIN_PLAN_BUDGET_TOKENS);
-                match plan::create(goal, constraints, acceptance, steps, budget_limit, &limits) {
+                match plan::create(goal, constraints, criteria, steps, budget_limit, &limits) {
                     Ok(mut created) => {
                         for s in &created.steps {
                             if let Err(rej) = validate_plan_refs(&ctx.root, &s.refs, true) {
@@ -1075,8 +1081,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             }
                         }
                         created.sessions = vec![ctx.session_id.clone()];
-                        // non-blocking checklist rides along (never gates)
-                        created.checklist = checklist;
                         let id = created.id.clone();
                         let step_count = created.steps.len();
                         // Journal-first (§2.1.4): the intent carries everything
@@ -1084,8 +1088,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         let args = serde_json::json!({
                             "goal": created.goal.text,
                             "constraints": created.constraints,
-                            "acceptance": created.acceptance.iter().map(|a| a.text.clone()).collect::<Vec<_>>(),
-                            "checklist": created.checklist,
+                            "criteria": created.criteria,
                             "steps": created.steps.iter().map(|s| serde_json::json!({
                                 "title": s.title,
                                 "refs": s.refs,
@@ -1115,10 +1118,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             }
             Err(e) => Outcome::err(format!("plan store unreadable: {e:#}")),
         },
-        plan::Op::Verify { .. } => Outcome::err(
-            "verify is retired: the host no longer certifies checks — run the command \
-             yourself (bash) and work from its observed result",
-        ),
         plan::Op::Cancel { id, reason } => {
             match id {
                 // No silent whole-plan kill here either: the dispatcher used

@@ -1,7 +1,6 @@
 use super::{
-    Acceptance, AcceptanceKind, AcceptanceStatus, Budget, Goal, MAX_STEPS_DEFAULT, Plan,
-    PlanStatus, Step, StepRef, StepStatus, Validation, ValidationStatus, complete, new_id, next_id,
-    now, render, verify_acceptance,
+    Budget, Goal, MAX_STEPS_DEFAULT, Plan, PlanStatus, Step, StepRef, StepStatus, complete, new_id,
+    next_id, now, render,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -27,14 +26,13 @@ pub enum Op {
         goal: String,
         #[serde(default)]
         constraints: Vec<String>,
-        #[serde(default)]
-        acceptance: Vec<String>,
+        /// Done-criteria notes the agent writes for itself (plain text).
+        /// Required non-empty — the one create-time check, a form
+        /// completeness gate, not a workflow gate.
+        #[serde(default, alias = "acceptance")]
+        criteria: Vec<String>,
         #[serde(default)]
         steps: Vec<NewStep>,
-        /// Non-blocking free-text checklist (plan-lite). Never gates
-        /// complete; walked past, never settled.
-        #[serde(default)]
-        checklist: Vec<String>,
     },
     Start {
         id: String,
@@ -44,9 +42,6 @@ pub enum Op {
     Finish {
         id: String,
         summary: String,
-        /// Deprecated input retained for wire compatibility; the host ignores it.
-        #[serde(default)]
-        evidence: Vec<u64>,
     },
     Block {
         id: String,
@@ -88,24 +83,16 @@ pub enum Op {
         #[serde(default)]
         refs: Vec<StepRef>,
     },
-    /// Append acceptance criteria to a plan born without (or with fewer
-    /// than needed): plan-lite grows teeth when the work turns out real.
-    /// Same typing gate as create; baselines are captured by the dispatcher
-    /// for the new items (best effort — a check that already passes stays
-    /// unproven, correctly: the host never saw it fail).
-    AddAcceptance {
-        #[serde(default)]
-        items: Vec<String>,
+    /// Append done-criteria notes to a plan born with fewer than the work
+    /// now needs. Plain text, no typing gate — a criterion is the agent's
+    /// own reminder, not a check the host settles.
+    AddCriteria {
+        #[serde(default, alias = "items")]
+        criteria: Vec<String>,
     },
     Split {
         id: String,
         into: Vec<NewStep>,
-    },
-    Verify {
-        acceptance: usize,
-        /// Deprecated input retained for wire compatibility; the host ignores it.
-        #[serde(default)]
-        evidence: Vec<u64>,
     },
     Complete,
     Show,
@@ -171,26 +158,22 @@ pub struct PlanDraftArgs {
     pub goal: String,
     #[serde(default)]
     pub constraints: Vec<String>,
-    #[serde(default)]
-    pub acceptance: Vec<String>,
+    #[serde(default, alias = "acceptance")]
+    pub criteria: Vec<String>,
     #[serde(default)]
     pub steps: Vec<NewStep>,
-    #[serde(default)]
-    pub checklist: Vec<String>,
 }
 
 impl PlanDraftArgs {
     pub fn build(&self, budget_limit: u64, limits: &Limits) -> Result<Plan, Rejection> {
-        let mut plan = create(
+        create(
             self.goal.clone(),
             self.constraints.clone(),
-            self.acceptance.clone(),
+            self.criteria.clone(),
             self.steps.clone(),
             budget_limit,
             limits,
-        )?;
-        plan.checklist = self.checklist.clone();
-        Ok(plan)
+        )
     }
 }
 
@@ -221,22 +204,12 @@ pub fn reset_discards(plan: &Plan) -> String {
         })
         .map(|step| step.id.as_str())
         .collect();
-    let unsettled = plan
-        .acceptance
-        .iter()
-        .filter(|item| {
-            !matches!(
-                item.validation.status,
-                ValidationStatus::Passed | ValidationStatus::Waived
-            )
-        })
-        .count();
     format!(
-        "{} steps done, {} open ({}), {} acceptance unsettled",
+        "{} steps done, {} open ({}), {} criteria",
         done,
         open.len(),
         open.join(", "),
-        unsettled
+        plan.criteria.len()
     )
 }
 
@@ -320,17 +293,14 @@ pub fn validate_proposal_invariants(
             }
         }
 
-        // 2. Acceptance criteria preservation under the same goal
-        for acc in &active.acceptance {
-            let found = draft.acceptance.iter().any(|a| a.trim() == acc.text.trim());
+        // 2. Done-criteria preservation under the same goal
+        for note in &active.criteria {
+            let found = draft.criteria.iter().any(|c| c.trim() == note.trim());
             if !found {
                 return Err(Rejection::new(
-                    "dropped_acceptance",
-                    format!(
-                        "proposal drops active acceptance item '{}' under the same goal",
-                        acc.text
-                    ),
-                    "keep existing acceptance criteria; manual acceptance can only be waived by user",
+                    "dropped_criteria",
+                    format!("proposal drops active criterion '{note}' under the same goal"),
+                    "keep existing criteria or propose a goal revision if the direction changed",
                 ));
             }
         }
@@ -373,29 +343,14 @@ impl Default for Limits {
     }
 }
 
-/// Shared typing gate for create and add-acceptance: every criterion is
-/// executable or explicitly human; free text settles on whatever evidence
-/// happens to exist, which is a claim, not a check.
-fn check_typed_acceptance(acceptance: &[String]) -> Result<(), Rejection> {
-    for text in acceptance {
-        if matches!(AcceptanceKind::classify(text), AcceptanceKind::Text(_)) {
-            return Err(Rejection::new(
-                "untyped_acceptance",
-                format!("acceptance criterion is free text: {text}"),
-                "rewrite it as cmd: (a check that fails before and passes after) \
-                 or manual: (a human checks it by hand); plain notes go to \
-                 checklist, which never gates anything",
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Build a new plan. Rejects an empty goal, zero steps and over-long plans.
+/// Build a new plan. Rejects an empty goal, empty criteria, zero steps and
+/// over-long plans. Criteria are the agent's own done-notes — plain text, no
+/// typing gate — but a plan must state at least one, so there is always a
+/// target that survives compaction.
 pub fn create(
     goal: String,
     constraints: Vec<String>,
-    acceptance: Vec<String>,
+    criteria: Vec<String>,
     steps: Vec<NewStep>,
     budget_limit: u64,
     limits: &Limits,
@@ -405,6 +360,14 @@ pub fn create(
             "empty_goal",
             "a plan needs a goal",
             "state what must be true when the work is done",
+        ));
+    }
+    if criteria.iter().all(|c| c.trim().is_empty()) {
+        return Err(Rejection::new(
+            "empty_criteria",
+            "a plan needs at least one done-criterion",
+            "add `criteria`: plain notes on what must be true when the work is done \
+             (e.g. the command that proves it, or the behaviour to check by hand)",
         ));
     }
     if steps.is_empty() {
@@ -425,15 +388,10 @@ pub fn create(
             "merge steps, or ask the user to raise it with /plan limit N",
         ));
     }
-    // Untyped acceptance is refused, not settled: free text settles on
-    // whatever evidence happens to exist, which is a claim, not a check.
-    // Every criterion is executable (`cmd:`, `snapshot:`, `differential:`,
-    // `signatures:`) or explicitly human (`manual:`).
-    check_typed_acceptance(&acceptance)?;
 
     let ts = now();
     let plan = Plan {
-        version: 1,
+        version: 3,
         id: new_id(),
         status: PlanStatus::Active,
         created: ts.clone(),
@@ -447,20 +405,10 @@ pub fn create(
             history: Vec::new(),
         },
         constraints,
-        acceptance: acceptance
+        criteria: criteria
             .into_iter()
-            .map(|text| Acceptance {
-                text,
-                status: AcceptanceStatus::Pending,
-                evidence: Vec::new(),
-                validation: Validation::default(),
-                baseline: None,
-                snapshot: None,
-                shape: None,
-                capture_pending: false,
-                by: None,
-                reason: None,
-            })
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
             .collect(),
         steps: steps
             .into_iter()
@@ -475,7 +423,6 @@ pub fn create(
                 reason: None,
                 evidence: Vec::new(),
                 refs: s.refs,
-                validation: Validation::default(),
                 step_epoch: 0,
                 stale_goal: None,
             })
@@ -488,10 +435,6 @@ pub fn create(
         revision: 0,
         rejections_in_a_row: 0,
         blocked_reason: None,
-        // the non-blocking checklist rides the create intent (dispatcher
-        // sets it post-create, like sessions); create() itself stays
-        // checklist-free so its 26 callers do not churn
-        checklist: Vec::new(),
     };
     Ok(plan)
 }
@@ -679,11 +622,7 @@ pub fn apply(
             "call plan with op step_diff",
         ),
         Op::Start { id, confirm } => start(plan, &id, confirm, current_step),
-        Op::Finish {
-            id,
-            summary,
-            evidence,
-        } => finish(plan, &id, summary, !evidence.is_empty()),
+        Op::Finish { id, summary } => finish(plan, &id, summary),
         Op::Block { id, reason } => block(plan, &id, reason),
         Op::Unblock { id } => unblock(plan, &id),
         Op::Cancel { id, reason } => cancel(plan, id.as_deref(), reason),
@@ -703,15 +642,8 @@ pub fn apply(
             )
         }
         Op::Add { after, title, refs } => add(plan, after.as_deref(), title, refs, limits),
-        Op::AddAcceptance { items } => add_acceptance(plan, items),
+        Op::AddCriteria { criteria } => add_criteria(plan, criteria),
         Op::Split { id, into } => split(plan, &id, into, limits),
-        // The host prepares the evidence (and runs `cmd:` items) before
-        // applying a verify; reaching it through `apply` alone means there is
-        // none, which `verify_acceptance` rejects for anything but `cmd:`.
-        Op::Verify {
-            acceptance,
-            evidence,
-        } => verify_acceptance(plan, acceptance, Vec::new(), !evidence.is_empty(), None),
         Op::Complete => complete(plan),
         Op::Join { session } => join(plan, &session),
     }
@@ -815,12 +747,7 @@ fn start(
     accept(plan, format!("step {id} in progress"))
 }
 
-fn finish(
-    plan: &mut Plan,
-    id: &str,
-    summary: String,
-    supplied_evidence: bool,
-) -> Result<Applied, Rejection> {
+fn finish(plan: &mut Plan, id: &str, summary: String) -> Result<Applied, Rejection> {
     let Some((status, _)) = step_status(plan, id) else {
         return unknown_step(plan, id);
     };
@@ -840,19 +767,13 @@ fn finish(
             "one line: what changed and where",
         );
     }
-    // Evidence presence is validated by the host tool dispatcher (strict
-    // mode only), after host journal records have been attached to this step.
-    // Soft steps close on the summary above; progress reads from receipts.
+    // `finish` records that the work was performed and moves on. Whether it
+    // verified is the host's observation in the journal, never a gate here.
     let step = plan.step_mut(id).expect("checked above");
     step.status = StepStatus::Done;
     step.finished = Some(now());
     step.summary = Some(summary);
-    let message = if supplied_evidence {
-        format!("step {id} done (model evidence ignored; host evidence used)")
-    } else {
-        format!("step {id} done")
-    };
-    accept(plan, message)
+    accept(plan, format!("step {id} done"))
 }
 
 fn block(plan: &mut Plan, id: &str, reason: String) -> Result<Applied, Rejection> {
@@ -999,7 +920,6 @@ fn add(
         reason: None,
         evidence: Vec::new(),
         refs,
-        validation: Validation::default(),
         step_epoch: 0,
         stale_goal: None,
     };
@@ -1008,39 +928,27 @@ fn add(
     accept(plan, format!("step {id} added"))
 }
 
-/// Append acceptance criteria. Empty additions and free text are refused;
-/// items land pending with no baseline — the dispatcher captures baselines
-/// for exactly these positions (see plan_op), so replay needs no proof data.
-pub(crate) fn add_acceptance(plan: &mut Plan, items: Vec<String>) -> Result<Applied, Rejection> {
-    if items.iter().all(|text| text.trim().is_empty()) {
+/// Append done-criteria notes. Empty additions are refused; the notes are
+/// plain text with no typing gate — a criterion is the agent's own reminder.
+pub(crate) fn add_criteria(plan: &mut Plan, criteria: Vec<String>) -> Result<Applied, Rejection> {
+    if criteria.iter().all(|text| text.trim().is_empty()) {
         return reject(
             plan,
-            "empty_acceptance",
-            "no acceptance criteria given",
-            "name a check (cmd:) or a human checkpoint (manual:)",
+            "empty_criteria",
+            "no criteria given",
+            "add at least one plain-text note on what must be true when done",
         );
     }
-    check_typed_acceptance(&items)?;
     let mut added = 0;
-    for text in items {
-        if text.trim().is_empty() {
+    for text in criteria {
+        let text = text.trim().to_string();
+        if text.is_empty() {
             continue;
         }
-        plan.acceptance.push(Acceptance {
-            text,
-            status: AcceptanceStatus::Pending,
-            evidence: Vec::new(),
-            validation: Validation::default(),
-            baseline: None,
-            snapshot: None,
-            shape: None,
-            capture_pending: false,
-            by: None,
-            reason: None,
-        });
+        plan.criteria.push(text);
         added += 1;
     }
-    accept(plan, format!("acceptance +{added}"))
+    accept(plan, format!("criteria +{added}"))
 }
 
 fn split(
@@ -1120,7 +1028,6 @@ fn split(
             reason: None,
             evidence: Vec::new(),
             refs: s.refs,
-            validation: Validation::default(),
             step_epoch: 0,
             stale_goal: None,
         })

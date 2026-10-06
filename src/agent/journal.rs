@@ -1785,7 +1785,7 @@ mod tests {
         let mut plan = crate::plan::create(
             "keep working".to_string(),
             Vec::new(),
-            Vec::new(),
+            vec!["note".to_string()],
             vec![crate::plan::NewStep {
                 title: "step".into(),
                 refs: Vec::new(),
@@ -1837,7 +1837,7 @@ mod tests {
         let plan = crate::plan::create(
             "test boundary".to_string(),
             Vec::new(),
-            Vec::new(),
+            vec!["note".to_string()],
             vec![crate::plan::NewStep {
                 title: "step 1".into(),
                 refs: Vec::new(),

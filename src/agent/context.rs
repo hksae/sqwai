@@ -901,7 +901,7 @@ mod tests {
         let mut plan_a = crate::plan::create(
             "session A goal".into(),
             Vec::new(),
-            Vec::new(),
+            vec!["note".to_string()],
             vec![crate::plan::NewStep {
                 title: "step A".into(),
                 refs: Vec::new(),
@@ -917,7 +917,7 @@ mod tests {
         let mut plan_b = crate::plan::create(
             "session B goal".into(),
             Vec::new(),
-            Vec::new(),
+            vec!["note".to_string()],
             vec![crate::plan::NewStep {
                 title: "step B".into(),
                 refs: Vec::new(),
@@ -949,7 +949,7 @@ mod tests {
         let mut plan = crate::plan::create(
             "resume safely".into(),
             Vec::new(),
-            Vec::new(),
+            vec!["note".to_string()],
             vec![crate::plan::NewStep {
                 title: "unfinished change".into(),
                 refs: Vec::new(),

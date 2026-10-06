@@ -433,9 +433,6 @@ pub struct App {
     /// Finalized activity groups (one per completed agent turn). The currently
     /// streaming turn is rendered live and only lands here at `finish_turn`.
     activity_groups: Vec<ActivityGroup>,
-    /// (plan_id, acceptance index) already announced as stale in chat.
-    /// Compared at turn end; newly stale items get one durable status row.
-    announced_stale: std::collections::HashSet<(String, usize)>,
     /// Wall-clock start of the turn currently streaming, used to freeze the
     /// activity duration once the turn completes.
     turn_started: Option<Instant>,
@@ -1027,7 +1024,6 @@ Continue from the pending step, or report to the user if the settled work looks 
             enter_gate: events::EnterGate::default(),
             pending_events: std::collections::VecDeque::new(),
             activity_groups: Vec::new(),
-            announced_stale: std::collections::HashSet::new(),
             turn_started: None,
         };
         if !startup {
@@ -2891,7 +2887,6 @@ Continue from the pending step, or report to the user if the settled work looks 
         self.subagent_chats.clear();
         self.subagent_meta.clear();
         self.sub_views.clear();
-        self.announced_stale.clear();
         // live + parked rows belong to the old transcript: drop them whole
         // so the next draw assembles from scratch instead of splicing
         // against a stale chunk map
@@ -3004,7 +2999,6 @@ Continue from the pending step, or report to the user if the settled work looks 
         self.subagent_chats.clear();
         self.subagent_meta.clear();
         self.sub_views.clear();
-        self.announced_stale.clear();
         self.stashed_main_scroll = None;
         self.todos.clear();
         self.turn_user_index = None;
@@ -3528,76 +3522,10 @@ Continue from the pending step, or report to the user if the settled work looks 
                 }
                 Err(message) => message,
             },
-            Some("waive") => {
-                let index = args.get(1).and_then(|s| s.parse::<usize>().ok());
-                let reason = args.get(2..).map(|v| v.join(" ")).unwrap_or_default();
-                match (index, reason.trim()) {
-                    (Some(index), reason) if !reason.is_empty() => match self.workable_plan() {
-                        Ok(mut active) => match plan::waive(&mut active, index, reason) {
-                            Ok(()) => {
-                                let sid = self.session.id.to_string();
-                                let args = serde_json::json!({"index": index, "reason": reason});
-                                match plan::commit(
-                                    &root,
-                                    &sid,
-                                    &mut active,
-                                    "waive",
-                                    "user",
-                                    true,
-                                    args,
-                                ) {
-                                    Ok(_) => format!("acceptance {index} waived"),
-                                    Err(e) => format!("plan write failed: {e:#}"),
-                                }
-                            }
-                            Err(e) => format!("plan waive rejected [{}]: {}", e.code, e.reason),
-                        },
-                        Err(message) => message,
-                    },
-                    _ => "usage: /plan waive <acceptance-index> <reason>".to_string(),
-                }
-            }
-            Some("confirm") => {
-                let index = args.get(1).and_then(|s| s.parse::<usize>().ok());
-                let reason = args.get(2..).map(|v| v.join(" ")).unwrap_or_default();
-                match (index, reason.trim()) {
-                    (Some(index), reason) if !reason.is_empty() => match self.workable_plan() {
-                        Ok(mut active) => {
-                            let sid = self.session.id.to_string();
-                            match plan::confirm(&root, &sid, &mut active, index, reason) {
-                                Ok(_) => {
-                                    let receipt = active
-                                        .acceptance
-                                        .get(index)
-                                        .and_then(|item| item.validation.receipts.last())
-                                        .and_then(|r| serde_json::to_value(r).ok());
-                                    let mut cargs =
-                                        serde_json::json!({"index": index, "reason": reason});
-                                    if let Some(receipt) = receipt {
-                                        cargs["receipt"] = receipt;
-                                    }
-                                    match plan::commit(
-                                        &root,
-                                        &sid,
-                                        &mut active,
-                                        "confirm",
-                                        "user",
-                                        true,
-                                        cargs,
-                                    ) {
-                                        Ok(_) => format!("acceptance {index} confirmed"),
-                                        Err(e) => format!("plan write failed: {e:#}"),
-                                    }
-                                }
-                                Err(e) => {
-                                    format!("plan confirm rejected [{}]: {}", e.code, e.reason)
-                                }
-                            }
-                        }
-                        Err(message) => message,
-                    },
-                    _ => "usage: /plan confirm <acceptance-index> <reason>".to_string(),
-                }
+            Some("waive") | Some("confirm") => {
+                "waive/confirm are retired: acceptance is now plain done-criteria notes the \
+                 agent keeps for itself — there is nothing for the host to certify"
+                    .to_string()
             }
             Some(other) => format!("unknown /plan action '{other}'"),
         };
@@ -4919,26 +4847,6 @@ Continue from the pending step, or report to the user if the settled work looks 
         self.session.save().ok();
     }
 
-    /// Push one durable chat row per newly-stale acceptance item, if a plan
-    /// is active. Split out for tests: production passes the loaded plan,
-    /// tests pass constructed ones (no disk involved).
-    fn announce_stale_rows(&mut self, plan: Option<crate::plan::Plan>) {
-        let Some(plan) = plan else {
-            self.announced_stale.clear();
-            return;
-        };
-        let (fresh, next) = crate::plan::stale_announcements(&self.announced_stale, &plan);
-        self.announced_stale = next;
-        for i in fresh {
-            self.push_segment(Segment::Status {
-                text: format!("acceptance {i} went stale — re-verify"),
-                kind: StatusKind::Err,
-                expanded: false,
-                transient: false,
-            });
-        }
-    }
-
     /// `advanced` tells the Ok path whether the outcome added a new plain
     /// assistant message past the one already on screen (`finish_turn_ok`
     /// computes it against the pre-replacement session). Callers that did
@@ -5112,19 +5020,6 @@ Continue from the pending step, or report to the user if the settled work looks 
         // Segment indices are stable from here on: the empty-thinking cleanup
         // and the answer backfill above have all run.
         self.finalize_activity_group();
-        // stale markers (I4): acceptance items that went stale since the
-        // last turn get one durable chat row each — the plan panel is not
-        // where the user reads. Placed after finalize so the row lands
-        // outside the folded group, always visible. The announced set
-        // dedupes; re-verified items re-arm automatically.
-        {
-            let root = std::env::current_dir().unwrap_or_default();
-            let sid = self.session.id.to_string();
-            let plan = crate::plan::open_active_for_session(&root, Some(&sid))
-                .ok()
-                .flatten();
-            self.announce_stale_rows(plan);
-        }
         // Persist the presentation summary only after the group was finalized.
         // Saving earlier lost it across a restart and restored bare tool rows.
         if let Some((text, is_error)) = turn_note

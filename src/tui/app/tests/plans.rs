@@ -26,7 +26,7 @@ fn plan_delete_user_command_flow() {
     let created = plan::create(
         "test delete goal".into(),
         vec![],
-        vec![],
+        vec!["note".to_string()],
         vec![plan::NewStep {
             title: "step 1".into(),
             refs: vec![],
@@ -71,7 +71,7 @@ fn plan_delete_user_command_flow() {
 }
 
 #[test]
-fn plan_confirm_user_command_flow() {
+fn plan_confirm_and_waive_are_retired() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let temp_dir =
         std::env::temp_dir().join(format!("sqwai-test-plan-confirm-{}", uuid::Uuid::new_v4()));
@@ -79,19 +79,11 @@ fn plan_confirm_user_command_flow() {
     app.project_root = temp_dir.clone();
     app.session.plan_id = None;
 
-    // usage without a reason
-    app.plan_command("/plan confirm 0");
-    assert!(
-        toast_text(&app).starts_with("usage: /plan confirm"),
-        "usage toasts: {:?}",
-        toast_text(&app)
-    );
-
     let limits = plan::Limits { max_steps: 10 };
     let created = plan::create(
         "test confirm goal".into(),
         vec![],
-        vec!["manual: eyeball it".into()],
+        vec!["eyeball it".into()],
         vec![plan::NewStep {
             title: "step 1".into(),
             refs: vec![],
@@ -103,20 +95,19 @@ fn plan_confirm_user_command_flow() {
     plan::store(&temp_dir, &created).unwrap();
     app.session.plan_id = Some(created.id.clone());
 
+    // acceptance is now plain done-criteria notes: the host certifies nothing,
+    // so both settle commands answer with the retirement notice.
     app.plan_command("/plan confirm 0 looks good");
-    assert_eq!(toast_text(&app), "acceptance 0 confirmed");
-    let reloaded = plan::read_plan_file(&temp_dir, &created.id).unwrap();
-    assert_eq!(
-        reloaded.acceptance[0].validation.status,
-        plan::ValidationStatus::Passed
+    assert!(
+        toast_text(&app).starts_with("waive/confirm are retired"),
+        "confirm toast: {:?}",
+        toast_text(&app)
     );
-    assert_eq!(
-        reloaded.acceptance[0]
-            .validation
-            .receipts
-            .last()
-            .and_then(|r| r.runner.as_deref()),
-        Some("manual")
+    app.plan_command("/plan waive 0 skip it");
+    assert!(
+        toast_text(&app).starts_with("waive/confirm are retired"),
+        "waive toast: {:?}",
+        toast_text(&app)
     );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -137,7 +128,7 @@ fn plan_delete_prefers_session_plan_over_most_recent() {
         plan::create(
             goal.into(),
             vec![],
-            vec![],
+            vec!["note".to_string()],
             vec![plan::NewStep {
                 title: "step 1".into(),
                 refs: vec![],
@@ -211,8 +202,8 @@ fn completed_linked_plan_refuses_tui_mutations() {
     );
     app.plan_command("/plan waive 0 looks fine");
     assert!(
-        last_status(&app).contains("read-only"),
-        "waive must refuse: {}",
+        last_status(&app).contains("retired"),
+        "waive is retired outright: {}",
         last_status(&app)
     );
     app.plan_command("/plan abandon");
@@ -263,7 +254,7 @@ fn plan_delete_then_session_has_no_plan() {
         plan::create(
             goal.into(),
             vec![],
-            vec![],
+            vec!["note".to_string()],
             vec![plan::NewStep {
                 title: "step 1".into(),
                 refs: vec![],
@@ -379,21 +370,8 @@ fn tui_commands_operate_on_session_plan_not_newest_global() {
     // resolver prefers the linked plan over the newest global one
     assert_eq!(app.session_plan().map(|p| p.id), Some(plan_a.id.clone()));
 
-    // /plan waive mutates A, leaves B alone
-    app.plan_command("/plan waive 0 looks good");
-    let a_after = plan::open(&temp_dir, &plan_a.id).unwrap();
-    assert!(matches!(
-        a_after.acceptance[0].status,
-        plan::AcceptanceStatus::Waived
-    ));
-    let b_after = plan::open(&temp_dir, &plan_b.id).unwrap();
-    assert!(matches!(
-        b_after.acceptance[0].status,
-        plan::AcceptanceStatus::Pending
-    ));
-
     // /plan complete mutates A, leaves B alone
-    let mut a_ready = a_after;
+    let mut a_ready = plan::open(&temp_dir, &plan_a.id).unwrap();
     a_ready.steps[0].status = plan::StepStatus::Done;
     plan::store(&temp_dir, &a_ready).unwrap();
     app.plan_command("/plan complete");

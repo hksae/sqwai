@@ -49,9 +49,7 @@ pub(super) const COMMANDS: &[&str] = &[
 pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
     (
         "/plan",
-        &[
-            "history", "limit", "complete", "abandon", "waive", "confirm", "delete",
-        ],
+        &["history", "limit", "complete", "abandon", "delete"],
     ),
     ("/undo", &["step"]),
     ("/test", &["animations", "art", "churn", "colors", "md"]),
@@ -3210,50 +3208,15 @@ fn plan_rows(
             Theme::dim(),
         );
     }
-    if !plan.checklist.is_empty() {
-        push_wrapped(
-            &mut rows,
-            "  checklist: ",
-            &plan.checklist.join(" · "),
-            Theme::dim(),
-            Theme::dim(),
-        );
-    }
-    if !plan.acceptance.is_empty() {
+    if !plan.criteria.is_empty() {
         rows.push(row(
-            Line::from(vec![Span::styled("  acceptance:", Theme::accent())]),
+            Line::from(vec![Span::styled("  criteria:", Theme::dim())]),
             MenuAction::None,
         ));
-        for (i, a) in plan.acceptance.iter().enumerate() {
-            let st = match a.status {
-                plan::AcceptanceStatus::Pending => Theme::dim(),
-                plan::AcceptanceStatus::Passed => Theme::ok(),
-                plan::AcceptanceStatus::Waived => Theme::warn(),
-            };
-            // stale validation overrides the passed color: the item will
-            // not satisfy `complete` until it is re-verified
-            let (st, suffix) = match a.validation.status {
-                plan::ValidationStatus::Stale => (Theme::err(), " [stale — re-verify]"),
-                plan::ValidationStatus::Unknown => (Theme::err(), " [flaky — runs disagree]"),
-                plan::ValidationStatus::Passed => (st, " [verified]"),
-                plan::ValidationStatus::Waived => (st, " [waived]"),
-                plan::ValidationStatus::Pending => (st, ""),
-            };
-            // slow proof still capturing in the background: visible live
-            // marker so the item never reads as silently stuck
-            let suffix = if a.capture_pending {
-                format!("{suffix} [capturing…]")
-            } else {
-                suffix.to_string()
-            };
-            let prefix = format!("    [{i}] {} ", a.status.as_str());
-            push_wrapped(
-                &mut rows,
-                &prefix,
-                &format!("{}{suffix}", a.text),
-                st,
-                Theme::base(),
-            );
+        // done-criteria are the agent's own plain-text notes; the host runs
+        // nothing and certifies nothing, so they render without status colors.
+        for note in &plan.criteria {
+            push_wrapped(&mut rows, "    · ", note, Theme::dim(), Theme::base());
         }
     }
     rows.push(row(
