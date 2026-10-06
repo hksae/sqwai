@@ -786,7 +786,6 @@ mod tests {
             vec!["cmd: cargo test".into()],
             vec![crate::plan::NewStep {
                 title: "implement anchor".into(),
-                refs: Vec::new(),
             }],
             20_000,
             &crate::plan::Limits::default(),
@@ -904,7 +903,6 @@ mod tests {
             vec!["note".to_string()],
             vec![crate::plan::NewStep {
                 title: "step A".into(),
-                refs: Vec::new(),
             }],
             20_000,
             &limits,
@@ -920,7 +918,6 @@ mod tests {
             vec!["note".to_string()],
             vec![crate::plan::NewStep {
                 title: "step B".into(),
-                refs: Vec::new(),
             }],
             20_000,
             &limits,
@@ -952,7 +949,6 @@ mod tests {
             vec!["note".to_string()],
             vec![crate::plan::NewStep {
                 title: "unfinished change".into(),
-                refs: Vec::new(),
             }],
             20_000,
             &crate::plan::Limits::default(),

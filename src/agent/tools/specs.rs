@@ -376,8 +376,7 @@ replacing the active plan; small edits to the active plan use plan add/split.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "title": {"type": "string"},
-                                "refs": {"type": "array", "items": {"type": ["string", "object"]}, "description": "what the step touches: plain \"path[::symbol]\" means modify, or {\"path\", \"symbol\", \"intent\": \"modify|create|remove\"}"}
+                                "title": {"type": "string"}
                             },
                             "required": ["title"]
                         }
@@ -447,8 +446,7 @@ either side — quote the conflict in reason.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "title": {"type": "string"},
-                                "refs": {"type": "array", "items": {"type": ["string", "object"]}, "description": "what the step touches: plain \"path[::symbol]\" means modify, or {\"path\", \"symbol\", \"intent\": \"modify|create|remove\"}"}
+                                "title": {"type": "string"}
                             },
                             "required": ["title"]
                         }
@@ -459,15 +457,13 @@ either side — quote the conflict in reason.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "title": {"type": "string"},
-                                "refs": {"type": "array", "items": {"type": ["string", "object"]}, "description": "what the step touches: plain \"path[::symbol]\" means modify, or {\"path\", \"symbol\", \"intent\": \"modify|create|remove\"}"}
+                                "title": {"type": "string"}
                             },
                             "required": ["title"]
                         }
                     },
                     "after": {"type": "string", "description": "add: insert after this step id"},
                     "title": {"type": "string", "description": "add: new step title"},
-                    "refs": {"type": "array", "items": {"type": ["string", "object"]}, "description": "what the step touches: plain \"path[::symbol]\" means modify, or {\"path\", \"symbol\", \"intent\": \"modify|create|remove\"}"},
                     "summary": {"type": "string", "description": "finish: what was done, where, and any remaining limitations"},
                     "reason": {"type": "string", "description": "block / cancel / block_plan: the quoted conflict for block_plan"},
                     "confirm": {"type": "boolean", "description": "start: re-read a stale step"},

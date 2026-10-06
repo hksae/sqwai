@@ -1788,7 +1788,6 @@ mod tests {
             vec!["note".to_string()],
             vec![crate::plan::NewStep {
                 title: "step".into(),
-                refs: Vec::new(),
             }],
             1000,
             &crate::plan::Limits::default(),
@@ -1840,7 +1839,6 @@ mod tests {
             vec!["note".to_string()],
             vec![crate::plan::NewStep {
                 title: "step 1".into(),
-                refs: Vec::new(),
             }],
             1000,
             &crate::plan::Limits::default(),

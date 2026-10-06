@@ -2889,7 +2889,6 @@ mod effort_tests {
             vec!["manual: eyeball it".to_string()],
             vec![plan::NewStep {
                 title: "work".into(),
-                refs: Vec::new(),
             }],
             1000,
             &plan::Limits::default(),
@@ -2916,7 +2915,6 @@ mod effort_tests {
             vec!["note".to_string()],
             vec![plan::NewStep {
                 title: "work".into(),
-                refs: Vec::new(),
             }],
             1000,
             &plan::Limits::default(),
@@ -3833,7 +3831,6 @@ mod effort_tests {
             vec!["note".to_string()],
             vec![plan::NewStep {
                 title: "step".into(),
-                refs: Vec::new(),
             }],
             20_000,
             &plan::Limits::default(),
@@ -3923,7 +3920,6 @@ mod effort_tests {
             vec!["note".to_string()],
             vec![plan::NewStep {
                 title: "step".into(),
-                refs: Vec::new(),
             }],
             20_000,
             &plan::Limits::default(),
@@ -3965,7 +3961,6 @@ mod effort_tests {
             vec!["note".to_string()],
             vec![plan::NewStep {
                 title: "step".into(),
-                refs: Vec::new(),
             }],
             20_000,
             &plan::Limits::default(),

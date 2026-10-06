@@ -10,7 +10,6 @@ use super::verify::{
 };
 use crate::plan;
 use serde_json::Value;
-use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileDiff {
@@ -700,106 +699,6 @@ fn parse_time_bound(s: &str, end_of_day: bool) -> Option<chrono::DateTime<chrono
     None
 }
 
-/// Validate step references against the code graph per §2.4.8:
-/// - `modify` / `remove` require `found` where the file's capabilities include declarations (`not_found` rejects with candidates)
-/// - `create` requires the symbol to be absent on declaration (`not_found` or `unknown`), rejecting `found` on initial start or add
-/// - `unknown` passes for all intents
-fn validate_plan_refs(
-    root: &Path,
-    refs: &[crate::plan::StepRef],
-    is_create_intent: bool,
-) -> Result<(), plan::Rejection> {
-    if refs.is_empty() {
-        return Ok(());
-    }
-    let mut store = match crate::agent::graph::SqliteGraphStore::open(root) {
-        Ok(s) => s,
-        Err(_) => return Ok(()),
-    };
-
-    for step_ref in refs {
-        let res = match store.resolve_ref(None, Some(&step_ref.path), step_ref.symbol.as_deref()) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-
-        match step_ref.intent {
-            crate::plan::RefIntent::Modify | crate::plan::RefIntent::Remove => match res {
-                crate::agent::graph::ResolveRefResult::NotFound { candidates, .. } => {
-                    // a bare directory (often with a trailing slash) is never
-                    // a precise ref: say so directly instead of the nonsense
-                    // "X not found in X" the generic branch prints below
-                    if step_ref.symbol.is_none()
-                        && root.join(step_ref.path.trim_end_matches('/')).is_dir()
-                    {
-                        return Err(plan::Rejection::new(
-                            "ref_is_directory",
-                            format!(
-                                "ref '{}' is a directory, not a file or symbol",
-                                step_ref.path
-                            ),
-                            "name a file or symbol inside it (drop any trailing slash)",
-                        ));
-                    }
-                    let mut hint = if candidates.is_empty() {
-                        "verify the file path and symbol name or check resolve_ref".to_string()
-                    } else {
-                        format!(
-                            "candidates: {}",
-                            candidates
-                                .iter()
-                                .map(|c| c.name.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    };
-                    // scoped names (`Menu::Effort`) that resolve to nothing:
-                    // point at the file fallback instead of letting the
-                    // model restructure the plan around a bad ref
-                    if root.join(&step_ref.path).is_file() {
-                        hint.push_str("; or drop the symbol and reference the file alone");
-                    }
-                    let target = step_ref.symbol.as_deref().unwrap_or(&step_ref.path);
-                    return Err(plan::Rejection::new(
-                        "ref_not_found",
-                        format!("ref '{target}' not found in {}", step_ref.path),
-                        hint,
-                    ));
-                }
-                crate::agent::graph::ResolveRefResult::Ambiguous { candidates, .. } => {
-                    return Err(plan::Rejection::new(
-                        "ref_ambiguous",
-                        format!(
-                            "ref '{}' in {} is ambiguous ({} candidates)",
-                            step_ref.symbol.as_deref().unwrap_or(&step_ref.path),
-                            step_ref.path,
-                            candidates.len()
-                        ),
-                        "disambiguate by specifying the scope or kind (e.g. fn::foo)",
-                    ));
-                }
-                crate::agent::graph::ResolveRefResult::Found { .. }
-                | crate::agent::graph::ResolveRefResult::Unknown { .. } => {}
-            },
-            crate::plan::RefIntent::Create => {
-                if is_create_intent && let crate::agent::graph::ResolveRefResult::Found { .. } = res
-                {
-                    let target = step_ref.symbol.as_deref().unwrap_or(&step_ref.path);
-                    return Err(plan::Rejection::new(
-                        "ref_collision",
-                        format!(
-                            "cannot create ref '{target}': already exists in {}",
-                            step_ref.path
-                        ),
-                        "choose a different symbol name or change intent to modify",
-                    ));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 /// The `plan` tool: one operation per call, validated by the host (§2.1.3).
 pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     // verify was retired: the host no longer certifies checks. Catch it by
@@ -874,11 +773,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     .max(MIN_PLAN_BUDGET_TOKENS);
                 match plan::create(goal, constraints, criteria, steps, budget_limit, &limits) {
                     Ok(mut created) => {
-                        for s in &created.steps {
-                            if let Err(rej) = validate_plan_refs(&ctx.root, &s.refs, true) {
-                                return rejection(rej);
-                            }
-                        }
                         created.sessions = vec![ctx.session_id.clone()];
                         let id = created.id.clone();
                         let step_count = created.steps.len();
@@ -890,7 +784,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             "criteria": created.criteria,
                             "steps": created.steps.iter().map(|s| serde_json::json!({
                                 "title": s.title,
-                                "refs": s.refs,
                             })).collect::<Vec<_>>(),
                             "budget_limit": created.budget.limit,
                             "result_id": created.id,
@@ -1045,19 +938,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 .unwrap_or("unknown")
                 .to_string();
             let readonly_show = op_name == "show";
-            if let plan::Op::Start { ref id, .. } = other
-                && let Some(step) = active.step(id)
-            {
-                let is_initial_start = step.status == plan::StepStatus::Pending;
-                if let Err(rej) = validate_plan_refs(&ctx.root, &step.refs, is_initial_start) {
-                    return rejection(rej);
-                }
-            }
-            if let plan::Op::Add { ref refs, .. } = other
-                && let Err(rej) = validate_plan_refs(&ctx.root, refs, true)
-            {
-                return rejection(rej);
-            }
             match plan::apply(&mut active, other, &limits, ctx.current_step.as_deref()) {
                 Ok(applied) => {
                     if readonly_show {

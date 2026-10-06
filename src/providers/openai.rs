@@ -1253,11 +1253,9 @@ mod tests {
                 vec![
                     NewStep {
                         title: "write it".into(),
-                        refs: vec![],
                     },
                     NewStep {
                         title: "test it".into(),
-                        refs: vec![],
                     },
                 ],
                 20_000,

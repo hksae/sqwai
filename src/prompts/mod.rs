@@ -382,7 +382,6 @@ mod tests {
             vec!["cmd: exit 0".to_string()],
             vec![plan::NewStep {
                 title: "do the work".to_string(),
-                refs: Vec::new(),
             }],
             0,
             &plan::Limits::default(),

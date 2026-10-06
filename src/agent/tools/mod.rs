@@ -2828,7 +2828,6 @@ end
             criteria: vec!["new note".into()],
             steps: vec![plan::NewStep {
                 title: "new step".into(),
-                refs: vec![],
             }],
         };
         let mut fresh = draft.build(u64::MAX, &plan::Limits::default()).unwrap();
@@ -3255,79 +3254,6 @@ end
         );
         assert!(diff_path.ok, "{}", diff_path.output);
         assert!(diff_path.output.contains("feature2.rs"));
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn plan_refs_validation_enforces_intent() {
-        let (mut ctx, dir) = proj();
-        fs::write(
-            dir.join("src/calc.rs"),
-            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
-        )
-        .unwrap();
-        fs::write(dir.join("notes.txt"), "plain notes\n").unwrap();
-
-        let mut store = crate::agent::graph::SqliteGraphStore::open(&dir).unwrap();
-        crate::agent::graph_index::index_project(&mut store, &dir).unwrap();
-
-        // 1. Create plan with modify intent on missing symbol -> rejected!
-        let rej = plan_op(
-            &mut ctx,
-            &json!({
-                "op": "create",
-                "criteria": ["note"],
-                "goal": "test goal",
-                "steps": [{
-                    "title": "step 1",
-                    "kind": "change",
-                    "refs": [{"path": "src/calc.rs", "symbol": "nonexistent", "intent": "modify"}]
-                }]
-            }),
-        );
-        assert!(!rej.ok, "should reject missing ref on modify");
-        assert!(rej.output.contains("ref_not_found"), "{}", rej.output);
-
-        // 2. Create plan with modify intent on plain txt (unknown capabilities) -> passes!
-        let pass_unknown = plan_op(
-            &mut ctx,
-            &json!({
-                "op": "create",
-                "criteria": ["note"],
-                "goal": "test goal",
-                "steps": [{
-                    "title": "step 1",
-                    "kind": "change",
-                    "refs": [{"path": "notes.txt", "symbol": "anything", "intent": "modify"}]
-                }]
-            }),
-        );
-        assert!(
-            pass_unknown.ok,
-            "unknown must pass: {}",
-            pass_unknown.output
-        );
-
-        // 3. Add step with create intent on an already existing symbol -> rejected!
-        let rej_create = plan_op(
-            &mut ctx,
-            &json!({
-                "op": "add",
-                "title": "step 2",
-                "kind": "change",
-                "refs": [{"path": "src/calc.rs", "symbol": "add", "intent": "create"}]
-            }),
-        );
-        assert!(
-            !rej_create.ok,
-            "should reject existing ref on create intent"
-        );
-        assert!(
-            rej_create.output.contains("ref_collision"),
-            "{}",
-            rej_create.output
-        );
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -135,97 +135,6 @@ impl StepStatus {
     }
 }
 
-/// What a step intends to touch (§2.1.2, §2.4.8). `modify` and `remove`
-/// refer to existing code; `create` declares a new path/symbol that must
-/// not exist yet. Plain strings stay accepted on input and mean
-/// `modify` (the `path::symbol` tail, if any, becomes `symbol`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum RefIntent {
-    #[default]
-    Modify,
-    Create,
-    Remove,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct StepRef {
-    pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub symbol: Option<String>,
-    #[serde(default)]
-    pub intent: RefIntent,
-}
-
-impl<'de> Deserialize<'de> for StepRef {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct StepRefVisitor;
-        impl<'de> Visitor<'de> for StepRefVisitor {
-            type Value = StepRef;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("a ref object or a plain \"path[::symbol]\" string")
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(StepRef::from(value))
-            }
-
-            fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
-            where
-                M: de::MapAccess<'de>,
-            {
-                #[derive(Deserialize)]
-                struct Wire {
-                    path: String,
-                    #[serde(default)]
-                    symbol: Option<String>,
-                    #[serde(default)]
-                    intent: RefIntent,
-                }
-                Wire::deserialize(de::value::MapAccessDeserializer::new(map)).map(|wire| StepRef {
-                    path: wire.path,
-                    symbol: wire.symbol,
-                    intent: wire.intent,
-                })
-            }
-        }
-        deserializer.deserialize_any(StepRefVisitor)
-    }
-}
-
-impl From<&str> for StepRef {
-    /// `"src/x.rs"` → modify `src/x.rs`; `"src/x.rs::fn::foo"` → modify
-    /// path `src/x.rs`, symbol `fn::foo` (the `::` convention the
-    /// misattribution warning already splits on).
-    fn from(value: &str) -> Self {
-        match value.split_once("::") {
-            Some((path, symbol)) if !path.is_empty() && !symbol.is_empty() => StepRef {
-                path: path.to_string(),
-                symbol: Some(symbol.to_string()),
-                intent: RefIntent::Modify,
-            },
-            _ => StepRef {
-                path: value.to_string(),
-                symbol: None,
-                intent: RefIntent::Modify,
-            },
-        }
-    }
-}
-
-impl From<String> for StepRef {
-    fn from(value: String) -> Self {
-        StepRef::from(value.as_str())
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoalRevision {
     pub text: String,
@@ -260,9 +169,6 @@ pub struct Step {
     /// Journal seq values. Written by the host only (§2.1.2).
     #[serde(default)]
     pub evidence: Vec<EvidenceRef>,
-    /// What the step intends to touch (§2.1.2, §2.4.8).
-    #[serde(default)]
-    pub refs: Vec<StepRef>,
     /// Bumped by every host-only reopen; subagent evidence from an older
     /// epoch does not count (§2.2.4, phase 2).
     #[serde(default)]
@@ -474,11 +380,9 @@ mod tests {
             vec![
                 NewStep {
                     title: "add the model".to_string(),
-                    refs: Vec::new(),
                 },
                 NewStep {
                     title: "add the validator".to_string(),
-                    refs: Vec::new(),
                 },
             ],
             20000,
@@ -890,7 +794,6 @@ mod tests {
             Op::Add {
                 after: Some("1".into()),
                 title: "extra".into(),
-                refs: Vec::new(),
             },
             &limits,
             None,
@@ -902,7 +805,6 @@ mod tests {
             Op::Add {
                 after: None,
                 title: "one too many".into(),
-                refs: Vec::new(),
             },
             &limits,
             None,
@@ -946,7 +848,6 @@ mod tests {
             criteria: vec!["cargo test must pass".into()],
             steps: vec![NewStep {
                 title: "step 1".into(),
-                refs: vec![],
             }],
         };
 
@@ -1326,7 +1227,6 @@ mod tests {
             vec!["first note".to_string()],
             vec![NewStep {
                 title: "work".into(),
-                refs: Vec::new(),
             }],
             1000,
             &Limits::default(),
@@ -1442,36 +1342,15 @@ mod tests {
         )
         .unwrap();
         let plan = open(&dir, id).unwrap();
-        // a legacy v1 file still loads: the retired `acceptance` objects are
-        // ignored (no plain-text criteria to migrate from an object shape),
-        // so criteria defaults empty while the step's refs and evidence parse.
+        // a legacy v1 file still loads: the retired `acceptance` objects and
+        // step `refs` are ignored (no plain-text criteria to migrate from an
+        // object shape), so criteria defaults empty while evidence parses.
         assert!(plan.criteria.is_empty());
         assert_eq!(plan.applied_event, None);
         let step = &plan.steps[0];
         assert_eq!(step.step_epoch, 0);
         assert_eq!(step.evidence.len(), 2);
-        assert_eq!(step.refs.len(), 2);
-        assert_eq!(step.refs[0].path, "src/session/mod.rs");
-        assert_eq!(step.refs[0].symbol.as_deref(), Some("fn::save"));
-        assert_eq!(step.refs[0].intent, RefIntent::Modify);
-        assert_eq!(step.refs[1].path, "src/plain.rs");
-        assert_eq!(step.refs[1].symbol, None);
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn step_ref_objects_keep_intent() {
-        let create: StepRef = serde_json::from_value(serde_json::json!({
-            "path": "src/new.rs", "symbol": "Thing", "intent": "create"
-        }))
-        .unwrap();
-        assert_eq!(create.intent, RefIntent::Create);
-        assert_eq!(create.symbol.as_deref(), Some("Thing"));
-        // intent defaults to modify when omitted
-        let plain: StepRef =
-            serde_json::from_value(serde_json::json!({"path": "src/x.rs"})).unwrap();
-        assert_eq!(plain.intent, RefIntent::Modify);
-        assert_eq!(plain.symbol, None);
     }
 
     #[test]
@@ -1658,11 +1537,9 @@ mod tests {
         let parts = vec![
             NewStep {
                 title: "part a".into(),
-                refs: vec![],
             },
             NewStep {
                 title: "part b".into(),
-                refs: vec![],
             },
         ];
         assert!(
@@ -1705,11 +1582,9 @@ mod tests {
         let parts = vec![
             NewStep {
                 title: "part a".into(),
-                refs: vec![],
             },
             NewStep {
                 title: "part b".into(),
-                refs: vec![],
             },
         ];
 

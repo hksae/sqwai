@@ -1,6 +1,6 @@
 use super::{
-    Budget, Goal, MAX_STEPS_DEFAULT, Plan, PlanStatus, Step, StepRef, StepStatus, complete, new_id,
-    next_id, now, render,
+    Budget, Goal, MAX_STEPS_DEFAULT, Plan, PlanStatus, Step, StepStatus, complete, new_id, next_id,
+    now, render,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -12,8 +12,6 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewStep {
     pub title: String,
-    #[serde(default)]
-    pub refs: Vec<StepRef>,
 }
 
 /// One operation per call (§2.1.3). `Serialize` is for the journal intent
@@ -80,8 +78,6 @@ pub enum Op {
         #[serde(default)]
         after: Option<String>,
         title: String,
-        #[serde(default)]
-        refs: Vec<StepRef>,
     },
     /// Append done-criteria notes to a plan born with fewer than the work
     /// now needs. Plain text, no typing gate — a criterion is the agent's
@@ -422,7 +418,6 @@ pub fn create(
                 summary: None,
                 reason: None,
                 evidence: Vec::new(),
-                refs: s.refs,
                 step_epoch: 0,
                 stale_goal: None,
             })
@@ -573,8 +568,7 @@ pub(crate) fn resolve_boundary_commits(
     (start_sha, finish_sha)
 }
 
-/// Apply one operation. Every rule from §2.1.4 except the evidence rule and
-/// refs (deferred to F3 / I4).
+/// Apply one operation. Every rule from §2.1.4 except the evidence rule.
 pub fn apply(
     plan: &mut Plan,
     op: Op,
@@ -641,7 +635,7 @@ pub fn apply(
                 format!("plan {} abandoned on approved reset: {quoted}", plan.id),
             )
         }
-        Op::Add { after, title, refs } => add(plan, after.as_deref(), title, refs, limits),
+        Op::Add { after, title } => add(plan, after.as_deref(), title, limits),
         Op::AddCriteria { criteria } => add_criteria(plan, criteria),
         Op::Split { id, into } => split(plan, &id, into, limits),
         Op::Complete => complete(plan),
@@ -871,7 +865,6 @@ fn add(
     plan: &mut Plan,
     after: Option<&str>,
     title: String,
-    refs: Vec<StepRef>,
     limits: &Limits,
 ) -> Result<Applied, Rejection> {
     if title.trim().is_empty() {
@@ -919,7 +912,6 @@ fn add(
         summary: None,
         reason: None,
         evidence: Vec::new(),
-        refs,
         step_epoch: 0,
         stale_goal: None,
     };
@@ -1027,7 +1019,6 @@ fn split(
             summary: None,
             reason: None,
             evidence: Vec::new(),
-            refs: s.refs,
             step_epoch: 0,
             stale_goal: None,
         })
