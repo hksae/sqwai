@@ -2175,8 +2175,17 @@ effort = "off"
             assert!(cfg.providers.contains_key(p), "missing provider {p}");
             assert!(cfg.is_builtin_provider(p), "not marked builtin {p}");
         }
-        assert!(cfg.is_builtin_model("gemini-3.8-flash"));
-        assert!(cfg.is_builtin_model("deepseek-chat"));
+        // Exact model ids float with the catalog (deepseek-chat became
+        // v4-pro/v4-flash in the 2026-10-03 discovery sync), so assert
+        // structurally: every builtin provider contributes builtin models.
+        for p in ["gemini", "anthropic", "openai", "deepseek", "grok", "kimi"] {
+            assert!(
+                cfg.models
+                    .values()
+                    .any(|m| m.provider == p && cfg.is_builtin_model(&m.id)),
+                "provider {p} has no builtin models"
+            );
+        }
         // auto-discovered providers resolve at least one model each; exact
         // revisions float with the catalog, so assert structurally, not by id
         for (provider, min_models) in [("anthropic", 5), ("openai", 5), ("grok", 4), ("kimi", 3)] {
@@ -2201,6 +2210,7 @@ effort = "off"
             "grok-beta",
             "moonshot-v1-8k",
             "kimi-latest",
+            "deepseek-chat",
         ] {
             assert!(
                 !cfg.is_builtin_model(retired),
