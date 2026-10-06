@@ -413,15 +413,3 @@ pub(crate) fn acceptance_policy_hit(ctx: &ToolCtx, command: &str) -> Option<Poli
         }
     }
 }
-
-/// Pure half of the `forbid-cmd:` live gate: first pattern matching the
-/// command (case-insensitive substring), if any. Heuristic like every
-/// text match; the waiver covers overmatches.
-pub(crate) fn forbidden_command(patterns: &[String], command: &str) -> Option<String> {
-    let lower = command.to_lowercase();
-    patterns
-        .iter()
-        .filter(|p| !p.trim().is_empty())
-        .find(|p| lower.contains(&p.to_lowercase()))
-        .cloned()
-}

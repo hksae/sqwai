@@ -50,14 +50,7 @@ pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
     (
         "/plan",
         &[
-            "history",
-            "limit",
-            "complete",
-            "abandon",
-            "waive",
-            "waive-constraint",
-            "confirm",
-            "delete",
+            "history", "limit", "complete", "abandon", "waive", "confirm", "delete",
         ],
     ),
     ("/undo", &["step"]),

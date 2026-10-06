@@ -572,28 +572,6 @@ pub(crate) async fn bash_call(
         }
     }
 
-    // 1d. typed constraints, live half: `forbid-cmd:` refuses outright
-    // (no approval dialog — the waiver is the override). Host-run
-    // acceptance commands never pass through here, only model calls.
-    if let Ok(Some(plan)) = plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
-        let waived = plan::waived_constraint_indices(&plan);
-        let patterns: Vec<String> = plan
-            .constraints
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| !waived.contains(index))
-            .filter_map(|(_, text)| match plan::classify_constraint(text) {
-                plan::ConstraintKind::ForbidCmd(pattern) => Some(pattern.to_string()),
-                _ => None,
-            })
-            .collect();
-        if let Some(hit) = tools::forbidden_command(&patterns, &command) {
-            return tools::Outcome::err(format!(
-                "constraint_violated: command matches forbidden pattern '{hit}' — have the user waive it (/plan waive-constraint <index> <reason>)"
-            ));
-        }
-    }
-
     if let Some(reason) = &needs_approval {
         if !always_allow.contains(&command) {
             if subagent_depth > 0 {

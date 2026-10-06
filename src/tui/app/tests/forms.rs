@@ -505,13 +505,7 @@ fn plan_subcommand_popup_filters_and_inserts() {
     // filtering by the typed prefix
     app.input = App::fresh_input("/plan w".into());
     assert!(app.popup_visible());
-    assert_eq!(
-        app.popup_items(),
-        vec![
-            "/plan waive".to_string(),
-            "/plan waive-constraint".to_string()
-        ]
-    );
+    assert_eq!(app.popup_items(), vec!["/plan waive".to_string()]);
     // insert replaces only the subcommand word, keeps typed args
     app.input = App::fresh_input("/plan wai".into());
     app.apply_subcommand_insert("/plan", "waive");

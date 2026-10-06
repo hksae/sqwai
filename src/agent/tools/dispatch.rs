@@ -1,4 +1,3 @@
-use super::astgrep;
 use super::ctx::{MIN_PLAN_BUDGET_TOKENS, ToolCtx};
 use super::exec;
 use super::fs;
@@ -1002,106 +1001,6 @@ fn validate_plan_refs(
     Ok(())
 }
 
-/// Create-time validation for typed constraints (§2.1.10): empty payloads
-/// settle or block nothing, `path:` roots must resolve, `ast:` patterns
-/// must compile. Rejects while the model can still rewrite the item.
-fn validate_typed_constraints(
-    ctx: &mut ToolCtx,
-    constraints: &[String],
-) -> Result<(), plan::Rejection> {
-    for text in constraints {
-        match plan::classify_constraint(text) {
-            plan::ConstraintKind::Plain(_) | plan::ConstraintKind::ForbidImport(_) => {}
-            plan::ConstraintKind::ForbidCmd(pattern) => {
-                if pattern.trim().is_empty() {
-                    return Err(plan::Rejection::new(
-                        "empty_constraint",
-                        "forbid-cmd: names no pattern".to_string(),
-                        "name the command shape to forbid, or drop the item".to_string(),
-                    ));
-                }
-            }
-            plan::ConstraintKind::Ast(pattern) => {
-                if pattern.trim().is_empty() {
-                    return Err(plan::Rejection::new(
-                        "empty_constraint",
-                        "ast: names no pattern".to_string(),
-                        "give the tree-sitter pattern, or drop the item".to_string(),
-                    ));
-                }
-                let outcome = astgrep::ast_grep(
-                    ctx,
-                    &serde_json::json!({"pattern": pattern, "path": ".", "max": 1}),
-                );
-                if !outcome.ok {
-                    return Err(plan::Rejection::new(
-                        "bad_constraint_pattern",
-                        format!("ast: pattern does not compile: {pattern}"),
-                        format!("fix the pattern — {}", outcome.output),
-                    ));
-                }
-            }
-            plan::ConstraintKind::Path(roots) => {
-                if roots.is_empty() {
-                    return Err(plan::Rejection::new(
-                        "empty_constraint",
-                        "path: names no roots".to_string(),
-                        "name the roots the change must stay inside, or drop the item".to_string(),
-                    ));
-                }
-                for root in roots {
-                    if let Err(message) = ctx.resolve(root) {
-                        return Err(plan::Rejection::new(
-                            "bad_constraint_path",
-                            format!("path: root '{root}' does not resolve: {message}"),
-                            "name existing project paths (missing files are fine, escapes are not)"
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Advisory AGENTS.md mining at create: restriction markers with no typed
-/// constraint covering them earn one note line. Advisory only — never a
-/// gate — and silent once the author formalized anything.
-fn mine_constraint_candidates(root: &Path) -> Vec<String> {
-    const MARKERS: &[&str] = &[
-        "don't use",
-        "do not use",
-        "forbidden",
-        "never use",
-        "deprecated",
-        "avoid using",
-        "do not touch",
-        "don't touch",
-    ];
-    let text = match std::fs::read_to_string(root.join("AGENTS.md")) {
-        Ok(text) => text,
-        Err(_) => return Vec::new(),
-    };
-    text.lines()
-        .map(str::trim)
-        .filter(|line| {
-            let lower = line.to_lowercase();
-            MARKERS.iter().any(|m| lower.contains(m))
-        })
-        .take(5)
-        .map(|line| {
-            line.chars()
-                .take(120)
-                .collect::<String>()
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .filter(|line| !line.is_empty())
-        .collect()
-}
-
 /// The `plan` tool: one operation per call, validated by the host (§2.1.3).
 pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let op: plan::Op = match serde_json::from_value(args.clone()) {
@@ -1174,14 +1073,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             if let Err(rej) = validate_plan_refs(&ctx.root, &s.refs, true) {
                                 return rejection(rej);
                             }
-                        }
-                        // typed constraints are validated like refs: an empty
-                        // payload, an unresolvable root, or an uncompilable
-                        // pattern rejects the create while the model can
-                        // still rewrite it — not at `complete`, when the
-                        // work is already done.
-                        if let Err(rej) = validate_typed_constraints(ctx, &created.constraints) {
-                            return rejection(rej);
                         }
                         created.sessions = vec![ctx.session_id.clone()];
                         // non-blocking checklist rides along (never gates)

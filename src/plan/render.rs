@@ -2,7 +2,7 @@ use super::{
     AcceptanceKind, AcceptanceStatus, Applied, GoalRevision, Plan, PlanStatus, Receipt, Rejection,
     StepStatus, ValidationStatus, accept, commit, differential_current, digest_paths, ladder_rung,
     now, open_active_for_session, proven_failing, reject, signatures_current, snapshot_current,
-    state_digest, waived_constraint_indices,
+    state_digest,
 };
 use anyhow::Result;
 use std::path::Path;
@@ -295,20 +295,7 @@ pub fn render_goal(plan: &Plan) -> String {
     out.push_str(&format!("plan {}\n", plan.id));
     out.push_str(&format!("goal: {}\n", plan.goal.text));
     if !plan.constraints.is_empty() {
-        let waived = waived_constraint_indices(plan);
-        let rendered: Vec<String> = plan
-            .constraints
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                if waived.contains(&i) {
-                    format!("{c} [waived]")
-                } else {
-                    c.clone()
-                }
-            })
-            .collect();
-        out.push_str(&format!("constraints: {}\n", rendered.join(" · ")));
+        out.push_str(&format!("constraints: {}\n", plan.constraints.join(" · ")));
     }
     if !plan.checklist.is_empty() {
         out.push_str(&format!(

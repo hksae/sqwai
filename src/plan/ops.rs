@@ -492,7 +492,6 @@ pub fn create(
         // sets it post-create, like sessions); create() itself stays
         // checklist-free so its 26 callers do not churn
         checklist: Vec::new(),
-        waived_constraints: Vec::new(),
     };
     Ok(plan)
 }

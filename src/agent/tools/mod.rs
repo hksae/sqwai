@@ -20,8 +20,8 @@ pub(crate) mod web;
 pub(crate) use ctx::{MIN_PLAN_BUDGET_TOKENS, ReadState, ToolCtx};
 pub(crate) use dispatch::{FileDiff, Outcome, bg_running_commands, execute, kill_remaining_jobs};
 pub(crate) use policy::{
-    bash_scope_hit, forbidden_command, register_mention_prereads, register_subagent_scope,
-    take_mention_prereads, take_subagent_scope,
+    bash_scope_hit, register_mention_prereads, register_subagent_scope, take_mention_prereads,
+    take_subagent_scope,
 };
 pub(crate) use specs::{
     Kind, call_args_for_journal, call_path, call_summary, decode_child_output, is_mutating_call,
@@ -1858,116 +1858,6 @@ mod tests {
         } else {
             "date +%s%N".to_string()
         }
-    }
-
-    /// `complete` runs `cmd:` items again instead of trusting the verify that
-    /// happened earlier: a criterion that stopped passing must block
-    /// completion (§2.1.2).
-    ///
-    /// §12.12 three states: the probe misses before the change (baseline),
-    /// is fixed, verifies green, then the tracked world visibly moves and
-    /// the check breaks with it — a regression on moved state, so
-    /// `acceptance_failed`, not `flaky_check`. `gate.txt` is tracked
-    /// throughout (the step refs validate); the probe watches a second
-    /// §12.12 three states, verify side: a green run attested the state,
-    /// and now the same state answers red with nothing tracked moving —
-    /// the runs disagree, so the item is flaky rather than failed. A
-    /// further green run must not silently retry it into verified, and
-    /// §12.12 three states, verify side, the other half of the
-    /// distinguisher: the red run lands on visibly moved state, so it is
-    /// §12.12 three states, complete side: the re-run at `complete` is the
-    /// run that disagrees — same attested state, red answer — so the item
-    /// Rung 4, the green path: the host froze `data.txt` at plan time, the
-    /// content is unchanged, so the re-run matches byte for byte and the
-    /// Rung 4 refuses vacuous freezes: `exit 0` prints nothing, and empty
-    /// output discriminates nothing — the item stays unfrozen and `verify`
-    /// Rung 4, three states: the frozen run attested one digest and the
-    /// content changed under it with no tracked state moving — the runs
-    /// Rung 4, the regression half: `data.txt` is tracked, so the content
-    /// change moves the digest and the differing output is changed behavior
-    /// Rung 4 through `complete`: unchanged output re-runs green and the
-    /// An unsafe `snapshot:` check is never run to freeze itself: the item
-    /// stays unfrozen (`no_snapshot`), and even a smuggled-in frozen output
-    /// Rung 3, the green path inverted from rung 4: the host froze `data.txt`
-    /// at "v1"; unchanged content settles nothing (`no_observable_change`),
-    /// Rung 3 settles working changes: changed output with a non-zero exit
-    /// is breakage (`broken_change`), not movement. Fixing an error
-    /// Rung 3 refuses nondeterministic inputs at freeze time: a clock reads
-    /// differently on every run, so comparing against it would pass
-    /// Rung 3 shares rung 4's vacuity rule: silent output discriminates
-    /// Rung 3 through `complete`: the re-run sees moved output and the plan
-    /// An unsafe `differential:` check is never run to freeze itself, and a
-    /// Rung 5, the green path: the host froze `src/main.rs` as one `main`.
-    /// Editing the body keeps the shape and verifies; adding a function
-    /// Rung 5 freezes nothing without files: a missing path leaves the
-    /// whole item unfrozen (all-or-nothing, so a typo cannot silently
-    /// Rung 5 never reads through the host boundary: a `.sqwai` path is
-    /// Rung 5 through `complete`: the re-read sees a reshaped file and
-    /// Rung 5 through `complete`, the green half: the held shape re-reads
-    /// Check inputs freeze at create: a `tests/` file present lands in the
-    /// item's inputs and shows in render; `src/` files do not (the known
-    /// Background capture: with the flag set, create marks slow items
-    /// pending and returns without running anything; without it, the same
-    /// create captures synchronously. `exit 3` distinguishes the paths
-    /// Writing a frozen input is refused with a structured code; waiving
-    /// Pure additions to a frozen input flow without asking: appending a
-    /// test extends the check instead of rewriting it, and the host
-    /// Receipt-time guard: editing a frozen input outside the file tools
-    /// (or before the guard existed) still meets the hash comparison at
-    /// The shell matcher is best-effort and documented as such: redirects
-    /// `forbid-cmd:` matching is a pure substring on the lowered command:
-    /// empty patterns never match, casing never matters.
-    #[test]
-    fn forbidden_command_matches_substrings() {
-        let patterns = vec!["rm -rf".to_string(), "DROP TABLE".to_string()];
-        assert_eq!(
-            forbidden_command(&patterns, "rm -rf /tmp/x"),
-            Some("rm -rf".to_string())
-        );
-        assert_eq!(
-            forbidden_command(&patterns, "sudo RM -RF /"),
-            Some("rm -rf".to_string())
-        );
-        assert_eq!(forbidden_command(&patterns, "ls -la"), None);
-        assert_eq!(forbidden_command(&[], "rm -rf /"), None);
-        assert_eq!(
-            forbidden_command(&["  ".to_string()], "rm -rf /"),
-            None,
-            "blank patterns match nothing"
-        );
-    }
-
-    /// Typed constraints validate at create: empty payloads, unresolvable
-    /// roots, and uncompilable patterns reject while the model can rewrite.
-    #[test]
-    fn create_validates_typed_constraints() {
-        let (mut ctx, dir) = proj();
-        for (constraints, code) in [
-            (vec!["ast: "], "empty_constraint"),
-            (vec!["path: "], "empty_constraint"),
-            (vec!["forbid-cmd: "], "empty_constraint"),
-            (vec!["path: ../outside"], "bad_constraint_path"),
-            (vec!["path: .sqwai/nope"], "bad_constraint_path"),
-            (vec!["ast: Ok("], "bad_constraint_pattern"),
-        ] {
-            let rejected = plan_op(
-                &mut ctx,
-                &json!({
-                    "op": "create",
-                    "goal": "bad constraint",
-                    "constraints": constraints,
-                    "acceptance": ["manual: eyeball it"],
-                    "steps": [{"title": "verify"}]
-                }),
-            );
-            assert!(!rejected.ok, "{constraints:?}");
-            assert!(
-                rejected.output.contains(code),
-                "{constraints:?}: {}",
-                rejected.output
-            );
-        }
-        fs::remove_dir_all(&dir).ok();
     }
 
     /// `forbid-import:` blocks `complete` naming the offending file, and a

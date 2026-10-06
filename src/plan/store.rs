@@ -2,7 +2,7 @@ use super::{
     Baseline, EvidenceRef, Limits, NewStep, Op, Plan, PlanDraftArgs, PlanStatus, Receipt,
     Rejection, ShapeFreeze, Snapshot, add_acceptance, apply, apply_flaky, apply_invalidate,
     attach_confirmation, create, plans_dir, reopen_for_undo, set_baselines, set_goal, set_shapes,
-    set_snapshots, verify_acceptance, waive, waive_constraint,
+    set_snapshots, verify_acceptance, waive,
 };
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -542,19 +542,6 @@ fn apply_record(
                 .and_then(|value| value.as_str())
                 .unwrap_or("");
             waive(plan, index, reason).map(|_| true)
-        }
-        Some("waive_constraint") => {
-            let index = fields
-                .get("index")
-                .and_then(|value| value.as_u64())
-                .ok_or_else(|| {
-                    Rejection::new("replay_shape", "waive_constraint intent without index", "")
-                })? as usize;
-            let reason = fields
-                .get("reason")
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
-            waive_constraint(plan, index, reason).map(|_| true)
         }
         Some("set_goal") => {
             let text = fields
