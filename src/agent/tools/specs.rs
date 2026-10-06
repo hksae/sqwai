@@ -357,106 +357,6 @@ await its result before dependent changes or reporting success.",
             parameters: json!({"type":"object","properties":{"section":{"type":"string","enum":["Project","Conventions","User","Agreements"]},"scope":{"type":"string","enum":["project","user"]},"text":{"type":"string"},"replaces":{"type":"string"}},"required":["section","text"]}),
         },
         ToolDef {
-            name: "resolve_ref",
-            kind: Kind::ReadOnly,
-            description: "Resolve a code reference (file path and/or symbol name) against the project graph. \
-Guarantees disk freshness by verifying file byte hash before resolution. \
-Returns definition location, signature, provenance (source_hash, generation, freshness, precision), and capabilities, or suggestions if not found.",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                "ref": {
-                    "type": "string",
-                    "description": "reference key (sym:path::kind::name) or shorthand (path::symbol)"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "project-relative file path"
-                },
-                "symbol": {
-                    "type": "string",
-                    "description": "symbol name or scoped name"
-                }
-            }}),
-        },
-        ToolDef {
-            name: "recall",
-            kind: Kind::ReadOnly,
-            description: "Search the code graph by symbol name, path or concept \
-using deterministic ranking. \
-Returns matching items with canonical keys (sym:..., file:...), kinds, paths, one-line snippets, and provenance. \
-Always prefer using the canonical keys returned by recall in subsequent graph_query calls.",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "search query (symbol, path or concept)"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "maximum results to return (default 8, max 20)"
-                    }
-                },
-                "required": ["query"]
-            }),
-        },
-        ToolDef {
-            name: "graph_query",
-            kind: Kind::ReadOnly,
-            description: "Traverse relationships in the code graph from a starting node using bounded breadth-first search. \
-Accepts canonical keys (sym:..., file:...) or shorthand (path::symbol, symbol name). \
-Unresolvable or ambiguous starts return an error with candidates (use recall for canonical keys). \
-Default preset is 'dependencies', without expanding file containers into sibling declarations. \
-Returns connected nodes, incident edges, and explicit truncation status.",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "node": {
-                        "type": "string",
-                        "description": "canonical node key (sym:..., file:..., mem:...) or shorthand (path::symbol, symbol name)"
-                    },
-                    "preset": {
-                        "type": "string",
-                        "enum": ["dependencies", "structure", "all"],
-                        "description": "relation preset: 'dependencies' (calls, imports, references, about; default), 'structure' (hierarchy/containment), 'all'"
-                    },
-                    "direction": {
-                        "type": "string",
-                        "enum": ["both", "incoming", "outgoing"],
-                        "description": "traversal direction (default 'both')"
-                    },
-                    "max_depth": {
-                        "type": "integer",
-                        "description": "traversal depth 1..=3 (default 2)"
-                    },
-                    "max_nodes": {
-                        "type": "integer",
-                        "description": "maximum node budget 1..=100 (default 30)"
-                    },
-                    "max_edges": {
-                        "type": "integer",
-                        "description": "maximum edge budget 1..=100 (default 50)"
-                    },
-                    "max_output_tokens": {
-                        "type": "integer",
-                        "description": "maximum token budget for formatted output (default 2000)"
-                    },
-                    "relations": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "custom edge kind filter overriding preset (e.g. ['calls', 'imports'])"
-                    },
-                    "kinds": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "optional node kind filter (e.g. ['function', 'struct', 'decision'])"
-                    }
-                },
-                "required": ["node"]
-            }),
-        },
-        ToolDef {
             name: "propose_plan",
             kind: Kind::ReadOnly,
             description: "Propose a new full plan or a replacement for the active one. \
@@ -807,24 +707,6 @@ pub fn call_summary(name: &str, args: &Value) -> String {
         }
         "plan" => format!("plan {}", s("op")),
         "propose_plan" => s("goal"),
-        "resolve_ref" => {
-            if let Some(r) = args["ref"].as_str() {
-                format!("resolve_ref {r}")
-            } else if let Some(p) = args["path"].as_str() {
-                let sym = args["symbol"].as_str().unwrap_or("*");
-                format!("resolve_ref {p}::{sym}")
-            } else if let Some(s) = args["symbol"].as_str() {
-                format!("resolve_ref {s}")
-            } else {
-                "resolve_ref".to_string()
-            }
-        }
-        "recall" => format!("recall {}", s("query")),
-        "graph_query" => {
-            let node = s("node");
-            let dir = args["direction"].as_str().unwrap_or("both");
-            format!("graph_query {node} ({dir})")
-        }
         "journal" => {
             let op = args["op"].as_str().unwrap_or("read");
             if op == "assumptions" {

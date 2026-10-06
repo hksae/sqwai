@@ -978,7 +978,7 @@ mod tests {
                 "{hidden} must be hidden on baseline: {names:?}"
             );
         }
-        for kept in ["read", "bash", "resolve_ref", "recall"] {
+        for kept in ["read", "bash", "edit", "write"] {
             assert!(
                 names.contains(&kept.to_string()),
                 "{kept} must stay on baseline: {names:?}"
@@ -3260,38 +3260,6 @@ end
     }
 
     #[test]
-    fn resolve_ref_tool_execution() {
-        let (mut ctx, dir) = proj();
-        fs::write(
-            dir.join("src/calc.rs"),
-            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
-        )
-        .unwrap();
-
-        let mut store = crate::agent::graph::SqliteGraphStore::open(&dir).unwrap();
-        crate::agent::graph_index::index_project(&mut store, &dir).unwrap();
-
-        let outcome = execute(
-            &mut ctx,
-            "resolve_ref",
-            &json!({"path": "src/calc.rs", "symbol": "add"}),
-        );
-        assert!(outcome.ok, "{}", outcome.output);
-        assert!(outcome.output.contains("pub fn add"));
-        assert!(outcome.output.contains("\"status\": \"found\""));
-
-        let not_found = execute(
-            &mut ctx,
-            "resolve_ref",
-            &json!({"ref": "src/calc.rs::subtract"}),
-        );
-        assert!(not_found.ok, "{}", not_found.output);
-        assert!(not_found.output.contains("\"status\": \"not_found\""));
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn plan_refs_validation_enforces_intent() {
         let (mut ctx, dir) = proj();
         fs::write(
@@ -3413,33 +3381,6 @@ end
             !out2.output.contains("warning: symbol 'add' not in index"),
             "should not warn for indexed symbol: {}",
             out2.output
-        );
-
-        fs::remove_dir_all(&dir).ok();
-    }
-    #[test]
-    fn graph_query_tool_unresolved_start_returns_structured_error() {
-        let (mut ctx, dir) = proj();
-        let mut store = crate::agent::graph::SqliteGraphStore::open(&dir).unwrap();
-        crate::agent::graph_index::index_project(&mut store, &dir).unwrap();
-
-        let out = execute(
-            &mut ctx,
-            "graph_query",
-            &json!({
-                "node": "nonexistent::FooBar"
-            }),
-        );
-        assert!(!out.ok, "must fail for nonexistent start");
-        assert!(
-            out.output.contains("unresolved_start"),
-            "must contain unresolved_start code: {}",
-            out.output
-        );
-        assert!(
-            out.output.contains("hint"),
-            "must contain hint: {}",
-            out.output
         );
 
         fs::remove_dir_all(&dir).ok();
