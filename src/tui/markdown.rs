@@ -402,7 +402,7 @@ pub fn render(text: &str, width: u16, hl: &Highlighter) -> Vec<Line<'static>> {
                 };
                 let mut spans = vec![
                     Span::styled("  ".repeat(nest + 1), base_style()),
-                    Span::styled(head, marker_style.clone()),
+                    Span::styled(head, marker_style),
                 ];
                 spans.extend(row.spans);
                 out.push(Line::from(spans));

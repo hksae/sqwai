@@ -201,18 +201,19 @@ pub(super) fn read(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Ou
     }
     let total_lines = text.lines().count();
     let mut out = String::new();
-    let mut emitted = 0usize;
     let first_no = offset;
     let mut last_no = offset.saturating_sub(1);
     let mut truncated = false;
-    for (i, line) in text.lines().enumerate().skip(offset - 1) {
-        if emitted >= limit || out.len() > 300_000 {
+    for (i, line) in text.lines().enumerate().skip(offset - 1).take(limit) {
+        if out.len() > 300_000 {
             truncated = true;
             break;
         }
         out.push_str(&format!("{:>6}\t{line}\n", i + 1));
         last_no = i + 1;
-        emitted += 1;
+    }
+    if !truncated && last_no < total_lines {
+        truncated = true;
     }
     if total_lines == 0 {
         out.push_str("(empty file)\n");
@@ -703,17 +704,12 @@ pub(super) fn grep(
             {
                 out.push_str("--\n");
             }
-            for i in start..end {
+            for (i, line) in lines.iter().enumerate().take(end).skip(start) {
                 if last_printed.is_some_and(|p| i <= p) {
                     continue;
                 }
                 let sep = if i == hit { ':' } else { '-' };
-                out.push_str(&format!(
-                    "{}{sep}{}: {}\n",
-                    shown,
-                    i + 1,
-                    show_line(&lines[i])
-                ));
+                out.push_str(&format!("{}{sep}{}: {}\n", shown, i + 1, show_line(line)));
                 last_printed = Some(i);
             }
             if out.len() > 300_000 {

@@ -420,13 +420,6 @@ pub(crate) async fn propose_plan(
         Ok(None) => None,
         Err(e) => return tools::Outcome::err(format!("plan store unreadable: {e:#}")),
     };
-    // §12.12: the same proof `plan create` takes, at the same moment — the
-    // tree is still the pre-change one while the user is deciding.
-    let proof = tools::capture_baselines(ctx, &fresh);
-    plan::set_baselines(&mut fresh, proof.slots.clone());
-    plan::set_snapshots(&mut fresh, proof.frozen.clone());
-    plan::set_shapes(&mut fresh, proof.shapes.clone());
-    plan::set_inputs(&mut fresh, proof.inputs.clone());
     // Journal-first (§2.1.4): the intent carries the full draft so replay
     // can rebuild the new plan and retire the old one after a crash.
     let new_id = fresh.id.clone();
@@ -441,10 +434,6 @@ pub(crate) async fn propose_plan(
                     "ok": true,
                     "plan_id": new_id,
                     "draft": draft_args,
-                    "baselines": proof.slots,
-                    "snapshots": proof.frozen,
-                    "shapes": proof.shapes,
-                    "inputs": proof.inputs,
                     "new_id": new_id,
                     "new_created": new_created,
                     "new_sessions": [session_id],
@@ -496,13 +485,9 @@ pub(crate) async fn propose_plan(
     tools::Outcome::ok(match abandoned {
         Some(old) => format!(
             "plan {new_id} accepted with {steps} steps; previous plan {old} abandoned. \
-             Start its first step.{}",
-            proof.notes.join("")
+             Start its first step."
         ),
-        None => format!(
-            "plan {new_id} accepted with {steps} steps. Start its first step.{}",
-            proof.notes.join("")
-        ),
+        None => format!("plan {new_id} accepted with {steps} steps. Start its first step."),
     })
 }
 
@@ -585,17 +570,6 @@ pub(crate) async fn bash_call(
                 None => reason,
             });
         }
-    }
-
-    // 1c. frozen check inputs: a shell write to a test/fixture the plan
-    // froze needs the same approval; headless contexts deny instead.
-    // Best-effort token matching — what slips past still meets the
-    // receipt-time hash comparison.
-    if let Some(hit) = tools::frozen_input_command_hit(&ctx.root, &ctx.session_id, &command) {
-        needs_approval = Some(match needs_approval {
-            Some(prior) => format!("{prior}; {hit}"),
-            None => hit,
-        });
     }
 
     // 1d. typed constraints, live half: `forbid-cmd:` refuses outright
@@ -681,85 +655,6 @@ pub(crate) async fn bash_call(
     // 2. run it through the normal bash handler on a blocking thread so a long
     //    command never stalls the async runtime (and the TUI render loop)
     run_tool_blocking(ctx, "bash", &call.args).await
-}
-
-/// File writes to frozen check inputs: pure additions flow (dispatch
-/// re-freezes the extended file), oracle rewrites need user approval.
-/// Mirrors the bash approval flow; subagents cannot prompt. The verdict is
-/// predicted from the call arguments before anything touches disk, so an
-/// approval dialog always shows the exact proposed diff.
-pub(crate) async fn file_tool_call(
-    call: &ToolCallReq,
-    ctx: &mut ToolCtx,
-    tx: &mpsc::Sender<AgentEvent>,
-    ctl: &mut mpsc::Receiver<ControlMsg>,
-    next_id: &mut u64,
-    subagent_depth: u8,
-    approved_frozen: &mut Vec<String>,
-) -> tools::Outcome {
-    if !matches!(
-        call.name.as_str(),
-        "write" | "edit" | "multi_edit" | "patch"
-    ) {
-        return run_tool_blocking(ctx, &call.name, &call.args).await;
-    }
-    // one-shot approvals must not leak across calls: the per-call list is
-    // rebuilt from session grants every time, RunOnce adds for this call only
-    ctx.approved_frozen.retain(|p| approved_frozen.contains(p));
-    let (path, preview) = match tools::frozen_write_verdict(ctx, &call.name, &call.args) {
-        tools::FrozenVerdict::Clear | tools::FrozenVerdict::Additive { .. } => {
-            return run_tool_blocking(ctx, &call.name, &call.args).await;
-        }
-        tools::FrozenVerdict::Modify { path, preview } => (path, preview),
-    };
-    if approved_frozen.iter().any(|p| p == &path) {
-        ctx.approved_frozen.push(path);
-        return run_tool_blocking(ctx, &call.name, &call.args).await;
-    }
-    if subagent_depth > 0 {
-        return tools::Outcome::err(format!(
-            "frozen check input '{path}': editing it changes the check, not the code under test — subagents cannot prompt for approval"
-        ));
-    }
-    let id = *next_id;
-    *next_id += 1;
-    let reason = format!(
-        "frozen check input '{path}' would change oracle lines (additions flow without asking):\n{preview}\nAllow the edit and re-freeze the file?"
-    );
-    if tx
-        .send(AgentEvent::Approval {
-            id,
-            command: format!("{} {path}", call.name),
-            reason: reason.clone(),
-        })
-        .await
-        .is_err()
-    {
-        return tools::Outcome::err("tui closed awaiting approval");
-    }
-    let decision = loop {
-        match ctl.recv().await {
-            Some(ControlMsg::ApprovalAnswer { id: aid, decision }) if aid == id => {
-                break decision;
-            }
-            Some(_) => continue,
-            None => return tools::Outcome::err("agent cancelled awaiting approval"),
-        }
-    };
-    match decision {
-        ApprovalDecision::Deny => {
-            tools::Outcome::err(format!("frozen check input edit denied by user ({reason})"))
-        }
-        ApprovalDecision::RunOnce => {
-            ctx.approved_frozen.push(path);
-            run_tool_blocking(ctx, &call.name, &call.args).await
-        }
-        ApprovalDecision::AlwaysSession => {
-            approved_frozen.push(path.clone());
-            ctx.approved_frozen.push(path);
-            run_tool_blocking(ctx, &call.name, &call.args).await
-        }
-    }
 }
 
 /// Execute a tool handler on a dedicated blocking thread.

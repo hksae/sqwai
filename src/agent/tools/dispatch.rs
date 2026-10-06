@@ -4,14 +4,10 @@ use super::exec;
 use super::fs;
 use super::git;
 use super::outline;
-use super::policy::{
-    FrozenVerdict, bash_scope_hit, commanded_verify_refs, frozen_write_verdict, in_write_scope,
-    mutation_target_paths, step_epoch_current,
-};
+use super::policy::{bash_scope_hit, in_write_scope, mutation_target_paths, step_epoch_current};
 use super::specs;
 use super::verify::{
-    capture_baselines, capture_baselines_fast, rejection, validate_complete, validate_evidence,
-    verify_acceptance, with_assumption_warning, with_blast_radius, with_evidence_ts_warning,
+    rejection, with_assumption_warning, with_blast_radius, with_evidence_ts_warning,
 };
 use crate::agent::graph::GraphStore;
 use crate::plan;
@@ -192,42 +188,6 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             .to_string(),
         );
     }
-    // Frozen check inputs: editing a test/fixture the active plan froze at
-    // create changes the check, not the code. Pure additions (new tests,
-    // new fixture rows) flow through and the host re-freezes the extended
-    // file; anything rewriting frozen lines needs user approval (the agent
-    // loop asks), a restore, a waiver (/plan waive) or a surrendered
-    // contradictory spec (block_plan). New files stay writable — rung 2
-    // lives on that. An approval granted by the loop rides
-    // `approved_frozen` for this call.
-    let mut pending_refreeze: Option<String> = None;
-    if matches!(name, "write" | "edit" | "multi_edit" | "patch") {
-        match frozen_write_verdict(ctx, name, args) {
-            FrozenVerdict::Clear => {}
-            FrozenVerdict::Additive { path } => {
-                pending_refreeze = Some(path);
-            }
-            FrozenVerdict::Modify { path, .. }
-                if ctx.approved_frozen.iter().any(|p| p == &path) =>
-            {
-                pending_refreeze = Some(path);
-            }
-            FrozenVerdict::Modify { path, preview } => {
-                return Outcome::err(
-                    serde_json::json!({
-                        "ok": false,
-                        "code": "frozen_input",
-                        "reason": format!(
-                            "'{path}' is a frozen check input: editing it changes the check, not the code under test"
-                        ),
-                        "hint": "restore the file, have the user waive the acceptance item (/plan waive), or surrender a contradictory spec with block_plan",
-                        "preview": preview,
-                    })
-                    .to_string(),
-                );
-            }
-        }
-    }
     // Writer-subagent scope: a child declared its roots at spawn, and every
     // file mutation must sit inside them. Read-only children never reach
     // here (refused above); the main agent carries no scope.
@@ -301,7 +261,8 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             );
         }
     }
-    let mut outcome = match name {
+
+    match name {
         "read" => fs::read(ctx, args["file_path"].as_str().unwrap_or_default(), args),
         "write" => fs::write_file(
             ctx,
@@ -631,20 +592,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         }
         "journal" => journal_op(ctx, args),
         other => Outcome::err(format!("unknown tool '{other}'")),
-    };
-    // An additive (or approved) write to a frozen input went through: the
-    // extended file becomes the new baseline, and Passed verdicts on it go
-    // Stale — the check changed, so it must run again. Visible in the
-    // outcome; the edit's own file_diff record carries the audit trail.
-    if outcome.ok
-        && let Some(path) = pending_refreeze
-        && plan::rebaseline_input(&ctx.root, &ctx.session_id, &path)
-    {
-        outcome.output.push_str(&format!(
-            "\nfrozen baseline re-captured for {path}: extend, don't rewrite"
-        ));
     }
-    outcome
 }
 
 /// The `journal` tool: a read-only projection of the host journal (§2.2).
@@ -1198,20 +1146,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         max_steps: ctx.plan_limits.max_steps,
     };
 
-    let gate = if matches!(op, plan::Op::Complete) {
-        validate_complete(ctx)
-    } else {
-        validate_evidence(
-            &ctx.root,
-            &op,
-            Some(&ctx.session_id),
-            ctx.plan_limits.strict,
-        )
-    };
-    if let Err(message) = gate {
-        return Outcome::err(message);
-    }
-
     match op {
         plan::Op::Create {
             goal,
@@ -1234,33 +1168,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     .plan_limits
                     .budget_tokens(ctx.context_limit)
                     .max(MIN_PLAN_BUDGET_TOKENS);
-                // Named verify commands (`cmd: $name`) expand here, against
-                // the project's seeded map — an unknown name rejects the
-                // create with the known list instead of burning a turn at
-                // verify time on a command that never existed.
-                let named_refs = commanded_verify_refs(&acceptance);
-                let acceptance = match plan::substitute_verify_commands(
-                    acceptance,
-                    &crate::config::Config::project_verify_commands(&ctx.root),
-                ) {
-                    Ok(expanded) => expanded,
-                    Err(unknown) => {
-                        let hint = if unknown.known.is_empty() {
-                            "no verify commands seeded — run /init or write the command out"
-                                .to_string()
-                        } else {
-                            format!("known: {}", unknown.known.join(", "))
-                        };
-                        return rejection(plan::Rejection::new(
-                            "unknown_verify",
-                            format!(
-                                "acceptance refers to unknown verify command(s): ${}",
-                                unknown.names.join(", $")
-                            ),
-                            hint,
-                        ));
-                    }
-                };
                 match plan::create(goal, constraints, acceptance, steps, budget_limit, &limits) {
                     Ok(mut created) => {
                         for s in &created.steps {
@@ -1279,26 +1186,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         created.sessions = vec![ctx.session_id.clone()];
                         // non-blocking checklist rides along (never gates)
                         created.checklist = checklist;
-                        // §12.12: prove the cmd: checks discriminate, before
-                        // anything has changed. Rung 4 freezes beside them.
-                        // Interactive runs defer the slow executions to a
-                        // background worker (the tool call returns now);
-                        // tests and headless runs capture synchronously.
-                        let proof = if ctx.background_baselines {
-                            let proof = capture_baselines_fast(ctx, &created);
-                            for index in &proof.pending {
-                                if let Some(item) = created.acceptance.get_mut(*index) {
-                                    item.capture_pending = true;
-                                }
-                            }
-                            proof
-                        } else {
-                            capture_baselines(ctx, &created)
-                        };
-                        plan::set_baselines(&mut created, proof.slots.clone());
-                        plan::set_snapshots(&mut created, proof.frozen.clone());
-                        plan::set_shapes(&mut created, proof.shapes.clone());
-                        plan::set_inputs(&mut created, proof.inputs.clone());
                         let id = created.id.clone();
                         let step_count = created.steps.len();
                         // Journal-first (§2.1.4): the intent carries everything
@@ -1313,10 +1200,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                                 "refs": s.refs,
                             })).collect::<Vec<_>>(),
                             "budget_limit": created.budget.limit,
-                            "baselines": proof.slots,
-                            "snapshots": proof.frozen,
-                            "shapes": proof.shapes,
-                            "inputs": proof.inputs,
                             "result_id": created.id,
                             "result_created": created.created,
                             "result_sessions": created.sessions,
@@ -1331,96 +1214,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             args,
                         ) {
                             Ok(_) => {
-                                let mut message = format!(
-                                    "plan {id} created with {step_count} steps{}",
-                                    proof.notes.join("")
-                                );
-                                // provenance: expanded commands come from
-                                // project config, not model text — the model
-                                // reviews someone else's command here
-                                if !named_refs.is_empty() {
-                                    message.push_str(&format!(
-                                        "\nacceptance: ${} expanded from .sqwai/config.toml [verify] — project-defined commands run under the same policy as typed ones",
-                                        named_refs.join(", $")
-                                    ));
-                                }
-                                // advisory mining: AGENTS.md restricts
-                                // something no typed constraint covers.
-                                // Silent once the author formalized anything.
-                                let typed = created.constraints.iter().any(|text| {
-                                    !matches!(
-                                        plan::classify_constraint(text),
-                                        plan::ConstraintKind::Plain(_)
-                                    )
-                                });
-                                if !typed {
-                                    let candidates = mine_constraint_candidates(&ctx.root);
-                                    if !candidates.is_empty() {
-                                        message.push_str(&format!(
-                                            "\nconstraints: AGENTS.md restricts {} — consider forbid-import:/forbid-cmd:/ast:/path: (advisory; untyped constraints are not enforced)",
-                                            candidates.join(" · ")
-                                        ));
-                                    }
-                                }
-                                // acceptance suggestion: a plan born without
-                                // criteria plus detected check commands gets a
-                                // pointer, not a mandate — the model decides
-                                // with op add_acceptance. (Read-only work
-                                // rightly has none of either.)
-                                if created.acceptance.is_empty() {
-                                    let detected =
-                                        crate::config::Config::detect_verify_commands(&ctx.root);
-                                    if !detected.is_empty() {
-                                        let offered: Vec<String> = detected
-                                            .iter()
-                                            .take(3)
-                                            .map(|(name, command, _)| {
-                                                format!("cmd: {command} ({name})")
-                                            })
-                                            .collect();
-                                        message.push_str(&format!(
-                                            "\nacceptance: none yet — detected checks you can adopt with {{\"op\": \"add_acceptance\", \"items\": [...]}} (or write manual:): {}",
-                                            offered.join(" · ")
-                                        ));
-                                    }
-                                }
-                                // rung suggestions: a cmd: that already passes
-                                // pre-change proves nothing as cmd: — offer the
-                                // freeze rungs transparently; adoption goes
-                                // through add_acceptance (frozen at adopt
-                                // time). Capped: more than three is a lecture.
-                                {
-                                    let mut offered = 0;
-                                    for (index, item) in created.acceptance.iter().enumerate() {
-                                        if offered >= 3 {
-                                            break;
-                                        }
-                                        let plan::AcceptanceKind::Command(command) = item.kind()
-                                        else {
-                                            continue;
-                                        };
-                                        if proof.slots.get(index).is_some_and(|slot| slot.is_some())
-                                        {
-                                            continue;
-                                        }
-                                        // not run (unsafe/needs-approval) or
-                                        // cancelled: no outcome to judge —
-                                        // but a run that passed is exactly
-                                        // the suggest case ("passes already")
-                                        if proof.notes.iter().any(|note| {
-                                            note.starts_with(&format!("\nacceptance {index}:"))
-                                                && (note.contains("not run")
-                                                    || note.contains("cancelled"))
-                                        }) {
-                                            continue;
-                                        }
-                                        message.push_str(&format!(
-                                            "\nacceptance {index} (`cmd: {command}`) already passes pre-change, so cmd: proves nothing — to freeze this output say {{\"op\": \"add_acceptance\", \"items\": [\"snapshot: {command}\"]}} (byte-identical) or [\"differential: {command}\"] (must change)"
-                                        ));
-                                        offered += 1;
-                                    }
-                                }
-                                Outcome::ok(message)
+                                Outcome::ok(format!("plan {id} created with {step_count} steps"))
                             }
                             Err(e) => Outcome::err(format!("plan write failed: {e:#}")),
                         }
@@ -1430,10 +1224,10 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             }
             Err(e) => Outcome::err(format!("plan store unreadable: {e:#}")),
         },
-        plan::Op::Verify {
-            acceptance,
-            evidence,
-        } => verify_acceptance(ctx, acceptance, !evidence.is_empty()),
+        plan::Op::Verify { .. } => Outcome::err(
+            "verify is retired: the host no longer certifies checks — run the command \
+             yourself (bash) and work from its observed result",
+        ),
         plan::Op::Cancel { id, reason } => {
             match id {
                 // No silent whole-plan kill here either: the dispatcher used
@@ -1555,47 +1349,13 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             // Journal-first (§2.1.4): the intent is recorded ahead of the
             // store, carrying the full op for replay. `show` is read-only
             // and keeps the old plain store with no cursor advance.
-            let mut other = other;
-            // $named expansion for added criteria, same as create: unknown
-            // names reject here, not at verify time on a command that never
-            // existed.
-            if let plan::Op::AddAcceptance { ref mut items } = other {
-                match plan::substitute_verify_commands(
-                    items.clone(),
-                    &crate::config::Config::project_verify_commands(&ctx.root),
-                ) {
-                    Ok(expanded) => *items = expanded,
-                    Err(unknown) => {
-                        let hint = if unknown.known.is_empty() {
-                            "no verify commands seeded — run /init or write the command out"
-                                .to_string()
-                        } else {
-                            format!("known: {}", unknown.known.join(", "))
-                        };
-                        return rejection(plan::Rejection::new(
-                            "unknown_verify",
-                            format!(
-                                "acceptance refers to unknown verify command(s): ${}",
-                                unknown.names.join(", $")
-                            ),
-                            hint,
-                        ));
-                    }
-                }
-            }
-            let mut op_value = serde_json::to_value(&other).unwrap_or(serde_json::Value::Null);
+            let op_value = serde_json::to_value(&other).unwrap_or(serde_json::Value::Null);
             let op_name = op_value
                 .get("op")
                 .and_then(|value| value.as_str())
                 .unwrap_or("unknown")
                 .to_string();
             let readonly_show = op_name == "show";
-            // late-added criteria need baselines for exactly their new
-            // positions (existing ones belong to the pre-change tree and are
-            // never re-run); recorded before apply so the fill below knows
-            // where the plan ended
-            let prev_acceptance_len = active.acceptance.len();
-            let adding_acceptance = matches!(&other, plan::Op::AddAcceptance { .. });
             if let plan::Op::Start { ref id, .. } = other
                 && let Some(step) = active.step(id)
             {
@@ -1611,61 +1371,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             }
             match plan::apply(&mut active, other, &limits, ctx.current_step.as_deref()) {
                 Ok(applied) => {
-                    // baselines for late-added criteria ride the same intent
-                    // (replay restores them instead of re-running checks).
-                    // Captured against a plan trimmed to the new items only:
-                    // re-running the old checks would waste turns and pin
-                    // notes to stale indices. A check that already passes
-                    // stays unproven — correctly, the host never saw it fail.
-                    let mut proof_notes = String::new();
-                    if adding_acceptance && active.acceptance.len() > prev_acceptance_len {
-                        let mut probe = active.clone();
-                        probe.acceptance = probe.acceptance.split_off(prev_acceptance_len);
-                        let proof = if ctx.background_baselines {
-                            capture_baselines_fast(ctx, &probe)
-                        } else {
-                            capture_baselines(ctx, &probe)
-                        };
-                        let proven = proof.slots.iter().filter(|slot| slot.is_some()).count();
-                        let added = active.acceptance.len() - prev_acceptance_len;
-                        for (offset, item) in active
-                            .acceptance
-                            .iter_mut()
-                            .enumerate()
-                            .skip(prev_acceptance_len)
-                        {
-                            let slot = offset - prev_acceptance_len;
-                            item.baseline = proof.slots.get(slot).cloned().flatten();
-                            item.snapshot = proof.frozen.get(slot).cloned().flatten();
-                            item.shape = proof.shapes.get(slot).cloned().flatten();
-                            item.inputs = proof.inputs.get(slot).cloned().unwrap_or_default();
-                            if proof.pending.contains(&slot) {
-                                item.capture_pending = true;
-                            }
-                        }
-                        if let Some(record) = op_value.as_object_mut() {
-                            record.insert(
-                                "new_baselines".to_string(),
-                                serde_json::to_value(&proof.slots).unwrap_or_default(),
-                            );
-                            record.insert(
-                                "new_snapshots".to_string(),
-                                serde_json::to_value(&proof.frozen).unwrap_or_default(),
-                            );
-                            record.insert(
-                                "new_shapes".to_string(),
-                                serde_json::to_value(&proof.shapes).unwrap_or_default(),
-                            );
-                            record.insert(
-                                "new_inputs".to_string(),
-                                serde_json::to_value(&proof.inputs).unwrap_or_default(),
-                            );
-                        }
-                        proof_notes.push_str(&format!(
-                            "\nbaselines: {proven}/{added} new items fail pre-change and can settle; \
-                             the rest already pass and stay unproven (waivable)"
-                        ));
-                    }
                     if readonly_show {
                         if let Err(e) = plan::store(&ctx.root, &active) {
                             return Outcome::err(format!("plan write failed: {e:#}"));
@@ -1708,7 +1413,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             let msg =
                                 with_evidence_ts_warning(ctx, finishing.as_deref(), &active, msg);
                             let msg = with_blast_radius(ctx, finishing.as_deref(), &active, msg);
-                            let msg = format!("{msg}{proof_notes}");
                             Outcome::ok(msg)
                         }
                         plan::Applied::Shown { text } => Outcome::ok(text),

@@ -723,7 +723,7 @@ impl App {
                 let effort = previous
                     .as_ref()
                     .map(|p| p.effort)
-                    .or_else(|| form_effort.and_then(|s| crate::config::EffortLevel::from_str(s)))
+                    .or_else(|| form_effort.and_then(crate::config::EffortLevel::from_str))
                     .unwrap_or(crate::config::EffortLevel::Medium);
                 let updated = ModelConfig {
                     provider: provider.clone(),

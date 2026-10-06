@@ -31,13 +31,15 @@ pub use store::{
     read_plan_file, replay, store,
 };
 #[cfg(test)]
-pub(crate) use verify::{Rung, ladder_top, legacy_passed};
+pub(crate) use verify::{Rung, legacy_passed};
 pub use verify::{
-    changed_check_inputs, check_definition_hash, differential_current, digest_paths,
-    freeze_check_inputs, frozen_input_paths, ladder_note, ladder_rung, proven_failing,
-    rebaseline_input, set_baselines, set_inputs, set_shapes, set_snapshots, signatures_current,
-    snapshot_current, state_digest, verify_acceptance,
+    differential_current, digest_paths, ladder_rung, proven_failing, set_baselines, set_shapes,
+    set_snapshots, signatures_current, snapshot_current, state_digest, verify_acceptance,
 };
+// Receipt tests build baselines with the real check-definition hash; the
+// binary itself only reaches it through the matchers above.
+#[cfg(test)]
+pub use verify::check_definition_hash;
 pub(crate) use verify::{complete, next_id};
 
 /// A host-owned journal reference. The session is part of the identity because
@@ -392,41 +394,12 @@ pub struct Acceptance {
     /// identical — bodies may move, the structure must not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<ShapeFreeze>,
-    /// Frozen check inputs for `cmd:`/`snapshot:`/`differential:` items:
-    /// test and fixture files hashed at plan time. Editing a listed file
-    /// invalidates later verdicts (write-time refusal, receipt-time
-    /// comparison); waiving the item unfreezes its inputs. Empty for kinds
-    /// without commands.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub inputs: Vec<CheckInput>,
-    /// Slow capture (baselines, snapshots, differentials) runs in the
-    /// background after create/add_acceptance instead of blocking the tool
-    /// call: while set, the slow proof for this item is not in yet. The
-    /// background worker clears it when it commits; verify captures it
-    /// synchronously as a fallback if it arrives first.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub capture_pending: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-}
-
-/// One frozen check input: a test/fixture file hashed at plan time, so
-/// editing the check itself (rather than the code under it) invalidates
-/// every later verdict. Only files that existed at capture are listed —
-/// new test files are always allowed.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CheckInput {
-    /// project-relative, forward slashes
-    pub path: String,
-    /// blake3 of the file bytes at capture
-    pub hash: String,
-    /// blob id of the content at capture (additive-silent): lets the host
-    /// tell appended lines from rewritten oracle lines. `None` on legacy
-    /// plans and files too large to keep — those fall back to refuse.
-    #[serde(default)]
-    pub blob: Option<String>,
 }
 
 /// One host run of a `cmd:` acceptance item that failed, kept as the item's
@@ -1894,7 +1867,6 @@ mod tests {
                     ],
                     "new_snapshots": [null, null],
                     "new_shapes": [null, null],
-                    "new_inputs": [[], []],
                 }),
             )
             .unwrap();
@@ -2370,7 +2342,6 @@ mod tests {
                 baseline: None,
                 snapshot: None,
                 shape: None,
-                inputs: Vec::new(),
                 capture_pending: false,
                 by: None,
                 reason: None,
@@ -2452,73 +2423,6 @@ mod tests {
         assert!(!signatures_current(&plan.acceptance[0]));
     }
 
-    fn frozen_tree() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("sqwai-freeze-{}", new_id()));
-        std::fs::create_dir_all(dir.join("tests")).unwrap();
-        std::fs::create_dir_all(dir.join("src")).unwrap();
-        std::fs::create_dir_all(dir.join("target")).unwrap();
-        std::fs::write(dir.join("tests/auth.rs"), "fn t() {}\n").unwrap();
-        std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
-        std::fs::write(dir.join("target/cached.rlib"), "blob").unwrap();
-        dir
-    }
-
-    #[test]
-    fn freeze_check_inputs_covers_test_layout_not_build_outputs() {
-        let dir = frozen_tree();
-        let inputs = freeze_check_inputs(&dir);
-        assert_eq!(
-            inputs.iter().map(|i| i.path.clone()).collect::<Vec<_>>(),
-            vec!["tests/auth.rs".to_string()],
-            "conventional test layout in, src/ and target/ out: {inputs:?}"
-        );
-        // sorted and hashed
-        assert!(!inputs[0].hash.is_empty());
-        assert!(changed_check_inputs(&dir, &inputs).is_empty());
-
-        // edit and deletion both read as changed
-        std::fs::write(dir.join("tests/auth.rs"), "fn t() {}\nfn u() {}\n").unwrap();
-        assert_eq!(
-            changed_check_inputs(&dir, &inputs),
-            vec!["tests/auth.rs".to_string()]
-        );
-        std::fs::remove_file(dir.join("tests/auth.rs")).unwrap();
-        assert_eq!(
-            changed_check_inputs(&dir, &inputs),
-            vec!["tests/auth.rs".to_string()]
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn frozen_input_paths_skip_waived_items() {
-        let mut plan = create(
-            "frozen".to_string(),
-            Vec::new(),
-            vec![
-                "cmd: cargo test".to_string(),
-                "cmd: cargo clippy".to_string(),
-            ],
-            vec![NewStep {
-                title: "do the work".to_string(),
-                refs: Vec::new(),
-            }],
-            0,
-            &Limits::default(),
-        )
-        .unwrap();
-        let inputs = vec![CheckInput {
-            path: "tests/a.rs".to_string(),
-            hash: "h".to_string(),
-            blob: None,
-        }];
-        set_inputs(&mut plan, vec![inputs.clone(), inputs]);
-        assert_eq!(frozen_input_paths(&plan).len(), 2);
-        plan.acceptance[0].status = AcceptanceStatus::Waived;
-        // waiving takes responsibility: the item's inputs unfreeze
-        assert_eq!(frozen_input_paths(&plan), vec!["tests/a.rs".to_string()]);
-    }
-
     fn rung_of(text: &str) -> Option<Rung> {
         ladder_rung(&Acceptance {
             text: text.to_string(),
@@ -2528,7 +2432,6 @@ mod tests {
             baseline: None,
             snapshot: None,
             shape: None,
-            inputs: Vec::new(),
             capture_pending: false,
             by: None,
             reason: None,
@@ -2552,34 +2455,6 @@ mod tests {
         // manual and free text engage no rung
         assert_eq!(rung_of("manual: eyeball it"), None);
         assert_eq!(rung_of("the page renders"), None);
-    }
-
-    #[test]
-    fn ladder_walk_stops_at_the_highest_trust_rung() {
-        let mut plan = create(
-            "walk the ladder".to_string(),
-            Vec::new(),
-            vec![
-                "manual: eyeball it".to_string(),
-                "cmd: ./run-fixture.sh".to_string(),
-                "snapshot: mycli --version".to_string(),
-            ],
-            vec![NewStep {
-                title: "do the work".to_string(),
-                refs: Vec::new(),
-            }],
-            0,
-            &Limits::default(),
-        )
-        .unwrap();
-        assert_eq!(ladder_top(&plan), Some(Rung::Snapshot));
-        assert!(ladder_note(&plan).contains("rung 4 snapshot"));
-        assert!(render(&plan).contains("[rung 4 snapshot]"));
-        assert!(render(&plan).contains("[rung 8 fixture]"));
-        // manual only: no rung to stand on
-        plan.acceptance.retain(|item| ladder_rung(item).is_none());
-        assert_eq!(ladder_top(&plan), None);
-        assert!(ladder_note(&plan).contains("no executable rung"));
     }
 
     #[test]
@@ -2819,38 +2694,6 @@ mod tests {
             .unwrap()
             .expect("active plan");
         assert_eq!(same.applied_event, cursor);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn rebaseline_input_updates_hash_blob_and_stales_passed() {
-        let dir = std::env::temp_dir().join(format!("sqwai-plan-rebase-{}", new_id()));
-        std::fs::create_dir_all(dir.join("tests")).unwrap();
-        std::fs::write(dir.join("tests/f.rs"), "fn f() {}\n").unwrap();
-        let mut plan = new_plan();
-        plan.sessions = vec!["sess".to_string()];
-        set_inputs(&mut plan, vec![freeze_check_inputs(&dir)]);
-        // pretend the check passed on the frozen content
-        plan.acceptance[0].validation.status = ValidationStatus::Passed;
-        store(&dir, &plan).unwrap();
-        let before = plan.acceptance[0].inputs[0].hash.clone();
-        assert!(plan.acceptance[0].inputs[0].blob.is_some());
-        // pure addition: the extended file becomes the new baseline
-        std::fs::write(dir.join("tests/f.rs"), "fn f() {}\n#[test]\nfn g() {}\n").unwrap();
-        assert!(rebaseline_input(&dir, "sess", "tests/f.rs"));
-        let reloaded = open_active_for_session(&dir, Some("sess"))
-            .unwrap()
-            .expect("active plan");
-        assert_ne!(reloaded.acceptance[0].inputs[0].hash, before);
-        assert_eq!(
-            reloaded.acceptance[0].validation.status,
-            ValidationStatus::Stale,
-            "a check changed under green must run again"
-        );
-        assert!(reloaded.applied_event.is_some(), "rebaseline commits");
-        // unknown path and missing session: silent no-ops
-        assert!(!rebaseline_input(&dir, "sess", "tests/nope.rs"));
-        assert!(!rebaseline_input(&dir, "other", "tests/f.rs"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

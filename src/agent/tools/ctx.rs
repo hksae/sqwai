@@ -86,7 +86,6 @@ pub struct ToolCtx {
     /// dialog (additive writes never land here — they flow without asking).
     /// Checked by dispatch; the loop owns the lifetime (one-shot vs session
     /// grants), so blocking dispatch clones never need merging back.
-    pub approved_frozen: Vec<String>,
     /// Slow baseline capture (baselines, snapshots, differentials) is
     /// deferred to a background worker instead of blocking the tool call.
     /// Set by the interactive loop; tests and headless runs keep the
@@ -122,7 +121,6 @@ impl ToolCtx {
             subagent_write_paths: None,
             parent_session: None,
             blocked_patterns: Vec::new(),
-            approved_frozen: Vec::new(),
             background_baselines: false,
         }
     }

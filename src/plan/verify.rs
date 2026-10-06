@@ -1,8 +1,7 @@
 use super::ops::{accept, reject};
 use super::{
-    Acceptance, AcceptanceKind, AcceptanceStatus, Applied, Baseline, CheckInput, EvidenceRef, Plan,
-    PlanStatus, Receipt, Rejection, ShapeFreeze, Snapshot, StepStatus, ValidationStatus, commit,
-    open_active_for_session,
+    Acceptance, AcceptanceKind, AcceptanceStatus, Applied, Baseline, EvidenceRef, Plan, PlanStatus,
+    Receipt, Rejection, ShapeFreeze, Snapshot, StepStatus, ValidationStatus,
 };
 use std::path::Path;
 
@@ -192,24 +191,6 @@ fn classify_command_rung(command: &str) -> Rung {
     }
 }
 
-/// The walk itself: the highest-trust rung the plan engages, if any.
-pub fn ladder_top(plan: &Plan) -> Option<Rung> {
-    plan.acceptance.iter().filter_map(ladder_rung).min()
-}
-
-/// One trailing line for the plan-create/accept result: where on the
-/// ladder this plan stands.
-pub fn ladder_note(plan: &Plan) -> String {
-    match ladder_top(plan) {
-        Some(rung) => format!(
-            "\nladder: rung {} {} — highest-trust executable acceptance",
-            rung.number(),
-            rung.name()
-        ),
-        None => "\nladder: no executable rung — manual/text only".to_string(),
-    }
-}
-
 /// Rung 5: does this item carry frozen declaration shapes to compare
 /// against? True only for a `signatures:` item whose shapes were frozen
 /// against the file set it still names — renaming the set makes a new
@@ -248,170 +229,6 @@ pub fn set_shapes(plan: &mut Plan, shapes: Vec<Option<ShapeFreeze>>) {
     for (item, shape) in plan.acceptance.iter_mut().zip(shapes) {
         item.shape = shape;
     }
-}
-
-/// Host-only: attach frozen check inputs, positional like [`set_baselines`].
-pub fn set_inputs(plan: &mut Plan, inputs: Vec<Vec<CheckInput>>) {
-    for (item, item_inputs) in plan.acceptance.iter_mut().zip(inputs) {
-        item.inputs = item_inputs;
-    }
-}
-
-/// Re-freeze one path across the session's active plan after an approved
-/// or additive edit: new hash + new blob for every item pinning it, and
-/// Passed validations drop to Stale — the check changed under a green
-/// verdict, so it must run again. Committed journal-first (op
-/// `rebaseline`, actor `host`), like every other plan mutation.
-/// Returns true when anything changed.
-pub fn rebaseline_input(root: &Path, session_id: &str, path: &str) -> bool {
-    let mut plan = match open_active_for_session(root, Some(session_id)) {
-        Ok(Some(plan)) => plan,
-        _ => return false,
-    };
-    let bytes = match std::fs::read(root.join(path)) {
-        Ok(bytes) => bytes,
-        Err(_) => return false,
-    };
-    let hash = blake3::hash(&bytes).to_hex().to_string();
-    let blob = (bytes.len() <= CHECK_INPUT_MAX_BLOB_BYTES)
-        .then(|| crate::agent::blobs::put(root, &bytes).ok())
-        .flatten();
-    let mut changed = false;
-    for item in plan.acceptance.iter_mut().filter(|item| {
-        item.status != AcceptanceStatus::Waived
-            && item.inputs.iter().any(|input| input.path == path)
-    }) {
-        let mut item_changed = false;
-        for input in item.inputs.iter_mut().filter(|input| input.path == path) {
-            if input.hash != hash || input.blob != blob {
-                input.hash = hash.clone();
-                input.blob = blob.clone();
-                item_changed = true;
-            }
-        }
-        if item_changed {
-            changed = true;
-            if item.validation.status == ValidationStatus::Passed {
-                item.validation.status = ValidationStatus::Stale;
-            }
-        }
-    }
-    if !changed {
-        return false;
-    }
-    plan.revision += 1;
-    plan.rejections_in_a_row = 0;
-    commit(
-        root,
-        session_id,
-        &mut plan,
-        "rebaseline",
-        "host",
-        true,
-        serde_json::json!({"path": path}),
-    )
-    .is_ok()
-}
-
-/// Directories whose whole subtrees are check inputs by convention.
-const CHECK_INPUT_DIRS: &[&str] = &["tests", "test", "spec", "specs", "fixtures", "snapshots"];
-
-/// Walked but never frozen (or even descended into): VCS, host state,
-/// build outputs.
-const CHECK_INPUT_SKIPS: &[&str] = &[".git", ".sqwai", "target", "node_modules"];
-
-/// Caps: freezing is plan-time overhead on every create.
-const CHECK_INPUT_MAX_FILES: usize = 500;
-const CHECK_INPUT_MAX_BYTES: u64 = 2_000_000;
-/// Blob storage cap per input: content over this keeps its hash but no
-/// copy — additive checks need the bytes, so oversized inputs fall back
-/// to refuse rather than a wrong allow.
-const CHECK_INPUT_MAX_BLOB_BYTES: usize = 256 * 1024;
-
-/// Hash the check inputs that exist right now: test and fixture files by
-/// conventional layout. Sorted for determinism. Only pre-existing files
-/// are listed — new test files are always allowed (rung 2 lives on that).
-///
-/// Known gap, documented not hidden: Rust unit tests live inside `src/`
-/// (`#[cfg(test)]`), which no glob can isolate from the code under test.
-/// Those are covered by the confirm-gate on write, not by this freeze.
-pub fn freeze_check_inputs(root: &Path) -> Vec<CheckInput> {
-    let mut paths = Vec::new();
-    collect_check_inputs(root, root, &mut paths);
-    paths.sort();
-    paths
-        .into_iter()
-        .take(CHECK_INPUT_MAX_FILES)
-        .filter_map(|path| {
-            let bytes = std::fs::read(root.join(&path)).ok()?;
-            if bytes.len() as u64 > CHECK_INPUT_MAX_BYTES {
-                return None;
-            }
-            let blob = (bytes.len() <= CHECK_INPUT_MAX_BLOB_BYTES)
-                .then(|| crate::agent::blobs::put(root, &bytes).ok())
-                .flatten();
-            Some(CheckInput {
-                path,
-                hash: blake3::hash(&bytes).to_hex().to_string(),
-                blob,
-            })
-        })
-        .collect()
-}
-
-fn collect_check_inputs(root: &Path, dir: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if path.is_dir() {
-            if CHECK_INPUT_SKIPS.contains(&name.as_str()) {
-                continue;
-            }
-            collect_check_inputs(root, &path, out);
-            continue;
-        }
-        let rel = match path.strip_prefix(root) {
-            Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
-            Err(_) => continue,
-        };
-        if is_check_input(&rel, &name) {
-            out.push(rel);
-        }
-    }
-}
-
-fn is_check_input(rel: &str, name: &str) -> bool {
-    if rel.split('/').any(|comp| CHECK_INPUT_DIRS.contains(&comp)) {
-        return true;
-    }
-    let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name);
-    stem.starts_with("test_") || stem.ends_with("_test") || name.ends_with(".snap")
-}
-
-/// Re-hash frozen inputs; returns the paths that changed or vanished.
-/// Empty means the check still runs against what was frozen.
-pub fn changed_check_inputs(root: &Path, inputs: &[CheckInput]) -> Vec<String> {
-    inputs
-        .iter()
-        .filter(|input| match std::fs::read(root.join(&input.path)) {
-            Ok(bytes) => blake3::hash(&bytes).to_hex().to_string() != input.hash,
-            Err(_) => true,
-        })
-        .map(|input| input.path.clone())
-        .collect()
-}
-
-/// Paths no model write may touch without the user taking responsibility:
-/// frozen inputs of every non-waived acceptance item. Waiving unfreezes.
-pub fn frozen_input_paths(plan: &Plan) -> Vec<String> {
-    plan.acceptance
-        .iter()
-        .filter(|item| item.status != AcceptanceStatus::Waived)
-        .flat_map(|item| item.inputs.iter().map(|input| input.path.clone()))
-        .collect()
 }
 
 /// Mark an acceptance item verified on the host's terms.

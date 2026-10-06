@@ -3997,22 +3997,6 @@ Continue from the pending step, or report to the user if the settled work looks 
                     before,
                     after,
                 } => self.note_compaction(summarized, before, after),
-                AgentEvent::BaselineProgress { command, done } => {
-                    // slow baseline captures run behind the turn: the start
-                    // toast says what is running (no more silent minutes),
-                    // the finish toast says it landed (the plan panel shows
-                    // live [capturing…] markers meanwhile)
-                    let (text, kind) = if done {
-                        (format!("baseline captured: {command}"), StatusKind::Ok)
-                    } else {
-                        (
-                            format!("capturing baseline in background: {command}"),
-                            StatusKind::Info,
-                        )
-                    };
-                    self.status(&text, kind);
-                    self.dirty = true;
-                }
                 AgentEvent::TranscriptSync { messages, summary } => {
                     self.persist_transcript(messages, summary)
                 }
@@ -5506,14 +5490,14 @@ Continue from the pending step, or report to the user if the settled work looks 
         // plan, so the revert must be scoped to this plan, not scanned
         // project-wide (no plan → the old unscoped scan, nothing better)
         let plan_id =
-            crate::plan::open_active_for_session(&root, Some(&self.session.id.to_string()))
+            crate::plan::open_active_for_session(root, Some(&self.session.id.to_string()))
                 .ok()
                 .flatten()
                 .map(|plan| plan.id);
         // no plan to scope to → the old unscoped scan (nothing better exists)
         let revert = match &plan_id {
-            Some(pid) => crate::agent::journal::Journal::step_pre_images_in(&root, Some(pid), step),
-            None => crate::agent::journal::Journal::step_pre_images(&root, step),
+            Some(pid) => crate::agent::journal::Journal::step_pre_images_in(root, Some(pid), step),
+            None => crate::agent::journal::Journal::step_pre_images(root, step),
         };
         let revert = match revert {
             Ok(revert) => revert,
@@ -5541,14 +5525,14 @@ Continue from the pending step, or report to the user if the settled work looks 
             None => return,
         };
 
-        match crate::agent::checkpoints::restore_from_blobs(&root, &revert.files) {
+        match crate::agent::checkpoints::restore_from_blobs(root, &revert.files) {
             Ok(report) => {
                 let touched = report.touched();
                 let mut reopened: Vec<String> = Vec::new();
                 // the same plan the revert was scoped to: reopening anything
                 // else would attach this session's undo to foreign work
                 if let Some(pid) = &plan_id
-                    && let Ok(mut active) = crate::plan::open(&root, pid)
+                    && let Ok(mut active) = crate::plan::open(root, pid)
                     && crate::plan::reopen_for_undo(
                         &mut active,
                         step,
@@ -5561,14 +5545,14 @@ Continue from the pending step, or report to the user if the settled work looks 
                         "reason": format!("reopened by undo of step {step}"),
                     });
                     let sid = self.session.id.to_string();
-                    if crate::plan::commit(&root, &sid, &mut active, "reopen", "host", true, args)
+                    if crate::plan::commit(root, &sid, &mut active, "reopen", "host", true, args)
                         .is_ok()
                     {
                         reopened.push(step.to_string());
                     }
                 }
                 if let Ok(mut journal) =
-                    crate::agent::journal::Journal::open(&root, &self.session.id.to_string())
+                    crate::agent::journal::Journal::open(root, &self.session.id.to_string())
                 {
                     // host-written, like every other undo record (§2.2.2)
                     journal.set_attribution(None, None, "host");

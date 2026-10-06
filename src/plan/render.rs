@@ -365,9 +365,6 @@ pub fn render_status(plan: &Plan) -> String {
             if matches!(a.kind(), AcceptanceKind::Signatures(_)) && !signatures_current(a) {
                 out.push_str(" [no signatures]");
             }
-            if !a.inputs.is_empty() {
-                out.push_str(&format!(" [inputs: {}]", a.inputs.len()));
-            }
             out.push('\n');
         }
     }

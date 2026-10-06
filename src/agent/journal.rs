@@ -59,13 +59,6 @@ pub struct Record {
     pub fields: serde_json::Map<String, Value>,
 }
 
-/// True when a resolved evidence record still belongs to the step's current
-/// epoch: unstamped records predate epochs (or come from the main agent)
-/// and always count.
-pub fn epoch_matches(record: &Record, step_epoch: u64) -> bool {
-    record.epoch.is_none_or(|epoch| epoch == step_epoch)
-}
-
 pub struct Journal {
     path: PathBuf,
     file: File,
@@ -232,21 +225,6 @@ impl Journal {
             crate::plan::store(root, &active)?;
         }
         Ok(seq)
-    }
-
-    /// Record a host-run check bound to the exact state it verified (§2.1.4).
-    /// `details` carries the receipt fields (check_definition_hash, runner,
-    /// command, args, cwd, started_at, finished_at, state_before,
-    /// state_after, state_digest, exit, output_hash, paths); the acceptance
-    /// id is stamped here so callers cannot mislabel it.
-    pub fn append_verification_receipt(
-        &mut self,
-        acceptance: usize,
-        details: Value,
-    ) -> Result<u64> {
-        let mut map = details.as_object().cloned().unwrap_or_default();
-        map.insert("acceptance_id".to_string(), Value::from(acceptance as u64));
-        self.append("verification_receipt", Value::Object(map))
     }
 
     #[allow(dead_code)]
@@ -735,15 +713,6 @@ impl Journal {
             }
         }
         Ok(found)
-    }
-
-    /// Return the journal sequence of a step's host-recorded start operation.
-    ///
-    /// Cross-session `seq > start` is disabled: `seq` is per-file, so the global
-    /// max mixes unrelated files and falsely invalidates evidence (e.g. `6 > 112`).
-    /// See `evidence` — it still checks `plan`/`step`/`kind`.
-    pub fn step_started_at(_root: &Path, _plan: &str, _step: &str) -> Result<Option<u64>> {
-        Ok(None)
     }
 
     /// Per-session timestamp check as **warn** (not `invalid_evidence`).
@@ -1862,45 +1831,6 @@ mod tests {
         assert!(journal.append("bad", json!("nope")).is_err());
         fs::remove_dir_all(root).ok();
     }
-
-    #[test]
-    fn verification_receipt_records_the_check() {
-        let root = root();
-        let mut journal = Journal::open(&root, "verify").unwrap();
-        let seq = journal
-            .append_verification_receipt(
-                0,
-                json!({
-                    "state_digest": "digest-abc",
-                    "command": "cargo test",
-                    "exit": 0,
-                    "output_hash": "outhash",
-                }),
-            )
-            .unwrap();
-        let records = Journal::records_for(&root, "verify").unwrap();
-        let record = records.iter().find(|r| r.seq == seq).unwrap();
-        assert_eq!(record.kind, "verification_receipt");
-        assert_eq!(
-            record.fields.get("acceptance_id").and_then(Value::as_u64),
-            Some(0)
-        );
-        assert_eq!(
-            record.fields.get("state_digest").and_then(Value::as_str),
-            Some("digest-abc")
-        );
-        assert_eq!(
-            record.fields.get("command").and_then(Value::as_str),
-            Some("cargo test")
-        );
-        assert_eq!(record.fields.get("exit").and_then(Value::as_i64), Some(0));
-        assert_eq!(
-            record.fields.get("output_hash").and_then(Value::as_str),
-            Some("outhash")
-        );
-        fs::remove_dir_all(root).ok();
-    }
-
     #[test]
     fn stale_evidence_warnings_checks_sequence_boundary() {
         let root = root();
@@ -1977,9 +1907,6 @@ mod tests {
         let by_seq = |seq| records.iter().find(|r| r.seq == seq).unwrap().epoch;
         assert_eq!(by_seq(plain), None);
         assert_eq!(by_seq(stamped), Some(3));
-        assert!(epoch_matches(&records[1], 3));
-        assert!(!epoch_matches(&records[1], 4));
-        assert!(epoch_matches(&records[0], 99));
         fs::remove_dir_all(root).ok();
     }
 

@@ -1,8 +1,8 @@
 use super::{
-    Baseline, CheckInput, EvidenceRef, Limits, NewStep, Op, Plan, PlanDraftArgs, PlanStatus,
-    Receipt, Rejection, ShapeFreeze, Snapshot, add_acceptance, apply, apply_flaky,
-    apply_invalidate, attach_confirmation, create, plans_dir, reopen_for_undo, set_baselines,
-    set_goal, set_inputs, set_shapes, set_snapshots, verify_acceptance, waive, waive_constraint,
+    Baseline, EvidenceRef, Limits, NewStep, Op, Plan, PlanDraftArgs, PlanStatus, Receipt,
+    Rejection, ShapeFreeze, Snapshot, add_acceptance, apply, apply_flaky, apply_invalidate,
+    attach_confirmation, create, plans_dir, reopen_for_undo, set_baselines, set_goal, set_shapes,
+    set_snapshots, verify_acceptance, waive, waive_constraint,
 };
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -389,13 +389,6 @@ fn restore_create_riders(plan: &mut Plan, fields: &serde_json::Map<String, serde
     {
         set_snapshots(plan, snapshots);
     }
-    // check inputs ride with them: re-hashed at every verdict, never
-    // re-frozen after the work starts.
-    if let Some(value) = fields.get("inputs")
-        && let Ok(inputs) = serde_json::from_value::<Vec<Vec<CheckInput>>>(value.clone())
-    {
-        set_inputs(plan, inputs);
-    }
     // rung 5 rides with them: frozen shapes are restored, never re-read.
     if let Some(value) = fields.get("shapes")
         && let Ok(shapes) = serde_json::from_value::<Vec<Option<ShapeFreeze>>>(value.clone())
@@ -711,16 +704,6 @@ fn apply_record(
                 for (item, slot) in plan.acceptance.iter_mut().skip(start).zip(slots) {
                     if let Some(shape) = slot {
                         item.shape = Some(shape);
-                    }
-                }
-            }
-            if let Some(value) = fields.get("new_inputs")
-                && let Ok(slots) = serde_json::from_value::<Vec<Vec<CheckInput>>>(value.clone())
-            {
-                let start = plan.acceptance.len().saturating_sub(slots.len());
-                for (item, slot) in plan.acceptance.iter_mut().skip(start).zip(slots) {
-                    if !slot.is_empty() {
-                        item.inputs = slot;
                     }
                 }
             }
