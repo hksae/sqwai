@@ -2,12 +2,12 @@
 
 Thank you for your interest in contributing to sqwai!
 
-## Read the Design First
+## Read the Decisions First
 
-sqwai is built around strict execution integrity on long tasks. Before proposing architectural changes or new features, please read [DESIGN.md](DESIGN.md):
-- Reading order for newcomers: **§0 → §1 → §2 → §3**.
-- Project status and roadmaps live exclusively in **§7 (work queue)**.
-- If code and `DESIGN.md` disagree, update both in the same commit.
+sqwai is built around memory and visibility on long tasks. Before proposing architectural changes or new features, please read [Changes.md](Changes.md):
+- §0 is the mechanism test (prison vs skeleton) every change must pass.
+- §13.1 is the archive of rejected decisions — check your idea there first.
+- When a decision changes, record it in `Changes.md` with its reason.
 
 ## Core Invariants
 

@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Have an idea for sqwai? Please check [DESIGN.md](https://github.com/hksae/sqwai/blob/master/DESIGN.md) to see if it aligns with the core architecture.
+        Have an idea for sqwai? Please check [Changes.md](https://github.com/hksae/sqwai/blob/master/Changes.md) — especially §0 (the mechanism test) and §13.1 (rejected decisions) — to see if it aligns with the core architecture.
   - type: textarea
     id: problem
     attributes:

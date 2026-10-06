@@ -16,7 +16,7 @@ For a normal tool-enabled request, sqwai sends these parts in order:
 
 ## Design requirements
 
-The prompt follows DESIGN.md §6: one statement per rule, no incident-specific examples or magic thresholds, project-specific development rules in `AGENTS.md`, and host-generated blocks described with provenance rather than blanket authority.
+The prompt follows the design rules (DESIGN.md retired 2026-10-06; its §6 rules preserved in git history): one statement per rule, no incident-specific examples or magic thresholds, project-specific development rules in `AGENTS.md`, and host-generated blocks described with provenance rather than blanket authority.
 
 It defines plan workflow (start before acting, finish with summary and limitations, host-validated transitions, rejection codes) without duplicating validator thresholds — the exact evidence rules live in the `plan` tool schema — and distinguishes user-only waiver of `manual:` acceptance, describes blocked/cancelled steps, Plan-mode restrictions, assumption notes, untrusted input as task data versus host-designated project instructions, and the completion report (changed / verified / unverified-or-blocked).
 

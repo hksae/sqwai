@@ -5,9 +5,10 @@ context compaction, requires evidence before a step can be closed, and answers
 Written in Rust. Single binary. Works with Anthropic, OpenAI, OpenAI-compatible
 endpoints, and local models.
 
-> **Status.** Under active development. Unmarked features work today; anything
-> marked **[in development]** is specified in [DESIGN.md](DESIGN.md) and not
-> built yet. The work queue in DESIGN.md §7 is authoritative.
+> **Status.** Under active development. Decisions and their reasons live in
+> [Changes.md](Changes.md). DESIGN.md was retired on 2026-10-06 during the
+> simplification pass and will be rewritten from scratch once those decisions
+> are implemented.
 
 ## Quick start
 
@@ -39,7 +40,8 @@ Keys resolve from `<PROVIDER>_API_KEY` unless the config says otherwise.
 - **Answers from the journal.** History, undo, diary and disputes read an
   append-only event log of what actually happened.
 
-How each of these works is in [DESIGN.md](DESIGN.md).
+How each of these works is in [Changes.md](Changes.md) until the new DESIGN.md
+lands.
 
 ## Project layout
 

@@ -13,4 +13,4 @@ Closes #
 - [ ] Tests pass (`cargo test --locked`)
 - [ ] Code is formatted and passes clippy (`cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`)
 - [ ] Verified TUI invariants (narrow terminal, Unicode column widths) if UI was modified
-- [ ] Updated `DESIGN.md` if architectural changes or state transitions were introduced
+- [ ] Updated `Changes.md` if a decision changed or a new one was made
