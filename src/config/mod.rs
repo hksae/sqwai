@@ -880,14 +880,6 @@ impl Default for UndoConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum PlanFirstMode {
-    #[default]
-    Soft,
-    Off,
-}
-
 /// `[plan]` — the host's own limits on the structured plan (§5.9).
 ///
 /// These are host values on purpose. The plan budget used to be computed from
@@ -905,16 +897,6 @@ pub struct PlanConfig {
     /// to update the plan
     #[serde(default = "default_plan_nudge_after")]
     pub nudge_after: usize,
-    /// plan-first gate: in Act mode, first mutating tool call without an active plan
-    /// requires a plan first unless user message is heuristic-trivial
-    #[serde(default)]
-    pub plan_first: PlanFirstMode,
-    /// strict steps: `plan finish` additionally demands host-recorded
-    /// evidence of successful work on the step. Off by default — soft
-    /// steps close on a summary alone, and progress is read from receipts.
-    /// For weak models, small windows, and unattended work.
-    #[serde(default)]
-    pub strict: bool,
 }
 
 impl Default for PlanConfig {
@@ -923,8 +905,6 @@ impl Default for PlanConfig {
             budget_ratio: default_plan_budget_ratio(),
             max_steps: default_plan_max_steps(),
             nudge_after: default_plan_nudge_after(),
-            plan_first: PlanFirstMode::default(),
-            strict: false,
         }
     }
 }
@@ -2443,6 +2423,7 @@ token_budget = 500
 
 [plan]
 max_steps = 5
+budget_ratio = 0.9
 plan_first = "off"
 
 [safety]
@@ -2458,8 +2439,13 @@ provider = "p"
         let notes = cfg.apply_project_overrides(dir.path());
         assert_eq!(cfg.diary.token_budget, 500);
         assert_eq!(cfg.plan.max_steps, 5);
-        // not allowlisted: values untouched, but reported
-        assert_eq!(cfg.plan.plan_first, PlanFirstMode::Soft);
+        // allowlisted keys land
+        assert!(
+            (cfg.plan.budget_ratio - 0.9).abs() < 1e-9,
+            "budget_ratio is allowlisted: {}",
+            cfg.plan.budget_ratio
+        );
+        // not allowlisted: reported, never applied
         assert!(
             notes.iter().any(|n| n.contains("plan.plan_first")),
             "{notes:?}"
@@ -2491,7 +2477,7 @@ provider = "p"
     }
 
     #[test]
-    fn test_model_config_fallback_and_plan_first_deserialization() {
+    fn test_model_config_fallback_deserialization() {
         let toml_str = r#"
             [models.primary]
             provider = "openai"
@@ -2505,18 +2491,10 @@ provider = "p"
             id = "claude-3-5-sonnet"
             context = 200000
             effort = "off"
-
-            [plan]
-            plan_first = "off"
         "#;
         let cfg: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.models["primary"].fallback.as_deref(), Some("secondary"));
         assert_eq!(cfg.models["secondary"].fallback, None);
-        assert_eq!(cfg.plan.plan_first, PlanFirstMode::Off);
-
-        // Test default plan_first is Soft
-        let default_plan: PlanConfig = toml::from_str("").unwrap();
-        assert_eq!(default_plan.plan_first, PlanFirstMode::Soft);
     }
 
     #[test]

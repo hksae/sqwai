@@ -5,7 +5,7 @@
 //! receiving user interaction answers (ask_user, dangerous-command approval)
 //! back through the [`ControlMsg`] channel. Aborting the task stops the agent.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use sha2::Digest;
@@ -366,55 +366,6 @@ pub fn spawn_agent(input: AgentInput) -> AgentHandle {
         abort,
         cancel,
     }
-}
-
-/// Heuristic check for trivial user prompts (§2.1.9, §7 W).
-///
-/// In ACT mode, unprompted file mutations without an active plan require
-/// a plan first (`plan_required`) unless the prompt is trivial:
-/// e.g. single-file typo fixes, simple renames, comments, whitespace,
-/// or very short, non-complex requests affecting <= 1 file.
-/// Gate input: an active plan only counts when it carries acceptance.
-/// A plan without criteria settles nothing, so mutating under one is the
-/// same as mutating without a plan. #171 still applies — one active plan
-/// per project (§2.1.1), a global check; session-scoped resolution stays
-/// strict everywhere else.
-fn plan_with_acceptance(root: &Path) -> bool {
-    crate::plan::open_active(root)
-        .ok()
-        .flatten()
-        .is_some_and(|plan| !plan.acceptance.is_empty())
-}
-
-/// Refusal body for the plan-first gate. The gate asks "is there a
-/// criterion", not "is there a plan": when one already exists but settles
-/// nothing, telling the model to create another sends it into a
-/// plan_exists refusal followed by a plan-show reassurance loop (seen
-/// live). Name the real next step instead.
-fn plan_required_refusal(root: &Path) -> serde_json::Value {
-    let bare_plan = crate::plan::open_active(root)
-        .ok()
-        .flatten()
-        .filter(|plan| plan.acceptance.is_empty())
-        .map(|plan| plan.id);
-    let (reason, hint) = match bare_plan {
-        Some(id) => (
-            format!(
-                "In ACT mode, mutating tools require acceptance criteria first. Plan {id} is active but settles nothing yet — add executable (cmd:) or human (manual:) criteria with 'plan add_acceptance' (free-text notes go to checklist) before modifying project files."
-            ),
-            "Call 'plan add_acceptance' with items for the active plan; do not create another one.".to_string(),
-        ),
-        None => (
-            "In ACT mode, mutating tools require an active plan with acceptance criteria first. Create a plan with 'plan create' (acceptance: cmd: for executable checks, manual: for human checks, free-text notes go to checklist) before modifying project files.".to_string(),
-            "Call 'plan create' with your goal, acceptance criteria, and initial steps.".to_string(),
-        ),
-    };
-    serde_json::json!({
-        "ok": false,
-        "code": "plan_required",
-        "reason": reason,
-        "hint": hint,
-    })
 }
 
 /// Advisory repeat note for a bash outcome: when the same command already
@@ -1317,19 +1268,6 @@ async fn run_agent(
                     })
                     .await;
 
-                // Soft plan discipline (§2.1.9): a single-file mutation
-                // without an acceptance-bearing plan proceeds — the advisory
-                // nudge attaches to a successful outcome below. Multi-file
-                // and opaque mutations take the hard refusal above instead.
-                let plan_nudge = !plan_mode
-                    && subagent_depth == 0
-                    && !crate::bench::baseline()
-                    && plan_limits.plan_first == crate::config::PlanFirstMode::Soft
-                    && tools::is_mutating_call(&call.name, &call.args)
-                    && call.name != "plan"
-                    && !tools::is_readonly_bash(&call.name, &call.args)
-                    && !tools::is_multi_file_mutation(&call.name, &call.args)
-                    && !plan_with_acceptance(&root);
                 let mut outcome = if pre_cancelled {
                     tools::Outcome::cancelled()
                 } else if read_only && tools::is_mutating_call(&call.name, &call.args) {
@@ -1345,29 +1283,6 @@ async fn run_agent(
                      user to switch to ACT (Tab) before changing anything.",
                         call.name
                     ))
-                } else if !plan_mode
-                && subagent_depth == 0
-                && !crate::bench::baseline()
-                && plan_limits.plan_first == crate::config::PlanFirstMode::Soft
-                && tools::is_mutating_call(&call.name, &call.args)
-                && call.name != "plan"
-                // read-only inspection needs no plan: Get-Process/netstat
-                // style diagnostics run free (advisory classification —
-                // approvals still guard real damage, see is_readonly_bash)
-                && !tools::is_readonly_bash(&call.name, &call.args)
-                // Hard path: multi-file or opaque-target mutations are still
-                // refused without an acceptance-bearing plan. Single-file
-                // writes fall through to dispatch with an advisory nudge
-                // attached below (soft discipline, §2.1.9).
-                && tools::is_multi_file_mutation(&call.name, &call.args)
-                // The gate asks "is there a criterion", not "is there a
-                // plan" and not "is the prose trivial": before the first
-                // mutation an acceptance item must exist — executable or
-                // human — so there is something to settle against. One
-                // active plan per project (§2.1.1).
-                && !plan_with_acceptance(&root)
-                {
-                    tools::Outcome::err(plan_required_refusal(&root).to_string())
                 } else {
                     match call.name.as_str() {
                         "ask_user" if subagent_depth > 0 => tools::Outcome::err(
@@ -1598,18 +1513,6 @@ async fn run_agent(
                 // "only if the tree changed since the previous snapshot" — that
                 // is exactly the condition §3.7 asks for, so it is read from
                 // there rather than reimplemented.
-                // Soft discipline, kept visible: the mutation went through
-                // without acceptance criteria backing it. First line, so it
-                // lands in the journal summary and the model reads it before
-                // the output. Failed calls mutated nothing — no nudge.
-                if plan_nudge && outcome.ok {
-                    outcome.output = format!(
-                        "[host nudge: single-file mutation without an acceptance-bearing plan — \
-                         create one with plan create (goal, steps, optional acceptance) so the \
-                         work settles against criteria. Proceeding anyway.]\n{}",
-                        outcome.output
-                    );
-                }
                 if outcome.cancelled
                     && call.name == "bash"
                     && let Ok(Some(sha)) = checkpoints::snapshot_session(
@@ -2701,50 +2604,6 @@ mod effort_tests {
         }
     }
 
-    #[test]
-    fn test_plan_with_acceptance_gate_input() {
-        // the gate asks "is there a criterion", not "is there a plan" and
-        // not "is the prose trivial": an active plan counts only with
-        // acceptance items on it.
-        let dir = std::env::temp_dir().join(format!("sqwai-gate-{}", crate::plan::new_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        assert!(!plan_with_acceptance(&dir), "no plan at all");
-
-        let mut plan = crate::plan::create(
-            "goal".to_string(),
-            Vec::new(),
-            Vec::new(),
-            vec![crate::plan::NewStep {
-                title: "step".to_string(),
-                refs: Vec::new(),
-            }],
-            0,
-            &crate::plan::Limits::default(),
-        )
-        .unwrap();
-        crate::plan::store(&dir, &plan).unwrap();
-        assert!(
-            !plan_with_acceptance(&dir),
-            "a plan without acceptance settles nothing"
-        );
-
-        plan.acceptance.push(crate::plan::Acceptance {
-            text: "cmd: cargo test".to_string(),
-            status: crate::plan::AcceptanceStatus::Pending,
-            evidence: Vec::new(),
-            validation: Default::default(),
-            baseline: None,
-            snapshot: None,
-            shape: None,
-            capture_pending: false,
-            by: None,
-            reason: None,
-        });
-        crate::plan::store(&dir, &plan).unwrap();
-        assert!(plan_with_acceptance(&dir));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     struct MockTestProvider {
         events: std::sync::Mutex<Vec<Vec<crate::providers::StreamResult>>>,
     }
@@ -3791,368 +3650,6 @@ mod effort_tests {
         assert!(kept.contains("truncated to fit"), "{kept:?}");
     }
 
-    #[tokio::test]
-    async fn test_plan_first_gate_blocks_and_allows_mutations() {
-        // 1. Single-file write without a plan: proceeds with an advisory
-        // nudge (soft discipline) instead of the old refusal
-        let blocked_provider = std::sync::Arc::new(MockTestProvider {
-            events: std::sync::Mutex::new(vec![
-                vec![Ok(crate::providers::StreamEvent::ToolCall(
-                    crate::providers::ToolCallReq::new(
-                        "c1",
-                        "write",
-                        serde_json::json!({
-                            "file_path": "new_feature.rs",
-                            "content": "pub fn hello() {}"
-                        }),
-                    ),
-                ))],
-                vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
-            ]),
-        });
-
-        let temp_dir =
-            std::env::temp_dir().join(format!("sqwai-test-planfirst-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let input = AgentInput {
-            provider: blocked_provider,
-            model_id: "m".into(),
-            model_key: "primary".into(),
-            effort: None,
-            effort_support: crate::config::EffortSupport::default(),
-            max_tokens: None,
-            system: vec![],
-            messages: vec![Message::new(
-                Role::User,
-                "implement new authentication feature",
-            )],
-            root: temp_dir.clone(),
-            session_id: "test-plan-first-sess".into(),
-            blocked_patterns: vec![],
-            plan_mode: false,
-            context_limit: 10000,
-            enable_tools: true,
-            background_baselines: false,
-            read_only: false,
-            previous_response_id: None,
-            summary: None,
-            mcp: Default::default(),
-            lsp: Default::default(),
-            compact_only: false,
-            diary: Default::default(),
-            memory: Default::default(),
-            compaction: Default::default(),
-            plan_limits: crate::config::PlanConfig {
-                plan_first: crate::config::PlanFirstMode::Soft,
-                ..Default::default()
-            },
-            shadow_store: crate::config::ShadowStore::Off,
-            subagent_depth: 0,
-            parent_step: None,
-            parent_session: None,
-            fallback_chain: vec![],
-        };
-
-        let mut handle = spawn_agent(input);
-        let mut saw_tool_notice = false;
-
-        while let Some(ev) = handle.rx.recv().await {
-            match ev {
-                AgentEvent::ToolNotice { name, ok, .. } => {
-                    assert_eq!(name, "write");
-                    assert!(ok, "single-file write proceeds with a nudge, not a refusal");
-                    saw_tool_notice = true;
-                }
-                AgentEvent::Completed(Ok(outcome)) => {
-                    if let Some(tool_msg) = outcome.messages.iter().find(|m| m.role == Role::Tool) {
-                        assert!(
-                            tool_msg.content.contains("host nudge"),
-                            "advisory must ride the result: {}",
-                            tool_msg.content
-                        );
-                    }
-                    break;
-                }
-                AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
-                _ => {}
-            }
-        }
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        assert!(saw_tool_notice, "should have seen tool notice");
-    }
-
-    /// Soft discipline: single-file writes proceed with a nudge whether or
-    /// not an acceptance-bearing plan exists. The hard refusal survives
-    /// only for multi-file/opaque mutations (covered by
-    /// `is_multi_file_mutation` unit tests and the patch refusal below).
-    #[tokio::test]
-    async fn test_plan_first_gate_nudges_single_file_writes() {
-        // fresh filename per session: the read-before-edit guard would
-        // otherwise refuse the second write (file exists, never read here)
-        // and mask the plan-gate verdict under test
-        async fn run_write(root: &std::path::Path, session: &str) -> bool {
-            let file = format!("gated-{session}.rs");
-            let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
-                events: std::sync::Mutex::new(vec![
-                    vec![Ok(crate::providers::StreamEvent::ToolCall(
-                        crate::providers::ToolCallReq::new(
-                            "c1",
-                            "write",
-                            serde_json::json!({
-                                "file_path": file,
-                                "content": "pub fn hello() {}"
-                            }),
-                        ),
-                    ))],
-                    vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
-                ]),
-            });
-            let temp_dir = root.to_path_buf();
-            let input = AgentInput {
-                provider,
-                model_id: "m".into(),
-                model_key: "primary".into(),
-                effort: None,
-                effort_support: crate::config::EffortSupport::default(),
-                max_tokens: None,
-                system: vec![],
-                messages: vec![Message::new(Role::User, "fix typo")],
-                root: temp_dir.clone(),
-                session_id: session.into(),
-                blocked_patterns: vec![],
-                plan_mode: false,
-                context_limit: 10000,
-                enable_tools: true,
-                background_baselines: false,
-                read_only: false,
-                previous_response_id: None,
-                summary: None,
-                mcp: Default::default(),
-                lsp: Default::default(),
-                compact_only: false,
-                diary: Default::default(),
-                memory: Default::default(),
-                compaction: Default::default(),
-                plan_limits: crate::config::PlanConfig {
-                    plan_first: crate::config::PlanFirstMode::Soft,
-                    ..Default::default()
-                },
-                shadow_store: crate::config::ShadowStore::Off,
-                subagent_depth: 0,
-                parent_step: None,
-                parent_session: None,
-                fallback_chain: vec![],
-            };
-            let mut handle = spawn_agent(input);
-            let mut wrote = false;
-            while let Some(ev) = handle.rx.recv().await {
-                match ev {
-                    AgentEvent::ToolNotice { name, ok, .. } => {
-                        assert_eq!(name, "write");
-                        wrote = ok;
-                    }
-                    AgentEvent::Completed(Ok(_)) => break,
-                    AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
-                    _ => {}
-                }
-            }
-            wrote
-        }
-
-        let temp_dir =
-            std::env::temp_dir().join(format!("sqwai-test-gate-acc-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let _ = std::fs::create_dir_all(&temp_dir);
-        // soft discipline: a single-file write without any plan proceeds
-        // (with a nudge) instead of refusing
-        assert!(run_write(&temp_dir, "sess-no-plan").await);
-        assert!(
-            temp_dir.join("gated-sess-no-plan.rs").exists(),
-            "nudged mutation still lands"
-        );
-
-        // a plan without acceptance settles nothing — but the write is
-        // single-file, so it still proceeds (nudge, not refusal)
-        let mut plan = crate::plan::create(
-            "goal".to_string(),
-            Vec::new(),
-            Vec::new(),
-            vec![crate::plan::NewStep {
-                title: "step".to_string(),
-                refs: Vec::new(),
-            }],
-            0,
-            &crate::plan::Limits::default(),
-        )
-        .unwrap();
-        crate::plan::store(&temp_dir, &plan).unwrap();
-        assert!(run_write(&temp_dir, "sess-empty-plan").await);
-
-        // any single item opens the gate — even a human one
-        plan.acceptance.push(crate::plan::Acceptance {
-            text: "manual: eyeball it".to_string(),
-            status: crate::plan::AcceptanceStatus::Pending,
-            evidence: Vec::new(),
-            validation: Default::default(),
-            baseline: None,
-            snapshot: None,
-            shape: None,
-            capture_pending: false,
-            by: None,
-            reason: None,
-        });
-        crate::plan::store(&temp_dir, &plan).unwrap();
-        assert!(run_write(&temp_dir, "sess-with-plan").await);
-        assert!(
-            temp_dir.join("gated-sess-with-plan.rs").exists(),
-            "allowed mutation must land on disk"
-        );
-        let _ = std::fs::remove_dir_all(&temp_dir);
-    }
-
-    /// The refusal names the real next step: with no plan at all it says
-    /// create; with an active plan that settles nothing it must say
-    /// add_acceptance — saying create there ends in plan_exists followed
-    /// by a plan-show reassurance loop (seen live in the COMODO session).
-    #[test]
-    fn plan_required_refusal_names_add_acceptance_for_bare_plan() {
-        let empty = std::env::temp_dir().join(format!(
-            "sqwai-gate-noplan-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&empty);
-        std::fs::create_dir_all(&empty).unwrap();
-        let refusal = plan_required_refusal(&empty);
-        assert_eq!(refusal["code"], "plan_required");
-        assert!(
-            refusal["hint"].as_str().unwrap().contains("plan create"),
-            "{refusal}"
-        );
-
-        let dir = std::env::temp_dir().join(format!(
-            "sqwai-gate-bareplan-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        let plan = crate::plan::create(
-            "bare goal".into(),
-            Vec::new(),
-            Vec::new(),
-            vec![crate::plan::NewStep {
-                title: "work".into(),
-                refs: Vec::new(),
-            }],
-            1000,
-            &crate::plan::Limits::default(),
-        )
-        .unwrap();
-        crate::plan::store(&dir, &plan).unwrap();
-        let refusal = plan_required_refusal(&dir);
-        assert_eq!(refusal["code"], "plan_required");
-        let hint = refusal["hint"].as_str().unwrap();
-        assert!(hint.contains("add_acceptance"), "{refusal}");
-        assert!(
-            !hint.contains("plan create"),
-            "must not suggest create: {refusal}"
-        );
-        assert!(
-            refusal["reason"].as_str().unwrap().contains(&plan.id),
-            "names the plan to extend: {refusal}"
-        );
-        let _ = std::fs::remove_dir_all(&empty);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Hard path survives: a two-file patch without any plan is still
-    /// refused with plan_required (the gate fires before git ever runs,
-    /// so the fixture needs no real repo state).
-    #[tokio::test]
-    async fn test_plan_first_gate_still_refuses_multi_file_patch() {
-        let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
-            events: std::sync::Mutex::new(vec![
-                vec![Ok(crate::providers::StreamEvent::ToolCall(
-                    crate::providers::ToolCallReq::new(
-                        "c1",
-                        "patch",
-                        serde_json::json!({
-                            "patch": "diff --git a/one.rs b/one.rs\n--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/two.rs b/two.rs\n--- a/two.rs\n+++ b/two.rs\n@@ -1 +1 @@\n-a\n+b\n"
-                        }),
-                    ),
-                ))],
-                vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
-            ]),
-        });
-        let temp_dir =
-            std::env::temp_dir().join(format!("sqwai-test-gate-patch-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let input = AgentInput {
-            provider,
-            model_id: "m".into(),
-            model_key: "primary".into(),
-            effort: None,
-            effort_support: crate::config::EffortSupport::default(),
-            max_tokens: None,
-            system: vec![],
-            messages: vec![Message::new(Role::User, "patch two files")],
-            root: temp_dir.clone(),
-            session_id: "sess-patch-gate".into(),
-            blocked_patterns: vec![],
-            plan_mode: false,
-            context_limit: 10000,
-            enable_tools: true,
-            background_baselines: false,
-            read_only: false,
-            previous_response_id: None,
-            summary: None,
-            mcp: Default::default(),
-            lsp: Default::default(),
-            compact_only: false,
-            diary: Default::default(),
-            memory: Default::default(),
-            compaction: Default::default(),
-            plan_limits: crate::config::PlanConfig {
-                plan_first: crate::config::PlanFirstMode::Soft,
-                ..Default::default()
-            },
-            shadow_store: crate::config::ShadowStore::Off,
-            subagent_depth: 0,
-            parent_step: None,
-            parent_session: None,
-            fallback_chain: vec![],
-        };
-        let mut handle = spawn_agent(input);
-        let mut refused = false;
-        while let Some(ev) = handle.rx.recv().await {
-            match ev {
-                AgentEvent::ToolNotice { name, ok, .. } => {
-                    assert_eq!(name, "patch");
-                    refused = !ok;
-                }
-                AgentEvent::Completed(Ok(outcome)) => {
-                    if let Some(tool_msg) = outcome.messages.iter().find(|m| m.role == Role::Tool) {
-                        assert!(
-                            tool_msg.content.contains("plan_required"),
-                            "hard refusal keeps its code: {}",
-                            tool_msg.content
-                        );
-                    }
-                    break;
-                }
-                AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
-                _ => {}
-            }
-        }
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        assert!(refused, "multi-file patch without a plan must refuse");
-    }
-
     /// `forbid-cmd:` refuses live in the turn: a forbidden shell command
     /// never executes, with a structured code pointing at the waiver.
     #[tokio::test]
@@ -4213,10 +3710,7 @@ mod effort_tests {
             diary: Default::default(),
             memory: Default::default(),
             compaction: Default::default(),
-            plan_limits: crate::config::PlanConfig {
-                plan_first: crate::config::PlanFirstMode::Soft,
-                ..Default::default()
-            },
+            plan_limits: crate::config::PlanConfig::default(),
             shadow_store: crate::config::ShadowStore::Off,
             subagent_depth: 0,
             parent_step: None,
@@ -4310,10 +3804,7 @@ mod effort_tests {
             diary: Default::default(),
             memory: Default::default(),
             compaction: Default::default(),
-            plan_limits: crate::config::PlanConfig {
-                plan_first: crate::config::PlanFirstMode::Soft,
-                ..Default::default()
-            },
+            plan_limits: crate::config::PlanConfig::default(),
             shadow_store: crate::config::ShadowStore::Off,
             subagent_depth: 0,
             parent_step: None,
@@ -4896,82 +4387,6 @@ mod effort_tests {
             results.contains(&"c1".to_string()) && results.contains(&"c2".to_string()),
             "results address both calls: {results:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn test_plan_first_gate_allows_when_mode_is_off() {
-        let provider = std::sync::Arc::new(MockTestProvider {
-            events: std::sync::Mutex::new(vec![
-                vec![Ok(crate::providers::StreamEvent::ToolCall(
-                    crate::providers::ToolCallReq::new(
-                        "c1",
-                        "write",
-                        serde_json::json!({
-                            "file_path": "foo.txt",
-                            "content": "hello"
-                        }),
-                    ),
-                ))],
-                vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
-            ]),
-        });
-
-        let temp_dir =
-            std::env::temp_dir().join(format!("sqwai-test-planfirst-off-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let input = AgentInput {
-            provider,
-            model_id: "m".into(),
-            model_key: "primary".into(),
-            effort: None,
-            effort_support: crate::config::EffortSupport::default(),
-            max_tokens: None,
-            system: vec![],
-            messages: vec![Message::new(Role::User, "implement full rewrite")],
-            root: temp_dir.clone(),
-            session_id: "test-plan-first-off-sess".into(),
-            blocked_patterns: vec![],
-            plan_mode: false,
-            context_limit: 10000,
-            enable_tools: true,
-            background_baselines: false,
-            read_only: false,
-            previous_response_id: None,
-            summary: None,
-            mcp: Default::default(),
-            lsp: Default::default(),
-            compact_only: false,
-            diary: Default::default(),
-            memory: Default::default(),
-            compaction: Default::default(),
-            plan_limits: crate::config::PlanConfig {
-                plan_first: crate::config::PlanFirstMode::Off,
-                ..Default::default()
-            },
-            shadow_store: crate::config::ShadowStore::Off,
-            subagent_depth: 0,
-            parent_step: None,
-            parent_session: None,
-            fallback_chain: vec![],
-        };
-
-        let mut handle = spawn_agent(input);
-        let mut saw_tool_notice = false;
-
-        while let Some(ev) = handle.rx.recv().await {
-            match ev {
-                AgentEvent::ToolNotice { name, ok, .. } => {
-                    assert_eq!(name, "write");
-                    assert!(ok, "mutation should be allowed when plan_first is Off");
-                    saw_tool_notice = true;
-                }
-                AgentEvent::Completed(Ok(_)) => break,
-                AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
-                _ => {}
-            }
-        }
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        assert!(saw_tool_notice, "should have seen tool notice");
     }
 }
 

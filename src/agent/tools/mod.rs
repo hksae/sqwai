@@ -24,9 +24,8 @@ pub(crate) use policy::{
     take_mention_prereads, take_subagent_scope,
 };
 pub(crate) use specs::{
-    Kind, call_args_for_journal, call_path, call_summary, decode_child_output,
-    is_multi_file_mutation, is_mutating_call, is_readonly_bash, merge_specs, tool_names,
-    tool_specs, trim_middle,
+    Kind, call_args_for_journal, call_path, call_summary, decode_child_output, is_mutating_call,
+    merge_specs, tool_names, tool_specs, trim_middle,
 };
 
 #[cfg(test)]
@@ -1032,102 +1031,6 @@ mod tests {
         assert!(!is_mutating_call("read", &json!({"file_path": "src/a.rs"})));
     }
 
-    /// Gate blast-radius classes: single-file writes go soft (nudge),
-    /// everything unknown or multi-file stays hard (refusal).
-    #[test]
-    fn multi_file_mutation_splits_soft_from_hard() {
-        use serde_json::json;
-        assert!(!is_multi_file_mutation(
-            "write",
-            &json!({"file_path": "a.rs"})
-        ));
-        assert!(!is_multi_file_mutation(
-            "edit",
-            &json!({"file_path": "a.rs"})
-        ));
-        assert!(!is_multi_file_mutation(
-            "multi_edit",
-            &json!({"file_path": "a.rs", "edits": []})
-        ));
-        assert!(!is_multi_file_mutation(
-            "patch",
-            &json!({"patch": "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n"})
-        ));
-        assert!(is_multi_file_mutation(
-            "patch",
-            &json!({"patch": "diff --git a/a.rs b/a.rs\n--- x\ndiff --git a/b.rs b/b.rs\n--- y\n"})
-        ));
-        assert!(is_multi_file_mutation("patch", &json!({})));
-        assert!(is_multi_file_mutation(
-            "patch",
-            &json!({"patch": "garbage"})
-        ));
-        assert!(is_multi_file_mutation(
-            "bash",
-            &json!({"command": "rm -rf x"})
-        ));
-        // bounded index ops go soft; the all:true variants stage the tree
-        assert!(!is_multi_file_mutation(
-            "git_stage",
-            &json!({"paths": ["src/a.rs"]})
-        ));
-        assert!(is_multi_file_mutation("git_stage", &json!({"all": true})));
-        assert!(!is_multi_file_mutation(
-            "git_commit",
-            &json!({"message": "x"})
-        ));
-        assert!(is_multi_file_mutation(
-            "git_commit",
-            &json!({"message": "x", "all": true})
-        ));
-    }
-
-    /// Read-only bash classification: the observed inspection shapes pass,
-    /// anything that could write fails closed. Advisory only — the plan
-    /// gate consults it, approvals do not.
-    #[test]
-    fn readonly_bash_covers_inspection_but_nothing_else() {
-        let bash =
-            |command: &str| is_readonly_bash("bash", &serde_json::json!({"command": command}));
-        // observed read-only shapes from a real inspection session
-        assert!(bash(
-            "powershell -NoProfile -Command \"Get-Process | Sort-Object CPU -Descending | Select-Object -First 25 Name, Id\""
-        ));
-        assert!(bash(
-            "powershell -NoProfile -Command \"Get-Process | Where-Object { $_.Path } | Select-Object Name\""
-        ));
-        assert!(bash("netstat -ano | findstr LISTENING"));
-        assert!(bash("netstat -ano | findstr ESTABLISHED"));
-        assert!(bash("schtasks /query /FO TABLE | more"));
-        assert!(bash(
-            "reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"
-        ));
-        assert!(bash("tasklist /FI \"PID eq 20912\" /FO TABLE"));
-        assert!(bash(
-            "powershell -NoProfile -Command \"Get-MpComputerStatus | Select-Object AntivirusEnabled\""
-        ));
-        // writes, chains into writes, redirect, subexpressions: all mutating
-        assert!(!bash("Get-Process; Remove-Item C:\\temp\\x"));
-        assert!(!bash("echo hi > out.txt"));
-        assert!(!bash(
-            "powershell -NoProfile -Command \"Get-Process\" | Out-File x.txt"
-        ));
-        assert!(!bash("powershell -c \"rm foo\""));
-        assert!(!bash("netstat -ano & del C:\\t"));
-        assert!(!bash("powershell -Command \"$(rm foo)\""));
-        assert!(!bash("schtasks /delete /TN x /F"));
-        assert!(!bash("reg add HKCU\\x /v y"));
-        assert!(!bash("date 01-01-25"));
-        assert!(!bash(""));
-        assert!(!bash("   "));
-        // not bash at all
-        assert!(!is_readonly_bash(
-            "read",
-            &serde_json::json!({"file_path": "a"})
-        ));
-        assert!(!is_readonly_bash("bash", &serde_json::json!({})));
-    }
-
     /// §2.1.2 makes the plan budget a host value: model context times
     /// [plan].budget_ratio. It used to be read out of the model's own tool
     /// arguments — `args["context_limit"]` — so the model could raise its own
@@ -1717,13 +1620,11 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// Strict mode keeps the #198 bar — failed calls are not evidence —
-    /// Soft steps (the default) close on a summary alone — no journal
-    /// evidence needed. Progress is read from receipts, not from gates.
+    /// Steps close on a summary alone — the host records what it observed
+    /// and never demands an oath to close progress.
     #[test]
     fn soft_finish_closes_on_summary_alone() {
         let (mut ctx, dir) = proj();
-        assert!(!ctx.plan_limits.strict, "soft is the default");
         let created = plan_op(
             &mut ctx,
             &json!({

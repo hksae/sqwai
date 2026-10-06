@@ -263,7 +263,6 @@ pub(super) enum MenuAction {
     ToggleHttpLog,
     ToggleExperimentalTest,
     TogglePerfLog,
-    TogglePlanStrict,
     ToggleMode,
     OpenSessions,
     Confirm(Box<MenuAction>),
@@ -1381,13 +1380,6 @@ impl App {
                 self.status(&format!("http debug log: {}", on_off(on)), StatusKind::Ok);
                 self.build_menu_rows();
             }
-            MenuAction::TogglePlanStrict => {
-                self.cfg.plan.strict = !self.cfg.plan.strict;
-                self.cfg.save().ok();
-                let on = self.cfg.plan.strict;
-                self.status(&format!("strict steps: {}", on_off(on)), StatusKind::Ok);
-                self.build_menu_rows();
-            }
             MenuAction::ToggleExperimentalTest => {
                 self.cfg.ui.experimental_test = !self.cfg.ui.experimental_test;
                 self.cfg.save().ok();
@@ -2171,13 +2163,6 @@ impl App {
                     "nudge after",
                     ScalarSetting::PlanNudgeAfter.current(&self.cfg),
                     ScalarSetting::PlanNudgeAfter,
-                ));
-                self.menu_rows.push(row(
-                    Line::from(vec![
-                        Span::styled(format!("  {:<18}", "strict steps"), Theme::FG()),
-                        Span::styled(on_off(self.cfg.plan.strict), Theme::dim()),
-                    ]),
-                    MenuAction::TogglePlanStrict,
                 ));
                 self.menu_rows.push(header("memory"));
                 self.menu_rows.push(scalar(
