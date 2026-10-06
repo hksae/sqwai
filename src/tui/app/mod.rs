@@ -443,8 +443,8 @@ pub struct App {
     popup_scroll: usize,
     popup_rows: Vec<(u16, String)>,
     /// @-mention completion: dismissed-by-Esc flag plus the cached file
-    /// list (root, built-at, rel paths) backing the file half of the
-    /// unified popup. Symbols come live from the graph index.
+    /// list (root, built-at, rel paths) backing the popup. Mentions resolve
+    /// to files and paths only.
     mention_dismiss: bool,
     mention_files: Option<(PathBuf, std::time::Instant, Vec<String>)>,
 
@@ -2096,9 +2096,8 @@ Continue from the pending step, or report to the user if the settled work looks 
         self.mention_files = Some((self.project_root.clone(), now, files));
     }
 
-    /// Unified @ completion rows: files (scored by match tier) plus graph
-    /// symbols (ranked by the index), capped. Display strings insert
-    /// verbatim: `@file:src/main.rs`, `@sym:src/main.rs::Config`.
+    /// Unified @ completion rows: project files (scored by match tier),
+    /// capped. Display strings insert verbatim: `@file:src/main.rs`.
     fn mention_candidates(&self) -> Vec<String> {
         const CAP: usize = 9;
         let Some((_, _, frag)) = self.mention_fragment() else {
@@ -2119,18 +2118,6 @@ Continue from the pending step, or report to the user if the settled work looks 
             for f in files {
                 if let Some(tier) = Self::mention_file_tier(f, &query) {
                     scored.push((tier, 0.0, format!("@file:{f}")));
-                }
-            }
-        }
-        if let Ok(store) = crate::agent::graph::SqliteGraphStore::open(&self.project_root) {
-            use crate::agent::graph::GraphStore;
-            if let Ok(items) = store.recall(&query, CAP) {
-                for it in items {
-                    if !it.key.starts_with("sym:") {
-                        continue;
-                    }
-                    let tier = if it.score >= 0.9 { 2 } else { 1 };
-                    scored.push((tier, it.score, format!("@{}", it.key)));
                 }
             }
         }
@@ -3214,24 +3201,6 @@ Continue from the pending step, or report to the user if the settled work looks 
             }
 
             "/help" => self.open_menu(Menu::Help),
-            "/graph-rebuild" => {
-                if self.streaming {
-                    self.show_busy_status();
-                } else {
-                    let root = std::env::current_dir().unwrap_or_default();
-                    match crate::agent::graph_index::rebuild_project(&root) {
-                        Ok(report) => self.status(
-                            &format!(
-                                "graph rebuilt: {} indexed, {} removed, {} skipped",
-                                report.indexed_files, report.removed_files, report.skipped_files
-                            ),
-                            StatusKind::Ok,
-                        ),
-                        Err(error) => self
-                            .status(&format!("graph rebuild failed: {error:#}"), StatusKind::Err),
-                    }
-                }
-            }
             "/init" => {
                 if std::path::Path::new("AGENTS.md").exists() {
                     self.status("AGENTS.md already exists", StatusKind::Warn);

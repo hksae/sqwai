@@ -1411,7 +1411,6 @@ fn command_popup_contains_only_command_names() {
     assert!(COMMANDS.iter().all(|command| !command.contains(' ')));
     assert!(COMMANDS.contains(&"/undo"));
     assert!(COMMANDS.contains(&"/skill"));
-    assert!(COMMANDS.contains(&"/graph-rebuild"));
 }
 #[test]
 fn help_menu_is_empty() {

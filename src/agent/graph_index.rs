@@ -576,6 +576,9 @@ fn stamp_file_mtime(batch: &mut GraphBatch, relative_path: &str, mtime: i64) {
 
 /// Full rebuild with §2.4.2 atomicity: index into `graph.db.new`, then swap
 /// it over `graph.db` on success, so a half-built graph is never published.
+/// Unreferenced by the model-facing code (its only caller, `/graph-rebuild`,
+/// is gone); kept because the whole indexing module still backs the store.
+#[allow(dead_code)]
 pub fn rebuild_project(root: &Path) -> Result<IndexReport> {
     let root = root
         .canonicalize()

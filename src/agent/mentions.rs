@@ -16,8 +16,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::agent::graph::GraphStore;
-
 /// Whole-file inject cap: beyond this the fence truncates with a marker.
 /// The hash always covers the injected bytes, never the whole file.
 pub const MENTION_MAX_LINES: usize = 200;
@@ -239,10 +237,10 @@ fn is_binary(bytes: &[u8]) -> bool {
 
 /// Resolve one token against the project. Returns the fence plus the
 /// absolute path for read-guard seeding, or a warning when the token
-/// stays literal.
+/// stays literal. Mentions resolve to files and paths only — the graph
+/// index is gone, so `sym:` keys and name lookups stay literal.
 fn resolve_token(
     ctx: &crate::agent::tools::ToolCtx,
-    store: Option<&crate::agent::graph::SqliteGraphStore>,
     raw: &str,
 ) -> Result<(String, PathBuf), String> {
     let raw = raw.replace('\\', "/");
@@ -253,47 +251,14 @@ fn resolve_token(
         }
         return read_target(ctx, path, range, &format!("file:{path}"), &raw);
     }
-    if let Some(rest) = head.strip_prefix("sym:") {
-        let Some(store) = store else {
-            return Err(format!("@{raw}: graph index unavailable, kept literally"));
-        };
-        let key = format!("sym:{rest}");
-        let node = store
-            .find_node(&key)
-            .ok()
-            .flatten()
-            .ok_or_else(|| format!("@{raw}: unknown symbol, kept literally"))?;
-        let node_path = node.path.clone().unwrap_or_default();
-        if node_path.is_empty() {
-            return Err(format!("@{raw}: symbol has no file, kept literally"));
-        }
-        return read_target(ctx, &node_path, range.or(node_lines(&node)), &key, &raw);
+    if head.starts_with("sym:") {
+        return Err(format!("@{raw}: symbol index is retired, kept literally"));
     }
-    // bare token, smart: an existing file wins, else an exact graph hit
+    // bare token: an existing file wins, otherwise kept literal
     if ctx.resolve(&head).is_ok_and(|abs| abs.is_file()) {
         return read_target(ctx, &head, range, &format!("file:{head}"), &raw);
     }
-    if let Some(store) = store {
-        let hits = store.recall(&head, 5).unwrap_or_default();
-        if let Some(hit) = hits
-            .iter()
-            .find(|h| h.score >= 0.9 && h.key.starts_with("sym:"))
-            && let Some(node) = store.find_node(&hit.key).ok().flatten()
-            && let Some(node_path) = node.path.clone()
-            && !node_path.is_empty()
-        {
-            return read_target(ctx, &node_path, range.or(node_lines(&node)), &hit.key, &raw);
-        }
-    }
     Err(format!("@{raw}: unresolved mention, kept literally"))
-}
-
-fn node_lines(node: &crate::agent::graph::Node) -> Option<(usize, usize)> {
-    match (node.line_start, node.line_end) {
-        (Some(s), Some(e)) if s >= 1 && e >= s => Some((s as usize, e as usize)),
-        (Some(s), _) if s >= 1 => Some((s as usize, s as usize)),
-        _ => None,
-    }
 }
 
 /// Read, slice, fence and hash one file target. The hash covers exactly
@@ -363,13 +328,11 @@ pub fn resolve_mentions(root: &Path, text: &str) -> ResolvedText {
         return out;
     }
     let ctx = crate::agent::tools::ToolCtx::new(root);
-    let store = crate::agent::graph::SqliteGraphStore::open(root).ok();
-    let store_ref = store.as_ref();
     let mut cursor = 0;
     for token in tokens {
         out.text.push_str(&text[cursor..token.start]);
         cursor = token.end;
-        match resolve_token(&ctx, store_ref, &token.raw) {
+        match resolve_token(&ctx, &token.raw) {
             Ok((fence, abs)) => {
                 out.text.push_str(&fence);
                 if !out.pre_reads.contains(&abs) {

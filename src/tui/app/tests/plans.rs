@@ -1004,15 +1004,3 @@ fn subagent_rows_land_at_call_site_not_after_answer() {
         .collect();
     assert_eq!(kinds, vec!["user", "sub", "sub", "answer"]);
 }
-
-#[test]
-fn test_node_badge_method_and_memory() {
-    use crate::agent::graph::NodeKind;
-    use crate::tui::app::menus::node_badge;
-
-    assert_eq!(node_badge(&NodeKind::Method), "[meth]");
-    assert_eq!(node_badge(&NodeKind::Memory), "[mem]");
-    assert_eq!(node_badge(&NodeKind::Function), "[fn]");
-    assert_eq!(node_badge(&NodeKind::Struct), "[st]");
-    assert_eq!(node_badge(&NodeKind::Enum), "[e]");
-}

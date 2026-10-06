@@ -24,7 +24,6 @@ pub(super) const COMMANDS: &[&str] = &[
     "/exit",
     "/export",
     "/goal",
-    "/graph-rebuild",
     "/help",
     "/init",
     "/lsp",
@@ -3096,37 +3095,6 @@ impl App {
         if self.menu_sel >= self.menu_len() {
             self.menu_sel = self.menu_len().saturating_sub(1);
         }
-    }
-}
-
-/// Kind badge for graph nodes, salvaged from the removed viewer for the
-/// @-mention completion list (P3.2): `[f]`, `[fn]`, `[sym]`, …
-#[allow(dead_code)]
-pub(super) fn node_badge(kind: &crate::agent::graph::NodeKind) -> &'static str {
-    use crate::agent::graph::NodeKind;
-    match kind {
-        NodeKind::File => "[f]",
-        NodeKind::Folder => "[dir]",
-        NodeKind::Document => "[doc]",
-        NodeKind::Section => "[sec]",
-        NodeKind::Module => "[mod]",
-        NodeKind::Namespace => "[ns]",
-        NodeKind::Function => "[fn]",
-        NodeKind::Method => "[meth]",
-        NodeKind::Class => "[cls]",
-        NodeKind::Struct => "[st]",
-        NodeKind::Enum => "[e]",
-        NodeKind::Interface => "[if]",
-        NodeKind::Trait => "[tr]",
-        NodeKind::Variable => "[v]",
-        NodeKind::Constant => "[c]",
-        NodeKind::Type => "[ty]",
-        NodeKind::Macro => "[mac]",
-        NodeKind::Test => "[test]",
-        NodeKind::Memory => "[mem]",
-        NodeKind::Decision => "[dec]",
-        NodeKind::Commit => "[cmt]",
-        NodeKind::Branch => "[br]",
     }
 }
 
