@@ -970,7 +970,7 @@ mod tests {
             "propose_plan",
             "note",
             "journal",
-            "memory_propose",
+            "memory_write",
             "memory_read",
         ] {
             assert!(

@@ -20,9 +20,7 @@ use crate::agent::checkpoints;
 use crate::agent::context;
 use crate::agent::tools::{self, ToolCtx};
 use crate::plan;
-use loop_ask::{
-    ask_user, bash_call, is_accepted_memory_answer, propose_plan, propose_reset, run_tool_blocking,
-};
+use loop_ask::{ask_user, bash_call, propose_plan, propose_reset, run_tool_blocking};
 use loop_compact::{
     CompactionPrefix, compact_history, effort_ignored_reason, plan_hint_for_summary,
     record_compaction, turn_shows_no_reasoning,
@@ -749,7 +747,7 @@ async fn run_agent(
         })
         .unwrap_or_default();
     let mut always_allow: Vec<String> = Vec::new();
-    let mut memory_proposals_this_turn: u8;
+    let mut memory_writes_this_turn: u8;
     let mut next_id: u64 = 0;
     // prompt size of the last request, as reported by the provider
     let mut prompt_size: u64 = 0;
@@ -778,9 +776,9 @@ async fn run_agent(
                 })
                 .await;
         }
-        // The proposal limit applies to one model request/turn, not the whole
+        // The write limit applies to one model request/turn, not the whole
         // session. A new request gets a fresh allowance.
-        memory_proposals_this_turn = 0;
+        memory_writes_this_turn = 0;
         // The diary is written before the compaction policy can discard any
         // transcript context. The writer has a hard timeout and host fallback.
         // Skipped on the G0 baseline (§8.2): no durable memory there.
@@ -1386,78 +1384,33 @@ async fn run_agent(
                             outcome
                         }
                         "subagent" => tools::Outcome::err("nested subagents are not allowed"),
-                        "memory_propose" if subagent_depth > 0 => tools::Outcome::err(
-                            "subagents cannot propose durable memories; memories belong to the primary session",
+                        "memory_write" if subagent_depth > 0 => tools::Outcome::err(
+                            "subagents cannot write durable memories; memories belong to the primary session",
                         ),
-                        "memory_propose" => {
-                            memory_proposals_this_turn =
-                                memory_proposals_this_turn.saturating_add(1);
-                            if memory_proposals_this_turn > memory.max_proposals_per_turn {
-                                tools::Outcome::err("memory proposal limit reached for this turn")
+                        "memory_write" => {
+                            memory_writes_this_turn = memory_writes_this_turn.saturating_add(1);
+                            if memory_writes_this_turn > memory.max_writes_per_turn {
+                                tools::Outcome::err("memory write limit reached for this turn")
                             } else {
-                                let proposal =
-                                    tools::execute(&mut ctx, "memory_propose", &call.args);
-                                if !proposal.ok {
-                                    proposal
-                                } else {
-                                    let prompt = format!(
-                                        "Approve this durable memory proposal?\n{}\nChoose: accept, edit, or reject.",
-                                        proposal.output
-                                    );
-                                    let question = ToolCallReq::new(
-                                        call.id.clone(),
-                                        "ask_user",
-                                        serde_json::json!({
-                                            "question": prompt,
-                                            "options": [
-                                                {"label": "accept", "description": "write the proposal"},
-                                                {"label": "edit", "description": "provide replacement text"},
-                                                {"label": "reject", "description": "do not write it"}
-                                            ],
-                                            "multiple": false,
-                                            "allow_free": true
-                                        }),
-                                    );
-                                    let answer =
-                                        ask_user(&question, &tx, &mut ctl, &mut next_id).await;
-                                    let raw_answer = answer.output.trim();
-                                    let answer_lower = raw_answer.to_ascii_lowercase();
-                                    if is_accepted_memory_answer(answer.ok, raw_answer) {
-                                        let text = if answer_lower == "accept" {
-                                            call.args["text"].as_str().unwrap_or_default()
-                                        } else {
-                                            raw_answer
-                                        };
-                                        let scope = crate::agent::memory::Scope::parse(
-                                            call.args["scope"].as_str().unwrap_or("project"),
-                                        );
-                                        match scope.and_then(|scope| {
-                                            crate::agent::memory::apply_proposal(
-                                                &root,
-                                                scope,
-                                                call.args["section"].as_str().unwrap_or("Project"),
-                                                text,
-                                                call.args["replaces"].as_str(),
-                                                &session_id,
-                                                memory.max_tokens,
-                                            )
-                                            .map(|path| {
-                                                format!("memory written: {}", path.display())
-                                            })
-                                            .map_err(|error| error.to_string())
-                                        }) {
-                                            Ok(output) => tools::Outcome::ok(output),
-                                            Err(error) => tools::Outcome::err(error),
-                                        }
-                                    } else if answer.ok && answer_lower == "reject" {
-                                        tools::Outcome::ok("memory proposal rejected")
-                                    } else if answer.ok && answer_lower == "edit" {
-                                        tools::Outcome::err(
-                                            "memory proposal edit requires a follow-up proposal",
-                                        )
-                                    } else {
-                                        tools::Outcome::err("memory proposal was not accepted")
-                                    }
+                                let text = call.args["text"].as_str().unwrap_or_default().trim();
+                                match crate::agent::memory::Scope::parse(
+                                    call.args["scope"].as_str().unwrap_or("project"),
+                                )
+                                .and_then(|scope| {
+                                    crate::agent::memory::apply_proposal(
+                                        &root,
+                                        scope,
+                                        call.args["section"].as_str().unwrap_or("Project"),
+                                        text,
+                                        call.args["replaces"].as_str(),
+                                        &session_id,
+                                        memory.max_tokens,
+                                    )
+                                    .map(|path| format!("memory written: {}", path.display()))
+                                    .map_err(|error| error.to_string())
+                                }) {
+                                    Ok(output) => tools::Outcome::ok(output),
+                                    Err(error) => tools::Outcome::err(error),
                                 }
                             }
                         }
@@ -1917,7 +1870,6 @@ async fn run_agent(
 
 #[cfg(test)]
 mod subagent_tests {
-    use super::loop_ask::is_accepted_memory_answer;
     use super::loop_subagent::{
         MAX_PARALLEL_SUBAGENTS, SubagentTask, next_subagent_session, subagent_tasks_from_args,
     };
@@ -2027,31 +1979,6 @@ mod subagent_tests {
         let error = subagent_tasks_from_args(&serde_json::json!({"tasks":tasks})).unwrap_err();
         assert!(error.contains("maximum is 8"));
         assert_eq!(MAX_PARALLEL_SUBAGENTS, 4);
-    }
-
-    #[test]
-    fn memory_proposal_answers_filter_subagent_responses() {
-        assert!(is_accepted_memory_answer(true, "accept"));
-        assert!(is_accepted_memory_answer(true, " ACCEPT "));
-        assert!(is_accepted_memory_answer(true, "edited content by user"));
-        assert!(!is_accepted_memory_answer(true, "reject"));
-        assert!(!is_accepted_memory_answer(true, "edit"));
-        assert!(!is_accepted_memory_answer(true, ""));
-        assert!(!is_accepted_memory_answer(false, "accept"));
-        assert!(!is_accepted_memory_answer(
-            true,
-            "subagents cannot reach the user; decide yourself and continue"
-        ));
-        // audit H10: a refusal typed at the dialog is not content
-        for refusal in [
-            "no", "No.", "nope", "n", "deny", "cancel", "stop", "don't", "never", "abort", "skip",
-            "rejected",
-        ] {
-            assert!(
-                !is_accepted_memory_answer(true, refusal),
-                "refusal '{refusal}' must not be accepted as memory content"
-            );
-        }
     }
 }
 

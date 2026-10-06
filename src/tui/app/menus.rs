@@ -373,7 +373,7 @@ impl ScalarSetting {
             Self::PlanNudgeAfter => cfg.plan.nudge_after.to_string(),
             Self::MemoryLoadBudgetRatio => cfg.memory.load_budget_ratio.to_string(),
             Self::MemoryMaxTokens => cfg.memory.max_tokens.to_string(),
-            Self::MemoryMaxProposals => cfg.memory.max_proposals_per_turn.to_string(),
+            Self::MemoryMaxProposals => cfg.memory.max_writes_per_turn.to_string(),
             Self::DiaryTokenBudget => cfg.diary.token_budget.to_string(),
             Self::DiaryTimeoutSecs => cfg.diary.timeout_secs.to_string(),
             Self::CompactionThreshold => cfg.compaction.threshold.to_string(),
@@ -416,8 +416,8 @@ impl ScalarSetting {
             Self::MemoryMaxProposals => apply_num(
                 label,
                 raw,
-                &mut cfg.memory.max_proposals_per_turn,
-                def.memory.max_proposals_per_turn,
+                &mut cfg.memory.max_writes_per_turn,
+                def.memory.max_writes_per_turn,
             ),
             Self::DiaryTokenBudget => apply_num(
                 label,

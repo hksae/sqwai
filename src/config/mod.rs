@@ -798,8 +798,11 @@ pub struct MemoryConfig {
     pub load_budget_ratio: f64,
     #[serde(default = "default_memory_max_tokens")]
     pub max_tokens: u32,
-    #[serde(default = "default_memory_max_proposals")]
-    pub max_proposals_per_turn: u8,
+    #[serde(
+        default = "default_memory_max_proposals",
+        alias = "max_proposals_per_turn"
+    )]
+    pub max_writes_per_turn: u8,
 }
 
 impl Default for MemoryConfig {
@@ -807,7 +810,7 @@ impl Default for MemoryConfig {
         Self {
             load_budget_ratio: default_memory_load_budget_ratio(),
             max_tokens: default_memory_max_tokens(),
-            max_proposals_per_turn: default_memory_max_proposals(),
+            max_writes_per_turn: default_memory_max_proposals(),
         }
     }
 }
@@ -1089,7 +1092,8 @@ struct VerifyOverride {
 struct MemoryOverride {
     load_budget_ratio: Option<f64>,
     max_tokens: Option<u32>,
-    max_proposals_per_turn: Option<u8>,
+    #[serde(alias = "max_proposals_per_turn")]
+    max_writes_per_turn: Option<u8>,
 }
 
 /// (table, keys) accepted from a project file. Anything else present is
@@ -1114,7 +1118,12 @@ const PROJECT_ALLOWLIST: &[(&str, &[&str])] = &[
     ("verify", &["commands"]),
     (
         "memory",
-        &["load_budget_ratio", "max_tokens", "max_proposals_per_turn"],
+        &[
+            "load_budget_ratio",
+            "max_tokens",
+            "max_writes_per_turn",
+            "max_proposals_per_turn",
+        ],
     ),
 ];
 
@@ -1533,8 +1542,8 @@ impl Config {
         if let Some(v) = o.max_tokens {
             memory.max_tokens = v;
         }
-        if let Some(v) = o.max_proposals_per_turn {
-            memory.max_proposals_per_turn = v;
+        if let Some(v) = o.max_writes_per_turn {
+            memory.max_writes_per_turn = v;
         }
         notes
     }

@@ -142,6 +142,12 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     } else {
         out.push_str(&format!("recent failures: {}\n", failures.join(" · ")));
     }
+    // Compaction/session-start is exactly when the transcript is about to
+    // lose detail — a cheap nudge to persist anything durable before it goes.
+    out.push_str(
+        "durable facts learned (preference, convention, non-obvious decision) belong in \
+         memory: call memory_write before they trim out of context.\n",
+    );
     out
 }
 

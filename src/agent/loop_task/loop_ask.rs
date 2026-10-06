@@ -648,20 +648,3 @@ pub(crate) async fn run_tool_blocking(
     ctx.read_windows = exec_ctx.read_windows;
     outcome
 }
-
-pub(crate) fn is_accepted_memory_answer(answer_ok: bool, raw_answer: &str) -> bool {
-    let raw = raw_answer.trim();
-    let lower = raw.to_ascii_lowercase();
-    // Free text is edited content (the typed text replaces the proposal),
-    // but a bare refusal word typed at the dialog must never become the
-    // memory body (audit H10): "no" used to be accepted as content "no".
-    const REFUSALS: &[&str] = &[
-        "reject", "rejected", "edit", "no", "no.", "nope", "n", "deny", "cancel", "stop", "don't",
-        "do not", "never", "abort", "skip",
-    ];
-    answer_ok
-        && (lower == "accept"
-            || (!raw.is_empty()
-                && !REFUSALS.contains(&lower.as_str())
-                && !lower.starts_with("subagents cannot")))
-}

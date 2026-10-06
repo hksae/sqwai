@@ -311,7 +311,13 @@ await its result before dependent changes or reporting success.",
         ToolDef {
             name: "note",
             kind: Kind::ReadOnly,
-            description: "Record a concise model note in the host journal.",
+            description: "Record a concise note in the host journal — the durable event log \
+that survives compaction and feeds the next session's anchor. Use it at the close of a \
+step to capture what context will lose: a `decision` you made and why, a `rejected` \
+approach (so it is not retried), an `assumption` you are relying on but have not verified \
+(pass `resolves` with that note's seq to close it later), a `lesson` learned, or a `blocker`. \
+Notes are how your reasoning outlives the transcript; a plain-text note is cheap and \
+invisibly valuable tomorrow.",
             parameters: json!({"type":"object","properties":{"note":{"type":"string"},"kind":{"type":"string","enum":["decision","rejected","assumption","lesson","blocker"]},"resolves":{"type":"integer","description":"journal seq of an assumption this note closes (§2.1.4)"}},"required":["note","kind"]}),
         },
         ToolDef {
@@ -351,9 +357,16 @@ await its result before dependent changes or reporting success.",
             parameters: json!({"type":"object","properties":{"date":{"type":"string","description":"local diary date, YYYY-MM-DD"}},"required":["date"]}),
         },
         ToolDef {
-            name: "memory_propose",
+            name: "memory_write",
             kind: Kind::ReadOnly,
-            description: "Propose a durable memory fact. The user must approve it before the host writes MEMORY.md or USER.md.",
+            description: "Persist one durable fact to host memory (MEMORY.md for the \
+project, USER.md for the user) — it is injected into your context at the start of \
+every future session, so this is how knowledge outlives the conversation. Write it \
+as soon as you learn something that will still matter later: a stated user preference \
+or an agreement, a project convention, a decision or fact that is not derivable from \
+code or git, an environment gotcha. Use `replaces` with the old text to correct a fact \
+instead of duplicating it. Store durable truths only — not transient task state, \
+guesses, or anything you would not want shown to you every session.",
             parameters: json!({"type":"object","properties":{"section":{"type":"string","enum":["Project","Conventions","User","Agreements"]},"scope":{"type":"string","enum":["project","user"]},"text":{"type":"string"},"replaces":{"type":"string"}},"required":["section","text"]}),
         },
         ToolDef {
@@ -671,7 +684,7 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             .map(|tasks| format!("{} tasks", tasks.len()))
             .unwrap_or_else(|| s("task")),
         "memory_read" => s("date"),
-        "memory_propose" => format!("{}: {}", s("scope"), s("text")),
+        "memory_write" => format!("{}: {}", s("scope"), s("text")),
         "ask_user" => {
             let single = s("question");
             if !single.is_empty() {
@@ -755,7 +768,7 @@ pub fn tool_specs(_plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
             !baseline
                 || !matches!(
                     d.name,
-                    "plan" | "propose_plan" | "note" | "journal" | "memory_propose" | "memory_read"
+                    "plan" | "propose_plan" | "note" | "journal" | "memory_write" | "memory_read"
                 )
         })
         .map(|d| crate::providers::ToolSpec {

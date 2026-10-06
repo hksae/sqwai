@@ -330,25 +330,6 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             Ok(text) => Outcome::ok(text),
             Err(message) => Outcome::err(message),
         },
-        "memory_propose" => {
-            let text = args["text"].as_str().unwrap_or_default().trim();
-            let section = args["section"].as_str().unwrap_or("Project");
-            let scope = args["scope"].as_str().unwrap_or("project");
-            match crate::agent::memory::Scope::parse(scope) {
-                Ok(scope) if !text.is_empty() => Outcome::ok(
-                    serde_json::json!({
-                        "proposal": "memory_propose",
-                        "scope": scope.label(),
-                        "section": section,
-                        "text": crate::agent::diary::screen(text).text,
-                        "replaces": args["replaces"].as_str(),
-                    })
-                    .to_string(),
-                ),
-                Ok(_) => Outcome::err("memory proposal text must not be empty"),
-                Err(error) => Outcome::err(error),
-            }
-        }
         "note" => {
             let note = args["note"].as_str().unwrap_or_default().trim();
             let kind = args["kind"].as_str().unwrap_or_default().trim();
@@ -986,7 +967,27 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         }
                         plan::Applied::Shown { text } => Outcome::ok(text),
                         plan::Applied::Completed => {
-                            Outcome::ok(format!("plan {} completed", active.id))
+                            let mut msg = format!("plan {} completed", active.id);
+                            // soft nudge (§8): a finished plan is a natural moment
+                            // to persist durable facts — but only nag while project
+                            // memory is still empty, so it never repeats on every plan.
+                            let memory_empty =
+                                std::fs::read_to_string(crate::agent::memory::project_path(
+                                    &ctx.root,
+                                ))
+                                .map(|text| {
+                                    !text
+                                        .lines()
+                                        .any(|line| line.trim_start().starts_with("- "))
+                                })
+                                .unwrap_or(true);
+                            if memory_empty {
+                                msg.push_str(
+                                    " — if this run surfaced a durable fact (convention, \
+                                     decision, gotcha), memory_write it before context trims.",
+                                );
+                            }
+                            Outcome::ok(msg)
                         }
                     }
                 }
