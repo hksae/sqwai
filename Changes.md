@@ -439,27 +439,30 @@ receipt-машинерии (digest_paths в plan/verify.rs) и validate_plan_ref
 и снос графа становится механическим. Решения не изменены, только порядок.
 
 B1 закрыт коммитами 13d2430, e03e133, 7447bdd, 3ecd40c (сьюта зелёная:
-916/0/20 ignore). B2 разбор по коммитам (каждый — fmt/clippy-D/test зелёные):
+916/0/20 ignore). B2.1 закрыт 652a07b (914/0/20). B2 разбор по коммитам
+(каждый — fmt/clippy-D/test зелёные). Порядок: сначала ВСЕ потребители стора,
+тор deletion последним (validate_plan_refs — тоже потребитель, потому refs
+идут до сноса стора):
 
-- B2.1 тулы модели: specs.rs (resolve_ref/recall/graph_query определения +
-  display-ветки) и dispatch.rs (три arms + импорт GraphStore). Стор пока жив
-  для mentions/pre-edit/TUI — не мёртвый код.
+- B2.1 (DONE 652a07b) тулы модели: specs.rs (resolve_ref/recall/graph_query
+  определения + display-ветки) и dispatch.rs (три arms + импорт GraphStore).
 - B2.2 потребители стора: mentions.rs sym/recall-ноги (деградация к файлам,
   без store), tools/fs.rs pre-edit warning + места вызова, tui/app/mod.rs
   mention store-open + `/graph-rebuild`, menus.rs node_badge + `/graph-rebuild`
-  в списке слэш-команд, и связанные тесты (mention sym, node_badge). После
-  этого ничего вне graph*.rs стор не трогает.
-- B2.3 снос стора: удалить graph.rs и graph_index.rs целиком; graph_lang.rs
-  ужать до реестра TsLang (for_path/from_extension/from_name/grammar/name/
-  is_comment/capabilities/adapter_version) — astgrep.rs:17 держит `TsLang`,
-  outline-модуля нет; удалить analyze/Decl/Import/Call/TsAnalysis/ walkers/
-  TsAdapter + NodeKind-импорт + анализаторные тесты. rusqlite из Cargo.toml
-  (единственный `use rusqlite` был в graph.rs).
-- B2.4 step.refs (§16): plan/{mod,ops,store}.rs (RefIntent/StepRef/refs поля,
+  в списке слэш-команд, и связанные тесты (pre-edit warning, mention sym,
+  node_badge).
+- B2.3 step.refs (§16): plan/{mod,ops,store}.rs (RefIntent/StepRef/refs поля,
   NewStep.refs, Op::Add.refs, Split через NewStep), dispatch.rs validate_plan_refs
-  + места create/start/add, specs.rs refs-параметр в 4 местах, тесты-фикстуры
-  (пустые vec → удаление поля). EvidenceRef (доказательства шага) НЕ трогать —
-  другой концепт, остаётся.
+  + места create/start/add, specs.rs refs-параметр в местах create/add/split,
+  тесты-фикстуры (refs в json create/add, plan_refs_validation_enforces_intent).
+  EvidenceRef (доказательства шага) НЕ трогать — другой концепт, остаётся.
+- B2.4 снос стора (ПОСЛЕДНИМ, когда ноль потребителей): удалить graph.rs и
+  graph_index.rs целиком; graph_lang.rs ужать до реестра TsLang (for_path/
+  from_extension/from_name/grammar/name/is_comment/capabilities/adapter_version)
+  — его держат astgrep.rs:17 И outline.rs:8; удалить analyze/Decl/Import/Call/
+  TsAnalysis/walkers/TsAdapter + NodeKind-импорт + анализаторные тесты. rusqlite
+  из Cargo.toml (единственный `use rusqlite` был в graph.rs).
+
 
 Гейты каждого коммита: `cargo fmt --all --check`, `cargo clippy --all-targets
 -- -D warnings`, полный сьют; снапшоты смотреть глазами, не blind-accept;
