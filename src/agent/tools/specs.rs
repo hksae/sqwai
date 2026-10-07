@@ -87,7 +87,7 @@ mismatch); replace_all needs one. Never edit on a stale read — the host refuse
         ToolDef {
             name: "multi_edit",
             kind: Kind::Mutating,
-            description: "Apply several exact replacements to one file atomically.",
+            description: "Apply several exact replacements to one file as one operation: a rename that touches five places, or a change plus its doc line.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -111,7 +111,7 @@ mismatch); replace_all needs one. Never edit on a stale read — the host refuse
         ToolDef {
             name: "ls",
             kind: Kind::ReadOnly,
-            description: "List one directory's entries (name, type, size).",
+            description: "List one directory's entries (name, type, size). First move in an unfamiliar tree, and the check on what a write actually created.",
             parameters: json!({
                 "type": "object",
                 "properties": {"path": {"type": "string"}}
@@ -120,7 +120,7 @@ mismatch); replace_all needs one. Never edit on a stale read — the host refuse
         ToolDef {
             name: "glob",
             kind: Kind::ReadOnly,
-            description: "Find files by glob pattern (respects .gitignore). Example: src/**/*.rs",
+            description: "Find files by name when you know its shape but not its place: src/**/*.rs, **/*test*.py. Respects .gitignore.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -162,8 +162,10 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
         ToolDef {
             name: "bash",
             kind: Kind::Mutating,
-            description: "Run a shell command in the project directory. Destructive or risky commands \
-(rm -rf, sudo, disk ops, force-push, etc.) require user approval and the model should avoid them. \
+            description: "Run a shell command in the project directory — the way to build, test, \
+install and inspect anything the file tools cannot reach. Destructive or risky shapes (rm -rf, \
+sudo, disk ops, force-push, sending data outward) stop at the classifier for one user approval: \
+that is the seatbelt doing its job, so name what the command does rather than reaching around it. \
 On Windows the shell is cmd.exe/PowerShell: there are no POSIX coreutils, so no `head`, `tail`, `grep`, \
 `sed`, `awk` or `| pipe` chains through them — use `| Select-Object -First/Last N` for trimming and the \
 read/grep tools for searching files. \
@@ -221,19 +223,19 @@ await its result before dependent changes or reporting success.",
         ToolDef {
             name: "git_status",
             kind: Kind::ReadOnly,
-            description: "Show the Git branch and worktree status.",
+            description: "Show the Git branch and worktree status. Use it before committing and after a run that touched many files — it names what moved, which a count does not.",
             parameters: json!({"type":"object","properties":{"porcelain":{"type":"boolean"}}}),
         },
         ToolDef {
             name: "git_diff",
             kind: Kind::ReadOnly,
-            description: "Show unstaged Git diff, optionally limited to one path.",
+            description: "Show the unstaged diff, optionally one path. Read your own edits back before reporting them.",
             parameters: json!({"type":"object","properties":{"target":{"type":"string"}}}),
         },
         ToolDef {
             name: "git_log",
             kind: Kind::ReadOnly,
-            description: "Show recent Git commits.",
+            description: "Show recent commits. Use it to find where a behavior came from before blaming the tree.",
             parameters: json!({"type":"object","properties":{"count":{"type":"integer","minimum":1,"maximum":100},"format":{"type":"string"}}}),
         },
         ToolDef {
@@ -251,7 +253,7 @@ await its result before dependent changes or reporting success.",
         ToolDef {
             name: "git_commit",
             kind: Kind::Mutating,
-            description: "Create a Git commit from currently staged changes, or all tracked changes when all is true.",
+            description: "Create a commit from staged changes, or from all tracked changes when all is true. Only when the user asked for a commit.",
             parameters: json!({"type":"object","properties":{"message":{"type":"string"},"all":{"type":"boolean"}},"required":["message"]}),
         },
         ToolDef {
@@ -316,8 +318,8 @@ that survives compaction and feeds the next session's anchor. Use it at the clos
 step to capture what context will lose: a `decision` you made and why, a `rejected` \
 approach (so it is not retried), an `assumption` you are relying on but have not verified \
 (pass `resolves` with that note's seq to close it later), a `lesson` learned, or a `blocker`. \
-Notes are how your reasoning outlives the transcript; a plain-text note is cheap and \
-invisibly valuable tomorrow.",
+Notes are how your reasoning outlives the transcript, and tomorrow-you reads them blind. \
+One batch at the close of a step is enough.",
             parameters: json!({"type":"object","properties":{"note":{"type":"string"},"kind":{"type":"string","enum":["decision","rejected","assumption","lesson","blocker"]},"resolves":{"type":"integer","description":"journal seq of an assumption this note closes (§2.1.4)"}},"required":["note","kind"]}),
         },
         ToolDef {
@@ -329,12 +331,10 @@ invisibly valuable tomorrow.",
              evidence and note resolves. Times are UTC. Use it to find what evidence exists \
              or what was already tried. Output is newest-first and always capped: \
              narrow with kind/step/from/to/after/query instead of dumping everything. \
-             Ground-truth discipline: your context memory is lossy (early history gets \
-             compacted away), the journal is not. Before asserting anything about past \
-             actions — who changed, moved or deleted what — query it (query=<filename> \
-             usually finds it in one call). Claims about history without journal evidence \
-             are forbidden; your own earlier calls are the first suspect. Never blame \
-             external forces for something the journal attributes to you.",
+             Ground truth for anything that already happened: your context memory is \
+             lossy (early history gets compacted away), the journal is not. Before saying \
+             what was changed, moved or deleted, query it (query=<filename> usually finds it \
+             in one call) and report what you found — including when it says you were wrong.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -353,7 +353,7 @@ invisibly valuable tomorrow.",
         ToolDef {
             name: "memory_read",
             kind: Kind::ReadOnly,
-            description: "Read one host-owned daily diary entry. Date must use YYYY-MM-DD.",
+            description: "Read one day of the host diary (YYYY-MM-DD). The diary holds the story of past sessions; memory holds the facts that survived them.",
             parameters: json!({"type":"object","properties":{"date":{"type":"string","description":"local diary date, YYYY-MM-DD"}},"required":["date"]}),
         },
         ToolDef {
@@ -434,8 +434,7 @@ either side — quote the conflict in reason.",
                     "title": {"type": "string", "description": "add: new step title"},
                     "summary": {"type": "string", "description": "finish: what was done, where, and any remaining limitations"},
                     "reason": {"type": "string", "description": "block / cancel / block_plan: the quoted conflict for block_plan"},
-                    "confirm": {"type": "boolean", "description": "start: re-read a stale step"},
-                    "evidence": {"type": "array", "items": {"type": "integer"}, "description": "deprecated informational field; host ignores it"}
+                    "confirm": {"type": "boolean", "description": "start: re-read a stale step"}
                 },
                 "required": ["op"]
             }),

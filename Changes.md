@@ -467,6 +467,39 @@ process_block и пустой runtime_context не тронуты (кэш-дис
 префикса под контролем; после переписки проверка на реальных сессиях через
 toolfreq (метрики §8 плюс: ноль запросов разрешения там, где гейтов больше нет).
 
+Исполнено 2026-10-07:
+- B8.1 system.md: снесён абзац «file-changing work needs an acceptance-bearing
+  plan first … refused until a plan with at least one cmd: or manual: acceptance
+  exists (plan add_acceptance)» — гейт убран в e03e133, opt-опыт удалён в 3ecd40c,
+  текст пережил их обоих. Вместо него план описан как чем он является: структура
+  задачи самого агента, criteria = собственные заметки, которые хост не запускает
+  и не оценивает, abandon+create как честная смена направления. Добавлен блок
+  «Memory and journal» с обязанностями из §8 (память — тем же ходом, как только
+  факт появился; note — пачкой в конце шага; journal — прочитать, прежде чем
+  утверждать про прошлое; причина писать — контекст режут, файлы нет). Oath-тон
+  заменён на observation: nudge = напоминание, не приказ; ссылка на
+  «revision workflow» (propose_plan) из Host context убрана.
+- B8.2 specs.rs: `bash` — ремень описан как ремень («назови эффект команды вместо
+  того чтобы обходить»), не «the model should avoid them»; `journal` — «Claims
+  about history without journal evidence are forbidden / never blame external
+  forces» переписаны в «прочитай и скажи что нашлось, в том числе когда это
+  против тебя»; `note` — триггер вместо оценки дешевизны; у 8 молчаливых тулов
+  (ls, glob, git_status, git_diff, git_log, multi_edit, memory_read, git_commit)
+  первая строка теперь «когда звать»; из схемы `plan` убрано поле `evidence`
+  («deprecated informational field; host ignores it» — реклама аргумента, который
+  хост игнорирует).
+- B8.3 проверки: остальные «approval» в текстах — это живой классификатор
+  опасных команд (ярус A, он не сносился), не память об удалённых гейтах;
+  заголовок `Confirm command` ему соответствует. Anchor уже observation-фрейминг
+  («host-generated working memo; journal facts, not a summary»), plan/render
+  печатает «criteria (your own done-notes)». Легасовый `acceptance` остался
+  только в тестовом фикстуре context.rs:1026 — он держит под проверкой serde-алиас
+  миграции, это покрытие, не текст для модели.
+- NOT VERIFIED (нужны живые сессии, не мой прогон): toolfreq-метрика §15 —
+  «ноль запросов разрешения там, где гейтов больше нет» и метрики §8
+  (≥1 memory_write в сессии со stated-предпочтением, ≥1 note на завершённый
+  шаг). Код и текст это не доказывают; проверять на реальных прогонах.
+
 Позиция в порядке работ: ПОСЛЕДНИМ, после всего кодового сноса — иначе
 переписывать дважды.
 
