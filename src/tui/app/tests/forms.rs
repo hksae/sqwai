@@ -236,11 +236,10 @@ fn wheel_test_app() -> (crate::tui::app::App, usize) {
     use ratatui::layout::Rect;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.cfg.ui.experimental_test = true;
-    app.command("test animations");
-    assert!(
-        crate::tui::spinners::ALL.len() > 20,
-        "gallery must be longer than one window"
-    );
+    // the art gallery is the longest experimental list now that the spinner
+    // showcase is gone: rows must overflow one window for the wheel to have
+    // something to scroll
+    app.command("test art");
     // one draw so the wheel knows the window height
     let area = Rect::new(0, 0, 80, 24);
     let mut buf = Buffer::empty(area);

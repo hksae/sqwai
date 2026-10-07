@@ -2839,7 +2839,6 @@ impl App {
         let has_hints = matches!(
             menu,
             Some(Menu::Sessions)
-                | Some(Menu::TestAnims)
                 | Some(Menu::TestArt)
                 | Some(Menu::TestColors)
                 | Some(Menu::TestMd)
@@ -3028,57 +3027,6 @@ impl App {
                     }
                 }
             }
-        } else if matches!(self.cur_menu(), Some(Menu::TestAnims)) {
-            // gallery: live frame + name per row, list-style selection.
-            // slowed 4x (one frame per 200ms) so each animation is examinable.
-            let tick = self.spinner_tick / 4;
-            for (n, _) in self
-                .menu_rows
-                .iter()
-                .skip(self.menu_scroll)
-                .take(content_rows)
-                .enumerate()
-            {
-                let abs = self.menu_scroll + n;
-                let entry = crate::tui::spinners::ALL.get(abs % crate::tui::spinners::ALL.len());
-                let mut spans = match entry {
-                    Some(e) if e.name.starts_with("shimmer-") => {
-                        let mut v = crate::tui::shimmer::shimmer_named("Working", tick, e.name);
-                        v.push(Span::styled(format!("  {}", e.name), Theme::dim()));
-                        v
-                    }
-                    Some(e) if e.name == "flux-wave-wide" => {
-                        // 8-cell braille wave, one frame of phase per cell —
-                        // the FluxSpinner look without the widget dependency
-                        const WAVE: [char; 8] = ['⣾', '⣷', '⣯', '⣟', '⡿', '⢿', '⣽', '⣻'];
-                        let wave: String = (0..WAVE.len())
-                            .map(|c| WAVE[(tick + c) % WAVE.len()])
-                            .collect();
-                        vec![
-                            Span::styled(format!("{wave}  "), Theme::accent()),
-                            Span::styled(e.name.to_string(), Theme::base()),
-                        ]
-                    }
-                    Some(e) => vec![
-                        Span::styled(
-                            format!(
-                                "{}  ",
-                                truncate_display_width(crate::tui::spinners::frame(e, tick), 24)
-                            ),
-                            Theme::accent(),
-                        ),
-                        Span::styled(e.name.to_string(), Theme::base()),
-                    ],
-                    None => vec![Span::styled(String::new(), Theme::base())],
-                };
-                if abs == self.menu_sel {
-                    spans = spans
-                        .into_iter()
-                        .map(|s| Span::styled(s.content.to_string(), Theme::accent_bold()))
-                        .collect();
-                }
-                rows.push(Line::from(spans));
-            }
         } else {
             // render only the visible window of the list. Selection is one
             // fill band across the content width (Crush dialog style): the
@@ -3175,10 +3123,7 @@ impl App {
             );
         } else if matches!(
             self.cur_menu(),
-            Some(Menu::TestAnims)
-                | Some(Menu::TestArt)
-                | Some(Menu::TestColors)
-                | Some(Menu::TestMd)
+            Some(Menu::TestArt) | Some(Menu::TestColors) | Some(Menu::TestMd)
         ) {
             block = block.title_bottom(Theme::hints(&[("enter/esc", "close")]).right_aligned());
         } else if matches!(self.cur_menu(), Some(Menu::EditProvider { .. })) {

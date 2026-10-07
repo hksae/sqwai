@@ -5,5 +5,4 @@ pub mod markdown;
 pub mod presenter;
 mod priority;
 pub mod shimmer;
-pub mod spinners;
 pub mod theme;

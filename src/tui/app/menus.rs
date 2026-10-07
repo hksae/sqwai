@@ -51,7 +51,7 @@ pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
         &["history", "limit", "complete", "abandon", "delete"],
     ),
     ("/undo", &["step"]),
-    ("/test", &["animations", "art", "churn", "colors", "md"]),
+    ("/test", &["art", "churn", "colors", "md"]),
     ("/providers", &["update"]),
     ("/constraints", &["add", "remove"]),
     ("/mode", &["plan", "act"]),
@@ -182,8 +182,6 @@ pub(super) enum Menu {
     Effort {
         model: Option<String>,
     },
-    /// /test animations: spinner/animation showcase gallery (eye candy, picks welcome)
-    TestAnims,
     /// /test art: numbered static logo variants for picking the empty-state mark
     TestArt,
     /// /test colors: every Theme color in one list, duplicates visible
@@ -719,10 +717,7 @@ impl App {
     fn menu_skips_none(&self) -> bool {
         !matches!(
             self.cur_menu(),
-            Some(Menu::TestAnims)
-                | Some(Menu::TestArt)
-                | Some(Menu::TestColors)
-                | Some(Menu::TestMd)
+            Some(Menu::TestArt) | Some(Menu::TestColors) | Some(Menu::TestMd)
         )
     }
 
@@ -987,10 +982,7 @@ impl App {
         // galleries are showcases: any commit just closes them
         if matches!(
             self.cur_menu(),
-            Some(Menu::TestAnims)
-                | Some(Menu::TestArt)
-                | Some(Menu::TestColors)
-                | Some(Menu::TestMd)
+            Some(Menu::TestArt) | Some(Menu::TestColors) | Some(Menu::TestMd)
         ) {
             self.menu_back();
             return;
@@ -1796,7 +1788,6 @@ impl App {
                 Some(key) => format!(" Effort · {key} "),
                 None => " Effort ".into(),
             },
-            Some(Menu::TestAnims) => " Test ".into(),
             Some(Menu::TestArt) => " Art ".into(),
             Some(Menu::TestColors) => " Colors ".into(),
             Some(Menu::TestMd) => " Md ".into(),
@@ -2785,19 +2776,6 @@ impl App {
                             Span::styled(note, Theme::dim()),
                         ]),
                         MenuAction::SetEffort(lvl),
-                    ));
-                }
-            }
-            Menu::TestAnims => {
-                // rows carry names only; live frames are painted at draw time
-                // (see draw_menu gallery branch), so rows never go stale
-                for entry in crate::tui::spinners::ALL {
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(
-                            format!(" {}", entry.name),
-                            Theme::base(),
-                        )]),
-                        MenuAction::None,
                     ));
                 }
             }

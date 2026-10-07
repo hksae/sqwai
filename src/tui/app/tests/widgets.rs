@@ -181,9 +181,9 @@ fn working_tail_line_shimmers_coral() {
     );
 }
 
-/// Bottom spinner is removed for now (a replacement from the
-/// `/test animations` gallery is coming): while streaming the status
-/// bar must show no spinner glyph anywhere.
+/// The bottom spinner stays removed: while streaming the status bar must show
+/// no spinner glyph anywhere. (The `/test animations` showcase that was going
+/// to supply a replacement is cut — the running signal is the Working shimmer.)
 #[test]
 fn no_bottom_spinner_while_streaming() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());

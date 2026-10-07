@@ -1413,7 +1413,6 @@ Continue from the pending step, or report to the user if the settled work looks 
             let animating = self.streaming
                 || self.tool_running()
                 || self.toast.is_some()
-                || matches!(self.cur_menu(), Some(Menu::TestAnims))
                 // live mode-chip sweep gets its 250ms even past streaming
                 // end, or the chip would freeze mid-blend on the toggle
                 || self.mode_blend.is_some_and(|(_, t0)| {
@@ -3043,8 +3042,6 @@ Continue from the pending step, or report to the user if the settled work looks 
             "/test" => {
                 if !self.experimental_test() {
                     self.status("unknown command /test", StatusKind::Warn);
-                } else if rest.split_whitespace().nth(1) == Some("animations") {
-                    self.open_menu(Menu::TestAnims);
                 } else if rest.split_whitespace().nth(1) == Some("art") {
                     self.open_menu(Menu::TestArt);
                 } else if rest.split_whitespace().nth(1) == Some("colors") {
@@ -3054,10 +3051,7 @@ Continue from the pending step, or report to the user if the settled work looks 
                 } else if rest.split_whitespace().nth(1) == Some("churn") {
                     self.start_test_churn();
                 } else {
-                    self.status(
-                        "/test takes: animations, art, churn, colors, md",
-                        StatusKind::Warn,
-                    );
+                    self.status("/test takes: art, churn, colors, md", StatusKind::Warn);
                 }
             }
             "/debug" => self.open_menu(Menu::Debug),

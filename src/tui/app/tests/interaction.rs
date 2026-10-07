@@ -1422,73 +1422,11 @@ fn help_menu_is_empty() {
 }
 
 #[test]
-fn test_command_opens_animation_gallery_with_live_rows() {
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    assert!(COMMANDS.contains(&"/test"));
-    app.cfg.ui.experimental_test = true;
-    app.command("test animations");
-    assert!(
-        matches!(app.cur_menu(), Some(Menu::TestAnims)),
-        "/test animations must open the gallery"
-    );
-    assert_eq!(
-        app.menu_rows.len(),
-        crate::tui::spinners::ALL.len(),
-        "one row per catalog entry"
-    );
-    // smoke-render: live frames paint without panic, names visible
-    app.spinner_tick = 7;
-    let area = Rect::new(0, 0, 80, 24);
-    let mut buf = Buffer::empty(area);
-    app.draw_menu(&mut buf, area);
-    let text: String = buf.content().iter().map(|c| c.symbol()).collect();
-    assert!(text.contains("braille-classic"), "{text:?}");
-    assert!(text.contains(" Test "), "{text:?}");
-    // scroll to the shimmer row: keyboard nav pulls the window after it
-    let shim = crate::tui::spinners::ALL
-        .iter()
-        .position(|e| e.name == "shimmer-live")
-        .expect("shimmer row");
-    while app.menu_sel < shim {
-        app.menu_nav(1);
-    }
-    assert_eq!(app.menu_sel, shim);
-    let mut buf = Buffer::empty(area);
-    app.draw_menu(&mut buf, area);
-    let text: String = buf.content().iter().map(|c| c.symbol()).collect();
-    assert!(text.contains("shimmer-live"), "{text:?}");
-    assert!(text.contains("Working"), "{text:?}");
-    // new rows paint too: a tint shimmer, a flux preset, the wave
-    for probe in ["shimmer-ocean", "flux-dice", "flux-wave-wide"] {
-        let pos = crate::tui::spinners::ALL
-            .iter()
-            .position(|e| e.name == probe)
-            .expect("gallery row");
-        while app.menu_sel < pos {
-            app.menu_nav(1);
-        }
-        assert_eq!(app.menu_sel, pos);
-        let mut buf = Buffer::empty(area);
-        app.draw_menu(&mut buf, area);
-        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
-        assert!(text.contains(probe), "{probe} not visible: {text:?}");
-        if probe.starts_with("shimmer-") {
-            assert!(text.contains("Working"), "{probe} lost its demo text");
-        }
-    }
-    // Enter closes the gallery again
-    app.menu_activate();
-    assert!(app.menu_stack.is_empty(), "gallery must close on commit");
-}
-
-#[test]
-fn test_animations_gated_behind_experimental_flag() {
+fn test_subcommands_gated_behind_experimental_flag() {
     // off by default: unknown command, hidden from both popup levels
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     assert!(!app.cfg.ui.experimental_test, "flag defaults to off");
-    app.command("test animations");
+    app.command("test art");
     assert!(
         app.menu_stack.is_empty(),
         "gated command must not open anything"
@@ -1512,15 +1450,14 @@ fn test_animations_gated_behind_experimental_flag() {
     assert_eq!(
         app.popup_items(),
         vec![
-            "/test animations".to_string(),
             "/test art".to_string(),
             "/test churn".to_string(),
             "/test colors".to_string(),
             "/test md".to_string()
         ]
     );
-    app.command("test animations");
-    assert!(matches!(app.cur_menu(), Some(Menu::TestAnims)));
+    app.command("test art");
+    assert!(matches!(app.cur_menu(), Some(Menu::TestArt)));
     // bare /test with the flag on hints at the subcommand
     let mut app2 = test_app("http://127.0.0.1:9/v1".into());
     app2.cfg.ui.experimental_test = true;
