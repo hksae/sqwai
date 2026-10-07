@@ -162,6 +162,7 @@ pub(crate) async fn run_subagent_batch(
     provider: &SharedProvider,
     model_id: &str,
     blocked_patterns: &[String],
+    web_allow_hosts: &[String],
     plan_mode: bool,
     context_limit: u64,
     effort: Option<EffortLevel>,
@@ -236,6 +237,7 @@ pub(crate) async fn run_subagent_batch(
                 let model_id = model_id.to_string();
                 let root = root.to_path_buf();
                 let blocked_patterns = blocked_patterns.to_vec();
+                let web_allow_hosts = web_allow_hosts.to_vec();
                 let system = system.to_vec();
                 let mcp = mcp.clone();
                 let lsp = lsp.clone();
@@ -254,6 +256,7 @@ pub(crate) async fn run_subagent_batch(
                         &model_id,
                         &root,
                         &blocked_patterns,
+                        &web_allow_hosts,
                         plan_mode,
                         context_limit,
                         effort,
@@ -380,6 +383,7 @@ pub(crate) async fn run_subagent(
     model_id: &str,
     root: &Path,
     blocked_patterns: &[String],
+    web_allow_hosts: &[String],
     plan_mode: bool,
     context_limit: u64,
     effort: Option<EffortLevel>,
@@ -432,6 +436,7 @@ pub(crate) async fn run_subagent(
                         model_id,
                         root,
                         blocked_patterns,
+                        web_allow_hosts,
                         plan_mode,
                         context_limit,
                         effort,
@@ -534,6 +539,7 @@ pub(crate) async fn run_subagent(
         // and would append to a previous run's journal file
         session_id: child_session.clone(),
         blocked_patterns: blocked_patterns.to_vec(),
+        web_allow_hosts: web_allow_hosts.to_vec(),
         plan_mode,
         context_limit,
         enable_tools: true,

@@ -9,7 +9,7 @@ const MAX_BODY_BYTES: usize = 1_000_000;
 /// output cap in chars: head+tail mid-trim, same budget as exec/git
 const MAX_OUTPUT_CHARS: usize = 30_000;
 
-fn url_arg(args: &Value) -> Result<Url, String> {
+fn url_arg(args: &Value, allow_hosts: &[String]) -> Result<Url, String> {
     let raw = args
         .get("url")
         .and_then(Value::as_str)
@@ -26,19 +26,20 @@ fn url_arg(args: &Value) -> Result<Url, String> {
         return Err("webfetch URL must include a host".into());
     }
     // shared SSRF gate (see crate::config): initial URL and redirects
-    host_allowed(&url)?;
+    host_allowed(&url, allow_hosts)?;
     Ok(url)
 }
 
 /// Thin webfetch spelling over the shared gate: same rules, our prefix.
-fn host_allowed(url: &Url) -> Result<(), String> {
-    crate::config::url_host_allowed(url).map_err(|detail| format!("webfetch {detail}"))
+/// `[web].allow_hosts` is the user's opt-in for loopback targets (§11).
+fn host_allowed(url: &Url, allow_hosts: &[String]) -> Result<(), String> {
+    crate::config::url_host_allowed(url, allow_hosts).map_err(|detail| format!("webfetch {detail}"))
 }
 
-fn client(timeout: u64, agent: &'static str) -> Result<Client, String> {
+fn client(timeout: u64, agent: &'static str, allow_hosts: Vec<String>) -> Result<Client, String> {
     Client::builder()
         .timeout(Duration::from_secs(timeout.clamp(1, 60)))
-        .redirect(redirect_policy())
+        .redirect(redirect_policy(allow_hosts))
         .user_agent(agent)
         .build()
         .map_err(|e| format!("client error: {e}"))
@@ -46,26 +47,27 @@ fn client(timeout: u64, agent: &'static str) -> Result<Client, String> {
 
 /// Redirects re-enter the SSRF gate at every hop with the same 5-hop
 /// budget as before: a benign short link follows, a bounce into
-/// 127.0.0.1 or metadata stops the request.
-fn redirect_policy() -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(|attempt: reqwest::redirect::Attempt| {
+/// 127.0.0.1 or metadata stops the request. The allowlist rides along, so a
+/// redirect off a listed dev host onto an unlisted one still stops.
+fn redirect_policy(allow_hosts: Vec<String>) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt: reqwest::redirect::Attempt| {
         if attempt.previous().len() >= 5 {
             return attempt.stop();
         }
-        match host_allowed(attempt.url()) {
+        match host_allowed(attempt.url(), &allow_hosts) {
             Ok(()) => attempt.follow(),
             Err(_) => attempt.stop(),
         }
     })
 }
 
-pub async fn fetch(args: &Value) -> Outcome {
-    let url = match url_arg(args) {
+pub async fn fetch(args: &Value, allow_hosts: &[String]) -> Outcome {
+    let url = match url_arg(args, allow_hosts) {
         Ok(url) => url,
         Err(error) => return Outcome::err(error),
     };
     let timeout = args.get("timeout").and_then(Value::as_u64).unwrap_or(15);
-    let client = match client(timeout, crate::providers::USER_AGENT) {
+    let client = match client(timeout, crate::providers::USER_AGENT, allow_hosts.to_vec()) {
         Ok(c) => c,
         Err(e) => return Outcome::err(format!("webfetch {e}")),
     };
@@ -170,7 +172,7 @@ pub async fn search(args: &Value) -> Outcome {
         .unwrap_or(5)
         .clamp(1, 10) as usize;
     let timeout = args.get("timeout").and_then(Value::as_u64).unwrap_or(15);
-    let client = match client(timeout, "sqwai/0.1 websearch") {
+    let client = match client(timeout, "sqwai/0.1 websearch", Vec::new()) {
         Ok(c) => c,
         Err(e) => return Outcome::err(format!("websearch {e}")),
     };
@@ -301,14 +303,14 @@ mod tests {
     #[test]
     fn validates_http_urls_and_rejects_other_schemes() {
         assert_eq!(
-            url_arg(&json!({"url": " https://example.com/a "}))
+            url_arg(&json!({"url": " https://example.com/a "}), &[])
                 .unwrap()
                 .path(),
             "/a"
         );
         for value in ["", "not a url", "file:///tmp/a", "https://"] {
             assert!(
-                url_arg(&json!({"url": value})).is_err(),
+                url_arg(&json!({"url": value}), &[]).is_err(),
                 "accepted {value:?}"
             );
         }
@@ -340,7 +342,7 @@ mod tests {
             "https://user:pass@192.168.0.1/",
         ] {
             assert!(
-                url_arg(&json!({"url": value})).is_err(),
+                url_arg(&json!({"url": value}), &[]).is_err(),
                 "SSRF gate passed {value:?}"
             );
         }
@@ -351,15 +353,52 @@ mod tests {
             "https://crates.io/crates/tokio",
         ] {
             assert!(
-                url_arg(&json!({"url": value})).is_ok(),
+                url_arg(&json!({"url": value}), &[]).is_ok(),
                 "SSRF gate blocked {value:?}"
             );
         }
         // redirect hops re-enter the same gate
         let bounced: Url = "http://127.0.0.1:8080/".parse().unwrap();
-        assert!(host_allowed(&bounced).is_err());
+        assert!(host_allowed(&bounced, &[]).is_err());
         let fine: Url = "https://example.com/target".parse().unwrap();
-        assert!(host_allowed(&fine).is_ok());
+        assert!(host_allowed(&fine, &[]).is_ok());
+    }
+
+    /// §11: with `[web].allow_hosts` the loopback class becomes reachable
+    /// through webfetch — the honest path to a dev server. The gate's own
+    /// spelling is what the redirect policy uses, so hops obey the same list.
+    #[test]
+    fn a_listed_loopback_host_passes_the_gate() {
+        let allow: Vec<String> = ["localhost:3000", "127.0.0.1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for value in [
+            "http://localhost:3000/api",
+            "http://LOCALHOST:3000/api",
+            "http://127.0.0.1:11434/v1",
+        ] {
+            assert!(
+                url_arg(&json!({"url": value}), &allow).is_ok(),
+                "listed loopback must pass: {value}"
+            );
+        }
+        // unlisted loopback and everything else stay shut
+        for value in [
+            "http://localhost:3001/",
+            "http://api.localhost/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.1/",
+        ] {
+            assert!(
+                url_arg(&json!({"url": value}), &allow).is_err(),
+                "must stay refused with the list present: {value}"
+            );
+        }
+        let hop: Url = "http://localhost:3000/next".parse().unwrap();
+        assert!(host_allowed(&hop, &allow).is_ok());
+        let offlist: Url = "http://localhost:3001/next".parse().unwrap();
+        assert!(host_allowed(&offlist, &allow).is_err());
     }
 
     #[test]

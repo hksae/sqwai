@@ -45,6 +45,7 @@ fn jitter_test_app() -> App {
         providers,
         models,
         safety: Default::default(),
+        web: Default::default(),
         ui: Default::default(),
         mcp: Default::default(),
         lsp: Default::default(),

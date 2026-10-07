@@ -79,11 +79,15 @@ pub(crate) fn mutation_target_paths(ctx: &ToolCtx, name: &str, args: &Value) -> 
 /// any. Best-effort: redirect
 /// destinations plus operands of the classic mutating shapes (tee, cp/mv/
 /// install/rsync/ln, dd's `of=`, truncate/mkdir/rmdir/rm/touch, in-place
-/// sed, patch application). An unresolvable target fails closed (it is an
-/// escape or it never reaches the tree — either way not an in-scope
+/// sed, patch application). Only what a shape *writes* counts: a mover's
+/// sources are reads (its destination is its last operand), a sed script is
+/// not a file, `/dev/null` is a sink. An unresolvable target fails closed (it
+/// is an escape or it never reaches the tree — either way not an in-scope
 /// write). What slips past — implicit writes like a test run rebuilding
-/// `target/`, `cd` games — is documented, not fixed: refusing all bash
-/// for scoped children would brick their legitimate test runs.
+/// `target/`, `cd` games, writers outside the list (python, cargo) — is
+/// documented, not fixed: refusing all bash for scoped children would brick
+/// their legitimate test runs, and the journal plus the shadow copy see those
+/// writes either way.
 pub(crate) fn bash_scope_hit(ctx: &ToolCtx, scope: &[String], command: &str) -> Option<String> {
     for target in bash_write_targets(command) {
         // canonical, not lexical: a symlink inside scope can point at a
@@ -205,8 +209,19 @@ fn bash_write_targets(command: &str) -> Vec<String> {
                     targets.extend(non_flag.iter().map(|s| s.to_string()));
                 }
                 Some("sed") => {
-                    if operands.iter().any(|w| *w == "-i" || w.starts_with("-i")) {
-                        targets.extend(non_flag.iter().map(|s| s.to_string()));
+                    if operands.iter().any(|w| w.starts_with("-i")) {
+                        // POSIX: the first non-flag operand is the script —
+                        // with or without -e in front of it — so
+                        // `sed -i s/a/b/ f.rs` writes f.rs alone. A `-f`
+                        // script file is the exception: then every remaining
+                        // operand is a file.
+                        let script_from_file = operands.iter().any(|w| w.starts_with("-f"));
+                        let files: &[&str] = if script_from_file {
+                            &non_flag
+                        } else {
+                            non_flag.get(1..).unwrap_or(&[])
+                        };
+                        targets.extend(files.iter().map(|s| s.to_string()));
                     }
                 }
                 Some("patch") => {
@@ -229,7 +244,15 @@ fn bash_write_targets(command: &str) -> Vec<String> {
             }
         }
     }
-    targets
+    // A null sink carries nothing into the tree: `2>/dev/null` is not a
+    // write, and treating it as one refused every scoped child that ran it.
+    targets.into_iter().filter(|t| !is_null_sink(t)).collect()
+}
+
+/// The discard destinations of both shells: `/dev/null` and Windows `NUL`.
+fn is_null_sink(target: &str) -> bool {
+    let flat = target.replace('\\', "/");
+    flat.ends_with("/dev/null") || flat.eq_ignore_ascii_case("nul")
 }
 
 /// `> "dest"`, `> 'dest'` — matched on the original text.
@@ -238,9 +261,11 @@ fn redirect_quoted_re() -> regex::Regex {
 }
 
 /// `> dest` — matched on a copy with quoted spans blanked (see
-/// [`blank_quoted`]), so quoted operators never count.
+/// [`blank_quoted`]), so quoted operators never count. The capture excludes
+/// `>`: otherwise `>> 'file'` backtracks into matching the second arrow as
+/// the destination and reports a phantom `>` target.
 fn redirect_bare_re() -> regex::Regex {
-    regex::Regex::new("(?:^|[\\s;&|])(?:\\d+)?>>?\\s*([^\\s;&|]+)").unwrap()
+    regex::Regex::new("(?:^|[\\s;&|])(?:\\d+)?>>?\\s*([^\\s;&|>]+)").unwrap()
 }
 
 /// The redirect regex above runs on the original for quoted destinations;
@@ -401,7 +426,9 @@ pub(crate) fn acceptance_policy_hit(ctx: &ToolCtx, command: &str) -> Option<Poli
         });
     }
     let tainted = ctx.external_taint();
-    match crate::agent::trust::trust_gate(command, tainted, true) {
+    // Unattended acceptance has no dialog to answer, so there is no ack to
+    // honor: the headless branch decides and the Confirm branch both refuse.
+    match crate::agent::trust::trust_gate(command, tainted, true, &[]) {
         crate::agent::trust::Gate::Allow => None,
         crate::agent::trust::Gate::Deny(reason) | crate::agent::trust::Gate::Confirm(reason) => {
             Some(PolicyRefusal {
@@ -411,5 +438,104 @@ pub(crate) fn acceptance_policy_hit(ctx: &ToolCtx, command: &str) -> Option<Poli
                        rewrite it or have the user waive the item",
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bash_write_targets;
+
+    fn targets(command: &str) -> Vec<String> {
+        bash_write_targets(command)
+    }
+
+    /// A mover writes only its destination. Sources are reads, and reading
+    /// outside the scope is legal, so `mv ../old.rs ./new.rs` must yield only
+    /// the destination — otherwise a scoped child could not pull a file in.
+    #[test]
+    fn movers_count_only_the_destination() {
+        for bin in ["cp", "mv", "install", "rsync", "ln"] {
+            assert_eq!(
+                targets(&format!("{bin} -f ../outside.rs src/inside.rs")),
+                vec!["src/inside.rs".to_string()],
+                "{bin} must contribute its last operand only"
+            );
+        }
+        // many sources, one directory destination
+        assert_eq!(
+            targets("cp a.rs b.rs ../c.rs src/"),
+            vec!["src/".to_string()]
+        );
+    }
+
+    /// tee appends to every operand it names: all of them are written.
+    #[test]
+    fn tee_counts_every_operand() {
+        assert_eq!(
+            targets("echo hi | tee out.log ../err.log"),
+            vec!["out.log".to_string(), "../err.log".to_string()]
+        );
+    }
+
+    /// Redirects are the other writer: bare and quoted destinations both
+    /// count, and a `>` narrated inside quotes counts as nothing.
+    #[test]
+    fn redirect_destinations_are_targets() {
+        assert_eq!(targets("echo hi > out.txt"), vec!["out.txt".to_string()]);
+        assert_eq!(
+            targets("echo hi > 'my file.txt'"),
+            vec!["my file.txt".to_string()]
+        );
+        // the append arrow is one operator: no phantom `>` target, and the
+        // destination is still read
+        assert_eq!(targets("echo hi >> err.log"), vec!["err.log".to_string()]);
+        assert!(targets("echo \"write a > b\"").is_empty());
+        // a null sink writes nothing into the tree
+        assert!(targets("make test 2>/dev/null").is_empty());
+        assert!(targets("make test > NUL").is_empty());
+    }
+
+    /// The wrappers the safety AST walk strips must be stripped here too:
+    /// a desynced list let `nohup mv` escape the scope (audit H2).
+    #[test]
+    fn wrappers_do_not_hide_the_mover() {
+        assert_eq!(
+            targets("nohup mv a.rs ../b.rs"),
+            vec!["../b.rs".to_string()]
+        );
+        assert_eq!(
+            targets("FOO=1 timeout 10 cp a.rs ../b.rs"),
+            vec!["../b.rs".to_string()]
+        );
+    }
+
+    /// Writers outside this list (python, cargo, an unquoted heredoc) are
+    /// not extracted: documented best-effort, the journal and shadow copy
+    /// are what sees those writes.
+    #[test]
+    fn unlisted_writers_yield_nothing() {
+        assert!(targets("python write.py").is_empty());
+        assert!(targets("cargo build").is_empty());
+    }
+
+    /// The shapes with their own spelling: dd's `of=`, in-place sed, and
+    /// `git apply` (whose path operands name the files it scatters over).
+    #[test]
+    fn single_shape_writers() {
+        assert_eq!(targets("dd if=a of=b.img bs=1k"), vec!["b.img".to_string()]);
+        assert_eq!(
+            targets("sed -i s/old/new/ src/main.rs"),
+            vec!["src/main.rs".to_string()]
+        );
+        // with -e every non-flag operand is a file
+        assert_eq!(
+            targets("sed -i -e s/old/new/ src/a.rs src/b.rs"),
+            vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
+        );
+        assert!(targets("sed s/old/new/ src/main.rs").is_empty());
+        assert_eq!(
+            targets("git apply --check src/patch.diff"),
+            vec!["src/patch.diff".to_string()]
+        );
     }
 }

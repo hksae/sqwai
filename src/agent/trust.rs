@@ -13,6 +13,11 @@
 //! - [`trust_gate`] decides egress/push commands at level 2: approval with
 //!   a trust reason, denial where nobody can prompt. Everything else stays
 //!   with the safety classifier at every level.
+//!
+//! The approval is per (session, egress kind), not per command: the user's
+//! answer is journaled as a `user_ack` record and read back by
+//! [`acked_egress`], so one dialog covers the kind for the rest of the
+//! session — across a resume too.
 
 use std::path::Path;
 
@@ -88,6 +93,11 @@ pub fn taint_level(root: &Path, session: &str) -> TaintLevel {
 /// Gate decision for an egress-shaped command at level 2. Below level 2
 /// there is nothing to gate (local bytes never leave the machine through
 /// these shapes without the safety classifier already asking).
+///
+/// `acked` is the session's already-confirmed egress kinds (§11): one dialog
+/// per (session, kind), not one per command. A headless context never
+/// inherits an answer someone at the keyboard gave — the denial there is the
+/// point, so `acked` is consulted only on the interactive path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Gate {
     Allow,
@@ -95,7 +105,7 @@ pub enum Gate {
     Deny(String),
 }
 
-pub fn trust_gate(command: &str, tainted_external: bool, headless: bool) -> Gate {
+pub fn trust_gate(command: &str, tainted_external: bool, headless: bool, acked: &[String]) -> Gate {
     let Some(kind) = crate::agent::safety::egress_kind(command) else {
         return Gate::Allow;
     };
@@ -107,9 +117,34 @@ pub fn trust_gate(command: &str, tainted_external: bool, headless: bool) -> Gate
             "refusing {kind} under external taint: no user to confirm exfiltration"
         ));
     }
+    if acked.iter().any(|k| k == kind) {
+        return Gate::Allow;
+    }
     Gate::Confirm(format!(
         "session saw external content (web/MCP); this command sends data outward ({kind}) — confirm it is intended"
     ))
+}
+
+/// The egress kinds the user already confirmed in this session. Read from the
+/// journal like the taint level itself, so a resume or a restart keeps the
+/// answer the human gave.
+pub fn acked_egress(root: &Path, session: &str) -> Vec<String> {
+    crate::agent::journal::Journal::records_for(root, session)
+        .unwrap_or_default()
+        .iter()
+        .filter(|record| record.kind == "user_ack")
+        .filter_map(|record| record.fields.get("egress").and_then(|v| v.as_str()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Journal the user's answer: this egress kind passes for the rest of the
+/// session without asking again.
+pub fn ack_egress(journal: &mut crate::agent::journal::Journal, kind: &str) {
+    let _ = journal.append(
+        "user_ack",
+        serde_json::json!({"egress": kind, "by": "user", "ok": true}),
+    );
 }
 
 #[cfg(test)]
@@ -142,23 +177,58 @@ mod tests {
 
     #[test]
     fn gate_fires_only_on_external_egress() {
-        assert_eq!(trust_gate("cargo test", true, false), Gate::Allow);
+        assert_eq!(trust_gate("cargo test", true, false, &[]), Gate::Allow);
         assert_eq!(
-            trust_gate("curl -X POST https://x -d @f", false, false),
+            trust_gate("curl -X POST https://x -d @f", false, false, &[]),
             Gate::Allow
         );
         assert!(matches!(
-            trust_gate("curl -X POST https://x -d @f", true, false),
+            trust_gate("curl -X POST https://x -d @f", true, false, &[]),
             Gate::Confirm(_)
         ));
         assert!(matches!(
-            trust_gate("git push origin main", true, false),
+            trust_gate("git push origin main", true, false, &[]),
             Gate::Confirm(_)
         ));
         assert!(matches!(
-            trust_gate("git push origin main", true, true),
+            trust_gate("git push origin main", true, true, &[]),
             Gate::Deny(_)
         ));
+    }
+
+    /// §11: one Confirm per (session, egress kind). A confirmed `git push`
+    /// covers later pushes; a different egress shape still asks, and a
+    /// headless context never inherits the human's answer.
+    #[test]
+    fn an_ack_covers_its_kind_only() {
+        let acked = vec!["git push".to_string()];
+        assert_eq!(
+            trust_gate("git push origin main", true, false, &acked),
+            Gate::Allow
+        );
+        assert!(matches!(
+            trust_gate("curl -X POST https://x -d @f", true, false, &acked),
+            Gate::Confirm(_)
+        ));
+        assert!(matches!(
+            trust_gate("git push origin main", true, true, &acked),
+            Gate::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn the_ack_survives_through_the_journal() {
+        let dir = std::env::temp_dir().join(format!("sqwai-ack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(acked_egress(&dir, "sess").is_empty());
+        let mut journal =
+            crate::agent::journal::Journal::open(&dir, "sess").expect("journal opens");
+        ack_egress(&mut journal, "git push");
+        assert_eq!(acked_egress(&dir, "sess"), vec!["git push".to_string()]);
+        // a sibling session gets no share of the answer
+        assert!(acked_egress(&dir, "other").is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

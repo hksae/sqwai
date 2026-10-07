@@ -319,6 +319,41 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// §11 operand roles: a scoped child may read from anywhere and write
+    /// only inside its scope. A mover's sources are reads, `/dev/null` is a
+    /// sink, a sed script is not a file — none of them may refuse.
+    #[test]
+    fn subagent_scope_reads_outside_and_writes_inside() {
+        let (ctx, dir) = proj();
+        let scope = ["src".to_string()];
+        for cmd in [
+            "mv ../old.rs ./src/new.rs",
+            "cp /etc/hosts src/hosts.copy",
+            "rsync -a ../sibling/ src/sibling/",
+            "make test 2>/dev/null",
+            "sed -i s/old/new/ src/main.rs",
+            "echo done > 'src/status.txt'",
+        ] {
+            assert_eq!(
+                bash_scope_hit(&ctx, &scope, cmd),
+                None,
+                "legal in-scope write must not refuse: {cmd}"
+            );
+        }
+        for cmd in [
+            "mv src/x.rs ../x.rs",
+            "cp src/x.rs notes.md",
+            "echo hi > src/../notes.md",
+            "nohup tee notes.md < src/main.rs",
+        ] {
+            assert!(
+                bash_scope_hit(&ctx, &scope, cmd).is_some(),
+                "out-of-scope write must refuse: {cmd}"
+            );
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// Audit H3: scope was compared lexically while the OS resolves
     /// symlinks — a link inside scope `a/` pointing at sibling `b/` let a
     /// writer confined to `a/` mutate `b/`. Scope decisions must run on

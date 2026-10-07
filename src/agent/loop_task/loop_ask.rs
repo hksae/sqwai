@@ -172,6 +172,7 @@ pub(crate) async fn bash_call(
     blocked: &[String],
     next_id: &mut u64,
     subagent_depth: u8,
+    journal: &mut Option<crate::agent::journal::Journal>,
 ) -> tools::Outcome {
     let command = call.args["command"].as_str().unwrap_or("").to_string();
     let lower = command.to_lowercase();
@@ -229,13 +230,22 @@ pub(crate) async fn bash_call(
     // needs the same approval with a trust reason; headless contexts deny
     // instead. Runs after the safety verdict so a Blocked command never
     // reaches here; a command both dangerous and exfiltrating carries one
-    // combined reason into the single dialog.
-    match crate::agent::trust::trust_gate(&command, ctx.external_taint(), subagent_depth > 0) {
+    // combined reason into the single dialog. One dialog per (session, egress
+    // kind): a kind the user already confirmed passes (§11).
+    let acked = crate::agent::trust::acked_egress(&ctx.root, &ctx.session_id);
+    let mut taint_kind: Option<&'static str> = None;
+    match crate::agent::trust::trust_gate(
+        &command,
+        ctx.external_taint(),
+        subagent_depth > 0,
+        &acked,
+    ) {
         crate::agent::trust::Gate::Allow => {}
         crate::agent::trust::Gate::Deny(reason) => {
             return tools::Outcome::err(format!("command denied ({reason})"));
         }
         crate::agent::trust::Gate::Confirm(reason) => {
+            taint_kind = crate::agent::safety::egress_kind(&command);
             needs_approval = Some(match needs_approval {
                 Some(safety) => format!("{safety}; {reason}"),
                 None => reason,
@@ -276,8 +286,19 @@ pub(crate) async fn bash_call(
                 ApprovalDecision::Deny => {
                     return tools::Outcome::err(format!("command denied by user ({reason})"));
                 }
-                ApprovalDecision::AlwaysSession => always_allow.push(command.clone()),
-                ApprovalDecision::RunOnce => {}
+                // The user looked at this egress shape and said yes: journal
+                // it so the same kind passes for the rest of the session.
+                ApprovalDecision::AlwaysSession => {
+                    if let (Some(kind), Some(writer)) = (taint_kind, journal.as_mut()) {
+                        crate::agent::trust::ack_egress(writer, kind);
+                    }
+                    always_allow.push(command.clone());
+                }
+                ApprovalDecision::RunOnce => {
+                    if let (Some(kind), Some(writer)) = (taint_kind, journal.as_mut()) {
+                        crate::agent::trust::ack_egress(writer, kind);
+                    }
+                }
             }
         }
         // checkpoint before running: dangerous-approved commands always;

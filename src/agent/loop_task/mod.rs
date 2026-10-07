@@ -319,6 +319,9 @@ pub struct AgentInput {
     pub diary: crate::config::DiaryConfig,
     /// memory proposal limits copied from configuration
     pub memory: crate::config::MemoryConfig,
+    /// `[web].allow_hosts`: the user's opt-in loopback targets for webfetch.
+    /// Empty means the SSRF gate refuses every local host, as before.
+    pub web_allow_hosts: Vec<String>,
     /// compaction thresholds and summary policy copied from configuration
     pub compaction: crate::config::CompactionConfig,
     /// host limits on the structured plan copied from configuration
@@ -438,6 +441,7 @@ async fn run_agent(
         root,
         session_id,
         blocked_patterns,
+        web_allow_hosts,
         plan_mode,
         mut context_limit,
         enable_tools,
@@ -1182,6 +1186,7 @@ async fn run_agent(
                 &provider,
                 &model_id,
                 &blocked_patterns,
+                &web_allow_hosts,
                 plan_mode,
                 context_limit,
                 effort,
@@ -1285,12 +1290,13 @@ async fn run_agent(
                                 &blocked_patterns,
                                 &mut next_id,
                                 subagent_depth,
+                                &mut journal,
                             )
                             .await
                         }
                         "webfetch" | "websearch" => {
                             let mut outcome = if call.name == "webfetch" {
-                                tools::web::fetch(&call.args).await
+                                tools::web::fetch(&call.args, &web_allow_hosts).await
                             } else {
                                 tools::web::search(&call.args).await
                             };
@@ -1312,6 +1318,7 @@ async fn run_agent(
                                 &model_id,
                                 &root,
                                 &blocked_patterns,
+                                &web_allow_hosts,
                                 plan_mode,
                                 context_limit,
                                 effort,
@@ -2524,6 +2531,7 @@ mod effort_tests {
             root: temp_dir.clone(),
             session_id: "test-fallback-sess".into(),
             blocked_patterns: vec![],
+            web_allow_hosts: vec![],
             plan_mode: false,
             context_limit: 10000,
             enable_tools: false,
@@ -2613,6 +2621,7 @@ mod effort_tests {
             root: temp_dir.clone(),
             session_id: "test-partial-sess".into(),
             blocked_patterns: vec![],
+            web_allow_hosts: vec![],
             plan_mode: false,
             context_limit: 10000,
             enable_tools: false,
@@ -3448,6 +3457,7 @@ mod effort_tests {
             root: temp_dir.clone(),
             session_id: "test-baseline-sess".into(),
             blocked_patterns: vec![],
+            web_allow_hosts: vec![],
             plan_mode: false,
             context_limit: 10000,
             enable_tools: true,
@@ -3538,6 +3548,7 @@ mod effort_tests {
             root: temp_dir.clone(),
             session_id: "test-esc-sess".into(),
             blocked_patterns: vec![],
+            web_allow_hosts: vec![],
             plan_mode: false,
             context_limit: 10000,
             enable_tools: true,
@@ -3651,6 +3662,7 @@ mod effort_tests {
             &provider,
             "m",
             &root,
+            &[],
             &[],
             false,
             10_000,
@@ -3782,6 +3794,7 @@ mod effort_tests {
             "m",
             &root,
             &[],
+            &[],
             false,
             10_000,
             None,
@@ -3846,6 +3859,7 @@ mod effort_tests {
             "m",
             &root,
             &[],
+            &[],
             false,
             10_000,
             None,
@@ -3908,6 +3922,7 @@ mod effort_tests {
             &provider,
             "m",
             &root,
+            &[],
             &[],
             false,
             10_000,
@@ -3987,6 +4002,7 @@ mod effort_tests {
             root: temp_dir.clone(),
             session_id: "test-subbatch-sess".into(),
             blocked_patterns: vec![],
+            web_allow_hosts: vec![],
             plan_mode: false,
             context_limit: 10000,
             enable_tools: true,
@@ -4105,6 +4121,7 @@ mod trust_gate_tests {
             &[],
             &mut next_id,
             1,
+            &mut None,
         )
         .await;
         assert!(!outcome.ok, "must refuse");
@@ -4141,6 +4158,7 @@ mod trust_gate_tests {
             &[],
             &mut next_id,
             1,
+            &mut None,
         )
         .await;
         assert!(
@@ -4213,6 +4231,7 @@ mod trust_gate_tests {
             &[],
             &mut next_id,
             0,
+            &mut None,
         )
         .await;
         assert!(outcome.ok, "{}", outcome.output);
@@ -4265,6 +4284,7 @@ mod trust_gate_tests {
             &[],
             &mut next_id,
             0,
+            &mut None,
         )
         .await;
         assert!(
@@ -4289,6 +4309,7 @@ mod trust_gate_tests {
             bash_call_parts(&dir, &session);
         let mut always_allow = Vec::new();
         let mut next_id = 0u64;
+        let mut no_journal: Option<crate::agent::journal::Journal> = None;
         let future = bash_call(
             &call,
             &mut ctx,
@@ -4298,6 +4319,7 @@ mod trust_gate_tests {
             &[],
             &mut next_id,
             0,
+            &mut no_journal,
         );
         tokio::pin!(future);
         let outcome = loop {
@@ -4326,6 +4348,103 @@ mod trust_gate_tests {
             "{}",
             outcome.output
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// §11: one dialog per (session, egress kind). After the user answers for
+    /// a push, the next push in the same session runs without asking, and the
+    /// answer is in the journal — so it survives a resume.
+    #[tokio::test]
+    async fn an_approved_egress_kind_does_not_ask_again() {
+        let (dir, session) = tainted_project("ack");
+        let (call, mut ctx, tx_agent, mut rx_ui, tx_ui, mut rx_agent) =
+            bash_call_parts(&dir, &session);
+        let mut journal =
+            Some(crate::agent::journal::Journal::open(&dir, &session).expect("journal opens"));
+        let mut always_allow = Vec::new();
+        let mut next_id = 0u64;
+        // first push: the dialog runs and the user answers once. Each run is
+        // scoped so the future's borrows end before the next call reuses the
+        // same parts.
+        let asked = {
+            let future = bash_call(
+                &call,
+                &mut ctx,
+                &tx_agent,
+                &mut rx_agent,
+                &mut always_allow,
+                &[],
+                &mut next_id,
+                0,
+                &mut journal,
+            );
+            let mut asked = false;
+            tokio::pin!(future);
+            let _ = loop {
+                tokio::select! {
+                    out = &mut future => break out,
+                    ev = rx_ui.recv() => {
+                        if let Some(AgentEvent::Approval { id, .. }) = ev {
+                            asked = true;
+                            tx_ui
+                                .send(ControlMsg::ApprovalAnswer {
+                                    id,
+                                    decision: ApprovalDecision::RunOnce,
+                                })
+                                .await
+                                .unwrap();
+                        }
+                    }
+                }
+            };
+            asked
+        };
+        assert!(asked, "the first tainted push must ask");
+        assert_eq!(
+            crate::agent::trust::acked_egress(&dir, &session),
+            vec!["git push".to_string()],
+            "the answer must be journaled"
+        );
+        // second push, same kind, different spelling: no dialog
+        let second = crate::providers::ToolCallReq::new(
+            "c2",
+            "bash",
+            serde_json::json!({"command": "git push origin HEAD"}),
+        );
+        let asked_again = {
+            let future = bash_call(
+                &second,
+                &mut ctx,
+                &tx_agent,
+                &mut rx_agent,
+                &mut always_allow,
+                &[],
+                &mut next_id,
+                0,
+                &mut journal,
+            );
+            let mut asked_again = false;
+            tokio::pin!(future);
+            let _ = loop {
+                tokio::select! {
+                    out = &mut future => break out,
+                    ev = rx_ui.recv() => {
+                        if let Some(AgentEvent::Approval { id, .. }) = ev {
+                            asked_again = true;
+                            tx_ui
+                                .send(ControlMsg::ApprovalAnswer {
+                                    id,
+                                    decision: ApprovalDecision::Deny,
+                                })
+                                .await
+                                .unwrap();
+                        }
+                    }
+                }
+            };
+            asked_again
+        };
+        assert!(!asked_again, "the same egress kind must not ask twice");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

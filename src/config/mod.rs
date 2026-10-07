@@ -340,31 +340,87 @@ pub const BUILTIN_PROVIDERS_URL: &str =
 /// base_urls (with the user's key following them), so both entries run
 /// this. DNS names are NOT resolved here: resolution races the connect
 /// (rebinding) — a hostile-DNS residual remains, documented not fixed.
-pub(crate) fn url_host_allowed(url: &reqwest::Url) -> Result<(), String> {
-    let host = url.host_str().unwrap_or_default();
-    // host_str keeps IPv6 brackets; strip them before parsing
-    let host = host
-        .strip_prefix('[')
-        .and_then(|inner| inner.strip_suffix(']'))
-        .unwrap_or(host);
+///
+/// `allow_hosts` is the user's `[web]` opt-in (§11) and opens exactly one
+/// class: loopback. A dev server on `localhost:3000` or `127.0.0.1:8080` is a
+/// legitimate target the gate used to refuse while bash `curl` reached the
+/// same host silently — the honest path was missing, not the danger.
+/// Everything else stays refused whatever the list says: the metadata names
+/// are the IMDS target, and the other non-public ranges are the SSRF blast
+/// radius. The catalog calls this with an empty list: remote catalog text
+/// must not gain a host the user typed for their own tools.
+pub(crate) fn url_host_allowed(url: &reqwest::Url, allow_hosts: &[String]) -> Result<(), String> {
+    let host = url_host(url);
+    let listed = entry_matches(&host, url.port_or_known_default(), allow_hosts);
     // the url crate normalizes WHATWG numeric forms (2130706433,
     // 0x7f.0.0.1) to dotted quads before we ever see them, so parsing
     // the normalized host catches the obfuscated literals too
     if let Ok(addr) = host.parse::<std::net::IpAddr>() {
+        if addr.is_loopback() {
+            return match listed {
+                true => Ok(()),
+                false => Err(format!(
+                    "refuses loopback IP literal {host}; list it in [web].allow_hosts"
+                )),
+            };
+        }
         if ip_blocked(&addr) {
             return Err(format!("refuses non-public IP literal {host}"));
         }
         return Ok(());
     }
-    let name = host.trim_end_matches('.').to_ascii_lowercase();
-    if name == "localhost"
-        || name.ends_with(".localhost")
-        || name == "metadata.google.internal"
-        || name == "metadata.google"
-    {
-        return Err(format!("refuses local/metadata host {host}"));
+    let name = host.trim_end_matches('.');
+    if name == "metadata.google.internal" || name == "metadata.google" {
+        return Err(format!("refuses metadata host {host}"));
+    }
+    if name == "localhost" || name.ends_with(".localhost") {
+        return match listed {
+            true => Ok(()),
+            false => Err(format!(
+                "refuses local host {host}; list it in [web].allow_hosts"
+            )),
+        };
     }
     Ok(())
+}
+
+/// The gate's view of a URL's host: no IPv6 brackets, lowercased.
+/// [`reqwest::Url::host_str`] keeps the brackets, and the comparison below
+/// runs against user-typed entries.
+fn url_host(url: &reqwest::Url) -> String {
+    let host = url.host_str().unwrap_or_default();
+    host.strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host)
+        .to_ascii_lowercase()
+}
+
+/// `[web].allow_hosts` matching: an entry is `host` (any port) or
+/// `host:port` (that port only). IPv6 entries keep their brackets
+/// (`[::1]:8080`); a portless entry still matches a default port, since
+/// [`reqwest::Url::port_or_known_default`] fills it in.
+fn entry_matches(host: &str, port: Option<u16>, allow_hosts: &[String]) -> bool {
+    allow_hosts.iter().any(|raw| {
+        let entry = raw.trim().to_ascii_lowercase();
+        let (want_host, want_port) = match entry.split_once("]:") {
+            // [::1]:8080 — the compared host carries no brackets
+            Some((h, p)) => (h.trim_start_matches('[').to_string(), p.parse::<u16>().ok()),
+            None => match entry.rsplit_once(':') {
+                // a second colon means a bare IPv6 address, not a port
+                Some((h, p)) if !h.contains(':') && p.parse::<u16>().is_ok() => {
+                    (h.to_string(), p.parse::<u16>().ok())
+                }
+                _ => (
+                    entry
+                        .trim_start_matches('[')
+                        .trim_end_matches(']')
+                        .to_string(),
+                    None,
+                ),
+            },
+        };
+        want_host == host && want_port.is_none_or(|p| Some(p) == port)
+    })
 }
 
 /// True for every IPv4/IPv6 range that is not public unicast: loopback,
@@ -579,7 +635,9 @@ pub fn validate_fetched_catalog(text: &str, cached_serial: u64) -> Result<Builti
                 provider.base_url
             );
         }
-        url_host_allowed(&url)
+        // The catalog is remote text: it gets no share of the user's own
+        // `[web].allow_hosts` (§11).
+        url_host_allowed(&url, &[])
             .map_err(|detail| anyhow::anyhow!("provider {name:?} base_url {detail}"))?;
         if let Some((host, key_env)) = pinned_origin(name) {
             if url.host_str() != Some(host) {
@@ -694,6 +752,23 @@ pub struct SafetyConfig {
     #[serde(default)]
     #[allow(dead_code)]
     pub blocked_patterns: Vec<String>,
+}
+
+/// `[web]` — the opt-in exceptions to the SSRF gate.
+///
+/// `allow_hosts` lists `host` or `host:port` targets the loopback class may
+/// serve (§11). Deliberately narrow: only loopback (127.0.0.0/8, `::1`,
+/// `localhost`, `*.localhost`) can be listed. Other non-public ranges
+/// (10/8, 172.16/12, 192.168/16, 169.254/16, CGNAT) and the cloud metadata
+/// names stay refused, list or no list — those are the SSRF blast radius, and
+/// a bare GET to them is never a legitimate dev-server visit.
+///
+/// Not project-overridable: a cloned repository must not be able to widen the
+/// host its own tooling may reach.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WebConfig {
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
 }
 
 /// MCP server transport configuration.
@@ -1191,6 +1266,8 @@ pub struct Config {
     #[serde(default)]
     pub safety: SafetyConfig,
     #[serde(default)]
+    pub web: WebConfig,
+    #[serde(default)]
     pub ui: UiConfig,
     #[serde(default)]
     pub mcp: McpConfig,
@@ -1262,6 +1339,7 @@ impl Default for Config {
             providers: catalog.providers,
             models: catalog.models,
             safety: SafetyConfig::default(),
+            web: WebConfig::default(),
             ui: UiConfig::default(),
             mcp: McpConfig::default(),
             lsp: LspConfig::default(),
@@ -2438,6 +2516,9 @@ plan_first = "off"
 [safety]
 blocked_patterns = ["rm -rf /"]
 
+[web]
+allow_hosts = ["127.0.0.1:3000"]
+
 [models."x"]
 provider = "p"
 "#,
@@ -2461,6 +2542,13 @@ provider = "p"
         );
         assert!(notes.iter().any(|n| n.contains("[safety]")), "{notes:?}");
         assert!(notes.iter().any(|n| n.contains("[models]")), "{notes:?}");
+        // §11: a cloned repo must not widen the hosts our webfetch may reach
+        assert!(notes.iter().any(|n| n.contains("[web]")), "{notes:?}");
+        assert!(
+            cfg.web.allow_hosts.is_empty(),
+            "project file must not open loopback targets: {:?}",
+            cfg.web.allow_hosts
+        );
         assert!(
             !cfg.models.contains_key("x"),
             "project file must not inject models"
@@ -2578,5 +2666,79 @@ provider = "p"
         assert_eq!(chain[1].0, "m_c");
         assert_eq!(chain[1].1.id, "id_c");
         // m_c fallback to m_a was not added due to cycle protection
+    }
+
+    fn gate(url: &str, allow: &[&str]) -> Result<(), String> {
+        let parsed = reqwest::Url::parse(url).expect("test url parses");
+        url_host_allowed(
+            &parsed,
+            &allow.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        )
+    }
+
+    /// §11: the opt-in opens exactly the loopback class, and only when the
+    /// user named it. Empty list = today's behavior, refuse every local host.
+    #[test]
+    fn loopback_needs_an_explicit_entry() {
+        for local in [
+            "http://localhost:3000/api",
+            "http://my.app.localhost:8080/",
+            "http://127.0.0.1:11434/v1",
+            "http://[::1]:8080/",
+        ] {
+            assert!(
+                gate(local, &[]).is_err(),
+                "{local} must stay shut by default"
+            );
+        }
+        assert!(gate("http://localhost:3000/api", &["localhost:3000"]).is_ok());
+        assert!(gate("http://localhost:9999/api", &["localhost:3000"]).is_err());
+        // a portless entry covers every port of that host
+        assert!(gate("http://127.0.0.1:11434/v1", &["127.0.0.1"]).is_ok());
+        assert!(gate("http://[::1]:8080/", &["[::1]:8080"]).is_ok());
+        assert!(gate("http://[::1]:8080/", &["[::1]:9"]).is_err());
+        // the scheme default counts as the port
+        assert!(gate("http://my.app.localhost/app", &["my.app.localhost:80"]).is_ok());
+    }
+
+    /// Everything else in the non-public space stays refused with the host
+    /// listed: the metadata names are the IMDS target, the other ranges are
+    /// the SSRF blast radius a dev-server allowance must not open.
+    #[test]
+    fn allowlist_never_opens_metadata_or_internal_ranges() {
+        for (url, listed) in [
+            (
+                "http://169.254.169.254/latest/meta-data/",
+                "169.254.169.254",
+            ),
+            ("http://10.0.0.5/admin", "10.0.0.5"),
+            ("http://192.168.1.1/", "192.168.1.1"),
+            ("http://172.16.0.1/", "172.16.0.1"),
+            (
+                "http://metadata.google.internal/",
+                "metadata.google.internal",
+            ),
+            ("http://0.0.0.0/", "0.0.0.0"),
+        ] {
+            assert!(gate(url, &[]).is_err(), "{url} must be refused");
+            assert!(
+                gate(url, &[listed]).is_err(),
+                "{url} must stay refused when listed"
+            );
+        }
+        // WHATWG numeric spellings of loopback normalize to a dotted quad, so
+        // they land in the loopback class and follow the list
+        assert!(gate("http://2130706433:3000/", &[]).is_err());
+        assert!(gate("http://2130706433:3000/", &["127.0.0.1:3000"]).is_ok());
+    }
+
+    /// Public targets never consult the list, and an entry is never a
+    /// wildcard: matching is by host (plus optional port), exact.
+    #[test]
+    fn public_hosts_ignore_the_list() {
+        assert!(gate("https://example.com/", &[]).is_ok());
+        assert!(gate("https://example.com/", &["localhost"]).is_ok());
+        assert!(gate("https://8.8.8.8/", &[]).is_ok());
+        assert!(gate("http://example.com./", &[]).is_ok());
     }
 }

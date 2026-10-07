@@ -296,6 +296,7 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
         root: root.clone(),
         session_id: session_id.clone(),
         blocked_patterns: vec![],
+        web_allow_hosts: vec![],
         plan_mode: false,
         context_limit,
         enable_tools: true,
