@@ -357,30 +357,36 @@ pub fn spawn_agent(input: AgentInput) -> AgentHandle {
     }
 }
 
-/// Advisory repeat note for a bash outcome: when the same command already
-/// ran earlier in this session with byte-identical output, re-running
-/// learned nothing — say so once, attached to this result, instead of
-/// burning another turn on the same bytes. Advisory only: polled state
-/// legitimately changes, and the note says to ignore it then. Compares full
-/// outputs, not journal summaries (truncated to 200 chars), so same-headed
-/// but different-tailed outputs never match.
-fn repeat_bash_note(messages: &[Message], call: &ToolCallReq, output: &str) -> Option<String> {
-    let command = call.args.get("command")?.as_str()?;
-    if command.trim().is_empty() {
+/// Advisory repeat note for any tool outcome: when the same call already ran
+/// earlier in this session with byte-identical output, re-running learned
+/// nothing — say so once, attached to this result, instead of burning another
+/// turn on the same bytes. Advisory only: polled state legitimately changes,
+/// and the note says to ignore it then. Compares full outputs, not journal
+/// summaries (truncated to 200 chars), so same-headed but different-tailed
+/// outputs never match.
+///
+/// It used to cover `bash` only, which is how a live session spent ten turns
+/// on `git status` and five byte-identical `git_diff` calls with no pushback:
+/// the loop was visible to the user and invisible to the guard.
+fn repeat_note(messages: &[Message], call: &ToolCallReq, output: &str) -> Option<String> {
+    // Repeating is the mechanism here: polling a job and waiting are supposed
+    // to be called again.
+    if matches!(call.name.as_str(), "bash_output" | "sleep") {
         return None;
     }
-    // (command, output) pairs in order; the current call has no result yet,
+    let key = call_key(call);
+    if key.is_empty() {
+        return None;
+    }
+    // (call key, output) pairs in order; the current call has no result yet,
     // so everything collected here is older
-    let mut pairs: Vec<(&str, &str)> = Vec::new();
+    let mut pairs: Vec<(String, &str)> = Vec::new();
     for message in messages {
         if message.role != Role::Assistant {
             continue;
         }
         for tc in &message.tool_calls {
-            if tc.name != "bash" {
-                continue;
-            }
-            let Some(cmd) = tc.args.get("command").and_then(|v| v.as_str()) else {
+            let Some(previous) = call_key_ref(tc) else {
                 continue;
             };
             let out = messages
@@ -388,20 +394,46 @@ fn repeat_bash_note(messages: &[Message], call: &ToolCallReq, output: &str) -> O
                 .find(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some(&tc.id))
                 .map(|m| m.content.as_str())
                 .unwrap_or("");
-            pairs.push((cmd, out));
+            pairs.push((previous, out));
         }
     }
     if pairs
         .iter()
-        .any(|(cmd, out)| *cmd == command && *out == output)
+        .any(|(previous, out)| *previous == key && *out == output)
     {
-        Some(
-            "\n[host: you already ran this exact command earlier in this session with byte-identical output — reuse that observation instead of re-running it. If the underlying state may have changed since, ignore this note.]"
-                .to_string(),
-        )
+        Some(format!(
+            "\n[host: you already called {} with these exact arguments earlier in this \
+             session and got byte-identical output — reuse that observation instead of \
+             re-running it. If the underlying state may have changed since, ignore this note.]",
+            call.name
+        ))
     } else {
         None
     }
+}
+
+/// What makes two calls the same call: for `bash` the command line alone (a
+/// different `timeout` is the same observation attempt), for everything else
+/// the tool name plus its canonicalized arguments. Empty when there is nothing
+/// to compare — an unargumented `plan show` is not a repeat risk worth noting.
+fn call_key(call: &ToolCallReq) -> String {
+    call_key_ref(call).unwrap_or_default()
+}
+
+fn call_key_ref(call: &ToolCallReq) -> Option<String> {
+    if call.name == "bash" {
+        let command = call.args.get("command")?.as_str()?.trim();
+        return (!command.is_empty()).then(|| format!("bash {command}"));
+    }
+    let args = call.args.as_object()?;
+    if args.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} {}",
+        call.name,
+        serde_json::to_string(&call.args).ok()?
+    ))
 }
 
 /// Sessions this process already opened an agent run for. `run_agent` is
@@ -1772,9 +1804,8 @@ async fn run_agent(
                 // repeat nudge (§7 W): an identical re-run learned nothing.
                 // Advisory and single-shot — attached to this result only, so
                 // it never nags twice about the same bytes.
-                if call.name == "bash"
-                    && outcome.ok
-                    && let Some(note) = repeat_bash_note(&messages, call, &outcome.output)
+                if outcome.ok
+                    && let Some(note) = repeat_note(&messages, call, &outcome.output)
                 {
                     outcome.output.push_str(&note);
                 }
@@ -2686,7 +2717,7 @@ mod effort_tests {
     /// output fires the advisory note; a changed output, a different
     /// command, or a first run stays silent.
     #[test]
-    fn repeat_bash_note_fires_only_on_identical_reruns() {
+    fn repeat_note_fires_only_on_identical_reruns() {
         use crate::providers::ToolCallReq;
         let bash_call = |id: &str, command: &str| {
             ToolCallReq::new(id, "bash", serde_json::json!({"command": command}))
@@ -2698,18 +2729,57 @@ mod effort_tests {
             Message::new(Role::User, "and?"),
         ];
         let again = bash_call("c2", "netstat");
-        let note = repeat_bash_note(&messages, &again, "TCP 1.2.3.4:443");
+        let note = repeat_note(&messages, &again, "TCP 1.2.3.4:443");
         assert!(
-            note.clone().is_some_and(|n| n.contains("already ran")),
+            note.clone()
+                .is_some_and(|n| n.contains("already called bash")),
             "{note:?}"
         );
         // changed output: fresh state, no note
-        assert!(repeat_bash_note(&messages, &again, "TCP 9.9.9.9:80").is_none());
+        assert!(repeat_note(&messages, &again, "TCP 9.9.9.9:80").is_none());
         // different command: no note
         let other = bash_call("c3", "Get-Process");
-        assert!(repeat_bash_note(&messages, &other, "TCP 1.2.3.4:443").is_none());
+        assert!(repeat_note(&messages, &other, "TCP 1.2.3.4:443").is_none());
         // first run ever: no note
-        assert!(repeat_bash_note(&[], &again, "TCP 1.2.3.4:443").is_none());
+        assert!(repeat_note(&[], &again, "TCP 1.2.3.4:443").is_none());
+        // a bash re-run with a different timeout is still the same attempt
+        let with_timeout = ToolCallReq::new(
+            "c4",
+            "bash",
+            serde_json::json!({"command": "netstat", "timeout": 30}),
+        );
+        assert!(repeat_note(&messages, &with_timeout, "TCP 1.2.3.4:443").is_some());
+    }
+
+    /// The gap a live session fell into: five byte-identical `git_diff {}`
+    /// calls in a row, none of them flagged, because the guard only looked at
+    /// `bash`. Any tool with the same arguments and the same output now gets
+    /// the same advisory note.
+    #[test]
+    fn repeat_note_covers_read_only_tools_too() {
+        use crate::providers::ToolCallReq;
+        let diff = |id: &str, args: serde_json::Value| ToolCallReq::new(id, "git_diff", args);
+        let messages = vec![
+            Message::new(Role::User, "check"),
+            Message::new(Role::Assistant, "")
+                .with_tool_calls(vec![diff("c1", serde_json::json!({"target": "src/x.rs"}))]),
+            Message::tool_result("c1", "diff --git a/src/x.rs", false),
+        ];
+        let same = diff("c2", serde_json::json!({"target": "src/x.rs"}));
+        assert!(
+            repeat_note(&messages, &same, "diff --git a/src/x.rs").is_some(),
+            "an identical git_diff re-run must be flagged"
+        );
+        // different arguments are a different question, not a repeat
+        let narrower = diff("c3", serde_json::json!({"target": "src/y.rs"}));
+        assert!(repeat_note(&messages, &narrower, "diff --git a/src/x.rs").is_none());
+        // no arguments at all: nothing to call a repeat, so nothing to nag about
+        assert!(repeat_note(&messages, &diff("c4", serde_json::json!({})), "").is_none());
+        // polling and waiting are the mechanism, not a loop
+        let poll = ToolCallReq::new("c5", "bash_output", serde_json::json!({"id": 3}));
+        assert!(repeat_note(&messages, &poll, "diff --git a/src/x.rs").is_none());
+        let nap = ToolCallReq::new("c6", "sleep", serde_json::json!({"seconds": 5}));
+        assert!(repeat_note(&messages, &nap, "diff --git a/src/x.rs").is_none());
     }
 
     /// the turn, with progress events bracketing each run.

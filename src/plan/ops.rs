@@ -673,7 +673,17 @@ fn finish(plan: &mut Plan, id: &str, summary: String) -> Result<Applied, Rejecti
     step.status = StepStatus::Done;
     step.finished = Some(now());
     step.summary = Some(summary);
-    accept(plan, format!("step {id} done"))
+    // One thin trigger, at the moment it is actionable: a live session closed
+    // two steps and wrote no note at all, because the `note` description is
+    // read once and forgotten. The summary says what changed; only a note can
+    // carry why, and what was rejected on the way.
+    accept(
+        plan,
+        format!(
+            "step {id} done — a decision this step settled, an approach it rejected or a \
+             lesson it learned belongs in `note`; the transcript gets compacted, the journal does not"
+        ),
+    )
 }
 
 fn block(plan: &mut Plan, id: &str, reason: String) -> Result<Applied, Rejection> {
