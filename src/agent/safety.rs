@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Two-layer safety classification for shell commands (design §4.4).
 //!
 //! Layer 1: fast heuristic (substring/regex-based).
@@ -23,6 +22,7 @@ pub enum Verdict {
 }
 
 /// classify a command using the syntax of the shell that will execute it.
+#[cfg(test)] // the detect-the-shell shorthand; every product call passes its known ShellKind
 pub fn classify(cmd: &str) -> Verdict {
     classify_for(ShellKind::detect(), cmd)
 }

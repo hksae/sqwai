@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! File tool handlers. Every path passes through `ToolCtx::resolve`
 //! (project-jail), mutations snapshot first, edits require a prior read.
 

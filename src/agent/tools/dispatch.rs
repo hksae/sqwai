@@ -114,8 +114,6 @@ impl Outcome {
     }
 }
 
-const READ_MAX_BYTES: usize = 400_000;
-
 /// (id, owning session, command) of background jobs whose processes are
 /// still alive. The undo preflight (§2.5, S1) refuses a restore while any
 /// of these run — the writer lock stops in-process dispatch, but an

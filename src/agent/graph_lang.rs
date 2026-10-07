@@ -1,10 +1,7 @@
-//! Tree-sitter language registry: one grammar table for every consumer.
-//!
-//! `TsLang` maps file extensions and language names to the eleven loaded
-//! grammars, with the comment-node kinds the pattern matcher needs. It backs
-//! the `ast_grep` matching engine and the `outline` tool; the project graph
-//! index and its per-language walkers that used to live here were retired
-//! with the graph store.
+//! Tree-sitter language registry: the grammar table behind the `outline`
+//! tool. The project graph index, its per-language walkers and the `ast_grep`
+//! pattern engine that also lived on this enum were all retired — the graph
+//! with the store, the pattern engine when its tool left the registry.
 
 use tree_sitter::Language;
 
@@ -24,7 +21,7 @@ pub enum TsLang {
 }
 
 impl TsLang {
-    /// Extension table shared by every consumer (pattern engine, outline).
+    /// File extension to grammar, the only mapping `outline` needs.
     pub fn from_extension(ext: &str) -> Option<Self> {
         Some(match ext.to_ascii_lowercase().as_str() {
             "rs" => TsLang::Rust,
@@ -37,25 +34,6 @@ impl TsLang {
             "c" | "h" => TsLang::C,
             "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => TsLang::Cpp,
             "cs" => TsLang::CSharp,
-            "java" => TsLang::Java,
-            _ => return None,
-        })
-    }
-
-    /// Language-name table shared by every consumer (pattern engine,
-    /// outline parser tags).
-    pub fn from_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "rust" => TsLang::Rust,
-            "python" => TsLang::Python,
-            "javascript" => TsLang::JavaScript,
-            "typescript" => TsLang::TypeScript,
-            "tsx" => TsLang::Tsx,
-            "go" => TsLang::Go,
-            "bash" => TsLang::Bash,
-            "c" => TsLang::C,
-            "cpp" | "c++" => TsLang::Cpp,
-            "csharp" | "c#" | "cs" => TsLang::CSharp,
             "java" => TsLang::Java,
             _ => return None,
         })
@@ -74,30 +52,6 @@ impl TsLang {
             TsLang::Cpp => tree_sitter_cpp::LANGUAGE.into(),
             TsLang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
             TsLang::Java => tree_sitter_java::LANGUAGE.into(),
-        }
-    }
-
-    pub fn name(&self) -> &'static str {
-        match self {
-            TsLang::Rust => "rust",
-            TsLang::Python => "python",
-            TsLang::JavaScript => "javascript",
-            TsLang::TypeScript => "typescript",
-            TsLang::Tsx => "tsx",
-            TsLang::Go => "go",
-            TsLang::Bash => "bash",
-            TsLang::C => "c",
-            TsLang::Cpp => "cpp",
-            TsLang::CSharp => "csharp",
-            TsLang::Java => "java",
-        }
-    }
-
-    /// Comment node kinds for pattern matching (comments never match code).
-    pub fn is_comment(&self, kind: &str) -> bool {
-        match self {
-            TsLang::Rust => matches!(kind, "line_comment" | "block_comment"),
-            _ => kind == "comment" || kind == "line_comment" || kind == "block_comment",
         }
     }
 }

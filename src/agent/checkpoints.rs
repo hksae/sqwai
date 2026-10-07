@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Checkpoints taken before mutating actions (§2.5), across two layers.
 //!
 //! Layer 1 ([`crate::agent::blobs`]) keeps the pre-image of every file the
@@ -45,6 +44,7 @@ pub fn shadow_repo(root: &Path, store: ShadowStore) -> Option<Shadow> {
 /// Deliberately does not create anything: an availability check that
 /// initialised a repository as a side effect would litter every directory the
 /// TUI asks about.
+#[cfg(test)] // the Local shorthand the tests call; every product site passes its store to `available_in`
 pub fn available(root: &Path) -> bool {
     available_in(root, ShadowStore::Local)
 }
@@ -111,6 +111,7 @@ pub fn changed_files(root: &Path, store: ShadowStore, sha: &str) -> Result<Vec<S
 /// them after the fact so passed receipts covering those paths go stale.
 /// Empty when the shadow is off, the chain has no commit, or the tree is
 /// clean against the head.
+#[cfg(test)] // attribution test only; the undo path reads the diff through restore_paths_in
 pub fn changed_since_head(root: &Path, store: ShadowStore, session_id: &str) -> Vec<String> {
     let Some(shadow) = shadow(root, store) else {
         return Vec::new();
@@ -350,6 +351,7 @@ pub fn restore_from_blobs(
 ///
 /// The index and HEAD are never touched, and no path outside `targets` is read
 /// or written.
+#[cfg(test)] // the Local shorthand the restore tests call; the product uses restore_paths_in
 pub fn restore_paths(root: &Path, sha: &str, targets: &[Target]) -> Result<RestoreReport> {
     restore_paths_in(root, ShadowStore::Local, sha, targets)
 }

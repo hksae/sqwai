@@ -105,46 +105,6 @@ pub(crate) fn bash_scope_hit(ctx: &ToolCtx, scope: &[String], command: &str) -> 
     None
 }
 
-/// `$name` / `${name}` references in acceptance texts: what the host
-/// expanded from project config, for the provenance note. Pure scan —
-/// expansion itself (and unknown-name rejection) lives in
-/// `plan::substitute_verify_commands`; the name grammar mirrors it.
-pub(crate) fn commanded_verify_refs(texts: &[String]) -> Vec<String> {
-    let mut names = Vec::new();
-    for text in texts {
-        let mut chars = text.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c != '$' {
-                continue;
-            }
-            let braced = chars.peek() == Some(&'{');
-            if braced {
-                chars.next();
-            }
-            let mut name = String::new();
-            while let Some(&d) = chars.peek() {
-                if d.is_alphanumeric() || d == '_' || d == '-' {
-                    name.push(d);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            if braced {
-                if chars.peek() == Some(&'}') {
-                    chars.next();
-                } else {
-                    continue;
-                }
-            }
-            if !name.is_empty() && !names.contains(&name) {
-                names.push(name);
-            }
-        }
-    }
-    names
-}
-
 /// Raw write-target tokens of a shell command: redirect destinations and
 /// mutating-shape operands. Quoted spans never contribute operators (an
 /// `echo "a > b"` is not a redirect), but stay available as quoted
@@ -371,74 +331,6 @@ pub(crate) fn in_write_scope(path: &str, scope: &[String]) -> bool {
     scope
         .iter()
         .any(|root| path == root || path.starts_with(&format!("{root}/")) || root == ".")
-}
-
-/// Why an acceptance command must not run, beyond what the classifier
-/// says at each call site. The classifier stays where it is (every runner
-/// phrases its refusal differently); this carries the policy layers the
-/// runners used to skip: the user's hard blocks, untaint-conditioned
-/// exfil refusal, and the exfil trust gate. Acceptance runs unattended,
-/// so anything but Safe refuses.
-pub(crate) struct PolicyRefusal {
-    pub code: &'static str,
-    pub reason: String,
-    pub hint: &'static str,
-}
-
-/// The full bash policy for an unattended acceptance command: the user's
-/// `[safety].blocked_patterns` first (fail-closed on a bad regex, like the
-/// bash tool), then exfil shapes (uploads, pushes — refused with or
-/// without session taint, because no taint state makes an unattended
-/// upload consenting), then the exfil trust gate (Deny and would-Confirm
-/// both refuse — there is nobody to ask). Model-typed `cmd:` and
-/// project-injected `cmd: $name` (`.sqwai/config.toml`, MEMORY.md) face
-/// the same list either way: a `[verify]` plant that classifies Safe is
-/// exactly what the egress rule stops.
-pub(crate) fn acceptance_policy_hit(ctx: &ToolCtx, command: &str) -> Option<PolicyRefusal> {
-    for pat in &ctx.blocked_patterns {
-        match regex::Regex::new(pat) {
-            Ok(re) => {
-                if re.is_match(command) {
-                    return Some(PolicyRefusal {
-                        code: "blocked_command",
-                        reason: format!("matches [safety].blocked_patterns '{pat}'"),
-                        hint: "remove the pattern or rewrite the check",
-                    });
-                }
-            }
-            Err(e) => {
-                return Some(PolicyRefusal {
-                    code: "blocked_command",
-                    reason: format!("invalid [safety].blocked_patterns regex '{pat}': {e}"),
-                    hint: "fix the pattern in [safety].blocked_patterns",
-                });
-            }
-        }
-    }
-    if let Some(kind) = crate::agent::safety::egress_kind(command) {
-        return Some(PolicyRefusal {
-            code: "unsafe_acceptance",
-            reason: format!(
-                "sends data outward ({kind}): unattended acceptance never runs exfiltration-shaped checks, tainted session or not"
-            ),
-            hint: "acceptance commands run without asking, so they must be safe; \
-                   rewrite it or have the user waive the item",
-        });
-    }
-    let tainted = ctx.external_taint();
-    // Unattended acceptance has no dialog to answer, so there is no ack to
-    // honor: the headless branch decides and the Confirm branch both refuse.
-    match crate::agent::trust::trust_gate(command, tainted, true, &[]) {
-        crate::agent::trust::Gate::Allow => None,
-        crate::agent::trust::Gate::Deny(reason) | crate::agent::trust::Gate::Confirm(reason) => {
-            Some(PolicyRefusal {
-                code: "unsafe_acceptance",
-                reason,
-                hint: "acceptance commands run without asking, so they must be safe; \
-                       rewrite it or have the user waive the item",
-            })
-        }
-    }
 }
 
 #[cfg(test)]

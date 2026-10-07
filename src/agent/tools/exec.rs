@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Shell execution tool (`bash`).
 //!
 //! Cross-platform: uses the platform default shell (cmd on Windows, sh
