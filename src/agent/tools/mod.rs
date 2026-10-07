@@ -596,7 +596,8 @@ mod tests {
             ".sqwai/journal/live.jsonl".to_string(),
             ".sqwai/journal/forged.jsonl".to_string(),
             ".sqwai/memory/MEMORY.md".to_string(),
-            ".sqwai/graph/graph.db".to_string(),
+            ".sqwai/checkpoints/head.json".to_string(),
+            ".sqwai/exports/session.md".to_string(),
             ".sqwai".to_string(),
         ] {
             for tool in ["read", "ls", "write", "edit"] {
@@ -610,6 +611,18 @@ mod tests {
                 assert!(
                     out.output.contains("host-owned state"),
                     "{tool} on {path} must say why: {}",
+                    out.output
+                );
+                // the hint is model-facing: it must name tools that exist.
+                // It used to point at a graph store that was cut in B2.
+                assert!(
+                    !out.output.contains("graph"),
+                    "{tool} on {path} names a retired mechanism: {}",
+                    out.output
+                );
+                assert!(
+                    out.output.contains("memory_write"),
+                    "{tool} on {path} must offer the way in: {}",
                     out.output
                 );
             }

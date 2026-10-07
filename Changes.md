@@ -510,6 +510,34 @@ toolfreq (метрики §8 плюс: ноль запросов разреше�
   (≥1 memory_write в сессии со stated-предпочтением, ≥1 note на завершённый
   шаг). Код и текст это не доказывают; проверять на реальных прогонах.
 
+### 15.1 Baseline «до», замерен по журналу 2026-10-07
+
+Счётчиков нет (§12), поэтому baseline считается из `.sqwai/journal/*.jsonl` —
+2275 файлов, все эпохи до перепрошивки:
+
+- сессий, сделавших хотя бы один tool_call: **152** из 2275 (остальное —
+  обрывки session_start+user_msg+provider_error, ~440 байт);
+- tool_call всего **2274**: read 735, plan 316, grep 252, bash 189,
+  bash_output 154, ls 117, git_status 60, glob 46, outline 44, webfetch 40,
+  websearch 39, edit 33, git_log 32, ask_user 29, subagent 26, journal 23,
+  note **11**, write 6, memory_read 3, **memory_propose 1**;
+- из снесённого в кампании: recall 21, graph_query 19, propose_plan 12,
+  think 8, resolve_ref 7, ast_grep 5;
+- plan-опы: start 70, finish 61, show 29, create 14, **verify 14**,
+  complete 12, **propose 10**, **accept_proposal 9**, **add_acceptance 6**,
+  split 6, block 3, cancel 3, block_plan 2, unblock 2,
+  **propose_goal_revision 1**, **decline_proposal 1**;
+- note-записи по видам: decision 8, lesson 1, assumption 1;
+- отказы: `{"code"…}` 64, **invalid_evidence 19**, plan op rejected 12,
+  unknown tool 12, cancelled by user 11, file not found 5, **no_evidence 5**,
+  subagent task is required 5.
+
+Вывод для сравнения: память писала **один раз за всю историю** (и то через
+аппрув), note — 11 раз на 152 рабочих сессии (≈7%), а 24 отказа приходились на
+машинерию приёмки (invalid_evidence/no_evidence/plan op rejected), которой
+больше нет. Живой прогон должен показать ≥1 memory_write на сессию с заявленным
+предпочтением, ≥1 note на закрытый шаг и ноль отказов с кодами приёмки.
+
 Позиция в порядке работ: ПОСЛЕДНИМ, после всего кодового сноса — иначе
 переписывать дважды.
 

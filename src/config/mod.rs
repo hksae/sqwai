@@ -2668,6 +2668,29 @@ provider = "p"
         // m_c fallback to m_a was not added due to cycle protection
     }
 
+    /// The opt-in has to survive a real config file, not just a struct
+    /// literal: an empty default must mean "shut", and a written list must
+    /// arrive at the gate unchanged.
+    #[test]
+    fn web_allow_hosts_parse_from_toml() {
+        let empty: Config = toml::from_str("").unwrap();
+        assert!(
+            empty.web.allow_hosts.is_empty(),
+            "default must stay shut: {:?}",
+            empty.web.allow_hosts
+        );
+        let cfg: Config =
+            toml::from_str("[web]\nallow_hosts = [\"localhost:3000\", \"127.0.0.1\"]\n").unwrap();
+        assert_eq!(
+            cfg.web.allow_hosts,
+            vec!["localhost:3000".to_string(), "127.0.0.1".to_string()]
+        );
+        // and it survives a save/load round trip
+        let text = toml::to_string(&cfg).unwrap();
+        let again: Config = toml::from_str(&text).unwrap();
+        assert_eq!(again.web.allow_hosts, cfg.web.allow_hosts);
+    }
+
     fn gate(url: &str, allow: &[&str]) -> Result<(), String> {
         let parsed = reqwest::Url::parse(url).expect("test url parses");
         url_host_allowed(

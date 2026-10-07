@@ -303,6 +303,71 @@ mod tests {
         assert!(!builtin_prompt().trim().is_empty());
     }
 
+    /// The prompt layer is the agent's constitution: a word naming a retired
+    /// mechanism teaches it to call a tool that does not exist, or to ask for
+    /// permission nobody gives. Every cut in the simplification pass left its
+    /// text behind once (plan-first, `add_acceptance`, propose_plan) — this is
+    /// the guard that was missing then. `verify`/`verification` stay legal:
+    /// `[verify] commands` is alive, and "report unverified work as unverified"
+    /// is a duty, not a gate.
+    #[test]
+    fn prompt_layer_names_no_retired_machinery() {
+        let retired_tools = [
+            "propose_plan",
+            "memory_propose",
+            "graph_query",
+            "resolve_ref",
+            "recall",
+            "ast_grep",
+            "test_impact",
+            "think",
+        ];
+        let retired_words = [
+            "acceptance",
+            "propose_reset",
+            "accept_proposal",
+            "decline_proposal",
+            "propose_goal_revision",
+            "add_acceptance",
+            "frozen_input",
+            "plan_first",
+            "plan_required",
+            "SQWAI_BENCH",
+            "step.refs",
+            "cmd:",
+            "manual:",
+            "waive",
+            "invalid_evidence",
+            "no_evidence",
+        ];
+
+        let specs = crate::agent::tools::tool_specs(false);
+        for name in retired_tools {
+            assert!(
+                !specs.iter().any(|s| s.name == name),
+                "{name} is retired; it must not come back into the registry"
+            );
+        }
+
+        // the shipped text, not `builtin_prompt()`: a user's own
+        // config_dir/system.md override is theirs to write, and a guard must
+        // not fail on it
+        let mut haystack = include_str!("system.md").to_string();
+        for spec in &specs {
+            haystack.push_str(&spec.name);
+            haystack.push_str(&spec.description);
+            haystack.push_str(&serde_json::to_string(&spec.parameters).unwrap_or_default());
+        }
+        let lowered = haystack.to_ascii_lowercase();
+        for word in retired_words {
+            assert!(
+                !lowered.contains(&word.to_ascii_lowercase()),
+                "the prompt layer still names retired machinery {word:?}; reflash the text \
+                 that mentions it (system.md, the tool descriptions, or a refusal hint)"
+            );
+        }
+    }
+
     #[test]
     fn integrity_section_contains_sqwai_blocking_rule() {
         let prompt = builtin_prompt();
