@@ -17,7 +17,7 @@ mod specs;
 mod verify;
 pub(crate) mod web;
 
-pub(crate) use ctx::{MIN_PLAN_BUDGET_TOKENS, ReadState, ToolCtx};
+pub(crate) use ctx::{ReadState, ToolCtx};
 pub(crate) use dispatch::{FileDiff, Outcome, bg_running_commands, execute, kill_remaining_jobs};
 pub(crate) use policy::{
     bash_scope_hit, register_mention_prereads, register_subagent_scope, take_mention_prereads,
@@ -33,6 +33,7 @@ mod tests {
     use super::dispatch::plan_op;
     use super::policy::acceptance_policy_hit;
     use super::*;
+    use crate::agent::tools::ctx::MIN_PLAN_BUDGET_TOKENS;
     use crate::plan;
     use serde_json::json;
     use std::fs;
@@ -965,14 +966,7 @@ mod tests {
         let _guard = BaselineGuard;
         crate::bench::set_baseline_override(Some(true));
         let names: Vec<String> = tool_specs(false).iter().map(|t| t.name.clone()).collect();
-        for hidden in [
-            "plan",
-            "propose_plan",
-            "note",
-            "journal",
-            "memory_write",
-            "memory_read",
-        ] {
+        for hidden in ["plan", "note", "journal", "memory_write", "memory_read"] {
             assert!(
                 !names.contains(&hidden.to_string()),
                 "{hidden} must be hidden on baseline: {names:?}"
@@ -2813,13 +2807,11 @@ end
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// An accept_proposal-born plan whose file tears must rebuild from the
-    /// journaled accept intent — not quarantine. Pre-fix: rebuild_corrupt
-    /// refused accept-born plans outright (fear of re-running sibling
-    /// abandonment), so the new plan and all its later ops were lost even
-    /// though the journal held everything.
+    /// A plan created after an abandonment whose file tears must rebuild from
+    /// the journaled create intent — not quarantine, and without resurrecting
+    /// the abandoned sibling.
     #[test]
-    fn plan_corrupt_accept_born_plan_rebuilds() {
+    fn plan_corrupt_rebuild_keeps_abandoned_sibling_down() {
         let (mut ctx, dir) = proj();
         let created = plan_op(
             &mut ctx,
@@ -2832,40 +2824,23 @@ end
         );
         assert!(created.ok, "{}", created.output);
         let old_id = plan::open_active(&dir).unwrap().unwrap().id;
-        // the replacement, built the way the accept flow builds it
-        let draft = plan::PlanDraftArgs {
-            goal: "new plan".into(),
-            constraints: vec![],
-            criteria: vec!["new note".into()],
-            steps: vec![plan::NewStep {
-                title: "new step".into(),
-            }],
-        };
-        let mut fresh = draft.build(u64::MAX, &plan::Limits::default()).unwrap();
-        let new_id = fresh.id.clone();
-        let new_created = fresh.created.clone();
-        fresh.sessions = vec![ctx.session_id.clone()];
-        // the accept intent, journaled the way loop_task journals it
-        let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
-        let accept_seq = journal
-            .append(
-                "plan",
-                json!({
-                    "op": "accept_proposal", "by": "user", "ok": true,
-                    "plan_id": new_id,
-                    "draft": serde_json::to_value(&draft).unwrap(),
-                    "baselines": [], "snapshots": [], "shapes": [], "inputs": [],
-                    "new_id": new_id, "new_created": new_created,
-                    "new_sessions": [ctx.session_id.clone()], "abandoned": old_id,
-                }),
-            )
-            .unwrap();
-        // the live flow stores both sides after journaling
-        fresh.applied_event = Some(format!("{}:{accept_seq}", ctx.session_id));
-        plan::store(&dir, &fresh).unwrap();
-        let mut old = plan::open(&dir, &old_id).unwrap();
-        plan::abandon(&mut old);
-        plan::store(&dir, &old).unwrap();
+        let abandoned = plan_op(
+            &mut ctx,
+            &json!({"op": "abandon", "reason": "the goal moved to a different task"}),
+        );
+        assert!(abandoned.ok, "{}", abandoned.output);
+        let replacement = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "new plan",
+                "criteria": ["new note"],
+                "steps": [{"title": "new step"}]
+            }),
+        );
+        assert!(replacement.ok, "{}", replacement.output);
+        let new_id = plan::open_active(&dir).unwrap().unwrap().id;
+        assert_ne!(old_id, new_id, "the replacement is a different plan");
         // a later op on the new plan (it is the only active one)
         let started = plan_op(&mut ctx, &json!({"op": "start", "id": "1"}));
         assert!(started.ok, "{}", started.output);
@@ -2875,7 +2850,7 @@ end
             "{torn",
         )
         .unwrap();
-        let rebuilt = plan::open(&dir, &new_id).expect("accept-born plan must rebuild");
+        let rebuilt = plan::open(&dir, &new_id).expect("torn plan file must rebuild");
         assert_eq!(rebuilt.goal.text, "new plan");
         assert_eq!(
             rebuilt.step("1").unwrap().status,

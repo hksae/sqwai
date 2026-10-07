@@ -19,10 +19,7 @@ mod ops;
 mod render;
 pub(crate) mod store;
 mod verify;
-pub use ops::{
-    Applied, Limits, NewStep, Op, PlanDraftArgs, Rejection, abandon, apply, create,
-    validate_proposal_invariants,
-};
+pub use ops::{Applied, Limits, NewStep, Op, Rejection, abandon, apply, create};
 pub(crate) use ops::{add_criteria, step_diff};
 pub use render::{render, render_goal, render_status, set_goal};
 pub use store::{
@@ -835,40 +832,6 @@ mod tests {
         assert!(open(&dir, id).is_err());
         assert!(plans.join("corrupt").join(format!("{id}.json")).exists());
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn proposal_invariants_reject_dropping_constraints_under_same_goal() {
-        let active = new_plan(); // constraint "no new dependencies", criterion "cargo test must pass"
-        let mut draft = PlanDraftArgs {
-            goal: active.goal.text.clone(),
-            constraints: vec![], // dropped!
-            criteria: vec!["cargo test must pass".into()],
-            steps: vec![NewStep {
-                title: "step 1".into(),
-            }],
-        };
-
-        // 1. Weakened constraints rejected
-        let res = validate_proposal_invariants(Some(&active), &draft);
-        assert!(res.is_err());
-        assert_eq!(res.unwrap_err().code, "weakened_constraints");
-
-        // 2. Preserved constraints accepted
-        draft.constraints = active.constraints.clone();
-        assert!(validate_proposal_invariants(Some(&active), &draft).is_ok());
-
-        // 3. Dropped criteria rejected
-        draft.criteria = vec![];
-        let res = validate_proposal_invariants(Some(&active), &draft);
-        assert!(res.is_err());
-        assert_eq!(res.unwrap_err().code, "dropped_criteria");
-
-        // 4. Changing goal allows new constraints and criteria
-        draft.goal = "A completely different goal".into();
-        draft.constraints = vec!["new constraint".into()];
-        draft.criteria = vec!["new note".into()];
-        assert!(validate_proposal_invariants(Some(&active), &draft).is_ok());
     }
 
     #[test]

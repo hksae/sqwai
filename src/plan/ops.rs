@@ -144,38 +144,8 @@ pub enum Applied {
     Completed,
 }
 
-/// Arguments of a full-plan proposal: the same shape as `Op::Create`
-/// without the active-plan guard. The host validates a draft with
-/// `create` before the user ever sees it, and stores the rebuilt plan on
-/// accept — the agent never writes plan state itself.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanDraftArgs {
-    #[serde(default)]
-    pub goal: String,
-    #[serde(default)]
-    pub constraints: Vec<String>,
-    #[serde(default, alias = "acceptance")]
-    pub criteria: Vec<String>,
-    #[serde(default)]
-    pub steps: Vec<NewStep>,
-}
-
-impl PlanDraftArgs {
-    pub fn build(&self, budget_limit: u64, limits: &Limits) -> Result<Plan, Rejection> {
-        create(
-            self.goal.clone(),
-            self.constraints.clone(),
-            self.criteria.clone(),
-            self.steps.clone(),
-            budget_limit,
-            limits,
-        )
-    }
-}
-
-/// Host-only: retire the active plan when the user accepts a replacement
-/// proposal. The reason travels in the journal; the file keeps no history
-/// of why it was abandoned.
+/// Host-only: retire the active plan. The reason travels in the journal; the
+/// file keeps no history of why it was abandoned (history is never rewritten).
 pub fn abandon(plan: &mut Plan) {
     plan.status = PlanStatus::Abandoned;
     plan.revision += 1;
@@ -222,80 +192,6 @@ fn block_plan(plan: &mut Plan, reason: String) -> Result<Applied, Rejection> {
         plan,
         format!("plan {} blocked: spec conflict recorded", plan.id),
     )
-}
-
-/// Host-side validation of a proposed plan draft against the current active plan (§2.1.6).
-///
-/// If the goal is unchanged (the model is refining/adjusting steps under the same goal),
-/// the model is not allowed to silently weaken commitments:
-/// 1. Active constraints cannot be dropped.
-/// 2. Active acceptance criteria cannot be dropped.
-/// 3. Pending steps cannot be silently deleted if work was already attempted on them.
-///
-/// If the goal is changed (user-initiated goal revision or model-proposed pivot),
-/// a new goal is declared and the diff will be explicitly reviewed and accepted by the user.
-pub fn validate_proposal_invariants(
-    active: Option<&Plan>,
-    draft: &PlanDraftArgs,
-) -> Result<(), Rejection> {
-    let Some(active) = active else {
-        return Ok(());
-    };
-
-    let same_goal = active.goal.text.trim() == draft.goal.trim();
-    if same_goal {
-        // 1. Constraints monotonicity under the same goal
-        for constraint in &active.constraints {
-            let found = draft
-                .constraints
-                .iter()
-                .any(|c| c.trim() == constraint.trim());
-            if !found {
-                return Err(Rejection::new(
-                    "weakened_constraints",
-                    format!(
-                        "proposal removes active constraint '{constraint}' under the same goal"
-                    ),
-                    "keep existing constraints or propose a goal revision if the task direction changed",
-                ));
-            }
-        }
-
-        // 2. Done-criteria preservation under the same goal
-        for note in &active.criteria {
-            let found = draft.criteria.iter().any(|c| c.trim() == note.trim());
-            if !found {
-                return Err(Rejection::new(
-                    "dropped_criteria",
-                    format!("proposal drops active criterion '{note}' under the same goal"),
-                    "keep existing criteria or propose a goal revision if the direction changed",
-                ));
-            }
-        }
-
-        // 3. Pending steps preservation: cannot drop steps that had attempts or evidence
-        for step in &active.steps {
-            if !step.evidence.is_empty() {
-                // If a step has host evidence, its work or title should remain tracked
-                let title_retained = draft
-                    .steps
-                    .iter()
-                    .any(|s| s.title.trim() == step.title.trim());
-                if !title_retained {
-                    return Err(Rejection::new(
-                        "dropped_evidenced_step",
-                        format!(
-                            "proposal drops step '{}' which already has recorded evidence",
-                            step.title
-                        ),
-                        "steps with recorded evidence cannot be removed without trace; keep them in the proposal",
-                    ));
-                }
-            }
-        }
-    }
-
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]

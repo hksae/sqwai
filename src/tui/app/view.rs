@@ -90,10 +90,6 @@ impl MergeKind {
 /// Not `Copy`: the Link arm pins an owned URL at press time.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum ClickTarget {
-    Proposal {
-        seg: u64,
-        row: ProposalRow,
-    },
     Ask {
         seg: u64,
         row: AskRow,
@@ -248,14 +244,6 @@ pub(super) enum Segment {
         /// false shows only the head row (marker + name + summary)
         expanded: bool,
     },
-    /// propose_plan draft awaiting accept/decline, inline in chat and folded
-    /// into the turn's activity like a tool call. `decided` freezes it.
-    PlanProposal {
-        #[allow(dead_code)]
-        id: u64,
-        draft: crate::plan::Plan,
-        decided: Option<bool>,
-    },
     /// one reasoning block; the model may emit several across a turn
     Thinking {
         text: String,
@@ -329,14 +317,6 @@ pub(super) enum AskRow {
     Option { q: usize, opt: usize },
     Custom { q: usize },
     Confirm,
-}
-
-/// One interactive row inside an inline plan-proposal segment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum ProposalRow {
-    View,
-    Accept,
-    Decline,
 }
 
 fn edit_change_counts(diff: &str) -> (usize, usize) {
@@ -539,13 +519,9 @@ impl App {
     /// this frame was painted from; `char_col` is the press column mapped
     /// into the row's characters (for link hit-testing).
     fn resolve_target(&self, screen: u16, abs: usize, char_col: usize) -> Option<ClickTarget> {
-        // Proposal/ask rows only exist in the main view; in a subagent view
+        // Ask rows only exist in the main view; in a subagent view
         // the same absolute rows belong to a different transcript.
         if self.active_subagent.is_none() && self.menu_stack.is_empty() {
-            if let Some((seg_idx, row)) = self.proposal_row_at(abs) {
-                let id = self.seg_meta.get(seg_idx).map(|m| m.id)?;
-                return Some(ClickTarget::Proposal { seg: id, row });
-            }
             if let Some((seg_idx, row)) = self.ask_row_at(abs) {
                 let id = self.seg_meta.get(seg_idx).map(|m| m.id)?;
                 return Some(ClickTarget::Ask { seg: id, row });
@@ -676,27 +652,21 @@ impl App {
         // Outside the chat rectangle the row must not saturate onto row 0:
         // a header/tab hover would otherwise light up whatever sits on top.
         if !self.in_chat_rect(row) {
-            if self.ask_hover.is_some() || self.proposal_hover.is_some() {
+            if self.ask_hover.is_some() {
                 self.ask_hover = None;
-                self.proposal_hover = None;
                 self.dirty = true;
             }
             return;
         }
-        if self.menu_stack.is_empty()
-            && (self.active_ask_seg().is_some() || self.active_proposal_seg().is_some())
-        {
+        if self.menu_stack.is_empty() && self.active_ask_seg().is_some() {
             let abs = self.abs_row(row);
             let ask_hover = self.ask_row_at(abs).map(|(_, r)| r);
-            let proposal_hover = self.proposal_row_at(abs).map(|(_, r)| r);
-            if ask_hover != self.ask_hover || proposal_hover != self.proposal_hover {
+            if ask_hover != self.ask_hover {
                 self.ask_hover = ask_hover;
-                self.proposal_hover = proposal_hover;
                 self.dirty = true;
             }
-        } else if self.ask_hover.is_some() || self.proposal_hover.is_some() {
+        } else if self.ask_hover.is_some() {
             self.ask_hover = None;
-            self.proposal_hover = None;
             self.dirty = true;
         }
     }
@@ -794,26 +764,6 @@ impl App {
         (abs_row == start).then_some(seg_idx)
     }
 
-    /// map an absolute cache row onto an interactive proposal target, if any
-    pub(super) fn proposal_row_at(&self, abs_row: usize) -> Option<(usize, ProposalRow)> {
-        let seg_idx = self.cache_rowseg.get(abs_row).copied()??;
-        if Some(seg_idx) != self.active_proposal_seg() {
-            return None;
-        }
-        let Segment::PlanProposal { decided: None, .. } = self.segments.get(seg_idx)? else {
-            return None;
-        };
-        let (start, _) = self.ask_block_range(seg_idx)?;
-        // layout from render_segment's PlanProposal branch: header, goal,
-        // counts, view, accept, decline — one visual row each
-        match abs_row.saturating_sub(start) {
-            3 => Some((seg_idx, ProposalRow::View)),
-            4 => Some((seg_idx, ProposalRow::Accept)),
-            5 => Some((seg_idx, ProposalRow::Decline)),
-            _ => None,
-        }
-    }
-
     /// Atomic helper for tests: resolve and fire in one frame, where no
     /// layout shift can intervene.
     #[cfg(test)]
@@ -840,28 +790,6 @@ impl App {
     /// at a stale row number.
     fn fire_target(&mut self, target: ClickTarget) {
         match target {
-            ClickTarget::Proposal { seg, row } => {
-                let Some(idx) = self.index_of_seg(seg) else {
-                    return;
-                };
-                if Some(idx) != self.active_proposal_seg() {
-                    return;
-                }
-                if !matches!(
-                    self.segments.get(idx),
-                    Some(Segment::PlanProposal { decided: None, .. })
-                ) {
-                    return;
-                }
-                // inline plan proposal: view opens the draft popup,
-                // accept/decline answer the tool — a click must never
-                // dismiss the question
-                match row {
-                    ProposalRow::View => self.open_proposal_preview(),
-                    ProposalRow::Accept => self.proposal_answer(true),
-                    ProposalRow::Decline => self.proposal_answer(false),
-                }
-            }
             ClickTarget::Ask { seg, row } => {
                 let Some(idx) = self.index_of_seg(seg) else {
                     return;
@@ -1212,24 +1140,6 @@ impl App {
                 }
                 k
             }
-            Segment::PlanProposal { draft, decided, .. } => {
-                let mut k = draft.goal.text.len() * 3 + draft.steps.len() * 1000;
-                k += draft.constraints.len() * 101 + draft.criteria.len() * 103;
-                for s in &draft.steps {
-                    k += s.title.len();
-                }
-                if let Some(accepted) = decided {
-                    k += 1_000_000 + usize::from(*accepted) * 7;
-                }
-                if let Some(hover) = self.proposal_hover {
-                    k = k.wrapping_add(match hover {
-                        ProposalRow::View => 7_000_037,
-                        ProposalRow::Accept => 7_000_039,
-                        ProposalRow::Decline => 7_000_043,
-                    });
-                }
-                k
-            }
             Segment::Subagent {
                 id,
                 task,
@@ -1370,7 +1280,7 @@ impl App {
     }
 
     /// Render one segment. `segs` is the owning transcript (main chat or one
-    /// subagent's), `interactive` enables live ask/proposal highlight — only
+    /// subagent's), `interactive` enables the live ask highlight — only
     /// the main view is interactive; subagent rows always render inactive.
     /// Segment source lines; the live assistant answer takes the incremental
     /// path (its completed prefix is parsed once — see markdown::LiveRender),
@@ -1607,90 +1517,6 @@ impl App {
                         )]),
                         Some(idx),
                     ));
-                }
-            }
-            Segment::PlanProposal { draft, decided, .. } => {
-                let width = usize::from(w).max(1);
-                let live = decided.is_none();
-                let is_active_seg = interactive && self.active_proposal_seg() == Some(idx);
-                out.push((
-                    Line::from(vec![Span::styled(
-                        truncate_display_width(" ▸ proposed plan", width),
-                        if live {
-                            Theme::accent_bold()
-                        } else {
-                            Theme::dim()
-                        },
-                    )]),
-                    Some(idx),
-                ));
-                out.push((
-                    Line::from(vec![Span::styled(
-                        truncate_display_width(&format!(" ? {}", draft.goal.text), width),
-                        if live {
-                            Theme::accent_bold()
-                        } else {
-                            Theme::dim()
-                        },
-                    )]),
-                    Some(idx),
-                ));
-                out.push((
-                    Line::from(vec![Span::styled(
-                        truncate_display_width(
-                            &format!(
-                                "   {} steps · {} criteria · {} constraints",
-                                draft.steps.len(),
-                                draft.criteria.len(),
-                                draft.constraints.len()
-                            ),
-                            width,
-                        ),
-                        Theme::dim(),
-                    )]),
-                    Some(idx),
-                ));
-                if let Some(accepted) = decided {
-                    let (mark, style) = if *accepted {
-                        ("✓ accepted", Theme::ok())
-                    } else {
-                        ("✗ declined", Theme::warn())
-                    };
-                    out.push((
-                        Line::from(vec![Span::styled(
-                            truncate_display_width(&format!("  {mark}"), width),
-                            style,
-                        )]),
-                        Some(idx),
-                    ));
-                } else {
-                    for (n, (label, target)) in [
-                        ("посмотреть план", ProposalRow::View),
-                        ("принять", ProposalRow::Accept),
-                        ("отклонить", ProposalRow::Decline),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    {
-                        let hovered = live && is_active_seg && self.proposal_hover == Some(target);
-                        let style = if hovered {
-                            Style::new()
-                                .fg(Theme::BG())
-                                .bg(Theme::ACCENT())
-                                .add_modifier(Modifier::BOLD)
-                        } else if matches!(target, ProposalRow::Accept) {
-                            Theme::accent()
-                        } else {
-                            Theme::base()
-                        };
-                        out.push((
-                            Line::from(vec![Span::styled(
-                                truncate_display_width(&format!(" ○ {}. {label}", n + 1), width),
-                                style,
-                            )]),
-                            Some(idx),
-                        ));
-                    }
                 }
             }
             Segment::Thinking {
@@ -2045,7 +1871,7 @@ impl App {
         for idx in 0..self.segments.len() {
             let seg = &self.segments[idx];
             match seg {
-                Segment::AskUser { .. } | Segment::PlanProposal { .. } => {
+                Segment::AskUser { .. } => {
                     struct_row!(blank(), None);
                 }
                 Segment::User(_) => {
@@ -2350,7 +2176,6 @@ impl App {
         }
         self.spinner_tick.hash(&mut h);
         self.ask_hover.hash(&mut h);
-        self.proposal_hover.hash(&mut h);
         self.ask_custom_focus.hash(&mut h);
         h.finish()
     }

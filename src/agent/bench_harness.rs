@@ -367,15 +367,6 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
             AgentEvent::Compaction { .. } => {
                 report.compactions += 1;
             }
-            AgentEvent::PlanProposal { id, .. } => {
-                // headless bench: no user to click accept/decline, and the
-                // loop waits for the answer forever (1.2 deadlocked here on
-                // turn 1 — 1.3 never proposes, it plans directly). Autonomous
-                // surrogate: accept, so the mechanism arm keeps its plan flow.
-                let _ = handle
-                    .control
-                    .try_send(crate::agent::loop_task::ControlMsg::PlanAnswer { id, accept: true });
-            }
             AgentEvent::AskUser { id, .. } => {
                 // same deadlock class: answer so the run continues
                 // autonomously instead of waiting on nobody.

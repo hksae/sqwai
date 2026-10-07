@@ -120,7 +120,11 @@ sqwai — не жёсткость, а память и видимость: пла
   PlanProposal/PlanAccepted + TUI попап accept/decline + `PlanDraftArgs` +
   `validate_proposal_invariants` + replay-плечо accept_proposal
   (`Birth::Accepted`/`build_fresh_from_accept`) — всё вон, без сохранения
-  backwards-compat для старых accept-журналов.
+  backwards-compat для старых accept-журналов. Исключение — имена в wire-формате:
+  `serde(alias = "propose_reset")` на `Op::Abandon` и `"propose_reset"` в
+  списке распознаваемых op в replay (store.rs) оставлены намеренно: это не
+  механизм, а чтение уже записанных строк журнала, отказ от них затормозил бы
+  replay существующих сессий.
 - Модельный abandon: НОВЫЙ `Op::Abandon { reason }` (actor=model, причина
   обязательна, в журнал); `propose_reset` (user-confirm reset) уходит — его
   роль закрывает abandon. Юзерский `/plan abandon` — без confirm-диалога, с

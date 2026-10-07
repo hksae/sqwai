@@ -212,10 +212,6 @@ pub(super) enum Menu {
     Todo,
     /// full plan overview, opened with /plan
     Plan,
-    /// a propose_plan draft preview, read-only (same view as Plan)
-    PlanPreview {
-        draft: crate::plan::Plan,
-    },
 }
 
 #[derive(Clone)]
@@ -1809,7 +1805,6 @@ impl App {
             Some(Menu::AskFree { .. }) => " Answer ".into(),
             Some(Menu::Todo) => " To-do ".into(),
             Some(Menu::Plan) => " Plan ".into(),
-            Some(Menu::PlanPreview { .. }) => " Proposed plan ".into(),
             None => String::new(),
         }
     }
@@ -3083,14 +3078,6 @@ impl App {
                 ));
                 self.menu_footer_text = Some("up/down: scroll · esc: close".into());
             }
-            Menu::PlanPreview { draft } => {
-                self.menu_rows.extend(plan_rows(
-                    &draft,
-                    "  proposed plan".to_string(),
-                    " · not stored".to_string(),
-                ));
-                self.menu_footer_text = Some("up/down: scroll · esc: back".into());
-            }
         }
         if self.menu_sel >= self.menu_len() {
             self.menu_sel = self.menu_len().saturating_sub(1);
@@ -3098,8 +3085,7 @@ impl App {
     }
 }
 
-/// Render any plan — the active one from disk or an unstored proposal draft —
-/// as menu rows. Shared by /plan and the propose_plan preview popup.
+/// Render the session's plan as /plan menu rows.
 fn plan_rows(
     plan: &crate::plan::Plan,
     heading_main: String,

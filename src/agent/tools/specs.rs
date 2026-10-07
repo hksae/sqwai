@@ -370,35 +370,6 @@ guesses, or anything you would not want shown to you every session.",
             parameters: json!({"type":"object","properties":{"section":{"type":"string","enum":["Project","Conventions","User","Agreements"]},"scope":{"type":"string","enum":["project","user"]},"text":{"type":"string"},"replaces":{"type":"string"}},"required":["section","text"]}),
         },
         ToolDef {
-            name: "propose_plan",
-            kind: Kind::ReadOnly,
-            description: "Propose a new full plan or a replacement for the active one. \
-Nothing is written until the user accepts: the host validates the draft first, \
-then shows it for accept/decline with a preview. If declined, ask \
-the user what was wrong and adjust, do not stop. Use for a new goal and for \
-replacing the active plan; small edits to the active plan use plan add/split.",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "goal": {"type": "string", "description": "what must be true when the work is done"},
-                    "constraints": {"type": "array", "items": {"type": "string"}},
-                    "acceptance": {"type": "array", "items": {"type": "string"}},
-                    "steps": {
-                        "type": "array",
-                        "description": "initial steps (3-12)",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "title": {"type": "string"}
-                            },
-                            "required": ["title"]
-                        }
-                    }
-                },
-                "required": ["goal", "steps"]
-            }),
-        },
-        ToolDef {
             name: "plan",
             kind: Kind::Mutating,
             description: "Work the structured plan, one operation per call. Ops: create, start, \
@@ -413,7 +384,8 @@ as something you can check yourself (run the command with bash, read its observe
 add_criteria appends more notes as the work reveals them. The current plan, \
 with its step ids, is always in your context above — use those ids, never \
 guess them and never re-read the plan through tools. The host owns the goal and the constraints; \
-to change the goal, propose the full updated plan with propose_plan instead. finish records \
+changing the goal is the user's call, so if the direction has moved on, abandon the plan (op \
+abandon with a reason) and create a fresh one. finish records \
 completion of the step's work with a summary of what changed and any remaining limitations. \
 complete requires every step closed (done, cancelled or blocked with reason). block_plan surrenders \
 an impossible task: use it when the spec contradicts the tests (or itself) instead of gaming \
@@ -698,7 +670,6 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             }
         }
         "plan" => format!("plan {}", s("op")),
-        "propose_plan" => s("goal"),
         "journal" => {
             let op = args["op"].as_str().unwrap_or("read");
             if op == "assumptions" {
@@ -751,7 +722,7 @@ pub fn tool_specs(_plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
             !baseline
                 || !matches!(
                     d.name,
-                    "plan" | "propose_plan" | "note" | "journal" | "memory_write" | "memory_read"
+                    "plan" | "note" | "journal" | "memory_write" | "memory_read"
                 )
         })
         .map(|d| crate::providers::ToolSpec {

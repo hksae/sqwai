@@ -20,7 +20,7 @@ use crate::agent::checkpoints;
 use crate::agent::context;
 use crate::agent::tools::{self, ToolCtx};
 use crate::plan;
-use loop_ask::{ask_user, bash_call, propose_plan, run_tool_blocking};
+use loop_ask::{ask_user, bash_call, run_tool_blocking};
 use loop_compact::{
     CompactionPrefix, compact_history, effort_ignored_reason, plan_hint_for_summary,
     record_compaction, turn_shows_no_reasoning,
@@ -152,17 +152,6 @@ pub enum AgentEvent {
         id: u64,
         questions: Vec<AskQuestion>,
     },
-    /// the model proposed a full plan draft; accept/decline via ControlMsg.
-    /// Nothing is written until the user accepts.
-    PlanProposal {
-        id: u64,
-        draft: plan::Plan,
-    },
-    /// the host stored an accepted proposal; carries the stored plan's id so
-    /// the session re-links before the tool outcome is even processed
-    PlanAccepted {
-        id: String,
-    },
     /// the session's current plan step changed (§2.2.3); `None` means idle.
     /// The TUI persists it on the session; the loop itself tracks it in
     /// `current_step` and never waits for this round-trip.
@@ -227,7 +216,6 @@ pub struct FallbackCandidate {
 #[allow(clippy::enum_variant_names)] // the "Answer" suffix reads better at the call sites than a forced rename
 pub enum ControlMsg {
     AskAnswer { id: u64, text: String },
-    PlanAnswer { id: u64, accept: bool },
     ApprovalAnswer { id: u64, decision: ApprovalDecision },
 }
 
@@ -1287,24 +1275,6 @@ async fn run_agent(
                             "subagents cannot interact with the user; make decisions autonomously",
                         ),
                         "ask_user" => ask_user(call, &tx, &mut ctl, &mut next_id).await,
-                        "propose_plan" if subagent_depth > 0 => tools::Outcome::err(
-                            "subagents cannot propose plans; plans belong to the primary session",
-                        ),
-                        "propose_plan" => {
-                            propose_plan(
-                                call,
-                                &mut ctx,
-                                &plan_limits,
-                                context_limit,
-                                read_only,
-                                &mut journal,
-                                &tx,
-                                &mut ctl,
-                                &mut next_id,
-                                &session_id,
-                            )
-                            .await
-                        }
                         "bash" => {
                             bash_call(
                                 call,

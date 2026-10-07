@@ -238,10 +238,6 @@ async fn real_zen_smoke() {
             } => println!("seg[{i}] TOOL {name} ({args}) ok={ok:?}: {output}"),
             Segment::User(t) => println!("seg[{i}] USER: {t}"),
             Segment::Commentary(t) => println!("seg[{i}] COMMENTARY: {t}"),
-            Segment::PlanProposal { draft, decided, .. } => println!(
-                "seg[{i}] PLANPROPOSAL {} steps decided={decided:?}",
-                draft.steps.len()
-            ),
         }
     }
     assert!(!app.streaming, "turn still streaming after 180s");

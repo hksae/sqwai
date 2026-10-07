@@ -674,11 +674,6 @@ pub(crate) async fn run_subagent(
                     decision: ApprovalDecision::Deny,
                 });
             }
-            AgentEvent::PlanProposal { id, .. } => {
-                let _ = child
-                    .control
-                    .try_send(ControlMsg::PlanAnswer { id, accept: false });
-            }
             _ => {}
         }
     }

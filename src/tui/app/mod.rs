@@ -118,7 +118,7 @@ mod view;
 
 use forms::FormField;
 use menus::{Menu, MenuAction};
-use view::{ActivityGroup, AskRow, CellPos, ProposalRow, SegMeta, Segment, Selection, StoredView};
+use view::{ActivityGroup, AskRow, CellPos, SegMeta, Segment, Selection, StoredView};
 
 use menus::COMMANDS;
 
@@ -278,10 +278,6 @@ pub struct App {
     active_ask_id: Option<u64>,
     /// mouse hover target inside the active inline AskUser, for highlight
     ask_hover: Option<AskRow>,
-    /// id of the plan proposal awaiting accept/decline, if any
-    active_proposal_id: Option<u64>,
-    /// mouse hover target inside the active proposal, for highlight
-    proposal_hover: Option<ProposalRow>,
     assistant_buf: String,
     /// arrived text not yet revealed to the screen (typewriter effect)
     pending_reveal: String,
@@ -915,8 +911,6 @@ Continue from the pending step, or report to the user if the settled work looks 
             ask_custom_focus: None,
             active_ask_id: None,
             ask_hover: None,
-            active_proposal_id: None,
-            proposal_hover: None,
             assistant_buf: String::new(),
             pending_reveal: String::new(),
             thinking_open: false,
@@ -1916,98 +1910,6 @@ Continue from the pending step, or report to the user if the settled work looks 
         self.dirty = true;
     }
 
-    /// the live plan proposal awaiting accept/decline, if it still exists.
-    /// Resolved by tool-call id: rows inserted later shift indices.
-    pub(super) fn active_proposal_seg(&self) -> Option<usize> {
-        let id = self.active_proposal_id?;
-        self.segments.iter().position(|s| {
-            matches!(
-                s,
-                Segment::PlanProposal {
-                    id: qid,
-                    decided: None,
-                    ..
-                } if *qid == id
-            )
-        })
-    }
-
-    /// insert a proposal segment in execution order — before the live answer,
-    /// like tool rows — so the finished turn folds it into its activity group
-    /// instead of leaving it rendered below the answer.
-    pub(super) fn push_proposal_segment(&mut self, id: u64, draft: crate::plan::Plan) {
-        self.flush_assistant_preamble_to_commentary();
-        self.freeze_active_proposal();
-        let seg = Segment::PlanProposal {
-            id,
-            draft,
-            decided: None,
-        };
-        let pos = self
-            .segments
-            .iter()
-            .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
-            .unwrap_or(self.segments.len());
-        self.insert_segment(pos, seg);
-        self.active_proposal_id = Some(id);
-        self.proposal_hover = None;
-        self.follow = true;
-        self.dirty = true;
-    }
-
-    /// open the draft preview popup (same view as /plan, read-only)
-    pub(super) fn open_proposal_preview(&mut self) {
-        let Some(seg) = self.active_proposal_seg() else {
-            return;
-        };
-        let draft = match self.segments.get(seg) {
-            Some(Segment::PlanProposal { draft, .. }) => draft.clone(),
-            _ => return,
-        };
-        self.open_menu(Menu::PlanPreview { draft });
-    }
-
-    /// freeze the active proposal and deliver the verdict to the agent
-    pub(super) fn proposal_answer(&mut self, accept: bool) {
-        let Some(seg) = self.active_proposal_seg() else {
-            return;
-        };
-        let id = match self.segments.get(seg) {
-            Some(Segment::PlanProposal { id, .. }) => *id,
-            _ => return,
-        };
-        if let Some(Segment::PlanProposal { decided, .. }) = self.segments.get_mut(seg) {
-            *decided = Some(accept);
-        }
-        self.touch_segment(seg);
-        if let Some(agent) = &self.agent {
-            let _ = agent
-                .control
-                .try_send(ControlMsg::PlanAnswer { id, accept });
-        }
-        self.active_proposal_id = None;
-        self.proposal_hover = None;
-        self.follow = true;
-        self.dirty = true;
-    }
-
-    /// the agent turn ended while a proposal was open: never leave a ghost
-    /// behind. A dangling proposal always freezes as declined — answering
-    /// for the user is not something the host may do (§10).
-    fn freeze_active_proposal(&mut self) {
-        let Some(seg) = self.active_proposal_seg() else {
-            self.active_proposal_id = None;
-            return;
-        };
-        if let Some(Segment::PlanProposal { decided, .. }) = self.segments.get_mut(seg) {
-            *decided = Some(false);
-        }
-        self.touch_segment(seg);
-        self.active_proposal_id = None;
-        self.proposal_hover = None;
-        self.dirty = true;
-    }
-
     /// Second-level completion target: `<cmd> <tail>` filters that
     /// command's subcommand list from [`menus::SUBCOMMANDS`].
     /// Gated commands (e.g. `/test` without the experimental flag)
@@ -2896,8 +2798,6 @@ Continue from the pending step, or report to the user if the settled work looks 
         self.retry_notified = true;
         self.active_ask_id = None;
         self.ask_hover = None;
-        self.active_proposal_id = None;
-        self.proposal_hover = None;
         self.ask_custom_focus = None;
         self.rebuild_session_environment();
         self.load_history_segments();
@@ -2999,8 +2899,6 @@ Continue from the pending step, or report to the user if the settled work looks 
         self.retry_notified = true;
         self.active_ask_id = None;
         self.ask_hover = None;
-        self.active_proposal_id = None;
-        self.proposal_hover = None;
         self.ask_custom_focus = None;
         self.rebuild_session_environment();
         self.follow = true;
@@ -4095,17 +3993,6 @@ Continue from the pending step, or report to the user if the settled work looks 
                     // and the mouse target is the chat row itself.
                     self.push_ask_segment(id, questions);
                 }
-                AgentEvent::PlanProposal { id, draft } => {
-                    // Same treatment as a question: inline, in execution
-                    // order, folded into the turn's activity afterwards.
-                    self.push_proposal_segment(id, draft);
-                }
-                AgentEvent::PlanAccepted { id } => {
-                    // the loop stored the accepted draft: re-link the session
-                    // so fork copies the new plan instead of the abandoned one
-                    self.session.plan_id = Some(id);
-                    self.dirty = true;
-                }
                 AgentEvent::StepCurrent { step } => {
                     // the loop moved the session's current step (§2.2.3):
                     // persist the mirror so resume and the next run agree
@@ -4341,11 +4228,10 @@ Continue from the pending step, or report to the user if the settled work looks 
         // ask_user has its own inline Q&A segment (AgentEvent::AskUser); a
         // parallel Tool row would duplicate it and its expansion used to be
         // empty because `args` here is only a one-line summary, not the JSON.
-        // propose_plan is the same: the PlanProposal segment is the surface.
-        // subagent is the same again: its `Segment::Subagent` row is the call
+        // subagent is the same: its `Segment::Subagent` row is the call
         // row AND the child-chat entry point, so a generic `✓ subagent` row
         // next to it duplicated the call (and counted it twice).
-        if name == "ask_user" || name == "propose_plan" || name == "subagent" {
+        if name == "ask_user" || name == "subagent" {
             return;
         }
         self.perf.event(&format!("tool_start {name}"));
@@ -4439,7 +4325,7 @@ Continue from the pending step, or report to the user if the settled work looks 
         call_id: Option<String>,
     ) {
         // answered inline above; no Tool row exists for it by design
-        if name == "ask_user" || name == "propose_plan" {
+        if name == "ask_user" {
             return;
         }
         // subagent has no generic Tool row either (see handle_tool_start).
@@ -4639,8 +4525,8 @@ Continue from the pending step, or report to the user if the settled work looks 
             // Keep summaries in sync with rows removed during abort. This is
             // done after all ranges shift so the slice uses current indices.
             // The tally is shared with the group builder: a hand-rolled count
-            // here used to disagree with it (questions and plan proposals
-            // were silently dropped).
+            // here used to disagree with it (inline questions were
+            // silently dropped).
             for g in &mut self.activity_groups {
                 let run = self
                     .segments
@@ -4704,7 +4590,6 @@ Continue from the pending step, or report to the user if the settled work looks 
                     | Segment::Tool { .. }
                     | Segment::Commentary(_)
                     | Segment::AskUser { .. }
-                    | Segment::PlanProposal { .. }
                     | Segment::Subagent { .. }
             )
         {
@@ -4722,7 +4607,6 @@ Continue from the pending step, or report to the user if the settled work looks 
                 Segment::Thinking { .. }
                     | Segment::Tool { .. }
                     | Segment::AskUser { .. }
-                    | Segment::PlanProposal { .. }
                     | Segment::Subagent { .. }
             )
         });
@@ -4762,12 +4646,10 @@ Continue from the pending step, or report to the user if the settled work looks 
                     errors += 1;
                 }
                 Segment::Tool { .. } => calls += 1,
-                // a question and a plan proposal are tool calls awaiting the
-                // user; a delegated child is a tool call awaiting its answer.
-                // All three count with the rest of the turn's work.
-                Segment::AskUser { .. }
-                | Segment::PlanProposal { .. }
-                | Segment::Subagent { .. } => calls += 1,
+                // a question is a tool call awaiting the user; a delegated
+                // child is a tool call awaiting its answer. Both count with
+                // the rest of the turn's work.
+                Segment::AskUser { .. } | Segment::Subagent { .. } => calls += 1,
                 Segment::Thinking { .. } => thinking += 1,
                 // Commentary is prose folded into the group for context; it is
                 // always visible and never counts as a tool call.
@@ -4855,8 +4737,6 @@ Continue from the pending step, or report to the user if the settled work looks 
         self.clear_busy_statuses();
         // an aborted/errored turn can leave a question with nobody waiting
         // for its answer — freeze it instead of leaving a live ghost.
-        // Same for a dangling plan proposal (always declined: the host must
-        // not answer for the user).
         if res.is_err() {
             let note = if res.as_ref().is_err_and(|e| e == "aborted") {
                 "(no answer — stopped)"
@@ -4864,12 +4744,8 @@ Continue from the pending step, or report to the user if the settled work looks 
                 "(no answer — turn failed)"
             };
             self.freeze_active_ask(note);
-            self.freeze_active_proposal();
-        } else {
-            if self.active_ask_seg().is_some() {
-                self.freeze_active_ask("(no answer)");
-            }
-            self.freeze_active_proposal();
+        } else if self.active_ask_seg().is_some() {
+            self.freeze_active_ask("(no answer)");
         }
         if res.as_ref().is_err_and(|error| error == "aborted") {
             self.clear_subagent_ui_on_stop();

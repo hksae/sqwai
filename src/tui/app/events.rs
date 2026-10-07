@@ -105,17 +105,14 @@ impl App {
         self.dirty = true;
     }
 
-    /// A lone digit that would answer the inline question/proposal must reach
+    /// A lone digit that would answer the inline question must reach
     /// the hotkey arms below, not dissolve into a text batch with its
     /// neighbors when several keys arrive in one tick.
     fn is_answer_digit(&self, c: char) -> bool {
         if self.ask_custom_focus.is_some() || !self.menu_stack.is_empty() {
             return false;
         }
-        if self.active_ask_seg().is_some() && ('1'..='9').contains(&c) {
-            return true;
-        }
-        self.active_proposal_seg().is_some() && ('1'..='3').contains(&c)
+        self.active_ask_seg().is_some() && ('1'..='9').contains(&c)
     }
 
     pub(super) fn poll_input(
@@ -532,22 +529,6 @@ impl App {
                                 } else {
                                     self.inline_ask_select(q, digit - 1);
                                 }
-                            }
-                        }
-                        // digits answer the inline plan proposal the same way:
-                        // 1 opens the preview, 2/3 accept/decline
-                        KeyCode::Char(c)
-                            if self.menu_stack.is_empty()
-                                && self.active_proposal_seg().is_some()
-                                && self.ask_custom_focus.is_none()
-                                && !ctrl
-                                && !alt
-                                && ('1'..='3').contains(&c) =>
-                        {
-                            match c {
-                                '1' => self.open_proposal_preview(),
-                                '2' => self.proposal_answer(true),
-                                _ => self.proposal_answer(false),
                             }
                         }
                         // plan/act is switched by the user only (design §5).
