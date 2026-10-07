@@ -3124,9 +3124,10 @@ fn plan_rows(
         MenuAction::None,
     ));
     // goal: may be long, wrap it
+    let goal_prefix = format!("  goal [{} criteria]: ", plan.criteria.len());
     push_wrapped(
         &mut rows,
-        "  goal: ",
+        &goal_prefix,
         &plan.goal.text,
         Theme::dim(),
         Theme::base(),
