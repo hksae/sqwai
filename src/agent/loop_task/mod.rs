@@ -513,10 +513,7 @@ async fn run_agent(
         compaction.anchor_ratio,
         compaction.keep_turns,
         compaction.threshold,
-        // G0 baseline (§8.2) always summarizes instead of anchoring
-        crate::bench::baseline()
-            || crate::bench::summary_short()
-            || matches!(compaction.summary, crate::config::CompactionSummary::Short),
+        matches!(compaction.summary, crate::config::CompactionSummary::Short),
     );
     // Tools are part of the request prefix: sorted for stability, narrowed in
     // PLAN mode, and omitted entirely for requests that cannot call them.
@@ -537,33 +534,30 @@ async fn run_agent(
 
     // `/compact` — write the mandatory pre-compaction diary entry first, then
     // run the policy and hand the transcript back without a chat turn.
-    // No diary on the G0 baseline (§8.2).
     if compact_only {
-        if !crate::bench::baseline() {
-            let _ = crate::agent::diary::write_entry(
-                &root,
-                crate::agent::diary::today(),
-                &session_id,
-                "compaction",
-                Some(&provider),
-                &model_id,
-                plan::open_active_for_session(&root, Some(&session_id))
-                    .ok()
-                    .flatten()
-                    .map(|plan| plan::render(&plan))
-                    .as_deref(),
-                None,
-                messages
-                    .iter()
-                    .rev()
-                    .find(|message| message.role == Role::User)
-                    .map(|message| message.content.as_str()),
-                Some(diary.token_budget),
-                diary.effort,
-                Some(Duration::from_secs(diary.timeout_secs)),
-            )
-            .await;
-        }
+        let _ = crate::agent::diary::write_entry(
+            &root,
+            crate::agent::diary::today(),
+            &session_id,
+            "compaction",
+            Some(&provider),
+            &model_id,
+            plan::open_active_for_session(&root, Some(&session_id))
+                .ok()
+                .flatten()
+                .map(|plan| plan::render(&plan))
+                .as_deref(),
+            None,
+            messages
+                .iter()
+                .rev()
+                .find(|message| message.role == Role::User)
+                .map(|message| message.content.as_str()),
+            Some(diary.token_budget),
+            diary.effort,
+            Some(Duration::from_secs(diary.timeout_secs)),
+        )
+        .await;
         let mut compaction_journal = if !read_only {
             crate::agent::journal::Journal::open(&root, &session_id).ok()
         } else {
@@ -773,9 +767,7 @@ async fn run_agent(
         memory_writes_this_turn = 0;
         // The diary is written before the compaction policy can discard any
         // transcript context. The writer has a hard timeout and host fallback.
-        // Skipped on the G0 baseline (§8.2): no durable memory there.
-        if !crate::bench::baseline()
-            && messages.len() > 8
+        if messages.len() > 8
             && policy.pressure(prompt_size.max(context::estimated_tokens(&messages)))
                 != context::Pressure::Ok
         {
@@ -861,14 +853,12 @@ async fn run_agent(
         // mutations. Same content keeps the provider prefix cache hot, so
         // freshness costs nothing until the plan actually changes.
         // Goal + constraints churn only on rewrite (cached); step state
-        // churns every turn (volatile tail). Skipped on the G0 baseline.
-        if !crate::bench::baseline() {
-            if let Some(plan) = crate::prompts::plan_block(&root, Some(&session_id)) {
-                turn_system.push(crate::providers::SystemPart::cached(plan));
-            }
-            if let Some(status) = crate::prompts::plan_status_block(&root, Some(&session_id)) {
-                turn_system.push(crate::providers::SystemPart::volatile(status));
-            }
+        // churns every turn (volatile tail).
+        if let Some(plan) = crate::prompts::plan_block(&root, Some(&session_id)) {
+            turn_system.push(crate::providers::SystemPart::cached(plan));
+        }
+        if let Some(status) = crate::prompts::plan_status_block(&root, Some(&session_id)) {
+            turn_system.push(crate::providers::SystemPart::volatile(status));
         }
         // claim-lint repetition removed with Y: no nag block rides here
         // Decided per request, not once per turn: a request that carries tool
@@ -1116,12 +1106,7 @@ async fn run_agent(
                         compaction.anchor_ratio,
                         compaction.keep_turns,
                         compaction.threshold,
-                        crate::bench::baseline()
-                            || crate::bench::summary_short()
-                            || matches!(
-                                compaction.summary,
-                                crate::config::CompactionSummary::Short
-                            ),
+                        matches!(compaction.summary, crate::config::CompactionSummary::Short),
                     );
                     previous_response_id = None;
                     // The new provider gets its own overflow budget: its
@@ -1754,10 +1739,7 @@ async fn run_agent(
                                 let _ = tx.send(AgentEvent::StepCurrent { step: None }).await;
                             }
                         }
-                        if outcome.ok
-                            && matches!(op, "finish" | "block" | "cancel")
-                            && !crate::bench::baseline()
-                        {
+                        if outcome.ok && matches!(op, "finish" | "block" | "cancel") {
                             let _ = crate::agent::diary::write_entry(
                                 &root,
                                 crate::agent::diary::today(),
@@ -3408,98 +3390,6 @@ mod effort_tests {
             kept.chars().count()
         );
         assert!(kept.contains("truncated to fit"), "{kept:?}");
-    }
-
-    /// G0 baseline (§8.2): with the durable machinery off, the plan-first
-    /// gate is lifted (there is no plan to require) and mutations run.
-    #[tokio::test]
-    async fn baseline_arm_skips_plan_gate_and_runs_mutations() {
-        struct BaselineGuard;
-        impl Drop for BaselineGuard {
-            fn drop(&mut self) {
-                crate::bench::set_baseline_override(None);
-            }
-        }
-        let _guard = BaselineGuard;
-        crate::bench::set_baseline_override(Some(true));
-
-        let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
-            events: std::sync::Mutex::new(vec![
-                vec![Ok(crate::providers::StreamEvent::ToolCall(
-                    crate::providers::ToolCallReq::new(
-                        "c1",
-                        "write",
-                        serde_json::json!({
-                            "file_path": "baseline_feature.rs",
-                            "content": "pub fn hello() {}"
-                        }),
-                    ),
-                ))],
-                vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
-            ]),
-        });
-
-        let temp_dir =
-            std::env::temp_dir().join(format!("sqwai-test-baseline-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let input = AgentInput {
-            provider,
-            model_id: "m".into(),
-            model_key: "primary".into(),
-            effort: None,
-            effort_support: crate::config::EffortSupport::default(),
-            max_tokens: None,
-            system: vec![],
-            messages: vec![Message::new(
-                Role::User,
-                "implement new authentication feature",
-            )],
-            root: temp_dir.clone(),
-            session_id: "test-baseline-sess".into(),
-            blocked_patterns: vec![],
-            web_allow_hosts: vec![],
-            plan_mode: false,
-            context_limit: 10000,
-            enable_tools: true,
-            background_baselines: false,
-            read_only: false,
-            previous_response_id: None,
-            summary: None,
-            mcp: Default::default(),
-            lsp: Default::default(),
-            compact_only: false,
-            diary: Default::default(),
-            memory: Default::default(),
-            compaction: Default::default(),
-            plan_limits: crate::config::PlanConfig::default(),
-            shadow_store: crate::config::ShadowStore::Off,
-            subagent_depth: 0,
-            parent_step: None,
-            parent_session: None,
-            fallback_chain: vec![],
-        };
-
-        let mut handle = spawn_agent(input);
-        let mut saw_tool_notice = false;
-
-        while let Some(ev) = handle.rx.recv().await {
-            match ev {
-                AgentEvent::ToolNotice { name, ok, .. } => {
-                    assert_eq!(name, "write");
-                    assert!(ok, "baseline must run the mutation, not gate it");
-                    saw_tool_notice = true;
-                }
-                AgentEvent::Completed(Ok(_)) => break,
-                AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
-                _ => {}
-            }
-        }
-        assert!(saw_tool_notice, "should have seen tool notice");
-        assert!(
-            temp_dir.join("baseline_feature.rs").exists(),
-            "baseline mutation must land on disk"
-        );
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     /// #192: an Esc that lands between two tool calls must stop the batch.

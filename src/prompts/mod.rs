@@ -86,7 +86,9 @@ pub fn bench_prefix(root: &std::path::Path, baseline: bool) -> String {
 }
 
 fn stable_prefix_at(root: &std::path::Path) -> String {
-    stable_prefix_inner(root, crate::bench::baseline())
+    // the product always runs the full machinery; only the bench harness
+    // passes its own baseline flag, explicitly
+    stable_prefix_inner(root, false)
 }
 
 fn stable_prefix_inner(root: &std::path::Path, baseline: bool) -> String {
@@ -97,7 +99,9 @@ fn stable_prefix_inner(root: &std::path::Path, baseline: bool) -> String {
     );
     prompt.push_str("\n\n");
     prompt.push_str(&env::process_block_at(root));
-    // G0 baseline (§8.2): no durable memory in the prefix.
+    // The baseline arm of the bench runs without durable memory in the
+    // prefix; the product path always includes it (the flag is the harness's
+    // own argument, never an environment switch).
     if !baseline && let Some(memory) = memory_block(root) {
         prompt.push_str("\n\n");
         prompt.push_str(&memory);

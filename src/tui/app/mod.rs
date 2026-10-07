@@ -735,11 +735,6 @@ impl App {
         // Plan state rides every request (built in the turn loop, not
         // here): a turn-start snapshot would predate this turn's plan
         // mutations, leaving the model two plans — one live, one stale.
-        // G0 baseline (§8.2): no plan block, no host anchor, no resume
-        // notice — the model gets the stable prefix and volatile tail only.
-        if crate::bench::baseline() {
-            return parts;
-        }
         let root = std::env::current_dir().unwrap_or_default();
         // The model is never told its mode elsewhere: without this line it
         // learns Plan vs Act from the first refusal, burning a turn.

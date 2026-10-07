@@ -248,7 +248,6 @@ pub struct RunReport {
 /// the caller scores fixture state separately.
 pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Option<RunReport> {
     let model = bench_model()?;
-    crate::bench::set_baseline_override(Some(baseline));
     let started = Instant::now();
     let session_id = format!("bench-{}-{session_tag}", task.id);
     let mut report = RunReport {
@@ -413,7 +412,6 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
         || low.contains("done")
         || low.contains("finished")
         || low.contains("ready");
-    crate::bench::set_baseline_override(None);
 
     // mechanism finish from the plan file (acceptance-aware, complete-call-free)
     if !baseline {

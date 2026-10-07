@@ -989,32 +989,6 @@ mod tests {
         assert!(out.chars().count() <= 9 + 60, "{out}");
     }
 
-    /// G0 baseline (§8.2): the durable machinery is invisible to the model.
-    #[test]
-    fn baseline_hides_durable_machinery_tools() {
-        struct BaselineGuard;
-        impl Drop for BaselineGuard {
-            fn drop(&mut self) {
-                crate::bench::set_baseline_override(None);
-            }
-        }
-        let _guard = BaselineGuard;
-        crate::bench::set_baseline_override(Some(true));
-        let names: Vec<String> = tool_specs(false).iter().map(|t| t.name.clone()).collect();
-        for hidden in ["plan", "note", "journal", "memory_write", "memory_read"] {
-            assert!(
-                !names.contains(&hidden.to_string()),
-                "{hidden} must be hidden on baseline: {names:?}"
-            );
-        }
-        for kept in ["read", "bash", "edit", "write"] {
-            assert!(
-                names.contains(&kept.to_string()),
-                "{kept} must stay on baseline: {names:?}"
-            );
-        }
-    }
-
     /// One schema set in every mode: the tool block is part of the request
     /// prefix, so a mode-dependent set re-keys the cache on every Plan/Act
     /// toggle. Plan mode refuses mutating calls at dispatch instead

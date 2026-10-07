@@ -713,18 +713,8 @@ pub fn tool_specs(_plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
     // enforced by the dispatcher instead (`is_mutating_call` at dispatch
     // refuses mutating calls with an honest message, `git_branch` actions
     // included) — which is where the authority already lived.
-    // G0 baseline (§8.2): the durable machinery is invisible — no plan,
-    // notes, journal projection, or durable memory tools.
-    let baseline = crate::bench::baseline();
     let mut specs: Vec<crate::providers::ToolSpec> = defs()
         .into_iter()
-        .filter(|d| {
-            !baseline
-                || !matches!(
-                    d.name,
-                    "plan" | "note" | "journal" | "memory_write" | "memory_read"
-                )
-        })
         .map(|d| crate::providers::ToolSpec {
             name: d.name.to_string(),
             description: d.description.to_string(),
