@@ -1319,17 +1319,28 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// `propose_reset` never applies silently: the dispatcher refuses the
-    /// op outright and points at the loop-served tool (approval dialog).
+    /// `plan abandon` applies directly now (no confirm dialog): a quoted
+    /// reason retires the plan; a thin reason is refused with a code+hint.
     #[test]
-    fn plan_propose_reset_refuses_direct_application() {
+    fn plan_abandon_applies_with_a_reason() {
         let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({"op":"create","goal":"g","criteria":["note"],"steps":[{"title":"one"}]}),
+        );
+        assert!(created.ok, "{}", created.output);
+        let thin = plan_op(&mut ctx, &json!({"op": "abandon", "reason": "nope"}));
+        assert!(!thin.ok, "thin reason must be refused: {}", thin.output);
+        assert!(thin.output.contains("thin_reason"), "{}", thin.output);
         let out = plan_op(
             &mut ctx,
-            &json!({"op": "propose_reset", "reason": "goal targets removed feature X, steps assume the deleted API"}),
+            &json!({"op": "abandon", "reason": "goal targets removed feature X, steps assume the deleted API"}),
         );
-        assert!(!out.ok, "{}", out.output);
-        assert!(out.output.contains("agent loop"), "{}", out.output);
+        assert!(out.ok, "{}", out.output);
+        assert!(
+            plan::open_active(&dir).unwrap().is_none(),
+            "abandoned plan is no longer active"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

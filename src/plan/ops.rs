@@ -63,14 +63,14 @@ pub enum Op {
         #[serde(default)]
         reason: String,
     },
-    /// Reset proposal: the plan itself is wrong (not the work). `reason`
-    /// must quote the plan defect; empty reasons are refused. Never applied
-    /// directly — the dispatcher routes it to the agent loop, which asks
-    /// the user through the approval dialog and only then abandons. The
-    /// old plan stays on disk as `Abandoned` (history is never rewritten);
-    /// a replacement, if any, goes through a fresh `create` with all its
-    /// gates. Replayable like every op (see apply_record).
-    ProposeReset {
+    /// Abandon the whole plan: it is the wrong plan (not merely a hard step).
+    /// `reason` must say why (empty/thin reasons refused); applied directly by
+    /// either actor and journaled with actor + reason — no confirm dialog. The
+    /// old plan stays on disk as `Abandoned` (history is never rewritten); a
+    /// replacement, if any, goes through a fresh `create` with all its gates.
+    /// Replayable like every op (see apply_record).
+    #[serde(alias = "propose_reset")]
+    Abandon {
         #[serde(default)]
         reason: String,
     },
@@ -181,35 +181,7 @@ pub fn abandon(plan: &mut Plan) {
     plan.revision += 1;
 }
 
-/// What a reset would throw away, for the confirm dialog. Evidence stays
-/// journaled either way — this lists what leaves the active surface.
-pub fn reset_discards(plan: &Plan) -> String {
-    let done = plan
-        .steps
-        .iter()
-        .filter(|step| step.status == StepStatus::Done)
-        .count();
-    let open: Vec<&str> = plan
-        .steps
-        .iter()
-        .filter(|step| {
-            matches!(
-                step.status,
-                StepStatus::Pending | StepStatus::InProgress | StepStatus::Blocked
-            )
-        })
-        .map(|step| step.id.as_str())
-        .collect();
-    format!(
-        "{} steps done, {} open ({}), {} criteria",
-        done,
-        open.len(),
-        open.join(", "),
-        plan.criteria.len()
-    )
-}
-
-/// Reason gate shared by BlockPlan and ProposeReset: the surrender must
+/// Reason gate shared by BlockPlan and Abandon: the surrender must
 /// quote what is wrong (conflict or plan defect), not gesture at effort.
 /// Empty reasons are refused; one-word reasons are refused with guidance.
 pub fn validate_surrender_reason(reason: &str, what: &str) -> Result<String, Rejection> {
@@ -621,8 +593,8 @@ pub fn apply(
         Op::Unblock { id } => unblock(plan, &id),
         Op::Cancel { id, reason } => cancel(plan, id.as_deref(), reason),
         Op::BlockPlan { reason } => block_plan(plan, reason),
-        Op::ProposeReset { reason } => {
-            let quoted = match validate_surrender_reason(&reason, "proposing a reset") {
+        Op::Abandon { reason } => {
+            let quoted = match validate_surrender_reason(&reason, "abandoning a plan") {
                 Ok(quoted) => quoted,
                 Err(rejection) => {
                     plan.rejections_in_a_row += 1;
@@ -630,10 +602,7 @@ pub fn apply(
                 }
             };
             abandon(plan);
-            accept(
-                plan,
-                format!("plan {} abandoned on approved reset: {quoted}", plan.id),
-            )
+            accept(plan, format!("plan {} abandoned: {quoted}", plan.id))
         }
         Op::Add { after, title } => add(plan, after.as_deref(), title, limits),
         Op::AddCriteria { criteria } => add_criteria(plan, criteria),

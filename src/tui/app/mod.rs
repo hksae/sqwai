@@ -3478,19 +3478,39 @@ Continue from the pending step, or report to the user if the settled work looks 
                 }
                 Err(message) => message,
             },
-            Some("abandon") => match self.workable_plan() {
-                Ok(mut active) => {
-                    active.status = plan::PlanStatus::Abandoned;
-                    active.revision += 1;
-                    let sid = self.session.id.to_string();
-                    let args = serde_json::json!({"id": active.id.clone()});
-                    match plan::commit(&root, &sid, &mut active, "cancel", "user", true, args) {
-                        Ok(_) => "plan abandoned".to_string(),
-                        Err(e) => format!("plan write failed: {e:#}"),
+            Some("abandon") => {
+                let reason = args
+                    .get(1..)
+                    .map(|v| v.join(" "))
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                if reason.is_empty() {
+                    "usage: /plan abandon <reason>".to_string()
+                } else {
+                    match self.workable_plan() {
+                        Ok(mut active) => {
+                            plan::abandon(&mut active);
+                            let sid = self.session.id.to_string();
+                            let commit_args =
+                                serde_json::json!({"op": "abandon", "reason": reason});
+                            match plan::commit(
+                                &root,
+                                &sid,
+                                &mut active,
+                                "abandon",
+                                "user",
+                                true,
+                                commit_args,
+                            ) {
+                                Ok(_) => format!("plan abandoned: {reason}"),
+                                Err(e) => format!("plan write failed: {e:#}"),
+                            }
+                        }
+                        Err(message) => message,
                     }
                 }
-                Err(message) => message,
-            },
+            }
             Some("waive") | Some("confirm") => {
                 "waive/confirm are retired: acceptance is now plain done-criteria notes the \
                  agent keeps for itself — there is nothing for the host to certify"

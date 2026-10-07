@@ -20,8 +20,8 @@ mod render;
 pub(crate) mod store;
 mod verify;
 pub use ops::{
-    Applied, Limits, NewStep, Op, PlanDraftArgs, Rejection, abandon, apply, create, reset_discards,
-    validate_proposal_invariants, validate_surrender_reason,
+    Applied, Limits, NewStep, Op, PlanDraftArgs, Rejection, abandon, apply, create,
+    validate_proposal_invariants,
 };
 pub(crate) use ops::{add_criteria, step_diff};
 pub use render::{render, render_goal, render_status, set_goal};
@@ -606,11 +606,11 @@ mod tests {
     #[test]
     fn block_plan_records_the_quoted_conflict_and_closes() {
         let mut plan = new_plan();
-        // reset refusals first (empty and thin reasons change nothing);
+        // abandon refusals first (empty and thin reasons change nothing);
         // the successful abandon path is covered by the approval-flow test
         let err = apply(
             &mut plan,
-            Op::ProposeReset {
+            Op::Abandon {
                 reason: "   ".to_string(),
             },
             &Limits::default(),
@@ -620,7 +620,7 @@ mod tests {
         assert_eq!(err.code, "empty_reason");
         let err = apply(
             &mut plan,
-            Op::ProposeReset {
+            Op::Abandon {
                 reason: "nope".to_string(),
             },
             &Limits::default(),
@@ -674,17 +674,15 @@ mod tests {
         ));
     }
 
-    /// A quoted reset abandons (history kept as Abandoned, never deleted);
-    /// the discard summary counts what leaves the active surface.
+    /// A quoted reason abandons directly (history kept as Abandoned, never
+    /// deleted) — no confirm dialog on the apply path.
     #[test]
-    fn propose_reset_abandons_on_a_quoted_defect() {
+    fn abandon_applies_on_a_quoted_reason() {
         let mut plan = new_plan();
-        let out = reset_discards(&plan);
-        assert!(out.contains("0 steps done"), "{out}");
         assert!(matches!(
             apply(
                 &mut plan,
-                Op::ProposeReset {
+                Op::Abandon {
                     reason: "goal targets removed feature X, steps assume the deleted API"
                         .to_string(),
                 },

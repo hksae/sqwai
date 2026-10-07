@@ -862,13 +862,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 }
             }
         }
-        // reset needs a user confirm through the approval dialog, which only
-        // the agent loop can ask for — direct application here would abandon
-        // silently, which is exactly the rewrite-history hole this op closes
-        plan::Op::ProposeReset { .. } => Outcome::err(
-            "propose_reset is served by the agent loop, not by the dispatcher: \
-                 call the propose_reset tool so the user confirms the abandon",
-        ),
         other => {
             let mut active = match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
                 Ok(Some(p)) => p,

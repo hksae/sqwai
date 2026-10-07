@@ -399,29 +399,12 @@ replacing the active plan; small edits to the active plan use plan add/split.",
             }),
         },
         ToolDef {
-            name: "propose_reset",
-            kind: Kind::ReadOnly,
-            description: "Propose abandoning the active plan when the plan itself is wrong \
-(not the work): the reason must quote the plan defect, and the user confirms \
-through a dialog showing what gets discarded — nothing is written until then. \
-The old plan stays on disk as abandoned; a \
-replacement, if any, goes through a fresh plan create with all its gates. \
-For a bad direction with a salvageable structure use propose_plan instead; \
-for an impossible task use plan block_plan.",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "reason": {"type": "string", "description": "quoted plan defect: which goal, constraint, or acceptance item is wrong and why"}
-                },
-                "required": ["reason"]
-            }),
-        },
-        ToolDef {
             name: "plan",
             kind: Kind::Mutating,
             description: "Work the structured plan, one operation per call. Ops: create, start, \
-finish, block, unblock, cancel, add, split, add_criteria, complete, block_plan. To abandon \
-a wrong plan, use propose_reset (user-confirmed), never cancel-and-recreate around it. Plans are for \
+finish, block, unblock, cancel, add, split, add_criteria, complete, block_plan, abandon. To retire \
+a wrong plan, use op abandon with a reason (it is for wrong plans, not hard steps — a stuck step is \
+block or ask_user), never cancel-and-recreate around it. Plans are for \
 work that changes things: read-only inspection needs no plan — just look. \
 For a write, create with goal + steps + at least one criteria note. criteria are your own \
 plain-text done-notes: what must be true when the work is done. They survive compaction and \
@@ -440,7 +423,7 @@ either side — quote the conflict in reason.",
                 "properties": {
                     "op": {"type": "string", "enum": [
                         "create", "start", "finish", "block", "unblock", "cancel",
-                        "add", "split", "complete", "block_plan",
+                        "add", "split", "complete", "block_plan", "abandon",
                         "add_criteria", "step_diff"
                     ]},
                     "id": {"type": "string", "description": "step id"},

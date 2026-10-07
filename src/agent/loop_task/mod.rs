@@ -20,7 +20,7 @@ use crate::agent::checkpoints;
 use crate::agent::context;
 use crate::agent::tools::{self, ToolCtx};
 use crate::plan;
-use loop_ask::{ask_user, bash_call, propose_plan, propose_reset, run_tool_blocking};
+use loop_ask::{ask_user, bash_call, propose_plan, run_tool_blocking};
 use loop_compact::{
     CompactionPrefix, compact_history, effort_ignored_reason, plan_hint_for_summary,
     record_compaction, turn_shows_no_reasoning,
@@ -1305,13 +1305,6 @@ async fn run_agent(
                             )
                             .await
                         }
-                        "propose_reset" if subagent_depth > 0 => tools::Outcome::err(
-                            "subagents cannot reset plans; plans belong to the primary session",
-                        ),
-                        "propose_reset" => {
-                            propose_reset(call, &mut ctx, read_only, &tx, &mut ctl, &mut next_id)
-                                .await
-                        }
                         "bash" => {
                             bash_call(
                                 call,
@@ -2153,7 +2146,6 @@ mod transport_tests {
 
 #[cfg(test)]
 mod effort_tests {
-    use super::loop_ask::propose_reset;
     use super::loop_compact::{
         CompactionPrefix, MIN_ZERO_TURNS_BEFORE_REPORTING, compact_history, compaction_request,
         effort_ignored_reason, record_compaction, rejects_effort_parameter,
@@ -2759,114 +2751,6 @@ mod effort_tests {
         assert!(repeat_bash_note(&[], &again, "TCP 1.2.3.4:443").is_none());
     }
 
-    /// `propose_reset` through the approval dialog: RunOnce abandons (plan
-    /// stays on disk as Abandoned, session hold cleared), Deny keeps the
-    /// plan working with a pointer to block_plan.
-    #[tokio::test]
-    async fn propose_reset_abandons_on_approval_and_keeps_on_deny() {
-        use tokio::sync::mpsc;
-        async fn run_reset(
-            dir: &std::path::Path,
-            session: &str,
-            decision: ApprovalDecision,
-        ) -> tools::Outcome {
-            let call = ToolCallReq::new(
-                "c1",
-                "propose_reset",
-                serde_json::json!({
-                    "reason": "goal targets removed feature X, steps assume the deleted API",
-                }),
-            );
-            let mut ctx = tools::ToolCtx::new(dir).in_session(session.to_string());
-            let (tx_agent, mut rx_ui) = mpsc::channel::<AgentEvent>(8);
-            let (tx_ui, mut rx_agent) = mpsc::channel::<ControlMsg>(8);
-            let mut next_id = 0u64;
-            let future = propose_reset(
-                &call,
-                &mut ctx,
-                false,
-                &tx_agent,
-                &mut rx_agent,
-                &mut next_id,
-            );
-            tokio::pin!(future);
-            loop {
-                tokio::select! {
-                    out = &mut future => break out,
-                    ev = rx_ui.recv() => {
-                        if let Some(AgentEvent::Approval { id, command, reason }) = ev {
-                            assert!(command.contains("abandon plan"), "{command}");
-                            assert!(reason.contains("removed feature"), "{reason}");
-                            tx_ui
-                                .send(ControlMsg::ApprovalAnswer { id, decision })
-                                .await
-                                .unwrap();
-                        }
-                    }
-                }
-            }
-        }
-        let dir = std::env::temp_dir().join(format!("sqwai-reset-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let session = "reset-sess";
-        let mut plan = plan::create(
-            "goal".to_string(),
-            Vec::new(),
-            vec!["manual: eyeball it".to_string()],
-            vec![plan::NewStep {
-                title: "work".into(),
-            }],
-            1000,
-            &plan::Limits::default(),
-        )
-        .unwrap();
-        plan.sessions = vec![session.to_string()];
-        plan::store(&dir, &plan).unwrap();
-        let plan_id = plan.id.clone();
-
-        let outcome = run_reset(&dir, session, ApprovalDecision::RunOnce).await;
-        assert!(outcome.ok, "{}", outcome.output);
-        assert!(
-            outcome.output.contains("abandoned by user approval"),
-            "{}",
-            outcome.output
-        );
-        let after = plan::open(&dir, &plan_id).unwrap();
-        assert_eq!(after.status, plan::PlanStatus::Abandoned);
-
-        // deny: a fresh active plan stays active
-        let mut plan2 = plan::create(
-            "goal2".to_string(),
-            Vec::new(),
-            vec!["note".to_string()],
-            vec![plan::NewStep {
-                title: "work".into(),
-            }],
-            1000,
-            &plan::Limits::default(),
-        )
-        .unwrap();
-        plan2.sessions = vec![session.to_string()];
-        plan::store(&dir, &plan2).unwrap();
-        let denied = run_reset(&dir, session, ApprovalDecision::Deny).await;
-        assert!(!denied.ok, "{}", denied.output);
-        assert!(
-            denied.output.contains("denied by user"),
-            "{}",
-            denied.output
-        );
-        // the first plan stays abandoned; the second stays active
-        assert_eq!(
-            plan::open(&dir, &plan_id).unwrap().status,
-            plan::PlanStatus::Abandoned
-        );
-        assert_eq!(
-            plan::open(&dir, &plan2.id).unwrap().status,
-            plan::PlanStatus::Active
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
     /// the turn, with progress events bracketing each run.
     fn parent_prefix<'a>(
         system: &'a [crate::providers::SystemPart],

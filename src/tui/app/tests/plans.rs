@@ -202,7 +202,7 @@ fn completed_linked_plan_refuses_tui_mutations() {
         "waive is retired outright: {}",
         last_status(&app)
     );
-    app.plan_command("/plan abandon");
+    app.plan_command("/plan abandon wrong plan");
     assert!(
         last_status(&app).contains("read-only"),
         "abandon must refuse: {}",
@@ -379,7 +379,7 @@ fn tui_commands_operate_on_session_plan_not_newest_global() {
     plan_c.sessions = vec![sid.clone()];
     plan::store(&temp_dir, &plan_c).unwrap();
     app.session.plan_id = Some(plan_c.id.clone());
-    app.plan_command("/plan abandon");
+    app.plan_command("/plan abandon wrong plan");
     let c_abandoned = plan::open(&temp_dir, &plan_c.id).unwrap();
     assert_eq!(c_abandoned.status, plan::PlanStatus::Abandoned);
     let b_still_active = plan::open(&temp_dir, &plan_b.id).unwrap();
