@@ -116,6 +116,15 @@ sqwai — не жёсткость, а память и видимость: пла
 - `propose_plan`: РЕШЕНО убрать. Payload дублирует `Op::Create` (ops.rs:164),
   прямой `plan create` уже существует; диалог создания — церемония поверх
   прямого пути (юзер принимает ~99%). `plan create` остаётся единственным путём.
+  Снос ПОЛНЫЙ (B4, решено 2026-10-07): тул + loop-хендлер + события
+  PlanProposal/PlanAccepted + TUI попап accept/decline + `PlanDraftArgs` +
+  `validate_proposal_invariants` + replay-плечо accept_proposal
+  (`Birth::Accepted`/`build_fresh_from_accept`) — всё вон, без сохранения
+  backwards-compat для старых accept-журналов.
+- Модельный abandon: НОВЫЙ `Op::Abandon { reason }` (actor=model, причина
+  обязательна, в журнал); `propose_reset` (user-confirm reset) уходит — его
+  роль закрывает abandon. Юзерский `/plan abandon` — без confirm-диалога, с
+  причиной (actor=user). `block_plan` (честная сдача невозможной задачи) остаётся.
 - Гейты тезиса сносом propose_plan не трогаются: смена goal/constraints mid-task
   — только юзер; журнал пишет наблюдения.
 - Abandon: РЕШЕНО убрать user-only. Abandon разрешён обоим акторам, всегда с
