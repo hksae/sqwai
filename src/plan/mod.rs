@@ -18,7 +18,6 @@ use uuid::Uuid;
 mod ops;
 mod render;
 pub(crate) mod store;
-mod verify;
 pub use ops::{Applied, Limits, NewStep, Op, Rejection, abandon, apply, create};
 pub(crate) use ops::{add_criteria, step_diff};
 pub use render::{render, render_goal, render_status, set_goal};
@@ -26,7 +25,6 @@ pub use store::{
     StepContext, commit, list, list_active, open, open_active, open_active_for_session,
     read_plan_file, replay, store,
 };
-pub(crate) use verify::{complete, next_id};
 
 /// A host-owned journal reference. The session is part of the identity because
 /// journal sequence numbers restart for every session.
@@ -839,7 +837,7 @@ mod tests {
         let mut plan = new_plan();
         plan.steps[0].status = StepStatus::Done;
         plan.steps[1].status = StepStatus::Reopened;
-        let err = complete(&mut plan).unwrap_err();
+        let err = ops::complete(&mut plan).unwrap_err();
         assert_eq!(err.code, "steps_open");
         assert!(err.reason.contains('2'), "reason: {}", err.reason);
     }

@@ -1,6 +1,5 @@
 use super::{
-    Budget, Goal, MAX_STEPS_DEFAULT, Plan, PlanStatus, Step, StepStatus, complete, new_id, next_id,
-    now, render,
+    Budget, Goal, MAX_STEPS_DEFAULT, Plan, PlanStatus, Step, StepStatus, new_id, now, render,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -205,6 +204,48 @@ impl Default for Limits {
             max_steps: MAX_STEPS_DEFAULT,
         }
     }
+}
+
+/// Close the plan. The host checks only that no step is left open — the
+/// criteria are the agent's own done-notes, which nothing here runs or grades
+/// (§16). This is a completeness check on the form, not a verdict on the work.
+pub(crate) fn complete(plan: &mut Plan) -> Result<Applied, Rejection> {
+    let pending: Vec<String> = plan
+        .steps
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.status,
+                StepStatus::Pending
+                    | StepStatus::InProgress
+                    | StepStatus::Blocked
+                    | StepStatus::Reopened
+            )
+        })
+        .map(|s| s.id.clone())
+        .collect();
+    if !pending.is_empty() {
+        return reject(
+            plan,
+            "steps_open",
+            format!("steps still open: {}", pending.join(", ")),
+            "finish, unblock or cancel them first",
+        );
+    }
+    plan.status = PlanStatus::Completed;
+    plan.revision += 1;
+    plan.rejections_in_a_row = 0;
+    Ok(Applied::Completed)
+}
+
+pub(crate) fn next_id(plan: &Plan) -> String {
+    let max = plan
+        .steps
+        .iter()
+        .filter_map(|s| s.id.parse::<usize>().ok())
+        .max()
+        .unwrap_or(0);
+    (max + 1).to_string()
 }
 
 /// Build a new plan. Rejects an empty goal, empty criteria, zero steps and
