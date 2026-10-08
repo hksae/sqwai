@@ -688,9 +688,31 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let op: plan::Op = match serde_json::from_value(args.clone()) {
         Ok(op) => op,
         Err(e) => {
-            return Outcome::err(format!(
-                "plan op rejected: {e} — the current plan with its valid ops is in your context above"
-            ));
+            // `id` is one flat optional field shared by twelve ops — a JSON
+            // schema cannot say "required for start/finish/block" — so a missing
+            // step id is caught here rather than by the schema, and every model
+            // hits it once per session: it batches `create` + `start` in one turn
+            // and writes the second call's arguments before the first result
+            // exists. Naming the steps turns the guess into a lookup.
+            let hint = match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
+                Ok(Some(active)) if !active.steps.is_empty() => format!(
+                    " — active plan {} steps: {}",
+                    active.id,
+                    active
+                        .steps
+                        .iter()
+                        .map(|s| format!(
+                            "{} [{}] {}",
+                            s.id,
+                            s.status.as_str(),
+                            s.title.chars().take(48).collect::<String>()
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                ),
+                _ => " — the current plan with its valid ops is in your context above".to_string(),
+            };
+            return Outcome::err(format!("plan op rejected: {e}{hint}"));
         }
     };
     // host-only ops never reach the validator: session membership is joined
@@ -777,7 +799,26 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             args,
                         ) {
                             Ok(_) => {
-                                Outcome::ok(format!("plan {id} created with {step_count} steps"))
+                                // The step ids come back with the create. Without
+                                // them a model that batches `create` + `start` has
+                                // no id to write into the second call — the result
+                                // said only "created with 3 steps", and the plan
+                                // block carrying the ids exists one request later.
+                                let steps = created
+                                    .steps
+                                    .iter()
+                                    .map(|s| {
+                                        format!(
+                                            "{} {}",
+                                            s.id,
+                                            s.title.chars().take(48).collect::<String>()
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(" · ");
+                                Outcome::ok(format!(
+                                    "plan {id} created with {step_count} steps: {steps}"
+                                ))
                             }
                             Err(e) => Outcome::err(format!("plan write failed: {e:#}")),
                         }

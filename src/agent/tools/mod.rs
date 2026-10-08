@@ -1473,6 +1473,25 @@ mod tests {
             "{}",
             created.output
         );
+        // The ids come back with the create: a model that batches create+start
+        // writes the second call before this result exists.
+        assert!(
+            created.output.contains("1 add the schema")
+                && created.output.contains("2 add the dispatcher"),
+            "create must name its step ids: {}",
+            created.output
+        );
+        // And a rejected op names them too, instead of pointing at a context
+        // that does not contain them yet.
+        let blind_start = plan_op(&mut ctx, &json!({"op": "start"}));
+        assert!(!blind_start.ok, "start needs an id");
+        assert!(
+            blind_start.output.contains("missing field")
+                && blind_start.output.contains("1 [pending]")
+                && blind_start.output.contains("2 [pending]"),
+            "the rejection must list the steps: {}",
+            blind_start.output
+        );
 
         let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
         // the writer session must be the agent's own (#171): a foreign
