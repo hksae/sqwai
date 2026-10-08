@@ -863,9 +863,8 @@ Continue from the pending step, or report to the user if the settled work looks 
         let provider = providers::create(&resolved)?;
 
         #[cfg(test)]
-        let project_root: std::path::PathBuf = tempfile::tempdir()
-            .map(|d| d.keep())
-            .unwrap_or_else(|_| {
+        let project_root: std::path::PathBuf =
+            tempfile::tempdir().map(|d| d.keep()).unwrap_or_else(|_| {
                 std::env::temp_dir().join(format!("sqwai-test-{}", std::process::id()))
             });
         #[cfg(not(test))]
@@ -3126,7 +3125,8 @@ Continue from the pending step, or report to the user if the settled work looks 
                 if init_root.join("SQWAI.md").exists() {
                     self.status("SQWAI.md already exists", StatusKind::Warn);
                 } else {
-                    match std::fs::write(init_root.join("SQWAI.md"), crate::prompts::SQWAI_TEMPLATE) {
+                    match std::fs::write(init_root.join("SQWAI.md"), crate::prompts::SQWAI_TEMPLATE)
+                    {
                         Ok(()) => self.status(
                             "SQWAI.md created — this agent's own rules, highest priority",
                             StatusKind::Ok,
