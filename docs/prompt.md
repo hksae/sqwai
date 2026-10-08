@@ -10,13 +10,15 @@ For a normal tool-enabled request, sqwai sends these parts in order:
 2. `AGENTS.md` project instructions, if present.
 3. Stable environment context and durable user/project memory.
 4. The active durable plan, if present.
-5. The host-built `ANCHOR`, then resume notice and volatile runtime context.
+5. The volatile host block: mode line, verify-command names, the `ANCHOR` when the history has been compacted, resume and stopped-turn notices, the step-state plan tail, and the plan nudge.
 
-`ANCHOR` is state, not a model summary: after compaction it is the host-built record of the goal, constraints, plan state, and bounded journal facts. The prompt identifies `ANCHOR`, the durable plan and its per-turn tail (compact current-state block), the on-demand `journal` tool, and nudges as host blocks that preserve provenance: goals and constraints are user-approved state, journal lines are time-stamped observations, and summaries or assumptions inside them stay model-authored claims. The current plan tail supersedes an older anchor snapshot.
+The volatile parts are joined into one host block that trails the history as a `system` item, inserted before the newest user turn so the last thing in a request is the human's words or a tool result. It used to ride as a `user` item at the very end of every request, including every iteration of a tool loop, and a live session answered that block instead of the user (§18 in `Changes.md`).
+
+`ANCHOR` is state, not a model summary: journal-derived facts about this session — files it changed, what was last verified, open assumptions, decisions, recent failures. It carries no goal or plan content, because those ride live on every request and a snapshot would resurrect the two-plan problem. It appears only where the transcript has lost detail, after a compaction or on a restored session. The prompt identifies `ANCHOR`, the durable plan and its per-turn tail (compact current-state block), the on-demand `journal` tool, and nudges as host blocks that preserve provenance: goals and constraints are user-approved state, journal lines are time-stamped observations, and summaries or assumptions inside them stay model-authored claims. The current plan tail supersedes an older anchor snapshot. Blocks state facts; the rules built on them — do not re-read an active plan, do not recreate one, no plan block means no active plan, a request that is not about the plan gets answered — live in `system.md`, stated once.
 
 ## Design requirements
 
-The prompt follows the design rules (DESIGN.md retired 2026-10-06; its §6 rules preserved in git history): one statement per rule, no incident-specific examples or magic thresholds, project-specific development rules in `AGENTS.md`, and host-generated blocks described with provenance rather than blanket authority.
+The prompt follows the design rules in [`../DESIGN.md`](../DESIGN.md) (§1 principles, §3 what the model sees, in order): one statement per rule, no incident-specific examples or magic thresholds, project-specific development rules in `AGENTS.md`, and host-generated blocks described with provenance rather than blanket authority.
 
 It defines plan workflow (start before acting, finish with summary and limitations, host-validated transitions, rejection codes) without duplicating validator thresholds — the exact evidence rules live in the `plan` tool schema — and distinguishes user-only waiver of `manual:` acceptance, describes blocked/cancelled steps, Plan-mode restrictions, assumption notes, untrusted input as task data versus host-designated project instructions, and the completion report (changed / verified / unverified-or-blocked).
 

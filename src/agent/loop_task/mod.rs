@@ -357,30 +357,48 @@ pub fn spawn_agent(input: AgentInput) -> AgentHandle {
     }
 }
 
-/// Advisory repeat note for any tool outcome: when the same call already ran
-/// earlier in this session with byte-identical output, re-running learned
-/// nothing — say so once, attached to this result, instead of burning another
-/// turn on the same bytes. Advisory only: polled state legitimately changes,
-/// and the note says to ignore it then. Compares full outputs, not journal
-/// summaries (truncated to 200 chars), so same-headed but different-tailed
-/// outputs never match.
+/// Marker of the advisory note appended to a first identical re-run.
+const REPEAT_NOTE_MARK: &str = "\n[host: you already called";
+/// Marker of the stub that replaces a repeated result entirely (§18.1.8).
+const REPEAT_STUB_MARK: &str = "[host: not re-reported";
+
+/// What the host decides to do with a result the model has already seen
+/// byte-for-byte.
+#[derive(Debug)]
+enum RepeatVerdict {
+    /// nothing like it in this session — report as-is
+    Fresh,
+    /// first identical re-run: report the bytes, say so once
+    Note(String),
+    /// second identical re-run after being told: the bytes are withheld, a
+    /// pointer to the earlier copies stays in their place
+    Withheld(String),
+}
+
+/// Repeat handling for any tool outcome (§18.1.8). Compares full outputs, not
+/// journal summaries (truncated to 200 chars), so same-headed but
+/// different-tailed outputs never match.
 ///
-/// It used to cover `bash` only, which is how a live session spent ten turns
-/// on `git status` and five byte-identical `git_diff` calls with no pushback:
-/// the loop was visible to the user and invisible to the guard.
-fn repeat_note(messages: &[Message], call: &ToolCallReq, output: &str) -> Option<String> {
+/// Two earlier versions let the loop through. The guard covered `bash` only,
+/// which is how a live session spent ten turns on `git status` and five
+/// byte-identical `git_diff` calls with no pushback. And it stopped at an
+/// advisory note: the same session then produced four requests with identical
+/// `completion=204 reasoning=146` — a note attached to 18,846 repeating bytes is
+/// not a brake, the bytes are the fuel. Withholding them ends the loop on the
+/// third look no matter how degenerately the model decodes.
+fn repeat_verdict(messages: &[Message], call: &ToolCallReq, output: &str) -> RepeatVerdict {
     // Repeating is the mechanism here: polling a job and waiting are supposed
     // to be called again.
     if matches!(call.name.as_str(), "bash_output" | "sleep") {
-        return None;
+        return RepeatVerdict::Fresh;
     }
     let key = call_key(call);
-    if key.is_empty() {
-        return None;
+    if key.is_empty() || output.is_empty() {
+        return RepeatVerdict::Fresh;
     }
     // (call key, output) pairs in order; the current call has no result yet,
     // so everything collected here is older
-    let mut pairs: Vec<(String, &str)> = Vec::new();
+    let mut matches = 0usize;
     for message in messages {
         if message.role != Role::Assistant {
             continue;
@@ -389,33 +407,57 @@ fn repeat_note(messages: &[Message], call: &ToolCallReq, output: &str) -> Option
             let Some(previous) = call_key_ref(tc) else {
                 continue;
             };
+            if previous != key {
+                continue;
+            }
             let out = messages
                 .iter()
                 .find(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some(&tc.id))
-                .map(|m| m.content.as_str())
+                .map(|m| strip_host_repeat_marks(&m.content))
                 .unwrap_or("");
-            pairs.push((previous, out));
+            if out == output {
+                matches += 1;
+            }
         }
     }
-    if pairs
-        .iter()
-        .any(|(previous, out)| *previous == key && *out == output)
-    {
-        Some(format!(
-            "\n[host: you already called {} with these exact arguments earlier in this \
+    match matches {
+        0 => RepeatVerdict::Fresh,
+        1 => RepeatVerdict::Note(format!(
+            "{REPEAT_NOTE_MARK} {} with these exact arguments earlier in this \
              session and got byte-identical output — reuse that observation instead of \
              re-running it. If the underlying state may have changed since, ignore this note.]",
             call.name
-        ))
-    } else {
-        None
+        )),
+        seen => RepeatVerdict::Withheld(format!(
+            "{REPEAT_STUB_MARK} — this ran, and its {} bytes are byte-identical to the {seen} \
+             earlier results for the same arguments, which are already above. Reading the same \
+             state a third time tells you the same thing: decide from what you have, or change \
+             what you are looking at.]",
+            output.len()
+        )),
+    }
+}
+
+/// Strip the host's own repeat markers before comparing outputs: the note rides
+/// on the first identical re-run, so without this the second re-run would no
+/// longer match the first and the counter would restart every iteration.
+fn strip_host_repeat_marks(output: &str) -> &str {
+    let cut = [REPEAT_NOTE_MARK, REPEAT_STUB_MARK]
+        .iter()
+        .filter_map(|mark| output.find(mark))
+        .min();
+    match cut {
+        Some(at) => output[..at].trim_end(),
+        None => output,
     }
 }
 
 /// What makes two calls the same call: for `bash` the command line alone (a
 /// different `timeout` is the same observation attempt), for everything else
-/// the tool name plus its canonicalized arguments. Empty when there is nothing
-/// to compare — an unargumented `plan show` is not a repeat risk worth noting.
+/// the tool name plus its canonicalized arguments — and the name alone when it
+/// takes no arguments. `git_diff({})` five times is exactly the loop the guard
+/// exists for, so an argument-less call is a repeat risk like any other; only
+/// an empty result has nothing to match on.
 fn call_key(call: &ToolCallReq) -> String {
     call_key_ref(call).unwrap_or_default()
 }
@@ -427,7 +469,7 @@ fn call_key_ref(call: &ToolCallReq) -> Option<String> {
     }
     let args = call.args.as_object()?;
     if args.is_empty() {
-        return None;
+        return Some(call.name.clone());
     }
     Some(format!(
         "{} {}",
@@ -892,6 +934,11 @@ async fn run_agent(
         if let Some(status) = crate::prompts::plan_status_block(&root, Some(&session_id)) {
             turn_system.push(crate::providers::SystemPart::volatile(status));
         }
+        // No active plan: the host says nothing about plans. The convention
+        // "no plan block means no plan, do not reconstruct one from history" is
+        // a system.md rule, stated once — a per-request note naming the closed
+        // plan would inject plan vocabulary exactly where the plan is gone
+        // (§18.1.6).
         // claim-lint repetition removed with Y: no nag block rides here
         // Decided per request, not once per turn: a request that carries tool
         // results must never rely on the provider holding the calls they
@@ -1801,13 +1848,16 @@ async fn run_agent(
                 if outcome.cancelled {
                     interrupted = true;
                 }
-                // repeat nudge (§7 W): an identical re-run learned nothing.
-                // Advisory and single-shot — attached to this result only, so
-                // it never nags twice about the same bytes.
-                if outcome.ok
-                    && let Some(note) = repeat_note(&messages, call, &outcome.output)
-                {
-                    outcome.output.push_str(&note);
+                // Repeat handling (§18.1.8): the first identical re-run is
+                // reported with a note, the next one loses its bytes — the note
+                // alone did not stop a live session from calling the same
+                // `git_diff` five times over the same 18KB.
+                if outcome.ok {
+                    match repeat_verdict(&messages, call, &outcome.output) {
+                        RepeatVerdict::Fresh => {}
+                        RepeatVerdict::Note(note) => outcome.output.push_str(&note),
+                        RepeatVerdict::Withheld(stub) => outcome.output = stub,
+                    }
                 }
                 messages.push(Message::tool_result(&call.id, outcome.output, !outcome.ok));
                 if interrupted {
@@ -2713,73 +2763,127 @@ mod effort_tests {
         context::Policy::with_compaction(16_000, 0.08, 2, 0.80, true)
     }
 
-    /// An identical re-run is caught: same command plus byte-identical
-    /// output fires the advisory note; a changed output, a different
-    /// command, or a first run stays silent.
+    /// First identical re-run: reported with a note. Second one: the bytes are
+    /// withheld (§18.1.8). A changed output, a different command, or a first run
+    /// stays untouched.
     #[test]
-    fn repeat_note_fires_only_on_identical_reruns() {
+    fn repeat_verdict_notes_once_then_withholds() {
         use crate::providers::ToolCallReq;
         let bash_call = |id: &str, command: &str| {
             ToolCallReq::new(id, "bash", serde_json::json!({"command": command}))
         };
-        let messages = vec![
+        let first = vec![
             Message::new(Role::User, "check"),
             Message::new(Role::Assistant, "").with_tool_calls(vec![bash_call("c1", "netstat")]),
             Message::tool_result("c1", "TCP 1.2.3.4:443", false),
-            Message::new(Role::User, "and?"),
         ];
         let again = bash_call("c2", "netstat");
-        let note = repeat_note(&messages, &again, "TCP 1.2.3.4:443");
         assert!(
-            note.clone()
-                .is_some_and(|n| n.contains("already called bash")),
-            "{note:?}"
+            matches!(
+                repeat_verdict(&[], &again, "TCP 1.2.3.4:443"),
+                RepeatVerdict::Fresh
+            ),
+            "a first run ever is fresh"
         );
-        // changed output: fresh state, no note
-        assert!(repeat_note(&messages, &again, "TCP 9.9.9.9:80").is_none());
-        // different command: no note
-        let other = bash_call("c3", "Get-Process");
-        assert!(repeat_note(&messages, &other, "TCP 1.2.3.4:443").is_none());
-        // first run ever: no note
-        assert!(repeat_note(&[], &again, "TCP 1.2.3.4:443").is_none());
+        let noted = repeat_verdict(&first, &again, "TCP 1.2.3.4:443");
+        assert!(
+            matches!(&noted, RepeatVerdict::Note(n) if n.contains("already called bash")),
+            "the first re-run must be noted, not silenced: {noted:?}"
+        );
+        // the note rides on the stored result; a second re-run must still match
+        // the first, or the counter would restart every iteration and the loop
+        // would run forever on noted bytes
+        let mut noted_text = "TCP 1.2.3.4:443".to_string();
+        if let RepeatVerdict::Note(note) = &noted {
+            noted_text.push_str(note);
+        }
+        let twice = vec![
+            Message::new(Role::User, "check"),
+            Message::new(Role::Assistant, "").with_tool_calls(vec![bash_call("c1", "netstat")]),
+            Message::tool_result("c1", "TCP 1.2.3.4:443", false),
+            Message::new(Role::Assistant, "").with_tool_calls(vec![bash_call("c2", "netstat")]),
+            Message::tool_result("c2", noted_text, false),
+        ];
+        let third = repeat_verdict(&twice, &bash_call("c3", "netstat"), "TCP 1.2.3.4:443");
+        assert!(
+            matches!(&third, RepeatVerdict::Withheld(stub) if stub.contains("not re-reported")),
+            "the third look at identical bytes must not carry them again: {third:?}"
+        );
+        // changed output: fresh state
+        assert!(matches!(
+            repeat_verdict(&first, &again, "TCP 9.9.9.9:80"),
+            RepeatVerdict::Fresh
+        ));
+        // different command: not a repeat
+        assert!(matches!(
+            repeat_verdict(&first, &bash_call("c3", "Get-Process"), "TCP 1.2.3.4:443"),
+            RepeatVerdict::Fresh
+        ));
         // a bash re-run with a different timeout is still the same attempt
         let with_timeout = ToolCallReq::new(
             "c4",
             "bash",
             serde_json::json!({"command": "netstat", "timeout": 30}),
         );
-        assert!(repeat_note(&messages, &with_timeout, "TCP 1.2.3.4:443").is_some());
+        assert!(matches!(
+            repeat_verdict(&first, &with_timeout, "TCP 1.2.3.4:443"),
+            RepeatVerdict::Note(_)
+        ));
     }
 
     /// The gap a live session fell into: five byte-identical `git_diff {}`
-    /// calls in a row, none of them flagged, because the guard only looked at
-    /// `bash`. Any tool with the same arguments and the same output now gets
-    /// the same advisory note.
+    /// calls in a row, none flagged — the guard looked only at `bash`, and a
+    /// call with no arguments had no key at all. An argument-less call is now
+    /// keyed by its name, which is exactly what `git_diff {}` repeats as.
     #[test]
-    fn repeat_note_covers_read_only_tools_too() {
+    fn repeat_verdict_covers_argument_free_tools() {
         use crate::providers::ToolCallReq;
         let diff = |id: &str, args: serde_json::Value| ToolCallReq::new(id, "git_diff", args);
         let messages = vec![
             Message::new(Role::User, "check"),
             Message::new(Role::Assistant, "")
-                .with_tool_calls(vec![diff("c1", serde_json::json!({"target": "src/x.rs"}))]),
+                .with_tool_calls(vec![diff("c1", serde_json::json!({}))]),
             Message::tool_result("c1", "diff --git a/src/x.rs", false),
+            Message::new(Role::Assistant, "")
+                .with_tool_calls(vec![diff("c2", serde_json::json!({}))]),
+            Message::tool_result("c2", "diff --git a/src/x.rs", false),
         ];
-        let same = diff("c2", serde_json::json!({"target": "src/x.rs"}));
         assert!(
-            repeat_note(&messages, &same, "diff --git a/src/x.rs").is_some(),
-            "an identical git_diff re-run must be flagged"
+            matches!(
+                repeat_verdict(
+                    &messages,
+                    &diff("c3", serde_json::json!({})),
+                    "diff --git a/src/x.rs"
+                ),
+                RepeatVerdict::Withheld(_)
+            ),
+            "the third empty-argument git_diff over the same bytes must be cut off"
         );
         // different arguments are a different question, not a repeat
-        let narrower = diff("c3", serde_json::json!({"target": "src/y.rs"}));
-        assert!(repeat_note(&messages, &narrower, "diff --git a/src/x.rs").is_none());
-        // no arguments at all: nothing to call a repeat, so nothing to nag about
-        assert!(repeat_note(&messages, &diff("c4", serde_json::json!({})), "").is_none());
+        assert!(matches!(
+            repeat_verdict(
+                &messages,
+                &diff("c4", serde_json::json!({"target": "src/y.rs"})),
+                "diff --git a/src/x.rs"
+            ),
+            RepeatVerdict::Fresh
+        ));
+        // an empty result has nothing to match on
+        assert!(matches!(
+            repeat_verdict(&messages, &diff("c5", serde_json::json!({})), ""),
+            RepeatVerdict::Fresh
+        ));
         // polling and waiting are the mechanism, not a loop
-        let poll = ToolCallReq::new("c5", "bash_output", serde_json::json!({"id": 3}));
-        assert!(repeat_note(&messages, &poll, "diff --git a/src/x.rs").is_none());
-        let nap = ToolCallReq::new("c6", "sleep", serde_json::json!({"seconds": 5}));
-        assert!(repeat_note(&messages, &nap, "diff --git a/src/x.rs").is_none());
+        let poll = ToolCallReq::new("c6", "bash_output", serde_json::json!({"id": 3}));
+        assert!(matches!(
+            repeat_verdict(&messages, &poll, "diff --git a/src/x.rs"),
+            RepeatVerdict::Fresh
+        ));
+        let nap = ToolCallReq::new("c7", "sleep", serde_json::json!({"seconds": 5}));
+        assert!(matches!(
+            repeat_verdict(&messages, &nap, "diff --git a/src/x.rs"),
+            RepeatVerdict::Fresh
+        ));
     }
 
     /// the turn, with progress events bracketing each run.

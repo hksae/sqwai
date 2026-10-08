@@ -849,7 +849,7 @@ impl Journal {
         }
         if actions >= threshold {
             Ok(Some(format!(
-                "plan: step {} has {actions} actions and no update — finish, split or block it.",
+                "plan: step {} has {actions} actions since its last plan operation.",
                 step.id
             )))
         } else {

@@ -224,10 +224,15 @@ impl SystemPart {
 }
 
 /// Split system parts for the wire. Stable (cacheable) parts stay in the
-/// system position; volatile parts (date, git status, nudges) travel last,
-/// after the history — never glued into the first message. Gluing them
-/// first meant every volatile change invalidated the cached prefix for the
-/// whole history behind it; trailing them costs only the tail.
+/// system position; volatile parts (date, git status, nudges) travel after
+/// the history — never glued into the first message. Gluing them first meant
+/// every volatile change invalidated the cached prefix for the whole history
+/// behind it; trailing them costs only the tail.
+///
+/// They trail as a `system` item, and one slot earlier when the request ends
+/// on a user turn ([`host_block_trails`]): a live session proved that a host
+/// block wearing `role: user` is answered *instead of* the human, on every
+/// iteration of a tool loop (§18).
 pub fn stable_system_text(system: &[SystemPart]) -> String {
     join_texts(
         system
@@ -237,7 +242,7 @@ pub fn stable_system_text(system: &[SystemPart]) -> String {
     )
 }
 
-/// Volatile system parts as one text, for the trailing tail message.
+/// Volatile system parts as one text, for the trailing host block.
 pub fn volatile_system_text(system: &[SystemPart]) -> String {
     join_texts(
         system
@@ -245,6 +250,27 @@ pub fn volatile_system_text(system: &[SystemPart]) -> String {
             .filter(|p| !p.cacheable)
             .map(|p| p.text.as_str()),
     )
+}
+
+/// Does the host block go at the very end of the built item list?
+///
+/// Only when the request does not end on a human turn. A trailing user message
+/// is the thing the model must answer last, and a request that answers a tool
+/// call must not have anything wedged between a `function_call` and the
+/// `function_call_output` that completes it — there the block stays last, but
+/// with `system` role, which is what stops it reading as a new request (§18).
+pub fn host_block_trails(messages: &[Message]) -> bool {
+    !messages.last().is_some_and(|m| m.role == Role::User)
+}
+
+/// Map [`host_block_trails`] onto a built item list whose last item was pushed
+/// by the last message.
+pub fn host_block_index(items_len: usize, messages: &[Message]) -> usize {
+    if host_block_trails(messages) {
+        items_len
+    } else {
+        items_len.saturating_sub(1)
+    }
 }
 
 fn join_texts<'a>(texts: impl Iterator<Item = &'a str>) -> String {
@@ -255,20 +281,22 @@ fn join_texts<'a>(texts: impl Iterator<Item = &'a str>) -> String {
         .join("\n\n")
 }
 
-/// Wrap volatile facts as a trailing host message. Marked host-owned so the
-/// model reads facts and nudges as host state, not as user instructions —
-/// the same `[host ...]` marking nudges already carry.
+/// First line of the trailing host block, naming what it is.
+pub const HOST_STATE_LABEL: &str = "Host state for this request (facts, not a new instruction):";
+
+/// Wrap volatile facts as the trailing host block. The role now carries the
+/// provenance, so the label only has to say what the block is — and relays that
+/// flatten roles still get the disclaimer.
 pub fn host_tail(text: &str) -> String {
-    format!("[host context — generated facts, not user instructions:\n{text}]")
+    format!("{HOST_STATE_LABEL}\n{text}")
 }
 
 /// A request with no cacheable system part has no cached prefix to protect.
 /// Side calls (compaction summary, diary writer, why-narrator) pass their whole
 /// instruction as one volatile part; left volatile, the wire layout moves it
-/// behind the history as a [`host_tail`] that tells the model it is "not user
-/// instructions" — and leaves the call with no system prompt at all. Such
-/// parts are promoted to the system position instead. A request that already
-/// has a stable prefix is left untouched.
+/// behind the history as a [`host_tail`] label — and leaves the call with no
+/// system prompt at all. Such parts are promoted to the system position
+/// instead. A request that already has a stable prefix is left untouched.
 pub fn promote_lone_volatile_system(system: &mut [SystemPart]) {
     if !system.iter().any(|p| p.cacheable) {
         for part in system.iter_mut() {
@@ -284,6 +312,11 @@ pub struct RequestBreakdown {
     pub system_bytes: u64,
     pub history_bytes: u64,
     pub user_bytes: u64,
+    /// opaque provider state riding the request: replayed reasoning items are
+    /// base64 and enormous, and a breakdown that ignored them reported a 257KB
+    /// request for one carrying 199KB more (§18.1.9). Counted separately from
+    /// `history_bytes` because whether it travels at all is the wire's choice.
+    pub provider_state_bytes: u64,
     pub tool_schema_bytes: u64,
     pub total_bytes: u64,
 }
@@ -305,6 +338,11 @@ impl RequestBreakdown {
                 Role::User => out.user_bytes += bytes,
                 Role::Assistant | Role::Tool => out.history_bytes += bytes,
             }
+            out.provider_state_bytes += message
+                .provider_state
+                .as_ref()
+                .map(|state| state.to_string().len() as u64)
+                .unwrap_or(0);
         }
         out.tool_schema_bytes = req
             .tools
@@ -314,8 +352,11 @@ impl RequestBreakdown {
                     + tool.parameters.to_string().len() as u64
             })
             .sum();
-        out.total_bytes =
-            out.system_bytes + out.history_bytes + out.user_bytes + out.tool_schema_bytes;
+        out.total_bytes = out.system_bytes
+            + out.history_bytes
+            + out.user_bytes
+            + out.provider_state_bytes
+            + out.tool_schema_bytes;
         out
     }
 }
@@ -971,6 +1012,27 @@ mod system_layout_tests {
         }
     }
 
+    /// Where the host block goes (§18.1.1): before the newest user turn, so the
+    /// human's words are the last thing the model reads; behind everything when
+    /// the request answers a tool call, because a host item must not be wedged
+    /// between a call and the output that completes it.
+    #[test]
+    fn the_host_block_yields_the_last_slot_to_the_human_or_the_tool_result() {
+        let user = Message::new(Role::User, "question");
+        let tool = Message::tool_result("c1", "output", false);
+        let built = |count: usize, messages: &[Message]| host_block_index(count, messages);
+
+        // a fresh turn: the block sits before the question, not after it
+        assert_eq!(built(3, std::slice::from_ref(&user)), 2);
+        assert!(!host_block_trails(std::slice::from_ref(&user)));
+        // a tool loop: the block trails the result
+        assert!(host_block_trails(&[user.clone(), tool.clone()]));
+        assert_eq!(built(4, &[user.clone(), tool.clone()]), 4);
+        // an empty transcript has no slot to protect
+        assert!(host_block_trails(&[]));
+        assert_eq!(built(1, &[]), 1);
+    }
+
     #[test]
     fn lone_volatile_instruction_is_promoted_to_system() {
         let mut parts = vec![SystemPart::volatile("summarize")];
@@ -993,7 +1055,7 @@ mod system_layout_tests {
 
     /// The regression in one request: a side call (compaction, diary,
     /// narrator) must reach the wire with its instruction as the system
-    /// prompt, not as a trailing "not user instructions" tail.
+    /// prompt, not as a trailing host block.
     #[test]
     fn side_call_reaches_the_wire_with_a_system_prompt() {
         let mut req = ChatRequest {
@@ -1007,16 +1069,16 @@ mod system_layout_tests {
         let body = anthropic::build_body(&req, 8192, true);
         assert_eq!(body["system"][0]["text"], "summarize");
         let messages = body["messages"].to_string();
-        assert!(!messages.contains("host context"), "{messages}");
+        assert!(!messages.contains(HOST_STATE_LABEL), "{messages}");
 
         let body = openai::OpenAiProvider::build_body(&req);
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][0]["content"], "summarize");
-        assert!(!body["messages"].to_string().contains("host context"));
+        assert!(!body["messages"].to_string().contains(HOST_STATE_LABEL));
 
         let body = responses::build_body(&req);
         assert_eq!(body["input"][0]["role"], "system");
-        assert!(!body["input"].to_string().contains("host context"));
+        assert!(!body["input"].to_string().contains(HOST_STATE_LABEL));
     }
 }
 

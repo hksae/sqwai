@@ -163,6 +163,40 @@ fn truncate(text: &str) -> String {
     super::trim_middle(text, MAX_OUTPUT)
 }
 
+/// Paths from `git status --porcelain=v1` output: the two status columns are
+/// dropped, and a rename entry reports its destination (the source is already
+/// gone from the worktree). Quoted paths keep the quotes git adds only when the
+/// name needs them, so they are stripped here.
+pub fn porcelain_paths(status: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in status.lines().filter(|l| l.len() > 3) {
+        // `--branch` prefixes the header with "## ", and "!! " marks an
+        // ignored entry; neither is a dirty path
+        if line.starts_with("##") || line.starts_with("!!") {
+            continue;
+        }
+        let Some(path) = line.get(3..) else { continue };
+        let path = path.rsplit(" -> ").next().unwrap_or(path);
+        let path = path.trim().trim_matches('"').replace('\\', "/");
+        if !path.is_empty() && !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The worktree's dirty paths, project-relative. Empty (not an error) when the
+/// tree is clean or git cannot answer — callers treat it as "nothing to say".
+pub fn dirty_paths(ctx: &ToolCtx) -> Vec<String> {
+    let outcome = run_git(ctx, &["status", "--porcelain=v1"]);
+    if outcome.ok {
+        porcelain_paths(&outcome.output)
+    } else {
+        Vec::new()
+    }
+}
+
 pub fn status(ctx: &ToolCtx, args: &Value) -> Outcome {
     let porcelain = if args
         .get("porcelain")

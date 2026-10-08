@@ -208,9 +208,31 @@ fn git_info(root: &Path) -> String {
                 Err(error) => return format!("Git: unavailable ({error})\n"),
             };
             let mut out = format!("Git: {branch}\n");
-            // No "N changed file(s)" line: a bare count without names is zero
-            // orientation — `git status` one tool call away says more, and it
-            // says it current rather than at session start.
+            // §14 deleted "N changed file(s) at session start" as a bare,
+            // unoriented count — and with it the one job that line silently
+            // did: mark the authorship boundary. Measured in the first live
+            // session after the cut: the model found files modified that it had
+            // never written, assumed authorship, and started a
+            // check-commit-close ritual over another agent's edits. Names, not
+            // a number, and labelled as a start-of-session snapshot.
+            if let Ok(status) = capture_in(root, "git", &["status", "--porcelain"]) {
+                let paths = crate::agent::tools::porcelain_paths(&status);
+                if !paths.is_empty() {
+                    const SHOW: usize = 8;
+                    let shown = if paths.len() <= SHOW {
+                        paths.join(", ")
+                    } else {
+                        format!(
+                            "{}, … (+{} more)",
+                            paths[..SHOW].join(", "),
+                            paths.len() - SHOW
+                        )
+                    };
+                    out.push_str(&format!(
+                        "Dirty at session start (not necessarily yours): {shown}\n"
+                    ));
+                }
+            }
             match capture_in(root, "git", &["log", "-3", "--format=- %s"]) {
                 Ok(log) if !log.trim().is_empty() => {
                     out.push_str("Recent commits at session start:\n");
@@ -793,6 +815,68 @@ fn capture_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The dirty list names files, because a count without names was deleted
+    /// for orienting nobody — and it turned out the count was also the only
+    /// marker of "this dirt predates you".
+    #[test]
+    fn session_block_names_the_dirty_paths_at_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        std::fs::write(dir.path().join("tracked.rs"), "fn a() {}\n").unwrap();
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "init"]);
+        // one edit and one new file, neither of them made by this session
+        std::fs::write(dir.path().join("tracked.rs"), "fn a() { changed() }\n").unwrap();
+        std::fs::write(dir.path().join("foreign.rs"), "fn b() {}\n").unwrap();
+
+        let block = session_block(dir.path());
+        assert!(
+            block.contains("Dirty at session start"),
+            "the authorship marker is gone: {block}"
+        );
+        assert!(block.contains("tracked.rs"), "{block}");
+        assert!(block.contains("foreign.rs"), "{block}");
+        assert!(
+            !block.contains("changed file(s)"),
+            "the bare count stays cut: {block}"
+        );
+        // a clean tree says nothing at all
+        git(&["checkout", "--", "."]);
+        git(&["clean", "-fdq"]);
+        let clean = session_block(dir.path());
+        assert!(
+            !clean.contains("Dirty at session start"),
+            "a clean tree must not claim dirt: {clean}"
+        );
+    }
+
+    #[test]
+    fn porcelain_paths_reads_every_status_shape() {
+        let status = " M src/a.rs\n?? new.txt\nR  old.rs -> renamed.rs\nD  gone.rs\n";
+        assert_eq!(
+            crate::agent::tools::porcelain_paths(status),
+            vec![
+                "gone.rs".to_string(),
+                "new.txt".to_string(),
+                // a rename reports its destination: the source is gone
+                "renamed.rs".to_string(),
+                "src/a.rs".to_string(),
+            ]
+        );
+        assert!(crate::agent::tools::porcelain_paths("").is_empty());
+        // a header line with no path column contributes nothing
+        assert!(crate::agent::tools::porcelain_paths("## main...origin/main").is_empty());
+    }
 
     #[test]
     fn process_block_has_no_empty_os_fields() {

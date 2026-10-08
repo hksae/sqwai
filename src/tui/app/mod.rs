@@ -759,13 +759,22 @@ impl App {
                     .join("; ")
             )));
         }
-        // The anchor is host-generated from the plan and this session's
-        // journal. It is rebuilt every turn so resume/compaction never relies
-        // on a model-written summary.
-        parts.push(SystemPart::volatile(crate::agent::context::anchor(
-            &root,
-            &self.session.id.to_string(),
-        )));
+        // The anchor is host-generated from this session's journal, and it
+        // rides only where the transcript has actually lost detail: once a
+        // compaction has dropped messages. Rebuilt fresh each turn so
+        // resume/compaction never relies on a model-written summary.
+        //
+        // It used to ride every request while system.md called it the source of
+        // truth "because earlier history may be gone" — a standing order to
+        // distrust the conversation in front of the model, and the engine of a
+        // live session that re-answered its own previous turn and ran five
+        // identical `git_diff` calls (§18.1.5).
+        if self.session.summary.is_some() {
+            parts.push(SystemPart::volatile(crate::agent::context::anchor(
+                &root,
+                &self.session.id.to_string(),
+            )));
+        }
         // One-shot resume notice: only the first request after a genuine
         // restore (session loaded with history, or a compaction that changed
         // something) may claim anything was resumed. Injecting it every turn
@@ -3773,10 +3782,11 @@ Continue from the pending step, or report to the user if the settled work looks 
                 }
                 AgentEvent::RequestBreakdown(b) => {
                     crate::providers::log_http(&format!(
-                        "request breakdown: system={}B history={}B user={}B tools={}B total={}B",
+                        "request breakdown: system={}B history={}B user={}B provider_state={}B tools={}B total={}B",
                         b.system_bytes,
                         b.history_bytes,
                         b.user_bytes,
+                        b.provider_state_bytes,
                         b.tool_schema_bytes,
                         b.total_bytes,
                     ));

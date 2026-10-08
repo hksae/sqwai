@@ -96,8 +96,8 @@ impl OpenAiProvider {
 
     pub fn build_body(req: &ChatRequest) -> Value {
         let mut msgs: Vec<Value> = Vec::new();
-        // stable prefix first and alone: volatile parts travel last (see
-        // below), so a changed date or nudge never re-keys the history.
+        // stable prefix first and alone: the host block trails behind the
+        // history (see below), so a changed date or nudge never re-keys it.
         let system = super::stable_system_text(&req.system);
         if !system.trim().is_empty() {
             msgs.push(json!({"role": "system", "content": system}));
@@ -105,7 +105,14 @@ impl OpenAiProvider {
         msgs.extend(req.messages.iter().map(Self::message_json));
         let tail = super::volatile_system_text(&req.system);
         if !tail.trim().is_empty() {
-            msgs.push(json!({"role": "user", "content": super::host_tail(&tail)}));
+            // system role, and one slot before the human's turn when the
+            // request ends on one: the model must answer the person, not the
+            // state block (§18.1)
+            let at = super::host_block_index(msgs.len(), &req.messages);
+            msgs.insert(
+                at,
+                json!({"role": "system", "content": super::host_tail(&tail)}),
+            );
         }
         let mut body = json!({
             "model": req.model_id,
@@ -927,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn system_block_precedes_history() {
+    fn system_block_precedes_history_and_host_state_is_not_a_user_turn() {
         let req = ChatRequest {
             model_id: "m".into(),
             system: vec![
@@ -948,24 +955,75 @@ mod tests {
         assert_eq!(tail, "B");
         let body = OpenAiProvider::build_body(&req);
         let msgs = body["messages"].as_array().unwrap();
-        // stable system first, history, volatile tail last — never glued
+        // stable system first, then the host block, then the human's turn last:
+        // the model answers the person, never the state block (§18.1.1)
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[0]["content"], "A");
-        assert_eq!(msgs[1]["role"], "user");
-        assert_eq!(msgs[1]["content"], "hi");
-        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(msgs[1]["role"], "system");
+        let host = msgs[1]["content"].as_str().unwrap();
+        assert!(host.contains('B'), "host block carries B: {host}");
         assert!(
-            msgs[2]["content"].as_str().unwrap().contains('B'),
-            "volatile tail carries B: {}",
-            msgs[2]["content"]
+            host.contains("Host state for this request"),
+            "the block names itself: {host}"
         );
+        assert_eq!(
+            msgs.last().unwrap()["role"],
+            "user",
+            "the request must end on the human turn"
+        );
+        assert_eq!(msgs.last().unwrap()["content"], "hi");
+    }
+
+    /// Inside a tool loop the request ends on a tool result, and nothing may be
+    /// wedged between a call and the output that answers it: there the host
+    /// block stays last, and what defuses it is its role, not its position.
+    #[test]
+    fn host_block_follows_tool_results_but_never_wears_user() {
+        let body = OpenAiProvider::build_body(&ChatRequest {
+            model_id: "m".into(),
+            system: vec![
+                crate::providers::SystemPart::cached("A"),
+                crate::providers::SystemPart::volatile("B"),
+            ],
+            messages: vec![
+                Message::new(Role::User, "hi"),
+                Message::new(Role::Assistant, "").with_tool_calls(vec![
+                    crate::providers::ToolCallReq::new("c1", "git_diff", serde_json::json!({})),
+                ]),
+                Message::tool_result("c1", "diff --git a/x", false),
+            ],
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        });
+        let msgs = body["messages"].as_array().unwrap();
+        // The block trails the tool result: nothing may be wedged between a call
+        // and the output that answers it, so position is not the lever here —
+        // the `system` role is.
+        assert_eq!(msgs.last().unwrap()["role"], "system");
         assert!(
-            msgs[2]["content"]
+            msgs.last().unwrap()["content"]
                 .as_str()
                 .unwrap()
-                .contains("host context"),
-            "tail is marked host-owned: {}",
-            msgs[2]["content"]
+                .contains('B')
+        );
+        assert_eq!(
+            msgs[msgs.len() - 2]["role"],
+            "tool",
+            "the tool result stays directly above the block: {}",
+            msgs[msgs.len() - 2]
+        );
+        assert_eq!(msgs[msgs.len() - 3]["role"], "assistant");
+        assert!(
+            !msgs.iter().any(|m| m["role"] == "user"
+                && m["content"]
+                    .to_string()
+                    .contains("Host state for this request")),
+            "no host block may wear the user role: {}",
+            body
         );
     }
 
@@ -991,16 +1049,26 @@ mod tests {
         };
         let before = body_for("date: monday");
         let after = body_for("date: tuesday");
+        // Everything up to the host block is the cached prefix: the stable
+        // system message, then the older history. The block itself and the
+        // newest turn after it are new bytes either way, so a volatile change
+        // re-reads only from the block onward (§18.1.1).
         let prefix = |body: &Value| {
             body["messages"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .take(2)
+                .take(1)
                 .map(|m| m.to_string())
                 .collect::<Vec<_>>()
         };
         assert_eq!(prefix(&before), prefix(&after));
+        // and the human's turn is still the last thing in the request
+        for body in [&before, &after] {
+            let msgs = body["messages"].as_array().unwrap();
+            assert_eq!(msgs.last().unwrap()["role"], "user");
+            assert_eq!(msgs.last().unwrap()["content"], "hi");
+        }
     }
 
     #[test]
@@ -1234,6 +1302,52 @@ mod tests {
             req.messages = vec![Message::new(Role::User, "say hi in 3 words")];
             let u = run(&live, req).await;
             report("alive", &u);
+            assert!(u.prompt_tokens > 0);
+        }
+
+        /// The layout change in one live question (§18.1.1): does this gateway
+        /// accept a `system` item that is not first — before the newest user
+        /// turn on a fresh request, and trailing a tool result inside a loop?
+        /// A relay that only reads `system` at index 0 would 400 or silently
+        /// drop the host block, and that is a provider problem the layout has
+        /// to know about, not one a unit test can see.
+        #[tokio::test]
+        #[ignore = "live wire; requires configured provider"]
+        async fn live_host_block_positions_are_accepted() {
+            let live = live_provider();
+            let mut system = stable_prefix();
+            system.push(crate::providers::SystemPart::volatile(
+                "Mode: act\n<plan_status>status: active, steps: 1 done</plan_status>",
+            ));
+
+            // fresh turn: [system][host block][user]
+            let mut req = base_request(&live);
+            req.system = system.clone();
+            req.tools = probe_tools();
+            req.messages = vec![Message::new(Role::User, "reply with the word ok")];
+            let u = run(&live, req).await;
+            report("host block before the user turn", &u);
+            assert!(u.prompt_tokens > 0);
+
+            // inside a tool loop: [system][user][assistant call][tool][host block]
+            let mut req = base_request(&live);
+            req.system = system;
+            req.tools = probe_tools();
+            req.messages = vec![
+                Message::new(Role::User, "read src/main.rs"),
+                {
+                    let mut m = Message::new(Role::Assistant, "");
+                    m.tool_calls = vec![crate::providers::ToolCallReq::new(
+                        "call_1",
+                        "read",
+                        serde_json::json!({"path": "src/main.rs"}),
+                    )];
+                    m
+                },
+                Message::tool_result("call_1", "fn main() {}", false),
+            ];
+            let u = run(&live, req).await;
+            report("host block after a tool result", &u);
             assert!(u.prompt_tokens > 0);
         }
 

@@ -118,12 +118,24 @@ changing block ahead of the history defeats provider prefix caching for the
 whole session. Facts that change either arrive in the plan tail (which changes
 only when the plan does) or are one tool call away.
 
-**Compaction** replaces the discarded head with a host-built anchor — goal,
-constraints, plan state, journal-derived facts — under the header
-`ANCHOR (host-generated working memo; journal facts, not a summary)`. The model
-is never asked to summarize its own goal: a summary inherits the errors of
-what it summarizes, and constraints are the first thing it drops. The plan is
-the model's only plan source and is rebuilt live per request, so a turn-start
+The volatile parts are assembled into one **host block** that trails the
+history as a `system` item, inserted before the newest user turn so the last
+thing in a request is always the human's words or a tool result. It used to ride
+as a `user` item at the very end, on every iteration of a tool loop, and a live
+session answered that block instead of the user: it re-verified a tree it had
+already verified, five byte-identical times. Host state describing itself as a
+user turn is the one layout mistake a chat model cannot be argued out of.
+
+**Compaction** replaces the discarded head with a host-built anchor —
+journal-derived facts: files this session changed, what was last verified, open
+assumptions, decisions, recent failures — under the header
+`ANCHOR (host-generated working memo; journal facts, not a summary)`. It rides
+only where history has actually been dropped, never on every request: while it
+did, `system.md` called it the source of truth "because earlier history may be
+gone", which taught the model to distrust the conversation in front of it. The
+model is never asked to summarize its own goal: a summary inherits the errors of
+what it summarizes, and constraints are the first thing it drops. The plan is the
+model's only plan source and is rebuilt live per request, so a turn-start
 snapshot cannot outlive a mid-turn edit.
 
 ## 4. Tools

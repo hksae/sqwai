@@ -109,6 +109,15 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
         let last = system.len() - 1;
         system[last]["cache_control"] = json!({"type": "ephemeral"});
     }
+    // The host block rides here too, and deliberately AFTER the breakpoint: the
+    // cached prefix ends with the stable text, so a changed date or plan tail
+    // re-reads only this block. It is not allowed to ride a user turn — a host
+    // block wearing the human's role is what the model then answers, instead of
+    // the request (§18.1.1).
+    let tail = super::volatile_system_text(&req.system);
+    if !tail.trim().is_empty() {
+        system.push(json!({"type": "text", "text": super::host_tail(&tail)}));
+    }
     let mut msgs: Vec<Value> = Vec::new();
     for m in &req.messages {
         if m.role == Role::System
@@ -167,31 +176,7 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
             block["cache_control"] = json!({"type": "ephemeral"});
         }
     }
-    // volatile tail, unmarked and last: date, git status, nudges. Merged
-    // into a trailing user turn when the API's alternation allows it.
-    let tail = super::volatile_system_text(&req.system);
-    if !tail.trim().is_empty() {
-        let text = super::host_tail(&tail);
-        let tail_block = json!({"type": "text", "text": text});
-        let merge = msgs
-            .last()
-            .and_then(|p| p.get("role"))
-            .and_then(|r| r.as_str())
-            == Some("user");
-        if merge
-            && let Some(arr) = msgs
-                .last_mut()
-                .and_then(|p| p.get_mut("content"))
-                .and_then(|c| c.as_array_mut())
-        {
-            arr.push(tail_block);
-        } else {
-            msgs.push(json!({
-                "role": "user",
-                "content": [tail_block],
-            }));
-        }
-    }
+    // the volatile host block already rode out with `system` above (§18.1.1)
 
     let mut body = json!({
         "model": req.model_id,
@@ -618,22 +603,21 @@ mod tests {
             "only the last tool carries the marker: {tools:?}"
         );
         assert_eq!(tools[2]["cache_control"]["type"], "ephemeral");
-        // stable system keeps one trailing marker; volatile rides the tail
+        // stable system keeps one trailing marker; the host block rides after it,
+        // unmarked, in `system` — never as a user turn (§18.1.1)
         let system = body["system"].as_array().unwrap();
-        assert_eq!(system.len(), 1);
+        assert_eq!(system.len(), 2);
         assert_eq!(system[0]["text"], "stable");
         assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
-        let msgs = body["messages"].as_array().unwrap();
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0]["role"], "user");
-        assert!(msgs[0]["content"][0].get("cache_control").is_none());
+        assert!(system[1].get("cache_control").is_none());
         assert!(
-            msgs[0]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("anchor"),
-            "volatile tail travels last: {}",
-            msgs[0]["content"][0]["text"]
+            system[1]["text"].as_str().unwrap().contains("anchor"),
+            "the host block carries the volatile part: {}",
+            system[1]["text"]
+        );
+        assert!(
+            body["messages"].as_array().unwrap().is_empty(),
+            "the host block must not create a user turn"
         );
 
         // and nothing is marked for a provider without a documented cache
@@ -789,35 +773,34 @@ mod tests {
         };
         let b = build_body(&req, 8192, true);
         assert_eq!(b["model"], "claude-x");
-        // stable system keeps its trailing marker; volatile rides the tail;
-        // the last history message carries the third marker
-        assert_eq!(b["system"].as_array().unwrap().len(), 1);
-        assert_eq!(b["system"][0]["cache_control"]["type"], "ephemeral");
-        assert_eq!(b["system"][0]["text"], "stable prefix");
-        let msgs = b["messages"].as_array().unwrap();
-        // the tail merges into the trailing user turn (alternation holds);
-        // the marker stays on the history block, the tail rides unmarked
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0]["role"], "user");
-        assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
-        assert_eq!(msgs[0]["content"][0]["text"], "hi");
-        assert_eq!(msgs[0]["content"].as_array().unwrap().len(), 2);
-        assert!(msgs[0]["content"][1].get("cache_control").is_none());
+        // stable system keeps its trailing marker, the host block rides after it
+        // unmarked, and the last history message carries the third marker
+        let system = b["system"].as_array().unwrap();
+        assert_eq!(system.len(), 2);
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(system[0]["text"], "stable prefix");
+        assert!(system[1].get("cache_control").is_none());
         assert!(
-            msgs[0]["content"][1]["text"]
+            system[1]["text"]
                 .as_str()
                 .unwrap()
-                .contains("git: on branch main"),
-            "volatile tail travels last: {}",
-            msgs[0]["content"][1]["text"]
+                .contains("git: on branch main")
         );
+        let msgs = b["messages"].as_array().unwrap();
+        // the human's turn is the whole conversation: no host block merged into
+        // it, no extra user turn invented for it (§18.1.1)
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(msgs[0]["content"][0]["text"], "hi");
         assert_eq!(b["thinking"]["budget_tokens"], 16384);
         assert_eq!(b["max_tokens"], 8192 + 16384);
     }
 
-    /// The cache bug in one assertion: a changed volatile tail must not
-    /// move a single byte before it. Tools, stable system, and the history
-    /// message are identical; only the trailing tail differs.
+    /// The cache bug in one assertion: a changed host block must not move a
+    /// single byte of the cached prefix. Tools, the stable system block and the
+    /// history are identical; only the unmarked block after the marker differs.
     #[test]
     fn volatile_change_keeps_the_prefix_bytes() {
         let body_for = |volatile: &str| {
@@ -842,17 +825,9 @@ mod tests {
         };
         let before = body_for("git: on branch main");
         let after = body_for("git: on branch other");
-        assert_eq!(before["system"], after["system"]);
-        // history block identical, tail block moved (merged into the same
-        // trailing user turn)
-        assert_eq!(
-            before["messages"][0]["content"][0],
-            after["messages"][0]["content"][0]
-        );
-        assert_ne!(
-            before["messages"][0]["content"][1],
-            after["messages"][0]["content"][1]
-        );
+        assert_eq!(before["system"][0], after["system"][0]);
+        assert_eq!(before["messages"], after["messages"]);
+        assert_ne!(before["system"][1], after["system"][1]);
     }
 
     #[test]

@@ -6,7 +6,8 @@ use super::outline;
 use super::policy::{bash_scope_hit, in_write_scope, mutation_target_paths, step_epoch_current};
 use super::specs;
 use super::verify::{
-    rejection, with_assumption_warning, with_blast_radius, with_evidence_ts_warning,
+    rejection, with_assumption_warning, with_authorship, with_blast_radius,
+    with_evidence_ts_warning,
 };
 use crate::plan;
 use serde_json::Value;
@@ -301,8 +302,8 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             args["include"].as_str(),
             args["context"].as_u64().unwrap_or(0).min(10) as usize,
         ),
-        "git_status" => git::status(ctx, args),
-        "git_diff" => git::diff(ctx, args),
+        "git_status" => with_authorship(ctx, git::status(ctx, args)),
+        "git_diff" => with_authorship(ctx, git::diff(ctx, args)),
         "git_log" => git::log(ctx, args),
         "git_show" => git::show(ctx, args),
         "git_commit" => git::commit(ctx, args),

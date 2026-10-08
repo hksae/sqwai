@@ -17,6 +17,7 @@ pub(crate) mod web;
 
 pub(crate) use ctx::{ReadState, ToolCtx};
 pub(crate) use dispatch::{FileDiff, Outcome, bg_running_commands, execute, kill_remaining_jobs};
+pub(crate) use git::porcelain_paths;
 pub(crate) use policy::{
     bash_scope_hit, register_mention_prereads, register_subagent_scope, take_mention_prereads,
     take_subagent_scope,
@@ -551,6 +552,71 @@ mod tests {
             let o = execute(&mut ctx, "read", &json!({"file_path": p}));
             assert!(!o.ok, "{p} must be rejected");
         }
+    }
+
+    /// A dirty tree is not the same as a dirty tree *by this session*. Without
+    /// the distinction a model that finds unfamiliar edits assumes authorship
+    /// and starts committing work it never took on — measured in a live
+    /// session, where another agent's uncommitted edits triggered exactly that.
+    #[test]
+    fn git_status_marks_paths_this_session_never_wrote() {
+        let (mut ctx, dir) = proj();
+        // foreign dirt: it appears in the tree with no tool call behind it
+        fs::write(dir.join("foreign.rs"), "fn f() {}\n").unwrap();
+
+        let out = execute(&mut ctx, "git_status", &json!({}));
+        assert!(out.ok, "{}", out.output);
+        assert!(
+            out.output.contains("authorship") && out.output.contains("foreign.rs"),
+            "the foreign path must be named: {}",
+            out.output
+        );
+
+        // what this session wrote through a tool is not foreign — the journal
+        // says so, and that is the whole basis of the line
+        let mine = execute(
+            &mut ctx,
+            "write",
+            &json!({"file_path": "mine.rs", "content": "fn m() {}\n"}),
+        );
+        assert!(mine.ok, "{}", mine.output);
+        crate::agent::journal::Journal::open(&dir, &ctx.session_id)
+            .unwrap()
+            .append("file_diff", json!({"path": "mine.rs", "added": 1}))
+            .unwrap();
+
+        let again = execute(&mut ctx, "git_status", &json!({}));
+        let tail = again
+            .output
+            .split("authorship:")
+            .nth(1)
+            .unwrap_or_default()
+            .to_string();
+        assert!(tail.contains("foreign.rs"), "again: {}", again.output);
+        assert!(
+            !tail.contains("mine.rs"),
+            "the session's own write must not be called foreign: {tail}"
+        );
+
+        // a clean tree gets no line at all
+        let clean = std::env::temp_dir().join(format!("sqwai-author-clean-{}", std::process::id()));
+        std::fs::create_dir_all(&clean).unwrap();
+        std::process::Command::new("git")
+            .current_dir(&clean)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        let mut clean_ctx = ToolCtx::new(&clean);
+        clean_ctx.session_id = "clean-sess".to_string();
+        let quiet = execute(&mut clean_ctx, "git_status", &json!({}));
+        assert!(quiet.ok, "{}", quiet.output);
+        assert!(
+            !quiet.output.contains("authorship"),
+            "nothing dirty, nothing to say: {}",
+            quiet.output
+        );
+        fs::remove_dir_all(&clean).ok();
+        fs::remove_dir_all(&dir).ok();
     }
 
     /// §2.0: file tools must refuse host-owned state under `.sqwai/`. Without

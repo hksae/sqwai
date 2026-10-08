@@ -19,9 +19,15 @@
 
 use crate::providers::{Message, Role};
 
-/// Host-generated state anchor used after compaction and on session start.
-/// It contains only durable plan data and bounded journal-derived facts; the
-/// model never writes or rewrites this block.
+/// Host-generated state anchor for the moments when the transcript really has
+/// lost detail: after a compaction and on a restored session. It contains only
+/// durable plan data and bounded journal-derived facts; the model never writes
+/// or rewrites this block.
+///
+/// It used to ride every request while `system.md` told the model to treat it
+/// as the source of truth "because earlier history may be gone" — which taught
+/// a live session to distrust the conversation in front of it and re-answer its
+/// own previous turn (§18.1.5).
 pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     let mut out =
         String::from("ANCHOR (host-generated working memo; journal facts, not a summary)\n");
@@ -142,12 +148,10 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     } else {
         out.push_str(&format!("recent failures: {}\n", failures.join(" · ")));
     }
-    // Compaction/session-start is exactly when the transcript is about to
-    // lose detail — a cheap nudge to persist anything durable before it goes.
-    out.push_str(
-        "durable facts learned (preference, convention, non-obvious decision) belong in \
-         memory: call memory_write before they trim out of context.\n",
-    );
+    // No imperatives here. The anchor describes what the journal proves; the
+    // rule that durable facts belong in `memory_write` lives in system.md, where
+    // it is stated once. Riding every request as a command is what made a live
+    // session call `memory_write` in the middle of an unrelated loop (§18.1.3).
     out
 }
 
@@ -1036,6 +1040,36 @@ mod tests {
         // a foreign session still sees nothing of it
         assert!(!anchor(&root, "other").contains("ship it"));
         std::fs::remove_dir_all(root).ok();
+    }
+
+    /// The anchor describes what the journal proves and gives no orders. Its
+    /// `memory_write` imperative used to ride every request inside the host
+    /// block, and a live session obeyed it in the middle of an unrelated loop
+    /// (§18.1.3).
+    #[test]
+    fn anchor_states_facts_and_issues_no_commands() {
+        let root = temp_root("facts");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&root, "facts-session").unwrap();
+        journal
+            .append("file_diff", serde_json::json!({"path": "src/x.rs"}))
+            .unwrap();
+        journal
+            .append(
+                "tool_result",
+                serde_json::json!({"tool": "bash", "ok": true}),
+            )
+            .unwrap();
+        let rendered = anchor(&root, "facts-session");
+        assert!(rendered.contains("src/x.rs"), "{rendered}");
+        for command in ["memory_write", "call ", "Do not", "must "] {
+            assert!(
+                !rendered.contains(command),
+                "imperative {command:?} left in the anchor: {rendered}"
+            );
+        }
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

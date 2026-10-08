@@ -128,18 +128,22 @@ pub fn plan_block(root: &std::path::Path, session_id: Option<&str>) -> Option<St
     ))
 }
 
-/// The moving half of the plan: status, acceptance validation, steps.
-/// Rebuilt every turn — a volatile tail part, never the cached prefix.
-/// Carries its own usage note: the state below is already in the model's
-/// context, so re-reading it with `plan show` or re-creating an active
-/// plan is wasted work. (Kept out of `render_status`, which also paints
-/// the user-facing `/plan` panel.)
+/// The moving half of the plan: status and steps. Rebuilt per request — a
+/// volatile host-block part, never the cached prefix.
+///
+/// Reference tone on purpose (§18.1.3). This block used to end in "call ops
+/// directly with the step ids above … do not `create` — continue it", and a live
+/// session obeyed it into a five-iteration loop: with every step already done
+/// there was nothing to continue, so "continue it" came out as "проверяю,
+/// коммичу и закрываю". Commands belong in system.md, where they are stated
+/// once as rules; a block that rides every request describes state.
+/// (Kept out of `render_status`, which also paints the user-facing `/plan` panel.)
 pub fn plan_status_block(root: &std::path::Path, session_id: Option<&str>) -> Option<String> {
     let plan = crate::plan::open_active_for_session(root, session_id)
         .ok()
         .flatten()?;
     Some(format!(
-        "<plan_status>\n{}\nDo not call `plan show` to re-read this state — it is already in your context; call ops directly with the step ids above. If a plan id is listed, do not `create` — continue it.\n</plan_status>",
+        "<plan_status>\n{}\nThe state above is current as of this request, and the step ids are listed here.\n</plan_status>",
         crate::plan::render_status(&plan)
     ))
 }
@@ -390,10 +394,19 @@ mod tests {
         assert_eq!(headings_only(text), "## 2026-09-04\n### Done\n### Open");
     }
 
+    /// An empty project contributes no project memory and no diary. The
+    /// user-level `USER.md` is real state on a working machine — the agent
+    /// writes it with `memory_write` — so this test may not assume it is absent;
+    /// it asserts the project halves only.
     #[test]
-    fn memory_block_is_optional_for_empty_project() {
+    fn an_empty_project_contributes_no_project_memory_or_diary() {
         let root = std::env::temp_dir().join(format!("sqwai-prompt-{}", std::process::id()));
-        assert!(memory_block(&root).is_none());
+        let block = memory_block(&root).unwrap_or_default();
+        assert!(
+            !block.contains("<project_memory"),
+            "an empty project has no project memory: {block}"
+        );
+        assert!(!block.contains("<diary"), "no diary exists here: {block}");
     }
 
     #[test]
@@ -439,8 +452,12 @@ mod tests {
         assert!(v.is_empty());
     }
 
+    /// The plan block states facts and gives no orders (§18.1.3). An
+    /// imperative here — "continue it" — is what a live session followed into
+    /// a loop once every step was already done, because there was nothing left
+    /// to continue except closing.
     #[test]
-    fn plan_status_block_tells_the_model_not_to_reread() {
+    fn plan_status_block_states_facts_without_commands() {
         use crate::plan;
         let dir = std::env::temp_dir().join(format!("sqwai-plan-note-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -469,13 +486,26 @@ mod tests {
         .unwrap();
         let block = plan_status_block(&dir, Some("sess")).expect("active plan");
         assert!(
-            block.contains("Do not call `plan show`"),
-            "usage note missing: {block:.300}"
+            block.contains("current as of this request"),
+            "the block must date its own state: {block}"
         );
-        assert!(
-            block.contains("do not `create`"),
-            "no-recreate note missing: {block:.300}"
-        );
+        for command in [
+            "Do not call",
+            "call ops directly",
+            "continue it",
+            "do not `create`",
+        ] {
+            assert!(
+                !block.contains(command),
+                "imperative {command:?} left in the plan block"
+            );
+        }
+        // and a closed plan says nothing at all: the absence convention lives
+        // in system.md, not in a block that would re-inject plan vocabulary
+        // where there is no plan (§18.1.6)
+        plan.status = plan::PlanStatus::Completed;
+        plan::store(&dir, &plan).unwrap();
+        assert!(plan_status_block(&dir, Some("sess")).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -83,10 +83,17 @@ fn input_items(req: &ChatRequest) -> Vec<Value> {
     }
     let tail = crate::providers::volatile_system_text(&req.system);
     if !tail.trim().is_empty() {
-        input.push(json!({
-            "role": "user",
-            "content": crate::providers::host_tail(&tail),
-        }));
+        // `system` role, one slot before the trailing user item: the last thing
+        // in the request must be the human's turn or the tool result answering
+        // a call, never a host block claiming the user's role (§18.1.1)
+        let at = crate::providers::host_block_index(input.len(), &req.messages);
+        input.insert(
+            at,
+            json!({
+                "role": "system",
+                "content": crate::providers::host_tail(&tail),
+            }),
+        );
     }
     input
 }
@@ -575,8 +582,12 @@ mod tests {
 
     /// Volatile system parts travel last as a marked user entry, never
     /// glued into the leading system block.
+    /// The host block trails the history as a `system` item, one slot before the
+    /// newest user turn — the model must answer the human, not the state block
+    /// (§18.1.1). Inside a tool loop it stays last, because a host item must not
+    /// be wedged between a `function_call` and its `function_call_output`.
     #[test]
-    fn volatile_tail_travels_last() {
+    fn host_block_trails_the_history_as_system() {
         let req = ChatRequest {
             model_id: "gpt-x".into(),
             system: vec![
@@ -596,13 +607,54 @@ mod tests {
         assert_eq!(input.len(), 3);
         assert_eq!(input[0]["role"], "system");
         assert_eq!(input[0]["content"], "s");
-        assert_eq!(input[1]["content"], "hi");
-        assert_eq!(input[2]["role"], "user");
+        assert_eq!(input[1]["role"], "system");
         assert!(
-            input[2]["content"].as_str().unwrap().contains('v'),
-            "tail carries the volatile part: {}",
-            input[2]["content"]
+            input[1]["content"].as_str().unwrap().contains('v'),
+            "the host block carries the volatile part: {}",
+            input[1]["content"]
         );
+        assert_eq!(input[2]["role"], "user");
+        assert_eq!(input[2]["content"], "hi");
+        assert!(
+            !input
+                .iter()
+                .any(|item| item["role"] == "user"
+                    && item["content"].to_string().contains("Host state")),
+            "no host block may wear the user role: {b}"
+        );
+    }
+
+    #[test]
+    fn host_block_stays_last_behind_tool_results() {
+        let req = ChatRequest {
+            model_id: "gpt-x".into(),
+            system: vec![
+                crate::providers::SystemPart::cached("s"),
+                crate::providers::SystemPart::volatile("v"),
+            ],
+            messages: vec![
+                Message::new(Role::User, "hi"),
+                Message::new(Role::Assistant, "").with_tool_calls(vec![
+                    crate::providers::ToolCallReq::new("c1", "git_diff", serde_json::json!({})),
+                ]),
+                Message::tool_result("c1", "diff --git a/x", false),
+            ],
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        };
+        let input = build_body(&req)["input"].as_array().unwrap().clone();
+        // the call and its output stay adjacent, and the host block is last
+        let at = input
+            .iter()
+            .position(|item| item["type"] == "function_call_output")
+            .unwrap();
+        assert_eq!(input[at - 1]["type"], "function_call");
+        assert_eq!(input[at + 1]["role"], "system");
+        assert_eq!(input.len(), at + 2);
     }
 
     /// The round trip that #47 was about: a call the model made and the result
