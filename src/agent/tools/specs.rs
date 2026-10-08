@@ -29,6 +29,45 @@ struct ToolDef {
     parameters: Value,
 }
 
+/// Shell syntax guidance, built from the shell the host will actually spawn.
+///
+/// The text used to hardcode "On Windows the shell is cmd.exe/PowerShell … use
+/// `| Select-Object -First/Last N`". A live session on Windows obeyed it, ran
+/// under cmd.exe where no such cmdlet exists, and lost the call to exit 255 —
+/// the tool description was the bug. `ShellKind::detect()` already decides which
+/// classifier layer is authoritative (§5.2), so the same answer goes here.
+fn bash_description() -> &'static str {
+    static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TEXT.get_or_init(|| {
+        let guidance = match crate::agent::shell::ShellKind::detect() {
+            crate::agent::shell::ShellKind::PowerShell => {
+                "The shell here is PowerShell: no POSIX coreutils — trim with \
+`| Select-Object -First/Last N`, search with `Select-String`, or use the read/grep tools on files."
+            }
+            crate::agent::shell::ShellKind::Cmd => {
+                "The shell here is cmd.exe: no POSIX coreutils and no PowerShell cmdlets — \
+`head`, `tail`, `grep`, `sed` and `Select-Object` do not exist here. Trim with `more +N` if you \
+must, and use the read/grep tools for anything inside files."
+            }
+            crate::agent::shell::ShellKind::Bash | crate::agent::shell::ShellKind::Sh => {
+                "The shell here is bash: `head`, `tail`, `grep`, `sed` and `|` pipes work, and \
+PowerShell cmdlets like `Select-Object` do not. The read/grep tools are still the cheaper way to \
+look at files."
+            }
+        };
+        format!(
+            "Run a shell command in the project directory — the way to build, test, \
+install and inspect anything the file tools cannot reach. Destructive or risky shapes (rm -rf, \
+sudo, disk ops, force-push, sending data outward) stop at the classifier for one user approval: \
+that is the seatbelt doing its job, so name what the command does rather than reaching around it. \
+{guidance} \
+Long output is truncated to a tail and the full log path is returned. Use background=true when the \
+command may outlast the tool timeout; wait on it with bash_output(id, wait_secs) or sleep(seconds); \
+await its result before dependent changes or reporting success."
+        )
+    })
+}
+
 fn defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
@@ -40,8 +79,9 @@ to a file — grep it instead of re-reading). Must be called once before \
 replace_all edits and overwrites of existing files — one read per session \
 is enough: the host tracks freshness and refuses the edit with a stale \
 warning if the file moved underneath, so never re-read defensively. \
-Prefer offset/limit windows over full re-reads, and outline for structure \
-before targeted reading.",
+A first read of a large file carries its structural outline, so read windows \
+of it deliberately rather than scanning line by line; a window already shown \
+to you is answered with a pointer, not the bytes again.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -162,16 +202,7 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
         ToolDef {
             name: "bash",
             kind: Kind::Mutating,
-            description: "Run a shell command in the project directory — the way to build, test, \
-install and inspect anything the file tools cannot reach. Destructive or risky shapes (rm -rf, \
-sudo, disk ops, force-push, sending data outward) stop at the classifier for one user approval: \
-that is the seatbelt doing its job, so name what the command does rather than reaching around it. \
-On Windows the shell is cmd.exe/PowerShell: there are no POSIX coreutils, so no `head`, `tail`, `grep`, \
-`sed`, `awk` or `| pipe` chains through them — use `| Select-Object -First/Last N` for trimming and the \
-read/grep tools for searching files. \
-Long output is truncated to a tail and the full log path is returned. Use background=true when the \
-command may outlast the tool timeout; wait on it with bash_output(id, wait_secs) or sleep(seconds); \
-await its result before dependent changes or reporting success.",
+            description: bash_description(),
             parameters: json!({
                 "type": "object",
                 "properties": {

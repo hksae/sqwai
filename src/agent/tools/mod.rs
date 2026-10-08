@@ -558,6 +558,38 @@ mod tests {
     /// the distinction a model that finds unfamiliar edits assumes authorship
     /// and starts committing work it never took on — measured in a live
     /// session, where another agent's uncommitted edits triggered exactly that.
+    /// The bash guidance describes the shell the host will actually spawn, not
+    /// both Windows shells at once: a live session obeyed "use \
+    /// `| Select-Object -First N`" under cmd.exe and lost the call to exit 255.
+    #[test]
+    fn bash_description_names_one_shell_the_actual_one() {
+        use crate::agent::shell::ShellKind;
+        let spec = super::specs::tool_specs(false)
+            .into_iter()
+            .find(|s| s.name == "bash")
+            .expect("bash is registered");
+        let d = &spec.description;
+        assert!(
+            d.contains("The shell here is"),
+            "the description must name a shell: {d}"
+        );
+        let detected = ShellKind::detect();
+        let expected = match detected {
+            ShellKind::PowerShell => "PowerShell",
+            ShellKind::Cmd => "cmd.exe",
+            ShellKind::Bash | ShellKind::Sh => "bash",
+        };
+        assert!(
+            d.contains(expected),
+            "detected {detected:?} but the guidance says otherwise: {d}"
+        );
+        // one shell only — never the old "cmd.exe/PowerShell" both-at-once claim
+        assert!(
+            !d.contains("cmd.exe/PowerShell"),
+            "the old conflated sentence must be gone: {d}"
+        );
+    }
+
     #[test]
     fn git_status_marks_paths_this_session_never_wrote() {
         let (mut ctx, dir) = proj();

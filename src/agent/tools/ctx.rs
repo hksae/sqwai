@@ -35,13 +35,13 @@ pub struct ToolCtx {
     /// stops `read("src/x.rs")` followed by `edit("./src/x.rs")` from being
     /// refused as unread.
     pub files_read: HashMap<PathBuf, String>,
-    /// Served read windows this session: (canonical path, offset, limit) to
-    /// the content hash that was returned. A repeat read of an unchanged
-    /// window is answered with a stub pointing back at the earlier output
-    /// instead of re-sending thousands of lines — re-reading the same files
-    /// in circles was the top context burner, and the freshness guard below
-    /// already covers the case that actually needs a fresh read.
-    pub read_windows: HashMap<(PathBuf, usize, usize), String>,
+    /// Served read windows this session, per canonical path. A request whose
+    /// lines are already covered is answered with a pointer back at the earlier
+    /// output instead of the bytes again: a live session spent 23 of its 45
+    /// reads on one 5300-line file, five of them inside lines 846–926. Keyed by
+    /// content hash, so an edit or a `bash` write puts the file back on the
+    /// fresh path.
+    pub read_windows: HashMap<PathBuf, Served>,
     /// journal of checkpoints created by this session's mutations
     pub journal: Vec<(String, String)>,
     /// Host limits on the plan, and the model context they are derived from.
@@ -294,24 +294,75 @@ impl ToolCtx {
         }
     }
 
-    /// True when this exact window was already served with identical content:
-    /// the repeat read is answered with a stub, not the bytes again.
-    pub(crate) fn read_window_hit(
+    /// True when every line of `from..=to` was already served from identical
+    /// content — including the case where an earlier, wider window covers it.
+    pub(crate) fn read_range_served(
         &self,
         p: &Path,
-        offset: usize,
-        limit: usize,
         hash: &str,
-    ) -> bool {
-        self.read_windows
-            .get(&(Self::read_key(p), offset, limit))
-            .is_some_and(|served| served == hash)
+        from: usize,
+        to: usize,
+    ) -> Option<(usize, usize)> {
+        match self.read_windows.get(&Self::read_key(p)) {
+            Some(served) if served.hash == hash => served
+                .ranges
+                .iter()
+                .find(|(a, b)| *a <= from && *b >= to)
+                .copied(),
+            _ => None,
+        }
     }
 
-    /// Record a served window so repeats collapse to a stub.
-    pub(crate) fn note_read_window(&mut self, p: &Path, offset: usize, limit: usize, hash: String) {
+    /// Record the range that was actually put in front of the model, merging
+    /// touching ranges so the map cannot grow with every window.
+    pub(crate) fn note_read_window(&mut self, p: &Path, from: usize, to: usize, hash: String) {
+        let key = Self::read_key(p);
+        let served = self.read_windows.entry(key).or_insert_with(Served::new);
+        if served.hash != hash {
+            served.hash = hash;
+            served.ranges.clear();
+        }
+        served.served += 1;
+        served.ranges.push((from, to));
+        served.ranges.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(served.ranges.len());
+        for (a, b) in served.ranges.drain(..) {
+            match merged.last_mut() {
+                // touching ranges count as contiguous: 1–80 then 81–120 is 1–120
+                Some(last) if a <= last.1.saturating_add(1) => last.1 = last.1.max(b),
+                _ => merged.push((a, b)),
+            }
+        }
+        served.ranges = merged;
+    }
+
+    /// How many windows of this file the model has been served from identical
+    /// content — the counter behind the slicing nudge.
+    pub(crate) fn read_window_count(&self, p: &Path, hash: &str) -> usize {
         self.read_windows
-            .insert((Self::read_key(p), offset, limit), hash);
+            .get(&Self::read_key(p))
+            .filter(|served| served.hash == hash)
+            .map(|served| served.served)
+            .unwrap_or(0)
+    }
+}
+
+/// What `read` has already served from one content version of a file: the hash
+/// it served, the merged line ranges, and how many separate windows.
+#[derive(Debug, Clone)]
+pub struct Served {
+    pub hash: String,
+    pub ranges: Vec<(usize, usize)>,
+    pub served: usize,
+}
+
+impl Served {
+    fn new() -> Self {
+        Self {
+            hash: String::new(),
+            ranges: Vec::new(),
+            served: 0,
+        }
     }
 }
 /// What the read guard knows about a file the model wants to edit.

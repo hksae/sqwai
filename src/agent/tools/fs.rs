@@ -189,16 +189,24 @@ pub(super) fn read(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Ou
     // repeat reads of an unchanged window collapse to a stub: re-reading
     // the same files in circles was the top context burner, and the
     // freshness guard (require_read) already forces a fresh read when the
-    // file actually moved.
+    // file actually moved. Coverage counts, not equality — a live session
+    // asked for 846+80, then 846+15, then 855+60 of the same file, and an
+    // exact-match guard let all three through.
     let window_hash = content_hash(&bytes);
-    if ctx.read_window_hit(&p, offset, limit, &window_hash) {
+    let total_lines = text.lines().count();
+    let wanted_from = offset.min(total_lines.max(1));
+    let wanted_to = offset
+        .saturating_add(limit)
+        .saturating_sub(1)
+        .min(total_lines);
+    if wanted_to >= wanted_from
+        && let Some((a, b)) = ctx.read_range_served(&p, &window_hash, wanted_from, wanted_to)
+    {
         return Outcome::ok(format!(
-            "…(unchanged since your last read of this window: {} lines {}+, see above — no need to re-read)",
+            "…(unchanged since your last read: lines {a}–{b} of {} already cover {wanted_from}–{wanted_to}, see above — no need to re-read)",
             rel_label(&ctx.root, &p),
-            offset,
         ));
     }
-    let total_lines = text.lines().count();
     let mut out = String::new();
     let first_no = offset;
     let mut last_no = offset.saturating_sub(1);
@@ -228,9 +236,58 @@ pub(super) fn read(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Ou
             "\n(showing lines {first_no}–{last_no} of {total_lines} total)"
         ));
     }
+    // A big file gets its map with the first window. The read description has
+    // always said "outline for structure before targeted reading" and was
+    // ignored — 23 windows of one 5300-line file, scattered and overlapping,
+    // because the model had no idea where anything lived. Top-level outline,
+    // clipped, once per file: a few KB against twenty round trips.
+    let served_before = ctx.read_window_count(&p, &window_hash);
+    if served_before == 0 && total_lines >= STRUCTURE_HINT_MIN {
+        if let Some(hint) = structure_hint(ctx, raw) {
+            out.push_str(&hint);
+        }
+    } else if served_before >= SLICING_NUDGE_AFTER {
+        out.push_str(&format!(
+            "\n[host: this is window {} of this file — `outline` gives its map and `grep` with context finds a symbol in one call]",
+            served_before + 1
+        ));
+    }
     ctx.mark_read(&p);
-    ctx.note_read_window(&p, offset, limit, window_hash);
+    ctx.note_read_window(&p, first_no, last_no, window_hash);
     Outcome::ok(out)
+}
+
+/// Files at or above this line count get their outline attached to the first
+/// read of the session.
+const STRUCTURE_HINT_MIN: usize = 400;
+/// After this many windows of the same file, point at the cheaper tools.
+const SLICING_NUDGE_AFTER: usize = 3;
+/// The attached map is a locator, not a substitute for `outline`.
+const STRUCTURE_HINT_MAX_BYTES: usize = 3_000;
+
+fn structure_hint(ctx: &mut ToolCtx, raw: &str) -> Option<String> {
+    let listed = super::outline::outline(ctx, &serde_json::json!({"path": raw, "max_depth": 1}));
+    if !listed.ok {
+        return None;
+    }
+    let body = listed.output.trim_end();
+    if body.is_empty() || body.ends_with("(0 items)") {
+        return None;
+    }
+    let clipped = if body.len() > STRUCTURE_HINT_MAX_BYTES {
+        let cut = body
+            .char_indices()
+            .take_while(|(i, _)| *i < STRUCTURE_HINT_MAX_BYTES)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(STRUCTURE_HINT_MAX_BYTES);
+        format!("{}\n…(truncated)", &body[..cut])
+    } else {
+        body.to_string()
+    };
+    Some(format!(
+        "\n\nstructure of this file, so you can target reads instead of scanning it:\n{clipped}"
+    ))
 }
 
 pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome {
@@ -755,6 +812,79 @@ mod tests {
             !third.output.contains("unchanged since your last read"),
             "{}",
             third.output
+        );
+    }
+
+    /// Coverage, not equality: the live session's five looks at one region were
+    /// five different windows, and an exact-match guard served all of them.
+    #[test]
+    fn a_window_covered_by_an_earlier_read_collapses_to_a_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.path().join("big.txt"), body).unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+
+        let wide = read(&mut ctx, "big.txt", &json!({"offset": 1, "limit": 15}));
+        assert!(wide.ok);
+        assert!(wide.output.contains("line 7"), "{}", wide.output);
+
+        // inside the earlier window: no bytes, just where to look
+        let inside = read(&mut ctx, "big.txt", &json!({"offset": 5, "limit": 4}));
+        assert!(
+            inside.output.contains("unchanged since your last read")
+                && inside.output.contains("1–15"),
+            "a covered window must collapse: {}",
+            inside.output
+        );
+        assert!(!inside.output.contains("line 7"), "must not re-send lines");
+
+        // past the covered range it serves normally, and the record extends
+        let beyond = read(&mut ctx, "big.txt", &json!({"offset": 16, "limit": 5}));
+        assert!(beyond.output.contains("line 18"), "{}", beyond.output);
+        let now_covered = read(&mut ctx, "big.txt", &json!({"offset": 14, "limit": 4}));
+        assert!(
+            now_covered
+                .output
+                .contains("unchanged since your last read"),
+            "14–17 is covered by 1–15 plus 16–20: {}",
+            now_covered.output
+        );
+    }
+
+    /// The map comes with the first window of a big file, once.
+    #[test]
+    fn a_first_read_of_a_large_file_carries_its_outline() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (1..=450).map(|i| format!("fn f{i}() {{}}\n")).collect();
+        std::fs::write(dir.path().join("many.rs"), &body).unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+
+        let first = read(&mut ctx, "many.rs", &json!({"offset": 1, "limit": 30}));
+        assert!(
+            first.output.contains("structure of this file"),
+            "the first window must carry the map: {}",
+            first.output
+        );
+        assert!(
+            first.output.contains("f400") || first.output.contains("…(truncated)"),
+            "the map must reach past the served window: {}",
+            first.output
+        );
+
+        let second = read(&mut ctx, "many.rs", &json!({"offset": 200, "limit": 30}));
+        assert!(
+            !second.output.contains("structure of this file"),
+            "the map is attached once per file"
+        );
+        // and after enough windows, the host points at the cheaper tools
+        for offset in [300, 350, 400] {
+            read(&mut ctx, "many.rs", &json!({"offset": offset, "limit": 20}));
+        }
+        let nudged = read(&mut ctx, "many.rs", &json!({"offset": 100, "limit": 20}));
+        assert!(
+            nudged.output.contains("window") && nudged.output.contains("`outline`"),
+            "the slicing nudge should fire after several windows: {}",
+            nudged.output
         );
     }
 
