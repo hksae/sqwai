@@ -2073,7 +2073,7 @@ impl App {
                     )]),
                     MenuAction::DeleteListItems(ListSection::SkillsDirs),
                 ));
-                let root = std::env::current_dir().unwrap_or_default();
+                let root = self.project_root.clone();
                 let loaded = crate::prompts::skills::load(&self.cfg.skills, &root);
                 self.menu_rows
                     .push(row(Line::from("  Loaded skills"), MenuAction::None));

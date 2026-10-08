@@ -547,7 +547,7 @@ impl App {
     /// config_dir/system.md), AGENTS.md and the static environment.
     fn stable_prefix(&self) -> String {
         let mut prompt = crate::prompts::stable_prefix();
-        let root = std::env::current_dir().unwrap_or_default();
+        let root = self.project_root.clone();
         let mut loaded = crate::prompts::skills::load(&self.cfg.skills, &root);
         for selected in &self.active_skills {
             if !loaded.iter().any(|skill| skill.name == selected.name) {
@@ -562,7 +562,7 @@ impl App {
     }
 
     fn rebuild_session_environment(&mut self) {
-        let root = std::env::current_dir().unwrap_or_default();
+        let root = self.project_root.clone();
         self.session_environment = crate::prompts::env::session_block(&root);
     }
 
@@ -735,7 +735,7 @@ impl App {
         // Plan state rides every request (built in the turn loop, not
         // here): a turn-start snapshot would predate this turn's plan
         // mutations, leaving the model two plans — one live, one stale.
-        let root = std::env::current_dir().unwrap_or_default();
+        let root = self.project_root.clone();
         // The model is never told its mode elsewhere: without this line it
         // learns Plan vs Act from the first refusal, burning a turn.
         parts.push(SystemPart::volatile(format!(
@@ -862,6 +862,13 @@ Continue from the pending step, or report to the user if the settled work looks 
         let resolved = cfg.resolve_provider(&model_cfg)?;
         let provider = providers::create(&resolved)?;
 
+        #[cfg(test)]
+        let project_root: std::path::PathBuf = tempfile::tempdir()
+            .map(|d| d.keep())
+            .unwrap_or_else(|_| {
+                std::env::temp_dir().join(format!("sqwai-test-{}", std::process::id()))
+            });
+        #[cfg(not(test))]
         let project_root = std::env::current_dir().unwrap_or_default();
         if !read_only {
             // Heal a crash between a journal intent and its plan store
@@ -1618,7 +1625,7 @@ Continue from the pending step, or report to the user if the settled work looks 
         // entry is host-only here; model-written diary prose belongs to the
         // explicit diary/compaction paths, not the exit path.
         if self.session_has_messages() && !self.read_only {
-            let root = std::env::current_dir().unwrap_or_default();
+            let root = self.project_root.clone();
             let _ = crate::agent::diary::append_entry(
                 &root,
                 crate::agent::diary::today(),
@@ -2463,7 +2470,7 @@ Continue from the pending step, or report to the user if the settled work looks 
         // Resolved files seed the read guard via the registry (taken at
         // agent-context construction). Same root the agent is jailed to.
         {
-            let root = std::env::current_dir().unwrap_or_default();
+            let root = self.project_root.clone();
             let resolved = crate::agent::mentions::resolve_mentions(&root, &text);
             for warning in &resolved.warnings {
                 self.status(warning, StatusKind::Warn);
@@ -2483,7 +2490,7 @@ Continue from the pending step, or report to the user if the settled work looks 
         // The system block is assembled per request and travels separately
         // from the transcript: nothing here is ever written to the session.
         let system = self.system_block();
-        let root = std::env::current_dir().unwrap_or_default();
+        let root = self.project_root.clone();
         // L0 capture-nudge: a fresh restriction the active plan does not
         // cover yet. Marker scan first so ordinary turns never touch disk.
         if crate::agent::loop_task::has_restriction_marker(&text.to_lowercase())
@@ -2689,7 +2696,7 @@ Continue from the pending step, or report to the user if the settled work looks 
             // compaction needs no system block and no tools
             system: Vec::new(),
             messages: self.session.messages.clone(),
-            root: std::env::current_dir().unwrap_or_default(),
+            root: self.project_root.clone(),
             session_id: self.session.id.to_string(),
             blocked_patterns: Vec::new(),
             web_allow_hosts: Vec::new(),
@@ -2927,7 +2934,7 @@ Continue from the pending step, or report to the user if the settled work looks 
         if self.maintain_rx.is_some() {
             return;
         }
-        let root = std::env::current_dir().unwrap_or_default();
+        let root = self.project_root.clone();
         let session = self.session.id.to_string();
         let cfg = self.cfg.undo.clone();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -3069,7 +3076,7 @@ Continue from the pending step, or report to the user if the settled work looks 
             ),
             "/skill" => {
                 let query = rest.split_whitespace().nth(1);
-                let root = std::env::current_dir().unwrap_or_default();
+                let root = self.project_root.clone();
                 let loaded = crate::prompts::skills::load_matching(&self.cfg.skills, &root, query);
                 if loaded.is_empty() {
                     self.status("skill not found", StatusKind::Warn);
@@ -3100,10 +3107,14 @@ Continue from the pending step, or report to the user if the settled work looks 
 
             "/help" => self.open_menu(Menu::Help),
             "/init" => {
-                if std::path::Path::new("AGENTS.md").exists() {
+                let init_root = self.project_root.clone();
+                if init_root.join("AGENTS.md").exists() {
                     self.status("AGENTS.md already exists", StatusKind::Warn);
                 } else {
-                    match std::fs::write("AGENTS.md", crate::prompts::AGENTS_TEMPLATE) {
+                    match std::fs::write(
+                        init_root.join("AGENTS.md"),
+                        crate::prompts::AGENTS_TEMPLATE,
+                    ) {
                         Ok(()) => self.status(
                             "AGENTS.md created — it is sent to the model with every request",
                             StatusKind::Ok,
@@ -3112,10 +3123,10 @@ Continue from the pending step, or report to the user if the settled work looks 
                     }
                 }
                 // sqwai-only rules live apart so other tools never see them
-                if std::path::Path::new("SQWAI.md").exists() {
+                if init_root.join("SQWAI.md").exists() {
                     self.status("SQWAI.md already exists", StatusKind::Warn);
                 } else {
-                    match std::fs::write("SQWAI.md", crate::prompts::SQWAI_TEMPLATE) {
+                    match std::fs::write(init_root.join("SQWAI.md"), crate::prompts::SQWAI_TEMPLATE) {
                         Ok(()) => self.status(
                             "SQWAI.md created — this agent's own rules, highest priority",
                             StatusKind::Ok,
@@ -3125,7 +3136,7 @@ Continue from the pending step, or report to the user if the settled work looks 
                 }
                 // seed named verify commands (repo probing + MEMORY.md) so
                 // `cmd: $name` in plans resolves; hand-written names win.
-                let root = std::env::current_dir().unwrap_or_default();
+                let root = self.project_root.clone();
                 let (added, already) = crate::config::Config::seed_verify_commands(&root);
                 if !added.is_empty() || already > 0 {
                     let list = added
@@ -3180,7 +3191,7 @@ Continue from the pending step, or report to the user if the settled work looks 
                         StatusKind::Warn,
                     );
                 } else {
-                    let root = std::env::current_dir().unwrap_or_default();
+                    let root = self.project_root.clone();
                     match crate::agent::diary::append_entry(
                         &root,
                         crate::agent::diary::today(),
@@ -5068,7 +5079,7 @@ Continue from the pending step, or report to the user if the settled work looks 
         }
         let idx = self.session.checkpoints.len().saturating_sub(n);
         let (sha, label) = self.session.checkpoints[idx].clone();
-        let root = std::env::current_dir().unwrap_or_default();
+        let root = self.project_root.clone();
         let git_snapshots = crate::agent::checkpoints::available_in(&root, self.cfg.undo.shadow);
         // Scope the restore to what the host recorded as its own writes across
         // the checkpoints being undone. Without this, undo reverts the whole
@@ -5202,7 +5213,7 @@ Continue from the pending step, or report to the user if the settled work looks 
     /// later step has since written is refused by name rather than reverted,
     /// because putting the old bytes back would undo that later step too.
     fn undo_step(&mut self, step: &str) {
-        let root = std::env::current_dir().unwrap_or_default();
+        let root = self.project_root.clone();
         self.undo_step_in(&root, step);
     }
 
