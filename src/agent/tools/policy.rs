@@ -8,7 +8,7 @@ use super::git;
 use crate::plan;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 /// True when the step a subagent was spawned for still exists in the named
@@ -293,36 +293,6 @@ pub(crate) fn register_subagent_scope(session: &str, paths: Vec<String>) {
 /// Take a registered scope for child-context construction.
 pub(crate) fn take_subagent_scope(session: &str) -> Option<Vec<String>> {
     subagent_scopes().lock().unwrap().remove(session)
-}
-
-/// Canonical paths whose bytes the turn's opening message already carries
-/// via @-mention injection, keyed by session. Written at submit (after
-/// resolution), taken once at agent-context construction — single take,
-/// so an abandoned submit (slash command, empty send) cannot poison a
-/// later turn with stale paths.
-fn mention_prereads() -> &'static Mutex<HashMap<String, Vec<PathBuf>>> {
-    static PREREADS: OnceLock<Mutex<HashMap<String, Vec<PathBuf>>>> = OnceLock::new();
-    PREREADS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Register @-resolved paths for the coming turn.
-pub(crate) fn register_mention_prereads(session: &str, paths: Vec<PathBuf>) {
-    if paths.is_empty() {
-        return;
-    }
-    mention_prereads()
-        .lock()
-        .unwrap()
-        .insert(session.to_string(), paths);
-}
-
-/// Take registered @-paths for context construction (single take).
-pub(crate) fn take_mention_prereads(session: &str) -> Vec<PathBuf> {
-    mention_prereads()
-        .lock()
-        .unwrap()
-        .remove(session)
-        .unwrap_or_default()
 }
 
 /// True when `path` (project-relative, forward slashes) sits inside one

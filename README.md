@@ -50,7 +50,6 @@ what was cut to get here, is in [Changes.md](Changes.md).
   plans/      structured plans                 ignored
   journal/    event logs                       ignored
   memory/     MEMORY.md                        your choice (default ignored)
-  graph/      index                            ignored, rebuildable
   skills/     project skills                   committed
   config.toml project overrides                committed if present
 AGENTS.md     project instructions             committed

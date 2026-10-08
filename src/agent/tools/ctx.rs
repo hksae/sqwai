@@ -94,6 +94,7 @@ pub struct ToolCtx {
 }
 
 impl ToolCtx {
+    #[cfg(test)]
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self::with_read_only(root, false)
     }
@@ -274,14 +275,6 @@ impl ToolCtx {
     pub(crate) fn mark_read(&mut self, p: &Path) {
         let hash = file_hash(p);
         self.files_read.insert(Self::read_key(p), hash);
-    }
-
-    /// Seed the read guard with files whose bytes reached the model through
-    /// @-mention injection (same hash `read` records, so an edit afterwards
-    /// works without a redundant read — and goes stale the same way when
-    /// the file moves underneath).
-    pub(crate) fn note_read(&mut self, p: &Path) {
-        self.mark_read(p);
     }
 
     /// Whether the file may be edited: it was read, and it still holds what it

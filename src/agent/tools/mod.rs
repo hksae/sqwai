@@ -18,10 +18,7 @@ pub(crate) mod web;
 pub(crate) use ctx::{ReadState, ToolCtx};
 pub(crate) use dispatch::{FileDiff, Outcome, bg_running_commands, execute, kill_remaining_jobs};
 pub(crate) use git::porcelain_paths;
-pub(crate) use policy::{
-    bash_scope_hit, register_mention_prereads, register_subagent_scope, take_mention_prereads,
-    take_subagent_scope,
-};
+pub(crate) use policy::{bash_scope_hit, register_subagent_scope, take_subagent_scope};
 pub(crate) use specs::{
     Kind, call_args_for_journal, call_path, call_summary, decode_child_output, is_mutating_call,
     merge_specs, tool_names, tool_specs, trim_middle,

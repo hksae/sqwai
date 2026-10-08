@@ -8,7 +8,6 @@ pub mod graph_lang;
 pub mod journal;
 pub mod loop_task;
 pub mod memory;
-pub mod mentions;
 pub mod notify;
 pub mod safety;
 pub mod secrets;

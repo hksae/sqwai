@@ -696,12 +696,6 @@ async fn run_agent(
     // slow baseline capture defers to the background worker on interactive
     // turns; everywhere else the tool call captures synchronously
     ctx.background_baselines = background_baselines;
-    // @-mention bytes already in the opening message count as read, so an
-    // edit afterwards needs no redundant read (and goes stale the same
-    // way when the file moves underneath).
-    for p in tools::take_mention_prereads(&session_id) {
-        ctx.note_read(&p);
-    }
     // A child's shadow snapshots belong on the parent chain (§2.2.4), so the
     // parent's `/undo` sees step boundaries and bash mutations; the journal,
     // job isolation and read-guard stay on the child's own session.

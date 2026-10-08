@@ -379,7 +379,6 @@ impl App {
                                 }
                             } else if self.popup_visible() {
                                 self.popup_dismiss = true;
-                                self.mention_dismiss = true;
                                 self.hover = None;
                             } else if self.active_ask_seg().is_some() {
                                 // inline ask lives in the chat, not in a menu:
@@ -532,27 +531,6 @@ impl App {
                             }
                         }
                         // plan/act is switched by the user only (design §5).
-                        // A visible @ completion eats Tab first: accept the
-                        // highlighted row (or the top one), then Tab toggles
-                        // the mode again as before.
-                        KeyCode::Tab
-                            if self.menu_stack.is_empty()
-                                && self.active_ask_seg().is_none()
-                                && self.ask_custom_focus.is_none()
-                                && self.mention_fragment().is_some() =>
-                        {
-                            if let Some((start, end, _)) = self.mention_fragment() {
-                                let items = self.popup_items();
-                                let key = self
-                                    .hover
-                                    .clone()
-                                    .filter(|h| items.contains(h))
-                                    .or_else(|| items.into_iter().next());
-                                if let Some(key) = key {
-                                    self.apply_mention_insert(start, end, &key);
-                                }
-                            }
-                        }
                         KeyCode::Tab
                             if self.menu_stack.is_empty() && self.active_ask_seg().is_none() =>
                         {
@@ -771,29 +749,6 @@ impl App {
                         KeyCode::Down if alt => {
                             self.input.move_cursor(tui_textarea::CursorMove::Down)
                         }
-                        // @ completion open: arrows move the highlight,
-                        // Tab accepts, Esc dismisses (below); otherwise the
-                        // composer keeps its cursor and mode-toggle meanings
-                        KeyCode::Up
-                            if self.menu_stack.is_empty()
-                                && self.active_ask_seg().is_none()
-                                && self.ask_custom_focus.is_none()
-                                && !ctrl
-                                && !alt
-                                && self.mention_fragment().is_some() =>
-                        {
-                            self.mention_hover_by(-1);
-                        }
-                        KeyCode::Down
-                            if self.menu_stack.is_empty()
-                                && self.active_ask_seg().is_none()
-                                && self.ask_custom_focus.is_none()
-                                && !ctrl
-                                && !alt
-                                && self.mention_fragment().is_some() =>
-                        {
-                            self.mention_hover_by(1);
-                        }
                         KeyCode::Home if ctrl => {
                             self.follow = false;
                             self.view_top = 0;
@@ -824,10 +779,8 @@ impl App {
                     ) && !ctrl
                     {
                         self.popup_dismiss = false;
-                        self.mention_dismiss = false;
                         self.popup_scroll = 0;
                         self.hover = None;
-                        self.refresh_mention_files();
                     }
                     if !shift {
                         self.sel = None;
