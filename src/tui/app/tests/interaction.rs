@@ -718,27 +718,28 @@ fn subagent_rows_read_as_tool_rows_without_accent() {
     assert_eq!(running.spans[0].style, Theme::tool_head());
     assert_eq!(name_style(&running), Some(Theme::meta()));
     assert!(text.contains("look"), "task rides along: {text:?}");
-    // done: soft green dot, gray name
+    // done: the house green dot, gray name, no bold on either
     let done = line(1);
     assert_eq!(done.spans[0].content.as_ref(), "• ");
     assert!(
-        done.spans[0]
+        !done.spans[0]
             .style
             .add_modifier
             .contains(ratatui::style::Modifier::BOLD),
-        "dot stays bold: {:?}",
+        "the dot carries no bold: {:?}",
         done.spans[0].style
     );
     assert_eq!(name_style(&done), Some(Theme::meta()));
-    // failed: soft red dot, red name keeps screaming, like before
+    // failed: the house red dot and a red name — colored, not bolded; the
+    // marker shape and the hue carry the verdict
     let failed = line(2);
     assert_eq!(failed.spans[0].content.as_ref(), "• ");
     assert!(
-        failed.spans[0]
+        !failed.spans[0]
             .style
             .add_modifier
             .contains(ratatui::style::Modifier::BOLD),
-        "dot stays bold: {:?}",
+        "the dot carries no bold: {:?}",
         failed.spans[0].style
     );
     assert_eq!(name_style(&failed), Some(Theme::err()));

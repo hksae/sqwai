@@ -2693,7 +2693,6 @@ mod tests {
 
     #[test]
     fn quote_inline_markup_stays_green_without_band() {
-        use ratatui::style::Color;
         let hl = Highlighter::new();
         let lines = render("> use `read` and **bold** here", 60, &hl);
         assert_eq!(lines.len(), 1);
@@ -2703,14 +2702,14 @@ mod tests {
             .iter()
             .find(|s| s.content == "read")
             .expect("code span");
-        assert_eq!(code.style.fg, Some(Color::Green));
+        assert_eq!(code.style.fg, Some(Theme::GREEN()));
         assert_eq!(code.style.bg, None);
         // bold keeps the green fg, no band bg
         let bold = spans
             .iter()
             .find(|s| s.content == "bold")
             .expect("bold span");
-        assert_eq!(bold.style.fg, Some(Color::Green));
+        assert_eq!(bold.style.fg, Some(Theme::GREEN()));
         assert_eq!(bold.style.bg, None);
         // top-level code stays transparent (no ambient bg to inherit)
         let plain = inline("`x`", Theme::base());

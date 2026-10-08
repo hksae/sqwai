@@ -206,11 +206,14 @@ fn shimmer_ansi(text: &str, tick: usize) -> Vec<Span<'static>> {
 /// the static row.
 pub fn flash_spans(marker: &str, name: &str, done_ok: bool, progress: f64) -> Vec<Span<'static>> {
     const BAND: f64 = 6.0;
-    // act-chip green for success, slightly muted red for failure: readable
-    // on dark ground, loud enough to notice mid-sweep
-    const GREEN: (u8, u8, u8) = (80, 200, 120);
-    const RED: (u8, u8, u8) = (225, 110, 105);
-    let target = if done_ok { GREEN } else { RED };
+    // the house green and red, so the wave sweeps in the same colors the row
+    // settles to; bold stays here alone because a wave that cannot be seen is
+    // not a wave, and it is gone the moment the row is
+    let target = if done_ok {
+        Theme::OK_RGB
+    } else {
+        Theme::ERR_RGB
+    };
     let marker_w: f64 = marker
         .chars()
         .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as f64)
@@ -360,19 +363,26 @@ mod tests {
             at0.iter().all(|s| s.style.fg != GRAY),
             "no gray phase at the start"
         );
-        // mid-sweep: the act green band travels over the white name
+        // mid-sweep: the house green band travels over the white name
         let mid = flash_spans("  ✓ ", "read", true, 0.5);
         assert!(
-            mid.iter()
-                .any(|s| s.style.fg == Some(Color::Rgb(80, 200, 120))),
-            "act green band must ride mid-sweep"
+            mid.iter().any(|s| s.style.fg
+                == Some(Color::Rgb(
+                    Theme::OK_RGB.0,
+                    Theme::OK_RGB.1,
+                    Theme::OK_RGB.2
+                ))),
+            "the house green band must ride mid-sweep"
         );
         let mid_err = flash_spans("  ✗ ", "bash", false, 0.5);
         assert!(
-            mid_err
-                .iter()
-                .any(|s| s.style.fg == Some(Color::Rgb(225, 110, 105))),
-            "muted red band must ride mid-sweep"
+            mid_err.iter().any(|s| s.style.fg
+                == Some(Color::Rgb(
+                    Theme::ERR_RGB.0,
+                    Theme::ERR_RGB.1,
+                    Theme::ERR_RGB.2
+                ))),
+            "the house red band must ride mid-sweep"
         );
         assert!(
             mid.iter().all(|s| s.style.fg != GRAY) && mid_err.iter().all(|s| s.style.fg != GRAY),

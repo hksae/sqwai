@@ -76,25 +76,36 @@ impl Theme {
     pub const fn BORDER_DIM() -> Color {
         Color::DarkGray
     }
+    /// One green, one red, one amber for the whole UI. Verdicts (the tool dot,
+    /// the finish wave, blockquotes, the ACT chip) and the effort scale's
+    /// matching stops all read these three numbers: the app used to carry four
+    /// greens and two reds, every one of them claiming to mean "good".
+    pub const OK_RGB: (u8, u8, u8) = (135, 200, 145);
+    pub const ERR_RGB: (u8, u8, u8) = (220, 150, 145);
+    pub const WARN_RGB: (u8, u8, u8) = (222, 180, 124);
     #[allow(non_snake_case)]
     pub const fn OK() -> Color {
-        Color::Green
+        let (r, g, b) = Self::OK_RGB;
+        Color::Rgb(r, g, b)
     }
     #[allow(non_snake_case)]
     pub const fn ERR() -> Color {
-        Color::Red
+        let (r, g, b) = Self::ERR_RGB;
+        Color::Rgb(r, g, b)
     }
     #[allow(non_snake_case)]
     pub const fn WARN() -> Color {
-        Color::Yellow
+        let (r, g, b) = Self::WARN_RGB;
+        Color::Rgb(r, g, b)
     }
     #[allow(non_snake_case)]
     pub const fn LIGHT_BLUE() -> Color {
         Color::LightBlue
     }
+    /// Blockquotes are green — so they are *the* green, not a fourth one.
     #[allow(non_snake_case)]
     pub const fn GREEN() -> Color {
-        Color::Green
+        Self::OK()
     }
     /// Blockquote band: dark translucent-green on dark terminals. The `▐`
     /// rail itself stays on the default background; the band starts right
@@ -107,13 +118,15 @@ impl Theme {
     /// (slider track, dots, labels, status-bar chip). The slider sweep blends
     /// between these same numbers, so the frame it lands on *is* its endpoint:
     /// moving the level cannot leave the card brighter than it settles to.
+    /// Low and Xhigh are the house green and amber, not near-misses of them:
+    /// one color cannot mean two things in one glance.
     pub const fn effort_rgb(level: EffortLevel) -> (u8, u8, u8) {
         match level {
             EffortLevel::Off => (128, 128, 128),
-            EffortLevel::Low => (80, 200, 120),
+            EffortLevel::Low => Self::OK_RGB,
             EffortLevel::Medium => (80, 220, 220),
             EffortLevel::High => (110, 165, 255),
-            EffortLevel::Xhigh => (250, 200, 70),
+            EffortLevel::Xhigh => Self::WARN_RGB,
             EffortLevel::Max => (220, 130, 220),
         }
     }
@@ -221,14 +234,17 @@ impl Theme {
     pub fn tool_head_bold() -> Style {
         Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
     }
+    /// Status carries no bold: on a pastel ground bold is just a brighter
+    /// ground, which is the loudness this palette stopped having a use for.
+    /// The verdict lives in the marker's shape (✓/✗/spinner), as it always was.
     pub fn ok() -> Style {
-        Style::new().fg(Self::OK()).add_modifier(Modifier::BOLD)
+        Style::new().fg(Self::OK())
     }
     pub fn err() -> Style {
-        Style::new().fg(Self::ERR()).add_modifier(Modifier::BOLD)
+        Style::new().fg(Self::ERR())
     }
     pub fn warn() -> Style {
-        Style::new().fg(Self::WARN()).add_modifier(Modifier::BOLD)
+        Style::new().fg(Self::WARN())
     }
 
     /// table separators / horizontal rules

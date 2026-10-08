@@ -126,11 +126,11 @@ fn finish_wave_keeps_geometry_and_settles_static() {
     let rows = app.render_segment(&app.segments, 0, 80, true);
     assert_eq!(rows[0].0.spans[0].content.as_ref(), "• ");
     assert!(
-        rows[0].0.spans[0]
+        !rows[0].0.spans[0]
             .style
             .add_modifier
             .contains(ratatui::style::Modifier::BOLD),
-        "dot stays bold: {:?}",
+        "the settled dot carries no bold — the shape says done: {:?}",
         rows[0].0.spans[0].style
     );
     assert_eq!(rows[0].0.spans[1].content.as_ref(), "read");

@@ -173,8 +173,9 @@ impl Mode {
 /// Mode-chip color sweep length: a quick flash, not a lingering animation.
 const MODE_BLEND_MS: u64 = 250;
 /// Sweep endpoints: the effort Low/High hues, so the settle frame does
-/// not pop (see `Theme::mode_chip_act/plan`).
-const MODE_ACT_RGB: (u8, u8, u8) = (80, 200, 120);
+/// not pop (see `Theme::mode_chip_act/plan`) — which is why they name the
+/// theme's numbers instead of carrying their own copy.
+const MODE_ACT_RGB: (u8, u8, u8) = crate::tui::theme::Theme::OK_RGB;
 const MODE_PLAN_RGB: (u8, u8, u8) = (110, 165, 255);
 
 const WORKING_SPINNER: [char; 6] = ['◜', '◠', '◝', '◞', '◡', '◟'];

@@ -132,22 +132,16 @@ pub(super) fn tool_preview(diff: Option<&str>, output: &str) -> (Vec<String>, us
     (lines, total)
 }
 
-/// Codex-style state dot for tool rows: soft green / soft red, truecolor
-/// RGB with an indexed fallback so the dot reads on any terminal.
+/// State dot for tool rows: the house green and red, with an ANSI fallback for
+/// terminals without truecolor. No bold on either branch — the shape of the
+/// marker says the verdict, the color only echoes it.
 fn tool_dot_style(done_ok: bool) -> Style {
     if crate::tui::shimmer::has_truecolor() {
-        let (r, g, b) = if done_ok {
-            (135, 200, 145)
-        } else {
-            (220, 150, 145)
-        };
-        Style::new()
-            .fg(Color::Rgb(r, g, b))
-            .add_modifier(Modifier::BOLD)
+        if done_ok { Theme::ok() } else { Theme::err() }
     } else if done_ok {
-        Style::new().fg(Color::Green).add_modifier(Modifier::BOLD)
+        Style::new().fg(Color::Green)
     } else {
-        Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
+        Style::new().fg(Color::Red)
     }
 }
 
