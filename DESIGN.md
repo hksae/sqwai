@@ -80,14 +80,15 @@ It is the observer's data source, not a mechanism under test: it records
 failures and refusals too. Attribution (session, plan, step, step epoch) is
 stamped by the host at write time, never supplied by the model.
 
-**Memory** — two files and a diary. `MEMORY.md` holds durable project facts,
+**Memory** — two files. `MEMORY.md` holds durable project facts,
 `USER.md` the user's own preferences and agreements; both are injected into the
 stable prefix of every later session, which is why writing them is a
 same-turn duty rather than a courtesy. `memory_write` applies immediately — no
 approval dialog — under a section/scope schema, a `replaces` correction path, a
-secret screen, a size limit, and provenance with a date. The diary holds one
-entry per day, written by the host at compaction pressure and step
-boundaries, and read back through `memory_read`.
+secret screen, a size limit, and provenance with a date. Recent history is
+pulled, not pushed: `journal op=recap` summarizes the last days per session from
+host records — plan and its status, files touched, call counts, open threads —
+and nothing of it rides in the prefix unless it is durable memory.
 
 **Checkpoints and undo** — pre-images of every write, so a session's damage is
 reversible. Local shadow repository or a configured remote store; hash-gated,
@@ -101,7 +102,7 @@ One cached `stable_prefix`, assembled in this sequence:
     system.md              (built-in, overridable by config_dir/system.md)
     + AGENTS.md, .sqwai.md project rules, the latter winning on conflict
     + <process_environment> platform, shell, working directory — immutable per process
-    + memory               USER.md, MEMORY.md, the last days of the diary
+    + memory               USER.md, MEMORY.md — durable facts only
     + skills               the enabled skill bodies
 
 Then, as its own cached part:
@@ -145,7 +146,7 @@ snapshot cannot outlive a mid-turn edit.
 `bash_output`, `bash_kill`, `sleep`), git (`git_status`, `git_diff`, `git_log`,
 `git_show`, `git_commit`, `git_stage`, `git_branch`), web (`websearch`,
 `webfetch`), delegate (`subagent`), durable state (`plan`, `note`, `journal`,
-`memory_read`, `memory_write`), and `ask_user`.
+`memory_write`), and `ask_user`.
 
 Every description is a behavioral trigger: it says when to fire, not only what
 it does. A tool that needs no approval says so; a tool stopped by a seatbelt

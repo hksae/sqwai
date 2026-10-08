@@ -51,7 +51,6 @@ fn jitter_test_app() -> App {
         lsp: Default::default(),
         skills: Default::default(),
         memory: Default::default(),
-        diary: Default::default(),
         compaction: Default::default(),
         plan: Default::default(),
         verify: Default::default(),

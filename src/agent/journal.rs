@@ -104,13 +104,162 @@ pub struct Assumption {
 }
 
 impl Assumption {
-    /// One-line form for the finish warning, the anchor and the diary.
+    /// One-line form for the finish warning, the anchor and the recap.
     pub fn label(&self, limit: usize) -> String {
         let mut text: String = self.text.chars().take(limit).collect();
         if self.text.chars().count() > limit {
             text.push('…');
         }
         format!("j#{}: {text}", self.seq)
+    }
+}
+
+/// One session inside a [`Journal::recap`].
+#[derive(Debug, Clone, Default)]
+pub struct Recap {
+    pub session: String,
+    /// calendar day of the session's first record in the window
+    pub day: String,
+    pub from: String,
+    pub to: String,
+    /// what the session was working on: the goal of the first plan it touched
+    pub ask: Option<String>,
+    pub plans: Vec<RecapPlan>,
+    /// path, lines added, lines removed — summed over the window
+    pub files: Vec<(String, u64, u64)>,
+    pub calls: usize,
+    pub failures: usize,
+    pub notes: usize,
+    pub open: Vec<String>,
+}
+
+/// A plan as the recap sees it: identity, verdict, and what is still open.
+#[derive(Debug, Clone)]
+pub struct RecapPlan {
+    pub id: String,
+    pub goal: String,
+    pub status: String,
+    pub closed: usize,
+    pub total: usize,
+    pub unfinished: Vec<String>,
+}
+
+fn clock(ts: &str) -> (String, String) {
+    match chrono::DateTime::parse_from_rfc3339(ts) {
+        Ok(t) => (
+            t.format("%Y-%m-%d").to_string(),
+            t.format("%H:%M").to_string(),
+        ),
+        Err(_) => (String::new(), String::new()),
+    }
+}
+
+impl Recap {
+    fn from_records(
+        session: String,
+        records: &[Record],
+        plans: &[crate::plan::Plan],
+        root: &Path,
+    ) -> Result<Self> {
+        let (day, from) = clock(&records[0].ts);
+        let (_, to) = clock(&records[records.len() - 1].ts);
+        let mut out = Recap {
+            session,
+            day,
+            from,
+            to,
+            ..Default::default()
+        };
+        let mut seen_plans: Vec<String> = Vec::new();
+        for r in records {
+            match r.kind.as_str() {
+                "tool_call" => out.calls += 1,
+                "tool_result" => {
+                    if r.fields.get("ok").and_then(Value::as_bool) == Some(false) {
+                        out.failures += 1;
+                    }
+                }
+                "note" => out.notes += 1,
+                "file_diff" => {
+                    let Some(path) = r.fields.get("path").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let added = r.fields.get("added").and_then(Value::as_u64).unwrap_or(0);
+                    let removed = r.fields.get("removed").and_then(Value::as_u64).unwrap_or(0);
+                    match out.files.iter_mut().find(|(p, _, _)| p == path) {
+                        Some((_, a, b)) => {
+                            *a += added;
+                            *b += removed;
+                        }
+                        None => out.files.push((path.to_string(), added, removed)),
+                    }
+                }
+                _ => {}
+            }
+            if let Some(id) = &r.plan
+                && !seen_plans.iter().any(|seen| seen == id)
+            {
+                seen_plans.push(id.clone());
+            }
+        }
+        for id in seen_plans {
+            let Some(plan) = plans.iter().find(|p| p.id == id) else {
+                continue;
+            };
+            let closed = plan
+                .steps
+                .iter()
+                .filter(|s| {
+                    matches!(
+                        s.status,
+                        crate::plan::StepStatus::Done | crate::plan::StepStatus::Cancelled
+                    )
+                })
+                .count();
+            let unfinished = plan
+                .steps
+                .iter()
+                .filter(|s| {
+                    !matches!(
+                        s.status,
+                        crate::plan::StepStatus::Done | crate::plan::StepStatus::Cancelled
+                    )
+                })
+                .map(|s| {
+                    let title: String = s.title.chars().take(60).collect();
+                    format!("{id} {title}", id = s.id)
+                })
+                .collect();
+            let goal: String = plan.goal.text.chars().take(90).collect();
+            if out.ask.is_none() {
+                out.ask = Some(goal.clone());
+            }
+            out.plans.push(RecapPlan {
+                id: id.clone(),
+                goal,
+                status: match plan.status {
+                    crate::plan::PlanStatus::Active => "active",
+                    crate::plan::PlanStatus::Completed => "completed",
+                    crate::plan::PlanStatus::Abandoned => "abandoned",
+                    crate::plan::PlanStatus::Blocked => "blocked",
+                }
+                .to_string(),
+                closed,
+                total: plan.steps.len(),
+                unfinished,
+            });
+        }
+        out.open = Self::open_labels(root, &out.session);
+        Ok(out)
+    }
+
+    fn open_labels(root: &Path, session: &str) -> Vec<String> {
+        Journal::open_assumptions_in(root, session, None)
+            .unwrap_or_default()
+            .iter()
+            .take(4)
+            .map(|a| a.label(80))
+            .collect()
     }
 }
 
@@ -183,7 +332,7 @@ impl Journal {
     /// attach it to that step's evidence (§2.1.4).
     ///
     /// The record is written either way. With nothing in progress it carries
-    /// `step: null` and counts as a session fact — for the diary host block and
+    /// `step: null` and counts as a session fact — for the recap and
     /// the compaction anchor — but never as evidence (§2.2.3).
     pub fn append_evidence(&mut self, kind: &str, fields: Value) -> Result<u64> {
         let seq = self.append(kind, fields)?;
@@ -311,6 +460,65 @@ impl Journal {
                 Err(error) => Some(Err(error.into())),
             })
             .collect()
+    }
+
+    /// What happened in this project over the last `days` days, per session
+    /// (§20). Every number comes from a record the host wrote and every plan
+    /// line from the plan file itself: there is no model prose in a recap, so
+    /// it cannot report an outcome it never saw — which is exactly how the
+    /// diary it replaces differed.
+    pub fn recap(root: &Path, days: i64) -> Result<Vec<Recap>> {
+        let dir = root.join(".sqwai").join("journal");
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Ok(Vec::new());
+        };
+        let now = chrono::Local::now();
+        let first_day = (now - chrono::Duration::days(days.clamp(1, 7) - 1))
+            .naive_local()
+            .date();
+        // A file's mtime is its last write, so a journal whose newest byte is
+        // older than the window holds no record inside it. With thousands of
+        // session files in one project this stat is the difference between a
+        // millisecond and a rescan of all of them.
+        let cutoff_secs = first_day
+            .and_hms_opt(0, 0, 0)
+            .and_then(|t| t.and_local_timezone(chrono::Local).latest())
+            .map(|t| t.timestamp());
+        let plans = crate::plan::list(root);
+        let mut out: Vec<Recap> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if let (Some(cutoff), Ok(meta)) = (cutoff_secs, entry.metadata())
+                && let Ok(modified) = meta.modified()
+                && chrono::DateTime::<chrono::Utc>::from(modified).timestamp() < cutoff
+            {
+                continue;
+            }
+            let Some(session) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let mut records = Self::records_for(root, session)?;
+            records.retain(|r| {
+                chrono::DateTime::parse_from_rfc3339(&r.ts)
+                    .map(|t| t.date_naive() >= first_day)
+                    .unwrap_or(false)
+            });
+            if records.is_empty() {
+                continue;
+            }
+            records.sort_by_key(|record| record.seq);
+            out.push(Recap::from_records(
+                session.to_string(),
+                &records,
+                &plans,
+                root,
+            )?);
+        }
+        out.sort_by(|a, b| a.day.cmp(&b.day).then(a.from.cmp(&b.from)));
+        Ok(out)
     }
 
     /// Check that a sequence belongs to this plan and is useful evidence.

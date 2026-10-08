@@ -1,6 +1,6 @@
 //! Host-owned MEMORY.md and USER.md proposal storage (DESIGN §2.3.5).
 
-use crate::agent::diary::screen;
+use crate::agent::secrets::screen;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use std::fs;

@@ -3,7 +3,6 @@ pub mod bench_harness;
 pub mod blobs;
 pub mod checkpoints;
 pub mod context;
-pub mod diary;
 pub mod export;
 pub mod graph_lang;
 pub mod journal;

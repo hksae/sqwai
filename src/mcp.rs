@@ -124,7 +124,7 @@ impl Registry {
                     serde_json::to_string(&result.content)?
                 };
                 // server-authored bytes get the same secret screening as
-                // diary and memory before they enter context (audit M12)
+                // memory before they enter context (audit M12)
                 let output = crate::agent::secrets::screen(&output).text;
                 Ok((output, result.is_error.unwrap_or(false)))
             }

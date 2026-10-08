@@ -292,7 +292,7 @@ pub fn host_tail(text: &str) -> String {
 }
 
 /// A request with no cacheable system part has no cached prefix to protect.
-/// Side calls (compaction summary, diary writer, why-narrator) pass their whole
+/// Side calls (compaction summary, why-narrator) pass their whole
 /// instruction as one volatile part; left volatile, the wire layout moves it
 /// behind the history as a [`host_tail`] label — and leaves the call with no
 /// system prompt at all. Such parts are promoted to the system position
@@ -625,7 +625,7 @@ pub struct ChatRequest {
     /// conversation history (user / assistant / tool only)
     pub messages: Vec<Message>,
     /// how much work the user asked for; `None` means the caller does not
-    /// touch the model's reasoning at all (summaries, the diary writer)
+    /// touch the model's reasoning at all (summaries, the why-narrator)
     pub effort: Option<EffortLevel>,
     /// what the target model does with that level; see [`effort::plan`]
     pub effort_support: crate::config::EffortSupport,
@@ -1053,7 +1053,7 @@ mod system_layout_tests {
         assert!(!parts[1].cacheable, "main-loop layout must not change");
     }
 
-    /// The regression in one request: a side call (compaction, diary,
+    /// The regression in one request: a side call (compaction, narrator,
     /// narrator) must reach the wire with its instruction as the system
     /// prompt, not as a trailing host block.
     #[test]

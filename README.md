@@ -37,7 +37,7 @@ Keys resolve from `<PROVIDER>_API_KEY` unless the config says otherwise.
   a diff or a passing command — never on assertion.
 - **Compaction from state, not summary.** After context compaction the agent
   resumes from goal, plan, facts and open notes instead of a retold story.
-- **Answers from the journal.** History, undo, diary and disputes read an
+- **Answers from the journal.** History, undo, recaps and disputes read an
   append-only event log of what actually happened.
 
 How each of these works is in [DESIGN.md](DESIGN.md); why it works that way, and
@@ -49,7 +49,7 @@ what was cut to get here, is in [Changes.md](Changes.md).
 .sqwai/
   plans/      structured plans                 ignored
   journal/    event logs                       ignored
-  memory/     diary and MEMORY.md              your choice (default ignored)
+  memory/     MEMORY.md                        your choice (default ignored)
   graph/      index                            ignored, rebuildable
   skills/     project skills                   committed
   config.toml project overrides                committed if present

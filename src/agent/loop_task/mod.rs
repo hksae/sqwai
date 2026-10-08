@@ -6,7 +6,7 @@
 //! back through the [`ControlMsg`] channel. Aborting the task stops the agent.
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use sha2::Digest;
 use tokio::sync::mpsc;
@@ -315,8 +315,6 @@ pub struct AgentInput {
     /// Run the compaction policy and finish without talking to the model
     /// otherwise (the `/compact` command).
     pub compact_only: bool,
-    /// diary writer limits copied from configuration
-    pub diary: crate::config::DiaryConfig,
     /// memory proposal limits copied from configuration
     pub memory: crate::config::MemoryConfig,
     /// `[web].allow_hosts`: the user's opt-in loopback targets for webfetch.
@@ -524,7 +522,6 @@ async fn run_agent(
         mut previous_response_id,
         mut summary,
         compact_only,
-        diary,
         memory,
         compaction,
         plan_limits,
@@ -606,32 +603,11 @@ async fn run_agent(
     // rest of the session.
     let mut continuation_usable = true;
 
-    // `/compact` — write the mandatory pre-compaction diary entry first, then
-    // run the policy and hand the transcript back without a chat turn.
+    // `/compact` — run the policy and hand the transcript back without a chat
+    // turn. It used to write a mandatory diary entry first; the entry was the
+    // only thing that made the compaction visible to the next session, and the
+    // writer never produced a line of prose (§20).
     if compact_only {
-        let _ = crate::agent::diary::write_entry(
-            &root,
-            crate::agent::diary::today(),
-            &session_id,
-            "compaction",
-            Some(&provider),
-            &model_id,
-            plan::open_active_for_session(&root, Some(&session_id))
-                .ok()
-                .flatten()
-                .map(|plan| plan::render(&plan))
-                .as_deref(),
-            None,
-            messages
-                .iter()
-                .rev()
-                .find(|message| message.role == Role::User)
-                .map(|message| message.content.as_str()),
-            Some(diary.token_budget),
-            diary.effort,
-            Some(Duration::from_secs(diary.timeout_secs)),
-        )
-        .await;
         let mut compaction_journal = if !read_only {
             crate::agent::journal::Journal::open(&root, &session_id).ok()
         } else {
@@ -677,7 +653,6 @@ async fn run_agent(
                     "dropped_msgs": message_count_before.saturating_sub(messages.len()),
                     "kept_msgs": messages.len(),
                     "anchor_tokens": context::anchor(&root, &session_id).len().div_ceil(4),
-                    "diary_written": true,
                     "summarized": summarized,
                     "summary": summary.as_deref().unwrap_or(""),
                 }),
@@ -839,38 +814,8 @@ async fn run_agent(
         // The write limit applies to one model request/turn, not the whole
         // session. A new request gets a fresh allowance.
         memory_writes_this_turn = 0;
-        // The diary is written before the compaction policy can discard any
-        // transcript context. The writer has a hard timeout and host fallback.
-        if messages.len() > 8
-            && policy.pressure(prompt_size.max(context::estimated_tokens(&messages)))
-                != context::Pressure::Ok
-        {
-            let _ = crate::agent::diary::write_entry(
-                &root,
-                crate::agent::diary::today(),
-                &session_id,
-                "compaction",
-                Some(&provider),
-                &model_id,
-                plan::open_active_for_session(&root, Some(&session_id))
-                    .ok()
-                    .flatten()
-                    .map(|plan| plan::render(&plan))
-                    .as_deref(),
-                None,
-                messages
-                    .iter()
-                    .rev()
-                    .find(|message| message.role == Role::User)
-                    .map(|message| message.content.as_str()),
-                Some(diary.token_budget),
-                diary.effort,
-                Some(Duration::from_secs(diary.timeout_secs)),
-            )
-            .await;
-        }
         // Compaction gate. History only: the provider's full request size
-        // is observed for the diary trigger below, but the gate must use
+        // is observed here, but the gate must use
         // what compaction can actually remove — otherwise a big fixed
         // prefix fires futile compactions every turn.
         if std::env::var("SQWAI_BENCH_DEBUG").is_ok() {
@@ -1262,7 +1207,6 @@ async fn run_agent(
                 read_only,
                 shadow_store,
                 &mut messages,
-                diary.clone(),
                 memory.clone(),
                 compaction.clone(),
                 plan_limits,
@@ -1393,7 +1337,6 @@ async fn run_agent(
                                 lsp.clone(),
                                 read_only,
                                 shadow_store,
-                                diary.clone(),
                                 memory.clone(),
                                 compaction.clone(),
                                 plan_limits,
@@ -1818,31 +1761,9 @@ async fn run_agent(
                                 let _ = tx.send(AgentEvent::StepCurrent { step: None }).await;
                             }
                         }
-                        if outcome.ok && matches!(op, "finish" | "block" | "cancel") {
-                            let _ = crate::agent::diary::write_entry(
-                                &root,
-                                crate::agent::diary::today(),
-                                &session_id,
-                                "step_lifecycle",
-                                Some(&provider),
-                                &model_id,
-                                plan::open_active_for_session(&root, Some(&session_id))
-                                    .ok()
-                                    .flatten()
-                                    .map(|plan| plan::render(&plan))
-                                    .as_deref(),
-                                None,
-                                messages
-                                    .iter()
-                                    .rev()
-                                    .find(|message| message.role == Role::User)
-                                    .map(|message| message.content.as_str()),
-                                Some(diary.token_budget),
-                                diary.effort,
-                                Some(Duration::from_secs(diary.timeout_secs)),
-                            )
-                            .await;
-                        }
+                        // The diary entry that used to fire on finish/block/cancel
+                        // is gone (§20): `journal op=recap` reads these same
+                        // records on demand, and the writer never produced prose.
                     }
                 }
                 if outcome.cancelled {
@@ -2605,7 +2526,6 @@ mod effort_tests {
             mcp: Default::default(),
             lsp: Default::default(),
             compact_only: false,
-            diary: Default::default(),
             memory: Default::default(),
             compaction: Default::default(),
             plan_limits: Default::default(),
@@ -2695,7 +2615,6 @@ mod effort_tests {
             mcp: Default::default(),
             lsp: Default::default(),
             compact_only: false,
-            diary: Default::default(),
             memory: Default::default(),
             compaction: Default::default(),
             plan_limits: Default::default(),
@@ -3623,7 +3542,6 @@ mod effort_tests {
             mcp: Default::default(),
             lsp: Default::default(),
             compact_only: false,
-            diary: Default::default(),
             memory: Default::default(),
             compaction: Default::default(),
             plan_limits: Default::default(),
@@ -3738,7 +3656,6 @@ mod effort_tests {
             crate::config::LspConfig::default(),
             false,
             crate::config::ShadowStore::Off,
-            crate::config::DiaryConfig::default(),
             crate::config::MemoryConfig::default(),
             crate::config::CompactionConfig::default(),
             crate::config::PlanConfig::default(),
@@ -3869,7 +3786,6 @@ mod effort_tests {
             crate::config::LspConfig::default(),
             false,
             crate::config::ShadowStore::Off,
-            crate::config::DiaryConfig::default(),
             crate::config::MemoryConfig::default(),
             crate::config::CompactionConfig::default(),
             crate::config::PlanConfig::default(),
@@ -3934,7 +3850,6 @@ mod effort_tests {
             crate::config::LspConfig::default(),
             false,
             crate::config::ShadowStore::Off,
-            crate::config::DiaryConfig::default(),
             crate::config::MemoryConfig::default(),
             crate::config::CompactionConfig::default(),
             crate::config::PlanConfig::default(),
@@ -3998,7 +3913,6 @@ mod effort_tests {
             crate::config::LspConfig::default(),
             false,
             crate::config::ShadowStore::Off,
-            crate::config::DiaryConfig::default(),
             crate::config::MemoryConfig::default(),
             crate::config::CompactionConfig::default(),
             crate::config::PlanConfig::default(),
@@ -4077,7 +3991,6 @@ mod effort_tests {
             mcp: Default::default(),
             lsp: Default::default(),
             compact_only: false,
-            diary: Default::default(),
             memory: Default::default(),
             compaction: Default::default(),
             plan_limits: Default::default(),
@@ -4179,7 +4092,6 @@ mod freedom_tests {
             mcp: Default::default(),
             lsp: Default::default(),
             compact_only: false,
-            diary: Default::default(),
             memory: Default::default(),
             compaction: Default::default(),
             plan_limits: crate::config::PlanConfig::default(),

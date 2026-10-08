@@ -1615,24 +1615,6 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn memory_read_returns_only_a_valid_diary_date() {
-        let (mut ctx, dir) = proj();
-        let path = crate::agent::diary::diary_path(
-            &dir,
-            chrono::NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
-        );
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, "## diary\n- fact\n").unwrap();
-        let read = execute(&mut ctx, "memory_read", &json!({"date": "2026-09-04"}));
-        assert!(read.ok, "{}", read.output);
-        assert!(read.output.contains("fact"));
-        let invalid = execute(&mut ctx, "memory_read", &json!({"date": "../secret"}));
-        assert!(!invalid.ok);
-        assert!(invalid.output.contains("YYYY-MM-DD"), "{}", invalid.output);
-        fs::remove_dir_all(&dir).ok();
-    }
-
     /// §2.1.4's closure moment: finishing a step with an open assumption
     /// succeeds and says so. A silent finish is how an assumption outlives the
     /// work that depended on it.
@@ -2317,6 +2299,13 @@ end
             "{}",
             o.output
         );
+        // an unfiltered list points at the digest instead of making the model
+        // page through records to find out what happened recently (§20)
+        assert!(
+            o.output.contains("op=recap"),
+            "the bare read should hint at the recap: {}",
+            o.output
+        );
         assert!(
             o.output.contains("j#1 2026-01-01 10:00:00 user_msg"),
             "{}",
@@ -2365,6 +2354,113 @@ end
         // malformed bounds are rejected, not ignored
         let o = execute(&mut ctx, "journal", &json!({"from": "not-a-date"}));
         assert!(!o.ok, "{}", o.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `op=recap` summarizes the recent days from host records only (§20):
+    /// counts, files, the plan a session worked on, and what stayed open.
+    #[test]
+    fn journal_recap_summarizes_recent_sessions() {
+        let (mut ctx, dir) = proj();
+        let now = chrono::Local::now();
+        let ts = |mins: i64| (now - chrono::Duration::minutes(mins)).to_rfc3339();
+        write_journal(
+            &dir,
+            "recent",
+            &[
+                rec(1, &ts(90), "user_msg", r#","chars":20"#),
+                rec(2, &ts(80), "tool_call", r#","tool":"bash""#),
+                rec(
+                    3,
+                    &ts(70),
+                    "tool_result",
+                    r#","tool":"bash","ok":false,"code":"rejected""#,
+                ),
+                rec(
+                    4,
+                    &ts(60),
+                    "file_diff",
+                    r#","path":"src/a.rs","added":5,"removed":2"#,
+                ),
+            ],
+        );
+        write_journal(
+            &dir,
+            "ancient",
+            &[rec(
+                1,
+                "2020-01-01T00:00:00+00:00",
+                "tool_call",
+                r#","tool":"bash""#,
+            )],
+        );
+
+        let o = execute(&mut ctx, "journal", &json!({"op": "recap"}));
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("recent"), "{}", o.output);
+        assert!(
+            !o.output.contains("ancient"),
+            "a session outside the window must not appear: {}",
+            o.output
+        );
+        assert!(
+            o.output.contains("src/a.rs +5/-2"),
+            "files must be aggregated: {}",
+            o.output
+        );
+        assert!(o.output.contains("1 call · 1 failed"), "{}", o.output);
+        assert!(o.output.contains("(no plan)"), "{}", o.output);
+        assert!(o.output.contains("open: none"), "{}", o.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The recap quotes what a session was working on: the goal of its plan,
+    /// never the first message of the session — that is usually "привет".
+    #[test]
+    fn journal_recap_names_the_plan_and_its_goal() {
+        let (mut ctx, dir) = proj();
+        let created = execute(
+            &mut ctx,
+            "plan",
+            &json!({"op":"create","goal":"isolate the tests","criteria":["cargo test green"],
+                    "steps":[{"title":"find the writers"}]}),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan = crate::plan::list(&dir).remove(0);
+        let now = chrono::Local::now();
+        let ts = |mins: i64| (now - chrono::Duration::minutes(mins)).to_rfc3339();
+        let line = |seq: u64, kind: &str, extra: &str| {
+            format!(
+                r#"{{"seq":{seq},"ts":"{}","step":"1","plan":"{}","agent":"main","kind":"{kind}"{extra}}}"#,
+                ts(30),
+                plan.id,
+            )
+        };
+        write_journal(
+            &dir,
+            "planned",
+            &[
+                line(1, "user_msg", r#","chars":7"#),
+                line(2, "tool_call", r#","tool":"edit""#),
+            ],
+        );
+        let o = execute(&mut ctx, "journal", &json!({"op": "recap"}));
+        assert!(o.ok, "{}", o.output);
+        assert!(
+            o.output.contains("«isolate the tests»"),
+            "the plan goal is the session's subject: {}",
+            o.output
+        );
+        assert!(
+            o.output.contains("0/1 steps"),
+            "step progress must show: {}",
+            o.output
+        );
+        assert!(
+            o.output.contains("unfinished: 1 find the writers"),
+            "an open step is the line that changes tomorrow's run: {}",
+            o.output
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

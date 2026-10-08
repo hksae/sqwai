@@ -18,11 +18,15 @@ pub mod env;
 pub mod skills;
 
 const MEMORY_MAX_CHARS: usize = 12_000;
-const DIARY_HEADING_DAYS: i64 = 7;
 
-/// Durable user/project memory and recent diary context for the stable prefix.
-/// Missing files are normal; all loaded text is screened before it reaches the
-/// provider so secrets cannot be promoted into prompt context.
+/// Durable user/project memory for the stable prefix. Missing files are normal;
+/// all loaded text is screened before it reaches the provider so secrets cannot
+/// be promoted into prompt context.
+///
+/// The diary used to ride here too (two days raw, five more as headings) and
+/// cost up to 24KB of prefix for a copy of the journal — whose writer had in
+/// fact never produced a line of prose. Recent history is pulled now, with
+/// `journal op=recap` (§20).
 pub fn memory_block(root: &std::path::Path) -> Option<String> {
     let mut sections = Vec::new();
     if let Ok(path) = crate::config::config_dir().map(|dir| dir.join("USER.md"))
@@ -34,32 +38,13 @@ pub fn memory_block(root: &std::path::Path) -> Option<String> {
     if let Some(text) = read_bounded(&project_memory) {
         sections.push(format!("<project_memory>\n{text}\n</project_memory>"));
     }
-    let today = crate::agent::diary::today();
-    for offset in 0..DIARY_HEADING_DAYS {
-        let date = today - chrono::Duration::days(offset);
-        let path = crate::agent::diary::diary_path(root, date);
-        let Some(raw) = read_bounded(&path) else {
-            continue;
-        };
-        let text = if offset < 2 { raw } else { headings_only(&raw) };
-        if !text.trim().is_empty() {
-            sections.push(format!("<diary date=\"{date}\">\n{text}\n</diary>"));
-        }
-    }
     (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
 fn read_bounded(path: &std::path::Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
-    let screened = crate::agent::diary::screen(&text).text;
+    let screened = crate::agent::secrets::screen(&text).text;
     Some(truncate_chars(&screened, MEMORY_MAX_CHARS))
-}
-
-fn headings_only(text: &str) -> String {
-    text.lines()
-        .filter(|line| line.starts_with("#"))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {
@@ -240,11 +225,11 @@ pub const AGENTS_TEMPLATE: &str = "# AGENTS.md — instructions for sqwai\n\
 
 /// skeleton written by `/init` next to AGENTS.md: this agent's own
 /// rules (style, workflow habits). Instructions, not memories — facts
-/// and history belong to MEMORY.md/diary, not here.
+/// and history belong to MEMORY.md and the journal, not here.
 pub const SQWAI_TEMPLATE: &str = "# SQWAI.md — this agent's own rules\n\
 \n\
 Read by sqwai only (highest priority on conflict with AGENTS.md).\n\
-Put instructions here, not facts — memories live in MEMORY.md/diary.\n\
+Put instructions here, not facts — memories live in MEMORY.md.\n\
 \n\
 ## Style\n\
 - <how to talk to the user>\n\
@@ -388,25 +373,18 @@ mod tests {
         assert!(!include_str!("system.md").contains("{{TOOLS}}"));
     }
 
+    /// An empty project contributes no project memory. The user-level
+    /// `USER.md` is real state on a working machine — the agent writes it with
+    /// `memory_write` — so this test may not assume it is absent; it asserts the
+    /// project half only.
     #[test]
-    fn headings_only_keeps_structure_without_diary_prose() {
-        let text = "## 2026-09-04\n### Done\n- hidden detail\n### Open\n- pending";
-        assert_eq!(headings_only(text), "## 2026-09-04\n### Done\n### Open");
-    }
-
-    /// An empty project contributes no project memory and no diary. The
-    /// user-level `USER.md` is real state on a working machine — the agent
-    /// writes it with `memory_write` — so this test may not assume it is absent;
-    /// it asserts the project halves only.
-    #[test]
-    fn an_empty_project_contributes_no_project_memory_or_diary() {
+    fn an_empty_project_contributes_no_project_memory() {
         let root = std::env::temp_dir().join(format!("sqwai-prompt-{}", std::process::id()));
         let block = memory_block(&root).unwrap_or_default();
         assert!(
             !block.contains("<project_memory"),
             "an empty project has no project memory: {block}"
         );
-        assert!(!block.contains("<diary"), "no diary exists here: {block}");
     }
 
     #[test]

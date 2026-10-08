@@ -1379,7 +1379,6 @@ fn session_recovery_with_deleted_or_broken_plan_id() {
         lsp: Default::default(),
         skills: Default::default(),
         memory: Default::default(),
-        diary: Default::default(),
         compaction: Default::default(),
         plan: Default::default(),
         verify: Default::default(),

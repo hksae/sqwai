@@ -360,7 +360,10 @@ One batch at the close of a step is enough.",
              project (user messages, tool calls and results, file diffs, plan ops, notes, \
              checkpoints). Every line carries j#<seq>, the stable reference used by plan \
              evidence and note resolves. Times are UTC. Use it to find what evidence exists \
-             or what was already tried. Output is newest-first and always capped: \
+             or what was already tried; for what happened recently in this project — including \
+             sessions other than this one — use op=recap, which summarizes each of the last days' \
+             sessions (plan and its status, files touched, call counts, open threads) from host \
+             records alone. Output is newest-first and always capped: \
              narrow with kind/step/from/to/after/query instead of dumping everything. \
              Ground truth for anything that already happened: your context memory is \
              lossy (early history gets compacted away), the journal is not. Before saying \
@@ -369,7 +372,8 @@ One batch at the close of a step is enough.",
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "op": {"type": "string", "enum": ["read", "assumptions"], "description": "read journal records (default) or list open assumptions"},
+                    "op": {"type": "string", "enum": ["read", "recap", "assumptions"], "description": "read journal records (default); recap = what happened in this project over the last days, per session; assumptions = list open ones"},
+                    "days": {"type": "integer", "description": "recap only: how many days back, today included (default 3, max 7)"},
                     "session": {"type": "string", "enum": ["current", "all"], "description": "whose journal to read: this session (default) or every session in the project"},
                     "kind": {"type": "string", "description": "exact record kind: user_msg|tool_call|tool_result|file_diff|diagnostics|note|plan|checkpoint|provider_error|compaction"},
                     "step": {"type": "string", "description": "only records attached to this plan step id"},
@@ -380,12 +384,6 @@ One batch at the close of a step is enough.",
                     "query": {"type": "string", "description": "case-insensitive substring matched against the rendered line"}
                 }
             }),
-        },
-        ToolDef {
-            name: "memory_read",
-            kind: Kind::ReadOnly,
-            description: "Read one day of the host diary (YYYY-MM-DD). The diary holds the story of past sessions; memory holds the facts that survived them.",
-            parameters: json!({"type":"object","properties":{"date":{"type":"string","description":"local diary date, YYYY-MM-DD"}},"required":["date"]}),
         },
         ToolDef {
             name: "memory_write",
@@ -668,7 +666,6 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             .as_array()
             .map(|tasks| format!("{} tasks", tasks.len()))
             .unwrap_or_else(|| s("task")),
-        "memory_read" => s("date"),
         "memory_write" => format!("{}: {}", s("scope"), s("text")),
         "ask_user" => {
             let single = s("question");

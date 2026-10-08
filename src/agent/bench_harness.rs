@@ -306,7 +306,6 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
         mcp: Default::default(),
         lsp: Default::default(),
         compact_only: false,
-        diary: Default::default(),
         memory: Default::default(),
         compaction,
         plan_limits: Default::default(),

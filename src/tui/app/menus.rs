@@ -20,7 +20,6 @@ pub(super) const COMMANDS: &[&str] = &[
     "/compact",
     "/constraints",
     "/debug",
-    "/diary",
     "/exit",
     "/export",
     "/goal",
@@ -121,7 +120,7 @@ pub(super) enum Menu {
     Debug,
     /// /settings -> Experimental: opt-in unfinished things (/test ...)
     Experimental,
-    /// /settings -> Agent: plan, memory, diary and compaction scalars
+    /// /settings -> Agent: plan, memory and compaction scalars
     Agent,
     /// /settings -> Safety: secrets globs and blocked patterns
     Safety,
@@ -281,7 +280,6 @@ pub(super) enum MenuAction {
     DecideApproval(crate::agent::loop_task::ApprovalDecision),
     #[allow(dead_code)]
     OpenControls,
-    CycleDiaryEffort,
     CycleCompactionSummary,
     CycleUndoShadow,
     ToggleSkillsAutoLoad,
@@ -303,7 +301,7 @@ pub(super) enum MenuAction {
     EditScalar(ScalarSetting),
 }
 
-/// One numeric host setting editable from /settings. Enums (diary effort,
+/// One numeric host setting editable from /settings. Enums (effort,
 /// compaction summary, undo shadow) are cycle rows, not scalars.
 #[derive(Clone, Copy)]
 pub(super) enum ScalarSetting {
@@ -313,8 +311,6 @@ pub(super) enum ScalarSetting {
     MemoryLoadBudgetRatio,
     MemoryMaxTokens,
     MemoryMaxProposals,
-    DiaryTokenBudget,
-    DiaryTimeoutSecs,
     CompactionThreshold,
     CompactionKeepTurns,
     CompactionAnchorRatio,
@@ -349,8 +345,6 @@ impl ScalarSetting {
             Self::MemoryLoadBudgetRatio => "load budget ratio",
             Self::MemoryMaxTokens => "max tokens",
             Self::MemoryMaxProposals => "max proposals",
-            Self::DiaryTokenBudget => "token budget",
-            Self::DiaryTimeoutSecs => "timeout secs",
             Self::CompactionThreshold => "threshold",
             Self::CompactionKeepTurns => "keep turns",
             Self::CompactionAnchorRatio => "anchor ratio",
@@ -368,8 +362,6 @@ impl ScalarSetting {
             Self::MemoryLoadBudgetRatio => cfg.memory.load_budget_ratio.to_string(),
             Self::MemoryMaxTokens => cfg.memory.max_tokens.to_string(),
             Self::MemoryMaxProposals => cfg.memory.max_writes_per_turn.to_string(),
-            Self::DiaryTokenBudget => cfg.diary.token_budget.to_string(),
-            Self::DiaryTimeoutSecs => cfg.diary.timeout_secs.to_string(),
             Self::CompactionThreshold => cfg.compaction.threshold.to_string(),
             Self::CompactionKeepTurns => cfg.compaction.keep_turns.to_string(),
             Self::CompactionAnchorRatio => cfg.compaction.anchor_ratio.to_string(),
@@ -412,18 +404,6 @@ impl ScalarSetting {
                 raw,
                 &mut cfg.memory.max_writes_per_turn,
                 def.memory.max_writes_per_turn,
-            ),
-            Self::DiaryTokenBudget => apply_num(
-                label,
-                raw,
-                &mut cfg.diary.token_budget,
-                def.diary.token_budget,
-            ),
-            Self::DiaryTimeoutSecs => apply_num(
-                label,
-                raw,
-                &mut cfg.diary.timeout_secs,
-                def.diary.timeout_secs,
             ),
             Self::CompactionThreshold => apply_num(
                 label,
@@ -1093,19 +1073,6 @@ impl App {
             MenuAction::OpenSafety => self.open_menu(Menu::Safety),
             MenuAction::OpenUndo => self.open_menu(Menu::Undo),
             MenuAction::OpenControls => self.open_menu(Menu::Controls),
-            MenuAction::CycleDiaryEffort => {
-                let cur = EffortLevel::ALL
-                    .iter()
-                    .position(|l| *l == self.cfg.diary.effort)
-                    .unwrap_or(0);
-                self.cfg.diary.effort = EffortLevel::ALL[(cur + 1) % EffortLevel::ALL.len()];
-                self.cfg.save().ok();
-                self.status(
-                    &format!("diary effort = {}", self.cfg.diary.effort.as_str()),
-                    StatusKind::Ok,
-                );
-                self.build_menu_rows();
-            }
             MenuAction::CycleCompactionSummary => {
                 let all = crate::config::CompactionSummary::ALL;
                 let cur = all
@@ -2155,24 +2122,6 @@ impl App {
                     "max proposals",
                     ScalarSetting::MemoryMaxProposals.current(&self.cfg),
                     ScalarSetting::MemoryMaxProposals,
-                ));
-                self.menu_rows.push(header("diary"));
-                self.menu_rows.push(scalar(
-                    "token budget",
-                    ScalarSetting::DiaryTokenBudget.current(&self.cfg),
-                    ScalarSetting::DiaryTokenBudget,
-                ));
-                self.menu_rows.push(row(
-                    Line::from(vec![
-                        Span::styled(format!("  {:<18}", "effort"), Theme::FG()),
-                        Span::styled(self.cfg.diary.effort.as_str().to_string(), Theme::dim()),
-                    ]),
-                    MenuAction::CycleDiaryEffort,
-                ));
-                self.menu_rows.push(scalar(
-                    "timeout secs",
-                    ScalarSetting::DiaryTimeoutSecs.current(&self.cfg),
-                    ScalarSetting::DiaryTimeoutSecs,
                 ));
                 self.menu_rows.push(header("compaction"));
                 self.menu_rows.push(scalar(

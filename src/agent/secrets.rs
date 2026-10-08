@@ -1,6 +1,6 @@
 //! Secret screening for everything the host writes down (§2.3.6).
 //!
-//! Applied to the diary, MEMORY.md, the prompt blocks built from them, and the
+//! Applied to MEMORY.md, the prompt blocks built from them, and the
 //! free-text fields of journal records. It is the last thing between a command
 //! that echoes a token and a file that keeps it forever.
 
@@ -39,7 +39,7 @@ fn opaque_token_pattern() -> &'static Regex {
     TOKEN.get_or_init(|| Regex::new(r##"[^\s`\"']{20,}"##).unwrap())
 }
 
-/// Screen text before it reaches durable diary or summary storage.
+/// Screen text before it reaches durable memory or summary storage.
 pub fn screen(text: &str) -> Screened {
     let mut output = text.to_string();
     let mut redacted = false;

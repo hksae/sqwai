@@ -417,7 +417,7 @@ fn host_owned_denial(relative: &Path) -> Option<String> {
     }
     Some(format!(
         "path '{}' is host-owned state: the plan, the journal, memory and checkpoints are \
-         reachable only through their own tools (plan, note, journal, memory_read, \
+         reachable only through their own tools (plan, note, journal, \
          memory_write). Inside {STATE_DIR}/ the file tools may use skills/ and config.toml only.",
         relative.display()
     ))

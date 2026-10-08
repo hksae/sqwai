@@ -322,13 +322,6 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         "bash_kill" => exec::bash_kill(ctx, args),
         "sleep" => exec::sleep(ctx, args),
         "plan" => plan_op(ctx, args),
-        "memory_read" => match crate::agent::diary::read_day(
-            &ctx.root,
-            args["date"].as_str().unwrap_or_default(),
-        ) {
-            Ok(text) => Outcome::ok(text),
-            Err(message) => Outcome::err(message),
-        },
         "note" => {
             let note = args["note"].as_str().unwrap_or_default().trim();
             let kind = args["kind"].as_str().unwrap_or_default().trim();
@@ -395,8 +388,16 @@ fn journal_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             lines.join("\n")
         ));
     }
+    if op == "recap" {
+        let days = args["days"].as_u64().unwrap_or(3).clamp(1, 7) as i64;
+        let items = match crate::agent::journal::Journal::recap(&ctx.root, days) {
+            Ok(items) => items,
+            Err(e) => return Outcome::err(format!("journal recap failed: {e:#}")),
+        };
+        return Outcome::ok(recap_text(&items, days));
+    }
     if op != "read" {
-        return Outcome::err("journal op must be 'read' or 'assumptions'");
+        return Outcome::err("journal op must be 'read', 'recap' or 'assumptions'");
     }
 
     let (records, label) = match args["session"].as_str().unwrap_or("current") {
@@ -494,6 +495,19 @@ fn journal_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         "journal {label}: {total} records total, {matched} match, showing {} (oldest first, UTC)",
         lines.len()
     );
+    // A bare `journal` call is what the model reaches for when it wants to know
+    // what happened recently, and newest-first records answer that badly. Point
+    // at the digest, but only when nothing was asked for — a narrowed query has
+    // already been thought about.
+    if kind.is_none()
+        && step.is_none()
+        && from.is_none()
+        && to.is_none()
+        && after.is_none()
+        && query.is_none()
+    {
+        out.push_str("\nhint: unfiltered list. For \"what happened recently\" use journal op=recap (days=3, session=all).");
+    }
     if start > 0 {
         out.push_str(&format!(
             "; {start} older matches — page with 'after' or raise 'last'"
@@ -513,6 +527,99 @@ fn journal_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             .join("\n"),
     );
     Outcome::ok(out)
+}
+
+/// Rendered recap: a day header, then one entry per session (§20). Bounded on
+/// purpose — a busy week must cost one tool result, not a transcript, which is
+/// the mistake the diary made by pasting the whole session in every day.
+fn recap_text(items: &[crate::agent::journal::Recap], days: i64) -> String {
+    const SESSIONS_PER_DAY: usize = 6;
+    const FILES_SHOWN: usize = 6;
+    if items.is_empty() {
+        return format!("recap: nothing recorded in the last {days} days");
+    }
+    let mut out = format!(
+        "recap · {} sessions in the last {days} days · local dates\n",
+        items.len()
+    );
+    let mut day = String::new();
+    let mut shown = 0usize;
+    let mut omitted = 0usize;
+    for r in items {
+        if r.day != day {
+            day = r.day.clone();
+            shown = 0;
+            out.push_str(&format!("— {day} —\n"));
+        }
+        if shown >= SESSIONS_PER_DAY {
+            omitted += 1;
+            continue;
+        }
+        shown += 1;
+        let head: String = r.session.chars().take(8).collect();
+        out.push_str(&format!("  {head} {}→{}  ", r.from, r.to));
+        match &r.ask {
+            Some(ask) => out.push_str(&format!("«{ask}»\n")),
+            None => out.push_str("(no plan)\n"),
+        }
+        for plan in &r.plans {
+            out.push_str(&format!(
+                "    plan {} · {} · {}/{} steps",
+                crate::agent::tools::specs::clip(&plan.id, 26),
+                plan.status,
+                plan.closed,
+                plan.total
+            ));
+            // A second plan in one session means the direction moved; its goal
+            // is the information, and repeating the first one is noise.
+            if r.ask.as_deref() != Some(plan.goal.as_str()) {
+                out.push_str(&format!(" · «{}»", plan.goal));
+            }
+            out.push('\n');
+            if !plan.unfinished.is_empty() {
+                out.push_str(&format!(
+                    "      unfinished: {}\n",
+                    plan.unfinished.join(" · ")
+                ));
+            }
+        }
+        if !r.files.is_empty() {
+            let listed: Vec<String> = r
+                .files
+                .iter()
+                .take(FILES_SHOWN)
+                .map(|(path, added, removed)| format!("{path} +{added}/-{removed}"))
+                .collect();
+            let more = r.files.len().saturating_sub(FILES_SHOWN);
+            let tail = if more > 0 {
+                format!(" · +{more} more")
+            } else {
+                String::new()
+            };
+            out.push_str(&format!("    files: {}{tail}\n", listed.join(" · ")));
+        }
+        let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+        out.push_str(&format!(
+            "    {} · {} failed · {} notes\n",
+            plural(r.calls, "call"),
+            r.failures,
+            plural(r.notes, "note")
+        ));
+        out.push_str(&format!(
+            "    open: {}\n",
+            if r.open.is_empty() {
+                "none".to_string()
+            } else {
+                r.open.join(" · ")
+            }
+        ));
+    }
+    if omitted > 0 {
+        out.push_str(&format!(
+            "  +{omitted} sessions omitted (cap per day) — narrow with days= or session=\n"
+        ));
+    }
+    out
 }
 
 /// One rendered journal line: `j#<seq> <time> <kind> [step=N] ([agent]) | body`.

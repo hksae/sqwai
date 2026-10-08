@@ -890,21 +890,6 @@ impl Default for MemoryConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiaryConfig {
-    #[serde(default = "default_diary_token_budget")]
-    pub token_budget: u32,
-    /// Effort for the diary's own model call. §5.1 assigns effort per internal
-    /// role and puts the diary writer at `low`; §2.3.4 describes the same call
-    /// as running with effort off. The default keeps the cheaper reading — the
-    /// entry is a summary of facts the host already extracted — and the key
-    /// exists so the other one costs a line of config rather than a patch.
-    #[serde(default)]
-    pub effort: EffortLevel,
-    #[serde(default = "default_diary_timeout_secs")]
-    pub timeout_secs: u64,
-}
-
 /// `[undo]` — retention and storage for the two checkpoint layers (§2.5).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UndoConfig {
@@ -1085,16 +1070,6 @@ impl Default for CompactionConfig {
     }
 }
 
-impl Default for DiaryConfig {
-    fn default() -> Self {
-        Self {
-            token_budget: default_diary_token_budget(),
-            effort: EffortLevel::Off,
-            timeout_secs: default_diary_timeout_secs(),
-        }
-    }
-}
-
 /// Project-level overrides (`.sqwai/config.toml`, §5.9).
 ///
 /// A cloned repo must never be able to reconfigure trust: providers, models,
@@ -1105,8 +1080,6 @@ impl Default for DiaryConfig {
 /// rejected on parse error (fail-closed).
 #[derive(Debug, Clone, Default, Deserialize)]
 struct ProjectOverrides {
-    #[serde(default)]
-    diary: DiaryOverride,
     #[serde(default)]
     ui: UiOverride,
     #[serde(default)]
@@ -1119,13 +1092,6 @@ struct ProjectOverrides {
     verify: VerifyOverride,
     #[serde(default)]
     memory: MemoryOverride,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct DiaryOverride {
-    token_budget: Option<u32>,
-    effort: Option<EffortLevel>,
-    timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1174,7 +1140,6 @@ struct MemoryOverride {
 /// (table, keys) accepted from a project file. Anything else present is
 /// ignored and reported. Keep in sync with the `*Override` structs above.
 const PROJECT_ALLOWLIST: &[(&str, &[&str])] = &[
-    ("diary", &["token_budget", "effort", "timeout_secs"]),
     ("ui", &["typewriter", "http_log", "experimental_test"]),
     (
         "compaction",
@@ -1232,12 +1197,6 @@ fn default_memory_max_tokens() -> u32 {
 fn default_memory_max_proposals() -> u8 {
     2
 }
-fn default_diary_token_budget() -> u32 {
-    1500
-}
-fn default_diary_timeout_secs() -> u64 {
-    30
-}
 fn default_compaction_threshold() -> f64 {
     0.80
 }
@@ -1277,8 +1236,6 @@ pub struct Config {
     pub skills: SkillsConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
-    #[serde(default)]
-    pub diary: DiaryConfig,
     #[serde(default)]
     pub compaction: CompactionConfig,
     #[serde(default)]
@@ -1345,7 +1302,6 @@ impl Default for Config {
             lsp: LspConfig::default(),
             skills: SkillsConfig::default(),
             memory: MemoryConfig::default(),
-            diary: DiaryConfig::default(),
             compaction: CompactionConfig::default(),
             plan: PlanConfig::default(),
             verify: VerifyConfig::default(),
@@ -1545,17 +1501,6 @@ impl Config {
                 return notes;
             }
         };
-        let diary = &mut self.diary;
-        let o = &overrides.diary;
-        if let Some(v) = o.token_budget {
-            diary.token_budget = v;
-        }
-        if let Some(v) = o.effort {
-            diary.effort = v;
-        }
-        if let Some(v) = o.timeout_secs {
-            diary.timeout_secs = v;
-        }
         let ui = &mut self.ui;
         let o = &overrides.ui;
         if let Some(v) = o.typewriter {
@@ -2505,9 +2450,6 @@ effort = "off"
         std::fs::write(
             sqwai.join("config.toml"),
             r#"
-[diary]
-token_budget = 500
-
 [plan]
 max_steps = 5
 budget_ratio = 0.9
@@ -2527,7 +2469,6 @@ provider = "p"
 
         let mut cfg = Config::default();
         let notes = cfg.apply_project_overrides(dir.path());
-        assert_eq!(cfg.diary.token_budget, 500);
         assert_eq!(cfg.plan.max_steps, 5);
         // allowlisted keys land
         assert!(
@@ -2563,11 +2504,11 @@ provider = "p"
 
         let sqwai = dir.path().join(".sqwai");
         std::fs::create_dir_all(&sqwai).unwrap();
-        std::fs::write(sqwai.join("config.toml"), "[diary\ntoken_budget = ").unwrap();
-        let before = cfg.diary.token_budget;
+        std::fs::write(sqwai.join("config.toml"), "[plan\nmax_steps = ").unwrap();
+        let before = cfg.plan.max_steps;
         let notes = cfg.apply_project_overrides(dir.path());
         assert_eq!(
-            cfg.diary.token_budget, before,
+            cfg.plan.max_steps, before,
             "broken file must change nothing"
         );
         assert!(!notes.is_empty(), "broken file must be reported");

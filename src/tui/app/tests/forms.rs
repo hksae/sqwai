@@ -1081,10 +1081,6 @@ fn settings_scalar_edit_valid_and_invalid_reset() {
 #[test]
 fn settings_cycles_and_toggles() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    let effort = app.cfg.diary.effort;
-    app.run_action(MenuAction::CycleDiaryEffort);
-    assert_ne!(app.cfg.diary.effort.as_str(), effort.as_str());
-
     app.run_action(MenuAction::CycleCompactionSummary);
     assert_eq!(app.cfg.compaction.summary.as_str(), "off");
     app.run_action(MenuAction::CycleCompactionSummary);

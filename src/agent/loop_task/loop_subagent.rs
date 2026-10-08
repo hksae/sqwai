@@ -174,7 +174,6 @@ pub(crate) async fn run_subagent_batch(
     read_only: bool,
     shadow_store: crate::config::ShadowStore,
     messages: &mut Vec<Message>,
-    diary: crate::config::DiaryConfig,
     memory: crate::config::MemoryConfig,
     compaction: crate::config::CompactionConfig,
     plan_limits: crate::config::PlanConfig,
@@ -241,7 +240,6 @@ pub(crate) async fn run_subagent_batch(
                 let system = system.to_vec();
                 let mcp = mcp.clone();
                 let lsp = lsp.clone();
-                let diary = diary.clone();
                 let memory = memory.clone();
                 let compaction = compaction.clone();
                 let fallback_chain = fallback_chain.clone();
@@ -267,7 +265,6 @@ pub(crate) async fn run_subagent_batch(
                         lsp,
                         read_only,
                         shadow_store,
-                        diary,
                         memory,
                         compaction,
                         plan_limits,
@@ -394,7 +391,6 @@ pub(crate) async fn run_subagent(
     lsp: crate::config::LspConfig,
     read_only: bool,
     shadow_store: crate::config::ShadowStore,
-    diary: crate::config::DiaryConfig,
     memory: crate::config::MemoryConfig,
     compaction: crate::config::CompactionConfig,
     plan_limits: crate::config::PlanConfig,
@@ -422,7 +418,6 @@ pub(crate) async fn run_subagent(
                 let system = system.clone();
                 let mcp = mcp.clone();
                 let lsp = lsp.clone();
-                let diary = diary.clone();
                 let memory = memory.clone();
                 let compaction = compaction.clone();
                 let fallback_chain = fallback_chain.clone();
@@ -447,7 +442,6 @@ pub(crate) async fn run_subagent(
                         lsp,
                         read_only,
                         shadow_store,
-                        diary,
                         memory,
                         compaction,
                         plan_limits,
@@ -552,7 +546,6 @@ pub(crate) async fn run_subagent(
         mcp,
         lsp,
         compact_only: false,
-        diary,
         memory,
         compaction,
         plan_limits,

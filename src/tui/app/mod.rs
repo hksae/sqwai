@@ -1621,20 +1621,10 @@ Continue from the pending step, or report to the user if the settled work looks 
                 self.perf.frame(stat, renders, wraps);
             }
         }
-        // Shutdown must never wait for a provider request. A final diary
-        // entry is host-only here; model-written diary prose belongs to the
-        // explicit diary/compaction paths, not the exit path.
-        if self.session_has_messages() && !self.read_only {
-            let root = self.project_root.clone();
-            let _ = crate::agent::diary::append_entry(
-                &root,
-                crate::agent::diary::today(),
-                &self.session.id.to_string(),
-                "session_end",
-                None,
-            );
-            self.session.save().ok();
-        } else if self.session_has_messages() {
+        // Shutdown must never wait for a provider request: the session is
+        // saved and nothing else runs on the exit path. The host-only diary
+        // entry that used to be appended here is gone with the diary (§20).
+        if self.session_has_messages() {
             self.session.save().ok();
         }
         Ok(())
@@ -2555,7 +2545,6 @@ Continue from the pending step, or report to the user if the settled work looks 
             },
             summary: self.session.summary.clone(),
             compact_only: false,
-            diary: self.cfg.diary.clone(),
             memory: self.cfg.memory.clone(),
             compaction: self.cfg.compaction.clone(),
             plan_limits: self.cfg.plan,
@@ -2710,7 +2699,6 @@ Continue from the pending step, or report to the user if the settled work looks 
             previous_response_id: None,
             summary: self.session.summary.clone(),
             compact_only: true,
-            diary: self.cfg.diary.clone(),
             memory: self.cfg.memory.clone(),
             compaction: self.cfg.compaction.clone(),
             plan_limits: self.cfg.plan,
@@ -3183,30 +3171,6 @@ Continue from the pending step, or report to the user if the settled work looks 
                 self.quit = true;
             }
             "/compact" => self.start_compaction(),
-            "/diary" => {
-                if self.streaming {
-                    self.show_busy_status();
-                } else if self.read_only {
-                    self.status(
-                        "project is read-only; diary writes are disabled",
-                        StatusKind::Warn,
-                    );
-                } else {
-                    let root = self.project_root.clone();
-                    match crate::agent::diary::append_entry(
-                        &root,
-                        crate::agent::diary::today(),
-                        &self.session.id.to_string(),
-                        "manual",
-                        None,
-                    ) {
-                        Ok(()) => self.status("diary entry written", StatusKind::Ok),
-                        Err(error) => {
-                            self.status(&format!("diary write failed: {error:#}"), StatusKind::Err)
-                        }
-                    }
-                }
-            }
             "/undo" => {
                 if self.streaming {
                     self.show_busy_status();
