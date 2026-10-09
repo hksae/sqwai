@@ -153,6 +153,12 @@ pub struct Session {
     /// when a turn completes; consumed one-shot like resume_notice_armed.
     #[serde(default)]
     pub prev_turn_aborted: bool,
+    /// A `/undo` rolled work back that the transcript still describes as
+    /// present. The next request gets one host line naming what was reverted,
+    /// then the flag clears — the model must not read its own old claims as
+    /// current state.
+    #[serde(default)]
+    pub pending_undo_note: Option<String>,
     /// project root this session was born in; stamped by the host on
     /// creation. Plans, journals and undo chains live under this root, so
     /// opening the session elsewhere dangles those links (the UI warns).
@@ -185,6 +191,7 @@ impl Session {
             activity: Vec::new(),
             turn_notes: Vec::new(),
             prev_turn_aborted: false,
+            pending_undo_note: None,
             project: None,
         }
     }

@@ -1311,3 +1311,44 @@ fn aborted_turn_arms_resume_notice_and_bootstraps() {
     app.finish_turn_inner(Ok(()), false);
     assert!(!app.session.prev_turn_aborted);
 }
+
+/// `/undo` rolls bytes back that the transcript still describes as present, so
+/// the host names the revert once on the next request — same slot and same
+/// one-shot discipline as the resume notice above.
+#[test]
+fn undo_arms_one_host_line_about_the_reverted_files() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.arm_undo_note(
+        "undo to 'cafe1234'",
+        &["src/a.rs".into(), "src/b.rs".into()],
+    );
+    let first = app.system_block();
+    let texts: Vec<String> = first
+        .iter()
+        .filter(|p| !p.cacheable)
+        .map(|p| p.text.clone())
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("reverted work since your last turn")
+                && t.contains("2 file(s)")
+                && t.contains("src/a.rs")
+                && t.contains("undo to 'cafe1234'")),
+        "the revert must be named with its files and its target: {texts:?}"
+    );
+    assert!(
+        app.session.pending_undo_note.is_none(),
+        "arming is one-shot by construction"
+    );
+    let second = app.system_block();
+    let texts2: Vec<String> = second
+        .iter()
+        .filter(|p| !p.cacheable)
+        .map(|p| p.text.clone())
+        .collect();
+    assert!(
+        !texts2.iter().any(|t| t.contains("reverted work")),
+        "the note must not ride a second request: {texts2:?}"
+    );
+}

@@ -832,6 +832,18 @@ Steps marked done are settled — do not redo them, do not re-verify them. \
 Continue from the pending step, or report to the user if the settled work looks wrong. ({state})"
             )));
         }
+        // One-shot undo notice: the transcript still carries the writes that
+        // were rolled back, so the host says out loud what is no longer in the
+        // tree. Without it the model reads its own reverted diffs as current
+        // state and keeps building on files the user just took back.
+        if let Some(note) = self.session.pending_undo_note.take() {
+            self.session.save().ok();
+            parts.push(SystemPart::volatile(format!(
+                "The user reverted work since your last turn — {note}. Those bytes are \
+                 not in the tree: check a file before continuing over it, and do not \
+                 re-apply a reverted edit on your own."
+            )));
+        }
         let runtime = crate::prompts::runtime_context();
         if !runtime.is_empty() {
             parts.push(SystemPart::volatile(runtime));
@@ -4823,6 +4835,51 @@ Continue from the pending step, or report to the user if the settled work looks 
         Some(crate::agent::undo_guard::hold_restore())
     }
 
+    /// Tell the next request what was rolled back. The transcript still carries
+    /// the reverted writes, so without this line the model reads its own old
+    /// claims as the current state of the tree.
+    fn arm_undo_note(&mut self, what: &str, touched: &[String]) {
+        const NAMED: usize = 24;
+        let mut list = touched
+            .iter()
+            .take(NAMED)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        if let Some(extra) = touched.len().checked_sub(NAMED) {
+            list.push_str(&format!(", {extra} more"));
+        }
+        self.session.pending_undo_note = Some(format!(
+            "the user reverted {} file(s) by {what}: {list}",
+            touched.len()
+        ));
+    }
+
+    /// A restore that stopped mid-window. The files named in the report really
+    /// were reverted, so saying only "undo failed" would hide half the truth —
+    /// and the checkpoint stays, which lets another `/undo` finish the job.
+    fn report_partial_undo(
+        &mut self,
+        what: &str,
+        report: &crate::agent::checkpoints::RestoreReport,
+    ) {
+        let touched = report.touched();
+        self.arm_undo_note(what, &touched);
+        self.context_bootstrap_pending = true;
+        self.session.save().ok();
+        self.status(
+            &format!(
+                "undo stopped: {}; {} file(s) already reverted, {} left alone — the \
+                 checkpoint is kept, /undo again continues",
+                report.failed.clone().unwrap_or_default(),
+                touched.len(),
+                report.skipped.len(),
+            ),
+            StatusKind::Err,
+        );
+        self.dirty = true;
+    }
+
     fn undo(&mut self, n: usize) {
         let n = n.max(1);
         if self.session.checkpoints.is_empty() {
@@ -4863,12 +4920,13 @@ Continue from the pending step, or report to the user if the settled work looks 
         // is not a repository at all.
         let pre_images =
             crate::agent::journal::Journal::recorded_pre_images(&root, &undone).unwrap_or_default();
-        let have_blobs = pre_images.iter().any(|item| {
-            item.blob_before
-                .as_deref()
-                .is_some_and(|id| crate::agent::blobs::has(&root, id))
-        });
-        if !git_snapshots && !have_blobs {
+        // Layer 1 covers this window only when every item is either backed by a
+        // blob that is still there or is a pure creation with nothing to put
+        // back. Retention or a failed blob write can leave a window half
+        // covered; taking the blob path then reports the rest as "no stored
+        // pre-image" while the shadow snapshot could have restored all of them.
+        let covered = crate::agent::checkpoints::blobs_cover(&root, &pre_images);
+        if !git_snapshots && pre_images.is_empty() {
             self.status(
                 "nothing to undo from: no shadow snapshot and no stored pre-images",
                 StatusKind::Warn,
@@ -4882,7 +4940,11 @@ Continue from the pending step, or report to the user if the settled work looks 
             Some(guard) => guard,
             None => return,
         };
-        if !git_snapshots || (scoped && have_blobs) {
+        // Prefer the blob store when it covers the window: it reverts exactly
+        // the recorded writes, needs no repository, and cannot be invalidated by
+        // the user's own `git gc`. Without layer 2 it is the only option, so a
+        // half-covered window is still reverted as far as it reaches.
+        if !git_snapshots || (scoped && covered) {
             // Prefer the blob store when it covers the window: it reverts
             // exactly the recorded writes, needs no repository, and cannot be
             // invalidated by the user's own `git gc`.
@@ -4915,10 +4977,15 @@ Continue from the pending step, or report to the user if the settled work looks 
             &targets,
         ) {
             Ok(report) => {
+                if report.failed.is_some() {
+                    self.report_partial_undo(&format!("undo to '{label}'"), &report);
+                    return;
+                }
                 let touched = report.touched();
                 let reopened_steps =
                     reopen_undone_steps(&root, &self.session.id.to_string(), &touched, &sha);
                 self.session.checkpoints.truncate(idx);
+                self.arm_undo_note(&format!("undo to '{label}'"), &touched);
                 // The provider's copy of the conversation still contains the
                 // work that was just reverted, and a continuation reference
                 // would carry the model straight back to it. The next request
@@ -5016,7 +5083,12 @@ Continue from the pending step, or report to the user if the settled work looks 
 
         match crate::agent::checkpoints::restore_from_blobs(root, &revert.files) {
             Ok(report) => {
+                if report.failed.is_some() {
+                    self.report_partial_undo(&format!("undo of step {step}"), &report);
+                    return;
+                }
                 let touched = report.touched();
+                self.arm_undo_note(&format!("undo of step {step}"), &touched);
                 let mut reopened: Vec<String> = Vec::new();
                 // the same plan the revert was scoped to: reopening anything
                 // else would attach this session's undo to foreign work
@@ -5050,6 +5122,7 @@ Continue from the pending step, or report to the user if the settled work looks 
                 // The provider's copy of the conversation still contains the
                 // reverted work (§3.3, #50).
                 self.context_bootstrap_pending = true;
+                self.session.save().ok();
 
                 let mut note = format!("undo step {step}: {} file(s)", touched.len());
                 if !report.deleted.is_empty() {
@@ -5104,6 +5177,10 @@ Continue from the pending step, or report to the user if the settled work looks 
         };
         match crate::agent::checkpoints::restore_from_blobs(root, pre_images) {
             Ok(report) => {
+                if report.failed.is_some() {
+                    self.report_partial_undo(&format!("undo to '{label}'"), &report);
+                    return;
+                }
                 let touched = report.touched();
                 let sha = self
                     .session
@@ -5114,6 +5191,7 @@ Continue from the pending step, or report to the user if the settled work looks 
                 let reopened_steps =
                     reopen_undone_steps(root, &self.session.id.to_string(), &touched, &sha);
                 self.session.checkpoints.truncate(idx);
+                self.arm_undo_note(&format!("undo to '{label}'"), &touched);
                 self.context_bootstrap_pending = true;
                 self.session.save().ok();
 

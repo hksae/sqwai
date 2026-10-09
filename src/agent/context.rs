@@ -44,6 +44,19 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
             {
                 changed.push(bounded(path, 160));
             }
+            // An `/undo` takes back what it names: records arrive in sequence
+            // order, so a later write re-lists the path and the memo follows
+            // the tree instead of the session's whole history. Without this
+            // the anchor tells the model, exactly when it is re-grounded after
+            // a compaction, that reverted files still hold the agent's work.
+            if record.kind == "undo"
+                && let Some(files) = record.fields.get("files").and_then(|v| v.as_array())
+            {
+                for file in files.iter().filter_map(|v| v.as_str()) {
+                    let name = bounded(file, 160);
+                    changed.retain(|path: &String| *path != name);
+                }
+            }
             if record.kind == "tool_result"
                 && record
                     .fields
@@ -838,6 +851,47 @@ mod tests {
         // journal facts stay
         assert!(rendered.contains("files changed this session: src/main.rs"));
         assert!(rendered.contains("last verification: successful exec j#2"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// An `/undo` takes the claim back. The anchor is a memo about the tree, not
+    /// a ledger of everything the session ever touched — and it is read exactly
+    /// when the model is re-grounded, so a stale "files changed" line is the
+    /// worst possible place to keep claiming reverted bytes.
+    #[test]
+    fn anchor_drops_files_that_a_later_undo_reverted() {
+        let root = temp_root("anchor-undo");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        let mut journal = crate::agent::journal::Journal::open(&root, "s").unwrap();
+        for path in ["src/a.rs", "src/b.rs"] {
+            journal
+                .append("file_diff", serde_json::json!({"path": path}))
+                .unwrap();
+        }
+        journal
+            .append_undo("deadbeef", &["src/a.rs".to_string()], &[])
+            .unwrap();
+
+        let rendered = anchor(&root, "s");
+        assert!(
+            rendered.contains("files changed this session: src/b.rs"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("src/a.rs"),
+            "the reverted file must drop out: {rendered}"
+        );
+
+        // writing it again after the revert counts, exactly like the live tree
+        journal
+            .append("file_diff", serde_json::json!({"path": "src/a.rs"}))
+            .unwrap();
+        let rendered = anchor(&root, "s");
+        assert!(
+            rendered.contains("files changed this session: src/a.rs · src/b.rs"),
+            "{rendered}"
+        );
         std::fs::remove_dir_all(root).ok();
     }
 

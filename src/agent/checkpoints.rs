@@ -18,7 +18,7 @@
 //! Every function takes the project root explicitly — the agent works on the
 //! project directory, never on whatever cwd the process happens to have.
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -234,6 +234,11 @@ pub struct RestoreReport {
     /// record from before the blob store, or a store that could not be
     /// written. Reported rather than guessed at.
     pub no_pre_image: Vec<String>,
+    /// The loop stopped here: everything listed above was already applied, and
+    /// the caller must say so instead of reporting a clean failure. Restore is
+    /// not atomic — a read-only blob store or a locked file on Windows is
+    /// enough to hit this mid-window.
+    pub failed: Option<String>,
 }
 
 impl RestoreReport {
@@ -317,29 +322,73 @@ pub fn restore_from_blobs(
                 report.no_pre_image.push(item.path.clone());
             }
             Some(id) => {
-                let content = crate::agent::blobs::get(root, id)
-                    .with_context(|| format!("restoring {}", item.path))?;
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .with_context(|| format!("recreating {}", parent.display()))?;
+                let Ok(content) = crate::agent::blobs::get(root, id) else {
+                    report.failed = Some(format!("{}: pre-image unreadable", item.path));
+                    break;
+                };
+                if let Some(parent) = path.parent()
+                    && let Err(e) = std::fs::create_dir_all(parent)
+                {
+                    report.failed = Some(format!("{}: {e}", parent.display()));
+                    break;
                 }
-                std::fs::write(&path, &content)
-                    .with_context(|| format!("writing {}", path.display()))?;
+                if let Err(e) = std::fs::write(&path, &content) {
+                    report.failed = Some(format!("{}: {e}", path.display()));
+                    break;
+                }
                 report.restored.push(item.path.clone());
             }
             None => {
                 // created inside the window: reverting means it should not exist
                 match std::fs::remove_file(&path) {
-                    Ok(()) => report.deleted.push(item.path.clone()),
+                    Ok(()) => {
+                        report.deleted.push(item.path.clone());
+                        prune_empty_dirs(root, &path);
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     Err(e) => {
-                        return Err(e).with_context(|| format!("removing {}", path.display()));
+                        report.failed = Some(format!("{}: {e}", path.display()));
+                        break;
                     }
                 }
             }
         }
     }
     Ok(report)
+}
+
+/// Does layer 1 hold what this whole window needs? An item is covered when its
+/// pre-image blob is still in the store, or when the file did not exist before
+/// the window at all (a creation — reverting it is a delete, nothing to read
+/// back). Retention or a failed blob write can leave a window half covered, and
+/// taking the blob path then reports the rest as "no stored pre-image" while the
+/// shadow snapshot could have restored every one of them.
+pub fn blobs_cover(root: &Path, pre_images: &[crate::agent::journal::PreImage]) -> bool {
+    !pre_images.is_empty()
+        && pre_images
+            .iter()
+            .all(|item| match item.blob_before.as_deref() {
+                Some(id) => crate::agent::blobs::has(root, id),
+                None => !item.existed_before,
+            })
+}
+
+/// Remove the directories an undo just emptied, walking up from `path` and
+/// never past the project root. A revert that deletes `src/foo/bar.rs` should
+/// not leave `src/foo/` standing: the agent created it, so the state to return
+/// to has no such directory. Anything non-empty, already gone, or outside the
+/// root is left alone — this is cleanup, not a second sweep.
+fn prune_empty_dirs(root: &Path, path: &Path) {
+    let mut dir = path.parent();
+    while let Some(current) = dir {
+        if current == root || !current.starts_with(root) {
+            break;
+        }
+        if std::fs::remove_dir(current).is_err() {
+            break;
+        }
+        dir = current.parent();
+    }
 }
 
 /// Restore exactly `targets` from a snapshot, and nothing else.
@@ -391,24 +440,35 @@ pub fn restore_paths_in(
             continue;
         }
 
-        match shadow.show(sha, &target.path)? {
-            Some(content) => {
-                if let Some(parent) = absolute.parent() {
-                    std::fs::create_dir_all(parent)
-                        .with_context(|| format!("creating {}", parent.display()))?;
+        match shadow.show(sha, &target.path) {
+            Ok(Some(content)) => {
+                if let Some(parent) = absolute.parent()
+                    && let Err(e) = std::fs::create_dir_all(parent)
+                {
+                    report.failed = Some(format!("{}: {e}", parent.display()));
+                    break;
                 }
                 // bytes as recorded, no git filters (§2.5: core.autocrlf = false)
-                std::fs::write(&absolute, &content)
-                    .with_context(|| format!("restoring {}", target.path))?;
+                if let Err(e) = std::fs::write(&absolute, &content) {
+                    report.failed = Some(format!("{}: {e}", absolute.display()));
+                    break;
+                }
                 report.restored.push(target.path.clone());
             }
-            None => {
+            Ok(None) => {
                 // not in the snapshot: it appeared after, so undo removes it
                 if absolute.exists() {
-                    std::fs::remove_file(&absolute)
-                        .with_context(|| format!("removing {}", target.path))?;
+                    if let Err(e) = std::fs::remove_file(&absolute) {
+                        report.failed = Some(format!("{}: {e}", absolute.display()));
+                        break;
+                    }
+                    prune_empty_dirs(root, &absolute);
                 }
                 report.deleted.push(target.path.clone());
+            }
+            Err(e) => {
+                report.failed = Some(format!("{}: {e:#}", target.path));
+                break;
             }
         }
     }
@@ -732,26 +792,110 @@ mod tests {
     }
 
     /// A blob the store never got cannot be silently treated as "nothing to
-    /// do": the file would stay modified while undo reported success.
+    /// do": the file would stay modified while undo reported success. It also
+    /// cannot be reported as a clean failure — the items before it were already
+    /// put back, and the user has to know which files the tree lost.
     #[test]
-    fn a_missing_blob_fails_loudly() {
+    fn a_missing_blob_stops_the_restore_and_reports_what_already_happened() {
         use crate::agent::journal::PreImage;
         let dir = tempfile::Builder::new()
             .prefix("sqwai-blob-missing")
             .tempdir()
             .unwrap();
-        let err = restore_from_blobs(
-            dir.path(),
+        let root = dir.path();
+        fs::create_dir_all(root.join("made")).unwrap();
+        fs::write(root.join("made/new.rs"), b"agent created this").unwrap();
+
+        let report = restore_from_blobs(
+            root,
+            &[
+                PreImage {
+                    path: "made/new.rs".into(),
+                    blob_before: None,
+                    existed_before: false,
+                    agent_hash: None,
+                },
+                PreImage {
+                    path: "gone.rs".into(),
+                    blob_before: Some("blake3:0000".into()),
+                    existed_before: true,
+                    agent_hash: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.deleted,
+            vec!["made/new.rs".to_string()],
+            "the work before the failure must be reported"
+        );
+        let failure = report.failed.expect("the missing blob stops the loop");
+        assert!(failure.contains("gone.rs"), "{failure}");
+    }
+
+    /// The layer choice, nailed down: one surviving blob must not be read as
+    /// "layer 1 covers this window", or the other files get reported as
+    /// unrevertible while the shadow snapshot had every one of them.
+    #[test]
+    fn blobs_cover_requires_the_whole_window_not_one_lucky_file() {
+        use crate::agent::journal::PreImage;
+        let dir = tempfile::Builder::new()
+            .prefix("sqwai-cover")
+            .tempdir()
+            .unwrap();
+        let root = dir.path();
+        let stored = crate::agent::blobs::put(root, b"old bytes").unwrap();
+        let item = |path: &str, blob: Option<String>, existed: bool| PreImage {
+            path: path.into(),
+            blob_before: blob,
+            existed_before: existed,
+            agent_hash: None,
+        };
+        let creation = item("new.rs", None, false);
+        let backed = item("a.rs", Some(stored.clone()), true);
+        let purged = item("b.rs", Some("blake3:absent".into()), true);
+        let legacy = item("c.rs", None, true);
+
+        assert!(
+            blobs_cover(root, &[creation.clone(), backed.clone()]),
+            "a creation needs no blob"
+        );
+        assert!(!blobs_cover(root, &[backed.clone(), purged]));
+        assert!(!blobs_cover(root, &[backed.clone(), legacy]));
+        assert!(!blobs_cover(root, &[]), "an empty window covers nothing");
+    }
+
+    /// Reverting a created file must not leave the directories the agent made
+    /// for it: the state to return to has no `src/foo/` either.
+    #[test]
+    fn undo_removes_the_directories_it_emptied() {
+        use crate::agent::journal::PreImage;
+        let dir = tempfile::Builder::new()
+            .prefix("sqwai-blob-dirs")
+            .tempdir()
+            .unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("deep/inner")).unwrap();
+        fs::write(root.join("deep/inner/new.rs"), b"created by the agent").unwrap();
+        // a neighbour that must survive: pruning stops at a non-empty directory
+        fs::write(root.join("deep/keep.txt"), b"mine").unwrap();
+
+        let report = restore_from_blobs(
+            root,
             &[PreImage {
-                path: "gone.rs".into(),
-                blob_before: Some("blake3:0000".into()),
-                existed_before: true,
+                path: "deep/inner/new.rs".into(),
+                blob_before: None,
+                existed_before: false,
                 agent_hash: None,
             }],
         )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("restoring gone.rs"), "{err}");
+        .unwrap();
+
+        assert_eq!(report.deleted, vec!["deep/inner/new.rs".to_string()]);
+        assert!(!root.join("deep/inner").exists(), "emptied dir must go");
+        assert!(root.join("deep").exists(), "a non-empty parent stays");
+        assert!(root.join("deep/keep.txt").exists());
     }
 
     /// Run git against the fixture repository in an isolated environment.
