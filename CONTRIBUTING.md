@@ -2,12 +2,12 @@
 
 Thank you for your interest in contributing to sqwai!
 
-## Read the Decisions First
+## Read the Design First
 
-sqwai is built around memory and visibility on long tasks. Before proposing architectural changes or new features, please read [Changes.md](Changes.md):
-- §0 is the mechanism test (prison vs skeleton) every change must pass.
-- §13.1 is the archive of rejected decisions — check your idea there first.
-- When a decision changes, record it in `Changes.md` with its reason.
+sqwai is built around memory and visibility on long tasks. Before proposing architectural changes or new features, please read [DESIGN.md](DESIGN.md):
+- §0 is the mechanism test (skeleton vs prison) every change must pass.
+- §8 is the list of what is excluded by policy — check your idea there first.
+- When a decision changes, put its reason in the commit or PR description. The running decision journal is kept out of tree by the maintainer.
 
 ## Core Invariants
 

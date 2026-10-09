@@ -6,9 +6,8 @@ Written in Rust. Single binary. Works with Anthropic, OpenAI, OpenAI-compatible
 endpoints, and local models.
 
 > **Status.** Active. The design lives in [DESIGN.md](DESIGN.md), rewritten from
-> scratch after the simplification pass; decisions and their reasons stay in
-> [Changes.md](Changes.md), where the retired 2026-10-06 DESIGN.md was replaced
-> rather than amended.
+> scratch after the simplification pass; the reasoning behind each choice is in
+> the commit history, and the running decision journal is kept out of tree.
 
 ## Quick start
 
@@ -41,7 +40,7 @@ Keys resolve from `<PROVIDER>_API_KEY` unless the config says otherwise.
   append-only event log of what actually happened.
 
 How each of these works is in [DESIGN.md](DESIGN.md); why it works that way, and
-what was cut to get here, is in [Changes.md](Changes.md).
+what was cut to get here, is in the history of the commits that did it.
 
 ## Project layout
 

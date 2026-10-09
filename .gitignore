@@ -38,5 +38,8 @@ tui.md
 # Local-only implementation plan (never commit)
 /IMPL_PLAN.local.md
 
+# Decision journal: local working doc, same as the plan above
+/Changes.md
+
 # Local research notes
 /notes/

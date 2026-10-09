@@ -2,9 +2,9 @@
 
 Status: this document describes the design, not the state of the build. It says
 what the host owns and what each mechanism guarantees. Decisions, their history
-and their refusals live in `Changes.md`; behavior lives in the code. When code
-and this document disagree, the document is wrong until deliberately changed,
-and the fix happens in the same commit as the code.
+and their refusals are recorded in a decision journal kept out of tree; behavior
+lives in the code. When code and this document disagree, the document is wrong
+until deliberately changed, and the fix happens in the same commit as the code.
 
 Reading order: §0 → §1 → §2, then reference.
 
@@ -244,7 +244,8 @@ Stated plainly, because a document that hides them makes worse contributors.
 
 ## 8. Excluded by policy
 
-Not to be re-proposed, with the reasoning kept in `Changes.md` §13:
+Not to be re-proposed. The list itself is the contract here; the reasoning
+behind each entry is in the decision journal:
 
 - Multi-agent orchestration beyond the current `subagent` model — it dissolves
   ownership of the plan.
