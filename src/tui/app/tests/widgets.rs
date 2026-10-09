@@ -406,8 +406,8 @@ fn undo_refuses_an_argument_that_is_not_a_count() {
 /// `/undo step N` reverts through layer 1, so it must reach that path
 /// rather than the checkpoint one — with no journal records for the step
 /// there is nothing to put back, and saying so is the correct answer.
-/// Runs hermetic in a temp dir: the unscoped fallback scans every journal
-/// under the root, so the repo root would pick up live agent sessions.
+/// Runs hermetic in a temp dir: the scan walks every journal under the root,
+/// so the repo root would pick up live agent sessions.
 #[test]
 fn undo_step_reports_a_step_with_no_recorded_writes() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
@@ -417,6 +417,32 @@ fn undo_step_reports_a_step_with_no_recorded_writes() {
         .push(("deadbeef".into(), "write src/a.rs".into()));
 
     let dir = tempfile::tempdir().unwrap();
+    // the step belongs to a plan, so the command needs one to scope by
+    let mut active = crate::plan::create(
+        "revert one step".into(),
+        Vec::new(),
+        vec!["note".into()],
+        vec![crate::plan::NewStep {
+            title: "the only step".into(),
+        }],
+        20_000,
+        &crate::plan::Limits::default(),
+    )
+    .unwrap();
+    active.sessions = vec![app.session.id.to_string()];
+    crate::plan::store(dir.path(), &active).unwrap();
+    crate::plan::apply(
+        &mut active,
+        crate::plan::Op::Start {
+            id: "1".into(),
+            confirm: None,
+        },
+        &crate::plan::Limits::default(),
+        None,
+    )
+    .unwrap();
+    crate::plan::store(dir.path(), &active).unwrap();
+
     app.undo_step_in(dir.path(), "3");
     let status = app
         .toast
@@ -431,6 +457,33 @@ fn undo_step_reports_a_step_with_no_recorded_writes() {
         app.session.checkpoints.len(),
         1,
         "a per-step revert must not touch the checkpoint stack"
+    );
+}
+
+/// Step numbers restart per plan, so without one the host cannot say which
+/// step is meant — and cannot reopen it, which would leave the tree reverted
+/// while the plan still claimed the work. Refusing is the answer.
+#[test]
+fn undo_step_refuses_without_an_active_plan() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    let dir = tempfile::tempdir().unwrap();
+
+    app.undo_step_in(dir.path(), "3");
+
+    let status = app
+        .toast
+        .as_ref()
+        .map(|t| t.text.clone())
+        .unwrap_or_default();
+    assert!(
+        status.contains("needs an active plan") && status.contains("/undo <n>"),
+        "the refusal must name the alternative: {status:?}"
+    );
+    assert!(
+        !dir.path().join(".sqwai").exists(),
+        "a refusal touches nothing: {:?}",
+        dir.path()
     );
 }
 

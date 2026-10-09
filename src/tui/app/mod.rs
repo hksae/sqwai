@@ -5037,31 +5037,39 @@ Continue from the pending step, or report to the user if the settled work looks 
     }
 
     /// `undo_step` against an explicit root. Production passes the project
-    /// root; tests pass a temp dir — the unscoped fallback scans every
-    /// journal under the root, so running this against the repo while an
-    /// agent session is active reverts (or deletes!) that session's live
-    /// files. Hermetic by construction, never ambient.
+    /// root; tests pass a temp dir — the scan walks every journal under the
+    /// root, so running it against the repo while an agent session is active
+    /// could revert (or delete!) that session's live files. Hermetic by
+    /// construction, never ambient.
     fn undo_step_in(&mut self, root: &std::path::Path, step: &str) {
-        // resolve the session's own plan first: step numbers restart per
-        // plan, so the revert must be scoped to this plan, not scanned
-        // project-wide (no plan → the old unscoped scan, nothing better)
-        let plan_id =
+        // Step numbers restart per plan, so "3" names nothing without one — and
+        // the reopen half of this command cannot run at all, which would leave
+        // the tree reverted while the plan still says the step is done. Refuse
+        // rather than scan the project for a number that happens to match.
+        let Some(plan_id) =
             crate::plan::open_active_for_session(root, Some(&self.session.id.to_string()))
                 .ok()
                 .flatten()
-                .map(|plan| plan.id);
-        // no plan to scope to → the old unscoped scan (nothing better exists)
-        let revert = match &plan_id {
-            Some(pid) => crate::agent::journal::Journal::step_pre_images_in(root, Some(pid), step),
-            None => crate::agent::journal::Journal::step_pre_images(root, step),
+                .map(|plan| plan.id)
+        else {
+            self.status(
+                &format!(
+                    "/undo step {step} needs an active plan: without one the host cannot tell \
+                     whose step {step} this is, nor reopen it. /undo <n> rolls back the last \
+                     checkpoints instead."
+                ),
+                StatusKind::Warn,
+            );
+            return;
         };
-        let revert = match revert {
-            Ok(revert) => revert,
-            Err(e) => {
-                self.status(&format!("undo step {step}: {e:#}"), StatusKind::Err);
-                return;
-            }
-        };
+        let revert =
+            match crate::agent::journal::Journal::step_pre_images_in(root, Some(&plan_id), step) {
+                Ok(revert) => revert,
+                Err(e) => {
+                    self.status(&format!("undo step {step}: {e:#}"), StatusKind::Err);
+                    return;
+                }
+            };
         if revert.files.is_empty() {
             let note = if revert.written_since.is_empty() {
                 format!("undo step {step}: this step recorded no file writes")
@@ -5092,8 +5100,7 @@ Continue from the pending step, or report to the user if the settled work looks 
                 let mut reopened: Vec<String> = Vec::new();
                 // the same plan the revert was scoped to: reopening anything
                 // else would attach this session's undo to foreign work
-                if let Some(pid) = &plan_id
-                    && let Ok(mut active) = crate::plan::open(root, pid)
+                if let Ok(mut active) = crate::plan::open(root, &plan_id)
                     && crate::plan::reopen_for_undo(
                         &mut active,
                         step,

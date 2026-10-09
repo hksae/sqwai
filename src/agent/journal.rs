@@ -644,21 +644,20 @@ impl Journal {
     /// any other steps since (verified via the journal's `file_diff` chain)"*.
     /// That proviso is the whole difficulty: a file the step wrote and a later
     /// step then rewrote cannot be reverted in isolation, because putting the
-    /// old bytes back would silently undo the later step as well.
+    /// old bytes back would silently undo the later step as well. So the result
+    /// carries the revertible pre-images and, separately, the paths a later step
+    /// has since written, so the caller can refuse and say which.
     ///
-    /// Returns the revertible pre-images and, separately, the paths a later
-    /// step has since written, so the caller can refuse and say which.
-    pub fn step_pre_images(root: &Path, step: &str) -> Result<StepRevert> {
-        Self::step_pre_images_in(root, None, step)
-    }
-
-    /// Pre-images for one plan step, scoped to one plan. Step numbers restart
-    /// per plan ("1" exists in every plan), so the unscoped scan merges
-    /// same-numbered steps of every plan in the project — undoing one step
-    /// could put back another plan's bytes. Records stamped before plan
-    /// attribution existed (`plan: None`) still count: they cannot be
-    /// attributed anywhere else. `plan: None` keeps the old unscoped scan
-    /// for callers that resolved no plan.
+    /// The scan is scoped to one plan, because step numbers restart per plan
+    /// ("1" exists in every plan) and an unscoped scan merges same-numbered
+    /// steps of every plan in the project — undoing one step could put back
+    /// another plan's bytes. Records stamped before plan attribution existed
+    /// (`plan: None`) still count: they cannot be attributed anywhere else.
+    ///
+    /// `plan: None` keeps that unscoped scan. It is a query, not a command: the
+    /// only thing allowed to run it is a test fixture. `/undo step` refuses
+    /// without a plan, because a revert it cannot attribute is a revert it
+    /// cannot reopen.
     pub fn step_pre_images_in(root: &Path, plan: Option<&str>, step: &str) -> Result<StepRevert> {
         let records = Self::records(root)?;
         let in_scope = |record: &Record| {
@@ -1561,7 +1560,7 @@ mod tests {
             )
             .unwrap();
 
-        let revert = Journal::step_pre_images(&root, "1").unwrap();
+        let revert = Journal::step_pre_images_in(&root, None, "1").unwrap();
         assert_eq!(
             revert.written_since,
             vec!["src/a.rs".to_string()],
@@ -1580,7 +1579,7 @@ mod tests {
         );
 
         // and step 2 itself, being the latest writer, reverts freely
-        let revert = Journal::step_pre_images(&root, "2").unwrap();
+        let revert = Journal::step_pre_images_in(&root, None, "2").unwrap();
         assert!(revert.written_since.is_empty());
         assert_eq!(
             revert.files[0].blob_before.as_deref(),
@@ -1681,12 +1680,12 @@ mod tests {
             )
             .unwrap();
 
-        let revert = Journal::step_pre_images(&root, "7").unwrap();
+        let revert = Journal::step_pre_images_in(&root, None, "7").unwrap();
         assert_eq!(revert.files.len(), 1);
         assert_eq!(revert.files[0].path, "mine.rs");
 
         assert!(
-            Journal::step_pre_images(&root, "9")
+            Journal::step_pre_images_in(&root, None, "9")
                 .unwrap()
                 .files
                 .is_empty(),
