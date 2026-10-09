@@ -986,7 +986,7 @@ fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
         }
     }
     // Headings: h1 wears the brand gradient (no underline anymore — the
-    // ramp carries the level), h2 muted coral, h3 light coral, h4 white,
+    // ramp carries the level), h2 muted berry, h3 light berry, h4 white,
     // h5-h6 dim italic. h3/h4+ deliberately do not rely on italic alone: terminals
     // without italic support (conhost) would render them as plain text.
     // The `#` markers are syntax, not content: they are never printed,
@@ -1000,11 +1000,11 @@ fn try_heading(s: &str) -> Option<Vec<Span<'static>>> {
     let style = match level {
         2 => crate::tui::art::h2_style(),
         3 => {
-            // light coral: headings stay one family (gradient, muted,
+            // light berry: headings stay one family (gradient, muted,
             // light), brightness falling with depth
             if crate::tui::shimmer::has_truecolor() {
                 Style::new()
-                    .fg(Color::Rgb(255, 180, 130))
+                    .fg(Color::Rgb(230, 99, 140))
                     .add_modifier(Modifier::BOLD | Modifier::ITALIC)
             } else {
                 Style::new()

@@ -54,9 +54,12 @@ fn tool_rows_read_as_flat_one_liners_with_live_tail() {
         !text.contains("calls"),
         "no aggregate in a flat transcript: {text}"
     );
-    // the live status lives above the input, never in the transcript
-    let frame = render_to_string(&mut app, 100, 30);
-    assert!(frame.contains("Working"), "status row works: {frame}");
+    // the live status row is the tail of the transcript itself, not a strip
+    // above the input
+    assert!(
+        text.contains("working · esc to interrupt"),
+        "the working row tails the transcript: {text}"
+    );
     // clicking the done row expands its output instead of folding anything
     let row = app
         .cache_lines
@@ -737,50 +740,55 @@ fn live_turn_shows_tool_rows_and_working_tail() {
     assert!(text.contains("read"), "live work is visible: {text}");
     assert!(!text.contains("calls"), "no aggregate: {text}");
     // the live status lives in the row above the input, never in the
-    // transcript: full-frame render carries it while streaming
-    let frame = render_to_string(&mut app, 100, 30);
-    assert!(frame.contains("Working"), "status row works: {frame}");
+    // transcript: the working row sits under the live work it describes
+    assert!(
+        text.contains("working · esc to interrupt"),
+        "working row in the transcript: {text}"
+    );
 }
 
 #[test]
 fn a_turn_with_nothing_visible_yet_still_shows_the_working_line() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.streaming = true;
+    app.turn_started = Some(std::time::Instant::now());
     app.push_segment(Segment::User("привет".into()));
     // no thought, no call, no revealed text: the model is producing its first
     // token and the screen must not read as a hung app
     app.rebuild_cache(80);
     let text = rendered(&app);
     assert!(
-        !text.contains("Working"),
-        "transcript carries no status row: {text}"
+        text.contains("working · 0s · esc to interrupt"),
+        "the transcript itself says what is happening: {text}"
     );
-    // the status row above the input does: full-frame render while streaming
-    let frame = render_to_string(&mut app, 100, 30);
-    assert!(frame.contains("Working"), "status row works: {frame}");
     // an empty live assistant row changes nothing: still waiting
     app.push_segment(Segment::Assistant {
         text: String::new(),
         live: true,
     });
     app.rebuild_cache(80);
-    let text = rendered(&app);
     assert!(
-        !text.contains("Working"),
-        "still no status in the transcript: {text}"
+        rendered(&app).contains("esc to interrupt"),
+        "still one working row: {}",
+        rendered(&app)
     );
-    // once the turn ends without any work, no status row survives
+    // once the turn ends without any work, no working row survives
     app.streaming = false;
     app.rebuild_cache(80);
     assert!(
-        !rendered(&app).contains("Working"),
+        !rendered(&app).contains("working"),
         "a finished turn leaves no working line: {}",
         rendered(&app)
     );
+    // and the row exists exactly once on screen: the strip above the input is
+    // notices only, it no longer repeats the status
+    app.streaming = true;
+    app.rebuild_cache(80);
     let frame = render_to_string(&mut app, 100, 30);
-    assert!(
-        !frame.contains("Working"),
-        "status row gone with the turn: {frame}"
+    assert_eq!(
+        frame.matches("esc to interrupt").count(),
+        1,
+        "one working row per frame: {frame}"
     );
 }
 

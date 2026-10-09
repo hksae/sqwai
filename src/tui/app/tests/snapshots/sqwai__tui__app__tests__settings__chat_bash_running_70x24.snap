@@ -7,6 +7,7 @@ expression: s
 
  ◜ bash ({"cmd":"cargo test"})
 
+ ⠁ working · esc to interrupt
 
 
 
@@ -23,6 +24,5 @@ expression: s
 
 
 
-Working
 ›
  ACT                                               0% (0) m off [CWD]

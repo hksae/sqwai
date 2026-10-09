@@ -55,17 +55,18 @@ impl Theme {
     pub const fn META() -> Color {
         Color::Gray
     }
-    /// House accent: warm orange from the brand gradient's start
-    /// (`#ff9a5c`, xterm 209). Blue vibrated on black terminals and fought
-    /// the coral identity everywhere; links keep their own blue.
+    /// House accent: xterm 168 (`#d75f87`), the cube color nearest the brand
+    /// ramp's loud end (`#de2f66`) and the same index the art falls back to
+    /// without truecolor. Blue vibrated on black terminals and fought the
+    /// brand identity everywhere; links keep their own blue.
     /// Indexed, not RGB — renders on terminals without truecolor.
     #[allow(non_snake_case)]
     pub const fn ACCENT() -> Color {
-        Color::Indexed(209)
+        Color::Indexed(168)
     }
     #[allow(non_snake_case)]
     pub const fn ACCENT_SOFT() -> Color {
-        Color::Indexed(209)
+        Color::Indexed(168)
     }
     #[allow(non_snake_case)]
     #[allow(dead_code)]
@@ -255,7 +256,7 @@ impl Theme {
     /// Every color the UI uses, in one list for `/test colors`: name plus
     /// the style as used. New colors land here or they do not land at
     /// all — the gallery is how duplicates get spotted (ACCENT and
-    /// ACCENT_SOFT are already the same cyan; BG/SURFACE/FG all Reset).
+    /// ACCENT_SOFT are already the same index; BG/SURFACE/FG all Reset).
     pub fn palette() -> Vec<(&'static str, Style)> {
         let mut out = vec![
             ("FG", Style::new().fg(Self::FG())),

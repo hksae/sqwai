@@ -1,3 +1,4 @@
+pub mod anim;
 pub mod app;
 pub mod art;
 mod event_log;

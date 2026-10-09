@@ -44,6 +44,46 @@ fn status_bar_fits_and_keeps_click_targets_inside_a_wide_directory() {
     }
 }
 
+/// The row above the composer is one slot: the queue drops into it when there
+/// is no notice, so a queued message never leaves a hole over the input.
+#[test]
+fn queue_moves_into_the_free_slot_above_the_input() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.push_segment(Segment::User("go".into()));
+    app.pending_queue.push("later message".into());
+    let rows: Vec<String> = render_to_string(&mut app, 60, 12)
+        .lines()
+        .map(String::from)
+        .collect();
+    let input = rows
+        .iter()
+        .rposition(|l| l.trim_start().starts_with('›'))
+        .expect("composer row");
+    assert!(
+        rows[input - 1].contains("later message"),
+        "queue sits right above the composer: {rows:?}"
+    );
+    // with a notice the slot is taken: the queue keeps its own row above it
+    app.status("network timeout 408", StatusKind::Err);
+    let rows: Vec<String> = render_to_string(&mut app, 60, 12)
+        .lines()
+        .map(String::from)
+        .collect();
+    let input = rows
+        .iter()
+        .rposition(|l| l.trim_start().starts_with('›'))
+        .expect("composer row");
+    assert!(
+        rows[input - 1].contains("network timeout"),
+        "notice owns the slot: {rows:?}"
+    );
+    assert!(
+        rows[input - 2].contains("later message"),
+        "queue moves up one: {rows:?}"
+    );
+}
+
 #[test]
 fn notice_row_fits_width_next_to_queue() {
     #[allow(clippy::type_complexity)]
@@ -153,37 +193,40 @@ fn running_tool_name_shimmers_like_activity_header() {
 }
 
 #[test]
-fn working_tail_line_shimmers_coral() {
-    use super::super::view::working_tail_line;
-    // the status row above the input while streaming: the bare word with
-    // the classic shimmer. No aggregate, no folding, no click target.
-    let live = working_tail_line(crate::tui::shimmer::SHIMMER_PERIOD_TICKS / 4);
-    let live_text: String = live.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(live_text.contains("Working"), "{live_text:?}");
-    assert!(!live_text.contains("calls"), "no aggregate: {live_text:?}");
-    // the 7 "Working" letters carry more than one brightness step
-    let word: String = live
-        .spans
-        .iter()
-        .take(7)
-        .map(|s| s.content.as_ref())
-        .collect();
-    assert_eq!(word, "Working");
-    let styles: std::collections::HashSet<String> = live
-        .spans
-        .iter()
-        .take(7)
-        .map(|s| format!("{:?}", s.style))
-        .collect();
-    assert!(
-        styles.len() > 1,
-        "tail must shade the word differently: {styles:?}"
+fn working_line_names_phase_and_hints_esc() {
+    use super::super::view::working_line;
+    // the live tail row of the transcript: what is happening, how long, how to
+    // stop. No aggregate, no click target, and the verb is one span in one
+    // static color — the shimmer is gone on purpose, only the marker moves.
+    let work = working_line(false, Some(27), 0);
+    let work_text: String = work.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(
+        work_text,
+        format!(
+            "{} working · 27s · esc to interrupt",
+            crate::tui::anim::working_mark(0)
+        )
+    );
+    assert_eq!(
+        work.spans.iter().filter(|s| s.content == "working").count(),
+        1,
+        "the verb must not split into brightness steps: {work:?}"
+    );
+    // a turn that has not started its clock yet still says how to stop it
+    let think = working_line(true, None, 1);
+    let think_text: String = think.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(
+        think_text,
+        format!(
+            "{} thinking · esc to interrupt",
+            crate::tui::anim::working_mark(1)
+        )
     );
 }
 
 /// The bottom spinner stays removed: while streaming the status bar must show
-/// no spinner glyph anywhere. (The `/test animations` showcase that was going
-/// to supply a replacement is cut — the running signal is the Working shimmer.)
+/// no spinner glyph anywhere. The running signal is the working row at the tail
+/// of the transcript, and `/test anim` is where its marker is picked.
 #[test]
 fn no_bottom_spinner_while_streaming() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
@@ -470,11 +513,16 @@ async fn an_auth_failure_ends_the_turn_instead_of_retrying() {
         !app.streaming,
         "an auth failure must end the turn, not retry it"
     );
-    let reported = app
-        .toast
-        .as_ref()
-        .map(|t| t.text.clone())
-        .unwrap_or_default();
+    // the turn note is the chat's last row now, not a toast over it
+    let reported: String = app
+        .segments
+        .iter()
+        .filter_map(|s| match s {
+            Segment::Status { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
     assert!(
         reported.contains("API key") || reported.contains("401"),
         "the user should be told what to fix: {reported:?}"

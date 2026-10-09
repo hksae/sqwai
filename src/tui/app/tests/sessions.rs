@@ -162,14 +162,15 @@ fn restored_session_rebuilds_thought_rows_in_order() {
     app.session.messages = vec![
         Message::new(Role::User, "inspect"),
         Message::new(Role::Assistant, "")
-            .with_thinking("weighing the options".into())
+            .with_thinking("weighing the options".into(), 4_200)
             .with_tool_calls(vec![ToolCallReq::new(
                 "call-1",
                 "read",
                 serde_json::json!({}),
             )]),
         Message::tool_result("call-1", "file contents", false),
-        Message::new(Role::Assistant, "done").with_thinking("one more consideration".into()),
+        // a save from before durations existed: text, no clock
+        Message::new(Role::Assistant, "done").with_thinking("one more consideration".into(), 0),
     ];
     app.clear_segments();
     app.load_history_segments();
@@ -203,13 +204,31 @@ fn restored_session_rebuilds_thought_rows_in_order() {
         vec!["weighing the options", "one more consideration"]
     );
 
-    // a restored row carries no clock; restored thoughts read as bare
-    // `thought` rows, the tool row and answer flat with no aggregate
+    // the clock a save carried comes back with the row; a save that never
+    // measured one stays bare instead of inventing a number
+    let clocks: Vec<u64> = app
+        .segments
+        .iter()
+        .filter_map(|s| match s {
+            Segment::Thinking { duration_ms, .. } => Some(*duration_ms),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(clocks, vec![4_200, 0], "{:?}", app.segments);
+
     app.rebuild_cache(80);
     let text = rendered(&app);
     assert!(text.contains("read"), "tool visible: {text}");
     assert!(text.contains("done"), "answer visible: {text}");
-    assert!(text.contains("thought"), "thought rows visible: {text}");
+    assert!(
+        text.contains("thought · 4s"),
+        "the saved duration reappears: {text}"
+    );
+    assert_eq!(
+        text.lines().filter(|l| l.trim() == "thought").count(),
+        1,
+        "the clockless row renders bare: {text}"
+    );
     assert!(!text.contains("calls"), "no aggregate: {text}");
 }
 
@@ -327,7 +346,8 @@ fn stopped_and_failed_turns_append_durable_notes() {
         [crate::session::TurnNote { text, is_error: true, .. }]
             if text == "error: provider offline"
     ));
-    // durable notes render live in the chat AND toast — neither alone
+    // durable notes render in the chat only: the row sits at the tail of the
+    // transcript, so a toast would repeat the same word under it
     for (app, text, kind) in [
         (&stopped, "stopped", StatusKind::Info),
         (&failed, "error: provider offline", StatusKind::Err),
@@ -340,8 +360,9 @@ fn stopped_and_failed_turns_append_durable_notes() {
             "live {text:?} segment missing"
         );
         assert!(
-            app.toast.as_ref().is_some_and(|t| t.text == text),
-            "live {text:?} toast missing"
+            !app.toast.as_ref().is_some_and(|t| t.text == text),
+            "{text:?} must not also toast: {:?}",
+            app.toast
         );
     }
 }
@@ -735,7 +756,7 @@ fn pinned_sessions_frame_stays_dim() {
             .add_modifier
             .contains(ratatui::style::Modifier::BOLD)
             && sp.style.fg != Some(Color::White)),
-        "divider wears section coral: {div:?}"
+        "divider wears the section style: {div:?}"
     );
     // data rung (title) bright, meta rung (model) gray, hint rung dim
     let (row, _) = app
@@ -974,9 +995,9 @@ fn sessions_menu_groups_rows_by_day_sections() {
     assert!(pos("old one") > yesterday, "{all:?}");
 }
 
-// day sections read as headers: capitalized, muted-coral bold like H2
+// day sections read as headers: capitalized, muted brand bold like H2
 #[test]
-fn session_day_sections_wear_h2_coral_flush_left() {
+fn session_day_sections_wear_h2_brand_flush_left() {
     use ratatui::style::{Color, Modifier};
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let now = chrono::Utc::now();
@@ -1013,10 +1034,10 @@ fn session_day_sections_wear_h2_coral_flush_left() {
     assert!(
         line.spans.iter().all(|sp| {
             sp.style.add_modifier.contains(Modifier::BOLD)
-                && (sp.style.fg == Some(Color::Indexed(209))
+                && (sp.style.fg == Some(Color::Indexed(168))
                     || matches!(sp.style.fg, Some(Color::Rgb(_, _, _))))
         }),
-        "divider wears H2 muted coral: {line:?}"
+        "divider wears H2 muted brand ink: {line:?}"
     );
 }
 

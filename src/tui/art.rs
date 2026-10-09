@@ -17,16 +17,18 @@ pub const SQWAI_TEXT: &str = include_str!("../../assets/ascii-sqwai.txt");
 /// `gradient_block` normalizes, so the file can never break the render.
 pub const SQWAI_COMPACT_TEXT: &str = include_str!("../../assets/ascii-sqwai-compact.txt");
 
-/// Coral ramp ends, pipetted off the logo PNG (matches the SVG stops):
-/// top-left `#ff9a5c` → bottom-right `#f43f5e`.
-pub const CORAL_START: (u8, u8, u8) = (255, 154, 92);
-pub const CORAL_END: (u8, u8, u8) = (244, 63, 94);
-/// Muted middle of the ramp, for H2 and other quiet brand ink.
-pub const CORAL_MUTED: (u8, u8, u8) = (250, 108, 93);
-/// Solid warm fallback where truecolor is unavailable (salmon-ish).
-const CORAL_FALLBACK: Color = Color::Indexed(209);
+/// Ramp ends: top-left `#de2f66` → bottom-right `#753a88`, berry into plum.
+/// The names still say CORAL_* because that is what the first ramp was.
+pub const CORAL_START: (u8, u8, u8) = (222, 47, 102);
+pub const CORAL_END: (u8, u8, u8) = (117, 58, 136);
+/// Exact middle of the ramp, for H2 and other quiet brand ink.
+pub const CORAL_MUTED: (u8, u8, u8) = (170, 52, 119);
+/// Solid brand color where truecolor is unavailable: xterm 168 (`#d75f87`),
+/// the cube color nearest the ramp. Same index as [`Theme::ACCENT`], so the
+/// one brand color a limited terminal shows is the same in the art and in links.
+const CORAL_FALLBACK: Color = Color::Indexed(168);
 
-/// Quiet brand ink: muted coral bold, the H2 look. Menu titles and day
+/// Quiet brand ink: muted berry bold, the H2 look. Menu titles and day
 /// sections share it so headers read as one family across surfaces.
 pub fn h2_style() -> Style {
     if crate::tui::shimmer::has_truecolor() {
@@ -49,10 +51,10 @@ pub fn coral_at(x: usize, width: usize) -> (u8, u8, u8) {
     crate::tui::shimmer::blend(CORAL_START, CORAL_END, t)
 }
 
-/// Gradient wordmark lines: one coral ramp shared across the whole block
+/// Gradient wordmark lines: one brand ramp shared across the whole block
 /// (gemini-cli style) — every row uses its column's color, so the gradient
 /// reads as one. Spaces stay unpainted; without truecolor the block falls
-/// back to one solid warm color, never unstyled.
+/// back to one solid brand color, never unstyled.
 pub fn sqwai_gradient_lines() -> Vec<Line<'static>> {
     gradient_block(SQWAI_TEXT)
 }
@@ -62,7 +64,7 @@ pub fn sqwai_compact_lines() -> Vec<Line<'static>> {
     gradient_block(SQWAI_COMPACT_TEXT)
 }
 
-/// One coral ramp shared across a whole text block. Source rows are
+/// One brand ramp shared across a whole text block. Source rows are
 /// right-normalized first (trim + pad to the widest), so ragged asset
 /// lines — editors love eating trailing spaces — can never skew the ramp
 /// or the layout.
@@ -129,10 +131,10 @@ fn push_span(spans: &mut Vec<Span>, buf: &mut String, buf_style: &mut Option<Sty
     }
 }
 
-/// Repaint a per-character coral ramp over spans (for H1), preserving
+/// Repaint a per-character brand ramp over spans (for H1), preserving
 /// every other modifier. One span per char — headings are short, and the
 /// ramp moves every column. Without truecolor the run falls back to one
-/// solid warm color instead of garbage escapes.
+/// solid brand color instead of garbage escapes.
 pub fn gradient_spans(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
     use crate::tui::shimmer::has_truecolor;
     let truecolor = has_truecolor();
@@ -275,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn gradient_ramp_spans_the_brand_coral() {
+    fn gradient_ramp_spans_the_brand_ramp() {
         assert_eq!(coral_at(0, 65), CORAL_START);
         assert_eq!(coral_at(64, 65), CORAL_END);
         let mid = coral_at(32, 65);

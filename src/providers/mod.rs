@@ -107,6 +107,17 @@ pub struct Message {
     /// wire — replay of reasoning uses `provider_state`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub thinking: String,
+    /// Wall time the model spent reasoning on this turn, for the same
+    /// display-only purpose: a restored session prints `thought · 6s` instead
+    /// of a bare `thought`. `0` means never measured — a turn without
+    /// reasoning, or a save written before durations were stored — and such a
+    /// row shows no clock rather than an invented one.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub thinking_ms: u64,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
 }
 
 impl Message {
@@ -119,6 +130,7 @@ impl Message {
             is_error: false,
             provider_state: None,
             thinking: String::new(),
+            thinking_ms: 0,
         }
     }
 
@@ -135,6 +147,7 @@ impl Message {
             is_error,
             provider_state: None,
             thinking: String::new(),
+            thinking_ms: 0,
         }
     }
 
@@ -148,8 +161,11 @@ impl Message {
         self
     }
 
-    pub fn with_thinking(mut self, thinking: String) -> Self {
+    /// Attach the reasoning a turn streamed and how long it took. Both travel
+    /// together: the text rebuilds the thought row, the clock labels it.
+    pub fn with_thinking(mut self, thinking: String, ms: u64) -> Self {
         self.thinking = thinking;
+        self.thinking_ms = ms;
         self
     }
 }

@@ -50,7 +50,7 @@ pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
         &["history", "limit", "complete", "abandon", "delete"],
     ),
     ("/undo", &["step"]),
-    ("/test", &["art", "churn", "colors", "md"]),
+    ("/test", &["anim", "art", "churn", "colors", "md"]),
     ("/providers", &["update"]),
     ("/constraints", &["add", "remove"]),
     ("/mode", &["plan", "act"]),
@@ -181,6 +181,9 @@ pub(super) enum Menu {
     Effort {
         model: Option<String>,
     },
+    /// /test anim: every single-character frame set, spinning, for picking the
+    /// live status marker
+    TestAnim,
     /// /test art: numbered static logo variants for picking the empty-state mark
     TestArt,
     /// /test colors: every Theme color in one list, duplicates visible
@@ -697,7 +700,10 @@ impl App {
     fn menu_skips_none(&self) -> bool {
         !matches!(
             self.cur_menu(),
-            Some(Menu::TestArt) | Some(Menu::TestColors) | Some(Menu::TestMd)
+            Some(Menu::TestAnim)
+                | Some(Menu::TestArt)
+                | Some(Menu::TestColors)
+                | Some(Menu::TestMd)
         )
     }
 
@@ -962,7 +968,10 @@ impl App {
         // galleries are showcases: any commit just closes them
         if matches!(
             self.cur_menu(),
-            Some(Menu::TestArt) | Some(Menu::TestColors) | Some(Menu::TestMd)
+            Some(Menu::TestAnim)
+                | Some(Menu::TestArt)
+                | Some(Menu::TestColors)
+                | Some(Menu::TestMd)
         ) {
             self.menu_back();
             return;
@@ -1755,6 +1764,7 @@ impl App {
                 Some(key) => format!(" Effort · {key} "),
                 None => " Effort ".into(),
             },
+            Some(Menu::TestAnim) => " Anim ".into(),
             Some(Menu::TestArt) => " Art ".into(),
             Some(Menu::TestColors) => " Colors ".into(),
             Some(Menu::TestMd) => " Md ".into(),
@@ -2728,6 +2738,41 @@ impl App {
                     ));
                 }
             }
+            Menu::TestAnim => {
+                // One row per frame set: the live frame in the brand's loud end,
+                // the name, then the whole cycle — a pick should not depend on
+                // remembering glyphs that only appear once every 50 ms. Rebuilt
+                // on every animation tick while this gallery is open.
+                const STRIP: usize = 24;
+                // Half the frame rate of the tool spinner: at 20 FPS the short
+                // cycles (2..4 frames) strobe instead of turning, and nobody can
+                // read a glyph they are picking.
+                let tick = self.spinner_tick / 2;
+                let loud = {
+                    let (r, g, b) = crate::tui::art::CORAL_START;
+                    Style::new().fg(ratatui::style::Color::Rgb(r, g, b))
+                };
+                for set in crate::tui::anim::sets() {
+                    let all: Vec<char> = set.frames.chars().collect();
+                    let rest = all
+                        .len()
+                        .checked_sub(STRIP)
+                        .map(|n| format!(" +{n}"))
+                        .unwrap_or_default();
+                    let shown: String = all.iter().take(STRIP).collect();
+                    self.menu_rows.push(row(
+                        Line::from(vec![
+                            Span::styled(
+                                format!("{} ", crate::tui::anim::frame_at(set, tick)),
+                                loud,
+                            ),
+                            Span::styled(format!("{:<15}", set.name), Theme::dim()),
+                            Span::styled(format!("{shown}{rest}"), Theme::meta()),
+                        ]),
+                        MenuAction::None,
+                    ));
+                }
+            }
             Menu::TestArt => {
                 // static art blocks: one numbered label row per variant,
                 // then its lines. All dead rows (viewing only) — the pick
@@ -3183,7 +3228,7 @@ fn day_section(last: chrono::DateTime<chrono::Utc>) -> String {
     }
 }
 
-/// Day-section header style: muted coral like H2 (bold), same truecolor
+/// Day-section header style: muted brand ink like H2 (bold), same truecolor
 /// fallback to the indexed house accent.
 fn day_section_style() -> Style {
     crate::tui::art::h2_style()

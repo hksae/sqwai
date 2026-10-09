@@ -88,6 +88,10 @@ pub(crate) struct TurnOutcome {
     /// the reasoning text of this turn, for display only: the session stores
     /// it so a reloaded transcript can rebuild its thought rows
     pub(crate) reasoning_text: String,
+    /// wall time the reasoning stream was open in this turn, in ms. Measured
+    /// here because the provider cannot report it afterwards, and stored on
+    /// the message so the `thought · 6s` label survives a restart.
+    pub(crate) reasoning_ms: u64,
     /// the provider rejected the effort parameter outright, so the turn was
     /// retried without it and the session must stop sending it
     pub(crate) effort_rejected: bool,
@@ -127,11 +131,21 @@ pub(crate) async fn run_turn(
         // reasoning of THIS attempt only: a retry that replaces a failed
         // request must not inherit the dead attempt's thoughts
         let mut reasoning_text = String::new();
+        // open span of the reasoning phase, summed across bursts: reasoning
+        // starts on the first reasoning chunk and stops the moment anything
+        // else arrives, which is what "how long it thought" means on screen
+        let mut reasoning_open: Option<Instant> = None;
+        let mut reasoning_ms = 0u64;
         let mut calls: Vec<ToolCallReq> = Vec::new();
         let mut provider_state: Option<serde_json::Value> = None;
 
         let mut stream = provider.stream_chat(req.clone());
         while let Some(ev) = stream.next().await {
+            if !matches!(ev, Ok(StreamEvent::Reasoning(_)))
+                && let Some(at) = reasoning_open.take()
+            {
+                reasoning_ms += at.elapsed().as_millis() as u64;
+            }
             match ev {
                 Ok(StreamEvent::Text(t)) => {
                     if !t.is_empty() {
@@ -146,6 +160,7 @@ pub(crate) async fn run_turn(
                     if !t.is_empty() {
                         got_delta = true;
                         saw_reasoning = true;
+                        reasoning_open.get_or_insert_with(Instant::now);
                         reasoning_text.push_str(&t);
                         if tx.send(AgentEvent::ThinkingDelta(t)).await.is_err() {
                             return Err(TurnFailure::new("tui closed", None, attempt));
@@ -205,6 +220,10 @@ pub(crate) async fn run_turn(
             }
         }
 
+        if let Some(at) = reasoning_open.take() {
+            reasoning_ms += at.elapsed().as_millis() as u64;
+        }
+
         let Some(error) = failed else {
             // The one line that makes the effort machinery inspectable: what
             // was asked for, what went on the wire, and what the provider
@@ -235,6 +254,7 @@ pub(crate) async fn run_turn(
                 reasoning_tokens,
                 saw_reasoning,
                 reasoning_text,
+                reasoning_ms,
                 effort_rejected,
                 retries: attempt,
                 provider_state,

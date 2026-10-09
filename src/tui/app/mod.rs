@@ -1053,20 +1053,20 @@ Continue from the pending step, or report to the user if the settled work looks 
         Ok(app)
     }
 
-    /// render persisted messages as chat segments (used on start and on resume)
-    /// A thought row rebuilt from a saved session: folded and finished, with no
-    /// clock — the save carries the reasoning text, not its duration, and a
-    /// restored row must not invent one.
-    fn restored_thinking(text: &str) -> Segment {
+    /// A thought row rebuilt from a saved session: folded and finished, with
+    /// the clock the save carried. Saves from before durations existed say 0,
+    /// and a 0 renders as a bare `thought` rather than an invented one.
+    fn restored_thinking(text: &str, ms: u64) -> Segment {
         Segment::Thinking {
             text: text.to_string(),
             expanded: false,
             started: None,
-            duration_ms: 0,
+            duration_ms: ms,
             live: false,
         }
     }
 
+    /// Render persisted messages as chat segments (used on start and on resume).
     fn load_history_segments(&mut self) {
         // Tool calls and their results are part of the durable provider
         // transcript. Keep the rendered row keyed by call id so batched calls
@@ -1118,7 +1118,7 @@ Continue from the pending step, or report to the user if the settled work looks 
                     // a restored thought row joins the work run it preceded,
                     // exactly where the live path painted it
                     if !m.thinking.is_empty() {
-                        self.push_segment(Self::restored_thinking(&m.thinking));
+                        self.push_segment(Self::restored_thinking(&m.thinking, m.thinking_ms));
                     }
                     if let Some(seg_start) = work_start.take() {
                         // A saved session is never streaming: historical work
@@ -1138,7 +1138,7 @@ Continue from the pending step, or report to the user if the settled work looks 
                 Role::Assistant => {
                     work_start.get_or_insert(self.segments.len());
                     if !m.thinking.is_empty() {
-                        self.push_segment(Self::restored_thinking(&m.thinking));
+                        self.push_segment(Self::restored_thinking(&m.thinking, m.thinking_ms));
                     }
                     let trimmed = m.content.trim();
                     if !trimmed.is_empty() {
@@ -1417,6 +1417,9 @@ Continue from the pending step, or report to the user if the settled work looks 
             let animating = self.streaming
                 || self.tool_running()
                 || self.toast.is_some()
+                // the animation gallery *is* its frame: it must keep its 20 FPS
+                // with nothing else running behind it
+                || matches!(self.cur_menu(), Some(Menu::TestAnim))
                 // live mode-chip sweep gets its 250ms even past streaming
                 // end, or the chip would freeze mid-blend on the toggle
                 || self.mode_blend.is_some_and(|(_, t0)| {
@@ -1495,6 +1498,16 @@ Continue from the pending step, or report to the user if the settled work looks 
                 // fixed 20 FPS animation rate from the wall clock, not per
                 // loop iteration: bursts would otherwise fast-forward it
                 self.spinner_tick = (self.tick_origin.elapsed().as_millis() / 50) as usize;
+                // the gallery's rows carry the frame, so they are the thing that
+                // animates here; scroll and selection survive a rebuild. Every
+                // other tick, because the gallery shows one frame per two (see
+                // Menu::TestAnim) — rebuilding in between would clone rows
+                // whose frame did not move.
+                if matches!(self.cur_menu(), Some(Menu::TestAnim))
+                    && self.spinner_tick.is_multiple_of(2)
+                {
+                    self.build_menu_rows();
+                }
                 self.dirty = true;
             }
             // fake churn turn emits its synthetic rows from here (streaming
@@ -2812,6 +2825,8 @@ Continue from the pending step, or report to the user if the settled work looks 
                     self.status("unknown command /test", StatusKind::Warn);
                 } else if rest.split_whitespace().nth(1) == Some("art") {
                     self.open_menu(Menu::TestArt);
+                } else if rest.split_whitespace().nth(1) == Some("anim") {
+                    self.open_menu(Menu::TestAnim);
                 } else if rest.split_whitespace().nth(1) == Some("colors") {
                     self.open_menu(Menu::TestColors);
                 } else if rest.split_whitespace().nth(1) == Some("md") {
@@ -2819,7 +2834,10 @@ Continue from the pending step, or report to the user if the settled work looks 
                 } else if rest.split_whitespace().nth(1) == Some("churn") {
                     self.start_test_churn();
                 } else {
-                    self.status("/test takes: art, churn, colors, md", StatusKind::Warn);
+                    self.status(
+                        "/test takes: anim, art, churn, colors, md",
+                        StatusKind::Warn,
+                    );
                 }
             }
             "/debug" => self.open_menu(Menu::Debug),
@@ -4610,9 +4628,9 @@ Continue from the pending step, or report to the user if the settled work looks 
             } else {
                 StatusKind::Info
             };
-            self.status(note, kind);
-            // durable turn notes stay in the chat as segments (they are
-            // history, restored on reload) — the toast alone is not enough
+            // The chat segment is the whole signal: it lands as the last row of
+            // the transcript, which is where the eye already is, and it is what
+            // survives a reload. A toast on top of it only duplicated the word.
             self.push_segment(Segment::Status {
                 text: note.clone(),
                 kind,

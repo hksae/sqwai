@@ -165,6 +165,21 @@ pub(super) fn code_blocks(text: &str) -> Vec<String> {
     blocks
 }
 
+/// Re-assert what `init_presenter` asked the terminal for. On Windows the
+/// opener's `cmd.exe` attaches to *our* console and rewrites its input mode,
+/// clearing `ENABLE_MOUSE_INPUT` without putting it back on the way out — so
+/// without this the first link click silently kills the wheel and every click
+/// for the rest of the session, while the keyboard keeps working and the loss
+/// looks like a frozen view. Idempotent, so it is safe on every platform.
+#[cfg(not(test))]
+fn rearm_input_capture() {
+    use std::io::Write as _;
+    let _ = crossterm::terminal::enable_raw_mode();
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
+    let _ = std::io::stdout().write_all(b"\x1b[?1003h");
+    let _ = std::io::stdout().flush();
+}
+
 /// Open a clicked chat link in the system browser, detached (never blocks
 /// the frame). The hit-test only resolves `http(s)` targets, so nothing
 /// else can arrive here from a click.
@@ -181,23 +196,35 @@ fn open_browser_url(url: &str) -> std::io::Result<()> {
     }
     #[cfg(not(test))]
     {
+        use std::process::Stdio;
+        // The child gets no handle on our terminal: an error line from `cmd`
+        // or `xdg-open` would otherwise land inside a frame and skew the diff.
         #[cfg(target_os = "windows")]
-        {
+        let spawned = std::process::Command::new("cmd")
             // `start` takes the first quoted arg as the window title: the empty
             // title keeps the URL in the command slot, quoted whole by spawn
-            std::process::Command::new("cmd")
-                .args(["/C", "start", "", url])
-                .spawn()?;
-        }
+            .args(["/C", "start", "", url])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
         #[cfg(target_os = "macos")]
-        {
-            std::process::Command::new("open").arg(url).spawn()?;
-        }
+        let spawned = std::process::Command::new("open")
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
         #[cfg(all(not(test), not(any(target_os = "windows", target_os = "macos"))))]
-        {
-            std::process::Command::new("xdg-open").arg(url).spawn()?;
-        }
-        Ok(())
+        let spawned = std::process::Command::new("xdg-open")
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        let result = spawned.map(|_| ());
+        rearm_input_capture();
+        result
     }
 }
 
@@ -1925,6 +1952,20 @@ impl App {
             chunks.push((AsmTag::Seg(meta.id), rows));
             fresh.push(true);
         }
+        // The live tail of the transcript: one row saying what the agent is
+        // doing right now, breathing like every other block. Deliberately not
+        // a `Segment` — it is never persisted, never clicked and never
+        // restored, so keeping it out of the segment list keeps the anchor,
+        // fold and click maps alone.
+        if self.streaming {
+            let line = working_line(
+                self.thinking_open,
+                self.turn_started.map(|at| at.elapsed().as_secs()),
+                self.spinner_tick,
+            );
+            struct_row!(blank(), None);
+            struct_row!(line, None);
+        }
         let _ = struct_ord;
         // Drop cache entries for segments that no longer exist anywhere (main
         // transcript or any open subagent chat). Ids are never reused, so a
@@ -2282,27 +2323,20 @@ impl App {
         // The borderless composer takes exactly its content height: one row
         // until the user enters a newline, then it grows up to six rows.
         let input_h = input_rows;
-        // the queue owns an extra row above the input zone, but only while
-        // non-empty: no queue, no row, no wasted space. Same for the single
-        // status row above the input: notice and working share it (dots,
-        // then the notice text), and it exists only with content.
+        // One slot sits above the composer. A notice owns it; when there is
+        // nothing to say, the queue moves down into it instead of leaving the
+        // row empty under its own line. The queue keeps a row of its own only
+        // while a notice holds the slot — the two never both go unused.
         let notice = self.notice_line(area.width);
-        let working = self.streaming;
+        let queued = !self.pending_queue.is_empty();
         let mut constraints = vec![
             Constraint::Min(3),
-            Constraint::Length(if self.pending_queue.is_empty() { 0 } else { 1 }),
+            Constraint::Length(u16::from(notice.is_some() && queued)),
+            // the row directly above the composer: the slot when something owns
+            // it, plain air otherwise
+            Constraint::Length(1),
         ];
-        // one air row above the input zone, but only when the status row
-        // is absent: otherwise the air stacks into a hole
-        if notice.is_none() && !working {
-            constraints.push(Constraint::Length(1));
-        }
-        let live_r = if notice.is_some() || working {
-            constraints.push(Constraint::Length(1));
-            Some(constraints.len() - 1)
-        } else {
-            None
-        };
+        let live_r = (notice.is_some() || queued).then_some(constraints.len() - 1);
         constraints.push(Constraint::Length(input_h));
         let input_r = constraints.len() - 1;
         constraints.push(Constraint::Length(1));
@@ -2456,30 +2490,20 @@ impl App {
             }
         }
 
-        // the queue sits in its own row above the notice row (which is
-        // always reserved); transient messages take the notice row at full
-        // width. The separator lines are gone, the composer is a filled
-        // band instead.
-        if !self.pending_queue.is_empty() {
-            Paragraph::new(self.queue_line(area.width)).render(layout[1], buf);
+        // The queue renders where it has room: its own row above the slot when
+        // a notice holds that row, the slot itself when nothing is waiting to
+        // say anything. The composer stays a filled band; there are no
+        // separator lines.
+        if queued && let Some(r) = if notice.is_some() { Some(1) } else { live_r } {
+            Paragraph::new(self.queue_line(area.width)).render(layout[r], buf);
         }
-        // one status row above the input, shared: travelling dots while
-        // the turn streams, then the notice text to their right. Empty
-        // without either — the row itself only exists with content.
+        // one status row above the input, for transient notices only. The
+        // "what the agent is doing" row is not here: it is the last row of the
+        // transcript, so it scrolls with the work it describes.
         if let Some(r) = live_r
-            && (notice.is_some() || working)
+            && let Some(line) = notice
         {
-            let mut spans = Vec::new();
-            if working {
-                spans.extend(working_tail_line(self.spinner_tick).spans);
-                if notice.is_some() {
-                    spans.push(Span::styled("  ".to_string(), Theme::base()));
-                }
-            }
-            if let Some(line) = notice {
-                spans.extend(line.spans);
-            }
-            Paragraph::new(Line::from(spans)).render(layout[r], buf);
+            Paragraph::new(line).render(layout[r], buf);
         }
         self.input.set_block(Self::input_block());
         // the cursor is rendered by tui-textarea; the input has no frame.
@@ -2826,6 +2850,7 @@ impl App {
         let has_hints = matches!(
             menu,
             Some(Menu::Sessions)
+                | Some(Menu::TestAnim)
                 | Some(Menu::TestArt)
                 | Some(Menu::TestColors)
                 | Some(Menu::TestMd)
@@ -3110,7 +3135,10 @@ impl App {
             );
         } else if matches!(
             self.cur_menu(),
-            Some(Menu::TestArt) | Some(Menu::TestColors) | Some(Menu::TestMd)
+            Some(Menu::TestAnim)
+                | Some(Menu::TestArt)
+                | Some(Menu::TestColors)
+                | Some(Menu::TestMd)
         ) {
             block = block.title_bottom(Theme::hints(&[("enter/esc", "close")]).right_aligned());
         } else if matches!(self.cur_menu(), Some(Menu::EditProvider { .. })) {
@@ -3869,11 +3897,28 @@ pub(super) fn blank() -> Line<'static> {
     Line::from(vec![Span::styled(String::new(), Theme::base())])
 }
 
-/// Live status row above the input while the turn streams: the bare word
-/// with the classic gray-to-white shimmer. No aggregate, no folding,
-/// no click target.
-pub(super) fn working_tail_line(tick: usize) -> Line<'static> {
-    Line::from(crate::tui::shimmer::shimmer_spans("Working", tick))
+/// The live tail row of the transcript: what the agent is doing right now,
+/// how long this turn has run, and how to stop it. The marker cycles through
+/// the `sand` family (see `/test anim`); the paint stays static — the word
+/// already changes when the phase changes, so a wave over it would be
+/// decoration.
+pub(super) fn working_line(thinking: bool, elapsed_s: Option<u64>, tick: usize) -> Line<'static> {
+    let brand = |c: (u8, u8, u8)| Style::new().fg(Color::Rgb(c.0, c.1, c.2));
+    let mut spans = vec![
+        Span::styled(
+            format!("{} ", crate::tui::anim::working_mark(tick)),
+            brand(crate::tui::art::CORAL_START),
+        ),
+        Span::styled(
+            if thinking { "thinking" } else { "working" },
+            brand(crate::tui::art::CORAL_MUTED),
+        ),
+    ];
+    if let Some(secs) = elapsed_s {
+        spans.push(Span::styled(format!(" · {secs}s"), Theme::dim()));
+    }
+    spans.push(Span::styled(" · esc to interrupt", Theme::dim()));
+    Line::from(spans)
 }
 
 fn dim_all(l: Line<'static>) -> Line<'static> {

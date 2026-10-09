@@ -1451,6 +1451,7 @@ fn test_subcommands_gated_behind_experimental_flag() {
     assert_eq!(
         app.popup_items(),
         vec![
+            "/test anim".to_string(),
             "/test art".to_string(),
             "/test churn".to_string(),
             "/test colors".to_string(),
@@ -1459,6 +1460,10 @@ fn test_subcommands_gated_behind_experimental_flag() {
     );
     app.command("test art");
     assert!(matches!(app.cur_menu(), Some(Menu::TestArt)));
+    // the animation gallery opens (its content is checked in
+    // `test_galleries_open_with_content`)
+    app.command("test anim");
+    assert!(matches!(app.cur_menu(), Some(Menu::TestAnim)));
     // bare /test with the flag on hints at the subcommand
     let mut app2 = test_app("http://127.0.0.1:9/v1".into());
     app2.cfg.ui.experimental_test = true;
@@ -1527,6 +1532,17 @@ fn test_galleries_open_with_content() {
     for needle in ["Title", "bold", "quoted line", "first", "fn main", "x + y"] {
         assert!(text.contains(needle), "showcase shows {needle}: {text:?}");
     }
+    // anim: exactly one row per frame set
+    app.command("test anim");
+    assert!(matches!(
+        app.cur_menu(),
+        Some(crate::tui::app::menus::Menu::TestAnim)
+    ));
+    assert_eq!(
+        app.menu_rows.len(),
+        crate::tui::anim::sets().len(),
+        "one row per set"
+    );
     // draws without panic at both widths
     for (w, h) in [(100u16, 30u16), (70, 24)] {
         let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
@@ -1690,14 +1706,13 @@ fn queue_preview_renders_above_input() {
         .collect();
     let input_y = app.last_input.y as usize;
     assert!(
-        lines[input_y - 2].contains("queued 2: fix the typo"),
-        "preview sits in its own row above the notice row: {:?}",
-        lines[input_y - 2]
+        lines[input_y - 1].contains("queued 2: fix the typo"),
+        "with no notice to show, the queue takes the row above the composer: {:?}",
+        lines[input_y - 1]
     );
-    assert!(lines[input_y - 2].contains("(+1 more)"));
     assert!(
-        lines[input_y - 1].trim().is_empty(),
-        "notice row stays blank: {:?}",
+        lines[input_y - 1].contains("(+1 more)"),
+        "the whole preview travels with it: {:?}",
         lines[input_y - 1]
     );
 }
