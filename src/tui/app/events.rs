@@ -1061,14 +1061,18 @@ impl App {
     pub(super) fn input_mouse_down(&mut self, row: u16, col: u16) {
         self.input.cancel_selection();
         self.input.move_cursor(self.input_cursor_at(row, col));
-        self.input_dragging = false;
+        // The composer owns the button from the press on. Without this the
+        // first Drag event failed the routing guard (nothing was selected yet)
+        // and fell through to the chat selection, so drag-selecting in the
+        // input did nothing at all.
+        self.input_dragging = true;
         self.dirty = true;
     }
 
     pub(super) fn input_mouse_drag(&mut self, row: u16, col: u16) {
-        if !self.input_dragging {
+        if !self.input.is_selecting() {
+            // anchor at the cell the press landed on, then follow the mouse
             self.input.start_selection();
-            self.input_dragging = true;
         }
         self.input.move_cursor(self.input_cursor_at(row, col));
         self.dirty = true;

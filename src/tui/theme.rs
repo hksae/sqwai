@@ -2,14 +2,18 @@ use ratatui::style::{Color, Modifier, Style};
 
 use crate::config::EffortLevel;
 
-/// Fixed Codex-style palette for the TUI: ANSI-16 names only, no custom RGB.
+/// The TUI palette: ANSI-16 grays for the surfaces, three truecolor verdicts,
+/// one brand ramp, and a short list of named accents.
 ///
-/// Rules (mirroring `codex-rs/tui/styles.md`):
+/// Rules (started from `codex-rs/tui/styles.md`, then diverged):
 /// - primary text is the terminal default (`Reset`), secondary is dim gray;
-/// - `Cyan` = tips, selection, status, accents, tool names; `Green` = success;
+/// - a highlight is a gray band (`SELECTION_BG`), never a cyan block — the one
+///   exception is the block cursor, which stays black on white by design;
+/// - `Cyan` = tips and accents, `Green` = success and blockquotes;
 /// - `Red` = errors; `Yellow` = busy/attention (dark terminals);
-/// - `LightBlue` = ordered list markers; `Green` = blockquotes;
-/// - no painted backgrounds: everything is transparent over the terminal.
+/// - `LightBlue` = ordered list markers;
+/// - backgrounds are painted on purpose: `MENU_BG`, `INPUT_BG`, `QUOTE_BG` are
+///   the depth ladder the surfaces sit on.
 ///
 /// Dark terminal is assumed (no light-theme probing like Codex `color.rs`).
 pub struct Theme;

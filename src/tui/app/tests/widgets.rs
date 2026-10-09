@@ -945,11 +945,14 @@ fn plain_click_in_composer_does_not_start_selection() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.last_input = ratatui::layout::Rect::new(0, 10, 40, 3);
     app.input_mouse_down(10, 5);
+    // The press captures the button — that is what routes a following drag to
+    // the composer instead of the chat — but it selects nothing until the mouse
+    // actually moves.
     assert!(!app.input.is_selecting());
-    assert!(!app.input_dragging);
+    assert!(app.input_dragging, "the composer holds the press");
     app.input_mouse_up();
-    assert!(!app.input.is_selecting());
-    assert!(!app.input_dragging);
+    assert!(!app.input.is_selecting(), "a click leaves no selection");
+    assert!(!app.input_dragging, "and releases the button");
 }
 
 #[test]

@@ -1295,18 +1295,16 @@ Continue from the pending step, or report to the user if the settled work looks 
         input.set_block(Self::input_block());
         input.set_style(Theme::base());
         input.set_cursor_line_style(Style::new());
-        // Classic block cursor / selection on manually colored backgrounds
-        // (the styles.md exception for black & white).
+        // Classic block cursor on a manually colored background (the styles.md
+        // exception for black & white), but the highlight itself is the house
+        // band: the ANSI cyan default was the one place in the UI where a
+        // selection meant something other than "this row is picked".
         input.set_cursor_style(
             Style::new()
                 .bg(ratatui::style::Color::White)
                 .fg(ratatui::style::Color::Black),
         );
-        input.set_selection_style(
-            Style::new()
-                .bg(ratatui::style::Color::Cyan)
-                .fg(ratatui::style::Color::Black),
-        );
+        input.set_selection_style(Theme::selection());
         input
     }
 

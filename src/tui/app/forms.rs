@@ -82,11 +82,7 @@ impl FormField {
                 .bg(ratatui::style::Color::White)
                 .fg(ratatui::style::Color::Black),
         );
-        ta.set_selection_style(
-            Style::new()
-                .bg(ratatui::style::Color::Cyan)
-                .fg(ratatui::style::Color::Black),
-        );
+        ta.set_selection_style(Theme::selection());
         Self::Text {
             label: label.into(),
             ta,

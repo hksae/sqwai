@@ -1688,6 +1688,54 @@ fn session_switch_drops_the_queue() {
     assert!(app.pending_queue.is_empty());
 }
 
+/// Dragging inside the composer has to select, not just park the cursor. It
+/// used to fall through to the chat selection: the routing guard asked whether
+/// anything was selected, and at the first Drag event nothing was yet.
+#[test]
+fn dragging_in_the_composer_selects_text() {
+    use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEventKind};
+    use ratatui::{buffer::Buffer, layout::Rect};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.input = App::fresh_input("hello world".into());
+    let area = Rect::new(0, 0, 60, 16);
+    let mut buf = Buffer::empty(area);
+    app.render_into(&mut buf, area);
+    let row = app.last_input.y;
+    let col0 = app.last_input.x + app.input_marker_w() + 1;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let me = |kind: MouseEventKind, col: u16| {
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        })
+    };
+    tx.send(me(MouseEventKind::Down(MouseButton::Left), col0))
+        .unwrap();
+    app.poll_input(&rx).unwrap();
+    assert!(
+        !app.input.is_selecting(),
+        "a press alone only moves the cursor"
+    );
+
+    tx.send(me(MouseEventKind::Drag(MouseButton::Left), col0 + 4))
+        .unwrap();
+    app.poll_input(&rx).unwrap();
+    assert!(app.input.is_selecting(), "the drag must select");
+    assert_eq!(
+        app.input.cursor(),
+        (0, 4),
+        "the cursor lands where the mouse is, in characters"
+    );
+    assert!(
+        app.sel.is_none(),
+        "the chat must not steal the gesture from the composer"
+    );
+}
+
 #[test]
 fn queue_preview_renders_above_input() {
     use ratatui::buffer::Buffer;
