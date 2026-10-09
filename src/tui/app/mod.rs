@@ -1312,6 +1312,29 @@ Continue from the pending step, or report to the user if the settled work looks 
         Block::default()
     }
 
+    /// Copy a textarea's selection and return the text, **without ending the
+    /// selection**.
+    ///
+    /// `TextArea::copy()` reads through `take_selection_positions()`, which
+    /// cancels the selection it just read — so every copy erased the highlight
+    /// the user was looking at, on mouse release as much as on Ctrl+C. The yank
+    /// buffer is still filled (Ctrl+Y must paste what was copied), and the
+    /// selection is put back over the same range afterwards.
+    pub(super) fn copy_textarea(ta: &mut tui_textarea::TextArea) -> String {
+        let range = ta.selection_range();
+        ta.copy();
+        let text = ta.yank_text();
+        if let Some((start, end)) = range {
+            ta.move_cursor(tui_textarea::CursorMove::Jump(
+                start.0 as u16,
+                start.1 as u16,
+            ));
+            ta.start_selection();
+            ta.move_cursor(tui_textarea::CursorMove::Jump(end.0 as u16, end.1 as u16));
+        }
+        text
+    }
+
     /// Width of the `› ` input marker gutter (0 on degenerate widths).
     /// The marker occupies the gutter on the top input row only; the
     /// textarea itself is shifted right by this on every row.

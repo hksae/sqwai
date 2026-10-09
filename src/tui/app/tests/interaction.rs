@@ -1693,7 +1693,7 @@ fn session_switch_drops_the_queue() {
 /// anything was selected, and at the first Drag event nothing was yet.
 #[test]
 fn dragging_in_the_composer_selects_text() {
-    use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEventKind};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::{buffer::Buffer, layout::Rect};
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
@@ -1733,6 +1733,36 @@ fn dragging_in_the_composer_selects_text() {
     assert!(
         app.sel.is_none(),
         "the chat must not steal the gesture from the composer"
+    );
+
+    // Releasing copies the span; it must not take the highlight away with it —
+    // `TextArea::copy()` cancels the selection it reads, which used to make the
+    // selection vanish the moment the button came up.
+    tx.send(me(MouseEventKind::Up(MouseButton::Left), col0 + 4))
+        .unwrap();
+    app.poll_input(&rx).unwrap();
+    assert!(
+        app.input.is_selecting(),
+        "release keeps the selection visible"
+    );
+    assert_eq!(app.input.cursor(), (0, 4), "and the cursor stays put");
+
+    // Ctrl+C is a copy, not a cut: the text goes to the clipboard and the
+    // selection survives it.
+    tx.send(Event::Key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    )))
+    .unwrap();
+    app.poll_input(&rx).unwrap();
+    assert!(
+        app.input.is_selecting(),
+        "copying must not cancel the selection"
+    );
+    assert_eq!(
+        app.input.lines().join(""),
+        "hello world",
+        "and must not delete anything"
     );
 }
 

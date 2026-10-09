@@ -300,24 +300,22 @@ impl App {
                                     self.form_fields.get_mut(self.form_focus)
                                     && ta.is_selecting()
                                 {
-                                    ta.copy();
-                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                        let text = ta.yank_text();
-                                        if !text.is_empty() {
-                                            let _ = clipboard.set_text(text);
-                                        }
+                                    let text = Self::copy_textarea(ta);
+                                    if !text.is_empty()
+                                        && let Ok(mut clipboard) = arboard::Clipboard::new()
+                                    {
+                                        let _ = clipboard.set_text(text);
                                     }
                                     self.dirty = true;
                                 }
                                 continue;
                             }
                             if self.input.is_selecting() {
-                                self.input.copy();
-                                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                    let text = self.input.yank_text();
-                                    if !text.is_empty() {
-                                        let _ = clipboard.set_text(text);
-                                    }
+                                let text = Self::copy_textarea(&mut self.input);
+                                if !text.is_empty()
+                                    && let Ok(mut clipboard) = arboard::Clipboard::new()
+                                {
+                                    let _ = clipboard.set_text(text);
                                 }
                                 self.dirty = true;
                                 continue;
@@ -1080,8 +1078,9 @@ impl App {
 
     pub(super) fn input_mouse_up(&mut self) {
         if self.input_dragging && self.input.is_selecting() {
-            self.input.copy();
-            let text = self.input.yank_text();
+            // Release copies, it does not deselect: the highlight is the only
+            // proof the user has that the right span went to the clipboard.
+            let text = Self::copy_textarea(&mut self.input);
             if !text.is_empty()
                 && let Ok(mut clipboard) = arboard::Clipboard::new()
             {

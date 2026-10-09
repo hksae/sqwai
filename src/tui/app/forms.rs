@@ -519,12 +519,11 @@ impl App {
         if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus)
             && ta.is_selecting()
         {
-            ta.copy();
-            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                let text = ta.yank_text();
-                if !text.is_empty() {
-                    let _ = clipboard.set_text(text);
-                }
+            let text = Self::copy_textarea(ta);
+            if !text.is_empty()
+                && let Ok(mut clipboard) = arboard::Clipboard::new()
+            {
+                let _ = clipboard.set_text(text);
             }
         }
         self.dirty = true;
