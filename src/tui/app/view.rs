@@ -607,18 +607,35 @@ impl App {
         self.dirty = true;
     }
 
-    pub(super) fn mouse_up(&mut self, row: u16, col: u16) {
-        if let Some((x0, x1)) = self.ef_click
-            && row == self.status_y
-            && col >= x0
-            && col <= x1
-            && self.menu_stack.is_empty()
-        {
-            self.press = None;
-            self.press_anchor = None;
-            self.dragging = false;
-            self.sel = None;
+    /// A click on the status bar's model name or effort chip opens the same
+    /// menu the key opens (Ctrl+G and the chip's own binding). Both ranges were
+    /// measured while the bar was built, so the hit test follows the layout
+    /// instead of guessing at it.
+    fn status_chip_click(&mut self, row: u16, col: u16) -> bool {
+        if row != self.status_y || !self.menu_stack.is_empty() {
+            return false;
+        }
+        let inside =
+            |range: Option<(u16, u16)>| range.is_some_and(|(x0, x1)| col >= x0 && col <= x1);
+        let model = inside(self.md_click);
+        if !model && !inside(self.ef_click) {
+            return false;
+        }
+        self.press = None;
+        self.press_anchor = None;
+        self.dragging = false;
+        self.sel = None;
+        if model {
+            let provider = self.model_cfg.provider.clone();
+            self.open_menu(Menu::PickModel { provider });
+        } else {
             self.open_menu(Menu::Effort { model: None });
+        }
+        true
+    }
+
+    pub(super) fn mouse_up(&mut self, row: u16, col: u16) {
+        if self.status_chip_click(row, col) {
             return;
         }
         let _pressed = self.press.take();
@@ -1595,7 +1612,7 @@ impl App {
                             "{} ",
                             WORKING_SPINNER[self.spinner_tick % WORKING_SPINNER.len()]
                         ),
-                        Theme::tool_head(),
+                        Theme::spinner(),
                     ),
                 };
                 let name = format!("subagent-{id}");
@@ -1657,7 +1674,7 @@ impl App {
                             "{} ",
                             WORKING_SPINNER[self.spinner_tick % WORKING_SPINNER.len()]
                         ),
-                        Theme::tool_head(),
+                        Theme::spinner(),
                     ),
                     Some(done) => ("• ".to_string(), tool_dot_style(*done)),
                 };
@@ -3645,6 +3662,7 @@ impl App {
             .unwrap_or(&ef_short)
             .to_string();
         self.ef_click = None;
+        self.md_click = None;
 
         // right side: [ctx] [model] [effort] [folder] [MODE chip]
         let lsp_label = if self.lsp_diagnostics > 0 {
@@ -3706,14 +3724,16 @@ impl App {
         let mut spans = vec![Span::styled(format!(" {} ", self.mode.label()), chip_style)];
         let pad = (w as usize).saturating_sub(lw as usize + right_len);
         let model_x0 = lw + pad as u16 + cols(&ctx_label) as u16 + 1;
+        let model_cols = cols(&model_label) as u16;
         spans.push(Span::styled(" ".repeat(pad), Theme::base()));
         spans.push(Span::styled(ctx_label.clone(), Theme::dim()));
         spans.push(Span::styled(" ".to_string(), Theme::base()));
         spans.push(Span::styled(model_label, Theme::meta()));
+        self.md_click = Some((model_x0, model_x0 + model_cols));
         spans.push(Span::styled(" ".to_string(), Theme::base()));
         // click targets are measured from the same numbers, so `ef_x0`
         // accounts for the model group width.
-        let ef_x0 = model_x0 + cols(&self.session.model_key) as u16 + 1;
+        let ef_x0 = model_x0 + model_cols + 1;
         let ef_style = if self.model_cfg.effort == EffortLevel::Off || !effort_plan.is_honoured() {
             // a level the model will not act on must not be lit up as if it
             // were doing work

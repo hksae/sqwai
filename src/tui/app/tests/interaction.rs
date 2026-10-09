@@ -711,11 +711,16 @@ fn subagent_rows_read_as_tool_rows_without_accent() {
             .find(|s| s.content.contains("subagent-"))
             .map(|s| s.style)
     };
-    // running: spinner marker like bash, gray name, no arrow anywhere
+    // running: the quiet-white spinner marker, gray name, no arrow anywhere
     let running = line(0);
     let text: String = running.spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(!text.contains('→'), "arrow gone: {text:?}");
-    assert_eq!(running.spans[0].style, Theme::tool_head());
+    assert_eq!(running.spans[0].style, Theme::spinner());
+    assert_ne!(
+        running.spans[0].style,
+        Theme::tool_head(),
+        "the marker must not outshine the name"
+    );
     assert_eq!(name_style(&running), Some(Theme::meta()));
     assert!(text.contains("look"), "task rides along: {text:?}");
     // done: the house green dot, gray name, no bold on either

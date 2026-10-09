@@ -490,6 +490,9 @@ pub struct App {
     /// live filter typed inside the sessions menu
     sessions_filter: String,
     ef_click: Option<(u16, u16)>,
+    /// Click range of the model name in the status bar: the same target Ctrl+G
+    /// binds to.
+    md_click: Option<(u16, u16)>,
     /// Connection-check results per provider, shown on the provider's menu
     /// rows: green on success, red with the reason on failure.
     provider_checks: std::collections::HashMap<String, ProviderCheck>,
@@ -1013,6 +1016,7 @@ Continue from the pending step, or report to the user if the settled work looks 
             sessions: Vec::new(),
             sessions_filter: String::new(),
             ef_click: None,
+            md_click: None,
             provider_checks: std::collections::HashMap::new(),
             provider_check_rx: None,
             builtin_update_rx: None,

@@ -31,17 +31,47 @@ fn status_bar_fits_and_keeps_click_targets_inside_a_wide_directory() {
                 "{label:?} at width {w}: bar must fill exactly: {text:?}"
             );
 
-            for (what, click) in [("model", app.ef_click)] {
-                if let Some((from, to)) = click {
-                    assert!(
-                        to <= w && from <= to,
-                        "{label:?} at width {w}: {what} click target {from}..{to} \
-                         falls outside the row"
-                    );
-                }
+            for (what, click) in [("effort", app.ef_click), ("model", app.md_click)] {
+                let (from, to) = click.expect("{what} is clickable in the bar");
+                assert!(
+                    to <= w && from <= to,
+                    "{label:?} at width {w}: {what} click target {from}..{to} \
+                     falls outside the row"
+                );
             }
         }
     }
+}
+
+/// The model name in the status bar is the target Ctrl+G binds to, so clicking
+/// it must open the same menu — and the effort chip next to it must keep its
+/// own.
+#[test]
+fn clicking_the_model_name_opens_the_model_menu() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.status_bar_spans(100);
+    app.status_y = 10;
+
+    let (from, to) = app.md_click.expect("the model name is clickable");
+    assert_ne!(
+        Some((from, to)),
+        app.ef_click,
+        "the two targets must not be the same cells"
+    );
+    app.mouse_up(10, (from + to) / 2);
+    assert!(
+        matches!(app.cur_menu(), Some(Menu::PickModel { .. })),
+        "a click on the model opens the model menu"
+    );
+
+    app.menu_back();
+    let (ef0, ef1) = app.ef_click.expect("the effort chip is clickable");
+    app.mouse_up(10, (ef0 + ef1) / 2);
+    assert!(
+        matches!(app.cur_menu(), Some(Menu::Effort { .. })),
+        "the chip keeps its own menu"
+    );
 }
 
 /// The row above the composer is one slot: the queue drops into it when there

@@ -236,6 +236,11 @@ impl Theme {
     pub fn tool_head() -> Style {
         Style::new().fg(Color::White)
     }
+    /// The running marker alone: a quiet white, so motion does not outshine
+    /// the name next to it. The tool row keeps `tool_head` for its text.
+    pub fn spinner() -> Style {
+        Style::new().fg(Color::Gray)
+    }
     pub fn tool_head_bold() -> Style {
         Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
     }
@@ -283,6 +288,7 @@ impl Theme {
             ("MODE_ACT", Self::mode_chip_act()),
             ("MODE_PLAN", Self::mode_chip_plan()),
             ("TOOL_HEAD", Self::tool_head()),
+            ("SPINNER", Self::spinner()),
             ("FIELD_FOCUSED", Self::field_label_focused()),
             ("SELECTION", Self::selection()),
             (
