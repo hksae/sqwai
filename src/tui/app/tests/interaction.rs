@@ -1818,11 +1818,6 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    assert!(
-        text(&app).contains("no provider request yet"),
-        "no invented numbers before the first request: {}",
-        text(&app)
-    );
 
     app.session.last_breakdown = Some(crate::providers::RequestBreakdown {
         system_bytes: 4_000,
@@ -1849,8 +1844,6 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
     let t = text(&app);
     assert!(t.contains("9k"), "peak rides the header: {t}");
     assert!(t.contains("unaccounted"), "the gap is its own row: {t}");
-    assert!(t.contains("cached 6k"), "cached count shown: {t}");
-    assert!(t.contains("n/a"), "cache write was not reported: {t}");
     assert!(t.contains("free"), "free space is a legend row: {t}");
     // the fattest part is tools: it must lead the scale after sorting
     let meter = app.menu_rows[2].0.spans[0].content.clone();
@@ -1858,6 +1851,26 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
         meter.contains('▓'),
         "the fattest part is drawn densest: {meter:?}"
     );
+}
+
+/// The context menu is a read-only card: no cursor, no selection band — arrows
+/// and page keys do nothing, and the rows never paint the selection fill.
+#[test]
+fn context_menu_is_read_only() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.command("context");
+    assert!(app.menu_is_dead(), "context is a dead menu");
+    let sel = app.menu_sel;
+    app.menu_nav(1);
+    app.menu_nav(-1);
+    app.menu_nav(5); // page jump
+    assert_eq!(app.menu_sel, sel, "a dead menu has no cursor");
+    // and a live menu still moves
+    app.command("settings");
+    assert!(!app.menu_is_dead());
+    let sel = app.menu_sel;
+    app.menu_nav(1);
+    assert_ne!(app.menu_sel, sel);
 }
 
 #[test]

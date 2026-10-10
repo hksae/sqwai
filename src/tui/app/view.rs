@@ -3073,7 +3073,7 @@ impl App {
                 .enumerate()
             {
                 let abs = self.menu_scroll + n;
-                if abs == self.menu_sel {
+                if abs == self.menu_sel && !self.menu_is_dead() {
                     let mut out = Line::from(
                         line.spans
                             .iter()

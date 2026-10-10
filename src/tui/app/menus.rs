@@ -759,7 +759,16 @@ impl App {
         }
     }
 
+    /// A read-only menu: no selection band, no cursor movement — every row is
+    /// a painted fact, nothing in it is a button. Esc still closes it.
+    pub(super) fn menu_is_dead(&self) -> bool {
+        matches!(self.cur_menu(), Some(Menu::Context))
+    }
+
     pub(super) fn menu_nav(&mut self, dir: i32) {
+        if self.menu_is_dead() {
+            return;
+        }
         let is_form = self.is_form_menu();
         if is_form {
             let n = self.form_fields.len();
@@ -2928,78 +2937,10 @@ impl App {
                                 format!("{:>7} tok", fmt_k(u.prompt_tokens - covered)),
                                 Theme::meta(),
                             ),
-                            Span::styled(
-                                "   tokenizer · reasoning replay".to_string(),
-                                Theme::dim(),
-                            ),
                         ]),
                         MenuAction::None,
                     ));
                 }
-                self.menu_rows
-                    .push(row(super::view::blank(), MenuAction::None));
-
-                // last request counters: every `n/a` is "the provider said
-                // nothing", which is not zero and must not read as zero
-                match &session.last_usage {
-                    Some(u) => {
-                        let opt =
-                            |v: Option<u64>| v.map(fmt_k).unwrap_or_else(|| "n/a".to_string());
-                        let cached_pct = match (u.cached_tokens, u.prompt_tokens) {
-                            (Some(c), p) if p > 0 => {
-                                format!(" ({:.1}%)", (c as f64 / p as f64) * 100.0)
-                            }
-                            _ => String::new(),
-                        };
-                        self.menu_rows.push(row(
-                            Line::from(Span::styled(
-                                format!(
-                                    "last request: prompt {} · cached {}{} · cache write {} · \
-                                     reasoning {} · completion {}",
-                                    fmt_k(u.prompt_tokens),
-                                    opt(u.cached_tokens),
-                                    cached_pct,
-                                    opt(u.cache_write_tokens),
-                                    opt(u.reasoning_tokens),
-                                    fmt_k(u.completion_tokens),
-                                ),
-                                Theme::dim(),
-                            )),
-                            MenuAction::None,
-                        ));
-                    }
-                    None => {
-                        self.menu_rows.push(row(
-                            Line::from(Span::styled(
-                                "no provider request yet — the parts are estimates from \
-                                 the transcript"
-                                    .to_string(),
-                                Theme::dim(),
-                            )),
-                            MenuAction::None,
-                        ));
-                    }
-                }
-                self.menu_rows
-                    .push(row(super::view::blank(), MenuAction::None));
-                let c = &self.cfg.compaction;
-                self.menu_rows.push(row(
-                    Line::from(Span::styled(
-                        format!(
-                            "compaction at {:.0}% · anchor {:.0}% · keep {} turns · summary: {}",
-                            c.threshold * 100.0,
-                            c.anchor_ratio * 100.0,
-                            c.keep_turns,
-                            if session.summary.is_some() {
-                                "done"
-                            } else {
-                                "none"
-                            }
-                        ),
-                        Theme::dim(),
-                    )),
-                    MenuAction::None,
-                ));
             }
             Menu::TestAnim => {
                 // One row per frame set: the live frame in the brand's loud end,
