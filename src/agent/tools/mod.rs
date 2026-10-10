@@ -572,6 +572,53 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// The result must say where the change landed. Without an address the
+    /// model re-reads the window to find its own place, and on a 5400-line file
+    /// that re-read is the loop: 70 reads and 24 edits in one measured session.
+    #[test]
+    fn edit_reports_where_the_change_landed() {
+        let (mut ctx, dir) = proj();
+        let body: String = (1..=9).map(|i| format!("line {i}\n")).collect();
+        fs::write(dir.join("t.txt"), &body).unwrap();
+        let o = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "t.txt", "old_string": "line 4\n", "new_string": "four a\nfour b\n"}),
+        );
+        assert!(o.ok, "{}", o.output);
+        assert!(
+            o.output.contains("→ lines 4–5: \"four a\""),
+            "no landing address: {}",
+            o.output
+        );
+        // a pure delete names the place rather than inventing a span
+        let o = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "t.txt", "old_string": "four b\nline 5\n", "new_string": ""}),
+        );
+        assert!(o.ok, "{}", o.output);
+        assert!(o.output.contains("at line 5"), "{}", o.output);
+        // Several hunks get the outer span, which is the honest answer: for a
+        // batch that touches both ends of the file, "everything between" is
+        // true, while naming one line would not be.
+        let o = execute(
+            &mut ctx,
+            "multi_edit",
+            &json!({"file_path": "t.txt", "edits": [
+                {"old_string": "line 1\n", "new_string": "one\n"},
+                {"old_string": "line 9\n", "new_string": "nine\n"}
+            ]}),
+        );
+        assert!(o.ok, "{}", o.output);
+        assert!(
+            o.output.contains("→ across lines 1–8"),
+            "no span for a batch: {}",
+            o.output
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn path_escape_is_rejected() {
         let (mut ctx, _dir) = proj();

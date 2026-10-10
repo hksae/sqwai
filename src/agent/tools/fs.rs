@@ -433,6 +433,49 @@ pub(super) fn apply_one(
     })
 }
 
+/// The 1-based line span the change occupies in the file's new numbering, or
+/// `None` when nothing was left behind at that place (a pure delete).
+fn changed_span(before: &str, after: &str) -> Option<(usize, usize)> {
+    let bl: Vec<&str> = before.lines().collect();
+    let al: Vec<&str> = after.lines().collect();
+    let pre = bl.iter().zip(al.iter()).take_while(|(x, y)| x == y).count();
+    let shared = (bl.len() - pre).min(al.len() - pre);
+    let suf = (0..shared)
+        .take_while(|k| bl[bl.len() - 1 - k] == al[al.len() - 1 - k])
+        .count();
+    let (from, to) = (pre + 1, al.len() - suf);
+    (from <= to).then_some((from, to))
+}
+
+/// Where a single edit landed, in the file's new line numbers, with the first
+/// line of what went in.
+///
+/// The model wrote those bytes, so repeating them buys nothing — the address is
+/// what it cannot know, and without it a follow-up edit re-reads the window to
+/// find its own place. That re-read is what turned a 5400-line file into 70
+/// reads and 24 edits in one measured session.
+fn edit_landing(before: &str, after: &str) -> String {
+    let Some((from, to)) = changed_span(before, after) else {
+        let common = before
+            .lines()
+            .zip(after.lines())
+            .take_while(|(x, y)| x == y)
+            .count();
+        return format!("→ at line {}", common + 1);
+    };
+    let head = after.lines().nth(from - 1).unwrap_or_default().trim();
+    let head = if head.chars().count() > 60 {
+        format!("{}…", head.chars().take(60).collect::<String>())
+    } else {
+        head.to_string()
+    };
+    if from == to {
+        format!("→ line {from}: \"{head}\"")
+    } else {
+        format!("→ lines {from}–{to}: \"{head}\"")
+    }
+}
+
 pub(super) fn edit(
     ctx: &mut ToolCtx,
     raw: &str,
@@ -479,7 +522,11 @@ pub(super) fn edit(
         checkpoint_id,
         &diff,
     );
-    let out_msg = format!("edited {} (+{add}/-{rem})", rel_label(&ctx.root, &p));
+    let out_msg = format!(
+        "edited {} (+{add}/-{rem}) {}",
+        rel_label(&ctx.root, &p),
+        edit_landing(&content, &updated)
+    );
     Outcome::ok(out_msg)
         .with_diff(diff)
         .with_file_diff(metadata)
@@ -532,8 +579,15 @@ pub(super) fn multi_edit(
         checkpoint_id,
         &diff,
     );
+    // Several hunks can sit anywhere in the file, so the honest report is the
+    // outer span — naming one of their lines as if it were the change would be
+    // a guess.
+    let span = match changed_span(&before, &content) {
+        Some((from, to)) => format!("→ across lines {from}–{to}"),
+        None => "→ lines removed".to_string(),
+    };
     let out_msg = format!(
-        "applied {} edit(s) to {} (+{add}/-{rem})",
+        "applied {} edit(s) to {} (+{add}/-{rem}) {span}",
         edits.len(),
         rel_label(&ctx.root, &p)
     );
