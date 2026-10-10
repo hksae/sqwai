@@ -100,7 +100,7 @@ fn poll_jobs() {
     }
 }
 
-fn shell() -> (ShellKind, &'static str, &'static str) {
+fn shell() -> (ShellKind, std::borrow::Cow<'static, str>, &'static str) {
     let kind = ShellKind::detect();
     let (program, flag) = kind.program_and_flag();
     (kind, program, flag)
@@ -117,7 +117,7 @@ const DETACHED_PROCESS: u32 = 0x0800_0000;
 /// build a Command runnable in `cwd`
 fn spawn_command(ctx: &ToolCtx, command: &str, cwd: Option<&str>) -> Command {
     let (kind, program, flag) = shell();
-    let mut c = Command::new(program);
+    let mut c = Command::new(program.as_ref());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
