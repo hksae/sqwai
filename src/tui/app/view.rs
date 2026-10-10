@@ -3162,12 +3162,13 @@ impl App {
             );
         } else if matches!(
             self.cur_menu(),
-            Some(Menu::Context)
-                | Some(Menu::TestAnim)
+            Some(Menu::TestAnim)
                 | Some(Menu::TestArt)
                 | Some(Menu::TestColors)
                 | Some(Menu::TestMd)
         ) {
+            // `/context` is not in this list: a card that only shows a scale
+            // needs no lesson on how to leave it.
             block = block.title_bottom(Theme::hints(&[("enter/esc", "close")]).right_aligned());
         } else if matches!(self.cur_menu(), Some(Menu::EditProvider { .. })) {
             block = block.title_bottom(
