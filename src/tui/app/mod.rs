@@ -469,6 +469,8 @@ pub struct App {
     table_built_w: u16,
     /// card width the md showcase was wrapped for (same rebuild rule)
     md_built_w: u16,
+    /// card width the open /context menu was built for: a resize rebuilds it
+    ctx_built_w: u16,
     /// click/hover targets of the effort slider (rect → SELECTABLE index),
     /// rebuilt on every slider draw; empty when another menu is open
     effort_hits: Vec<(Rect, usize)>,
@@ -1010,6 +1012,7 @@ Continue from the pending step, or report to the user if the settled work looks 
             menu_rect: Rect::default(),
             table_built_w: 0,
             md_built_w: 0,
+            ctx_built_w: 0,
             effort_hits: Vec::new(),
             effort_blend: None,
             effort_blend_sel: None,

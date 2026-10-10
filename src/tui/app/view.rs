@@ -2950,10 +2950,16 @@ impl App {
                 self.table_built_w = want;
             }
         }
-        // The md showcase wraps at the card width: same rebuild-once rule.
+        // The md showcase wraps at the card width, the context scale sizes its
+        // bands from it: same rebuild-once rule — a stale rect draws a stale
+        // bar.
         if matches!(menu, Some(Menu::TestMd)) && self.md_built_w != rect.width {
             self.build_menu_rows();
             self.md_built_w = rect.width;
+        }
+        if matches!(menu, Some(Menu::Context)) && self.ctx_built_w != rect.width {
+            self.build_menu_rows();
+            self.ctx_built_w = rect.width;
         }
 
         // Menus are modal surfaces: dim the already-rendered screen while
