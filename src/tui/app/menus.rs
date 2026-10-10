@@ -523,26 +523,31 @@ fn cap_first(s: &str) -> String {
 }
 
 /// A noise meter: `cells` glyphs whose filled fraction tracks `density`
-/// (0..=1) by error diffusion over ▓▒░. 1.0 is solid ▓, 0.0 is empty ░, and
-/// everything between lands as an even mix — which is what makes a 0.3 share
-/// readable next to a 0.1 one instead of collapsing into the same block.
+/// (0..=1). The filled cells are placed at even intervals — one part is one
+/// texture, so its grain never clumps into dense and sparse patches — and the
+/// background is a single shade for the whole block: ░ while the block is
+/// sparse, ▒ once it is past half-full, so a dense block reads as soft noise
+/// instead of alternating bright and blank columns.
 pub(super) fn dither(density: f64, cells: usize) -> String {
     let density = density.clamp(0.0, 1.0);
-    let mut err = 0.0f64;
-    let mut out = String::with_capacity(cells * 3);
-    for _ in 0..cells {
-        let v = density + err;
-        let (ch, level) = if v >= 0.666_7 {
-            ('▓', 1.0)
-        } else if v >= 0.333_4 {
-            ('▒', 0.5)
-        } else {
-            ('░', 0.0)
-        };
-        err = (err + density - level).clamp(-0.5, 0.5);
-        out.push(ch);
+    let filled = (density * cells as f64).round() as usize;
+    let background = if density >= 0.5 { '▒' } else { '░' };
+    // the j-th filled cell is the center of the j-th of `filled` even slices,
+    // so bright cells land at even intervals no matter what the density is
+    let slice = cells as f64 / filled.max(1) as f64;
+    let mut marks = std::collections::HashSet::with_capacity(filled);
+    for j in 0..filled {
+        marks.insert((((j as f64 + 0.5) * slice).floor() as usize).min(cells - 1));
     }
-    out
+    (0..cells)
+        .map(|i| {
+            if marks.contains(&i) {
+                '▓'
+            } else {
+                background
+            }
+        })
+        .collect()
 }
 
 impl App {
@@ -2768,13 +2773,10 @@ impl App {
                 }
             }
             Menu::Context => {
-                // One noise scale: a block per part, the part's color, and the
-                // fill density tracking its share of the largest part. The
-                // window's real fullness lives in the header — this scale reads
-                // as composition, not as a gauge.
-                const PARTS: usize = 5;
-                let cells =
-                    ((self.menu_rect.width as usize).saturating_sub(12) / PARTS).clamp(4, 10);
+                // One continuous scale: a part's width is its share of the
+                // window, laid largest first, and the noise thins from the
+                // solid leader on the left toward the empty tail — size reads
+                // twice, as width and as texture.
                 let session = &self.session;
                 let b = session.last_breakdown;
                 let mut parts: Vec<(&str, u64, Style)> = vec![
@@ -2837,33 +2839,44 @@ impl App {
                 self.menu_rows
                     .push(row(super::view::blank(), MenuAction::None));
 
-                // the scale, then the names under it
-                let mut meter = Vec::new();
-                let mut labels = Vec::new();
-                for (name, tokens, style) in &parts {
-                    meter.push(Span::styled(dither(density(*tokens), cells), *style));
-                    meter.push(Span::styled(" ".to_string(), Theme::base()));
-                    labels.push(Span::styled(
-                        format!(
-                            "{:<width$}",
-                            super::view::truncate_display_width(name, cells),
-                            width = cells
-                        ),
-                        Theme::dim(),
-                    ));
-                    labels.push(Span::styled(" ".to_string(), Theme::base()));
+                // one proportional scale, no per-part labels: the legend below
+                // carries the names, the bar carries the sizes
+                let width = (self.menu_rect.width as usize)
+                    .saturating_sub(4)
+                    .clamp(20, 120);
+                let mut widths: Vec<usize> = parts
+                    .iter()
+                    .map(|(_, tokens, _)| ((*tokens as f64 / limit as f64) * width as f64) as usize)
+                    .collect();
+                // a part the legend names stays findable in the bar
+                for (w, (_, tokens, _)) in widths.iter_mut().zip(&parts) {
+                    if *tokens > 0 {
+                        *w = (*w).max(1);
+                    }
                 }
-                // free space pinned last and drawn empty, because it is
-                // nothing — the legend below carries its number
-                meter.push(Span::styled(dither(0.0, cells), Theme::dim()));
-                labels.push(Span::styled(
-                    format!("{:<width$}", "free", width = cells),
-                    Theme::dim(),
-                ));
+                // rounding — or a window pushed past its limit — must not
+                // overflow the row: give back from the widest first
+                while widths.iter().sum::<usize>() > width {
+                    let (i, _) = widths
+                        .iter()
+                        .enumerate()
+                        .max_by_key(|(_, w)| *w)
+                        .expect("parts is non-empty");
+                    widths[i] -= 1;
+                }
+                let free_cells = width - widths.iter().sum::<usize>();
+                let mut meter = Vec::new();
+                for ((_, tokens, style), cells) in parts.iter().zip(&widths) {
+                    if *cells == 0 {
+                        continue;
+                    }
+                    meter.push(Span::styled(dither(density(*tokens), *cells), *style));
+                }
+                if free_cells > 0 {
+                    meter.push(Span::styled(dither(0.0, free_cells), Theme::dim()));
+                }
                 self.menu_rows
                     .push(row(Line::from(meter), MenuAction::None));
-                self.menu_rows
-                    .push(row(Line::from(labels), MenuAction::None));
                 self.menu_rows
                     .push(row(super::view::blank(), MenuAction::None));
 
