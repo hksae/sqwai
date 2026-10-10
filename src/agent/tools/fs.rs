@@ -22,13 +22,27 @@ fn existing(ctx: &ToolCtx, p: &str) -> Result<PathBuf, String> {
     Ok(p)
 }
 
-/// Spilled tool output: oversized results land in a gitignored sidecar dir
-/// instead of dying in a truncation marker. The model gets the path plus a
-/// standing instruction to grep it or page it — never to re-read it whole.
-pub(super) fn spill_output(root: &Path, tool: &str, text: &str) -> Option<String> {
+/// Same, for ops that are about to change the file: the path jail lets
+/// `.sqwai/spill/` be opened but not written, so a result the model plants in
+/// the spill dir cannot come back later as its own past evidence.
+fn existing_writable(ctx: &ToolCtx, p: &str) -> Result<PathBuf, String> {
+    let p = ctx.resolve_writable(p)?;
+    if !p.exists() {
+        return err(format!("file not found: {}", p.display()));
+    }
+    Ok(p)
+}
+
+/// Spilled tool output: oversized results land in `.sqwai/spill/` instead of
+/// dying in a truncation marker. The model gets the path plus a standing
+/// instruction to grep it or page it — never to re-read it whole. It used to go
+/// to `sqwai-spill/` at the project root, where it turned up in `ls` among the
+/// source directories and needed its own ignore rule; inside the host state it
+/// is one disposable place, and the path jail lets it be read but not written.
+pub(super) fn spill_output(ctx: &ToolCtx, tool: &str, text: &str) -> Option<String> {
     const RETENTION_SECS: u64 = 7 * 24 * 3600;
     static SPILL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let dir = root.join("sqwai-spill");
+    let dir = ctx.spill_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return None;
     }
@@ -53,7 +67,7 @@ pub(super) fn spill_output(root: &Path, tool: &str, text: &str) -> Option<String
     if std::fs::write(&path, text).is_err() {
         return None;
     }
-    Some(format!("sqwai-spill/{name}"))
+    Some(format!(".sqwai/spill/{name}"))
 }
 
 /// guard shared by destructive writes: overwriting an existing file and
@@ -225,7 +239,7 @@ pub(super) fn read(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Ou
     if total_lines == 0 {
         out.push_str("(empty file)\n");
     } else if truncated {
-        match spill_output(&ctx.root, "read", &text) {
+        match spill_output(ctx, "read", &text) {
             Some(rel) => out.push_str(&format!(
                 "\n…(showing lines {first_no}–{last_no} of {total_lines} total — full output saved to {rel}: use grep to search it or read with offset/limit for specific sections, do not re-read the whole file)"
             )),
@@ -293,12 +307,14 @@ fn structure_hint(ctx: &mut ToolCtx, raw: &str) -> Option<String> {
 pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome {
     let exists = {
         // probe without failing when missing
-        ctx.resolve(raw).map(|p| p.exists()).unwrap_or(false)
+        ctx.resolve_writable(raw)
+            .map(|p| p.exists())
+            .unwrap_or(false)
     };
     // previous contents, kept for the post-facto diff
     let mut prev: Option<String> = None;
     if exists {
-        let p = match existing(ctx, raw) {
+        let p = match existing_writable(ctx, raw) {
             Ok(p) => p,
             Err(e) => return Outcome::err(e),
         };
@@ -307,7 +323,7 @@ pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome
         }
         prev = fs::read_to_string(&p).ok();
     }
-    let p = match ctx.resolve(raw) {
+    let p = match ctx.resolve_writable(raw) {
         Ok(p) => p,
         Err(e) => return Outcome::err(e),
     };
@@ -424,7 +440,7 @@ pub(super) fn edit(
     new: &str,
     replace_all: bool,
 ) -> Outcome {
-    let p = match existing(ctx, raw) {
+    let p = match existing_writable(ctx, raw) {
         Ok(p) => p,
         Err(e) => return Outcome::err(e),
     };
@@ -474,7 +490,7 @@ pub(super) fn multi_edit(
     raw: &str,
     edits: &[(String, String, bool)],
 ) -> Outcome {
-    let p = match existing(ctx, raw) {
+    let p = match existing_writable(ctx, raw) {
         Ok(p) => p,
         Err(e) => return Outcome::err(e),
     };
@@ -689,7 +705,7 @@ pub(super) fn grep(
                 hits.push(i);
                 matches += 1;
                 if matches >= 200 {
-                    match spill_output(&ctx.root, "grep", &out) {
+                    match spill_output(ctx, "grep", &out) {
                         Some(rel) => out.push_str(&format!(
                             "…(more matches truncated: first 200 shown, full list in {rel} — grep it with a narrower pattern instead of re-running broad)\n"
                         )),

@@ -506,7 +506,7 @@ mod tests {
         let o = execute(&mut ctx, "read", &json!({"file_path": "src/main.rs"}));
         assert!(o.ok, "{}", o.output);
         assert!(o.output.contains("of 2 total"), "{}", o.output);
-        assert!(!o.output.contains("sqwai-spill"), "{}", o.output);
+        assert!(!o.output.contains(".sqwai/spill"), "{}", o.output);
 
         // big file: truncated with totals, full text spilled to a file the
         // tools themselves can grep and page
@@ -515,7 +515,7 @@ mod tests {
         let o = execute(&mut ctx, "read", &json!({"file_path": "big.rs"}));
         assert!(o.ok, "{}", o.output);
         assert!(o.output.contains("of 2500 total"), "{}", o.output);
-        assert!(o.output.contains("sqwai-spill/read-"), "{}", o.output);
+        assert!(o.output.contains(".sqwai/spill/read-"), "{}", o.output);
         assert!(
             o.output.contains("do not re-read the whole file"),
             "{}",
@@ -525,7 +525,7 @@ mod tests {
             .output
             .lines()
             .find_map(|line| {
-                let start = line.find("sqwai-spill/read-")?;
+                let start = line.find(".sqwai/spill/read-")?;
                 Some(
                     line[start..]
                         .split_whitespace()
@@ -539,6 +539,36 @@ mod tests {
         let back = execute(&mut ctx, "read", &json!({"file_path": spill, "limit": 5}));
         assert!(back.ok, "spill must be readable: {}", back.output);
         assert!(back.output.contains("line 0"), "{}", back.output);
+
+        // grep reaches it too: the footer tells the model to search it, and
+        // `.sqwai/` is otherwise invisible to the walkers
+        let g = execute(
+            &mut ctx,
+            "grep",
+            &json!({"pattern": "line 2499", "path": spill}),
+        );
+        assert!(g.ok, "spill must be greppable: {}", g.output);
+        assert!(g.output.contains("line 2499"), "{}", g.output);
+
+        // Reading is all the jail grants here. A file the model planted in the
+        // spill dir would come back later looking like its own past evidence.
+        for (tool, args) in [
+            ("write", json!({"file_path": spill, "content": "planted"})),
+            (
+                "edit",
+                json!({"file_path": spill, "old_string": "line 0", "new_string": "planted"}),
+            ),
+        ] {
+            let o = execute(&mut ctx, tool, &args);
+            assert!(
+                !o.ok,
+                "{tool} into the spill dir must be refused: {}",
+                o.output
+            );
+        }
+        // the directory itself stays unlistable: the pointer names a file
+        let ls = execute(&mut ctx, "ls", &json!({"path": ".sqwai/spill"}));
+        assert!(!ls.ok, "the spill dir must not be browsable: {}", ls.output);
         fs::remove_dir_all(&dir).ok();
     }
 

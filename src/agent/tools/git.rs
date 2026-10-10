@@ -450,7 +450,7 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let touched_files = extract_patch_files(ctx, patch);
     let mut resolved_paths = Vec::new();
     for f in &touched_files {
-        match ctx.resolve(f) {
+        match ctx.resolve_writable(f) {
             Ok(p) => resolved_paths.push(p),
             Err(e) => return Outcome::err(format!("patch touches forbidden path '{f}': {e}")),
         }

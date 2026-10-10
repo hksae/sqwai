@@ -1,9 +1,9 @@
 /target
 **/*.rs.bk
 
-# spilled (truncated) tool output for agents to grep/page instead of
-# re-reading; retention-pruned after 7 days, never committed
-/sqwai-spill/
+# Host-owned project state: journal, plans, memory, checkpoints — and the
+# spilled (truncated) tool output the file tools may read but never write.
+# Retention-pruned, never committed.
 .sqwai/
 .zig-cache/
 

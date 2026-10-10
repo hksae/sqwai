@@ -143,7 +143,15 @@ impl ToolCtx {
     /// dotfiles, and the comparison has to run on canonical paths because
     /// the root itself may sit behind a symlink (macOS `/var`).
     pub fn host_state_dir(&self) -> PathBuf {
-        self.root_canon.join(".sqwai")
+        self.root_canon.join(STATE_DIR)
+    }
+
+    /// Where oversized tool output goes instead of dying in a truncation
+    /// marker: disposable, retention-pruned, and inside the host state the
+    /// project already ignores. It used to sit at the project root, where it
+    /// showed up in `ls` as if it were part of the codebase.
+    pub fn spill_dir(&self) -> PathBuf {
+        self.host_state_dir().join("spill")
     }
 
     pub fn with_shadow_store(mut self, shadow_store: crate::config::ShadowStore) -> Self {
@@ -196,18 +204,28 @@ impl ToolCtx {
     }
 
     /// resolve a user-supplied path inside the project; rejects escapes and
-    /// host-owned state under `.sqwai/` (§2.0)
+    /// host-owned state under `.sqwai/` (§2.0). Reading is the permissive
+    /// direction: spilled tool output under `.sqwai/spill/` stays reachable,
+    /// because a pointer the host handed out has to be one the model can
+    /// follow. Mutations go through
+    /// [`resolve_writable`](Self::resolve_writable), which does not.
     pub fn resolve(&self, p: &str) -> Result<PathBuf, String> {
-        self.resolve_parts(p).map(|(joined, _)| joined)
+        self.resolve_parts(p, false).map(|(joined, _)| joined)
+    }
+
+    /// [`resolve`](Self::resolve) for an op that is about to change the file.
+    pub fn resolve_writable(&self, p: &str) -> Result<PathBuf, String> {
+        self.resolve_parts(p, true).map(|(joined, _)| joined)
     }
 
     /// Canonical project-relative spelling (forward-slashed) of what `p`
     /// actually points at. Scope gates must decide on this, not on the
     /// lexical spelling: the OS resolves symlinks, so `src/link/x` with
     /// `src/link -> b/` writes into `b/` (audit H3). Same jail as
-    /// [`resolve`](Self::resolve).
+    /// [`resolve`](Self::resolve), and treated as a write target — which is
+    /// what scope gates are deciding about.
     pub fn resolve_scope_rel(&self, p: &str) -> Result<String, String> {
-        self.resolve_parts(p)
+        self.resolve_parts(p, true)
             .map(|(_, rel)| rel.to_string_lossy().replace('\\', "/"))
     }
 
@@ -215,7 +233,7 @@ impl ToolCtx {
     /// [`resolve_scope_rel`](Self::resolve_scope_rel): returns the
     /// display spelling (uncanonicalized join) and the canonical
     /// project-relative path the security decisions run on.
-    fn resolve_parts(&self, p: &str) -> Result<(PathBuf, PathBuf), String> {
+    fn resolve_parts(&self, p: &str, mutating: bool) -> Result<(PathBuf, PathBuf), String> {
         let joined = if Path::new(p).is_absolute() {
             PathBuf::from(p)
         } else {
@@ -254,7 +272,7 @@ impl ToolCtx {
         // Plan, journal, memory and graph are reachable only through their own
         // tools. Enforcing it here is what makes "host-written" and
         // "append-only" guarantees rather than requests (§2.0).
-        if let Some(denied) = host_owned_denial(relative) {
+        if let Some(denied) = host_owned_denial(relative, mutating) {
             return Err(denied);
         }
         // The display spelling is `joined`, not `resolved`: the whole display
@@ -385,15 +403,19 @@ fn file_hash(path: &Path) -> String {
     }
 }
 
-/// The agent's own state directory. File tools see only `skills/` and
-/// `config.toml` inside it; plan, journal, memory and graph are host-owned and
-/// reachable only through their dedicated tools (§2.0).
+/// The agent's own state directory. File tools see only `skills/`,
+/// `config.toml` and spilled tool output under `spill/` inside it; plan,
+/// journal, memory and checkpoints are host-owned and reachable only through
+/// their dedicated tools (§2.0).
 const STATE_DIR: &str = ".sqwai";
 
 /// Deny message when `relative` points at host-owned state, `None` otherwise.
 /// `relative` must already be relative to the canonicalized project root, so a
 /// symlink pointing into `.sqwai/` cannot slip past this check.
-fn host_owned_denial(relative: &Path) -> Option<String> {
+/// `mutating` is whether the caller is about to change the file: spilled tool
+/// output may be read back but never written, because a file the model plants
+/// in the spill dir would come to look like its own past evidence.
+fn host_owned_denial(relative: &Path, mutating: bool) -> Option<String> {
     use std::path::Component;
     let mut components = relative.components();
     match components.next() {
@@ -401,7 +423,13 @@ fn host_owned_denial(relative: &Path) -> Option<String> {
         _ => return None,
     }
     let allowed = match components.next() {
-        Some(Component::Normal(second)) => second == "skills" || second == "config.toml",
+        Some(Component::Normal(second)) if second == "skills" || second == "config.toml" => true,
+        // `.sqwai/spill/<file>`: the path a truncated result pointed at. The
+        // directory itself stays invisible, so this cannot be used to browse
+        // host state — only to open what was already named.
+        Some(Component::Normal(second)) if second == "spill" && !mutating => {
+            matches!(components.next(), Some(Component::Normal(_)))
+        }
         // `.sqwai` itself: listing or writing the directory is not allowed
         _ => false,
     };
@@ -411,7 +439,8 @@ fn host_owned_denial(relative: &Path) -> Option<String> {
     Some(format!(
         "path '{}' is host-owned state: the plan, the journal, memory and checkpoints are \
          reachable only through their own tools (plan, note, journal, \
-         memory_write). Inside {STATE_DIR}/ the file tools may use skills/ and config.toml only.",
+         memory_write). Inside {STATE_DIR}/ the file tools may use skills/, config.toml and \
+         files under spill/ (read only) — nothing else.",
         relative.display()
     ))
 }

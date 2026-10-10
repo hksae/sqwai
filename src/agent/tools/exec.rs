@@ -7,7 +7,6 @@
 
 use super::{Outcome, ToolCtx};
 use crate::agent::shell::ShellKind;
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -348,13 +347,14 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
     let is_capped = out_capped.load(std::sync::atomic::Ordering::Relaxed)
         || err_capped.load(std::sync::atomic::Ordering::Relaxed);
     let body = if combined.len() > MAX_RETURNED || is_capped {
-        let note = if is_capped {
-            format!(
-                "output (capped at 2 MB) written to {}",
-                spill(&combined).display()
-            )
-        } else {
-            format!("full output written to {}", spill(&combined).display())
+        // One home for oversized output, and it is a home the file tools can
+        // open. This used to be `%TEMP%\sqwai-cmd\`: a path outside the
+        // project jail, so the promise in the note was one only `bash` could
+        // keep — `read` would have refused it.
+        let note = match (super::fs::spill_output(ctx, "cmd", &combined), is_capped) {
+            (Some(rel), true) => format!("output (capped at 2 MB) written to {rel}"),
+            (Some(rel), false) => format!("full output written to {rel}"),
+            (None, _) => "output too large to show".to_string(),
         };
         format!("{note}\n{}", super::trim_middle(&combined, MAX_RETURNED))
     } else {
@@ -777,20 +777,6 @@ fn tail_of_file(path: &PathBuf, max: usize) -> Option<String> {
     } else {
         text
     })
-}
-
-fn spill(contents: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("sqwai-cmd");
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join(format!(
-        "cmd-{}.out",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    let _ = std::fs::File::create(&path).and_then(|mut f| f.write_all(contents.as_bytes()));
-    path
 }
 
 #[cfg(test)]
