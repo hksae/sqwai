@@ -36,6 +36,13 @@ impl Theme {
     pub const fn MENU_BG() -> Color {
         Color::Indexed(233)
     }
+    /// One step darker than the menu surface: a band drawn with it reads as an
+    /// inset on the panel — the free tail of the /context scale lives on it,
+    /// because a tail the same color as the panel is a tail you cannot see.
+    #[allow(non_snake_case)]
+    pub const fn MENU_BG_DIM() -> Color {
+        Color::Indexed(232)
+    }
     /// Composer band and user message strip: Codex-style ~#1c1c1c, one step
     /// above the menu surface (233). Same family, quieter — your messages and
     /// your input read as one surface, distinct from the menu chrome.
@@ -279,6 +286,7 @@ impl Theme {
             ("LIGHT_BLUE", Style::new().fg(Self::LIGHT_BLUE())),
             ("GREEN", Style::new().fg(Self::GREEN())),
             ("MENU_BG", Style::new().bg(Self::MENU_BG())),
+            ("MENU_BG_DIM", Style::new().bg(Self::MENU_BG_DIM())),
             ("INPUT_BG", Style::new().bg(Self::INPUT_BG())),
             ("SELECTION_BG", Style::new().bg(Self::SELECTION_BG())),
             ("QUOTE_BG", Style::new().bg(Self::QUOTE_BG())),

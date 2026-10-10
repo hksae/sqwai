@@ -2847,7 +2847,7 @@ impl App {
                 if free_cells > 0 {
                     meter.push(Span::styled(
                         " ".repeat(free_cells),
-                        Style::new().bg(Theme::MENU_BG()),
+                        Style::new().bg(Theme::MENU_BG_DIM()),
                     ));
                 }
                 self.menu_rows
