@@ -1771,31 +1771,6 @@ fn dragging_in_the_composer_selects_text() {
     );
 }
 
-/// The noise meter is the whole language of the context scale, so its edges
-/// must be exact: 0 is empty, 1 is solid, and the glyphs stay in the family.
-#[test]
-fn dither_maps_density_to_the_shade_mix() {
-    use crate::tui::app::menus::dither;
-    assert_eq!(dither(0.0, 8), "░░░░░░░░");
-    assert_eq!(dither(1.0, 8), "▓▓▓▓▓▓▓▓");
-    for d in [0.0f64, 0.2, 0.4, 0.6, 0.8, 1.0] {
-        let bar = dither(d, 12);
-        assert_eq!(bar.chars().count(), 12, "width is exact: {bar:?}");
-        assert!(
-            bar.chars().all(|c| matches!(c, '▓' | '▒' | '░')),
-            "only the three shades: {bar:?}"
-        );
-    }
-    // denser means at least as many full cells, never fewer
-    let full = |d: f64| dither(d, 12).matches('▓').count();
-    let mut prev = 0;
-    for d in [0.1f64, 0.3, 0.5, 0.7, 0.9] {
-        let n = full(d);
-        assert!(n >= prev, "density {d}: {n} full cells after {prev}");
-        prev = n;
-    }
-}
-
 /// `/context` (and the click on the context readout) shows the composition of
 /// the window: parts with their colors, free space, and the honest gaps —
 /// "no request yet" before one happens, "unaccounted" for whatever the parts

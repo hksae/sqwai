@@ -522,34 +522,6 @@ fn cap_first(s: &str) -> String {
     }
 }
 
-/// A noise meter: `cells` glyphs whose filled fraction tracks `density`
-/// (0..=1). The filled cells are placed at even intervals — one part is one
-/// texture, so its grain never clumps into dense and sparse patches — and the
-/// background is a single shade for the whole block: ░ while the block is
-/// sparse, ▒ once it is past half-full, so a dense block reads as soft noise
-/// instead of alternating bright and blank columns.
-pub(super) fn dither(density: f64, cells: usize) -> String {
-    let density = density.clamp(0.0, 1.0);
-    let filled = (density * cells as f64).round() as usize;
-    let background = if density >= 0.5 { '▒' } else { '░' };
-    // the j-th filled cell is the center of the j-th of `filled` even slices,
-    // so bright cells land at even intervals no matter what the density is
-    let slice = cells as f64 / filled.max(1) as f64;
-    let mut marks = std::collections::HashSet::with_capacity(filled);
-    for j in 0..filled {
-        marks.insert((((j as f64 + 0.5) * slice).floor() as usize).min(cells - 1));
-    }
-    (0..cells)
-        .map(|i| {
-            if marks.contains(&i) {
-                '▓'
-            } else {
-                background
-            }
-        })
-        .collect()
-}
-
 impl App {
     pub(super) fn cur_menu(&self) -> Option<&Menu> {
         self.menu_stack.last()
@@ -2816,14 +2788,6 @@ impl App {
                     ),
                 ];
                 parts.sort_by_key(|a| std::cmp::Reverse(a.1));
-                let fattest = parts.iter().map(|p| p.1).max().unwrap_or(0);
-                let density = |tokens: u64| {
-                    if fattest == 0 {
-                        0.0
-                    } else {
-                        tokens as f64 / fattest as f64
-                    }
-                };
 
                 // header: the truth about the window
                 let used = session.context_tokens_used();
@@ -2872,14 +2836,14 @@ impl App {
                 }
                 let free_cells = width - widths.iter().sum::<usize>();
                 let mut meter = Vec::new();
-                for ((_, tokens, style), cells) in parts.iter().zip(&widths) {
+                for ((_, _, style), cells) in parts.iter().zip(&widths) {
                     if *cells == 0 {
                         continue;
                     }
-                    meter.push(Span::styled(dither(density(*tokens), *cells), *style));
+                    meter.push(Span::styled("▓".repeat(*cells), *style));
                 }
                 if free_cells > 0 {
-                    meter.push(Span::styled(dither(0.0, free_cells), Theme::dim()));
+                    meter.push(Span::styled("░".repeat(free_cells), Theme::dim()));
                 }
                 self.menu_rows
                     .push(row(Line::from(meter), MenuAction::None));
