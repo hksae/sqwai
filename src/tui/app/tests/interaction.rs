@@ -1833,11 +1833,25 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
         (99.5..=100.5).contains(&sum),
         "legend percents must sum to 100: {sum:.1}\n{t}"
     );
-    // the fattest part is tools: it must lead the scale after sorting
-    let meter = app.menu_rows[2].0.spans[0].content.clone();
+    // the scale is solid color: spaces painted with the part's background, the
+    // fattest part (tools) leading the bar
+    let meter = &app.menu_rows[2].0;
     assert!(
-        meter.contains('▓'),
-        "the fattest part is drawn densest: {meter:?}"
+        meter
+            .spans
+            .iter()
+            .all(|s| s.content.chars().all(|c| c == ' ')),
+        "no glyphs on the scale: {:?}",
+        meter
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        meter.spans[0].style.bg,
+        Some(ratatui::style::Color::LightBlue),
+        "the fattest part (tools) leads the bar"
     );
 }
 

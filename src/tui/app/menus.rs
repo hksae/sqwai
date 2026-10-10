@@ -2760,31 +2760,31 @@ impl App {
                 // twice, as width and as texture.
                 let session = &self.session;
                 let b = session.last_breakdown;
-                let mut parts: Vec<(&str, u64, Style)> = vec![
+                let mut parts: Vec<(&str, u64, ratatui::style::Color)> = vec![
                     (
                         "system",
                         b.map(|b| b.system_tokens).unwrap_or(0),
-                        Style::new().fg(Theme::ACCENT()),
+                        Theme::ACCENT(),
                     ),
                     (
                         "tools",
                         b.map(|b| b.tool_schema_tokens).unwrap_or(0),
-                        Style::new().fg(Theme::LIGHT_BLUE()),
+                        Theme::LIGHT_BLUE(),
                     ),
                     (
                         "history",
                         b.map(|b| b.history_tokens).unwrap_or(0),
-                        Theme::ok(),
+                        Theme::OK(),
                     ),
                     (
                         "user turn",
                         b.map(|b| b.user_tokens).unwrap_or(0),
-                        Theme::warn(),
+                        Theme::WARN(),
                     ),
                     (
                         "host state",
                         b.map(|b| b.provider_state_tokens).unwrap_or(0),
-                        Theme::meta(),
+                        Theme::META(),
                     ),
                 ];
                 parts.sort_by_key(|a| std::cmp::Reverse(a.1));
@@ -2836,14 +2836,16 @@ impl App {
                 }
                 let free_cells = width - widths.iter().sum::<usize>();
                 let mut meter = Vec::new();
-                for ((_, _, style), cells) in parts.iter().zip(&widths) {
+                for ((_, _, color), cells) in parts.iter().zip(&widths) {
                     if *cells == 0 {
                         continue;
                     }
-                    meter.push(Span::styled("▓".repeat(*cells), *style));
+                    // a solid band: the color is the background, the glyph is
+                    // just a space — shade glyphs read as halftone noise
+                    meter.push(Span::styled(" ".repeat(*cells), Style::new().bg(*color)));
                 }
                 if free_cells > 0 {
-                    meter.push(Span::styled("░".repeat(free_cells), Theme::dim()));
+                    meter.push(Span::styled(" ".repeat(free_cells), Theme::base()));
                 }
                 self.menu_rows
                     .push(row(Line::from(meter), MenuAction::None));
@@ -2870,10 +2872,10 @@ impl App {
                 let scale = used_pct / (covered + unaccounted).max(1) as f64;
                 let part_pct = |tokens: u64| tokens as f64 * scale;
                 let unaccounted_pct = unaccounted as f64 * scale;
-                for (name, tokens, style) in &parts {
+                for (name, tokens, color) in &parts {
                     self.menu_rows.push(row(
                         Line::from(vec![
-                            Span::styled("● ".to_string(), *style),
+                            Span::styled("● ".to_string(), Style::new().fg(*color)),
                             Span::styled(format!("{:<11}", name), Theme::FG()),
                             Span::styled(format!("{:>7}", fmt_k(*tokens)), Theme::meta()),
                             Span::styled(format!("{:>6.1}%", part_pct(*tokens)), Theme::dim()),
