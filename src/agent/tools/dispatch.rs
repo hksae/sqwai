@@ -784,7 +784,57 @@ fn parse_time_bound(s: &str, end_of_day: bool) -> Option<chrono::DateTime<chrono
 }
 
 /// The `plan` tool: one operation per call, validated by the host (§2.1.3).
+/// The two shapes the model writes when it batches `create` and `start` in one
+/// turn, before the create result exists: `step_id` where the op wants `id`,
+/// and the plan's own ULID in `id`. Both are answered while the intent is
+/// unambiguous — exactly one step can be started, exactly one is running — and
+/// refused with the step list otherwise, so tolerance never mutates the wrong
+/// step on a guess.
+fn resolve_step_id(args: &mut Value, root: &std::path::Path, session_id: &str) {
+    const STEP_OPS: [&str; 5] = ["start", "finish", "block", "unblock", "cancel"];
+    let Some(obj) = args.as_object_mut() else {
+        return;
+    };
+    let Some(op) = obj.get("op").and_then(Value::as_str).map(str::to_string) else {
+        return;
+    };
+    if !STEP_OPS.contains(&op.as_str()) {
+        return;
+    }
+    if !obj.contains_key("id")
+        && let Some(step_id) = obj
+            .remove("step_id")
+            .and_then(|v| v.as_str().map(String::from))
+    {
+        obj.insert("id".into(), step_id.into());
+    }
+    let Ok(Some(active)) = plan::open_active_for_session(root, Some(session_id)) else {
+        return;
+    };
+    let given = obj.get("id").and_then(Value::as_str).map(String::from);
+    let missing_or_plan_id = match &given {
+        None => true,
+        Some(id) => *id == active.id,
+    };
+    if !missing_or_plan_id {
+        return;
+    }
+    let want = match op.as_str() {
+        "start" => plan::StepStatus::Pending,
+        "unblock" => plan::StepStatus::Blocked,
+        _ => plan::StepStatus::InProgress,
+    };
+    let mut candidates = active.steps.iter().filter(|s| s.status == want);
+    let (Some(first), None) = (candidates.next(), candidates.next()) else {
+        // zero or several: naming one would be the guess this refuses to make
+        return;
+    };
+    obj.insert("id".into(), first.id.clone().into());
+}
+
 pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
+    let mut args = args.clone();
+    resolve_step_id(&mut args, &ctx.root, &ctx.session_id);
     // verify was retired: the host no longer certifies checks. Catch it by
     // name before parsing so the model gets the reason, not a schema error.
     if args.get("op").and_then(|v| v.as_str()) == Some("verify") {

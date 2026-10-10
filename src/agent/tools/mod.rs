@@ -572,6 +572,47 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// The shapes the model actually writes when it plans before the create
+    /// result exists: `step_id` where the op wants `id`, no id at all, the
+    /// plan's own ULID in `id`. Each is answered when only one step can be
+    /// meant, and refused when two could be.
+    #[test]
+    fn plan_ops_resolve_the_shapes_the_model_writes() {
+        let (mut ctx, dir) = proj();
+        let created = plan_op(
+            &mut ctx,
+            &json!({
+                "op": "create",
+                "goal": "tolerance",
+                "acceptance": ["manual: eyeball it"],
+                "steps": [{"title": "one"}, {"title": "two"}]
+            }),
+        );
+        assert!(created.ok, "{}", created.output);
+        let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
+
+        // two steps are Pending: "start" with no id is a coin flip, and the
+        // refusal has to name the candidates
+        let ambiguous = plan_op(&mut ctx, &json!({"op": "start"}));
+        assert!(!ambiguous.ok, "a guess was made: {}", ambiguous.output);
+        assert!(
+            ambiguous.output.contains("one"),
+            "the refusal must list the steps: {}",
+            ambiguous.output
+        );
+
+        // the alias the model reaches for
+        let started = plan_op(&mut ctx, &json!({"op": "start", "step_id": "1"}));
+        assert!(started.ok, "{}", started.output);
+        // one step is running: finishing it needs no id
+        let done = plan_op(&mut ctx, &json!({"op": "finish", "summary": "did it"}));
+        assert!(done.ok, "{}", done.output);
+        // the plan's own id where a step id belongs, and one candidate left
+        let second = plan_op(&mut ctx, &json!({"op": "start", "id": plan_id}));
+        assert!(second.ok, "{}", second.output);
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// The result must say where the change landed. Without an address the
     /// model re-reads the window to find its own place, and on a 5400-line file
     /// that re-read is the loop: 70 reads and 24 edits in one measured session.
