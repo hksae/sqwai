@@ -2886,30 +2886,39 @@ impl App {
                 self.menu_rows
                     .push(row(super::view::blank(), MenuAction::None));
 
-                // legend: the dot wears the block's color. The denominator is
-                // the same request the parts estimate — the provider's
-                // prompt_tokens when it reported one, the sum of the parts
-                // otherwise.
-                let denom = session
+                // legend: the dot wears the block's color. Percentages are
+                // shares of the window, normalized to the provider's real
+                // usage: the parts are estimates and may overshoot
+                // `prompt_tokens`, so they are scaled to sum exactly to the
+                // used percent, and free completes the scale to 100.
+                let used_pct = session.context_percent();
+                // Percentages are shares of the window, normalized to the
+                // provider's real usage: the parts are estimates that may
+                // undershoot or overshoot `prompt_tokens`, so parts plus
+                // "unaccounted" are scaled to sum exactly to the used percent,
+                // and free completes the scale to 100.
+                let covered: u64 = parts.iter().map(|p| p.1).sum();
+                let unaccounted = session
                     .last_usage
                     .as_ref()
-                    .map(|u| u.prompt_tokens)
-                    .filter(|n| *n > 0)
-                    .unwrap_or_else(|| parts.iter().map(|p| p.1).sum::<u64>().max(1));
+                    .map(|u| u.prompt_tokens.saturating_sub(covered))
+                    .unwrap_or(0);
+                let scale = used_pct / (covered + unaccounted).max(1) as f64;
+                let part_pct = |tokens: u64| tokens as f64 * scale;
+                let unaccounted_pct = unaccounted as f64 * scale;
                 for (name, tokens, style) in &parts {
-                    let pct = (*tokens as f64 / denom as f64) * 100.0;
                     self.menu_rows.push(row(
                         Line::from(vec![
                             Span::styled("● ".to_string(), *style),
                             Span::styled(format!("{:<11}", name), Theme::FG()),
                             Span::styled(format!("{:>7}", fmt_k(*tokens)), Theme::meta()),
-                            Span::styled(format!("{:>6.1}%", pct), Theme::dim()),
+                            Span::styled(format!("{:>6.1}%", part_pct(*tokens)), Theme::dim()),
                         ]),
                         MenuAction::None,
                     ));
                 }
                 let free = limit.saturating_sub(used);
-                let free_pct = (free as f64 / limit as f64) * 100.0;
+                let free_pct = 100.0 - used_pct;
                 self.menu_rows.push(row(
                     Line::from(vec![
                         Span::styled("○ ".to_string(), Theme::dim()),
@@ -2922,18 +2931,13 @@ impl App {
                 // what the parts do not cover: the tokenizer, reasoning replay,
                 // message envelopes. Shown as its own row, never spread over
                 // the others to make the percentages reach 100.
-                let covered: u64 = parts.iter().map(|p| p.1).sum();
-                if let Some(u) = &session.last_usage
-                    && u.prompt_tokens > covered
-                {
+                if unaccounted > 0 {
                     self.menu_rows.push(row(
                         Line::from(vec![
                             Span::styled("◌ ".to_string(), Theme::dim()),
                             Span::styled(format!("{:<11}", "unaccounted"), Theme::FG()),
-                            Span::styled(
-                                format!("{:>7}", fmt_k(u.prompt_tokens - covered)),
-                                Theme::meta(),
-                            ),
+                            Span::styled(format!("{:>7}", fmt_k(unaccounted)), Theme::meta()),
+                            Span::styled(format!("{:>6.1}%", unaccounted_pct), Theme::dim()),
                         ]),
                         MenuAction::None,
                     ));

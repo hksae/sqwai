@@ -1845,6 +1845,19 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
     assert!(t.contains("used 8k"), "the header keeps only used: {t}");
     assert!(t.contains("unaccounted"), "the gap is its own row: {t}");
     assert!(t.contains("free"), "free space is a legend row: {t}");
+    // the legend is a partition of the window: every row carries a percent and
+    // together they may not claim more than the window has
+    let sum: f64 = t
+        .lines()
+        .filter(|l| l.starts_with("● ") || l.starts_with("○ ") || l.starts_with("◌ "))
+        .filter_map(|l| l.split_whitespace().last())
+        .filter_map(|p| p.strip_suffix('%'))
+        .filter_map(|p| p.parse::<f64>().ok())
+        .sum();
+    assert!(
+        (99.5..=100.5).contains(&sum),
+        "legend percents must sum to 100: {sum:.1}\n{t}"
+    );
     // the fattest part is tools: it must lead the scale after sorting
     let meter = app.menu_rows[2].0.spans[0].content.clone();
     assert!(
