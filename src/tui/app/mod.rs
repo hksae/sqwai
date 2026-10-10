@@ -142,6 +142,15 @@ struct Toast {
     until: Instant,
 }
 
+/// Coverage context for an undo toast: the mode tag plus a one-shot
+/// transition note. Built once per /undo so the blob path does not
+/// re-probe git on its own (and so `undo_from_blobs` stays within the
+/// argument limit).
+struct UndoCoverage {
+    tag: String,
+    transition: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Mode {
     Plan,
@@ -317,6 +326,10 @@ pub struct App {
     resume_notice_armed: bool,
     /// label of the last shadow checkpoint (design §10 indicator)
     last_checkpoint: Option<String>,
+    /// last observed layer-2 (shadow snapshot) availability for undo.
+    /// None until the first /undo call sets the baseline silently; a later
+    /// change surfaces once as a transition note in the undo toast.
+    undo_layer2: Option<bool>,
     /// user message index pushed for the active turn, if any
     turn_user_index: Option<usize>,
 
@@ -1041,6 +1054,7 @@ Continue from the pending step, or report to the user if the settled work looks 
             last_mouse: None,
             menu_open_mouse: None,
             last_checkpoint: None,
+            undo_layer2: None,
             press_anchor: None,
             dragging: false,
             sel: None,
@@ -4924,6 +4938,47 @@ Continue from the pending step, or report to the user if the settled work looks 
         self.dirty = true;
     }
 
+    /// Undo coverage tag for toast headers: empty in full mode (shadow
+    /// snapshots available), ` (files-only, …)` with the reason when layer 2
+    /// is down. Full mode stays silent — it is the default, not news. The tag
+    /// leads the toast text so it survives width truncation on narrow
+    /// terminals, which cuts the tail.
+    fn undo_coverage_tag(&self, layer2: bool) -> String {
+        if layer2 {
+            String::new()
+        } else {
+            format!(" (files-only, {})", self.undo_degraded_why())
+        }
+    }
+
+    /// Why layer 2 (shadow tree snapshots) is down: settings or environment.
+    fn undo_degraded_why(&self) -> &'static str {
+        if self.cfg.undo.shadow == crate::config::ShadowStore::Off {
+            "shadow off"
+        } else {
+            "no git"
+        }
+    }
+
+    /// Transition note when layer-2 availability changed since the previous
+    /// /undo call. The first call only sets the baseline silently — a degraded
+    /// mode at startup is reported by the coverage tag, not by a transition
+    /// that has no baseline to compare against.
+    fn undo_transition(&mut self, layer2: bool) -> Option<String> {
+        let prev = self.undo_layer2.replace(layer2);
+        match prev {
+            Some(old) if old != layer2 => Some(if layer2 {
+                "undo mode changed to full".to_string()
+            } else {
+                format!(
+                    "undo mode changed to files-only ({})",
+                    self.undo_degraded_why()
+                )
+            }),
+            _ => None,
+        }
+    }
+
     fn undo(&mut self, n: usize) {
         let n = n.max(1);
         if self.session.checkpoints.is_empty() {
@@ -4934,6 +4989,10 @@ Continue from the pending step, or report to the user if the settled work looks 
         let (sha, label) = self.session.checkpoints[idx].clone();
         let root = self.project_root.clone();
         let git_snapshots = crate::agent::checkpoints::available_in(&root, self.cfg.undo.shadow);
+        // Coverage header + transition note for the toasts below. Computed
+        // once: the blob path below must not re-probe git on its own.
+        let cov = self.undo_coverage_tag(git_snapshots);
+        let transition = self.undo_transition(git_snapshots);
         // Scope the restore to what the host recorded as its own writes across
         // the checkpoints being undone. Without this, undo reverts the whole
         // tree to the snapshot and silently discards anything the user edited
@@ -4992,7 +5051,17 @@ Continue from the pending step, or report to the user if the settled work looks 
             // Prefer the blob store when it covers the window: it reverts
             // exactly the recorded writes, needs no repository, and cannot be
             // invalidated by the user's own `git gc`.
-            self.undo_from_blobs(&root, idx, &label, &pre_images, unrecorded);
+            self.undo_from_blobs(
+                &root,
+                idx,
+                &label,
+                &pre_images,
+                unrecorded,
+                UndoCoverage {
+                    tag: cov,
+                    transition,
+                },
+            );
             return;
         }
         let targets: Vec<crate::agent::checkpoints::Target> = if scoped {
@@ -5037,7 +5106,7 @@ Continue from the pending step, or report to the user if the settled work looks 
                 self.context_bootstrap_pending = true;
                 self.session.save().ok();
 
-                let mut note = format!("undo: reverted '{label}' ({} file(s)", touched.len());
+                let mut note = format!("undo{cov}: reverted '{label}' ({} file(s)", touched.len());
                 if !report.deleted.is_empty() {
                     note.push_str(&format!(", {} removed", report.deleted.len()));
                 }
@@ -5062,6 +5131,9 @@ Continue from the pending step, or report to the user if the settled work looks 
                 } else {
                     StatusKind::Ok
                 };
+                if let Some(t) = transition {
+                    note = format!("{t}; {note}");
+                }
                 self.status(&note, kind);
                 self.dirty = true;
             }
@@ -5132,6 +5204,11 @@ Continue from the pending step, or report to the user if the settled work looks 
             Some(guard) => guard,
             None => return,
         };
+        // Step reverts are always layer 1, but the toast still names the
+        // mode: with layer 2 down, bash-written bytes of the window stay.
+        let layer2 = crate::agent::checkpoints::available_in(root, self.cfg.undo.shadow);
+        let cov = self.undo_coverage_tag(layer2);
+        let transition = self.undo_transition(layer2);
 
         match crate::agent::checkpoints::restore_from_blobs(root, &revert.files) {
             Ok(report) => {
@@ -5175,7 +5252,7 @@ Continue from the pending step, or report to the user if the settled work looks 
                 self.context_bootstrap_pending = true;
                 self.session.save().ok();
 
-                let mut note = format!("undo step {step}: {} file(s)", touched.len());
+                let mut note = format!("undo step {step}{cov}: {} file(s)", touched.len());
                 if !report.deleted.is_empty() {
                     note.push_str(&format!(", {} removed", report.deleted.len()));
                 }
@@ -5203,6 +5280,9 @@ Continue from the pending step, or report to the user if the settled work looks 
                 } else {
                     StatusKind::Ok
                 };
+                if let Some(t) = transition {
+                    note = format!("{t}; {note}");
+                }
                 self.status(&note, kind);
                 self.dirty = true;
             }
@@ -5219,7 +5299,12 @@ Continue from the pending step, or report to the user if the settled work looks 
         label: &str,
         pre_images: &[crate::agent::journal::PreImage],
         unrecorded: usize,
+        coverage: UndoCoverage,
     ) {
+        let UndoCoverage {
+            tag: cov,
+            transition,
+        } = coverage;
         // Called from `undo` after its own preflight; re-checking is cheap
         // and keeps this entry safe on its own.
         let _restore = match self.undo_preflight() {
@@ -5247,7 +5332,7 @@ Continue from the pending step, or report to the user if the settled work looks 
                 self.session.save().ok();
 
                 let mut note = format!(
-                    "undo: reverted '{label}' from stored pre-images ({} file(s)",
+                    "undo{cov}: reverted '{label}' from stored pre-images ({} file(s)",
                     touched.len()
                 );
                 if !report.deleted.is_empty() {
@@ -5278,6 +5363,9 @@ Continue from the pending step, or report to the user if the settled work looks 
                 } else {
                     StatusKind::Ok
                 };
+                if let Some(t) = transition {
+                    note = format!("{t}; {note}");
+                }
                 self.status(&note, kind);
                 self.dirty = true;
             }

@@ -517,6 +517,34 @@ fn undo_step_refuses_without_an_active_plan() {
     );
 }
 
+/// Undo coverage is silent in full mode and names the reason when degraded.
+/// The tag leads the toast so it survives width truncation, which cuts the
+/// tail on narrow terminals.
+#[test]
+fn undo_coverage_tag_is_empty_in_full_mode_and_names_the_reason_when_degraded() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    assert_eq!(app.undo_coverage_tag(true), "");
+    app.cfg.undo.shadow = crate::config::ShadowStore::Off;
+    assert_eq!(app.undo_coverage_tag(false), " (files-only, shadow off)");
+    app.cfg.undo.shadow = crate::config::ShadowStore::Local;
+    assert_eq!(app.undo_coverage_tag(false), " (files-only, no git)");
+}
+
+/// The first /undo call sets the baseline silently; only a change toasts.
+/// A degraded mode at startup is reported by the coverage tag, not by a
+/// transition that has no baseline to compare against.
+#[test]
+fn undo_transition_is_silent_first_and_fires_only_on_change() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    assert_eq!(app.undo_transition(true), None);
+    assert_eq!(app.undo_transition(true), None);
+    let down = app.undo_transition(false).expect("must fire on change");
+    assert!(down.contains("files-only"), "{down}");
+    assert_eq!(app.undo_transition(false), None);
+    let up = app.undo_transition(true).expect("must fire on recovery");
+    assert!(up.contains("full"), "{up}");
+}
+
 /// A server that answers every request with the same status and body.
 fn mock_status_server(status: u16, reason: &str, body: &str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
