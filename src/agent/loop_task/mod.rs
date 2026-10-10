@@ -1415,6 +1415,10 @@ async fn run_agent(
                                 }
                             }
                         }
+                        "recall_result" => crate::agent::tool_output::recall(
+                            &messages,
+                            call.args["call_id"].as_str().unwrap_or_default(),
+                        ),
                         "plan" => {
                             let mut args = call.args.clone();
                             args["context_limit"] = serde_json::json!(context_limit);

@@ -386,6 +386,17 @@ One batch at the close of a step is enough.",
             }),
         },
         ToolDef {
+            name: "recall_result",
+            kind: Kind::ReadOnly,
+            description: "Return the full stored output of one earlier tool call, by the \
+`call_id` a cleared result names in its place. Old tool output is trimmed from the request, \
+never from the session — so this is how you get it back without running the tool again: a \
+re-read sees whatever the file became since, and a re-run of a mutating command is work you \
+did not plan for. Refused when the result is still in your context (it is above you) and \
+when compaction has dropped it from the transcript.",
+            parameters: json!({"type":"object","properties":{"call_id":{"type":"string","description":"the call id the cleared result names"}},"required":["call_id"]}),
+        },
+        ToolDef {
             name: "memory_write",
             kind: Kind::ReadOnly,
             description: "Persist one durable fact to host memory (MEMORY.md for the \

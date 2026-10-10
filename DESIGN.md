@@ -130,6 +130,18 @@ session answered that block instead of the user: it re-verified a tree it had
 already verified, five byte-identical times. Host state describing itself as a
 user turn is the one layout mistake a chat model cannot be argued out of.
 
+**The wire is not the store.** Tool output is the bulk of a long session — a
+measured run carried 776 KB of results against 75 KB of conversation — so old
+results are trimmed *on the way to the request*, never in the session file. Once
+clearable output passes the trigger, the newest window stays intact and the
+older results are replaced by one line naming the tool, its target, the size and
+the `call_id` that brings them back through `recall_result`. A pass that frees
+too little is skipped: rewriting an old message re-keys the provider's prefix
+cache, and everything behind it is re-read. Errored results are never cleared —
+the reason it failed is the content. This is why `recall_result` reads the
+transcript the loop is holding rather than a file: the store is written once per
+iteration and can lag a call behind.
+
 **Compaction** replaces the discarded head with a host-built anchor —
 journal-derived facts: files this session changed, what was last verified, open
 assumptions, decisions, recent failures — under the header

@@ -62,15 +62,21 @@ pub(crate) fn turn_transport(
 }
 
 pub(crate) fn request_messages(messages: &[Message], transport: ContextTransport) -> Vec<Message> {
-    if transport != ContextTransport::PreviousResponse {
-        return messages.to_vec();
-    }
-    let unseen = messages
-        .iter()
-        .rev()
-        .take_while(|m| matches!(m.role, Role::Tool | Role::User))
-        .count();
-    messages[messages.len() - unseen..].to_vec()
+    let mut out = if transport != ContextTransport::PreviousResponse {
+        messages.to_vec()
+    } else {
+        let unseen = messages
+            .iter()
+            .rev()
+            .take_while(|m| matches!(m.role, Role::Tool | Role::User))
+            .count();
+        messages[messages.len() - unseen..].to_vec()
+    };
+    // Old tool output is trimmed here, on the way to the wire — never in the
+    // session, where every result stays whole and can be handed back by
+    // `recall`. The store and the request are different objects on purpose.
+    crate::agent::tool_output::trim_for_wire(&mut out);
+    out
 }
 
 pub(crate) struct TurnOutcome {

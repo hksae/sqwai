@@ -13,6 +13,7 @@ pub mod safety;
 pub mod secrets;
 pub mod shadow;
 pub mod shell;
+pub mod tool_output;
 pub mod tools;
 pub mod trust;
 pub mod undo_guard;
