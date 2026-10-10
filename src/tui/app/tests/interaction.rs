@@ -1842,7 +1842,7 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
     app.session.context_peak_tokens = 9_500;
     app.build_menu_rows();
     let t = text(&app);
-    assert!(t.contains("9k"), "peak rides the header: {t}");
+    assert!(t.contains("used 8k"), "the header keeps only used: {t}");
     assert!(t.contains("unaccounted"), "the gap is its own row: {t}");
     assert!(t.contains("free"), "free space is a legend row: {t}");
     // the fattest part is tools: it must lead the scale after sorting

@@ -2828,17 +2828,14 @@ impl App {
                 // header: the truth about the window
                 let used = session.context_tokens_used();
                 let limit = session.context_limit.max(1);
-                let peak = session.context_peak_tokens.max(used);
                 self.menu_rows.push(row(
                     Line::from(vec![
                         Span::styled(session.model_key.clone(), Theme::FG()),
                         Span::styled(
                             format!(
-                                " · limit {} · used {} ({:.1}%) · peak {}",
-                                fmt_k(limit),
+                                " · used {} ({:.1}%)",
                                 fmt_k(used),
-                                session.context_percent(),
-                                fmt_k(peak)
+                                session.context_percent()
                             ),
                             Theme::dim(),
                         ),
@@ -2905,7 +2902,7 @@ impl App {
                         Line::from(vec![
                             Span::styled("● ".to_string(), *style),
                             Span::styled(format!("{:<11}", name), Theme::FG()),
-                            Span::styled(format!("{:>7} tok", fmt_k(*tokens)), Theme::meta()),
+                            Span::styled(format!("{:>7}", fmt_k(*tokens)), Theme::meta()),
                             Span::styled(format!("{:>6.1}%", pct), Theme::dim()),
                         ]),
                         MenuAction::None,
@@ -2917,7 +2914,7 @@ impl App {
                     Line::from(vec![
                         Span::styled("○ ".to_string(), Theme::dim()),
                         Span::styled(format!("{:<11}", "free"), Theme::FG()),
-                        Span::styled(format!("{:>7} tok", fmt_k(free)), Theme::meta()),
+                        Span::styled(format!("{:>7}", fmt_k(free)), Theme::meta()),
                         Span::styled(format!("{:>6.1}%", free_pct), Theme::dim()),
                     ]),
                     MenuAction::None,
@@ -2934,7 +2931,7 @@ impl App {
                             Span::styled("◌ ".to_string(), Theme::dim()),
                             Span::styled(format!("{:<11}", "unaccounted"), Theme::FG()),
                             Span::styled(
-                                format!("{:>7} tok", fmt_k(u.prompt_tokens - covered)),
+                                format!("{:>7}", fmt_k(u.prompt_tokens - covered)),
                                 Theme::meta(),
                             ),
                         ]),
