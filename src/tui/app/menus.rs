@@ -2847,7 +2847,8 @@ impl App {
                 if free_cells > 0 {
                     meter.push(Span::styled(
                         " ".repeat(free_cells),
-                        Style::new().bg(Theme::MENU_BG_DIM()),
+                        // one step lighter than the panel: visible, still quiet
+                        Style::new().bg(Theme::INPUT_BG()),
                     ));
                 }
                 self.menu_rows
