@@ -170,6 +170,13 @@ pub struct Session {
     /// current state.
     #[serde(default)]
     pub pending_undo_note: Option<String>,
+    /// Layer-2 (shadow snapshot) availability as last observed by `/undo`.
+    /// `None` until the first call sets the baseline silently; a later change
+    /// surfaces once as a transition note. It lives here rather than on the
+    /// screen state because "once per transition" has to survive the restarts a
+    /// long session really has — six of them in one run that was measured.
+    #[serde(default)]
+    pub undo_layer2: Option<bool>,
     /// project root this session was born in; stamped by the host on
     /// creation. Plans, journals and undo chains live under this root, so
     /// opening the session elsewhere dangles those links (the UI warns).
@@ -205,6 +212,7 @@ impl Session {
             turn_notes: Vec::new(),
             prev_turn_aborted: false,
             pending_undo_note: None,
+            undo_layer2: None,
             project: None,
         }
     }

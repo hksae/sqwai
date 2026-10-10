@@ -369,11 +369,16 @@ pub struct RequestBreakdown {
     pub history_bytes: u64,
     /// what the tools answered (`Role::Tool` messages)
     pub tool_output_bytes: u64,
-    /// what the host bolts onto this one request: volatile facts, plus the
-    /// opaque provider state riding the messages. Replayed reasoning items are
-    /// base64 and enormous, and a breakdown that ignored them reported a 257KB
-    /// request for one carrying 199KB more (§18.1.9).
+    /// what the host bolts onto this one request: the volatile system parts
+    /// (mode, checks, anchor, plan status, nudge)
     pub host_bytes: u64,
+    /// opaque provider state riding the messages. Replayed reasoning items are
+    /// base64 and enormous — in one live run they were 363 KB of a 392 KB
+    /// second-largest pile — and a breakdown that ignored them reported a
+    /// 257KB request for one carrying 199KB more (§18.1.9). They get their own
+    /// row because nothing else on the wire is this unmovable: the host cannot
+    /// read them, summarize them, or clear them the way it can a tool result.
+    pub reasoning_bytes: u64,
     pub total_bytes: u64,
     pub system_tokens: u64,
     pub memory_tokens: u64,
@@ -381,6 +386,7 @@ pub struct RequestBreakdown {
     pub history_tokens: u64,
     pub tool_output_tokens: u64,
     pub host_tokens: u64,
+    pub reasoning_tokens: u64,
 }
 
 impl RequestBreakdown {
@@ -408,7 +414,7 @@ impl RequestBreakdown {
                 Role::User | Role::Assistant => out.history_bytes += bytes,
                 Role::Tool => out.tool_output_bytes += bytes,
             }
-            out.host_bytes += message
+            out.reasoning_bytes += message
                 .provider_state
                 .as_ref()
                 .map(|state| state.to_string().len() as u64)
@@ -427,7 +433,8 @@ impl RequestBreakdown {
             + out.skills_bytes
             + out.history_bytes
             + out.tool_output_bytes
-            + out.host_bytes;
+            + out.host_bytes
+            + out.reasoning_bytes;
         // Same counter the session uses for its own estimate: bytes over four.
         let tok = |bytes: u64| bytes.div_ceil(4);
         out.system_tokens = tok(out.system_bytes);
@@ -436,6 +443,7 @@ impl RequestBreakdown {
         out.history_tokens = tok(out.history_bytes);
         out.tool_output_tokens = tok(out.tool_output_bytes);
         out.host_tokens = tok(out.host_bytes);
+        out.reasoning_tokens = tok(out.reasoning_bytes);
         out
     }
 }
@@ -1139,6 +1147,8 @@ mod system_layout_tests {
     #[test]
     fn the_breakdown_cuts_the_request_where_a_reader_can_act_on_it() {
         let schema = serde_json::json!({"p": "the one param"});
+        // what the gateway hands back and asks us to replay verbatim
+        let replay = serde_json::json!({"reasoning_items": [{"encrypted_content": "AAAA"}]});
         let req = ChatRequest {
             model_id: "m".into(),
             system: vec![
@@ -1149,7 +1159,7 @@ mod system_layout_tests {
             ],
             messages: vec![
                 Message::new(Role::User, "question"),
-                Message::new(Role::Assistant, "answer"),
+                Message::new(Role::Assistant, "answer").with_provider_state(Some(replay.clone())),
                 Message::tool_result("c1", "a tool answered", false),
             ],
             tools: vec![ToolSpec {
@@ -1169,7 +1179,16 @@ mod system_layout_tests {
         );
         assert_eq!(b.memory_bytes, "durable memory".len() as u64);
         assert_eq!(b.skills_bytes, "skill bodies".len() as u64);
-        assert_eq!(b.host_bytes, "Mode: act".len() as u64);
+        assert_eq!(
+            b.host_bytes,
+            "Mode: act".len() as u64,
+            "the host block is the volatile parts, not the replay"
+        );
+        assert_eq!(
+            b.reasoning_bytes,
+            replay.to_string().len() as u64,
+            "replayed provider state is its own part"
+        );
         assert_eq!(
             b.history_bytes,
             ("question".len() + "answer".len()) as u64,
@@ -1185,6 +1204,7 @@ mod system_layout_tests {
                 + b.history_bytes
                 + b.tool_output_bytes
                 + b.host_bytes
+                + b.reasoning_bytes
         );
     }
 

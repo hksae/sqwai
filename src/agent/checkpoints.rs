@@ -49,11 +49,28 @@ pub fn available(root: &Path) -> bool {
     available_in(root, ShadowStore::Local)
 }
 
+/// Why layer 2 is down, in words an undo toast can show — `None` when it is up.
+/// Layer 2 fails for exactly three reasons, and naming one of them without
+/// looking is how a toast blamed git for a setting the user had switched off.
+pub fn unavailable_reason(root: &Path, store: ShadowStore) -> Option<&'static str> {
+    if matches!(store, ShadowStore::Off) {
+        return Some("shadow off");
+    }
+    if !crate::agent::shadow::git_available() {
+        return Some("no git");
+    }
+    // the store is on and git answers, so the only way left is that the place
+    // the snapshots would live in could not be named
+    crate::agent::shadow::dir_for(root, store)
+        .is_none()
+        .then_some("no checkpoint dir")
+}
+
 /// Availability in the configured store: with `[undo].shadow="user"` the
 /// snapshots live outside the project, and the Local check would report
 /// undo unavailable while it works fine.
 pub fn available_in(root: &Path, store: ShadowStore) -> bool {
-    crate::agent::shadow::git_available() && crate::agent::shadow::dir_for(root, store).is_some()
+    unavailable_reason(root, store).is_none()
 }
 
 /// Snapshot the worktree onto this session's chain in the shadow repository
