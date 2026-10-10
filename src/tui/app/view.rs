@@ -617,15 +617,18 @@ impl App {
         }
         let inside =
             |range: Option<(u16, u16)>| range.is_some_and(|(x0, x1)| col >= x0 && col <= x1);
+        let context = inside(self.ctx_click);
         let model = inside(self.md_click);
-        if !model && !inside(self.ef_click) {
+        if !context && !model && !inside(self.ef_click) {
             return false;
         }
         self.press = None;
         self.press_anchor = None;
         self.dragging = false;
         self.sel = None;
-        if model {
+        if context {
+            self.open_menu(Menu::Context);
+        } else if model {
             let provider = self.model_cfg.provider.clone();
             self.open_menu(Menu::PickModel { provider });
         } else {
@@ -2867,6 +2870,7 @@ impl App {
         let has_hints = matches!(
             menu,
             Some(Menu::Sessions)
+                | Some(Menu::Context)
                 | Some(Menu::TestAnim)
                 | Some(Menu::TestArt)
                 | Some(Menu::TestColors)
@@ -3152,7 +3156,8 @@ impl App {
             );
         } else if matches!(
             self.cur_menu(),
-            Some(Menu::TestAnim)
+            Some(Menu::Context)
+                | Some(Menu::TestAnim)
                 | Some(Menu::TestArt)
                 | Some(Menu::TestColors)
                 | Some(Menu::TestMd)
@@ -3663,6 +3668,7 @@ impl App {
             .to_string();
         self.ef_click = None;
         self.md_click = None;
+        self.ctx_click = None;
 
         // right side: [ctx] [model] [effort] [folder] [MODE chip]
         let lsp_label = if self.lsp_diagnostics > 0 {
@@ -3723,10 +3729,12 @@ impl App {
         };
         let mut spans = vec![Span::styled(format!(" {} ", self.mode.label()), chip_style)];
         let pad = (w as usize).saturating_sub(lw as usize + right_len);
-        let model_x0 = lw + pad as u16 + cols(&ctx_label) as u16 + 1;
+        let ctx_cols = cols(&ctx_label) as u16;
+        let model_x0 = lw + pad as u16 + ctx_cols + 1;
         let model_cols = cols(&model_label) as u16;
         spans.push(Span::styled(" ".repeat(pad), Theme::base()));
         spans.push(Span::styled(ctx_label.clone(), Theme::dim()));
+        self.ctx_click = Some((lw + pad as u16, lw + pad as u16 + ctx_cols));
         spans.push(Span::styled(" ".to_string(), Theme::base()));
         spans.push(Span::styled(model_label, Theme::meta()));
         self.md_click = Some((model_x0, model_x0 + model_cols));

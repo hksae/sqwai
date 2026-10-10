@@ -490,6 +490,9 @@ pub struct App {
     /// live filter typed inside the sessions menu
     sessions_filter: String,
     ef_click: Option<(u16, u16)>,
+    /// Click range of the context readout in the status bar: opens the same
+    /// menu `/context` opens.
+    ctx_click: Option<(u16, u16)>,
     /// Click range of the model name in the status bar: the same target Ctrl+G
     /// binds to.
     md_click: Option<(u16, u16)>,
@@ -1016,6 +1019,7 @@ Continue from the pending step, or report to the user if the settled work looks 
             sessions: Vec::new(),
             sessions_filter: String::new(),
             ef_click: None,
+            ctx_click: None,
             md_click: None,
             provider_checks: std::collections::HashMap::new(),
             provider_check_rx: None,
@@ -2995,6 +2999,7 @@ Continue from the pending step, or report to the user if the settled work looks 
                 self.quit = true;
             }
             "/compact" => self.start_compaction(),
+            "/context" => self.open_menu(Menu::Context),
             "/undo" => {
                 if self.streaming {
                     self.show_busy_status();
@@ -3553,6 +3558,9 @@ Continue from the pending step, or report to the user if the settled work looks 
                 }
                 AgentEvent::Usage(u) => {
                     self.session.add_usage(&u);
+                    // high-water mark of the live window, provider truth
+                    self.session.context_peak_tokens =
+                        self.session.context_peak_tokens.max(u.prompt_tokens);
                     self.dirty = true;
                 }
                 AgentEvent::EffortIgnored { level, why } => {
@@ -3581,6 +3589,7 @@ Continue from the pending step, or report to the user if the settled work looks 
                     self.persist_transcript(messages, summary)
                 }
                 AgentEvent::RequestBreakdown(b) => {
+                    self.session.last_breakdown = Some(b);
                     crate::providers::log_http(&format!(
                         "request breakdown: system={}B history={}B user={}B provider_state={}B tools={}B total={}B",
                         b.system_bytes,

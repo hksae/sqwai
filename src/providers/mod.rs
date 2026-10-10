@@ -323,7 +323,13 @@ pub fn promote_lone_volatile_system(system: &mut [SystemPart]) {
 
 /// Approximate request composition for diagnostics. This is intentionally
 /// provider-neutral: exact tokenization still belongs to the provider.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// The `*_tokens` fields are the same parts estimated with the session's
+/// counter (bytes over four). They are estimates by construction — the
+/// provider's `prompt_tokens` remains the only truth about the whole, and
+/// anything the parts fail to cover is shown as its own "unaccounted" row
+/// rather than being spread over the others.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestBreakdown {
     pub system_bytes: u64,
     pub history_bytes: u64,
@@ -335,6 +341,11 @@ pub struct RequestBreakdown {
     pub provider_state_bytes: u64,
     pub tool_schema_bytes: u64,
     pub total_bytes: u64,
+    pub system_tokens: u64,
+    pub history_tokens: u64,
+    pub user_tokens: u64,
+    pub provider_state_tokens: u64,
+    pub tool_schema_tokens: u64,
 }
 
 impl RequestBreakdown {
@@ -373,6 +384,13 @@ impl RequestBreakdown {
             + out.user_bytes
             + out.provider_state_bytes
             + out.tool_schema_bytes;
+        // Same counter the session uses for its own estimate: bytes over four.
+        let tok = |bytes: u64| bytes.div_ceil(4);
+        out.system_tokens = tok(out.system_bytes);
+        out.history_tokens = tok(out.history_bytes);
+        out.user_tokens = tok(out.user_bytes);
+        out.provider_state_tokens = tok(out.provider_state_bytes);
+        out.tool_schema_tokens = tok(out.tool_schema_bytes);
         out
     }
 }

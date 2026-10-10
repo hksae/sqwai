@@ -1771,6 +1771,95 @@ fn dragging_in_the_composer_selects_text() {
     );
 }
 
+/// The noise meter is the whole language of the context scale, so its edges
+/// must be exact: 0 is empty, 1 is solid, and the glyphs stay in the family.
+#[test]
+fn dither_maps_density_to_the_shade_mix() {
+    use crate::tui::app::menus::dither;
+    assert_eq!(dither(0.0, 8), "░░░░░░░░");
+    assert_eq!(dither(1.0, 8), "▓▓▓▓▓▓▓▓");
+    for d in [0.0f64, 0.2, 0.4, 0.6, 0.8, 1.0] {
+        let bar = dither(d, 12);
+        assert_eq!(bar.chars().count(), 12, "width is exact: {bar:?}");
+        assert!(
+            bar.chars().all(|c| matches!(c, '▓' | '▒' | '░')),
+            "only the three shades: {bar:?}"
+        );
+    }
+    // denser means at least as many full cells, never fewer
+    let full = |d: f64| dither(d, 12).matches('▓').count();
+    let mut prev = 0;
+    for d in [0.1f64, 0.3, 0.5, 0.7, 0.9] {
+        let n = full(d);
+        assert!(n >= prev, "density {d}: {n} full cells after {prev}");
+        prev = n;
+    }
+}
+
+/// `/context` (and the click on the context readout) shows the composition of
+/// the window: parts with their colors, free space, and the honest gaps —
+/// "no request yet" before one happens, "unaccounted" for whatever the parts
+/// do not cover of the provider's real prompt count.
+#[test]
+fn context_menu_shows_parts_legend_and_honest_gaps() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.command("context");
+    assert!(matches!(app.cur_menu(), Some(Menu::Context)));
+    assert!(!app.menu_rows.is_empty());
+    let text = |app: &App| {
+        app.menu_rows
+            .iter()
+            .map(|(l, _)| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        text(&app).contains("no provider request yet"),
+        "no invented numbers before the first request: {}",
+        text(&app)
+    );
+
+    app.session.last_breakdown = Some(crate::providers::RequestBreakdown {
+        system_bytes: 4_000,
+        history_bytes: 8_000,
+        user_bytes: 1_000,
+        provider_state_bytes: 800,
+        tool_schema_bytes: 16_000,
+        total_bytes: 29_800,
+        system_tokens: 1_000,
+        history_tokens: 2_000,
+        user_tokens: 250,
+        provider_state_tokens: 200,
+        tool_schema_tokens: 4_000,
+    });
+    app.session.last_usage = Some(crate::providers::Usage {
+        prompt_tokens: 8_000,
+        completion_tokens: 500,
+        cached_tokens: Some(6_000),
+        cache_write_tokens: None,
+        reasoning_tokens: Some(300),
+    });
+    app.session.context_peak_tokens = 9_500;
+    app.build_menu_rows();
+    let t = text(&app);
+    assert!(t.contains("9k"), "peak rides the header: {t}");
+    assert!(t.contains("unaccounted"), "the gap is its own row: {t}");
+    assert!(t.contains("cached 6k"), "cached count shown: {t}");
+    assert!(t.contains("n/a"), "cache write was not reported: {t}");
+    assert!(t.contains("free"), "free space is a legend row: {t}");
+    // the fattest part is tools: it must lead the scale after sorting
+    let meter = app.menu_rows[2].0.spans[0].content.clone();
+    assert!(
+        meter.contains('▓'),
+        "the fattest part is drawn densest: {meter:?}"
+    );
+}
+
 #[test]
 fn queue_preview_renders_above_input() {
     use ratatui::buffer::Buffer;

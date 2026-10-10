@@ -110,6 +110,17 @@ pub struct Session {
     /// live context occupancy — it replaces, never accumulates.
     #[serde(default)]
     pub last_usage: Option<Usage>,
+    /// Parts of the last built request in estimated tokens (bytes over four,
+    /// the same counter as `estimated_tokens`). The parts never sum to the
+    /// provider's `prompt_tokens` exactly; the gap is displayed as its own
+    /// "unaccounted" row, not spread over the others.
+    #[serde(default)]
+    pub last_breakdown: Option<crate::providers::RequestBreakdown>,
+    /// High-water mark of the provider's `prompt_tokens` across the session:
+    /// "it was 12k, now it is 8k" is the question a compaction answers, and
+    /// without a stored peak the menu can only show the current frame.
+    #[serde(default)]
+    pub context_peak_tokens: u64,
     /// compaction summary of the messages dropped so far (opencode-style)
     #[serde(default)]
     pub summary: Option<String>,
@@ -179,6 +190,8 @@ impl Session {
             usage: Usage::default(),
             estimated_tokens: 0,
             last_usage: None,
+            last_breakdown: None,
+            context_peak_tokens: 0,
             summary: None,
             cache_confirmed: false,
             last_message_at: None,

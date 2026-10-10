@@ -19,6 +19,7 @@ use crate::tui::theme::Theme;
 pub(super) const COMMANDS: &[&str] = &[
     "/compact",
     "/constraints",
+    "/context",
     "/debug",
     "/exit",
     "/export",
@@ -181,6 +182,8 @@ pub(super) enum Menu {
     Effort {
         model: Option<String>,
     },
+    /// /context: the context window's composition — one noise block per part
+    Context,
     /// /test anim: every single-character frame set, spinning, for picking the
     /// live status marker
     TestAnim,
@@ -519,6 +522,29 @@ fn cap_first(s: &str) -> String {
     }
 }
 
+/// A noise meter: `cells` glyphs whose filled fraction tracks `density`
+/// (0..=1) by error diffusion over ▓▒░. 1.0 is solid ▓, 0.0 is empty ░, and
+/// everything between lands as an even mix — which is what makes a 0.3 share
+/// readable next to a 0.1 one instead of collapsing into the same block.
+pub(super) fn dither(density: f64, cells: usize) -> String {
+    let density = density.clamp(0.0, 1.0);
+    let mut err = 0.0f64;
+    let mut out = String::with_capacity(cells * 3);
+    for _ in 0..cells {
+        let v = density + err;
+        let (ch, level) = if v >= 0.666_7 {
+            ('▓', 1.0)
+        } else if v >= 0.333_4 {
+            ('▒', 0.5)
+        } else {
+            ('░', 0.0)
+        };
+        err = (err + density - level).clamp(-0.5, 0.5);
+        out.push(ch);
+    }
+    out
+}
+
 impl App {
     pub(super) fn cur_menu(&self) -> Option<&Menu> {
         self.menu_stack.last()
@@ -700,7 +726,8 @@ impl App {
     fn menu_skips_none(&self) -> bool {
         !matches!(
             self.cur_menu(),
-            Some(Menu::TestAnim)
+            Some(Menu::Context)
+                | Some(Menu::TestAnim)
                 | Some(Menu::TestArt)
                 | Some(Menu::TestColors)
                 | Some(Menu::TestMd)
@@ -968,7 +995,8 @@ impl App {
         // galleries are showcases: any commit just closes them
         if matches!(
             self.cur_menu(),
-            Some(Menu::TestAnim)
+            Some(Menu::Context)
+                | Some(Menu::TestAnim)
                 | Some(Menu::TestArt)
                 | Some(Menu::TestColors)
                 | Some(Menu::TestMd)
@@ -1764,6 +1792,7 @@ impl App {
                 Some(key) => format!(" Effort · {key} "),
                 None => " Effort ".into(),
             },
+            Some(Menu::Context) => " Context ".into(),
             Some(Menu::TestAnim) => " Anim ".into(),
             Some(Menu::TestArt) => " Art ".into(),
             Some(Menu::TestColors) => " Colors ".into(),
@@ -2737,6 +2766,227 @@ impl App {
                         MenuAction::SetEffort(lvl),
                     ));
                 }
+            }
+            Menu::Context => {
+                // One noise scale: a block per part, the part's color, and the
+                // fill density tracking its share of the largest part. The
+                // window's real fullness lives in the header — this scale reads
+                // as composition, not as a gauge.
+                const PARTS: usize = 5;
+                let cells =
+                    ((self.menu_rect.width as usize).saturating_sub(12) / PARTS).clamp(4, 10);
+                let session = &self.session;
+                let b = session.last_breakdown;
+                let mut parts: Vec<(&str, u64, Style)> = vec![
+                    (
+                        "system",
+                        b.map(|b| b.system_tokens).unwrap_or(0),
+                        Style::new().fg(Theme::ACCENT()),
+                    ),
+                    (
+                        "tools",
+                        b.map(|b| b.tool_schema_tokens).unwrap_or(0),
+                        Style::new().fg(Theme::LIGHT_BLUE()),
+                    ),
+                    (
+                        "history",
+                        b.map(|b| b.history_tokens).unwrap_or(0),
+                        Theme::ok(),
+                    ),
+                    (
+                        "user turn",
+                        b.map(|b| b.user_tokens).unwrap_or(0),
+                        Theme::warn(),
+                    ),
+                    (
+                        "host state",
+                        b.map(|b| b.provider_state_tokens).unwrap_or(0),
+                        Theme::meta(),
+                    ),
+                ];
+                parts.sort_by_key(|a| std::cmp::Reverse(a.1));
+                let fattest = parts.iter().map(|p| p.1).max().unwrap_or(0);
+                let density = |tokens: u64| {
+                    if fattest == 0 {
+                        0.0
+                    } else {
+                        tokens as f64 / fattest as f64
+                    }
+                };
+
+                // header: the truth about the window
+                let used = session.context_tokens_used();
+                let limit = session.context_limit.max(1);
+                let peak = session.context_peak_tokens.max(used);
+                self.menu_rows.push(row(
+                    Line::from(vec![
+                        Span::styled(session.model_key.clone(), Theme::FG()),
+                        Span::styled(
+                            format!(
+                                " · limit {} · used {} ({:.1}%) · peak {}",
+                                fmt_k(limit),
+                                fmt_k(used),
+                                session.context_percent(),
+                                fmt_k(peak)
+                            ),
+                            Theme::dim(),
+                        ),
+                    ]),
+                    MenuAction::None,
+                ));
+                self.menu_rows
+                    .push(row(super::view::blank(), MenuAction::None));
+
+                // the scale, then the names under it
+                let mut meter = Vec::new();
+                let mut labels = Vec::new();
+                for (name, tokens, style) in &parts {
+                    meter.push(Span::styled(dither(density(*tokens), cells), *style));
+                    meter.push(Span::styled(" ".to_string(), Theme::base()));
+                    labels.push(Span::styled(
+                        format!(
+                            "{:<width$}",
+                            super::view::truncate_display_width(name, cells),
+                            width = cells
+                        ),
+                        Theme::dim(),
+                    ));
+                    labels.push(Span::styled(" ".to_string(), Theme::base()));
+                }
+                // free space pinned last and drawn empty, because it is
+                // nothing — the legend below carries its number
+                meter.push(Span::styled(dither(0.0, cells), Theme::dim()));
+                labels.push(Span::styled(
+                    format!("{:<width$}", "free", width = cells),
+                    Theme::dim(),
+                ));
+                self.menu_rows
+                    .push(row(Line::from(meter), MenuAction::None));
+                self.menu_rows
+                    .push(row(Line::from(labels), MenuAction::None));
+                self.menu_rows
+                    .push(row(super::view::blank(), MenuAction::None));
+
+                // legend: the dot wears the block's color. The denominator is
+                // the same request the parts estimate — the provider's
+                // prompt_tokens when it reported one, the sum of the parts
+                // otherwise.
+                let denom = session
+                    .last_usage
+                    .as_ref()
+                    .map(|u| u.prompt_tokens)
+                    .filter(|n| *n > 0)
+                    .unwrap_or_else(|| parts.iter().map(|p| p.1).sum::<u64>().max(1));
+                for (name, tokens, style) in &parts {
+                    let pct = (*tokens as f64 / denom as f64) * 100.0;
+                    self.menu_rows.push(row(
+                        Line::from(vec![
+                            Span::styled("● ".to_string(), *style),
+                            Span::styled(format!("{:<11}", name), Theme::FG()),
+                            Span::styled(format!("{:>7} tok", fmt_k(*tokens)), Theme::meta()),
+                            Span::styled(format!("{:>6.1}%", pct), Theme::dim()),
+                        ]),
+                        MenuAction::None,
+                    ));
+                }
+                let free = limit.saturating_sub(used);
+                let free_pct = (free as f64 / limit as f64) * 100.0;
+                self.menu_rows.push(row(
+                    Line::from(vec![
+                        Span::styled("○ ".to_string(), Theme::dim()),
+                        Span::styled(format!("{:<11}", "free"), Theme::FG()),
+                        Span::styled(format!("{:>7} tok", fmt_k(free)), Theme::meta()),
+                        Span::styled(format!("{:>6.1}%", free_pct), Theme::dim()),
+                    ]),
+                    MenuAction::None,
+                ));
+                // what the parts do not cover: the tokenizer, reasoning replay,
+                // message envelopes. Shown as its own row, never spread over
+                // the others to make the percentages reach 100.
+                let covered: u64 = parts.iter().map(|p| p.1).sum();
+                if let Some(u) = &session.last_usage
+                    && u.prompt_tokens > covered
+                {
+                    self.menu_rows.push(row(
+                        Line::from(vec![
+                            Span::styled("◌ ".to_string(), Theme::dim()),
+                            Span::styled(format!("{:<11}", "unaccounted"), Theme::FG()),
+                            Span::styled(
+                                format!("{:>7} tok", fmt_k(u.prompt_tokens - covered)),
+                                Theme::meta(),
+                            ),
+                            Span::styled(
+                                "   tokenizer · reasoning replay".to_string(),
+                                Theme::dim(),
+                            ),
+                        ]),
+                        MenuAction::None,
+                    ));
+                }
+                self.menu_rows
+                    .push(row(super::view::blank(), MenuAction::None));
+
+                // last request counters: every `n/a` is "the provider said
+                // nothing", which is not zero and must not read as zero
+                match &session.last_usage {
+                    Some(u) => {
+                        let opt =
+                            |v: Option<u64>| v.map(fmt_k).unwrap_or_else(|| "n/a".to_string());
+                        let cached_pct = match (u.cached_tokens, u.prompt_tokens) {
+                            (Some(c), p) if p > 0 => {
+                                format!(" ({:.1}%)", (c as f64 / p as f64) * 100.0)
+                            }
+                            _ => String::new(),
+                        };
+                        self.menu_rows.push(row(
+                            Line::from(Span::styled(
+                                format!(
+                                    "last request: prompt {} · cached {}{} · cache write {} · \
+                                     reasoning {} · completion {}",
+                                    fmt_k(u.prompt_tokens),
+                                    opt(u.cached_tokens),
+                                    cached_pct,
+                                    opt(u.cache_write_tokens),
+                                    opt(u.reasoning_tokens),
+                                    fmt_k(u.completion_tokens),
+                                ),
+                                Theme::dim(),
+                            )),
+                            MenuAction::None,
+                        ));
+                    }
+                    None => {
+                        self.menu_rows.push(row(
+                            Line::from(Span::styled(
+                                "no provider request yet — the parts are estimates from \
+                                 the transcript"
+                                    .to_string(),
+                                Theme::dim(),
+                            )),
+                            MenuAction::None,
+                        ));
+                    }
+                }
+                self.menu_rows
+                    .push(row(super::view::blank(), MenuAction::None));
+                let c = &self.cfg.compaction;
+                self.menu_rows.push(row(
+                    Line::from(Span::styled(
+                        format!(
+                            "compaction at {:.0}% · anchor {:.0}% · keep {} turns · summary: {}",
+                            c.threshold * 100.0,
+                            c.anchor_ratio * 100.0,
+                            c.keep_turns,
+                            if session.summary.is_some() {
+                                "done"
+                            } else {
+                                "none"
+                            }
+                        ),
+                        Theme::dim(),
+                    )),
+                    MenuAction::None,
+                ));
             }
             Menu::TestAnim => {
                 // One row per frame set: the live frame in the brand's loud end,
