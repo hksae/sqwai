@@ -892,12 +892,13 @@ async fn run_agent(
         }
         // The plan is the model's only plan source, rebuilt live on every
         // request: a turn-start snapshot would predate this turn's plan
-        // mutations. Same content keeps the provider prefix cache hot, so
-        // freshness costs nothing until the plan actually changes.
-        // Goal + constraints churn only on rewrite (cached); step state
-        // churns every turn (volatile tail).
+        // mutations. Both halves ride the volatile tail. The goal used to be a
+        // cached part on the theory that it churns only on rewrite — but
+        // `create` and `complete` are rewrites of a kind, and each one
+        // re-keyed the whole cached prefix: measured at ±531 B per plan
+        // lifecycle, and behind that key sits the entire conversation.
         if let Some(plan) = crate::prompts::plan_block(&root, Some(&session_id)) {
-            turn_system.push(crate::providers::SystemPart::cached(plan));
+            turn_system.push(crate::providers::SystemPart::volatile(plan));
         }
         if let Some(status) = crate::prompts::plan_status_block(&root, Some(&session_id)) {
             turn_system.push(crate::providers::SystemPart::volatile(status));

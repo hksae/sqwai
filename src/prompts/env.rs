@@ -45,26 +45,45 @@ pub fn stable_block() -> String {
     process_block()
 }
 
-/// Session-scoped facts, captured on startup and after compaction. They are a
-/// cacheable prompt layer: no per-turn Git status belongs here (the date and
-/// clock are close enough to the session start, and the anchor refreshes them
-/// after compaction). Current changes come from the anchor, FACTS, or an
-/// explicit tool call.
+/// Session-scoped facts that do not move while the session lives: the OS line
+/// and the probed toolchains. This is a cacheable prompt layer, so nothing that
+/// a working edit moves may stand here.
+///
+/// Date, clock, git state and the directory map used to ride in this block.
+/// They are the very facts a session changes: every commit re-keyed the cached
+/// prefix, and with it the whole conversation behind it — measured in a live
+/// session as a full re-read of 200–273k tokens on a one-byte drift. They now
+/// come from [`turn_facts`], which trails the history instead.
 pub fn session_block(root: &Path) -> String {
-    let results = run_session_probes(root.to_path_buf());
-    let now = chrono::Local::now();
-    let date = now.format("%Y-%m-%d (%A)");
-    let time = now.format("%H:%M (UTC%:z)");
-    let mut out = format!("<session_environment>\nDate: {date}\nTime: {time}\n");
-    for key in ["os", "git", "toolchains"] {
+    let results = run_session_probes(root.to_path_buf(), &["os", "toolchains"]);
+    let mut out = String::from("<session_environment>\n");
+    for key in ["os", "toolchains"] {
         if let Some(value) = results.get(key) {
             out.push_str(value);
         } else {
             out.push_str(&format!("{}: unavailable (timeout)\n", key_name(key)));
         }
     }
-    out.push_str(&tree_block(root));
     out.push_str("</session_environment>\n");
+    out
+}
+
+/// What is true of the project right now: the clock, git state, the directory
+/// map. The host appends this after the conversation, so refreshing it cannot
+/// invalidate anything cached in front of it.
+pub fn turn_facts(root: &Path) -> String {
+    let results = run_session_probes(root.to_path_buf(), &["git"]);
+    let now = chrono::Local::now();
+    let date = now.format("%Y-%m-%d (%A)");
+    let time = now.format("%H:%M (UTC%:z)");
+    let mut out = format!("<turn_environment>\nDate: {date}\nTime: {time}\n");
+    if let Some(git) = results.get("git") {
+        out.push_str(git);
+    } else {
+        out.push_str("Git: unavailable (timeout)\n");
+    }
+    out.push_str(&tree_block(root));
+    out.push_str("</turn_environment>\n");
     out
 }
 
@@ -83,14 +102,19 @@ fn key_name(key: &str) -> &str {
     }
 }
 
-fn run_session_probes(root: PathBuf) -> BTreeMap<String, String> {
+/// Runs the requested probes concurrently under one shared budget, so a slow
+/// toolchain check cannot add to a git check's wait.
+fn run_session_probes(root: PathBuf, keys: &[&str]) -> BTreeMap<String, String> {
     let (tx, rx) = mpsc::channel();
     let mut jobs = 0;
     for (key, task) in [
         ("os", ProbeTask::Os),
         ("git", ProbeTask::Git(root.clone())),
-        ("toolchains", ProbeTask::Toolchains(root)),
+        ("toolchains", ProbeTask::Toolchains(root.clone())),
     ] {
+        if !keys.contains(&key) {
+            continue;
+        }
         jobs += 1;
         let tx = tx.clone();
         thread::spawn(move || {
@@ -214,7 +238,7 @@ fn git_info(root: &Path) -> String {
             // session after the cut: the model found files modified that it had
             // never written, assumed authorship, and started a
             // check-commit-close ritual over another agent's edits. Names, not
-            // a number, and labelled as a start-of-session snapshot.
+            // a number, and labelled as the host's snapshot of this turn.
             if let Ok(status) = capture_in(root, "git", &["status", "--porcelain"]) {
                 let paths = crate::agent::tools::porcelain_paths(&status);
                 if !paths.is_empty() {
@@ -229,13 +253,13 @@ fn git_info(root: &Path) -> String {
                         )
                     };
                     out.push_str(&format!(
-                        "Dirty at session start (not necessarily yours): {shown}\n"
+                        "Dirty as of this turn (not necessarily yours): {shown}\n"
                     ));
                 }
             }
             match capture_in(root, "git", &["log", "-3", "--format=- %s"]) {
                 Ok(log) if !log.trim().is_empty() => {
-                    out.push_str("Recent commits at session start:\n");
+                    out.push_str("Recent commits as of this turn:\n");
                     out.push_str(log.trim_end());
                     out.push('\n');
                 }
@@ -284,7 +308,7 @@ fn tree_block(root: &Path) -> String {
     entries.sort();
 
     let omitted = entries.len().saturating_sub(TREE_LIMIT);
-    let mut out = String::from("Project tree (directories) at session start:\n");
+    let mut out = String::from("Project tree (directories) as of this turn:\n");
     for path in entries.into_iter().take(TREE_LIMIT) {
         let depth = path.components().count().saturating_sub(1);
         let name = path
@@ -820,7 +844,7 @@ mod tests {
     /// for orienting nobody — and it turned out the count was also the only
     /// marker of "this dirt predates you".
     #[test]
-    fn session_block_names_the_dirty_paths_at_start() {
+    fn turn_facts_name_the_dirty_paths_and_whose_they_are() {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
             let status = std::process::Command::new("git")
@@ -839,9 +863,9 @@ mod tests {
         std::fs::write(dir.path().join("tracked.rs"), "fn a() { changed() }\n").unwrap();
         std::fs::write(dir.path().join("foreign.rs"), "fn b() {}\n").unwrap();
 
-        let block = session_block(dir.path());
+        let block = turn_facts(dir.path());
         assert!(
-            block.contains("Dirty at session start"),
+            block.contains("Dirty as of this turn"),
             "the authorship marker is gone: {block}"
         );
         assert!(block.contains("tracked.rs"), "{block}");
@@ -853,10 +877,45 @@ mod tests {
         // a clean tree says nothing at all
         git(&["checkout", "--", "."]);
         git(&["clean", "-fdq"]);
-        let clean = session_block(dir.path());
+        let clean = turn_facts(dir.path());
         assert!(
-            !clean.contains("Dirty at session start"),
+            !clean.contains("Dirty as of this turn"),
             "a clean tree must not claim dirt: {clean}"
+        );
+    }
+
+    /// The cacheable half must not move when the working tree does. It used to
+    /// carry the clock, the branch, the dirt and the tree map, so any commit
+    /// re-keyed the cached prefix — and everything behind it, the whole
+    /// conversation, was re-read at full price.
+    #[test]
+    fn the_cached_block_survives_a_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "first"]);
+        let before = session_block(dir.path());
+
+        // a new directory, an edit and a commit: all of it moves the facts that
+        // now trail the history instead
+        std::fs::create_dir(dir.path().join("src")).ok();
+        std::fs::write(dir.path().join("a.rs"), "fn a() { changed() }\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "second"]);
+        assert_eq!(before, session_block(dir.path()), "the cache key moved");
+        assert!(
+            turn_facts(dir.path()).contains("second"),
+            "the fresh facts must still arrive"
         );
     }
 
@@ -885,20 +944,25 @@ mod tests {
         assert!(!block.contains("  ("));
     }
 
-    /// The block this repo actually gets, checked structurally: the bare
-    /// changed-file count is gone, the tree is directories, and the
-    /// toolchain header states which layer is which.
+    /// What this repo actually gets, checked structurally: the bare
+    /// changed-file count is gone, the tree is directories, and the toolchain
+    /// header states which layer is which. The two halves land in two blocks —
+    /// toolchains are stable, git state is not.
     #[test]
     fn session_block_of_this_repo_has_the_repaired_shape() {
-        let block = session_block(Path::new(env!("CARGO_MANIFEST_DIR")));
-        assert!(block.contains("Git: on branch"), "{block}");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let block = session_block(root);
         assert!(
             !block.contains("changed file"),
             "the bare count is retired: {block}"
         );
         assert!(
-            block.contains("Project tree (directories) at session start"),
-            "{block}"
+            !block.contains("Git:"),
+            "git state must not sit in the cached block: {block}"
+        );
+        assert!(
+            !block.contains("Date:"),
+            "the clock must not sit in the cached block: {block}"
         );
         assert!(
             block.contains("Toolchains: declared by manifests"),
@@ -907,6 +971,13 @@ mod tests {
         // this repo pins its toolchain, so the declared layer has something
         // to say — read from rust-toolchain.toml, no process spawned
         assert!(block.contains("declared: rust"), "{block}");
+
+        let facts = turn_facts(root);
+        assert!(facts.contains("Git: on branch"), "{facts}");
+        assert!(
+            facts.contains("Project tree (directories) as of this turn"),
+            "{facts}"
+        );
     }
 
     #[test]
@@ -935,7 +1006,7 @@ mod tests {
         assert!(out.contains("src/"), "{out}");
         assert!(!out.contains("README.md"), "{out}");
         assert!(!out.contains("main.rs"), "{out}");
-        assert!(out.contains("at session start"), "{out}");
+        assert!(out.contains("as of this turn"), "{out}");
     }
 
     /// `.git` internals are not project structure, and on this repo they ate

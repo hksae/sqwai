@@ -8,12 +8,15 @@
 /// 4. durable user/project memory.
 ///
 /// Session environment is a separate cacheable block built by the TUI on
-/// startup and after compaction. There is no per-turn environment block.
+/// startup and after compaction, and it holds only what does not move: the OS
+/// line and the probed toolchains. Everything a working edit moves — the clock,
+/// git state, the directory map — comes from `env::turn_facts` instead.
 ///
 /// The system block is assembled per request as ordered *parts*: the stable
-/// prefix above, then the durable plan, then whatever changes while the agent
-/// works (date, git state, project tree). Volatile facts always go last so
-/// they cannot invalidate a cached prefix.
+/// prefix above, then whatever changes while the agent works (the plan's goal
+/// and status, the mode line, this turn's environment). Volatile facts always
+/// go last so they cannot invalidate a cached prefix — a key change in front of
+/// the conversation costs the whole conversation.
 pub mod env;
 pub mod skills;
 
@@ -111,15 +114,18 @@ fn join_layers(layers: Vec<PrefixLayer>) -> String {
         .join("\n\n")
 }
 
-/// Per-turn environment context is intentionally empty to preserve history cache.
+/// Per-turn environment context is empty on purpose: nothing may sit between
+/// the cached prefix and the conversation without a reason. The facts that do
+/// move each turn — clock, git, directory map — go in `env::turn_facts`, which
+/// the host appends *after* the history, where changing them costs nothing.
 pub fn runtime_context() -> String {
     env::runtime_context()
 }
 
-/// The durable plan goal, when the project has one. Goal and constraints
-/// change only when the agent rewrites them, so this belongs to the
-/// cacheable prefix. Step state lives separately (see `plan_status_block`):
-/// a step that finishes must not re-key the cached prefix.
+/// The durable plan goal, when the project has one. It rides the volatile tail
+/// with the step state (`plan_status_block`), not the cached prefix: a plan
+/// being created or completed is a rewrite, and a rewrite in front of the
+/// conversation re-keys everything behind it.
 pub fn plan_block(root: &std::path::Path, session_id: Option<&str>) -> Option<String> {
     let plan = crate::plan::open_active_for_session(root, session_id)
         .ok()

@@ -109,17 +109,18 @@ split they let `/context` bill memory and skills apart from the rules:
 
 Then, as its own cached part:
 
-    <session_environment>  date, OS, git branch and recent commits, declared +
-                           probed toolchains, directory tree — captured at
+    <session_environment>  OS, declared + probed toolchains — captured at
                            session start, rebuilt after compaction and on
-                           session switch
+                           session switch. Only what cannot move mid-session.
 
-Then, per request inside the turn: the plan's goal and constraints as a cached
-part, the step-state tail as a volatile part, and the mode line as a volatile
-part — after everything cached. `runtime_context` is deliberately empty: a
-changing block ahead of the history defeats provider prefix caching for the
-whole session. Facts that change either arrive in the plan tail (which changes
-only when the plan does) or are one tool call away.
+Then, per request inside the turn, as volatile parts after everything cached:
+`<turn_environment>` (date, time, git branch, the dirty paths, recent commits,
+the directory tree), the mode line, the verify commands, the plan's goal and its
+step-state tail, and any one-shot notice. `runtime_context` stays deliberately
+empty: a changing block ahead of the history defeats provider prefix caching for
+the whole session — which is why the moving facts went behind the history
+rather than being left to age in front of it. Facts that change either arrive
+there or are one tool call away.
 
 The volatile parts are assembled into one **host block** that trails the
 history as a `system` item, inserted before the newest user turn so the last

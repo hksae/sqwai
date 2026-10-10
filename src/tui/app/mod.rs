@@ -741,9 +741,9 @@ impl App {
 
     /// Assemble the system block for one request.
     ///
-    /// Order matters: the stable prefix comes first, the durable plan next
-    /// (it only changes when the agent rewrites it), and everything that moves
-    /// while the agent works goes last so it cannot invalidate the prefix.
+    /// Order matters: the stable prefix comes first, and everything that moves
+    /// while the agent works goes last — a key change in front of the
+    /// conversation re-reads the whole conversation.
     fn system_block(&mut self) -> Vec<crate::providers::SystemPart> {
         use crate::providers::SystemPart;
         let mut parts = self.stable_parts.clone();
@@ -777,6 +777,10 @@ impl App {
                     .join("; ")
             )));
         }
+        // What is true of the project as of this turn: the clock, git state, the
+        // directory map. These used to ride in the cached session block, where
+        // any commit re-keyed the prefix and the whole conversation behind it.
+        parts.push(SystemPart::volatile(crate::prompts::env::turn_facts(&root)));
         // The anchor is host-generated from this session's journal, and it
         // rides only where the transcript has actually lost detail: once a
         // compaction has dropped messages. Rebuilt fresh each turn so
