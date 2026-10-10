@@ -526,8 +526,13 @@ fn undo_coverage_tag_is_empty_in_full_mode_and_names_the_reason_when_degraded() 
     assert_eq!(app.undo_coverage_tag(true), "");
     app.cfg.undo.shadow = crate::config::ShadowStore::Off;
     assert_eq!(app.undo_coverage_tag(false), " (files-only, shadow off)");
+    // the toast names what actually failed. With the store switched back on, a
+    // setting is no longer the cause, and blaming one would send the user to
+    // install something they already have.
     app.cfg.undo.shadow = crate::config::ShadowStore::Local;
-    assert_eq!(app.undo_coverage_tag(false), " (files-only, no git)");
+    let tag = app.undo_coverage_tag(false);
+    assert!(tag.starts_with(" (files-only, "), "{tag}");
+    assert!(!tag.contains("shadow off"), "{tag}");
 }
 
 /// The first /undo call sets the baseline silently; only a change toasts.

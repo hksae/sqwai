@@ -1801,13 +1801,15 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
         history_bytes: 8_000,
         tool_output_bytes: 16_000,
         host_bytes: 800,
-        total_bytes: 31_600,
+        reasoning_bytes: 400,
+        total_bytes: 32_000,
         system_tokens: 1_000,
         memory_tokens: 200,
         skills_tokens: 300,
         history_tokens: 2_000,
         tool_output_tokens: 4_000,
         host_tokens: 200,
+        reasoning_tokens: 100,
     });
     app.session.last_usage = Some(crate::providers::Usage {
         prompt_tokens: 8_000,
@@ -1871,6 +1873,16 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
     // biggest block on the scale unreadable
     assert!(t.contains("● memory"), "memory is a legend row: {t}");
     assert!(t.contains("● skills"), "skills is a legend row: {t}");
+    // and the replayed chain of thought is not allowed to hide inside a row
+    // named after the mode line
+    assert!(
+        t.contains("● reasoning"),
+        "replayed provider state is a legend row: {t}"
+    );
+    assert!(
+        t.contains("● host block"),
+        "the volatile host block is a legend row: {t}"
+    );
 }
 
 /// The context menu is a read-only card: no cursor, no selection band — arrows

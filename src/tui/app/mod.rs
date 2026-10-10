@@ -326,10 +326,6 @@ pub struct App {
     resume_notice_armed: bool,
     /// label of the last shadow checkpoint (design §10 indicator)
     last_checkpoint: Option<String>,
-    /// last observed layer-2 (shadow snapshot) availability for undo.
-    /// None until the first /undo call sets the baseline silently; a later
-    /// change surfaces once as a transition note in the undo toast.
-    undo_layer2: Option<bool>,
     /// user message index pushed for the active turn, if any
     turn_user_index: Option<usize>,
 
@@ -1054,7 +1050,6 @@ Continue from the pending step, or report to the user if the settled work looks 
             last_mouse: None,
             menu_open_mouse: None,
             last_checkpoint: None,
-            undo_layer2: None,
             press_anchor: None,
             dragging: false,
             sel: None,
@@ -3614,13 +3609,14 @@ Continue from the pending step, or report to the user if the settled work looks 
                     self.session.last_breakdown = Some(b);
                     crate::providers::log_http(&format!(
                         "request breakdown: system={}B memory={}B skills={}B history={}B \
-                         tool_output={}B host={}B total={}B",
+                         tool_output={}B host={}B reasoning={}B total={}B",
                         b.system_bytes,
                         b.memory_bytes,
                         b.skills_bytes,
                         b.history_bytes,
                         b.tool_output_bytes,
                         b.host_bytes,
+                        b.reasoning_bytes,
                         b.total_bytes,
                     ));
                 }
@@ -4951,21 +4947,24 @@ Continue from the pending step, or report to the user if the settled work looks 
         }
     }
 
-    /// Why layer 2 (shadow tree snapshots) is down: settings or environment.
+    /// Why layer 2 (shadow tree snapshots) is down. The probe names it: with
+    /// `[undo].shadow = "off"` the cause is a setting, and a toast that says
+    /// "no git" sends the user to install something they already have.
     fn undo_degraded_why(&self) -> &'static str {
-        if self.cfg.undo.shadow == crate::config::ShadowStore::Off {
-            "shadow off"
-        } else {
-            "no git"
-        }
+        crate::agent::checkpoints::unavailable_reason(&self.project_root, self.cfg.undo.shadow)
+            .unwrap_or("cause unknown")
     }
 
     /// Transition note when layer-2 availability changed since the previous
     /// /undo call. The first call only sets the baseline silently — a degraded
     /// mode at startup is reported by the coverage tag, not by a transition
-    /// that has no baseline to compare against.
+    /// that has no baseline to compare against. The baseline is saved, so a
+    /// restart does not turn every /undo back into a first call.
     fn undo_transition(&mut self, layer2: bool) -> Option<String> {
-        let prev = self.undo_layer2.replace(layer2);
+        let prev = self.session.undo_layer2.replace(layer2);
+        if prev != Some(layer2) {
+            self.session.save().ok();
+        }
         match prev {
             Some(old) if old != layer2 => Some(if layer2 {
                 "undo mode changed to full".to_string()
@@ -5048,9 +5047,6 @@ Continue from the pending step, or report to the user if the settled work looks 
         // the user's own `git gc`. Without layer 2 it is the only option, so a
         // half-covered window is still reverted as far as it reaches.
         if !git_snapshots || (scoped && covered) {
-            // Prefer the blob store when it covers the window: it reverts
-            // exactly the recorded writes, needs no repository, and cannot be
-            // invalidated by the user's own `git gc`.
             self.undo_from_blobs(
                 &root,
                 idx,

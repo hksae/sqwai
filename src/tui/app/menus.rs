@@ -2766,7 +2766,8 @@ impl App {
                     ("skills", b.map(|b| b.skills_tokens).unwrap_or(0)),
                     ("history", b.map(|b| b.history_tokens).unwrap_or(0)),
                     ("tools", b.map(|b| b.tool_output_tokens).unwrap_or(0)),
-                    ("host state", b.map(|b| b.host_tokens).unwrap_or(0)),
+                    ("reasoning", b.map(|b| b.reasoning_tokens).unwrap_or(0)),
+                    ("host block", b.map(|b| b.host_tokens).unwrap_or(0)),
                 ];
                 ranked.sort_by_key(|a| std::cmp::Reverse(a.1));
                 // The fills are the brand ramp cut into as many stops as there
