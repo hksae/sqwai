@@ -21,15 +21,17 @@ pub const SQWAI_COMPACT_TEXT: &str = include_str!("../../assets/ascii-sqwai-comp
 /// The names still say CORAL_* because that is what the first ramp was.
 pub const CORAL_START: (u8, u8, u8) = (222, 47, 102);
 pub const CORAL_END: (u8, u8, u8) = (117, 58, 136);
-/// Exact middle of the ramp, for H2 and other quiet brand ink.
-pub const CORAL_MUTED: (u8, u8, u8) = (170, 52, 119);
+/// The accent ink: the ramp's start color. The name still says "muted" for
+/// history — it used to hold the ramp's middle.
+pub const CORAL_MUTED: (u8, u8, u8) = (222, 47, 102);
 /// Solid brand color where truecolor is unavailable: xterm 168 (`#d75f87`),
 /// the cube color nearest the ramp. Same index as [`Theme::ACCENT`], so the
 /// one brand color a limited terminal shows is the same in the art and in links.
 const CORAL_FALLBACK: Color = Color::Indexed(168);
 
-/// Quiet brand ink: muted berry bold, the H2 look. Menu titles and day
-/// sections share it so headers read as one family across surfaces.
+/// Brand ink for headers: the ramp's start color, bold — the H2 look. Menu
+/// titles and day sections share it so headers read as one family across
+/// surfaces.
 pub fn h2_style() -> Style {
     if crate::tui::shimmer::has_truecolor() {
         let (r, g, b) = CORAL_MUTED;
