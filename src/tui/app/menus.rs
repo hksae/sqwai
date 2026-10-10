@@ -2760,6 +2760,19 @@ impl App {
                 // twice, as width and as texture.
                 let session = &self.session;
                 let b = session.last_breakdown;
+                // Chart fills, not chrome: the same hue the UI wears as text is
+                // nearly white as a background, and a nearly white block on this
+                // bar reads as "free". So each part takes its house hue one step
+                // down — the brand accent keeps its index, the ramp's plum end is
+                // already dark, and the green and amber are their text colors at
+                // about two thirds.
+                let fill = |rgb: (u8, u8, u8), k: f64| {
+                    ratatui::style::Color::Rgb(
+                        (rgb.0 as f64 * k) as u8,
+                        (rgb.1 as f64 * k) as u8,
+                        (rgb.2 as f64 * k) as u8,
+                    )
+                };
                 let mut parts: Vec<(&str, u64, ratatui::style::Color)> = vec![
                     (
                         "system",
@@ -2767,24 +2780,33 @@ impl App {
                         Theme::ACCENT(),
                     ),
                     (
-                        "tools",
-                        b.map(|b| b.tool_schema_tokens).unwrap_or(0),
-                        Theme::LIGHT_BLUE(),
+                        "memory",
+                        b.map(|b| b.memory_tokens).unwrap_or(0),
+                        ratatui::style::Color::Rgb(
+                            crate::tui::art::CORAL_END.0,
+                            crate::tui::art::CORAL_END.1,
+                            crate::tui::art::CORAL_END.2,
+                        ),
+                    ),
+                    (
+                        "skills",
+                        b.map(|b| b.skills_tokens).unwrap_or(0),
+                        ratatui::style::Color::Rgb(107, 133, 215),
                     ),
                     (
                         "history",
                         b.map(|b| b.history_tokens).unwrap_or(0),
-                        Theme::OK(),
+                        fill(Theme::OK_RGB, 0.68),
                     ),
                     (
-                        "user turn",
-                        b.map(|b| b.user_tokens).unwrap_or(0),
-                        Theme::WARN(),
+                        "tools",
+                        b.map(|b| b.tool_output_tokens).unwrap_or(0),
+                        fill(Theme::WARN_RGB, 0.75),
                     ),
                     (
                         "host state",
-                        b.map(|b| b.provider_state_tokens).unwrap_or(0),
-                        Theme::META(),
+                        b.map(|b| b.host_tokens).unwrap_or(0),
+                        Theme::DIM(),
                     ),
                 ];
                 parts.sort_by_key(|a| std::cmp::Reverse(a.1));
@@ -2858,15 +2880,11 @@ impl App {
 
                 // legend: the dot wears the block's color. Percentages are
                 // shares of the window, normalized to the provider's real
-                // usage: the parts are estimates and may overshoot
-                // `prompt_tokens`, so they are scaled to sum exactly to the
-                // used percent, and free completes the scale to 100.
+                // usage: the parts are estimates that may undershoot or
+                // overshoot `prompt_tokens`, so parts plus "unaccounted" are
+                // scaled to sum exactly to the used percent, and free completes
+                // the scale to 100.
                 let used_pct = session.context_percent();
-                // Percentages are shares of the window, normalized to the
-                // provider's real usage: the parts are estimates that may
-                // undershoot or overshoot `prompt_tokens`, so parts plus
-                // "unaccounted" are scaled to sum exactly to the used percent,
-                // and free completes the scale to 100.
                 let covered: u64 = parts.iter().map(|p| p.1).sum();
                 let unaccounted = session
                     .last_usage

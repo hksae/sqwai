@@ -207,6 +207,20 @@ impl Usage {
     }
 }
 
+/// Which layer of the prompt a system part belongs to. The wire does not care:
+/// [`stable_system_text`] joins every cacheable part whatever its section. The
+/// diagnostic breakdown does — `/context` cannot call a block honest until it
+/// knows whether it is rules, durable memory, skills, or a fact the host adds
+/// to this one request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PrefixSection {
+    /// built-in rules, project instructions, the environment, tool schemas
+    #[default]
+    System,
+    Memory,
+    Skills,
+}
+
 /// One part of the system block.
 ///
 /// The system block is **never** part of the conversation transcript: it is
@@ -219,6 +233,7 @@ impl Usage {
 pub struct SystemPart {
     pub text: String,
     pub cacheable: bool,
+    pub section: PrefixSection,
 }
 
 impl SystemPart {
@@ -227,6 +242,7 @@ impl SystemPart {
         Self {
             text: text.into(),
             cacheable: true,
+            section: PrefixSection::System,
         }
     }
 
@@ -235,7 +251,14 @@ impl SystemPart {
         Self {
             text: text.into(),
             cacheable: false,
+            section: PrefixSection::System,
         }
+    }
+
+    /// Tag a cached part with the prompt layer it came from, for diagnostics.
+    pub fn in_section(mut self, section: PrefixSection) -> Self {
+        self.section = section;
+        self
     }
 }
 
@@ -329,30 +352,50 @@ pub fn promote_lone_volatile_system(system: &mut [SystemPart]) {
 /// provider's `prompt_tokens` remains the only truth about the whole, and
 /// anything the parts fail to cover is shown as its own "unaccounted" row
 /// rather than being spread over the others.
+///
+/// The cuts follow what a reader can actually act on: a tool's *schema* is
+/// part of the fixed instruction surface it is billed with, while a tool's
+/// *output* is history that happens to have been written by a program.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RequestBreakdown {
+    /// built-in rules, project instructions, the environment, every tool schema
     pub system_bytes: u64,
+    /// durable user/project memory
+    pub memory_bytes: u64,
+    /// loaded `SKILL.md` bodies
+    pub skills_bytes: u64,
+    /// the conversation itself: user and assistant turns
     pub history_bytes: u64,
-    pub user_bytes: u64,
-    /// opaque provider state riding the request: replayed reasoning items are
+    /// what the tools answered (`Role::Tool` messages)
+    pub tool_output_bytes: u64,
+    /// what the host bolts onto this one request: volatile facts, plus the
+    /// opaque provider state riding the messages. Replayed reasoning items are
     /// base64 and enormous, and a breakdown that ignored them reported a 257KB
-    /// request for one carrying 199KB more (§18.1.9). Counted separately from
-    /// `history_bytes` because whether it travels at all is the wire's choice.
-    pub provider_state_bytes: u64,
-    pub tool_schema_bytes: u64,
+    /// request for one carrying 199KB more (§18.1.9).
+    pub host_bytes: u64,
     pub total_bytes: u64,
     pub system_tokens: u64,
+    pub memory_tokens: u64,
+    pub skills_tokens: u64,
     pub history_tokens: u64,
-    pub user_tokens: u64,
-    pub provider_state_tokens: u64,
-    pub tool_schema_tokens: u64,
+    pub tool_output_tokens: u64,
+    pub host_tokens: u64,
 }
 
 impl RequestBreakdown {
-    #[allow(clippy::field_reassign_with_default)] // system_bytes is accumulated in a loop after the initial set
     pub fn from_request(req: &ChatRequest) -> Self {
         let mut out = Self::default();
-        out.system_bytes = req.system.iter().map(|p| p.text.len() as u64).sum::<u64>();
+        for part in &req.system {
+            let bytes = part.text.len() as u64;
+            match part.section {
+                PrefixSection::Memory => out.memory_bytes += bytes,
+                PrefixSection::Skills => out.skills_bytes += bytes,
+                PrefixSection::System if part.cacheable => out.system_bytes += bytes,
+                // not an instruction — a fact about this request
+                PrefixSection::System => out.host_bytes += bytes,
+            }
+        }
         for message in &req.messages {
             let bytes = message.content.len() as u64
                 + message
@@ -362,35 +405,37 @@ impl RequestBreakdown {
                     .sum::<u64>();
             match message.role {
                 Role::System => out.system_bytes += bytes,
-                Role::User => out.user_bytes += bytes,
-                Role::Assistant | Role::Tool => out.history_bytes += bytes,
+                Role::User | Role::Assistant => out.history_bytes += bytes,
+                Role::Tool => out.tool_output_bytes += bytes,
             }
-            out.provider_state_bytes += message
+            out.host_bytes += message
                 .provider_state
                 .as_ref()
                 .map(|state| state.to_string().len() as u64)
                 .unwrap_or(0);
         }
-        out.tool_schema_bytes = req
+        out.system_bytes += req
             .tools
             .iter()
             .map(|tool| {
                 (tool.name.len() + tool.description.len()) as u64
                     + tool.parameters.to_string().len() as u64
             })
-            .sum();
+            .sum::<u64>();
         out.total_bytes = out.system_bytes
+            + out.memory_bytes
+            + out.skills_bytes
             + out.history_bytes
-            + out.user_bytes
-            + out.provider_state_bytes
-            + out.tool_schema_bytes;
+            + out.tool_output_bytes
+            + out.host_bytes;
         // Same counter the session uses for its own estimate: bytes over four.
         let tok = |bytes: u64| bytes.div_ceil(4);
         out.system_tokens = tok(out.system_bytes);
+        out.memory_tokens = tok(out.memory_bytes);
+        out.skills_tokens = tok(out.skills_bytes);
         out.history_tokens = tok(out.history_bytes);
-        out.user_tokens = tok(out.user_bytes);
-        out.provider_state_tokens = tok(out.provider_state_bytes);
-        out.tool_schema_tokens = tok(out.tool_schema_bytes);
+        out.tool_output_tokens = tok(out.tool_output_bytes);
+        out.host_tokens = tok(out.host_bytes);
         out
     }
 }
@@ -1085,6 +1130,62 @@ mod system_layout_tests {
         promote_lone_volatile_system(&mut parts);
         assert!(parts[0].cacheable);
         assert!(!parts[1].cacheable, "main-loop layout must not change");
+    }
+
+    /// The cuts `/context` draws its scale on: a tool's schema is billed with
+    /// the fixed instruction surface it rides, its output with the transcript;
+    /// durable memory and loaded skills are neither rules nor conversation;
+    /// and what the host adds to this one request is its own part.
+    #[test]
+    fn the_breakdown_cuts_the_request_where_a_reader_can_act_on_it() {
+        let schema = serde_json::json!({"p": "the one param"});
+        let req = ChatRequest {
+            model_id: "m".into(),
+            system: vec![
+                SystemPart::cached("rules"),
+                SystemPart::cached("durable memory").in_section(PrefixSection::Memory),
+                SystemPart::cached("skill bodies").in_section(PrefixSection::Skills),
+                SystemPart::volatile("Mode: act"),
+            ],
+            messages: vec![
+                Message::new(Role::User, "question"),
+                Message::new(Role::Assistant, "answer"),
+                Message::tool_result("c1", "a tool answered", false),
+            ],
+            tools: vec![ToolSpec {
+                name: "read".into(),
+                description: "reads a file".into(),
+                parameters: schema.clone(),
+            }],
+            ..Default::default()
+        };
+        let b = RequestBreakdown::from_request(&req);
+        assert_eq!(
+            b.system_bytes,
+            "rules".len() as u64
+                + ("read".len() + "reads a file".len()) as u64
+                + schema.to_string().len() as u64,
+            "the schema rides with the instructions, not on its own row"
+        );
+        assert_eq!(b.memory_bytes, "durable memory".len() as u64);
+        assert_eq!(b.skills_bytes, "skill bodies".len() as u64);
+        assert_eq!(b.host_bytes, "Mode: act".len() as u64);
+        assert_eq!(
+            b.history_bytes,
+            ("question".len() + "answer".len()) as u64,
+            "both human and model turns are the conversation"
+        );
+        assert_eq!(b.tool_output_bytes, "a tool answered".len() as u64);
+        // the parts are a partition: nothing is dropped, nothing is counted twice
+        assert_eq!(
+            b.total_bytes,
+            b.system_bytes
+                + b.memory_bytes
+                + b.skills_bytes
+                + b.history_bytes
+                + b.tool_output_bytes
+                + b.host_bytes
+        );
     }
 
     /// The regression in one request: a side call (compaction, narrator,

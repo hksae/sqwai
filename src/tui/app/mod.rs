@@ -226,10 +226,11 @@ pub struct App {
     provider: SharedProvider,
     session: Session,
     hl: Highlighter,
-    /// Stable system prefix: role, rules, project instructions, static
-    /// environment. Captured once per session and reused byte-for-byte so a
-    /// provider-side prefix cache can hit on every request.
-    stable_prefix: String,
+    /// Stable prefix as its cacheable layers (rules, environment, memory,
+    /// skills), captured once per session and reused byte-for-byte so a
+    /// provider-side prefix cache can hit on every request. Kept apart rather
+    /// than joined so `/context` can bill memory and skills on their own.
+    stable_parts: Vec<crate::providers::SystemPart>,
     /// This instance is read-only because another sqwai process owns the project lock.
     read_only: bool,
     /// Session-scoped environment facts, rebuilt only at startup and compaction.
@@ -548,9 +549,11 @@ pub struct App {
 
 impl App {
     /// Stable part of the system block: built-in markdown (overridable by
-    /// config_dir/system.md), AGENTS.md and the static environment.
-    fn stable_prefix(&self) -> String {
-        let mut prompt = crate::prompts::stable_prefix();
+    /// config_dir/system.md), AGENTS.md, the static environment, durable
+    /// memory, then the loaded skills — one cacheable part per layer.
+    fn stable_parts(&self) -> Vec<crate::providers::SystemPart> {
+        use crate::providers::PrefixSection;
+        let mut layers = crate::prompts::stable_prefix_layers();
         let root = self.project_root.clone();
         let mut loaded = crate::prompts::skills::load(&self.cfg.skills, &root);
         for selected in &self.active_skills {
@@ -559,10 +562,12 @@ impl App {
             }
         }
         if let Some(skills) = crate::prompts::skills::prompt(&loaded) {
-            prompt.push_str("\n\n");
-            prompt.push_str(&skills);
+            layers.push((PrefixSection::Skills, skills));
         }
-        prompt
+        layers
+            .into_iter()
+            .map(|(section, text)| crate::providers::SystemPart::cached(text).in_section(section))
+            .collect()
     }
 
     fn rebuild_session_environment(&mut self) {
@@ -732,7 +737,7 @@ impl App {
     /// while the agent works goes last so it cannot invalidate the prefix.
     fn system_block(&mut self) -> Vec<crate::providers::SystemPart> {
         use crate::providers::SystemPart;
-        let mut parts = vec![SystemPart::cached(self.stable_prefix.clone())];
+        let mut parts = self.stable_parts.clone();
         if !self.session_environment.is_empty() {
             parts.push(SystemPart::cached(self.session_environment.clone()));
         }
@@ -916,7 +921,7 @@ Continue from the pending step, or report to the user if the settled work looks 
             provider,
             session,
             hl: Highlighter::new(),
-            stable_prefix: String::new(),
+            stable_parts: Vec::new(),
             session_environment: String::new(),
             context_bootstrap_pending: true,
             active_skills: Vec::new(),
@@ -1068,7 +1073,7 @@ Continue from the pending step, or report to the user if the settled work looks 
             .flatten()
             .map(|plan| plan.id);
         }
-        app.stable_prefix = app.stable_prefix();
+        app.stable_parts = app.stable_parts();
         app.rebuild_session_environment();
         app.context_bootstrap_pending = true;
         crate::providers::set_conversation_id(&app.session.id.to_string());
@@ -2296,7 +2301,7 @@ Continue from the pending step, or report to the user if the settled work looks 
         // user (or the agent) changed mid-session — including across a
         // compaction — reaches the model on the next request. Identical bytes
         // keep the same cache key, so the rebuild costs disk reads, not cache.
-        self.stable_prefix = self.stable_prefix();
+        self.stable_parts = self.stable_parts();
         // session-aware gateways (OpenCode Go) route on this per conversation
         crate::providers::set_conversation_id(&self.session.id.to_string());
         self.push_segment(Segment::User(text.clone()));
@@ -2901,7 +2906,7 @@ Continue from the pending step, or report to the user if the settled work looks 
                     self.status("skill not found", StatusKind::Warn);
                 } else {
                     self.active_skills = loaded.clone();
-                    self.stable_prefix = self.stable_prefix();
+                    self.stable_parts = self.stable_parts();
                     self.context_bootstrap_pending = true;
                     self.status(
                         &format!(
@@ -2919,7 +2924,7 @@ Continue from the pending step, or report to the user if the settled work looks 
 
             "/skills" => {
                 self.active_skills.clear();
-                self.stable_prefix = self.stable_prefix();
+                self.stable_parts = self.stable_parts();
                 self.context_bootstrap_pending = true;
                 self.status("automatic Skills loading restored", StatusKind::Ok);
             }
@@ -3594,12 +3599,14 @@ Continue from the pending step, or report to the user if the settled work looks 
                 AgentEvent::RequestBreakdown(b) => {
                     self.session.last_breakdown = Some(b);
                     crate::providers::log_http(&format!(
-                        "request breakdown: system={}B history={}B user={}B provider_state={}B tools={}B total={}B",
+                        "request breakdown: system={}B memory={}B skills={}B history={}B \
+                         tool_output={}B host={}B total={}B",
                         b.system_bytes,
+                        b.memory_bytes,
+                        b.skills_bytes,
                         b.history_bytes,
-                        b.user_bytes,
-                        b.provider_state_bytes,
-                        b.tool_schema_bytes,
+                        b.tool_output_bytes,
+                        b.host_bytes,
                         b.total_bytes,
                     ));
                 }

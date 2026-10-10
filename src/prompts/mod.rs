@@ -55,9 +55,18 @@ fn truncate_chars(text: &str, max: usize) -> String {
     format!("{clipped}\n[truncated]")
 }
 
-/// Stable prefix: identical for every request of a session, safe to cache.
-pub fn stable_prefix() -> String {
-    stable_prefix_at(&std::env::current_dir().unwrap_or_default())
+/// One layer of the stable prefix: which section it belongs to, and its text.
+pub type PrefixLayer = (crate::providers::PrefixSection, String);
+
+/// The stable prefix as the layers it is made of, in wire order. `/context`
+/// bills these separately: durable memory and loaded skills are neither rules
+/// nor conversation, and lumping them into "system" made the biggest block on
+/// the scale a lie. Joined with blank lines, they are the bytes one string
+/// used to carry.
+pub fn stable_prefix_layers() -> Vec<PrefixLayer> {
+    // the product always runs the full machinery; only the bench harness
+    // passes its own baseline flag, explicitly
+    prefix_layers(&std::env::current_dir().unwrap_or_default(), false)
 }
 
 /// Bench assembly: identical layers, rooted at the fixture copy.
@@ -67,31 +76,39 @@ pub fn stable_prefix() -> String {
 /// prompts against a fixture root.
 #[allow(dead_code)]
 pub fn bench_prefix(root: &std::path::Path, baseline: bool) -> String {
-    stable_prefix_inner(root, baseline)
+    join_layers(prefix_layers(root, baseline))
 }
 
-fn stable_prefix_at(root: &std::path::Path) -> String {
-    // the product always runs the full machinery; only the bench harness
-    // passes its own baseline flag, explicitly
-    stable_prefix_inner(root, false)
-}
-
-fn stable_prefix_inner(root: &std::path::Path, baseline: bool) -> String {
-    let mut prompt = compose(
-        &builtin_prompt(),
-        project_agents_at(root).as_deref(),
-        project_sqwai_at(root).as_deref(),
-    );
-    prompt.push_str("\n\n");
-    prompt.push_str(&env::process_block_at(root));
+fn prefix_layers(root: &std::path::Path, baseline: bool) -> Vec<PrefixLayer> {
+    use crate::providers::PrefixSection;
+    let mut layers = vec![
+        (
+            PrefixSection::System,
+            compose(
+                &builtin_prompt(),
+                project_agents_at(root).as_deref(),
+                project_sqwai_at(root).as_deref(),
+            ),
+        ),
+        (PrefixSection::System, env::process_block_at(root)),
+    ];
     // The baseline arm of the bench runs without durable memory in the
     // prefix; the product path always includes it (the flag is the harness's
     // own argument, never an environment switch).
     if !baseline && let Some(memory) = memory_block(root) {
-        prompt.push_str("\n\n");
-        prompt.push_str(&memory);
+        layers.push((PrefixSection::Memory, memory));
     }
-    prompt
+    layers
+}
+
+/// The exact bytes the joined prefix used to carry: layers are already trimmed
+/// by their own readers, so this only inserts the separators between them.
+fn join_layers(layers: Vec<PrefixLayer>) -> String {
+    layers
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Per-turn environment context is intentionally empty to preserve history cache.
@@ -414,7 +431,7 @@ mod tests {
 
     #[test]
     fn stable_prefix_carries_no_volatile_facts() {
-        let p = stable_prefix();
+        let p = super::join_layers(super::stable_prefix_layers());
         assert!(p.contains("<process_environment>"));
         assert!(
             !p.contains("<session_environment>"),

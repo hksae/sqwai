@@ -1796,16 +1796,18 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
 
     app.session.last_breakdown = Some(crate::providers::RequestBreakdown {
         system_bytes: 4_000,
+        memory_bytes: 800,
+        skills_bytes: 1_200,
         history_bytes: 8_000,
-        user_bytes: 1_000,
-        provider_state_bytes: 800,
-        tool_schema_bytes: 16_000,
-        total_bytes: 29_800,
+        tool_output_bytes: 16_000,
+        host_bytes: 800,
+        total_bytes: 31_600,
         system_tokens: 1_000,
+        memory_tokens: 200,
+        skills_tokens: 300,
         history_tokens: 2_000,
-        user_tokens: 250,
-        provider_state_tokens: 200,
-        tool_schema_tokens: 4_000,
+        tool_output_tokens: 4_000,
+        host_tokens: 200,
     });
     app.session.last_usage = Some(crate::providers::Usage {
         prompt_tokens: 8_000,
@@ -1833,8 +1835,7 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
         (99.5..=100.5).contains(&sum),
         "legend percents must sum to 100: {sum:.1}\n{t}"
     );
-    // the scale is solid color: spaces painted with the part's background, the
-    // fattest part (tools) leading the bar
+    // the scale is solid color: spaces painted with the part's background
     let meter = &app.menu_rows[2].0;
     assert!(
         meter
@@ -1848,11 +1849,28 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
             .map(|s| s.content.as_ref())
             .collect::<Vec<_>>()
     );
+    // the bar and the legend must agree with each other, whatever hues get
+    // picked: the leading block wears the color the legend gives its part
+    let dot = |name: &str| -> Option<ratatui::style::Color> {
+        app.menu_rows.iter().find_map(|(line, _)| {
+            let mark = line.spans.first()?;
+            let label = line.spans.get(1)?;
+            if mark.content.starts_with('●') && label.content.starts_with(name) {
+                mark.style.fg
+            } else {
+                None
+            }
+        })
+    };
     assert_eq!(
         meter.spans[0].style.bg,
-        Some(ratatui::style::Color::LightBlue),
-        "the fattest part (tools) leads the bar"
+        dot("tools"),
+        "the fattest part (tools, i.e. their output) leads the bar"
     );
+    // memory and skills are their own parts: burying them in "system" made the
+    // biggest block on the scale unreadable
+    assert!(t.contains("● memory"), "memory is a legend row: {t}");
+    assert!(t.contains("● skills"), "skills is a legend row: {t}");
 }
 
 /// The context menu is a read-only card: no cursor, no selection band — arrows

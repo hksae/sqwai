@@ -97,7 +97,9 @@ rather than trusting any summary of it.
 
 ## 3. What the model sees, in order
 
-One cached `stable_prefix`, assembled in this sequence:
+The stable prefix, assembled in this sequence. It travels as separate cached
+parts, each tagged with the layer it came from — joined they are the same bytes,
+split they let `/context` bill memory and skills apart from the rules:
 
     system.md              (built-in, overridable by config_dir/system.md)
     + AGENTS.md, .sqwai.md project rules, the latter winning on conflict
