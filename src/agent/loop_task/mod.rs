@@ -450,6 +450,35 @@ fn strip_host_repeat_marks(output: &str) -> &str {
     }
 }
 
+/// One journal record per snapshot commit, named for what actually took it.
+///
+/// Every entry here is a shadow-git snapshot (`snapshot_session` for mutations,
+/// `snapshot_boundary` for step edges), so the layer is stated once and the
+/// reason carries the difference. Step tags arrive through the same vector as
+/// mutations because `plan` snapshots its own boundaries — reading the label
+/// is how the two stop being journaled twice, once as a step edge and once as
+/// a phantom "post_mutation".
+fn checkpoint_fields(sha: &str, label: &str) -> serde_json::Value {
+    if let Some(step) = label.strip_prefix("step_") {
+        for (suffix, reason) in [("_start", "step_start"), ("_finish", "step_finish")] {
+            if let Some(id) = step.strip_suffix(suffix) {
+                return serde_json::json!({
+                    "layer": "shadow",
+                    "id": sha,
+                    "reason": reason,
+                    "step": id,
+                });
+            }
+        }
+    }
+    serde_json::json!({
+        "layer": "shadow",
+        "id": sha,
+        "reason": "post_mutation",
+        "label": label,
+    })
+}
+
 /// What makes two calls the same call: for `bash` the command line alone (a
 /// different `timeout` is the same observation attempt), for everything else
 /// the tool name plus its canonicalized arguments — and the name alone when it
@@ -1535,15 +1564,7 @@ async fn run_agent(
                 if ctx.journal.len() > journal_mark {
                     if let Some(writer) = journal.as_mut() {
                         for (sha, label) in ctx.journal[journal_mark..].iter() {
-                            let _ = writer.append(
-                                "checkpoint",
-                                serde_json::json!({
-                                    "layer": "legacy",
-                                    "id": sha,
-                                    "reason": "post_mutation",
-                                    "label": label,
-                                }),
-                            );
+                            let _ = writer.append("checkpoint", checkpoint_fields(sha, label));
                         }
                     }
                     if let Some((_, label)) = ctx.journal.last() {
@@ -1686,12 +1707,13 @@ async fn run_agent(
                                     .await;
                             }
                             let tag = format!("step_{id}_start");
-                            let sha = if let Some((s, t)) = ctx.journal.last()
-                                && t == &tag
-                            {
-                                Some(s.clone())
-                            } else {
-                                checkpoints::snapshot_boundary(
+                            // `plan` snapshots its own boundaries and pushes the
+                            // commit into ctx.journal, which is where the record
+                            // above was written. Re-appending here journaled the
+                            // same commit twice under two different layers.
+                            let already = ctx.journal.last().is_some_and(|(_, t)| t == &tag);
+                            if !already
+                                && let Some(sha) = checkpoints::snapshot_boundary(
                                     &root,
                                     shadow_store,
                                     parent_session.as_deref().unwrap_or(&session_id),
@@ -1699,32 +1721,20 @@ async fn run_agent(
                                 )
                                 .ok()
                                 .flatten()
-                                .inspect(|s| {
-                                    ctx.journal.push((s.clone(), tag.clone()));
-                                })
-                            };
-                            if let Some(sha) = sha {
-                                let _ = writer.append(
-                                    "checkpoint",
-                                    serde_json::json!({
-                                        "layer": "shadow",
-                                        "id": sha,
-                                        "reason": "step_start",
-                                        "step": id,
-                                    }),
-                                );
+                            {
+                                ctx.journal.push((sha.clone(), tag.clone()));
+                                let _ = writer.append("checkpoint", checkpoint_fields(&sha, &tag));
                             }
                         } else if outcome.ok && matches!(op, "finish" | "block" | "cancel") {
                             if op == "finish"
                                 && let Some(id) = plan_step_id
                             {
                                 let tag = format!("step_{id}_finish");
-                                let sha = if let Some((s, t)) = ctx.journal.last()
-                                    && t == &tag
-                                {
-                                    Some(s.clone())
-                                } else {
-                                    checkpoints::snapshot_boundary(
+                                // Same as the start boundary: one commit, one
+                                // record, whatever layer name reads nicer.
+                                let already = ctx.journal.last().is_some_and(|(_, t)| t == &tag);
+                                if !already
+                                    && let Some(sha) = checkpoints::snapshot_boundary(
                                         &root,
                                         shadow_store,
                                         parent_session.as_deref().unwrap_or(&session_id),
@@ -1732,20 +1742,10 @@ async fn run_agent(
                                     )
                                     .ok()
                                     .flatten()
-                                    .inspect(|s| {
-                                        ctx.journal.push((s.clone(), tag.clone()));
-                                    })
-                                };
-                                if let Some(sha) = sha {
-                                    let _ = writer.append(
-                                        "checkpoint",
-                                        serde_json::json!({
-                                            "layer": "shadow",
-                                            "id": sha,
-                                            "reason": "step_finish",
-                                            "step": id,
-                                        }),
-                                    );
+                                {
+                                    ctx.journal.push((sha.clone(), tag.clone()));
+                                    let _ =
+                                        writer.append("checkpoint", checkpoint_fields(&sha, &tag));
                                 }
                             }
                             writer.set_attribution(None, plan_id, "main");
@@ -4526,5 +4526,43 @@ mod trust_gate_tests {
         };
         assert!(!asked_again, "the same egress kind must not ask twice");
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_journal_tests {
+    use super::checkpoint_fields;
+
+    /// One commit, one record, and the record names the edge it is. Step
+    /// boundaries used to be journaled twice — once as `shadow/step_start`,
+    /// once as `legacy/post_mutation` — where "legacy" described the very same
+    /// shadow snapshot layer, so the ledger claimed a mutation that never
+    /// happened.
+    #[test]
+    fn a_step_boundary_is_journaled_as_a_boundary_not_a_mutation() {
+        let start = checkpoint_fields("sha1", "step_2_start");
+        assert_eq!(start["layer"], "shadow");
+        assert_eq!(start["reason"], "step_start");
+        assert_eq!(start["step"], "2");
+        assert!(
+            start.get("label").is_none(),
+            "a boundary carries no phantom mutation label: {start}"
+        );
+        let finish = checkpoint_fields("sha2", "step_2_finish");
+        assert_eq!(finish["reason"], "step_finish");
+        assert_eq!(finish["step"], "2");
+    }
+
+    #[test]
+    fn a_mutation_snapshot_names_what_changed() {
+        for (label, want) in [
+            ("edit src/main.rs", "edit src/main.rs"),
+            ("bash cargo build", "bash cargo build"),
+        ] {
+            let rec = checkpoint_fields("sha3", label);
+            assert_eq!(rec["layer"], "shadow");
+            assert_eq!(rec["reason"], "post_mutation");
+            assert_eq!(rec["label"], want);
+        }
     }
 }
