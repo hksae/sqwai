@@ -346,6 +346,10 @@ pub struct App {
     last_fp: u64,
     /// per-frame perf log behind the `/debug` toggle; disabled by default
     perf: perf::PerfLog,
+    /// which animation condition (or bare `dirty`) drove the frame; bit layout
+    /// in [`perf`]. Computed every pass — it reuses the terms `animating`
+    /// already evaluates, so an off log costs one u32 store.
+    perf_why: u32,
     /// how the last rebuild merged chunks (Skip = fingerprint gate hit)
     last_merge: view::MergeKind,
     /// segment chunks rebuilt in the last rebuild
@@ -660,6 +664,7 @@ impl App {
             theme_rev: 0,
             last_fp: 0,
             perf: perf::PerfLog::new(),
+            perf_why: 0,
             last_merge: view::MergeKind::Skip,
             last_fresh: 0,
             last_rebuild_us: 0,
@@ -917,27 +922,40 @@ impl App {
                 self.toast = None;
                 self.dirty = true;
             }
-            let animating = self.streaming
-                || self.tool_running()
-                || self.toast.is_some()
-                // the animation gallery *is* its frame: it must keep its 20 FPS
-                // with nothing else running behind it
-                || matches!(self.cur_menu(), Some(Menu::TestAnim))
-                // live mode-chip sweep gets its 250ms even past streaming
-                // end, or the chip would freeze mid-blend on the toggle
-                || self.mode_blend.is_some_and(|(_, t0)| {
-                    t0.elapsed().as_millis() < MODE_BLEND_MS as u128
-                })
-                // live effort-slider sweep gets its 250ms too, or it
-                // would freeze on the arming frame showing the old color
-                || self.effort_blend.is_some_and(|(_, t0)| {
-                    t0.elapsed().as_millis() < MODE_BLEND_MS as u128
-                })
-                // finish waves get their outcome span even past streaming end,
-                // or the sweep would freeze mid-row on the last tool
-                || self.segments.iter().any(|s| {
-                    matches!(s, Segment::Tool { flash: Some(t0), ok: Some(done), .. } if t0.elapsed().as_millis() < crate::tui::shimmer::flash_ms(*done) as u128)
-                });
+            // Which condition costs this frame. Recorded for the `/debug` perf
+            // log (`perf::why`), because "the app redraws while idle" is only
+            // fixable once the log says what kept it awake.
+            let w_stream = self.streaming;
+            let w_tools = self.tool_running();
+            let w_toast = self.toast.is_some();
+            // the animation gallery *is* its frame: it must keep its 20 FPS
+            // with nothing else running behind it
+            let w_gallery = matches!(self.cur_menu(), Some(Menu::TestAnim));
+            // live mode-chip sweep gets its 250ms even past streaming end, or
+            // the chip would freeze mid-blend on the toggle
+            let w_mode = self
+                .mode_blend
+                .is_some_and(|(_, t0)| t0.elapsed().as_millis() < MODE_BLEND_MS as u128);
+            // live effort-slider sweep gets its 250ms too, or it would freeze
+            // on the arming frame showing the old color
+            let w_effort = self
+                .effort_blend
+                .is_some_and(|(_, t0)| t0.elapsed().as_millis() < MODE_BLEND_MS as u128);
+            // finish waves get their outcome span even past streaming end, or
+            // the sweep would freeze mid-row on the last tool
+            let w_wave = self.segments.iter().any(|s| {
+                matches!(s, Segment::Tool { flash: Some(t0), ok: Some(done), .. } if t0.elapsed().as_millis() < crate::tui::shimmer::flash_ms(*done) as u128)
+            });
+            let animating =
+                w_stream || w_tools || w_toast || w_gallery || w_mode || w_effort || w_wave;
+            self.perf_why = (u32::from(w_stream)
+                | (u32::from(w_tools) << 1)
+                | (u32::from(w_toast) << 2)
+                | (u32::from(w_gallery) << 3)
+                | (u32::from(w_mode) << 4)
+                | (u32::from(w_effort) << 5)
+                | (u32::from(w_wave) << 6))
+                | if animating { 0 } else { 1 << 7 };
             // Retire expired finish waves: the row renders its static style
             // again, and the rev bump forces the one final repaint even when
             // the wave was the only thing animating (turn ended exactly on
@@ -1120,6 +1138,8 @@ impl App {
                     fresh,
                     segs: self.segments.len(),
                     rows: self.cache_lines.len(),
+                    cached: self.seg_cache.len(),
+                    why: self.perf_why,
                     tick: self.spinner_tick,
                     streaming: self.streaming,
                     running: self.tool_running(),

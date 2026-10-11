@@ -5,9 +5,21 @@
 //! frame log → on, then read offline:
 //!
 //! ```text
-//! # frame t_ms draw_us rebuild_us bytes flush_us pace_us render_us latency_us dropped merge fresh renders wraps segs rows tick streaming running view
-//! 12 345 1843 1502 4096 1700 8333 900 1200 0 splice 1 1 3 9 42 45 1 1 0
+//! # frame t_ms draw_us rebuild_us bytes flush_us pace_us render_us latency_us dropped merge fresh renders wraps segs rows tick streaming running view cached why
+//! 12 345 1843 1502 4096 1700 8333 900 1200 0 splice 1 1 3 9 42 45 1 1 0 300 0x80
 //! EVT 1234 tool_start read
+//! ```
+//!
+//! `cached` is how many rendered segment blocks the cache is holding; a frame
+//! whose `renders` is large while `segs` did not grow means the cache stopped
+//! paying for itself. `why` is the reason the frame was drawn at all, as a bit
+//! mask — the redraw-while-idle question is unanswerable without it:
+//!
+//! ```text
+//! 0x01 streaming      0x02 a tool row running   0x04 a toast up
+//! 0x08 animation gallery menu                   0x10 mode-chip blend
+//! 0x20 effort blend   0x40 a finish wave alive   0x80 nothing animating:
+//!                                                plain `dirty` drew this frame
 //! ```
 //!
 //! Disabled by default: every method early-returns on `out: None`, so the
@@ -39,6 +51,10 @@ pub struct FrameStat {
     pub fresh: usize,
     pub segs: usize,
     pub rows: usize,
+    /// rendered segment blocks still held in the cache
+    pub cached: usize,
+    /// why the frame was drawn — see the bit list in the module docs
+    pub why: u32,
     pub tick: usize,
     pub streaming: bool,
     pub running: bool,
@@ -96,7 +112,7 @@ impl PerfLog {
                 let mut out = std::io::BufWriter::new(f);
                 let _ = writeln!(
                     out,
-                    "# frame t_ms draw_us rebuild_us bytes flush_us pace_us render_us latency_us dropped merge fresh renders wraps segs rows tick streaming running view"
+                    "# frame t_ms draw_us rebuild_us bytes flush_us pace_us render_us latency_us dropped merge fresh renders wraps segs rows tick streaming running view cached why"
                 );
                 self.path = path.display().to_string();
                 self.out = Some(out);
@@ -121,7 +137,7 @@ impl PerfLog {
         self.frames += 1;
         let _ = writeln!(
             out,
-            "{} {} {} {} {} {} {} {} {} {} {} {renders} {wraps} {} {} {} {} {} {} {}",
+            "{} {} {} {} {} {} {} {} {} {} {} {renders} {wraps} {} {} {} {} {} {} {} {} {:#x}",
             self.frames,
             self.t0.elapsed().as_millis(),
             s.draw_us,
@@ -140,6 +156,8 @@ impl PerfLog {
             s.streaming as u8,
             s.running as u8,
             s.view,
+            s.cached,
+            s.why,
         );
         if self.frames.is_multiple_of(100) {
             let _ = out.flush();

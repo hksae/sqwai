@@ -54,6 +54,8 @@ fn debug_perf_log_toggle_writes_frame_lines_to_temp_file() {
             fresh: 1,
             segs: 2,
             rows: 3,
+            cached: 2,
+            why: 0x81,
             tick: 7,
             streaming: true,
             running: false,
@@ -74,7 +76,7 @@ fn debug_perf_log_toggle_writes_frame_lines_to_temp_file() {
     assert!(
         content.lines().any(|l| {
             let parts: Vec<&str> = l.split_whitespace().collect();
-            parts.len() > 6
+            parts.len() >= 22
                 && parts[0] == "1"
                 && parts[2] == "10"
                 && parts[3] == "5"
@@ -85,6 +87,9 @@ fn debug_perf_log_toggle_writes_frame_lines_to_temp_file() {
                 && parts[8] == "1200"
                 && parts[9] == "2"
                 && parts[10] == "splice"
+                // the two probe columns: cache size, and why the frame drew
+                && parts[20] == "2"
+                && parts[21] == "0x81"
         }),
         "frame line:\n{content}"
     );
