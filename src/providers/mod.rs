@@ -414,11 +414,27 @@ impl RequestBreakdown {
                 Role::User | Role::Assistant => out.history_bytes += bytes,
                 Role::Tool => out.tool_output_bytes += bytes,
             }
+            // Replayed provider thinking, in whichever field the wire keeps
+            // it: the Anthropic signature blocks and the Responses reasoning
+            // items ride in `provider_state`, while Gemini's `thought_signature`
+            // rides per tool call in `extra_content` — Chat Completions has no
+            // message-level field, so without the second term the signatures
+            // travel on every request and appear in no row.
             out.reasoning_bytes += message
                 .provider_state
                 .as_ref()
                 .map(|state| state.to_string().len() as u64)
-                .unwrap_or(0);
+                .unwrap_or(0)
+                + message
+                    .tool_calls
+                    .iter()
+                    .map(|call| {
+                        call.extra_content
+                            .as_ref()
+                            .map(|extra| extra.to_string().len() as u64)
+                            .unwrap_or(0)
+                    })
+                    .sum::<u64>();
         }
         out.system_bytes += req
             .tools
@@ -1149,6 +1165,10 @@ mod system_layout_tests {
         let schema = serde_json::json!({"p": "the one param"});
         // what the gateway hands back and asks us to replay verbatim
         let replay = serde_json::json!({"reasoning_items": [{"encrypted_content": "AAAA"}]});
+        // the same replay on the OpenAI-compatible wire: Gemini's thought
+        // signature rides inside the tool call, not on the message
+        let signature = serde_json::json!({"google": {"thought": "sig"}});
+        let call_args = serde_json::json!({"command": "ls"});
         let req = ChatRequest {
             model_id: "m".into(),
             system: vec![
@@ -1160,6 +1180,10 @@ mod system_layout_tests {
             messages: vec![
                 Message::new(Role::User, "question"),
                 Message::new(Role::Assistant, "answer").with_provider_state(Some(replay.clone())),
+                Message::new(Role::Assistant, "").with_tool_calls(vec![
+                    ToolCallReq::new("c1", "bash", call_args.clone())
+                        .with_extra_content(Some(signature.clone())),
+                ]),
                 Message::tool_result("c1", "a tool answered", false),
             ],
             tools: vec![ToolSpec {
@@ -1186,13 +1210,14 @@ mod system_layout_tests {
         );
         assert_eq!(
             b.reasoning_bytes,
-            replay.to_string().len() as u64,
-            "replayed provider state is its own part"
+            replay.to_string().len() as u64 + signature.to_string().len() as u64,
+            "replayed provider state is its own part, whichever field carries it"
         );
         assert_eq!(
             b.history_bytes,
-            ("question".len() + "answer".len()) as u64,
-            "both human and model turns are the conversation"
+            ("question".len() + "answer".len()) as u64
+                + ("bash".len() + call_args.to_string().len()) as u64,
+            "the conversation is turns and call arguments — the signature is not history"
         );
         assert_eq!(b.tool_output_bytes, "a tool answered".len() as u64);
         // the parts are a partition: nothing is dropped, nothing is counted twice
