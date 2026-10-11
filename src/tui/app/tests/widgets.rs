@@ -694,6 +694,39 @@ fn inline_ask_single_choice_replaces_previous_pick() {
     }
 }
 
+/// The free-answer row is a peer of the options, so a single-choice question
+/// carries one filled marker at a time — from either side.
+#[test]
+fn single_choice_free_text_and_options_are_one_radio() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    push_inline_ask(&mut app, ask_fixture());
+    let seg = app.active_ask_seg().expect("live ask");
+    let set_free = |app: &mut App, text: &str| {
+        if let Some(Segment::Tool { ask: Some(ask), .. }) = app.segments.get_mut(seg) {
+            ask.custom[0] = text.to_string();
+        }
+        app.touch_segment(seg);
+    };
+    let picks = |app: &App| -> Vec<bool> {
+        match &app.segments[seg] {
+            Segment::Tool { ask: Some(ask), .. } => ask.picked[0].clone(),
+            other => panic!("no ask here: {other:?}"),
+        }
+    };
+
+    app.inline_ask_open_custom(0);
+    set_free(&mut app, "ffff");
+    assert_eq!(app.inline_ask_text(seg), "Q1: ffff | Q2: (no answer)");
+    // choosing an option retires the typed answer
+    app.inline_ask_select(0, 1);
+    assert_eq!(app.inline_ask_text(seg), "Q1: beta | Q2: (no answer)");
+    // choosing the free row retires the option
+    set_free(&mut app, "ffff");
+    app.inline_ask_open_custom(0);
+    assert_eq!(picks(&app), vec![false, false], "no option is filled");
+    assert_eq!(app.inline_ask_text(seg), "Q1: ffff | Q2: (no answer)");
+}
+
 #[test]
 fn inline_ask_skip_blurs_custom_first_then_freezes() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());

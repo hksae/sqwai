@@ -845,11 +845,7 @@ impl App {
                             self.inline_ask_select(q, opt);
                         }
                     }
-                    AskRow::Custom { q } => {
-                        self.inline_ask_focus(q);
-                        self.ask_custom_focus = Some(q);
-                        self.dirty = true;
-                    }
+                    AskRow::Custom { q } => self.inline_ask_open_custom(q),
                     AskRow::Confirm => self.inline_ask_confirm(),
                 }
             }
@@ -1355,7 +1351,7 @@ impl App {
                         Span::styled(
                             marker.to_string(),
                             if picked {
-                                Theme::accent()
+                                Theme::brand_ink()
                             } else {
                                 Theme::dim()
                             },
@@ -1372,18 +1368,41 @@ impl App {
             if q.allow_free {
                 let c = ask.custom.get(q_idx).map(|s| s.as_str()).unwrap_or("");
                 let editing = live && self.ask_custom_focus == Some(q_idx);
-                let text = if c.is_empty() {
-                    "  your answer…".to_string()
+                let filled = !c.is_empty();
+                // a peer of the options: same marker column, and the marker is
+                // filled exactly when the free text is this question's answer
+                let marker = if q.multiple {
+                    if filled { "  [x] " } else { "  [ ] " }
+                } else if filled {
+                    "  ● "
                 } else {
-                    format!("  {c}{}", if editing { "▌" } else { "" })
+                    "  ○ "
                 };
-                let style = if c.is_empty() && !editing {
-                    Theme::dim()
+                let text = if filled {
+                    format!("{c}{}", if editing { "▌" } else { "" })
                 } else {
-                    Theme::base()
+                    "your answer…".to_string()
                 };
+                let text = truncate_display_width(&text, width.saturating_sub(marker.width()));
                 row(
-                    vec![Span::styled(truncate_display_width(&text, width), style)],
+                    vec![
+                        Span::styled(
+                            marker.to_string(),
+                            if filled {
+                                Theme::brand_ink()
+                            } else {
+                                Theme::dim()
+                            },
+                        ),
+                        Span::styled(
+                            text,
+                            if filled || editing {
+                                Theme::base()
+                            } else {
+                                Theme::dim()
+                            },
+                        ),
+                    ],
                     live && self.ask_hover == Some(AskRow::Custom { q: q_idx }),
                 );
             }

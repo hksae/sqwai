@@ -68,6 +68,19 @@ impl Theme {
     pub const fn ACCENT() -> Color {
         Color::Indexed(168)
     }
+    /// The brand ink: the ramp's start (`#de2f66`), for the one glyph that says
+    /// "this is the choice" — a picked option's marker. Louder than
+    /// [`Self::accent`], whose pink is what the ramp degrades to on terminals
+    /// without truecolor. No bold: a marker earns color, not weight.
+    pub fn brand_ink() -> Style {
+        let fg = if crate::tui::shimmer::has_truecolor() {
+            let (r, g, b) = crate::tui::art::CORAL_START;
+            Color::Rgb(r, g, b)
+        } else {
+            Self::ACCENT()
+        };
+        Style::new().fg(fg)
+    }
     #[allow(non_snake_case)]
     pub const fn ACCENT_SOFT() -> Color {
         Color::Indexed(168)

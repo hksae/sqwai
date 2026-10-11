@@ -1337,6 +1337,13 @@ impl App {
                 *v = i == opt;
             }
             ask.focus = q;
+            // one radio: choosing an option retires the free text, so a
+            // single-choice question never shows two filled markers
+            if !ask.questions.get(q).is_some_and(|qq| qq.multiple)
+                && let Some(free) = ask.custom.get_mut(q)
+            {
+                free.clear();
+            }
         }
         self.touch_segment(seg);
         self.ask_custom_focus = None;
@@ -1374,6 +1381,25 @@ impl App {
         }
         self.touch_segment(seg);
         self.ask_custom_focus = None;
+        self.dirty = true;
+    }
+
+    /// focus the free-text editor of question q. On a single-choice question
+    /// this is the user choosing "something else", so the option markers clear —
+    /// the same radio `inline_ask_select` enforces from the other side.
+    pub(super) fn inline_ask_open_custom(&mut self, q: usize) {
+        self.inline_ask_focus(q);
+        if let Some(seg) = self.active_ask_seg()
+            && let Some(Segment::Tool { ask: Some(ask), .. }) = self.segments.get_mut(seg)
+            && !ask.questions.get(q).is_some_and(|qq| qq.multiple)
+            && let Some(opts) = ask.picked.get_mut(q)
+        {
+            for v in opts.iter_mut() {
+                *v = false;
+            }
+            self.touch_segment(seg);
+        }
+        self.ask_custom_focus = Some(q);
         self.dirty = true;
     }
 
