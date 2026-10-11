@@ -4,6 +4,8 @@
 //!
 use serde_json::{Value, json};
 
+use crate::agent::loop_task::{ASK_MAX_OPTIONS, ASK_MAX_QUESTIONS, ASK_MIN_OPTIONS};
+
 /// Clip to `max` chars on a char boundary (… marks the cut).
 pub(crate) fn clip(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -504,8 +506,8 @@ either side — quote the conflict in reason.",
                                         },
                                         "required": ["label"]
                                     },
-                                    "minItems": 2,
-                                    "maxItems": 5
+                                    "minItems": ASK_MIN_OPTIONS,
+                                    "maxItems": ASK_MAX_OPTIONS
                                 },
                                 "multiple": {"type": "boolean", "description": "Allow selecting multiple choices"},
                                 "allow_free": {"type": "boolean", "description": "Allow a custom typed answer as an extra option"}
@@ -513,7 +515,7 @@ either side — quote the conflict in reason.",
                             "required": ["question", "options"]
                         },
                         "minItems": 1,
-                        "maxItems": 4
+                        "maxItems": ASK_MAX_QUESTIONS
                     },
                     "options": {
                         "type": "array",
@@ -525,8 +527,8 @@ either side — quote the conflict in reason.",
                             },
                             "required": ["label"]
                         },
-                        "minItems": 2,
-                        "maxItems": 5
+                        "minItems": ASK_MIN_OPTIONS,
+                        "maxItems": ASK_MAX_OPTIONS
                     },
                     "multiple": {"type": "boolean", "description": "allow selecting several options (single-question mode)"},
                     "allow_free": {"type": "boolean", "description": "allow a custom typed answer (single-question mode)"}
@@ -910,6 +912,41 @@ fn call_args_for_journal_cuts_long_strings() {
     let body = kept["content"].as_str().unwrap();
     assert!(body.contains("chars total"), "{body}");
     assert!(body.len() < 600);
+}
+
+/// The schema is what the model is told; the loop's guard reads the same
+/// constants, so the two cannot disagree. The description is the one place the
+/// numbers are still written by hand, so it is pinned here too — change a
+/// constant and this test names the sentence to update.
+#[test]
+fn the_ask_user_schema_matches_the_shared_bounds() {
+    use crate::agent::loop_task::{ASK_MAX_OPTIONS, ASK_MAX_QUESTIONS, ASK_MIN_OPTIONS};
+    let spec = tool_specs(false)
+        .into_iter()
+        .find(|t| t.name == "ask_user")
+        .expect("ask_user is offered");
+    let n = |v: usize| serde_json::Value::from(v);
+    let props = &spec.parameters["properties"];
+    assert_eq!(props["questions"]["maxItems"], n(ASK_MAX_QUESTIONS));
+    assert_eq!(
+        props["questions"]["items"]["properties"]["options"]["minItems"],
+        n(ASK_MIN_OPTIONS)
+    );
+    assert_eq!(
+        props["questions"]["items"]["properties"]["options"]["maxItems"],
+        n(ASK_MAX_OPTIONS)
+    );
+    assert_eq!(props["options"]["minItems"], n(ASK_MIN_OPTIONS));
+    assert_eq!(props["options"]["maxItems"], n(ASK_MAX_OPTIONS));
+    assert!(
+        spec.description
+            .contains(&format!("(1-{ASK_MAX_QUESTIONS})"))
+            && spec
+                .description
+                .contains(&format!("{ASK_MIN_OPTIONS}-{ASK_MAX_OPTIONS}")),
+        "the description still names other bounds: {}",
+        spec.description
+    );
 }
 
 /// Wire weight of the tool surface: every request carries all specs, so

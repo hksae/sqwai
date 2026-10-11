@@ -37,6 +37,14 @@ mod loop_compact;
 mod loop_subagent;
 mod loop_turn;
 
+/// How much one `ask_user` call may hold. These are the only numbers for it:
+/// the tool schema the model reads is built from them, and the runtime guard
+/// refuses a call that breaks them — they had already drifted (schema said 4
+/// questions, the loop accepted 8 and dropped the rest without telling anyone).
+pub const ASK_MAX_QUESTIONS: usize = 4;
+pub const ASK_MIN_OPTIONS: usize = 2;
+pub const ASK_MAX_OPTIONS: usize = 5;
+
 #[derive(Debug, Clone)]
 pub struct AskOption {
     pub label: String,

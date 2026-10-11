@@ -1,4 +1,7 @@
-use super::{AgentEvent, ApprovalDecision, AskOption, AskQuestion, ControlMsg};
+use super::{
+    ASK_MAX_OPTIONS, ASK_MAX_QUESTIONS, ASK_MIN_OPTIONS, AgentEvent, ApprovalDecision, AskOption,
+    AskQuestion, ControlMsg,
+};
 use crate::agent::tools::{self, ToolCtx};
 use crate::agent::{checkpoints, safety};
 use crate::providers::ToolCallReq;
@@ -12,14 +15,13 @@ pub(crate) async fn ask_user(
 ) -> tools::Outcome {
     let id = *next_id;
     *next_id += 1;
-    // Support both single-question (legacy) and multi-question (questions array) modes.
-    // One dialog, bounded: a dump of dozens of questions is a wall the user
-    // cannot answer (audit M23) — the rest waits for the next call.
-    const MAX_QUESTIONS_PER_CALL: usize = 8;
+    // Support both single-question (legacy) and multi-question (questions array)
+    // modes. The bounds are not trimmed away here: a call that breaks them is
+    // refused by `ask_rejection` with the shape to resend, because silently
+    // dropping the model's fifth question leaves it believing it asked.
     let questions: Vec<AskQuestion> =
         if let Some(arr) = call.args.get("questions").and_then(|v| v.as_array()) {
             arr.iter()
-                .take(MAX_QUESTIONS_PER_CALL)
                 .map(|q| {
                     let header = q
                         .get("header")
@@ -150,18 +152,45 @@ fn parse_options(src: Option<&serde_json::Value>) -> Vec<AskOption> {
 /// Why this call must not reach the UI, in the words the model needs to fix
 /// it. `None` means the questionnaire is answerable as built.
 fn ask_rejection(questions: &[AskQuestion]) -> Option<String> {
-    if questions.is_empty() || questions.iter().any(|q| q.question.trim().is_empty()) {
+    if questions.is_empty() {
         return Some(
-            "ask_user rejected: 'question' is empty. Call it again with a non-empty question, \
-             e.g. {\"question\": \"Which web framework should I use?\", \"options\": \
-             [\"FastAPI\", \"Flask\"], \"multiple\": false, \"allow_free\": true} or with \
-             \"questions\": [{\"header\": \"Q1\", \"question\": \"...\", \"options\": [...] }]."
+            "ask_user rejected: no question given. Send {\"question\": \"…\", \"options\": \
+             [\"a\", \"b\"]} or \"questions\": [{\"header\": \"Q1\", \"question\": \"…\", \
+             \"options\": [\"a\", \"b\"]}]."
                 .to_string(),
         );
     }
+    if questions.len() > ASK_MAX_QUESTIONS {
+        return Some(format!(
+            "ask_user rejected: {} questions, and one call carries at most {ASK_MAX_QUESTIONS}. \
+             Ask the first {ASK_MAX_QUESTIONS} now; the rest belong to the next call, after the \
+             user has answered these.",
+            questions.len()
+        ));
+    }
+    if questions.iter().any(|q| q.question.trim().is_empty()) {
+        return Some(
+            "ask_user rejected: 'question' is empty. Call it again with a non-empty question, \
+             e.g. {\"question\": \"Which web framework should I use?\", \"options\": \
+             [\"FastAPI\", \"Flask\"]}."
+                .to_string(),
+        );
+    }
+    let wrong_count = questions
+        .iter()
+        .position(|q| q.options.len() < ASK_MIN_OPTIONS || q.options.len() > ASK_MAX_OPTIONS);
+    if let Some(i) = wrong_count {
+        return Some(format!(
+            "ask_user rejected: question {} has {} options; every question needs \
+             {ASK_MIN_OPTIONS}-{ASK_MAX_OPTIONS}. Offer a real choice, or ask in plain text and \
+             let the user answer freely.",
+            i + 1,
+            questions[i].options.len()
+        ));
+    }
     let blank = questions
         .iter()
-        .position(|q| !q.options.is_empty() && q.options.iter().any(|o| o.label.trim().is_empty()));
+        .position(|q| q.options.iter().any(|o| o.label.trim().is_empty()));
     blank.map(|i| {
         format!(
             "ask_user rejected: question {} has an option with no text, which the user cannot \
@@ -419,7 +448,29 @@ mod tests {
         let why = ask_rejection(&[question(json!(["", "  "]))]).expect("refused");
         assert!(why.contains("question 1"), "{why}");
         assert!(why.contains("no text"), "{why}");
-        // a free-text-only question is legitimate: it simply has no options
-        assert!(ask_rejection(&[question(json!([]))]).is_none());
+    }
+
+    #[test]
+    fn a_question_needs_a_real_set_of_options() {
+        // too few — including none, which used to pass as a free-text ask
+        assert!(ask_rejection(&[question(json!([]))]).is_some());
+        assert!(ask_rejection(&[question(json!(["only one"]))]).is_some());
+        // too many
+        let many: Vec<String> = (0..=ASK_MAX_OPTIONS).map(|i| format!("o{i}")).collect();
+        assert!(ask_rejection(&[question(json!(many))]).is_some());
+        // both edges of the promised range are fine
+        assert!(ask_rejection(&[question(json!(["a", "b"]))]).is_none());
+        let edge: Vec<String> = (0..ASK_MAX_OPTIONS).map(|i| format!("o{i}")).collect();
+        assert!(ask_rejection(&[question(json!(edge))]).is_none());
+    }
+
+    #[test]
+    fn a_call_with_too_many_questions_names_the_cap() {
+        let qs: Vec<AskQuestion> = (0..=ASK_MAX_QUESTIONS)
+            .map(|_| question(json!(["a", "b"])))
+            .collect();
+        let why = ask_rejection(&qs).expect("refused");
+        assert!(why.contains(&ASK_MAX_QUESTIONS.to_string()), "{why}");
+        assert!(why.contains("next call"), "{why}");
     }
 }
