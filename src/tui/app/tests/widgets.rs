@@ -18,6 +18,34 @@ fn a_toast_alone_does_not_ask_for_frames() {
     assert_eq!(why, 1 << 1, "{why:#x}");
 }
 
+/// A pointer reports motion far faster than the band needs: a burst of hover
+/// changes must fold into one repaint per interval, and the last one must still
+/// be drawn (a folded change is owed, never dropped).
+#[test]
+fn a_hover_burst_folds_into_one_frame() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.dirty = false;
+    app.request_hover_draw();
+    assert!(app.dirty, "the first change draws");
+    assert!(!app.hover_pending);
+
+    // inside the window: the state moves, the frame waits
+    app.dirty = false;
+    app.request_hover_draw();
+    assert!(!app.dirty, "a second change must not ask for another frame");
+    assert!(app.hover_pending, "…but it stays owed");
+
+    // once the window passes, the same call draws again
+    app.hover_last_draw = Some(
+        std::time::Instant::now()
+            - super::super::HOVER_REDRAW_INTERVAL
+            - std::time::Duration::from_millis(1),
+    );
+    app.request_hover_draw();
+    assert!(app.dirty, "the owed frame lands, it is not dropped");
+    assert!(!app.hover_pending);
+}
+
 /// The status bar is laid out in terminal columns and its click targets are
 /// derived from the same numbers. Now that the directory label is state
 /// rather than a call into the environment, the layout can be driven from

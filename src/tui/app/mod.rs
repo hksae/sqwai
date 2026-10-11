@@ -157,6 +157,12 @@ const WORKING_SPINNER: [char; 6] = ['◜', '◠', '◝', '◞', '◡', '◟'];
 const REVEAL_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(90);
 /// Reveal speed in chars/s: the old 12-chars-per-50ms-tick pace, unchanged.
 const REVEAL_RATE: usize = 240;
+/// How often a moving pointer may ask for a frame. Mouse motion reports far
+/// faster than the hover band needs to move, and every one of those frames is a
+/// full widget render plus diff — measured at ~1.2 ms and ~300 terminal bytes
+/// each, in bursts of one per 10 ms. One repaint per UI tick is the same band,
+/// six times cheaper.
+const HOVER_REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Chars to reveal in one flush: due at REVEAL_RATE since the window opened,
 /// at least 2, capped by the queue. The upper bound is pre-clamped — `queued`
@@ -350,6 +356,10 @@ pub struct App {
     /// in [`perf`]. Computed every pass — it reuses the terms `animating`
     /// already evaluates, so an off log costs one u32 store.
     perf_why: u32,
+    /// when a hover change last asked for a frame; see [`App::request_hover_draw`]
+    hover_last_draw: Option<Instant>,
+    /// a hover change arrived inside the fold window and still owes a frame
+    hover_pending: bool,
     /// how the last rebuild merged chunks (Skip = fingerprint gate hit)
     last_merge: view::MergeKind,
     /// segment chunks rebuilt in the last rebuild
@@ -665,6 +675,8 @@ impl App {
             last_fp: 0,
             perf: perf::PerfLog::new(),
             perf_why: 0,
+            hover_last_draw: None,
+            hover_pending: false,
             last_merge: view::MergeKind::Skip,
             last_fresh: 0,
             last_rebuild_us: 0,
@@ -983,6 +995,17 @@ impl App {
             {
                 self.effort_blend = None;
             }
+            // A hover change folded away by `request_hover_draw` is still owed
+            // its frame: once the interval has passed, ask for it. The tick
+            // wakes this loop every 50 ms whatever else is happening, so a
+            // pointer that stops mid-burst lands its band within one interval.
+            if self.hover_pending
+                && self
+                    .hover_last_draw
+                    .is_some_and(|t| t.elapsed() >= HOVER_REDRAW_INTERVAL)
+            {
+                self.dirty = true;
+            }
             if animating {
                 // fixed 20 FPS animation rate from the wall clock, not per
                 // loop iteration: bursts would otherwise fast-forward it
@@ -1005,6 +1028,11 @@ impl App {
                 self.tick_test_churn();
             }
             if self.dirty && last_build.elapsed() >= crate::tui::presenter::MIN_PRESENT_INTERVAL {
+                // Whatever draws next puts the current hover band on screen —
+                // including a frame built for streaming, which is why the
+                // stamp lives here and not in the hover handler.
+                self.hover_pending = false;
+                self.hover_last_draw = Some(Instant::now());
                 let area =
                     ratatui::layout::Rect::new(0, 0, self.term_size.width, self.term_size.height);
                 // cleared every frame (as the old draw path did): only a
@@ -3276,6 +3304,25 @@ impl App {
             .iter()
             .rev()
             .any(|s| matches!(s, Segment::Tool { ok: None, .. }))
+    }
+
+    /// Ask for a frame because the pointer moved. The caller has already
+    /// updated the hover state, so this never makes the band wrong — it only
+    /// decides when to repaint it, folding a burst of motion events into one
+    /// frame per [`HOVER_REDRAW_INTERVAL`]. The owed frame is flushed by the
+    /// loop's tick, so a pointer that stops mid-burst still lands.
+    fn request_hover_draw(&mut self) {
+        let now = Instant::now();
+        if self
+            .hover_last_draw
+            .is_some_and(|t| now.duration_since(t) < HOVER_REDRAW_INTERVAL)
+        {
+            self.hover_pending = true;
+            return;
+        }
+        self.hover_last_draw = Some(now);
+        self.hover_pending = false;
+        self.dirty = true;
     }
 
     /// What asks for a frame right now, as `(animating, why)` — `why` is the
