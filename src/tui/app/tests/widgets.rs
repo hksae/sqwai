@@ -1,5 +1,23 @@
 use super::*;
 
+/// A toast is static text with a deadline, so it must not hold the frame loop
+/// at 20 FPS. The `/debug` perf log measured it as 60 full-transcript redraws
+/// per notice, each one writing zero bytes to the terminal.
+#[test]
+fn a_toast_alone_does_not_ask_for_frames() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.status("saved", StatusKind::Info);
+    assert!(app.toast.is_some(), "the notice is up");
+    let (animating, why) = app.animating_terms();
+    assert!(!animating, "a toast is not an animation");
+    assert_eq!(why, 1 << 6, "the reason says bare dirty: {why:#x}");
+    // a running tool row still asks for frames, and names itself
+    app.handle_tool_start("read".into(), "a.rs".into(), Some("c1".into()));
+    let (animating, why) = app.animating_terms();
+    assert!(animating, "a running call animates");
+    assert_eq!(why, 1 << 1, "{why:#x}");
+}
+
 /// The status bar is laid out in terminal columns and its click targets are
 /// derived from the same numbers. Now that the directory label is state
 /// rather than a call into the environment, the layout can be driven from

@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! # frame t_ms draw_us rebuild_us bytes flush_us pace_us render_us latency_us dropped merge fresh renders wraps segs rows tick streaming running view cached why
-//! 12 345 1843 1502 4096 1700 8333 900 1200 0 splice 1 1 3 9 42 45 1 1 0 300 0x80
+//! 12 345 1843 1502 4096 1700 8333 900 1200 0 splice 1 1 3 9 42 45 1 1 0 300 0x40
 //! EVT 1234 tool_start read
 //! ```
 //!
@@ -16,10 +16,9 @@
 //! mask — the redraw-while-idle question is unanswerable without it:
 //!
 //! ```text
-//! 0x01 streaming      0x02 a tool row running   0x04 a toast up
-//! 0x08 animation gallery menu                   0x10 mode-chip blend
-//! 0x20 effort blend   0x40 a finish wave alive   0x80 nothing animating:
-//!                                                plain `dirty` drew this frame
+//! 0x01 streaming     0x02 a tool row running  0x04 animation gallery menu
+//! 0x08 mode-chip blend   0x10 effort blend    0x20 a finish wave alive
+//! 0x40 nothing animates: plain `dirty` drew this frame
 //! ```
 //!
 //! Disabled by default: every method early-returns on `out: None`, so the
