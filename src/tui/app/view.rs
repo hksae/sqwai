@@ -683,7 +683,7 @@ impl App {
                 .map(|(_, s)| s.clone());
             if hov != self.hover {
                 self.hover = hov;
-                self.request_hover_draw();
+                self.dirty = true;
             }
             return;
         }
@@ -693,7 +693,7 @@ impl App {
         if !self.in_chat_rect(row) {
             if self.ask_hover.is_some() {
                 self.ask_hover = None;
-                self.request_hover_draw();
+                self.dirty = true;
             }
             return;
         }
@@ -702,11 +702,11 @@ impl App {
             let ask_hover = self.ask_row_at(abs).map(|(_, r)| r);
             if ask_hover != self.ask_hover {
                 self.ask_hover = ask_hover;
-                self.request_hover_draw();
+                self.dirty = true;
             }
         } else if self.ask_hover.is_some() {
             self.ask_hover = None;
-            self.request_hover_draw();
+            self.dirty = true;
         }
     }
 

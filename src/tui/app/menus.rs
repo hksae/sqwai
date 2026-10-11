@@ -835,7 +835,7 @@ impl App {
                 .filter(|idx| *idx < self.form_fields.len());
             if hov != self.form_hover_row {
                 self.form_hover_row = hov;
-                self.request_hover_draw();
+                self.dirty = true;
             }
             return None;
         }
@@ -891,8 +891,7 @@ impl App {
         }
         if abs != self.menu_sel {
             self.menu_sel = abs;
-            // hover only: a click that lands here forces its own redraw below
-            self.request_hover_draw();
+            self.dirty = true;
         }
         Some(abs)
     }
