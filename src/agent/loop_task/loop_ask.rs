@@ -31,33 +31,7 @@ pub(crate) async fn ask_user(
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let options: Vec<AskOption> = q
-                        .get("options")
-                        .and_then(|v| v.as_array())
-                        .map(|a| {
-                            a.iter()
-                                .map(|o| AskOption {
-                                    label: o
-                                        .get("label")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string(),
-                                    description: o
-                                        .get("description")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string()),
-                                    recommended: o
-                                        .get("recommended")
-                                        .and_then(|v| v.as_bool())
-                                        .unwrap_or(false)
-                                        || o.get("label")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("")
-                                            .contains("(Recommended)"),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
+                    let options = parse_options(q.get("options"));
                     let multiple = q.get("multiple").and_then(|v| v.as_bool()).unwrap_or(false);
                     let allow_free = q
                         .get("allow_free")
@@ -85,34 +59,7 @@ pub(crate) async fn ask_user(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let options: Vec<AskOption> = call
-                .args
-                .get("options")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .map(|o| AskOption {
-                            label: o
-                                .get("label")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                            description: o
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string()),
-                            recommended: o
-                                .get("recommended")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false)
-                                || o.get("label")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .contains("(Recommended)"),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let options = parse_options(call.args.get("options"));
             let multiple = call
                 .args
                 .get("multiple")
@@ -132,16 +79,13 @@ pub(crate) async fn ask_user(
             }]
         };
 
-    // Small and open models often emit ask_user with no arguments at all.
-    // An empty popup is useless to the user, so refuse the call and hand the
-    // model the exact shape to retry with instead of blocking on the UI.
-    if questions.is_empty() || questions.iter().any(|q| q.question.is_empty()) {
-        return tools::Outcome::err(
-            "ask_user rejected: 'question' is empty. Call it again with a non-empty question, \
-             e.g. {\"question\": \"Which web framework should I use?\", \"options\": \
-             [{\"label\": \"FastAPI\"}, {\"label\": \"Flask\"}], \"multiple\": false, \
-             \"allow_free\": true} or with \"questions\": [{\"header\": \"Q1\", \"question\": \"...\", \"options\": [...] }].",
-        );
+    // Small and open models often emit ask_user with no arguments at all, or
+    // with the shape they had in mind rather than the one the schema asks for.
+    // A blank questionnaire is useless to the user and reads back to the model
+    // as "(no answer)" — which it then retries, three calls deep. Refuse the
+    // call and name the shape to send instead.
+    if let Some(why) = ask_rejection(&questions) {
+        return tools::Outcome::err(why);
     }
 
     if tx
@@ -164,6 +108,68 @@ pub(crate) async fn ask_user(
             None => return tools::Outcome::err("agent cancelled while asking"),
         }
     }
+}
+
+/// Options in either shape models actually send: the schema's
+/// `[{"label": …, "description": …}]`, or bare `["FastAPI", "Flask"]` strings,
+/// which small and free models emit constantly. A missing label falls back to
+/// the description; an option with no text at all stays empty, and
+/// [`ask_rejection`] refuses the call rather than painting a row nobody can
+/// pick.
+fn parse_options(src: Option<&serde_json::Value>) -> Vec<AskOption> {
+    src.and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|o| {
+                    let text = |key: &str| o.get(key).and_then(|v| v.as_str()).map(str::to_string);
+                    let label = o
+                        .as_str()
+                        .map(str::to_string)
+                        .or_else(|| text("label"))
+                        .or_else(|| text("title"))
+                        .or_else(|| text("text"))
+                        .or_else(|| text("description"))
+                        .unwrap_or_default();
+                    let description = text("description").filter(|d| d.trim() != label.trim());
+                    let recommended = o
+                        .get("recommended")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                        || label.contains("(Recommended)");
+                    AskOption {
+                        label,
+                        description,
+                        recommended,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Why this call must not reach the UI, in the words the model needs to fix
+/// it. `None` means the questionnaire is answerable as built.
+fn ask_rejection(questions: &[AskQuestion]) -> Option<String> {
+    if questions.is_empty() || questions.iter().any(|q| q.question.trim().is_empty()) {
+        return Some(
+            "ask_user rejected: 'question' is empty. Call it again with a non-empty question, \
+             e.g. {\"question\": \"Which web framework should I use?\", \"options\": \
+             [\"FastAPI\", \"Flask\"], \"multiple\": false, \"allow_free\": true} or with \
+             \"questions\": [{\"header\": \"Q1\", \"question\": \"...\", \"options\": [...] }]."
+                .to_string(),
+        );
+    }
+    let blank = questions
+        .iter()
+        .position(|q| !q.options.is_empty() && q.options.iter().any(|o| o.label.trim().is_empty()));
+    blank.map(|i| {
+        format!(
+            "ask_user rejected: question {} has an option with no text, which the user cannot \
+             read or pick. Send options as strings ([\"FastAPI\", \"Flask\"]) or as objects \
+             with a non-empty \"label\" ([{{\"label\": \"FastAPI\", \"description\": \"…\"}}]).",
+            i + 1
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -364,4 +370,56 @@ pub(crate) async fn run_tool_blocking(
     ctx.files_read = exec_ctx.files_read;
     ctx.read_windows = exec_ctx.read_windows;
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn question(options: serde_json::Value) -> AskQuestion {
+        AskQuestion {
+            header: String::new(),
+            question: "Which one?".into(),
+            options: parse_options(Some(&options)),
+            multiple: false,
+            allow_free: true,
+        }
+    }
+
+    #[test]
+    fn options_may_be_plain_strings() {
+        let opts = parse_options(Some(&json!(["FastAPI", "Flask"])));
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].label, "FastAPI");
+        assert_eq!(opts[1].label, "Flask");
+        assert!(opts.iter().all(|o| o.description.is_none()));
+        assert!(ask_rejection(&[question(json!(["a", "b"]))]).is_none());
+    }
+
+    #[test]
+    fn a_description_alone_can_carry_the_label() {
+        let opts = parse_options(Some(&json!([{"description": "just an explanation"}])));
+        assert_eq!(opts[0].label, "just an explanation");
+        assert!(opts[0].description.is_none(), "not repeated under itself");
+    }
+
+    #[test]
+    fn the_documented_shape_still_wins() {
+        let opts = parse_options(Some(&json!([
+            {"label": "FastAPI", "description": "typed, async", "recommended": true}
+        ])));
+        assert_eq!(opts[0].label, "FastAPI");
+        assert_eq!(opts[0].description.as_deref(), Some("typed, async"));
+        assert!(opts[0].recommended);
+    }
+
+    #[test]
+    fn an_option_with_no_text_refuses_the_call_instead_of_rendering_blank() {
+        let why = ask_rejection(&[question(json!(["", "  "]))]).expect("refused");
+        assert!(why.contains("question 1"), "{why}");
+        assert!(why.contains("no text"), "{why}");
+        // a free-text-only question is legitimate: it simply has no options
+        assert!(ask_rejection(&[question(json!([]))]).is_none());
+    }
 }

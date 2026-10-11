@@ -683,8 +683,8 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             if !single.is_empty() {
                 return single;
             }
-            // multi-question mode: compact one-line summary for the chat row
-            // and the history expansion (live asks use the inline segment)
+            // multi-question mode: compact one-line summary for the chat row,
+            // live and restored alike (the ask body is this row's expansion)
             let Some(qs) = args.get("questions").and_then(|v| v.as_array()) else {
                 return String::new();
             };
