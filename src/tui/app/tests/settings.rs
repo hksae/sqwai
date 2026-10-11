@@ -454,6 +454,26 @@ fn approval_option_index(app: &App, decision: ApprovalDecision) -> usize {
         .expect("approval option row must exist")
 }
 
+/// Red belongs to the refusal. The two granting rows are plain text — with all
+/// three painted pink, the safe action and the stopping action read as one
+/// kind of thing. The hint follows the shape every other menu uses.
+#[test]
+fn approval_paints_only_deny_in_red() {
+    use crate::tui::theme::Theme;
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    open_test_approval(&mut app);
+    let style = |d: ApprovalDecision| -> ratatui::style::Style {
+        app.menu_rows[approval_option_index(&app, d)].0.spans[0].style
+    };
+    assert_eq!(style(ApprovalDecision::RunOnce), Theme::base());
+    assert_eq!(style(ApprovalDecision::AlwaysSession), Theme::base());
+    assert_eq!(style(ApprovalDecision::Deny), Theme::err());
+    assert_eq!(
+        app.menu_footer_text.as_deref(),
+        Some("enter: confirm · esc: deny")
+    );
+}
+
 #[test]
 fn approval_opens_with_deny_preselected() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());

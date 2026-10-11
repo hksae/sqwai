@@ -3135,17 +3135,21 @@ impl App {
                 ));
                 // select-then-confirm: click/arrows/1-3 choose, Enter commits.
                 // Deny is preselected so a stray Enter refuses, not approves.
+                // The two granting options are plain text; red is the only
+                // colour in the card, and it sits on the refusal — a pink
+                // "run once" next to a pink "deny" made the safe row and the
+                // stopping row look like one kind of thing.
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled(
                         " 1: run once".to_string(),
-                        Theme::ACCENT_SOFT(),
+                        Theme::base(),
                     )]),
                     MenuAction::DecideApproval(ApprovalDecision::RunOnce),
                 ));
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled(
                         " 2: always allow this session".to_string(),
-                        Theme::ACCENT_SOFT(),
+                        Theme::base(),
                     )]),
                     MenuAction::DecideApproval(ApprovalDecision::AlwaysSession),
                 ));
@@ -3153,7 +3157,7 @@ impl App {
                     Line::from(vec![Span::styled(" 3: deny".to_string(), Theme::ERR())]),
                     MenuAction::DecideApproval(ApprovalDecision::Deny),
                 ));
-                self.menu_footer_text = Some("1/2/3: select · enter: confirm · esc: deny".into());
+                self.menu_footer_text = Some("enter: confirm · esc: deny".into());
             }
             Menu::EditProvider { .. }
             | Menu::EditModel { .. }
