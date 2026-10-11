@@ -245,7 +245,6 @@ impl App {
                                 {
                                     slot.push_str(&text_batch);
                                     self.touch_segment(seg);
-                                    self.follow = true;
                                 }
                             } else {
                                 self.paste_text(&text_batch);
@@ -507,13 +506,14 @@ impl App {
                             let Some(seg) = self.active_ask_seg() else {
                                 continue;
                             };
-                            let (q, multiple, n) = match self.segments.get(seg) {
+                            let (q, multiple, n, free) = match self.segments.get(seg) {
                                 Some(Segment::Tool { ask: Some(ask), .. }) => {
                                     let qq = ask.questions.get(ask.focus);
                                     (
                                         ask.focus,
                                         qq.is_some_and(|qq| qq.multiple),
                                         qq.map(|qq| qq.options.len()).unwrap_or(0),
+                                        qq.is_some_and(|qq| qq.allow_free),
                                     )
                                 }
                                 _ => continue,
@@ -524,6 +524,10 @@ impl App {
                                 } else {
                                     self.inline_ask_select(q, digit - 1);
                                 }
+                            } else if free && digit == n + 1 {
+                                // the row after the last option is the typed
+                                // answer: its digit opens the editor
+                                self.inline_ask_open_custom(q);
                             }
                         }
                         // plan/act is switched by the user only (design §5).
@@ -686,7 +690,6 @@ impl App {
                                     _ => {}
                                 }
                                 self.touch_segment(seg);
-                                self.follow = true;
                                 self.dirty = true;
                             }
                         }

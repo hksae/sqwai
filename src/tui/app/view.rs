@@ -1369,8 +1369,9 @@ impl App {
                 let c = ask.custom.get(q_idx).map(|s| s.as_str()).unwrap_or("");
                 let editing = live && self.ask_custom_focus == Some(q_idx);
                 let filled = !c.is_empty();
-                // a peer of the options: same marker column, and the marker is
-                // filled exactly when the free text is this question's answer
+                // a peer of the options: same marker column, the number after
+                // the last option so its digit opens it, and the marker filled
+                // exactly when the free text is this question's answer
                 let marker = if q.multiple {
                     if filled { "  [x] " } else { "  [ ] " }
                 } else if filled {
@@ -1379,9 +1380,13 @@ impl App {
                     "  ○ "
                 };
                 let text = if filled {
-                    format!("{c}{}", if editing { "▌" } else { "" })
+                    format!(
+                        "{}. {c}{}",
+                        q.options.len() + 1,
+                        if editing { "▌" } else { "" }
+                    )
                 } else {
-                    "your answer…".to_string()
+                    format!("{}. your answer…", q.options.len() + 1)
                 };
                 let text = truncate_display_width(&text, width.saturating_sub(marker.width()));
                 row(
@@ -1418,7 +1423,7 @@ impl App {
         }
         row(
             vec![Span::styled(
-                truncate_display_width("  confirm", width),
+                truncate_display_width("   enter to confirm", width),
                 Theme::dim(),
             )],
             live && self.ask_hover == Some(AskRow::Confirm),

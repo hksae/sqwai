@@ -1347,7 +1347,6 @@ impl App {
         }
         self.touch_segment(seg);
         self.ask_custom_focus = None;
-        self.follow = true;
         self.dirty = true;
     }
 
@@ -1365,7 +1364,6 @@ impl App {
         }
         self.touch_segment(seg);
         self.ask_custom_focus = None;
-        self.follow = true;
         self.dirty = true;
     }
 

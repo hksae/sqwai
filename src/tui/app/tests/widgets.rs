@@ -727,6 +727,43 @@ fn single_choice_free_text_and_options_are_one_radio() {
     assert_eq!(app.inline_ask_text(seg), "Q1: ffff | Q2: (no answer)");
 }
 
+/// The typed answer is the item after the last option: it carries that number,
+/// and the number opens the editor.
+#[test]
+fn the_free_answer_is_the_next_number() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    push_inline_ask(&mut app, ask_fixture()); // Q1 has two options + free text
+    let s = render_to_string(&mut app, 60, 30);
+    assert!(
+        s.contains("3. your answer"),
+        "numbered after the options:\n{s}"
+    );
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(Event::Key(KeyEvent::new(
+        KeyCode::Char('3'),
+        KeyModifiers::empty(),
+    )))
+    .unwrap();
+    app.poll_input(&rx).unwrap();
+    assert_eq!(app.ask_custom_focus, Some(0), "its digit opens the editor");
+}
+
+/// Choosing an option repaints one glyph in place — the block keeps its height
+/// — so the view must stay where the user left it. Forcing follow made a
+/// multi-question ask snap to its bottom on every click.
+#[test]
+fn picking_an_option_does_not_move_the_view() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    push_inline_ask(&mut app, ask_fixture());
+    app.follow = false;
+    app.inline_ask_select(0, 1);
+    assert!(!app.follow, "single pick keeps the viewport");
+    app.inline_ask_toggle(1, 0);
+    assert!(!app.follow, "multi pick keeps the viewport");
+}
+
 #[test]
 fn inline_ask_skip_blurs_custom_first_then_freezes() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
