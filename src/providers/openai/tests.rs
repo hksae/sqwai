@@ -1,0 +1,1032 @@
+use super::super::Message;
+use super::*;
+
+/// Serves one canned SSE body and closes. `id` is repeated on every chunk,
+/// the way Chat Completions actually streams.
+fn sse_server(body: String) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let h = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(&stream);
+        let mut line = String::new();
+        let mut len = 0usize;
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                break;
+            }
+            if let Some(v) = line
+                .to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .and_then(|s| s.trim().parse::<usize>().ok())
+            {
+                len = v;
+            }
+        }
+        // the request body must be drained or the client sees a reset
+        let mut buf = vec![0u8; len];
+        std::io::Read::read_exact(&mut reader, &mut buf).ok();
+        let mut out = stream;
+        write!(
+            out,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+        let _ = out.flush();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    });
+    (format!("http://{addr}/v1"), h)
+}
+
+/// Like [`sse_server`] but keeps the request bodies it received.
+fn capturing_sse_server() -> (
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    std::thread::JoinHandle<()>,
+) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen = bodies.clone();
+    let h = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        let mut len = 0usize;
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                break;
+            }
+            if let Some(v) = line
+                .to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .and_then(|s| s.trim().parse::<usize>().ok())
+            {
+                len = v;
+            }
+        }
+        let mut buf = vec![0u8; len];
+        reader.read_exact(&mut buf).ok();
+        seen.lock()
+            .unwrap()
+            .push(String::from_utf8_lossy(&buf).into_owned());
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
+        let mut out = stream;
+        write!(
+            out,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+        let _ = out.flush();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    });
+    (format!("http://{addr}/v1"), bodies, h)
+}
+
+fn plain_request() -> ChatRequest {
+    ChatRequest {
+        model_id: "m".into(),
+        system: vec![],
+        messages: vec![Message::new(Role::User, "hi")],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        tools: vec![],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    }
+}
+
+async fn collect(url: String) -> Vec<StreamEvent> {
+    use futures::StreamExt;
+    let p = OpenAiProvider::new(&crate::config::ResolvedProvider {
+        name: "p".into(),
+        format: crate::config::WireFormat::Openai,
+        base_url: url,
+        api_key: Some("k".into()),
+    })
+    .unwrap();
+    p.stream_chat(plain_request())
+        .filter_map(|e| async move { e.ok() })
+        .collect()
+        .await
+}
+
+/// The id identifies the response, not the chunk. Emitting it per chunk
+/// makes every consumer of `ResponseId` see a fresh response each time.
+#[tokio::test]
+async fn response_id_is_emitted_once_per_response() {
+    let body = "data: {\"id\":\"resp_1\",\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n\
+                data: {\"id\":\"resp_1\",\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n\
+                data: {\"id\":\"resp_1\",\"choices\":[{\"delta\":{\"content\":\"c\"}}]}\n\n\
+                data: [DONE]\n\n"
+        .to_string();
+    let (url, h) = sse_server(body);
+    let events = collect(url).await;
+    h.join().unwrap();
+    let ids: Vec<&String> = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::ResponseId(id) => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids, vec!["resp_1"], "one response, one id: {events:?}");
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::Text(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "abc", "text must still stream in full");
+}
+
+/// The Gemini preset speaks this wire format, so this is the body its
+/// requests actually carry. Asserted here rather than only in
+/// `providers::effort`, because the mapping being right and the body being
+/// right are two different claims.
+#[tokio::test]
+async fn the_body_carries_the_declared_level() {
+    use crate::config::{EffortControl, EffortLevel, EffortSupport};
+    for (level, control, expected) in [
+        (EffortLevel::Max, EffortControl::Named, Some("max")),
+        (EffortLevel::Xhigh, EffortControl::Named, Some("xhigh")),
+        (EffortLevel::High, EffortControl::Named, Some("high")),
+        (EffortLevel::Low, EffortControl::Named, Some("low")),
+        (EffortLevel::High, EffortControl::None, None),
+        (EffortLevel::Off, EffortControl::Named, None),
+    ] {
+        let (url, bodies, h) = capturing_sse_server();
+        let mut req = plain_request();
+        req.effort = Some(level);
+        req.effort_support = EffortSupport {
+            control,
+            always_on: false,
+        };
+        let p = OpenAiProvider::new(&crate::config::ResolvedProvider {
+            name: "p".into(),
+            format: crate::config::WireFormat::Openai,
+            base_url: url,
+            api_key: Some("k".into()),
+        })
+        .unwrap();
+        let _: Vec<_> = {
+            use futures::StreamExt;
+            p.stream_chat(req).collect().await
+        };
+        h.join().unwrap();
+        let body = bodies.lock().unwrap().first().cloned().unwrap_or_default();
+        let sent: Option<String> = serde_json::from_str::<Value>(&body).ok().and_then(|v| {
+            v.get("reasoning_effort")
+                .and_then(|e| e.as_str().map(String::from))
+        });
+        assert_eq!(
+            sent.as_deref(),
+            expected,
+            "{level:?} under {control:?} produced: {body}"
+        );
+    }
+}
+
+/// Gemini's OpenAI-compat layer thinks silently unless asked for thought
+/// summaries. Only gemini ids on this wire get the flag, and only when
+/// reasoning was actually requested — effort off stays off.
+#[test]
+fn gemini_models_ask_for_thought_summaries_when_reasoning() {
+    use crate::config::{EffortControl, EffortLevel, EffortSupport};
+    let req_with = |model: &str, effort: Option<EffortLevel>| ChatRequest {
+        model_id: model.into(),
+        system: vec![],
+        messages: vec![Message::new(Role::User, "hi")],
+        effort,
+        effort_support: EffortSupport {
+            control: EffortControl::Named,
+            always_on: false,
+        },
+        max_tokens: None,
+        tools: vec![],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    };
+    let thinking = |body: &Value| {
+        body.pointer("/extra_body/google/thinking_config/include_thoughts")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    };
+    let level = |body: &Value| {
+        body.pointer("/extra_body/google/thinking_config/thinking_level")
+            .and_then(|v| v.as_str().map(str::to_string))
+    };
+    let body = OpenAiProvider::build_body(&req_with("gemini-3.8-flash", Some(EffortLevel::High)));
+    // the endpoint rejects a body carrying both controls ("Expected one
+    // of either `reasoning_effort` or custom `thinking_config`; found
+    // both"), so gemini ids get the level in thinking_config alone
+    assert_eq!(level(&body), Some("high".to_string()), "{body}");
+    assert!(thinking(&body), "gemini + effort asks for thoughts: {body}");
+    assert!(
+        body.get("reasoning_effort").is_none(),
+        "gemini must not carry reasoning_effort next to thinking_config: {body}"
+    );
+    // a top-level `google` key is rejected by the endpoint outright
+    // ("Unknown name \"google\""): the config rides inside extra_body
+    assert!(
+        body.get("google").is_none(),
+        "thinking config must ride inside extra_body: {body}"
+    );
+    let body = OpenAiProvider::build_body(&req_with("gpt-5", Some(EffortLevel::High)));
+    assert_eq!(body["reasoning_effort"], "high");
+    assert!(!thinking(&body), "other models untouched: {body}");
+    let body = OpenAiProvider::build_body(&req_with("gemini-3.8-flash", Some(EffortLevel::Off)));
+    assert!(!thinking(&body), "effort off stays off: {body}");
+    let body = OpenAiProvider::build_body(&req_with("gemini-3.8-flash", None));
+    assert!(!thinking(&body), "no effort stays silent: {body}");
+}
+
+/// Thought summaries arrive in the same content field as the answer,
+/// flagged by extra_content.google.thought. Routing them as answer text
+/// would leak the model's private reasoning into the reply.
+#[tokio::test]
+async fn a_thought_flagged_delta_is_reasoning_not_text() {
+    let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<thought>weighing options</thought>\",\"extra_content\":{\"google\":{\"thought\":true}},\"role\":\"assistant\"}}]}\n\n\
+                data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"the answer\",\"role\":\"assistant\"},\"finish_reason\":\"stop\"}]}\n\n\
+                data: [DONE]\n\n"
+        .to_string();
+    let (url, h) = sse_server(body);
+    let events = collect(url).await;
+    h.join().unwrap();
+    let kinds: Vec<(&str, &str)> = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::Reasoning(s) => Some(("reasoning", s.as_str())),
+            StreamEvent::Text(s) => Some(("text", s.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![("reasoning", "weighing options"), ("text", "the answer")],
+        "{events:?}"
+    );
+}
+
+/// The closing tag arrives on the delta that opens the answer, unflagged.
+/// Stripping it there is the whole difference between a clean reply and
+/// one that starts with `</thought>`.
+#[tokio::test]
+async fn the_thought_close_tag_on_the_first_answer_delta_is_stripped() {
+    let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<thought>hmm</thought>\",\"extra_content\":{\"google\":{\"thought\":true}},\"role\":\"assistant\"}}]}\n\n\
+                data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"</thought>42\",\"role\":\"assistant\"},\"finish_reason\":\"stop\"}]}\n\n\
+                data: [DONE]\n\n"
+        .to_string();
+    let (url, h) = sse_server(body);
+    let events = collect(url).await;
+    h.join().unwrap();
+    let kinds: Vec<(&str, &str)> = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::Reasoning(s) => Some(("reasoning", s.as_str())),
+            StreamEvent::Text(s) => Some(("text", s.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![("reasoning", "hmm"), ("text", "42")],
+        "{events:?}"
+    );
+}
+/// Gemini 3 attaches a `thought_signature` to the first function call of a
+/// turn and rejects the next request of that same turn with a 400 when it
+/// is missing. The host cannot regenerate it, so the only correct
+/// behaviour is to carry it through untouched.
+#[tokio::test]
+async fn a_tool_call_keeps_the_provider_state_attached_to_it() {
+    let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"fc_1\",\"type\":\"function\",\"extra_content\":{\"google\":{\"thought_signature\":\"SIG_A\"}},\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n\
+                data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\\\"a.rs\\\"}\"}}]}}]}\n\n\
+                data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
+                data: [DONE]\n\n"
+        .to_string();
+    let (url, h) = sse_server(body);
+    let events = collect(url).await;
+    h.join().unwrap();
+    let call = events
+        .iter()
+        .find_map(|e| match e {
+            StreamEvent::ToolCall(c) => Some(c.clone()),
+            _ => None,
+        })
+        .expect("a tool call was streamed");
+    assert_eq!(call.args["path"], "a.rs", "arguments still accumulate");
+    assert_eq!(
+        call.extra_content
+            .as_ref()
+            .and_then(|e| e.pointer("/google/thought_signature"))
+            .and_then(|s| s.as_str()),
+        Some("SIG_A"),
+        "the signature must survive the stream: {:?}",
+        call.extra_content
+    );
+
+    // and it must go back out on the wire, verbatim, in the assistant turn
+    let replayed = OpenAiProvider::message_json(
+        &Message::new(Role::Assistant, "").with_tool_calls(vec![call]),
+    );
+    assert_eq!(
+        replayed["tool_calls"][0]["extra_content"]["google"]["thought_signature"],
+        "SIG_A"
+    );
+}
+
+/// The counter the observed-ignored check reads. `0` is a claim the
+/// provider made; a missing field must stay `None` rather than become 0,
+/// or every non-reasoning gateway would look like it ignored the request.
+#[test]
+fn reasoning_tokens_are_read_when_the_provider_reports_them() {
+    let with = json!({"usage": {"prompt_tokens": 10, "completion_tokens": 5,
+        "completion_tokens_details": {"reasoning_tokens": 0}}});
+    assert_eq!(
+        OpenAiProvider::map_usage(&with).unwrap().reasoning_tokens,
+        Some(0)
+    );
+    let without = json!({"usage": {"prompt_tokens": 10, "completion_tokens": 5}});
+    assert_eq!(
+        OpenAiProvider::map_usage(&without)
+            .unwrap()
+            .reasoning_tokens,
+        None,
+        "no counter is not the same as a zero counter"
+    );
+}
+
+/// A provider that never sent state must not grow an empty field: Gemini is
+/// the only one that validates it, and other gateways reject unknown keys.
+#[test]
+fn a_call_without_provider_state_carries_no_extra_content() {
+    let m = Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+        "c1",
+        "ls",
+        json!({}),
+    )]);
+    let v = OpenAiProvider::message_json(&m);
+    assert!(
+        v["tool_calls"][0].get("extra_content").is_none(),
+        "unexpected extra_content: {v}"
+    );
+}
+
+/// An invalid payload is dropped (there is nothing else to do with it), but
+/// it must not end the stream: the deltas after it still arrive.
+#[tokio::test]
+async fn an_unparsable_payload_does_not_end_the_stream() {
+    let body = "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n\
+                data: {not json at all\n\n\
+                data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n\
+                data: [DONE]\n\n"
+        .to_string();
+    let (url, h) = sse_server(body);
+    let events = collect(url).await;
+    h.join().unwrap();
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::Text(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "ab");
+}
+
+#[test]
+fn request_body_includes_tools_and_tool_messages() {
+    let req = ChatRequest {
+        model_id: "m".into(),
+        system: vec![],
+        messages: vec![
+            Message::new(Role::User, "list files"),
+            Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+                "call_1",
+                "ls",
+                json!({"path": "."}),
+            )]),
+            Message::tool_result("call_1", "a.txt\nb.txt", false),
+        ],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        tools: vec![super::super::ToolSpec {
+            name: "ls".into(),
+            description: "list directory".into(),
+            parameters: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+        }],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    };
+    let msgs: Vec<Value> = req
+        .messages
+        .iter()
+        .map(OpenAiProvider::message_json)
+        .collect();
+    assert_eq!(msgs[1]["tool_calls"][0]["function"]["name"], "ls");
+    assert_eq!(
+        msgs[1]["tool_calls"][0]["function"]["arguments"],
+        r#"{"path":"."}"#
+    );
+    assert_eq!(msgs[2]["role"], "tool");
+    assert_eq!(msgs[2]["tool_call_id"], "call_1");
+
+    let body_tools = json!(req.tools.iter().map(|t| json!({
+        "type": "function",
+        "function": {"name": t.name, "description": t.description, "parameters": t.parameters},
+    })).collect::<Vec<_>>());
+    assert_eq!(body_tools[0]["function"]["name"], "ls");
+}
+
+#[test]
+fn sanitize_drops_fields_a_gateway_does_not_support() {
+    let p = OpenAiProvider::new(&crate::config::ResolvedProvider {
+        name: "local".into(),
+        format: crate::config::WireFormat::Openai,
+        base_url: "http://localhost:11434/v1".into(),
+        api_key: None,
+    })
+    .unwrap();
+    let mut req = ChatRequest {
+        model_id: "m".into(),
+        system: vec![crate::providers::SystemPart::cached("sys")],
+        messages: vec![Message::new(Role::User, "hi")],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        tools: vec![],
+        previous_response_id: Some("resp_1".into()),
+        context_transport: crate::providers::ContextTransport::Stateless,
+    };
+    p.sanitize(&mut req);
+    assert!(
+        req.previous_response_id.is_none(),
+        "Chat Completions has no continuation field — it must never reach the wire"
+    );
+}
+
+#[test]
+fn system_block_precedes_history_and_host_state_is_not_a_user_turn() {
+    let req = ChatRequest {
+        model_id: "m".into(),
+        system: vec![
+            crate::providers::SystemPart::cached("A"),
+            crate::providers::SystemPart::volatile("B"),
+        ],
+        messages: vec![Message::new(Role::User, "hi")],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        tools: vec![],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    };
+    let system = crate::providers::stable_system_text(&req.system);
+    assert_eq!(system, "A");
+    let tail = crate::providers::volatile_system_text(&req.system);
+    assert_eq!(tail, "B");
+    let body = OpenAiProvider::build_body(&req);
+    let msgs = body["messages"].as_array().unwrap();
+    // stable system first, then the host block, then the human's turn last:
+    // the model answers the person, never the state block (§18.1.1)
+    assert_eq!(msgs[0]["role"], "system");
+    assert_eq!(msgs[0]["content"], "A");
+    assert_eq!(msgs[1]["role"], "system");
+    let host = msgs[1]["content"].as_str().unwrap();
+    assert!(host.contains('B'), "host block carries B: {host}");
+    assert!(
+        host.contains("Host state for this request"),
+        "the block names itself: {host}"
+    );
+    assert_eq!(
+        msgs.last().unwrap()["role"],
+        "user",
+        "the request must end on the human turn"
+    );
+    assert_eq!(msgs.last().unwrap()["content"], "hi");
+}
+
+/// Inside a tool loop the request ends on a tool result, and nothing may be
+/// wedged between a call and the output that answers it: there the host
+/// block stays last, and what defuses it is its role, not its position.
+#[test]
+fn host_block_follows_tool_results_but_never_wears_user() {
+    let body = OpenAiProvider::build_body(&ChatRequest {
+        model_id: "m".into(),
+        system: vec![
+            crate::providers::SystemPart::cached("A"),
+            crate::providers::SystemPart::volatile("B"),
+        ],
+        messages: vec![
+            Message::new(Role::User, "hi"),
+            Message::new(Role::Assistant, "").with_tool_calls(vec![
+                crate::providers::ToolCallReq::new("c1", "git_diff", serde_json::json!({})),
+            ]),
+            Message::tool_result("c1", "diff --git a/x", false),
+        ],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        tools: vec![],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    });
+    let msgs = body["messages"].as_array().unwrap();
+    // The block trails the tool result: nothing may be wedged between a call
+    // and the output that answers it, so position is not the lever here —
+    // the `system` role is.
+    assert_eq!(msgs.last().unwrap()["role"], "system");
+    assert!(
+        msgs.last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains('B')
+    );
+    assert_eq!(
+        msgs[msgs.len() - 2]["role"],
+        "tool",
+        "the tool result stays directly above the block: {}",
+        msgs[msgs.len() - 2]
+    );
+    assert_eq!(msgs[msgs.len() - 3]["role"], "assistant");
+    assert!(
+        !msgs.iter().any(|m| m["role"] == "user"
+            && m["content"]
+                .to_string()
+                .contains("Host state for this request")),
+        "no host block may wear the user role: {}",
+        body
+    );
+}
+
+#[test]
+fn volatile_change_keeps_the_prefix_bytes() {
+    // the cache bug: gluing volatile parts into the first message meant
+    // every volatile change re-keyed the whole history behind it.
+    let body_for = |volatile: &str| {
+        OpenAiProvider::build_body(&ChatRequest {
+            model_id: "m".into(),
+            system: vec![
+                crate::providers::SystemPart::cached("A"),
+                crate::providers::SystemPart::volatile(volatile),
+            ],
+            messages: vec![Message::new(Role::User, "hi")],
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        })
+    };
+    let before = body_for("date: monday");
+    let after = body_for("date: tuesday");
+    // Everything up to the host block is the cached prefix: the stable
+    // system message, then the older history. The block itself and the
+    // newest turn after it are new bytes either way, so a volatile change
+    // re-reads only from the block onward (§18.1.1).
+    let prefix = |body: &Value| {
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .take(1)
+            .map(|m| m.to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(prefix(&before), prefix(&after));
+    // and the human's turn is still the last thing in the request
+    for body in [&before, &after] {
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.last().unwrap()["role"], "user");
+        assert_eq!(msgs.last().unwrap()["content"], "hi");
+    }
+}
+
+#[test]
+fn stream_parses_tool_call_deltas() {
+    // simulate two argument deltas + finish_reason
+    let chunks = [
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_9","type":"function","function":{"name":"read","arguments":""}}]}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"src/main.rs\"}"}}]}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+    ];
+    let mut buf = String::new();
+    let mut partials: BTreeMap<i64, PartialCall> = BTreeMap::new();
+    for c in chunks {
+        let v: Value = serde_json::from_str(c).unwrap();
+        if let Some(calls) = v["choices"][0]["delta"]
+            .get("tool_calls")
+            .and_then(|x| x.as_array())
+        {
+            for tc in calls {
+                let idx = tc.get("index").and_then(|i| i.as_i64()).unwrap_or(0);
+                let slot = partials.entry(idx).or_default();
+                if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
+                    slot.id.push_str(id);
+                }
+                if let Some(f) = tc.get("function") {
+                    if let Some(n) = f.get("name").and_then(|n| n.as_str()) {
+                        slot.name.push_str(n);
+                    }
+                    if let Some(a) = f.get("arguments").and_then(|a| a.as_str()) {
+                        slot.args.push_str(a);
+                    }
+                }
+            }
+        }
+        if v["choices"][0]["finish_reason"] == "tool_calls" {
+            for (_, p) in std::mem::take(&mut partials) {
+                if let Some(r) = p.finish() {
+                    use std::fmt::Write;
+                    let _ = write!(buf, "{} {:?}", r.name, r.args);
+                }
+            }
+        }
+    }
+    assert!(buf.contains("read"), "{buf}");
+    assert!(buf.contains("src/main.rs"), "{buf}");
+}
+
+#[test]
+fn truncate_respects_char_boundaries() {
+    let s = "héllò wörld";
+    let t = truncate(s, 8);
+    assert!(t.ends_with('…'));
+    // no partial multibyte sequence: must round-trip as valid UTF-8
+    assert!(std::str::from_utf8(t.as_bytes()).is_ok());
+    assert!(s.starts_with(t.trim_end_matches('…')));
+}
+
+#[test]
+fn requested_max_tokens_uses_completion_tokens_for_o_series_or_reasoning() {
+    let mut req = ChatRequest {
+        model_id: "gpt-4o".into(),
+        system: vec![],
+        messages: vec![Message::new(Role::User, "hi")],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: Some(1024),
+        tools: vec![],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    };
+    let body = OpenAiProvider::build_body(&req);
+    assert_eq!(body["max_tokens"], 1024);
+    assert!(body.get("max_completion_tokens").is_none());
+
+    req.model_id = "o3-mini".into();
+    let body = OpenAiProvider::build_body(&req);
+    assert_eq!(body["max_completion_tokens"], 1024);
+    assert!(body.get("max_tokens").is_none());
+
+    req.model_id = "gpt-5-turbo".into();
+    let body = OpenAiProvider::build_body(&req);
+    assert_eq!(body["max_completion_tokens"], 1024);
+    assert!(body.get("max_tokens").is_none());
+
+    req.model_id = "custom-reasoning-model".into();
+    req.effort = Some(crate::providers::EffortLevel::Medium);
+    req.effort_support = crate::config::EffortSupport {
+        control: crate::config::EffortControl::Named,
+        always_on: false,
+    };
+    let body = OpenAiProvider::build_body(&req);
+    assert_eq!(body["max_completion_tokens"], 1024);
+    assert!(body.get("max_tokens").is_none());
+}
+
+/// Live cache probes against the real wire. Measurements, not behavior
+/// assertions: they print per-turn usage so prefix stability can be read
+/// off. The provider comes from the user config (same path as the bench),
+/// never env. Run with:
+/// `cargo test --bin sqwai live_ -- --ignored --nocapture`
+mod live_cache {
+    use super::*;
+    use futures::StreamExt;
+
+    struct Live {
+        provider: crate::providers::SharedProvider,
+        model_id: String,
+    }
+
+    /// Same credential path as the G0 bench: the provider comes from the
+    /// user's config file (`last_model`, or `SQWAI_BENCH_MODEL`), never
+    /// from env. The env key has no Go rights, which is why a hardcoded
+    /// probe 402/403s while the TUI and the bench work.
+    fn live_provider() -> Live {
+        // the Go gateway routes on x-opencode-session; without it every
+        // request 400s with MissingSessionID
+        crate::providers::set_conversation_id("cache-probe");
+        let bench = crate::agent::bench_harness::bench_model()
+            .expect("bench_model must resolve: check config + SQWAI_BENCH_MODEL");
+        Live {
+            provider: bench.provider,
+            model_id: bench.model_id,
+        }
+    }
+
+    /// Stable prefix big enough to clear the ~1024-token cache floor.
+    fn stable_prefix() -> Vec<crate::providers::SystemPart> {
+        let rules = format!(
+            "You are a coding agent. Rules of engagement:\n{}\n",
+            "Obey the project instructions. Confirm before mutating. ".repeat(120)
+        );
+        let project = format!(
+            "AGENTS.md (project instructions):\n{}\n",
+            "Use rustfmt. No unwrap in production paths. ".repeat(120)
+        );
+        vec![
+            crate::providers::SystemPart::cached(rules),
+            crate::providers::SystemPart::cached(project),
+        ]
+    }
+
+    fn probe_tools() -> Vec<crate::providers::ToolSpec> {
+        vec![
+            crate::providers::ToolSpec {
+                name: "read".into(),
+                description: "read a file".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            crate::providers::ToolSpec {
+                name: "bash".into(),
+                description: "run a shell command".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        ]
+    }
+
+    fn base_request(live: &Live) -> ChatRequest {
+        ChatRequest {
+            model_id: live.model_id.clone(),
+            system: vec![],
+            messages: vec![],
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: Some(64),
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        }
+    }
+
+    async fn run(live: &Live, req: ChatRequest) -> crate::providers::Usage {
+        // live gateway rate-limits: back off and retry, otherwise one
+        // 429 kills a four-request A/B halfway through
+        let mut wait_secs = 5u64;
+        for _ in 0..6 {
+            let mut usage = crate::providers::Usage::default();
+            let mut text = String::new();
+            let mut rate_limited = false;
+            let mut stream = live.provider.stream_chat(req.clone());
+            while let Some(ev) = stream.next().await {
+                match ev {
+                    Ok(crate::providers::StreamEvent::Text(t)) => text.push_str(&t),
+                    Ok(crate::providers::StreamEvent::Usage(u)) => {
+                        if u.prompt_tokens > 0 {
+                            usage = u;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        let msg = format!("{e:#}");
+                        if msg.contains("429") || msg.contains("rate_limit") {
+                            rate_limited = true;
+                            break;
+                        }
+                        panic!("stream failed: {msg}");
+                    }
+                }
+            }
+            if !rate_limited {
+                eprintln!("  answer: {}", text.chars().take(80).collect::<String>());
+                // gentle pacing: the gateway 429s back-to-back probes
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                return usage;
+            }
+            eprintln!("  429: waiting {wait_secs}s");
+            tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+            wait_secs = (wait_secs * 2).min(60);
+        }
+        panic!("still rate-limited after retries");
+    }
+
+    fn report(turn: &str, u: &crate::providers::Usage) {
+        let cached = u.cached_tokens.unwrap_or(0);
+        let frac = if u.prompt_tokens > 0 {
+            cached as f64 / u.prompt_tokens as f64
+        } else {
+            0.0
+        };
+        println!(
+            "{turn}: prompt={} cached={} completion={} cached_frac={:.2}",
+            u.prompt_tokens, cached, u.completion_tokens, frac
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "live wire; requires configured provider"]
+    async fn live_key_answers() {
+        let live = live_provider();
+        let mut req = base_request(&live);
+        req.messages = vec![Message::new(Role::User, "say hi in 3 words")];
+        let u = run(&live, req).await;
+        report("alive", &u);
+        assert!(u.prompt_tokens > 0);
+    }
+
+    /// The layout change in one live question (§18.1.1): does this gateway
+    /// accept a `system` item that is not first — before the newest user
+    /// turn on a fresh request, and trailing a tool result inside a loop?
+    /// A relay that only reads `system` at index 0 would 400 or silently
+    /// drop the host block, and that is a provider problem the layout has
+    /// to know about, not one a unit test can see.
+    #[tokio::test]
+    #[ignore = "live wire; requires configured provider"]
+    async fn live_host_block_positions_are_accepted() {
+        let live = live_provider();
+        let mut system = stable_prefix();
+        system.push(crate::providers::SystemPart::volatile(
+            "Mode: act\n<plan_status>status: active, steps: 1 done</plan_status>",
+        ));
+
+        // fresh turn: [system][host block][user]
+        let mut req = base_request(&live);
+        req.system = system.clone();
+        req.tools = probe_tools();
+        req.messages = vec![Message::new(Role::User, "reply with the word ok")];
+        let u = run(&live, req).await;
+        report("host block before the user turn", &u);
+        assert!(u.prompt_tokens > 0);
+
+        // inside a tool loop: [system][user][assistant call][tool][host block]
+        let mut req = base_request(&live);
+        req.system = system;
+        req.tools = probe_tools();
+        req.messages = vec![
+            Message::new(Role::User, "read src/main.rs"),
+            {
+                let mut m = Message::new(Role::Assistant, "");
+                m.tool_calls = vec![crate::providers::ToolCallReq::new(
+                    "call_1",
+                    "read",
+                    serde_json::json!({"path": "src/main.rs"}),
+                )];
+                m
+            },
+            Message::tool_result("call_1", "fn main() {}", false),
+        ];
+        let u = run(&live, req).await;
+        report("host block after a tool result", &u);
+        assert!(u.prompt_tokens > 0);
+    }
+
+    /// A/B the plan split: full render cached (old) vs goal cached +
+    /// status volatile (new), with a step finishing between turns.
+    /// Old should re-key the prefix on turn 2; new should stay ~1.0.
+    #[tokio::test]
+    #[ignore = "live wire; requires configured provider"]
+    async fn live_plan_split() {
+        use crate::plan::{self, NewStep, StepStatus};
+        let live = live_provider();
+        let tool_specs = probe_tools();
+        let mut plan = plan::create(
+            "ship the widget".into(),
+            vec!["keep API stable".into()],
+            vec!["manual: eyeball it".into()],
+            vec![
+                NewStep {
+                    title: "write it".into(),
+                },
+                NewStep {
+                    title: "test it".into(),
+                },
+            ],
+            20_000,
+            &plan::Limits::default(),
+        )
+        .unwrap();
+
+        // OLD: whole render in the cached prefix
+        let mut history: Vec<Message> = vec![];
+        for turn in 1..=2 {
+            if turn == 2 {
+                plan.steps[0].status = StepStatus::Done;
+            }
+            history.push(Message::new(
+                Role::User,
+                format!("old-layout turn {turn}: reply with the word ok"),
+            ));
+            let mut req = base_request(&live);
+            let mut system = stable_prefix();
+            system.push(crate::providers::SystemPart::cached(plan::render(&plan)));
+            req.system = system;
+            req.tools = tool_specs.clone();
+            req.messages = history.clone();
+            let u = run(&live, req).await;
+            report(&format!("old{turn}"), &u);
+            history.push(Message::new(Role::Assistant, "ok"));
+        }
+
+        // NEW: goal cached, status volatile
+        plan.steps[0].status = crate::plan::StepStatus::Pending;
+        let mut history: Vec<Message> = vec![];
+        for turn in 1..=2 {
+            if turn == 2 {
+                plan.steps[0].status = StepStatus::Done;
+            }
+            history.push(Message::new(
+                Role::User,
+                format!("new-layout turn {turn}: reply with the word ok"),
+            ));
+            let mut req = base_request(&live);
+            let mut system = stable_prefix();
+            system.push(crate::providers::SystemPart::cached(plan::render_goal(
+                &plan,
+            )));
+            system.push(crate::providers::SystemPart::volatile(plan::render_status(
+                &plan,
+            )));
+            req.system = system;
+            req.tools = tool_specs.clone();
+            req.messages = history.clone();
+            let u = run(&live, req).await;
+            report(&format!("new{turn}"), &u);
+            history.push(Message::new(Role::Assistant, "ok"));
+        }
+    }
+
+    /// Sharp divergence: completely different system block mid-history.
+    /// Strict-prefix caching collapses cached to ~0; block/global
+    /// caching keeps serving the unchanged blocks.
+    #[tokio::test]
+    #[ignore = "live wire; requires configured provider"]
+    async fn live_system_divergence() {
+        let live = live_provider();
+        let tool_specs = probe_tools();
+        let history = vec![
+            Message::new(Role::User, "remember the word sparrow"),
+            Message::new(Role::Assistant, "ok"),
+            Message::new(Role::User, "reply with the word ok"),
+        ];
+        for (label, system) in [
+            ("same1", stable_prefix()),
+            ("same2", stable_prefix()),
+            (
+                "diverged",
+                vec![crate::providers::SystemPart::cached(
+                    "Completely different instructions. ".repeat(300),
+                )],
+            ),
+            ("same3", stable_prefix()),
+        ] {
+            let mut req = base_request(&live);
+            req.system = system;
+            req.tools = tool_specs.clone();
+            req.messages = history.clone();
+            let u = run(&live, req).await;
+            report(label, &u);
+        }
+    }
+
+    /// Same prefix three turns in a row: turn 1 pays full price, turns
+    /// 2-3 should read mostly from cache.
+    #[tokio::test]
+    #[ignore = "live wire; requires configured provider"]
+    async fn live_prefix_stability() {
+        let live = live_provider();
+        let system = stable_prefix();
+        let tool_specs = probe_tools();
+        let mut history: Vec<Message> = vec![];
+        for turn in 1..=3 {
+            history.push(Message::new(
+                Role::User,
+                format!("turn {turn}: reply with the word ok"),
+            ));
+            let mut req = base_request(&live);
+            req.system = system.clone();
+            req.tools = tool_specs.clone();
+            req.messages = history.clone();
+            let u = run(&live, req).await;
+            report(&format!("turn{turn}"), &u);
+            history.push(Message::new(Role::Assistant, "ok"));
+        }
+    }
+}
