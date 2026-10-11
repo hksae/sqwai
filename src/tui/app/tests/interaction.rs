@@ -162,6 +162,7 @@ fn status_bar_ignores_subagents_and_abort_cancels_running_children() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     app.clear_subagent_ui_on_stop();
     assert!(app.subagents.is_empty());
@@ -524,6 +525,7 @@ fn open_sub_chat(app: &mut App, id: u64, status: &str) {
                 preview_total: 1,
                 expanded: false,
                 flash: None,
+                ask: None,
             },
             Segment::Assistant {
                 text: "found it".into(),
@@ -664,6 +666,7 @@ fn subagent_chat_click_expands_its_tool_without_switching_chat() {
             preview_total: 0,
             expanded: false,
             flash: None,
+            ask: None,
         }],
     );
     app.subagent_meta
@@ -770,6 +773,7 @@ fn expanding_a_tool_in_subagent_view_keeps_the_viewport() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     };
     app.subagent_chats.insert(
         7,

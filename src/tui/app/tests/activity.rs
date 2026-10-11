@@ -120,6 +120,7 @@ fn tool_row_name_is_quiet_gray_and_call_caps_at_half_width() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     let rows = app.render_segment(&app.segments, 0, 80, true);
     assert_eq!(rows.len(), 1, "one head row: {rows:?}");
@@ -303,6 +304,7 @@ fn finished_turn(app: &mut App, ok: bool) {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     app.push_segment(Segment::Assistant {
         text: "done".into(),
@@ -386,6 +388,7 @@ fn abort_remaps_activity_group_ranges_past_dropped_rows() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     app.push_segment(Segment::Thinking {
         text: "hmm".into(),
@@ -405,6 +408,7 @@ fn abort_remaps_activity_group_ranges_past_dropped_rows() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     app.push_segment(Segment::Assistant {
         text: "done".into(),
@@ -450,6 +454,7 @@ fn subagent_row_joins_the_turn_activity_group() {
             preview_total: 0,
             expanded: false,
             flash: None,
+            ask: None,
         });
     }
     app.push_segment(Segment::Subagent {
@@ -551,6 +556,7 @@ fn abort_drops_subagent_rows_inside_a_group() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     app.push_segment(Segment::Subagent {
         id: 1,
@@ -670,6 +676,7 @@ fn failed_turn_without_an_answer_still_groups_its_tools() {
             preview_total: 0,
             expanded: false,
             flash: None,
+            ask: None,
         });
     }
     app.finalize_activity_group();
@@ -706,6 +713,7 @@ fn activity_groups_never_overlap_previous_ranges() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     app.finalize_activity_group();
 
@@ -807,6 +815,7 @@ fn finish_retires_unfinished_tool_and_subagent_rows() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     app.push_segment(Segment::Subagent {
         id: 1,

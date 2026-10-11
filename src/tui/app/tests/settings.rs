@@ -36,24 +36,30 @@ fn ask_user_seg_key_changes_with_picked_options() {
         multiple: false,
         allow_free: false,
     }];
-    let seg1 = Segment::AskUser {
-        id: 1,
-        questions: q.clone(),
-        picked: vec![vec![true, false, false]],
-        custom: vec![String::new()],
-        focus: 0,
-        answered: None,
-        expanded: true,
+    let ask = |picked: Vec<Vec<bool>>| {
+        Box::new(crate::tui::app::view::AskState {
+            id: 1,
+            questions: q.clone(),
+            picked,
+            custom: vec![String::new()],
+            focus: 0,
+        })
     };
-    let seg2 = Segment::AskUser {
-        id: 1,
-        questions: q,
-        picked: vec![vec![false, true, false]],
-        custom: vec![String::new()],
-        focus: 0,
-        answered: None,
+    let tool = |ask| Segment::Tool {
+        name: "ask_user".into(),
+        args: String::new(),
+        call_id: None,
+        ok: None,
+        output: String::new(),
+        diff: None,
+        preview: Vec::new(),
+        preview_total: 0,
         expanded: true,
+        flash: None,
+        ask,
     };
+    let seg1 = tool(Some(ask(vec![vec![true, false, false]])));
+    let seg2 = tool(Some(ask(vec![vec![false, true, false]])));
     assert_ne!(app.seg_key(&seg1), app.seg_key(&seg2));
 }
 
@@ -600,6 +606,7 @@ fn snap_chat_three_tool_calls_one_failed() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     app.push_segment(Segment::Tool {
         call_id: None,
@@ -612,6 +619,7 @@ fn snap_chat_three_tool_calls_one_failed() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     app.push_segment(Segment::Tool {
         call_id: None,
@@ -624,6 +632,7 @@ fn snap_chat_three_tool_calls_one_failed() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     app.push_segment(Segment::Assistant {
         text: "Done, though one step failed.".into(),
@@ -655,6 +664,7 @@ fn snap_chat_twelve_successful_tool_calls() {
             preview_total: 0,
             expanded: false,
             flash: None,
+            ask: None,
         });
     }
     app.push_segment(Segment::Assistant {
@@ -683,6 +693,7 @@ fn snap_chat_bash_tool_still_running() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     // production always holds the live answer slot while streaming; the
     // group logic keys off the work rows, not the slot, but the frame
@@ -732,6 +743,7 @@ fn snap_chat_many_tools_flat() {
             preview_total: 0,
             expanded: false,
             flash: None,
+            ask: None,
         });
     }
     app.push_segment(Segment::Tool {
@@ -745,6 +757,7 @@ fn snap_chat_many_tools_flat() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     app.push_segment(Segment::Tool {
         call_id: None,
@@ -757,6 +770,7 @@ fn snap_chat_many_tools_flat() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     app.push_segment(Segment::Assistant {
         text: "Completed with one error.".into(),

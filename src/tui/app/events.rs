@@ -239,9 +239,9 @@ impl App {
                                 }
                             } else if let Some(q) = self.ask_custom_focus {
                                 if let Some(seg) = self.active_ask_seg()
-                                    && let Some(Segment::AskUser { custom, .. }) =
+                                    && let Some(Segment::Tool { ask: Some(ask), .. }) =
                                         self.segments.get_mut(seg)
-                                    && let Some(slot) = custom.get_mut(q)
+                                    && let Some(slot) = ask.custom.get_mut(q)
                                 {
                                     slot.push_str(&text_batch);
                                     self.touch_segment(seg);
@@ -457,9 +457,9 @@ impl App {
                             let (q, n) = self
                                 .active_ask_seg()
                                 .and_then(|s| match self.segments.get(s) {
-                                    Some(Segment::AskUser {
-                                        focus, questions, ..
-                                    }) => Some((*focus, questions.len().max(1))),
+                                    Some(Segment::Tool { ask: Some(ask), .. }) => {
+                                        Some((ask.focus, ask.questions.len().max(1)))
+                                    }
                                     _ => None,
                                 })
                                 .unwrap_or((0, 1));
@@ -508,12 +508,10 @@ impl App {
                                 continue;
                             };
                             let (q, multiple, n) = match self.segments.get(seg) {
-                                Some(Segment::AskUser {
-                                    focus, questions, ..
-                                }) => {
-                                    let qq = questions.get(*focus);
+                                Some(Segment::Tool { ask: Some(ask), .. }) => {
+                                    let qq = ask.questions.get(ask.focus);
                                     (
-                                        *focus,
+                                        ask.focus,
                                         qq.is_some_and(|qq| qq.multiple),
                                         qq.map(|qq| qq.options.len()).unwrap_or(0),
                                     )
@@ -673,9 +671,9 @@ impl App {
                             // typing lands in the segment, never the composer
                             if let Some(q) = self.ask_custom_focus
                                 && let Some(seg) = self.active_ask_seg()
-                                && let Some(Segment::AskUser { custom, .. }) =
+                                && let Some(Segment::Tool { ask: Some(ask), .. }) =
                                     self.segments.get_mut(seg)
-                                && let Some(slot) = custom.get_mut(q)
+                                && let Some(slot) = ask.custom.get_mut(q)
                             {
                                 match k.code {
                                     KeyCode::Char(c) if !ctrl && !alt => slot.push(c),

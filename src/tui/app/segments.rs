@@ -256,6 +256,7 @@ impl App {
                             preview_total: 0,
                             expanded: false,
                             flash: None,
+                            ask: None,
                         });
                         pending_tools.insert(call.id.clone(), idx);
                     }

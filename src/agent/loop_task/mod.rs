@@ -147,9 +147,12 @@ pub enum AgentEvent {
         diff: Option<String>,
         call_id: String,
     },
-    /// the model asked the user structured questions; answer via ControlMsg
+    /// the model asked the user structured questions; answer via ControlMsg.
+    /// `call_id` names the call whose `ToolStart` row the questionnaire fills —
+    /// an ask is a tool call like any other, not a separate surface.
     AskUser {
         id: u64,
+        call_id: String,
         questions: Vec<AskQuestion>,
     },
     /// the session's current plan step changed (§2.2.3); `None` means idle.

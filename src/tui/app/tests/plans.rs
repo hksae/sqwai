@@ -584,6 +584,7 @@ fn toggle_keeps_header_on_screen_row() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     for i in 0..25 {
         app.push_segment(Segment::Assistant {
@@ -651,6 +652,7 @@ fn subagent_redraw_reuses_cache_and_switch_restores_whole() {
             preview_total: 0,
             expanded: false,
             flash: None,
+            ask: None,
         }],
     );
     app.subagent_meta
@@ -697,6 +699,7 @@ fn stale_click_target_ignored() {
             preview_total: 0,
             expanded: false,
             flash: None,
+            ask: None,
         });
     }
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -774,8 +777,8 @@ fn hover_outside_chat_clears_ask_highlight() {
         .iter()
         .position(|t| *t == Some(ask_idx))
         .expect("ask block assembled");
-    // header row + question row, then option 0 (lockstep with ask_decode)
-    let opt_abs = start + 2;
+    // head row, header, question, then option 0 (lockstep with ask_decode)
+    let opt_abs = start + 3;
     let y = app.last_chat.y;
     let h = app.last_chat.height;
     app.mouse_move(y + (opt_abs - app.chat_top(h)) as u16);
@@ -887,6 +890,7 @@ fn toggled_tool_with_tabbed_output_leaves_no_control_cells() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();

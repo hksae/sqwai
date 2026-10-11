@@ -87,7 +87,7 @@ mod view;
 
 use forms::FormField;
 use menus::{Menu, MenuAction};
-use view::{ActivityGroup, AskRow, CellPos, SegMeta, Segment, Selection, StoredView};
+use view::{ActivityGroup, AskRow, AskState, CellPos, SegMeta, Segment, Selection, StoredView};
 
 use menus::COMMANDS;
 
@@ -1168,56 +1168,88 @@ impl App {
         matches!(self.cur_menu(), Some(Menu::AskFree { .. }))
     }
 
-    /// the live AskUser segment awaiting an answer, if it still exists.
-    /// Resolved by tool-call id: rows inserted later shift indices.
+    /// the live `ask_user` row awaiting an answer, if it still exists.
+    /// Resolved by the loop's ask id: rows inserted later shift indices.
     pub(super) fn active_ask_seg(&self) -> Option<usize> {
         let id = self.active_ask_id?;
         self.segments.iter().position(|s| {
             matches!(
                 s,
-                Segment::AskUser {
-                    id: qid,
-                    answered: None,
+                Segment::Tool {
+                    ask: Some(a),
                     ..
-                } if *qid == id
+                } if a.id == id
             )
         })
     }
 
-    /// insert an inline AskUser segment in execution order — before the live
-    /// answer, like tool rows — so the finished turn folds it into its
-    /// activity group (collapsed by default) instead of leaving the whole
-    /// questionnaire rendered below the answer.
-    pub(super) fn push_ask_segment(
+    /// hang the questionnaire on the tool row its call already opened. The row
+    /// is in execution order because `ToolStart` precedes this event, so the
+    /// ask inherits the place every other tool call has — no second surface is
+    /// inserted beside it, and the answered record is that same row.
+    pub(super) fn open_ask(
         &mut self,
+        call_id: &str,
         id: u64,
         questions: Vec<crate::agent::loop_task::AskQuestion>,
     ) {
-        self.flush_assistant_preamble_to_commentary();
-        // a previous unanswered ask (e.g. after abort) is frozen first so at
-        // most one segment stays active
+        // a previous unanswered ask (e.g. after abort) is closed first so at
+        // most one row stays interactive
         self.freeze_active_ask("(no answer — superseded)");
-        let picked = questions
-            .iter()
-            .map(|q| vec![false; q.options.len()])
-            .collect();
-        let custom = vec![String::new(); questions.len()];
-        let seg = Segment::AskUser {
+        let ask = Box::new(AskState {
             id,
-            questions,
-            picked,
-            custom,
+            picked: questions
+                .iter()
+                .map(|q| vec![false; q.options.len()])
+                .collect(),
+            custom: vec![String::new(); questions.len()],
             focus: 0,
-            answered: None,
-            // live questions open unfolded so they can be answered at once
-            expanded: true,
+            questions,
+        });
+        let found = self.segments.iter().position(|s| {
+            matches!(s, Segment::Tool { call_id: cid, ask: None, .. }
+                if cid.as_deref() == Some(call_id))
+        });
+        let seg = match found {
+            Some(i) => i,
+            None => {
+                // `ToolStart` is ordered ahead of this event on the same
+                // channel, so this is unreachable in a live run. Answering is
+                // impossible without a row, and the loop blocks on the answer
+                // forever, so the row is opened here rather than dropped.
+                let tool = Segment::Tool {
+                    name: "ask_user".into(),
+                    args: String::new(),
+                    call_id: Some(call_id.to_string()),
+                    ok: None,
+                    output: String::new(),
+                    diff: None,
+                    preview: Vec::new(),
+                    preview_total: 0,
+                    expanded: false,
+                    flash: None,
+                    ask: None,
+                };
+                let pos = self
+                    .segments
+                    .iter()
+                    .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
+                    .unwrap_or(self.segments.len());
+                self.insert_segment(pos, tool);
+                pos
+            }
         };
-        let pos = self
-            .segments
-            .iter()
-            .rposition(|s| matches!(s, Segment::Assistant { live: true, .. }))
-            .unwrap_or(self.segments.len());
-        self.insert_segment(pos, seg);
+        if let Some(Segment::Tool {
+            ask: slot,
+            expanded,
+            ..
+        }) = self.segments.get_mut(seg)
+        {
+            *slot = Some(ask);
+            // live questions open unfolded so they can be answered at once
+            *expanded = true;
+        }
+        self.touch_segment(seg);
         self.active_ask_id = Some(id);
         self.ask_hover = None;
         self.ask_custom_focus = None;
@@ -1225,19 +1257,16 @@ impl App {
         self.dirty = true;
     }
 
-    /// build the answer string for an inline AskUser segment, same shape as
+    /// build the answer string for the live ask, same shape as
     /// the legacy menu confirm (`"label1, label2; custom"` per question,
     /// `"H: answer"` joined with `" | "`, `"(no answer)"` when empty)
     pub(super) fn inline_ask_text(&self, seg_idx: usize) -> String {
-        let Some(Segment::AskUser {
-            questions,
-            picked,
-            custom,
-            ..
-        }) = self.segments.get(seg_idx)
-        else {
+        let Some(Segment::Tool { ask: Some(ask), .. }) = self.segments.get(seg_idx) else {
             return String::new();
         };
+        let questions = &ask.questions;
+        let picked = &ask.picked;
+        let custom = &ask.custom;
         let single_no_header = questions.len() == 1 && questions[0].header.is_empty();
         let mut parts = Vec::new();
         for (q_idx, q) in questions.iter().enumerate() {
@@ -1297,8 +1326,8 @@ impl App {
         let Some(seg) = self.active_ask_seg() else {
             return;
         };
-        if let Some(Segment::AskUser { picked, focus, .. }) = self.segments.get_mut(seg) {
-            let Some(opts) = picked.get_mut(q) else {
+        if let Some(Segment::Tool { ask: Some(ask), .. }) = self.segments.get_mut(seg) {
+            let Some(opts) = ask.picked.get_mut(q) else {
                 return;
             };
             if opt >= opts.len() {
@@ -1307,7 +1336,7 @@ impl App {
             for (i, v) in opts.iter_mut().enumerate() {
                 *v = i == opt;
             }
-            *focus = q;
+            ask.focus = q;
         }
         self.touch_segment(seg);
         self.ask_custom_focus = None;
@@ -1320,12 +1349,12 @@ impl App {
         let Some(seg) = self.active_ask_seg() else {
             return;
         };
-        if let Some(Segment::AskUser { picked, focus, .. }) = self.segments.get_mut(seg) {
-            let Some(v) = picked.get_mut(q).and_then(|v| v.get_mut(opt)) else {
+        if let Some(Segment::Tool { ask: Some(ask), .. }) = self.segments.get_mut(seg) {
+            let Some(v) = ask.picked.get_mut(q).and_then(|v| v.get_mut(opt)) else {
                 return;
             };
             *v = !*v;
-            *focus = q;
+            ask.focus = q;
         }
         self.touch_segment(seg);
         self.ask_custom_focus = None;
@@ -1338,12 +1367,10 @@ impl App {
         let Some(seg) = self.active_ask_seg() else {
             return;
         };
-        if let Some(Segment::AskUser {
-            questions, focus, ..
-        }) = self.segments.get_mut(seg)
-            && q < questions.len()
+        if let Some(Segment::Tool { ask: Some(ask), .. }) = self.segments.get_mut(seg)
+            && q < ask.questions.len()
         {
-            *focus = q;
+            ask.focus = q;
         }
         self.touch_segment(seg);
         self.ask_custom_focus = None;
@@ -1370,24 +1397,16 @@ impl App {
         self.inline_ask_answer("(no answer)".to_string());
     }
 
-    /// freeze the active inline segment and deliver the text to the agent
+    /// freeze the active ask and deliver the text to the agent
     fn inline_ask_answer(&mut self, text: String) {
         let Some(seg) = self.active_ask_seg() else {
             return;
         };
         let id = match self.segments.get(seg) {
-            Some(Segment::AskUser { id, .. }) => *id,
+            Some(Segment::Tool { ask: Some(ask), .. }) => ask.id,
             _ => return,
         };
-        if let Some(Segment::AskUser {
-            answered, expanded, ..
-        }) = self.segments.get_mut(seg)
-        {
-            *answered = Some(text.clone());
-            // settle to the one-line head row, like a finished tool row
-            *expanded = false;
-        }
-        self.touch_segment(seg);
+        self.close_ask_segment(seg, Some(text.clone()));
         if let Some(agent) = &self.agent {
             let _ = agent.control.try_send(ControlMsg::AskAnswer { id, text });
         }
@@ -1399,24 +1418,43 @@ impl App {
     }
 
     /// the agent turn ended (or was aborted) while a question was open:
-    /// never leave a ghost active segment behind.
+    /// never leave a ghost interactive row behind. The note becomes the row's
+    /// output; `retire_unfinished_rows` settles the marker if no notice follows.
     fn freeze_active_ask(&mut self, note: &str) {
         let Some(seg) = self.active_ask_seg() else {
             self.active_ask_id = None;
             return;
         };
-        if let Some(Segment::AskUser {
-            answered, expanded, ..
-        }) = self.segments.get_mut(seg)
-        {
-            *answered = Some(note.to_string());
-            *expanded = false;
-        }
-        self.touch_segment(seg);
+        self.close_ask_segment(seg, Some(note.to_string()));
         self.active_ask_id = None;
         self.ask_hover = None;
         self.ask_custom_focus = None;
         self.dirty = true;
+    }
+
+    /// take the questionnaire away and fold the row back to one line: this is
+    /// the moment `ask_user` stops being anything other than a tool row.
+    /// `output` is written only when the call will not report one itself.
+    fn close_ask_segment(&mut self, seg: usize, output: Option<String>) {
+        if let Some(Segment::Tool {
+            ask,
+            expanded,
+            output: out,
+            preview,
+            preview_total,
+            ..
+        }) = self.segments.get_mut(seg)
+        {
+            *ask = None;
+            *expanded = false;
+            if let Some(text) = output {
+                *out = text;
+                let (p, t) = view::tool_preview(None, out.as_str());
+                *preview = p;
+                *preview_total = t;
+            }
+        }
+        self.touch_segment(seg);
     }
 
     /// Second-level completion target: `<cmd> <tail>` filters that
@@ -2611,6 +2649,8 @@ impl App {
                             preview_total: 0,
                             expanded: false,
                             flash: None,
+                            // a child cannot reach the user: no ask body here
+                            ask: None,
                         },
                     );
                     self.dirty = true;
@@ -2718,11 +2758,15 @@ impl App {
                     self.todos = items;
                     self.dirty = true;
                 }
-                AgentEvent::AskUser { id, questions } => {
-                    // Inline in chat as an ordinary message: no overlay, no
-                    // modal menu, so a small window never covers the history
+                AgentEvent::AskUser {
+                    id,
+                    call_id,
+                    questions,
+                } => {
+                    // The call's own row carries the questionnaire: no overlay,
+                    // no modal menu, so a small window never covers the history
                     // and the mouse target is the chat row itself.
-                    self.push_ask_segment(id, questions);
+                    self.open_ask(&call_id, id, questions);
                 }
                 AgentEvent::StepCurrent { step } => {
                     // the loop moved the session's current step (§2.2.3):
@@ -2956,13 +3000,10 @@ impl App {
             self.thinking_open = false;
         }
         self.flush_assistant_preamble_to_commentary();
-        // ask_user has its own inline Q&A segment (AgentEvent::AskUser); a
-        // parallel Tool row would duplicate it and its expansion used to be
-        // empty because `args` here is only a one-line summary, not the JSON.
-        // subagent is the same: its `Segment::Subagent` row is the call
+        // subagent is the exception: its `Segment::Subagent` row is the call
         // row AND the child-chat entry point, so a generic `✓ subagent` row
         // next to it duplicated the call (and counted it twice).
-        if name == "ask_user" || name == "subagent" {
+        if name == "subagent" {
             return;
         }
         self.perf.event(&format!("tool_start {name}"));
@@ -2977,6 +3018,7 @@ impl App {
             preview_total: 0,
             expanded: false,
             flash: None,
+            ask: None,
         };
         // The model may stream a short preamble before emitting its tool call.
         // Keep tool activity above the live answer so the chat reads in
@@ -3055,10 +3097,6 @@ impl App {
         diff: Option<String>,
         call_id: Option<String>,
     ) {
-        // answered inline above; no Tool row exists for it by design
-        if name == "ask_user" {
-            return;
-        }
         // subagent has no generic Tool row either (see handle_tool_start).
         // Without this the "start event was missed" fallback below would
         // re-create exactly the row that was suppressed, already closed.
@@ -3090,6 +3128,8 @@ impl App {
                     preview,
                     preview_total,
                     flash,
+                    ask,
+                    expanded,
                     ..
                 }) = self.segments.get_mut(i)
                 {
@@ -3100,6 +3140,12 @@ impl App {
                         view::tool_preview(dslot.as_deref(), output.as_str());
                     // one-shot finish wave (green/red sweep, then static)
                     *flash = Some(std::time::Instant::now());
+                    // a questionnaire still open when its result lands (the
+                    // answer never came through the UI) folds back to the
+                    // ordinary one-line row
+                    if ask.take().is_some() {
+                        *expanded = false;
+                    }
                 }
                 self.touch_segment(i);
             }
@@ -3119,6 +3165,7 @@ impl App {
                     expanded: false,
                     // arrived already finished: play the wave from now
                     flash: Some(std::time::Instant::now()),
+                    ask: None,
                 };
                 let pos = self
                     .segments
@@ -3320,7 +3367,6 @@ impl App {
                 Segment::Thinking { .. }
                     | Segment::Tool { .. }
                     | Segment::Commentary(_)
-                    | Segment::AskUser { .. }
                     | Segment::Subagent { .. }
             )
         {
@@ -3335,10 +3381,7 @@ impl App {
         let has_work = segs[start..end].iter().any(|s| {
             matches!(
                 s,
-                Segment::Thinking { .. }
-                    | Segment::Tool { .. }
-                    | Segment::AskUser { .. }
-                    | Segment::Subagent { .. }
+                Segment::Thinking { .. } | Segment::Tool { .. } | Segment::Subagent { .. }
             )
         });
         if !has_work {
@@ -3377,10 +3420,9 @@ impl App {
                     errors += 1;
                 }
                 Segment::Tool { .. } => calls += 1,
-                // a question is a tool call awaiting the user; a delegated
-                // child is a tool call awaiting its answer. Both count with
-                // the rest of the turn's work.
-                Segment::AskUser { .. } | Segment::Subagent { .. } => calls += 1,
+                // a delegated child is a tool call awaiting its answer; it
+                // counts with the rest of the turn's work
+                Segment::Subagent { .. } => calls += 1,
                 Segment::Thinking { .. } => thinking += 1,
                 // Commentary is prose folded into the group for context; it is
                 // always visible and never counts as a tool call.

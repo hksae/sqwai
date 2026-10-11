@@ -203,9 +203,6 @@ async fn real_zen_smoke() {
     }
     for (i, s) in app.segments.iter().enumerate() {
         match s {
-            Segment::AskUser { questions, .. } => {
-                println!("seg[{i}] ASKUSER {} questions", questions.len())
-            }
             Segment::Assistant { text, live } => {
                 println!(
                     "seg[{i}] ASSISTANT live={live} len={} {:?}",
@@ -234,8 +231,12 @@ async fn real_zen_smoke() {
                 args,
                 ok,
                 output,
+                ask,
                 ..
-            } => println!("seg[{i}] TOOL {name} ({args}) ok={ok:?}: {output}"),
+            } => println!(
+                "seg[{i}] TOOL {name} ({args}) ok={ok:?}{}: {output}",
+                if ask.is_some() { " ASKING" } else { "" }
+            ),
             Segment::User(t) => println!("seg[{i}] USER: {t}"),
             Segment::Commentary(t) => println!("seg[{i}] COMMENTARY: {t}"),
         }
@@ -360,9 +361,20 @@ fn ask_fixture() -> Vec<crate::agent::loop_task::AskQuestion> {
     ]
 }
 
+/// A real ask arrives as two events: `ToolStart` opens the call's row, the ask
+/// event then hangs its questionnaire on that row. Both run here.
 fn push_inline_ask(app: &mut App, questions: Vec<crate::agent::loop_task::AskQuestion>) {
-    // exercise the real insertion path (before the live answer)
-    app.push_ask_segment(7, questions);
+    let summary = questions
+        .iter()
+        .map(|q| q.question.clone())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    app.handle_tool_start(
+        "ask_user".to_string(),
+        summary,
+        Some("call-ask".to_string()),
+    );
+    app.open_ask("call-ask", 7, questions);
 }
 
 /// Transient notices never become chat segments anymore — they toast

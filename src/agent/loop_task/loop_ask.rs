@@ -145,7 +145,11 @@ pub(crate) async fn ask_user(
     }
 
     if tx
-        .send(AgentEvent::AskUser { id, questions })
+        .send(AgentEvent::AskUser {
+            id,
+            call_id: call.id.clone(),
+            questions,
+        })
         .await
         .is_err()
     {

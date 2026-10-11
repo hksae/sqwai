@@ -112,6 +112,7 @@ fn finish_wave_keeps_geometry_and_settles_static() {
         preview_total: 0,
         expanded: false,
         flash: Some(std::time::Instant::now()),
+        ask: None,
     });
     let rows = app.render_segment(&app.segments, 0, 80, true);
     assert_eq!(rows.len(), 1, "head row only, like static");
@@ -152,6 +153,7 @@ fn expired_flash_key_matches_static_key() {
         preview_total: 0,
         expanded: false,
         flash,
+        ask: None,
     };
     let expired = mk(Some(
         std::time::Instant::now() - std::time::Duration::from_secs(5),
@@ -587,6 +589,7 @@ fn edit_row_shows_colored_change_counts() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     let rows = app.render_segment(&app.segments, 0, 80, true);
     let text: String = rows[0]
@@ -613,6 +616,7 @@ fn expanded_tool_output_indents_and_truncates() {
         preview_total: 0,
         expanded: true,
         flash: None,
+        ask: None,
     });
     let rows = app.render_segment(&app.segments, 0, 18, true);
     use unicode_width::UnicodeWidthStr;
@@ -716,6 +720,7 @@ fn resized_terminal_rebuilds_tool_frames_at_chat_width() {
         preview_total: 0,
         expanded: true,
         flash: None,
+        ask: None,
     });
     app.startup = false;
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();

@@ -191,6 +191,7 @@ fn running_tool_name_shimmers_like_activity_header() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     // mid-sweep tick: the wave sits on the name, like the live header
     app.spinner_tick = crate::tui::shimmer::SHIMMER_PERIOD_TICKS / 4;
@@ -370,6 +371,7 @@ fn tool_running_reflects_whether_the_last_tool_row_is_still_open() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
     assert!(app.tool_running());
 
@@ -668,8 +670,10 @@ fn inline_ask_select_and_confirm_freezes_with_answer() {
     app.inline_ask_confirm();
     assert!(app.active_ask_seg().is_none(), "confirm closes the ask");
     match app.segments.last() {
-        Some(Segment::AskUser {
-            answered: Some(a), ..
+        Some(Segment::Tool {
+            ask: None,
+            output: a,
+            ..
         }) => assert_eq!(a, "Q1: beta | Q2: x, y"),
         other => panic!("ask must freeze with the answer, got {other:?}"),
     }
@@ -683,8 +687,8 @@ fn inline_ask_single_choice_replaces_previous_pick() {
     app.inline_ask_select(0, 1);
     let seg = app.active_ask_seg().unwrap();
     match &app.segments[seg] {
-        Segment::AskUser { picked, .. } => {
-            assert_eq!(picked[0], vec![false, true], "single pick replaces");
+        Segment::Tool { ask: Some(ask), .. } => {
+            assert_eq!(ask.picked[0], vec![false, true], "single pick replaces");
         }
         other => panic!("unexpected {other:?}"),
     }
@@ -709,7 +713,14 @@ fn ask_user_answer_collapses_to_head_row() {
     push_inline_ask(&mut app, ask_fixture());
     let seg = app.active_ask_seg().expect("live ask");
     assert!(
-        matches!(app.segments[seg], Segment::AskUser { expanded: true, .. }),
+        matches!(
+            app.segments[seg],
+            Segment::Tool {
+                ask: Some(_),
+                expanded: true,
+                ..
+            }
+        ),
         "live questions open unfolded"
     );
     app.inline_ask_select(0, 1);
@@ -717,8 +728,8 @@ fn ask_user_answer_collapses_to_head_row() {
     assert!(
         matches!(
             app.segments[seg],
-            Segment::AskUser {
-                answered: Some(_),
+            Segment::Tool {
+                ask: None,
                 expanded: false,
                 ..
             }
@@ -727,11 +738,8 @@ fn ask_user_answer_collapses_to_head_row() {
     );
     let s = render_to_string(&mut app, 100, 30);
     assert!(s.contains("ask_user"), "head names the tool:\n{s}");
-    assert!(s.contains("beta"), "head carries the answer:\n{s}");
-    assert!(
-        !s.contains("Pick many"),
-        "the questionnaire folds away:\n{s}"
-    );
+    assert!(s.contains("Pick one"), "head carries the question:\n{s}");
+    assert!(!s.contains("beta"), "the questionnaire folds away:\n{s}");
 }
 
 #[test]
@@ -740,10 +748,17 @@ fn ask_user_head_click_folds_and_unfolds() {
     app.startup = false;
     push_inline_ask(&mut app, ask_fixture());
     app.inline_ask_confirm();
+    app.handle_tool_notice(
+        "ask_user".to_string(),
+        "Q1: beta | Q2: x, y".to_string(),
+        true,
+        None,
+        Some("call-ask".to_string()),
+    );
     let seg = app
         .segments
         .iter()
-        .position(|s| matches!(s, Segment::AskUser { .. }))
+        .position(|s| matches!(s, Segment::Tool { name, .. } if name == "ask_user"))
         .expect("ask segment");
     // collapsed to a single head row
     render_to_string(&mut app, 100, 30);
@@ -754,15 +769,14 @@ fn ask_user_head_click_folds_and_unfolds() {
         .iter()
         .position(|t| *t == Some(seg))
         .unwrap();
-    // head click unfolds the questionnaire back
+    // head click reveals the recorded answer, like any finished call
     app.click(abs);
     assert!(
-        matches!(app.segments[seg], Segment::AskUser { expanded: true, .. }),
+        matches!(app.segments[seg], Segment::Tool { expanded: true, .. }),
         "head click unfolds"
     );
-    render_to_string(&mut app, 100, 30);
-    let rows = app.cache_rowseg.iter().filter(|t| **t == Some(seg)).count();
-    assert!(rows > 5, "questionnaire is back: {rows} rows");
+    let s = render_to_string(&mut app, 100, 30);
+    assert!(s.contains("Q1: beta"), "the answer is the body:\n{s}");
     // and folds again on the first row
     let abs = app
         .cache_rowseg
@@ -773,7 +787,7 @@ fn ask_user_head_click_folds_and_unfolds() {
     assert!(
         matches!(
             app.segments[seg],
-            Segment::AskUser {
+            Segment::Tool {
                 expanded: false,
                 ..
             }
@@ -794,37 +808,179 @@ fn ask_user_option_click_still_selects_when_expanded() {
         .iter()
         .position(|t| *t == Some(seg))
         .expect("ask block");
-    // expanded layout: header, question, alpha, beta at offset 3
-    app.click(start + 3);
+    // expanded layout: head row, Q1 header, question, alpha, beta at offset 4
+    app.click(start + 4);
     match &app.segments[seg] {
-        Segment::AskUser { picked, .. } => {
-            assert_eq!(picked[0], vec![false, true], "option click selects")
+        Segment::Tool { ask: Some(ask), .. } => {
+            assert_eq!(ask.picked[0], vec![false, true], "option click selects")
         }
         other => panic!("unexpected {other:?}"),
     }
     assert!(
-        matches!(app.segments[seg], Segment::AskUser { expanded: true, .. }),
+        matches!(
+            app.segments[seg],
+            Segment::Tool {
+                ask: Some(_),
+                expanded: true,
+                ..
+            }
+        ),
         "option click must not fold the questionnaire"
     );
 }
 
+/// The claim behind the merge: the live turn and a session read back from disk
+/// paint the same rows for the same call, because there is one renderer.
 #[test]
-fn ask_user_tool_rows_are_suppressed_live() {
+fn an_answered_ask_renders_identically_after_reload() {
+    use crate::providers::{Message, Role, ToolCallReq};
+    let args = serde_json::json!({
+        "question": "Which part?",
+        "options": [{"label": "prompts"}, {"label": "tui"}],
+    });
+    let summary = crate::agent::tools::call_summary("ask_user", &args);
+    let answer = "tui";
+
+    // the live turn: ToolStart opens the row, the ask fills it, the answer closes it
+    let mut live = test_app("http://127.0.0.1:9/v1".into());
+    live.startup = false;
+    live.handle_tool_start("ask_user".into(), summary.clone(), Some("c1".into()));
+    live.open_ask(
+        "c1",
+        7,
+        vec![crate::agent::loop_task::AskQuestion {
+            header: String::new(),
+            question: "Which part?".into(),
+            options: vec!["prompts", "tui"]
+                .into_iter()
+                .map(|l| crate::agent::loop_task::AskOption {
+                    label: l.into(),
+                    description: None,
+                    recommended: false,
+                })
+                .collect(),
+            multiple: false,
+            allow_free: false,
+        }],
+    );
+    live.inline_ask_select(0, 1);
+    live.inline_ask_confirm();
+    live.handle_tool_notice(
+        "ask_user".into(),
+        answer.into(),
+        true,
+        None,
+        Some("c1".into()),
+    );
+
+    // the same transcript restored from disk
+    let mut reloaded = test_app("http://127.0.0.1:9/v1".into());
+    reloaded.startup = false;
+    reloaded.session.messages = vec![
+        Message::new(Role::User, "hi"),
+        Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+            "c1",
+            "ask_user",
+            args.clone(),
+        )]),
+        Message::tool_result("c1", answer, false),
+    ];
+    reloaded.clear_segments();
+    reloaded.load_history_segments();
+
+    // collapsed head, then the unfolded body: both states must agree
+    let paint = |app: &mut App, expanded: bool| -> Vec<String> {
+        let i = app
+            .segments
+            .iter()
+            .position(|s| matches!(s, Segment::Tool { name, .. } if name == "ask_user"))
+            .expect("the ask row");
+        if let Some(Segment::Tool {
+            expanded: e, flash, ..
+        }) = app.segments.get_mut(i)
+        {
+            *e = expanded;
+            // the finish wave is an animation, not the settled row
+            *flash = None;
+        }
+        app.touch_segment(i);
+        app.rebuild_cache(80);
+        app.cache_lines
+            .iter()
+            .zip(app.cache_rowseg.iter())
+            .filter(|(_, tag)| **tag == Some(i))
+            .map(|(line, _)| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    };
+    for expanded in [false, true] {
+        let live_rows = paint(&mut live, expanded);
+        let reloaded_rows = paint(&mut reloaded, expanded);
+        assert_eq!(
+            live_rows, reloaded_rows,
+            "one call, one renderer (expanded={expanded})"
+        );
+        if expanded {
+            assert!(
+                live_rows.iter().any(|r| r.contains("tui")),
+                "the answer is the body: {live_rows:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ask_user_travels_on_the_tool_row_path() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let before = app.segments.len();
-    app.handle_tool_start("ask_user".to_string(), "anything".to_string(), None);
-    assert_eq!(app.segments.len(), before, "no Tool row for ask_user");
+    app.handle_tool_start(
+        "ask_user".to_string(),
+        "anything".to_string(),
+        Some("c1".to_string()),
+    );
+    assert_eq!(app.segments.len(), before + 1, "the ask opens one row");
+    app.open_ask("c1", 7, ask_fixture());
     app.handle_tool_notice(
         "ask_user".to_string(),
         "answer".to_string(),
         true,
         None,
-        None,
+        Some("c1".to_string()),
     );
-    assert_eq!(app.segments.len(), before, "no Tool row on notice either");
+    assert_eq!(
+        app.segments.len(),
+        before + 1,
+        "the notice closes the same row: no second one"
+    );
+    let i = app
+        .segments
+        .iter()
+        .position(|s| matches!(s, Segment::Tool { call_id: Some(id), .. } if id == "c1"))
+        .expect("the ask row");
+    match &app.segments[i] {
+        Segment::Tool {
+            ok,
+            output,
+            ask,
+            name,
+            ..
+        } => {
+            assert_eq!(name, "ask_user");
+            assert_eq!(*ok, Some(true), "closed by the notice");
+            assert_eq!(output, "answer");
+            assert!(ask.is_none(), "the questionnaire goes with the answer");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
     // ordinary tools are unaffected
     app.handle_tool_start("read".to_string(), "a.rs".to_string(), None);
-    assert_eq!(app.segments.len(), before + 1);
+    assert_eq!(app.segments.len(), before + 2);
 }
 
 #[test]
@@ -849,8 +1005,8 @@ fn inline_ask_click_targets_decode_options_custom_confirm() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     push_inline_ask(&mut app, ask_fixture());
     app.rebuild_cache(80);
-    // layout for the fixture: header, question, 2 options, custom,
-    // separator, header, question, 2 options, confirm
+    // layout for the fixture: tool head row, then header, question, 2 options,
+    // custom, separator, header, question, 2 options, confirm
     let seg = app.active_ask_seg().unwrap();
     let (start, _) = app
         .cache_rowseg
@@ -865,26 +1021,37 @@ fn inline_ask_click_targets_decode_options_custom_confirm() {
         })
         .expect("ask block must be cached");
     let at = |off: usize| app.ask_row_at(start + off);
-    assert_eq!(at(0), None, "header is not clickable");
-    assert_eq!(at(1), None, "question is not clickable");
     assert_eq!(
-        at(2),
+        at(0),
+        None,
+        "the head row folds the body, it answers nothing"
+    );
+    assert_eq!(at(1), None, "header is not clickable");
+    assert_eq!(at(2), None, "question is not clickable");
+    assert_eq!(
+        at(3),
         Some((seg, super::super::view::AskRow::Option { q: 0, opt: 0 }))
     );
     assert_eq!(
-        at(3),
+        at(4),
         Some((seg, super::super::view::AskRow::Option { q: 0, opt: 1 }))
     );
     assert_eq!(
-        at(4),
+        at(5),
         Some((seg, super::super::view::AskRow::Custom { q: 0 }))
     );
-    assert_eq!(at(5), None, "separator is not clickable");
+    assert_eq!(at(6), None, "separator is not clickable");
+    assert_eq!(at(7), None, "second header is not clickable");
+    assert_eq!(at(8), None, "second question is not clickable");
     assert_eq!(
         at(9),
+        Some((seg, super::super::view::AskRow::Option { q: 1, opt: 0 }))
+    );
+    assert_eq!(
+        at(10),
         Some((seg, super::super::view::AskRow::Option { q: 1, opt: 1 }))
     );
-    assert_eq!(at(10), Some((seg, super::super::view::AskRow::Confirm)));
+    assert_eq!(at(11), Some((seg, super::super::view::AskRow::Confirm)));
 }
 
 #[test]
@@ -898,14 +1065,14 @@ fn inline_ask_click_selects_instead_of_dismissing() {
         .iter()
         .position(|t| *t == Some(seg))
         .expect("ask block");
-    // click the second option of Q1 (offset 3 in the layout above)
-    app.click(start + 3);
+    // click the second option of Q1 (offset 4 in the layout above)
+    app.click(start + 4);
     assert!(
         app.active_ask_seg().is_some(),
         "click must not dismiss the ask"
     );
     match &app.segments[seg] {
-        Segment::AskUser { picked, .. } => assert_eq!(picked[0], vec![false, true]),
+        Segment::Tool { ask: Some(ask), .. } => assert_eq!(ask.picked[0], vec![false, true]),
         other => panic!("unexpected {other:?}"),
     }
 }
@@ -993,12 +1160,12 @@ fn active_ask_survives_index_shifts() {
     let after = app.active_ask_seg().expect("ask must survive the shift");
     assert_eq!(after, 0);
     match &app.segments[after] {
-        Segment::AskUser { id: 7, .. } => {}
+        Segment::Tool { ask: Some(ask), .. } => assert_eq!(ask.id, 7),
         other => panic!("wrong segment resolved: {other:?}"),
     }
     app.inline_ask_select(0, 0);
     match &app.segments[after] {
-        Segment::AskUser { picked, .. } => assert_eq!(picked[0], vec![true, false]),
+        Segment::Tool { ask: Some(ask), .. } => assert_eq!(ask.picked[0], vec![true, false]),
         other => panic!("unexpected {other:?}"),
     }
 }
@@ -1162,6 +1329,7 @@ fn structural_insert_preserves_other_segment_caches() {
             preview_total: 0,
             expanded: false,
             flash: None,
+            ask: None,
         },
     );
 
@@ -1366,6 +1534,7 @@ fn commentary_left_alignment_matches_tool_call() {
         preview_total: 0,
         expanded: false,
         flash: None,
+        ask: None,
     });
 
     let commentary_rows = app.render_segment(&app.segments, 0, 80, true);
