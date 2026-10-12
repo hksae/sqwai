@@ -68,6 +68,14 @@ fn main() -> Result<()> {
         );
         let _ = crossterm::terminal::disable_raw_mode();
         eprintln!("{info}");
+        // A panic must not leave children running: the process is dying, and
+        // a detached shell that outlives it keeps editing the project with no
+        // one watching. `kill_remaining_jobs` is poison-safe, so it cannot
+        // turn this hook into a second panic.
+        let killed = agent::tools::kill_remaining_jobs();
+        if killed > 0 {
+            eprintln!("stopped {killed} background job(s) after the panic");
+        }
     }));
 
     providers::set_http_log(cfg.ui.http_log);
@@ -116,6 +124,10 @@ async fn run(cfg: config::Config, resume_id: Option<String>, read_only: bool) ->
         std::thread::sleep(std::time::Duration::from_millis(100));
         let _ = restore_terminal();
         eprintln!("{info}");
+        let killed = agent::tools::kill_remaining_jobs();
+        if killed > 0 {
+            eprintln!("stopped {killed} background job(s) after the panic");
+        }
     }));
     let app = tui::app::App::new(cfg, session, startup, read_only)?;
     let res = app
