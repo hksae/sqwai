@@ -414,10 +414,20 @@ fn reaped_and_killed_jobs_leave_no_log_files() {
     assert!(killed.ok, "{}", killed.output);
     assert!(!log.exists(), "killed job must not leave its log behind");
 
-    // reap path: finished job removed by the final read
+    // reap path: finished job removed by the final read. A fixed 600 ms budget
+    // was a coin flip under full-suite load: when the child had not been reaped
+    // yet, this assertion panicked while holding BG_SERIAL and the poisoned
+    // mutex took two sibling tests down with it. Wait for the reap instead of
+    // assuming a delay; the assertions below are unchanged.
     let (id, log) = spawn_bg_with_log(&mut c, "echo hi");
-    std::thread::sleep(std::time::Duration::from_millis(600));
-    let polled = bash_output(&c, &serde_json::json!({"id": id}));
+    let mut polled = bash_output(&c, &serde_json::json!({"id": id}));
+    for _ in 0..50 {
+        if polled.output.contains("finished") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        polled = bash_output(&c, &serde_json::json!({"id": id}));
+    }
     assert!(polled.ok, "{}", polled.output);
     assert!(polled.output.contains("finished"), "{}", polled.output);
     assert!(!log.exists(), "reaped job must not leave its log behind");
