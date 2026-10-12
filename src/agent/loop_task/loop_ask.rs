@@ -208,7 +208,7 @@ pub(crate) async fn bash_call(
     tx: &mpsc::Sender<AgentEvent>,
     ctl: &mut mpsc::Receiver<ControlMsg>,
     always_allow: &mut Vec<String>,
-    blocked: &[String],
+    blocked: &[(String, regex::Regex)],
     next_id: &mut u64,
     subagent_depth: u8,
     journal: &mut Option<crate::agent::journal::Journal>,
@@ -237,21 +237,14 @@ pub(crate) async fn bash_call(
         );
     }
 
-    // 0. hard block from config — no questions
-    for pat in blocked {
-        match regex::Regex::new(pat) {
-            Ok(re) => {
-                if re.is_match(&command) || re.is_match(&lower) {
-                    return tools::Outcome::err(format!(
-                        "command blocked by [safety].blocked_patterns '{pat}'"
-                    ));
-                }
-            }
-            Err(e) => {
-                return tools::Outcome::err(format!(
-                    "invalid [safety].blocked_patterns regex '{pat}': {e} - command blocked"
-                ));
-            }
+    // 0. hard block from config — no questions. The regexes arrive compiled by
+    // the run that owns this call; an invalid pattern is refused at startup,
+    // so there is nothing here to report but a match.
+    for (pat, re) in blocked {
+        if re.is_match(&command) || re.is_match(&lower) {
+            return tools::Outcome::err(format!(
+                "command blocked by [safety].blocked_patterns '{pat}'"
+            ));
         }
     }
 

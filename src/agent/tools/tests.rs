@@ -2876,9 +2876,6 @@ fn plan_corrupt_rebuild_keeps_abandoned_sibling_down() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// A user-blocked command inside `cmd:` acceptance never runs, even
-/// though the classifier alone would pass it: pre-fix the runners
-/// never consulted `[safety].blocked_patterns`, so `echo` (Safe)
 /// Finishing a step reports its blast radius in one line: the files
 /// the step wrote (journal file_diff chain, subagent sessions
 /// included). A step that wrote nothing stays silent.

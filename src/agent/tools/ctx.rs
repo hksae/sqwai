@@ -76,12 +76,6 @@ pub struct ToolCtx {
     /// the parent consumed; trust gates must see the parent's external
     /// exposure too. `None` for main agents.
     pub parent_session: Option<String>,
-    /// Hard-blocked command patterns from `[safety].blocked_patterns`.
-    /// The bash tool enforces them at dispatch; acceptance runners enforce
-    /// the same list through `acceptance_policy_hit`, so a `cmd:` check —
-    /// model-typed or project-injected via `cmd: $name` — cannot run what
-    /// the user explicitly blocked. Empty in unit tests (no policy).
-    pub blocked_patterns: Vec<String>,
     /// Frozen inputs the loop approved for this call after a user approval
     /// dialog (additive writes never land here — they flow without asking).
     /// Checked by dispatch; the loop owns the lifetime (one-shot vs session
@@ -121,7 +115,6 @@ impl ToolCtx {
             subagent_step: None,
             subagent_write_paths: None,
             parent_session: None,
-            blocked_patterns: Vec::new(),
             background_baselines: false,
         }
     }
@@ -193,13 +186,6 @@ impl ToolCtx {
     ) -> Self {
         self.plan_limits = plan_limits;
         self.context_limit = context_limit;
-        self
-    }
-
-    /// Hard-blocked command patterns from `[safety].blocked_patterns`, so
-    /// acceptance runners enforce the same list as the bash tool.
-    pub fn with_blocked_patterns(mut self, blocked_patterns: Vec<String>) -> Self {
-        self.blocked_patterns = blocked_patterns;
         self
     }
 

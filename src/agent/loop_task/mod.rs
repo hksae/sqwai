@@ -575,14 +575,22 @@ async fn run_agent(
     } = input;
     let mut current_model_key = model_key;
 
+    // Compile the hard-block patterns once per run. The gate used to call
+    // `Regex::new` on every bash command (#184); a pattern that does not
+    // compile still stops the run right here, exactly as before, so the gate
+    // never has to decide what an invalid config means mid-turn.
+    let mut blocked: Vec<(String, regex::Regex)> = Vec::with_capacity(blocked_patterns.len());
     for pat in &blocked_patterns {
-        if let Err(e) = regex::Regex::new(pat) {
-            let _ = tx
-                .send(AgentEvent::Completed(Err(format!(
-                    "invalid [safety].blocked_patterns regex '{pat}': {e}"
-                ))))
-                .await;
-            return;
+        match regex::Regex::new(pat) {
+            Ok(re) => blocked.push((pat.clone(), re)),
+            Err(e) => {
+                let _ = tx
+                    .send(AgentEvent::Completed(Err(format!(
+                        "invalid [safety].blocked_patterns regex '{pat}': {e}"
+                    ))))
+                    .await;
+                return;
+            }
         }
     }
 
@@ -731,7 +739,6 @@ async fn run_agent(
         .in_session(&session_id)
         .with_shadow_store(shadow_store)
         .with_plan_limits(plan_limits, context_limit)
-        .with_blocked_patterns(blocked_patterns.clone())
         .with_cancel(cancel_tool);
     // slow baseline capture defers to the background worker on interactive
     // turns; everywhere else the tool call captures synchronously
@@ -1330,7 +1337,7 @@ async fn run_agent(
                                 &tx,
                                 &mut ctl,
                                 &mut always_allow,
-                                &blocked_patterns,
+                                &blocked,
                                 &mut next_id,
                                 subagent_depth,
                                 &mut journal,
