@@ -12,6 +12,103 @@ fn ctx() -> ToolCtx {
 
 /// The exit code travels with the outcome instead of living only in
 /// the human-readable status line: receipts record the sourced code.
+/// A command that writes a *finished* hundred-kilobyte stream and then hangs.
+/// The producer is a separate process that exits (and therefore flushes) before
+/// the hang starts, so what the reader holds at the deadline is deterministic —
+/// unlike `echo MARKER; sleep`, whose bytes may still sit in the shell's buffer
+/// when we kill it.
+#[cfg(unix)]
+fn bulk_output_then_hang_command() -> String {
+    "seq 1 20000; sleep 30".to_string()
+}
+
+#[cfg(windows)]
+fn bulk_output_then_hang_command() -> String {
+    if ShellKind::detect() == ShellKind::Cmd {
+        // `for /L` echoes through cmd itself, line by line, and the ping that
+        // follows is a separate process that runs for ~30s.
+        "for /L %i in (1,1,20000) do @echo %i& ping -n 31 127.0.0.1 >nul".to_string()
+    } else {
+        // Git Bash: same spelling as unix, with the path-free form above.
+        "seq 1 20000; sleep 30".to_string()
+    }
+}
+
+/// Issue #178: the deadline branch killed the child and answered
+/// "output discarded" while every byte the command had already printed was
+/// still held by the reader threads. A hung `cargo test` is exactly the case
+/// where the last captured line is worth more than nothing.
+#[test]
+fn a_timed_out_command_returns_what_it_managed_to_print() {
+    let mut c = ctx();
+    let started = std::time::Instant::now();
+    let outcome = bash(&mut c, &bulk_output_then_hang_command(), Some(1), false);
+    let elapsed = started.elapsed();
+
+    assert!(!outcome.ok, "a killed command is not a success");
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "the timeout was not honoured: took {elapsed:?}"
+    );
+    assert!(
+        outcome.output.contains("timed out"),
+        "the status line must say what happened: {:?}",
+        outcome.output
+    );
+    assert!(
+        !outcome.output.contains("output discarded"),
+        "the partial output must survive the kill: {:?}",
+        outcome.output
+    );
+    // the last line of the bulk stream, written before the hang, is the proof
+    assert!(
+        outcome.output.contains("20000"),
+        "captured output was thrown away: {:?}",
+        &outcome.output[..outcome.output.len().min(200)]
+    );
+}
+
+/// Issue #172: the reader capped each stream at the first 1 MB and dropped the
+/// rest, so a long build lost precisely the failing line at its end. The budget
+/// is now spent on head *and* tail.
+#[test]
+fn the_read_buffer_keeps_the_head_and_the_tail_and_drops_the_middle() {
+    let mut b = HeadTail::new();
+    let chunk: Vec<u8> = (0..8192u16).map(|i| (i % 251) as u8).collect();
+    // ~3 MB through a 1 MB budget
+    for _ in 0..384 {
+        b.push(&chunk);
+    }
+    let kept = b.bytes();
+    assert!(
+        b.dropped() > 0,
+        "384 chunks of 8 KiB must overflow the 1 MB budget"
+    );
+    assert!(
+        kept.len() <= 3 * HEAD_TAIL_KEEP,
+        "the resident ceiling is the 1 MB kept budget plus one doubled tail window: {} bytes kept, {} dropped",
+        kept.len(),
+        b.dropped()
+    );
+    // head intact: the very first bytes of the very first chunk
+    assert_eq!(&kept[..chunk.len()], chunk.as_slice(), "head preserved");
+    // tail intact: the last chunk is still the last thing in the buffer
+    assert_eq!(
+        &kept[kept.len() - chunk.len()..],
+        chunk.as_slice(),
+        "the end of the stream survived — this is what the old head-only cap deleted"
+    );
+}
+
+#[test]
+fn a_small_stream_passes_through_the_read_buffer_untouched() {
+    let mut b = HeadTail::new();
+    b.push(b"first line\n");
+    b.push(b"last error line\n");
+    assert_eq!(b.dropped(), 0, "nothing was dropped");
+    assert_eq!(b.bytes(), b"first line\nlast error line\n");
+}
+
 #[test]
 fn exit_codes_travel_with_the_outcome() {
     let mut c = ctx();

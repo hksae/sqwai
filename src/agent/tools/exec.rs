@@ -248,6 +248,75 @@ pub(crate) fn kill_tree(child: &mut std::process::Child) {
     }
 }
 
+/// Bounded output buffer that keeps the **first** and the **last** bytes and
+/// drops the middle. A hard head-only cap deleted exactly what a build or a
+/// test run prints last — the failing line — so the agent read the start of a
+/// 4 MB log and reasoned about nothing. Everything downstream already prefers
+/// this shape (`trim_middle` keeps both ends of a long string); this enforces
+/// it while reading, where the bytes still exist.
+///
+/// The two halves are concatenated when read, so a multi-byte character can
+/// straddle the seam and decode to one replacement character. That is the
+/// price of not buffering a stream of unknown length; single-byte console code
+/// pages (the common case here) are unaffected.
+struct HeadTail {
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
+    seen: usize,
+}
+
+/// Half a megabyte each: 1 MB of *kept* bytes per stream, the budget the reader
+/// had before — spent now on the parts a log is judged by instead of its first
+/// megabyte. The tail window may sit at twice its budget between halvings, so
+/// the resident ceiling is 1.5 MB per stream rather than 1 MB.
+const HEAD_TAIL_KEEP: usize = 500_000;
+
+impl HeadTail {
+    fn new() -> Self {
+        Self {
+            head: Vec::new(),
+            tail: std::collections::VecDeque::new(),
+            seen: 0,
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        self.seen += chunk.len();
+        if self.head.len() < HEAD_TAIL_KEEP {
+            let take = chunk.len().min(HEAD_TAIL_KEEP - self.head.len());
+            self.head.extend_from_slice(&chunk[..take]);
+            self.push_tail(&chunk[take..]);
+            return;
+        }
+        self.push_tail(chunk);
+    }
+
+    fn push_tail(&mut self, chunk: &[u8]) {
+        self.tail.extend(chunk.iter().copied());
+        // Halve from the front only once the window has doubled its budget.
+        // Trimming to the exact size on every 8 KiB chunk would move the whole
+        // tail each time; this keeps the cost per byte constant. Overshooting
+        // between halvings is fine — the cap guards memory, not the byte count.
+        if self.tail.len() > 2 * HEAD_TAIL_KEEP {
+            for _ in 0..self.tail.len() - HEAD_TAIL_KEEP {
+                self.tail.pop_front();
+            }
+        }
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.head.len() + self.tail.len());
+        out.extend_from_slice(&self.head);
+        out.extend(self.tail.iter());
+        out
+    }
+
+    /// Bytes that fell out of the middle, for the note that says so.
+    fn dropped(&self) -> usize {
+        self.seen.saturating_sub(self.head.len() + self.tail.len())
+    }
+}
+
 fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
     use std::io::Read;
     use std::sync::{Arc, Mutex};
@@ -263,45 +332,30 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
     };
 
     // read stdout/stderr concurrently so a chatty child can't deadlock
-    let out_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let err_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let out_capped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let err_capped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let out_buf: Arc<Mutex<HeadTail>> = Arc::new(Mutex::new(HeadTail::new()));
+    let err_buf: Arc<Mutex<HeadTail>> = Arc::new(Mutex::new(HeadTail::new()));
     let mut readers = Vec::new();
-    let read_loop = |mut handle: Box<dyn std::io::Read + Send>,
-                     buf: Arc<Mutex<Vec<u8>>>,
-                     capped: Arc<std::sync::atomic::AtomicBool>| {
+    let read_loop = |mut handle: Box<dyn std::io::Read + Send>, buf: Arc<Mutex<HeadTail>>| {
         std::thread::spawn(move || {
             let mut chunk = [0u8; 8192];
             loop {
                 match handle.read(&mut chunk) {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let mut b = buf.lock().unwrap();
-                        if b.len() < 1_000_000 {
-                            let available = 1_000_000 - b.len();
-                            let to_take = n.min(available);
-                            b.extend_from_slice(&chunk[..to_take]);
-                            if to_take < n {
-                                capped.store(true, std::sync::atomic::Ordering::Relaxed);
-                            }
-                        } else {
-                            capped.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
+                    Ok(n) => buf.lock().unwrap().push(&chunk[..n]),
                 }
             }
         })
     };
     if let Some(so) = child.stdout.take() {
-        readers.push(read_loop(Box::new(so), out_buf.clone(), out_capped.clone()));
+        readers.push(read_loop(Box::new(so), out_buf.clone()));
     }
     if let Some(se) = child.stderr.take() {
-        readers.push(read_loop(Box::new(se), err_buf.clone(), err_capped.clone()));
+        readers.push(read_loop(Box::new(se), err_buf.clone()));
     }
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let mut status: Option<std::process::ExitStatus>;
+    let mut timed_out = false;
     loop {
         status = child.try_wait().ok().flatten();
         if status.is_some() {
@@ -324,9 +378,13 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
         }
         if std::time::Instant::now() >= deadline {
             kill_and_reap(&mut child);
-            return Outcome::err(format!(
-                "command timed out after {timeout_secs}s — output discarded"
-            ));
+            // Whatever the command printed before it hung is the part worth
+            // having: a timed-out `cargo test` that answered "output discarded"
+            // left the agent with nothing to reason about, while the bytes were
+            // still sitting in the readers' buffers. Fall through to the normal
+            // assembly and name the timeout on the status line instead.
+            timed_out = true;
+            break;
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
@@ -334,8 +392,17 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
 
     // console codepage, not UTF-8: plain lossy decoding turned RU
     // system messages into ���� (baselines and reports carried them)
-    let stdout = super::decode_child_output(&out_buf.lock().unwrap());
-    let stderr = super::decode_child_output(&err_buf.lock().unwrap());
+    let (out_bytes, out_dropped) = {
+        let held = out_buf.lock().unwrap();
+        (held.bytes(), held.dropped())
+    };
+    let (err_bytes, err_dropped) = {
+        let held = err_buf.lock().unwrap();
+        (held.bytes(), held.dropped())
+    };
+    let dropped = out_dropped + err_dropped;
+    let stdout = super::decode_child_output(&out_bytes);
+    let stderr = super::decode_child_output(&err_bytes);
     let code = status.and_then(|s| s.code());
     let code_str = code.map(|c| c.to_string()).unwrap_or_else(|| "?".into());
 
@@ -343,17 +410,25 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
     if combined.trim().is_empty() {
         combined = String::from("no output");
     }
-    let status_line = format!("(exit code {code_str})");
-    let is_capped = out_capped.load(std::sync::atomic::Ordering::Relaxed)
-        || err_capped.load(std::sync::atomic::Ordering::Relaxed);
-    let body = if combined.len() > MAX_RETURNED || is_capped {
+    let status_line = if timed_out {
+        format!("(command timed out after {timeout_secs}s and was killed)")
+    } else {
+        format!("(exit code {code_str})")
+    };
+    let body = if combined.len() > MAX_RETURNED || dropped > 0 {
         // One home for oversized output, and it is a home the file tools can
         // open. This used to be `%TEMP%\sqwai-cmd\`: a path outside the
         // project jail, so the promise in the note was one only `bash` could
-        // keep — `read` would have refused it.
-        let note = match (super::fs::spill_output(ctx, "cmd", &combined), is_capped) {
-            (Some(rel), true) => format!("output (capped at 2 MB) written to {rel}"),
-            (Some(rel), false) => format!("full output written to {rel}"),
+        // keep — `read` would have refused it. The note now says what was
+        // actually kept: the file holds the same head-and-tail text, not the
+        // whole stream, and promising otherwise is how an agent goes reading a
+        // file for lines that were never written to it.
+        let note = match (super::fs::spill_output(ctx, "cmd", &combined), dropped) {
+            (Some(rel), 0) => format!("full output written to {rel}"),
+            (Some(rel), n) => format!(
+                "output too large to keep whole: {n} bytes dropped from the middle, head and \
+                 tail kept (the same text is in {rel})"
+            ),
             (None, _) => "output too large to show".to_string(),
         };
         format!("{note}\n{}", super::trim_middle(&combined, MAX_RETURNED))
