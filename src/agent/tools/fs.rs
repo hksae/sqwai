@@ -686,7 +686,6 @@ pub(super) fn grep(
     context: usize,
 ) -> Outcome {
     use ignore::WalkBuilder;
-    use std::io::BufRead;
 
     let re = match regex::Regex::new(pattern) {
         Ok(r) => r,
@@ -742,15 +741,18 @@ pub(super) fn grep(
                 continue;
             }
         }
-        let file = match fs::File::open(path) {
-            Ok(f) => f,
-            Err(_) => continue,
-        };
-        let rd = std::io::BufReader::new(file);
-        let lines: Vec<String> = rd.lines().collect::<Result<_, _>>().unwrap_or_default();
-        if lines.iter().any(|line| line.contains('\0')) {
+        // The whole file is scanned even when some of its bytes are not valid
+        // UTF-8. Collecting `Lines` into `Result<_, _>` turned the first
+        // invalid byte into an empty line list, so a cp1251 source reported
+        // "no matches" for a pattern sitting on its third line (#214 M18).
+        // An unreadable file is skipped, not fatal: one locked path must not
+        // end the search.
+        let Ok(raw) = fs::read(path) else { continue };
+        if raw.contains(&0) {
             continue; // binary-ish
         }
+        let text = String::from_utf8_lossy(&raw);
+        let lines: Vec<&str> = text.lines().collect();
         let disp = path.strip_prefix(&ctx.root).unwrap_or(path);
         let shown = disp.display().to_string().replace('\\', "/");
         let mut hits: Vec<usize> = Vec::new();
@@ -965,6 +967,48 @@ mod tests {
         let outcome = grep(&mut ctx, "test", None, Some("[unclosed"), 0);
         assert!(!outcome.ok);
         assert!(outcome.output.contains("bad include glob pattern"));
+    }
+
+    /// #214 M18: a single undecodable line used to erase the rest of the
+    /// file. `rd.lines().collect::<Result<_, _>>()` returned `Err` on the
+    /// first invalid byte and `unwrap_or_default` turned that into an empty
+    /// line list, so the tool answered "no matches" about a pattern sitting
+    /// further down — the quietest possible failure.
+    #[test]
+    fn grep_scans_past_a_line_that_is_not_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = b"first line\n".to_vec();
+        // the second line is cp1251 text: fine in its own codepage, invalid
+        // UTF-8 from its very first byte
+        bytes.extend_from_slice(&[0xd0, 0xef, 0xff, 0xf1, 0xfe, 0xff, b':', b' ', 0x80, b'\n']);
+        bytes.extend_from_slice(b"needle after the bad line\n");
+        std::fs::write(dir.path().join("mixed.txt"), &bytes).unwrap();
+        std::fs::write(dir.path().join("bin.dat"), b"needle\x00after\n").unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+
+        let hit = grep(&mut ctx, "needle", None, None, 0);
+        assert!(hit.ok, "{}", hit.output);
+        assert!(
+            hit.output.contains("needle after the bad line"),
+            "a non-UTF-8 line must not end the scan: {}",
+            hit.output
+        );
+
+        // the bad line itself stays reachable, shown lossily as context
+        let lossy = grep(&mut ctx, "after", None, None, 1);
+        assert!(
+            lossy.output.contains('\u{fffd}'),
+            "invalid bytes should decode to the replacement character: {}",
+            lossy.output
+        );
+
+        // and a NUL still means binary: skipped, not scanned
+        let bin = grep(&mut ctx, "needle", None, Some("*.dat"), 0);
+        assert!(
+            bin.output.contains("no matches"),
+            "binary content must stay out of results: {}",
+            bin.output
+        );
     }
 
     #[test]
