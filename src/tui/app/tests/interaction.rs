@@ -956,31 +956,41 @@ fn effort_slider_opens_on_current_level_with_hits() {
         .position(|l| *l == EffortLevel::High)
         .unwrap();
     assert_eq!(app.menu_sel, want);
-    // render the slider card: 6 click targets, one per level
+    // render the surface into the composer slot: 6 click targets, one per level
     let area = Rect::new(0, 0, 100, 30);
+    let surface = Rect::new(0, 24, 100, 6);
     let mut buf = Buffer::empty(area);
-    app.draw_menu(&mut buf, area);
+    app.draw_effort_slider(&mut buf, surface);
     assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
     // first draw only tracks, never sweeps from nothing
     assert_eq!(app.effort_blend_sel, Some(want));
     assert!(app.effort_blend.is_none(), "no sweep on open");
     // moving the selection arms the color sweep for the new level
     app.menu_sel = 0;
-    app.draw_menu(&mut buf, area);
+    app.draw_effort_slider(&mut buf, surface);
     assert_eq!(app.effort_blend_sel, Some(0));
-    // title centered like every other menu, air row under it
-    let title_y = app.menu_rect.y as usize;
+    // the surface owns the bottom slot: title left, the committed level and
+    // the command that opens it right, one dim hint line at the very bottom
     let title: String = (0..100)
-        .map(|x| buf[(x, title_y as u16)].symbol().to_string())
+        .map(|x| buf[(x, surface.y)].symbol().to_string())
         .collect();
-    let pos = title.find("Effort").expect("title row: {title:?}");
-    let end = pos + "Effort".len();
     assert!(
-        (pos as i32 - (100 - end) as i32).abs() <= 2,
-        "title centered: {title:?}"
+        title.trim_start().starts_with("Effort"),
+        "title sits at the left of the surface: {title:?}"
+    );
+    assert!(
+        title.contains("high") && title.contains("/effort"),
+        "the committed level and the command ride the title row: {title:?}"
+    );
+    let hint: String = (0..100)
+        .map(|x| buf[(x, surface.bottom() - 1)].symbol().to_string())
+        .collect();
+    assert!(
+        hint.contains("enter confirm") && hint.contains("esc cancel"),
+        "one hint line at the bottom: {hint:?}"
     );
     let air: String = (0..100)
-        .map(|x| buf[(x, title_y as u16 + 1)].symbol().to_string())
+        .map(|x| buf[(x, surface.y + 1)].symbol().to_string())
         .collect();
     assert!(air.trim().is_empty(), "air row under title: {air:?}");
     assert!(
@@ -989,14 +999,14 @@ fn effort_slider_opens_on_current_level_with_hits() {
     );
     // restore High for the dots/hover checks below (they assume it selected)
     app.menu_sel = want;
-    app.draw_menu(&mut buf, area);
+    app.draw_effort_slider(&mut buf, surface);
     // expired sweep settles back to the palette color: the selected dot reads
     // the theme color, not a stale blend frame
     app.effort_blend = Some((
         (0, 0, 0),
         std::time::Instant::now() - std::time::Duration::from_secs(5),
     ));
-    app.draw_menu(&mut buf, area);
+    app.draw_effort_slider(&mut buf, surface);
     let (hit, _) = app.effort_hits[want];
     let dot = buf[(hit.x + 4, hit.y + 1)].style().fg;
     assert_eq!(
@@ -1315,7 +1325,7 @@ fn effort_scoped_menu_via_form_click() {
         .unwrap();
     assert_eq!(app.menu_sel, want, "cursor after form click");
     // wide draw keeps the cursor on the target level
-    app.draw_menu(&mut buf, area);
+    app.draw_effort_slider(&mut buf, Rect::new(0, 24, 100, 6));
     assert_eq!(app.menu_sel, want, "cursor after wide draw");
     assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
     // narrow draw stars the target level
@@ -1384,29 +1394,33 @@ fn effort_menu_reopens_without_a_stale_sweep() {
     use ratatui::layout::Rect;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let area = Rect::new(0, 0, 100, 30);
+    let surface = Rect::new(0, 24, 100, 6);
     let mut buf = Buffer::empty(area);
     app.model_cfg.effort = EffortLevel::High;
     app.open_menu(Menu::Effort { model: None });
-    app.draw_menu(&mut buf, area);
+    app.draw_effort_slider(&mut buf, surface);
     app.menu_sel = EffortLevel::SELECTABLE.len() - 1;
-    app.draw_menu(&mut buf, area);
+    app.draw_effort_slider(&mut buf, surface);
     assert!(app.effort_blend.is_some(), "a level change sweeps");
     app.menu_home();
     app.model_cfg.effort = EffortLevel::Low;
     app.open_menu(Menu::Effort { model: None });
     assert!(
         app.effort_blend.is_none() && app.effort_blend_sel.is_none(),
-        "opening must clear the old popup's blend state"
+        "opening must clear the old surface's blend state"
     );
-    app.draw_menu(&mut buf, area);
+    app.draw_effort_slider(&mut buf, surface);
     assert!(app.effort_blend.is_none(), "first frame must not sweep");
 }
 
 /// The effort card dims the screen behind it like every other menu. DIM alone
 /// only dulls the foreground, so painted backgrounds (user band, selection
 /// fills) would keep glowing behind this one popup.
+/// The effort surface owns the composer slot and nothing above it: the old
+/// floating card dimmed the whole screen behind it, which is exactly the
+/// "menu pops over the chat" behavior the redesign removes.
 #[test]
-fn effort_card_dims_painted_backgrounds() {
+fn effort_surface_leaves_the_transcript_untouched() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use ratatui::style::{Color, Style};
@@ -1415,10 +1429,21 @@ fn effort_card_dims_painted_backgrounds() {
     app.open_menu(Menu::Effort { model: None });
     let area = Rect::new(0, 0, 100, 30);
     let mut buf = Buffer::empty(area);
-    // well outside the centered card, so only the modal dim can reach it
+    // a painted transcript cell well above the surface slot
     buf[(0, 0)].set_style(Style::new().bg(Color::Indexed(235)));
-    app.draw_menu(&mut buf, area);
-    assert_eq!(buf[(0, 0)].style().bg, Some(Color::Indexed(233)));
+    app.draw_effort_slider(&mut buf, Rect::new(0, 24, 100, 6));
+    assert_eq!(
+        buf[(0, 0)].style().bg,
+        Some(Color::Indexed(235)),
+        "nothing above the surface may be dimmed or cleared"
+    );
+    assert!(
+        !buf[(0, 0)]
+            .style()
+            .add_modifier
+            .contains(ratatui::style::Modifier::DIM),
+        "no modal dim above the surface"
+    );
 }
 
 #[test]

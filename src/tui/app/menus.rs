@@ -899,6 +899,21 @@ impl App {
     /// Effort slider hit-test: label column or dot column → SELECTABLE
     /// index. Pure lookup, no side effects: hovering previews nothing, only
     /// a click (or arrows + Enter) changes the selection.
+    /// The level the open effort picker commits to: the scoped model's own,
+    /// or the session model's when the picker is unscoped. The bottom surface
+    /// shows it next to its title so "what will Enter write" is readable
+    /// without leaving the surface.
+    pub(super) fn effort_committed(&self) -> crate::config::EffortLevel {
+        match self.cur_menu() {
+            Some(Menu::Effort { model }) => model
+                .as_ref()
+                .and_then(|k| self.cfg.models.get(k))
+                .map(|m| m.effort)
+                .unwrap_or(self.model_cfg.effort),
+            _ => self.model_cfg.effort,
+        }
+    }
+
     pub(super) fn effort_index_at(&self, row: u16, col: u16) -> Option<usize> {
         if !matches!(self.cur_menu(), Some(Menu::Effort { .. })) {
             return None;

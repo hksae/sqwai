@@ -2241,6 +2241,12 @@ impl App {
         // The borderless composer takes exactly its content height: one row
         // until the user enters a newline, then it grows up to six rows.
         let input_h = input_rows;
+        // The effort picker is a surface, not a popup: while it is open it owns
+        // the composer's slot, and the transcript above is never dimmed or
+        // cleared for it. Its height is therefore the layout's business.
+        let effort_surface =
+            matches!(self.cur_menu(), Some(Menu::Effort { .. })) && area.width >= 56;
+        const EFFORT_SURFACE_H: u16 = 6;
         // One slot sits above the composer. A notice owns it; when there is
         // nothing to say, the queue moves down into it instead of leaving the
         // row empty under its own line. The queue keeps a row of its own only
@@ -2255,7 +2261,11 @@ impl App {
             Constraint::Length(1),
         ];
         let live_r = (notice.is_some() || queued).then_some(constraints.len() - 1);
-        constraints.push(Constraint::Length(input_h));
+        constraints.push(Constraint::Length(if effort_surface {
+            EFFORT_SURFACE_H
+        } else {
+            input_h
+        }));
         let input_r = constraints.len() - 1;
         constraints.push(Constraint::Length(1));
         let status_r = constraints.len() - 1;
@@ -2469,7 +2479,11 @@ impl App {
         let sb = self.status_bar(area.width);
         sb.render(layout[status_r], buf);
 
-        self.draw_popup(buf, layout[input_r]);
+        if effort_surface {
+            self.draw_effort_slider(buf, layout[input_r]);
+        } else {
+            self.draw_popup(buf, layout[input_r]);
+        }
         self.draw_menu(buf, area);
     }
 
@@ -2752,10 +2766,11 @@ impl App {
             self.menu_built_at = Some(now);
         }
 
-        // Effort gets a horizontal slider card instead of the generic
-        // row list (narrow terminals fall back to the list below).
+        // The wide effort picker is drawn into the composer slot by the layout
+        // (a surface, not a popup); here it only keeps the narrow-terminal
+        // fallback to the generic row list.
         if matches!(menu, Some(Menu::Effort { .. })) && area.width >= 56 {
-            self.draw_effort_slider(buf, area);
+            self.effort_hits.clear();
             return;
         }
         self.effort_hits.clear();
@@ -3198,7 +3213,7 @@ impl App {
     /// track below (off/gray on the left, max/magenta on the right). The
     /// filled part of the track takes the selected level's color; the rest
     /// stays dim. Arrows preview, click previews, Enter commits.
-    fn draw_effort_slider(&mut self, buf: &mut Buffer, area: Rect) {
+    pub(super) fn draw_effort_slider(&mut self, buf: &mut Buffer, area: Rect) {
         use crate::config::EffortLevel;
         const COL_W: u16 = 8;
         let n = EffortLevel::SELECTABLE.len();
@@ -3245,77 +3260,65 @@ impl App {
         };
         let ink = Style::new().fg(ink);
 
-        // card geometry: 1 pad + n columns; air row under the centered
-        // title (like every other menu), then labels + track + one air row
-        let inner_w = 1 + COL_W * n as u16;
-        let w = (inner_w + 2).clamp(30, area.width.saturating_sub(4).max(30));
-        let h: u16 = 6;
-        let rect = Rect {
-            x: area.x + (area.width.saturating_sub(w)) / 2,
-            y: area.y + (area.height.saturating_sub(h)) / 2,
-            width: w,
-            height: h.min(area.height.saturating_sub(2).max(4)),
-        };
+        // Surface form: the composer's slot, full width, no border and no
+        // modal dim — the transcript above stays exactly as it was, which is
+        // the whole difference from the old floating card.
+        let inner_w = COL_W * n as u16;
+        let rect = area;
         self.menu_rect = rect;
         self.effort_hits.clear();
-
-        // modal dim, same as generic menus (text and colors preserved): DIM
-        // alone only dulls the foreground, so painted backgrounds behind the
-        // card get stepped down by hand or they keep glowing
-        for y in area.y..area.bottom() {
-            for x in area.x..area.right() {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    let mut style = cell.style().add_modifier(Modifier::DIM);
-                    if let Some(bg) = style.bg {
-                        style.bg = Some(dim_bg(bg));
-                    }
-                    cell.set_style(style);
-                }
-            }
-        }
-
-        let block = Block::default()
-            .title_alignment(Alignment::Center)
-            .title(Span::styled(
-                format!(" {} ", self.menu_title()),
-                crate::tui::art::h2_style(),
-            ))
-            .title_bottom(
-                Line::from(vec![
-                    Span::styled(
-                        "← →".to_string(),
-                        Style::new()
-                            .fg(ratatui::style::Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" move ".to_string(), Theme::dim()),
-                ])
-                .right_aligned(),
-            );
-        Clear.render(rect, buf);
         for y in rect.y..rect.bottom() {
             for x in rect.x..rect.right() {
                 if let Some(cell) = buf.cell_mut((x, y)) {
-                    let mut style = cell.style();
-                    style.bg = Some(Theme::MENU_BG());
-                    cell.set_style(style);
+                    cell.set_style(Style::new().bg(Theme::INPUT_BG()));
                 }
             }
         }
-        let inner = Rect {
-            x: rect.x + 1,
-            y: rect.y + 1,
-            width: rect.width.saturating_sub(2),
-            height: rect.height.saturating_sub(2),
-        };
-        block.render(rect, buf);
-        if inner.height < 4 || inner.width < inner_w {
+        if rect.height < 6 || rect.width < inner_w + 4 {
             return;
         }
-
-        let labels_y = inner.y + 1;
-        let track_y = inner.y + 2;
-        let base_x = inner.x + 1;
+        // title row: the surface's name left; right, the level Enter would
+        // commit plus the command that opens this — the same fact the status
+        // bar carries, readable without looking away from the slider
+        let committed = self.effort_committed();
+        buf.set_line(
+            rect.x,
+            rect.y,
+            &Line::from(Span::styled(
+                format!(" {}", self.menu_title()),
+                crate::tui::art::h2_style(),
+            )),
+            rect.width,
+        );
+        Paragraph::new(
+            Line::from(Span::styled(
+                format!("{} · /effort", committed.as_str()),
+                Theme::dim(),
+            ))
+            .right_aligned(),
+        )
+        .render(
+            Rect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width.saturating_sub(1),
+                height: 1,
+            },
+            buf,
+        );
+        let labels_y = rect.y + 2;
+        let track_y = rect.y + 3;
+        let base_x = rect.x + ((rect.width.saturating_sub(inner_w)) / 2).max(1);
+        // one dim hint line at the very bottom, where their pickers keep theirs
+        buf.set_line(
+            rect.x + 1,
+            rect.bottom() - 1,
+            &Line::from(Span::styled(
+                "←/→ move · enter confirm · esc cancel",
+                Theme::dim(),
+            )),
+            rect.width.saturating_sub(2),
+        );
 
         // labels row + hit rects (label cell and dot cell share one target)
         for (i, lvl) in EffortLevel::SELECTABLE.iter().enumerate() {
@@ -3391,7 +3394,7 @@ impl App {
             Rect {
                 x: base_x,
                 y: track_y,
-                width: inner.width.saturating_sub(1),
+                width: inner_w,
                 height: 1,
             },
             buf,
