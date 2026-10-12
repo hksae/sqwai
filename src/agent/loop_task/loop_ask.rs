@@ -373,25 +373,41 @@ pub(crate) async fn run_tool_blocking(
     name: &str,
     args: &serde_json::Value,
 ) -> tools::Outcome {
+    // The three accumulating maps move into the worker thread instead of being
+    // copied through a `ToolCtx` clone (#193) — `files_read` and `read_windows`
+    // grow over a whole session, and this call runs for every tool call. What
+    // stays behind is one insurance copy, used only if the closure dies mid-run
+    // and takes the live maps with it.
+    let files_read = std::mem::take(&mut ctx.files_read);
+    let read_windows = std::mem::take(&mut ctx.read_windows);
+    let journal = std::mem::take(&mut ctx.journal);
+    let fallback = (files_read.clone(), read_windows.clone(), journal.clone());
     let mut exec_ctx = ctx.clone();
-    let fallback_ctx = exec_ctx.clone();
+    exec_ctx.files_read = files_read;
+    exec_ctx.read_windows = read_windows;
+    exec_ctx.journal = journal;
     let name = name.to_string();
     let args = args.clone();
-    let (outcome, exec_ctx) = tokio::task::spawn_blocking(move || {
-        let o = tools::execute(&mut exec_ctx, &name, &args);
-        (o, exec_ctx)
+    let joined = tokio::task::spawn_blocking(move || {
+        let outcome = tools::execute(&mut exec_ctx, &name, &args);
+        (outcome, exec_ctx)
     })
-    .await
-    .unwrap_or_else(|e| {
-        (
-            tools::Outcome::err(format!("tool thread failed: {e}")),
-            fallback_ctx,
-        )
-    });
-    ctx.journal = exec_ctx.journal;
-    ctx.files_read = exec_ctx.files_read;
-    ctx.read_windows = exec_ctx.read_windows;
-    outcome
+    .await;
+    match joined {
+        Ok((outcome, worker)) => {
+            ctx.journal = worker.journal;
+            ctx.files_read = worker.files_read;
+            ctx.read_windows = worker.read_windows;
+            outcome
+        }
+        Err(e) => {
+            let (files_read, read_windows, journal) = fallback;
+            ctx.journal = journal;
+            ctx.files_read = files_read;
+            ctx.read_windows = read_windows;
+            tools::Outcome::err(format!("tool thread failed: {e}"))
+        }
+    }
 }
 
 #[cfg(test)]
