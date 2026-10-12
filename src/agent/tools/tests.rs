@@ -520,7 +520,13 @@ fn read_output_reports_totals_and_spills_when_truncated() {
         &json!({"pattern": "line 2499", "path": spill}),
     );
     assert!(g.ok, "spill must be greppable: {}", g.output);
-    assert!(g.output.contains("line 2499"), "{}", g.output);
+    // a found line, not the `no matches for /<pattern>/` echo — that string
+    // contains the pattern too, so `contains("line 2499")` proved nothing
+    assert!(
+        g.output.contains(":2500: line 2499"),
+        "grep must reach the file the host pointed at: {}",
+        g.output
+    );
 
     // Reading is all the jail grants here. A file the model planted in the
     // spill dir would come back later looking like its own past evidence.

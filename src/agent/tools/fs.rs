@@ -724,12 +724,20 @@ pub(super) fn grep(
     let mut matches = 0usize;
     // same host-owned skip as glob above (see comment there)
     let host_owned = ctx.root.join(".sqwai");
+    // …with one exception, in the same spelling `resolve` hands back: a
+    // truncated result points the model at `.sqwai/spill/<file>` and tells it
+    // to grep that file, so the skip must not refuse the very path the host
+    // named. Only a walk *named* into the spill dir sees what it names — a
+    // sweep from the project root still never reaches host state. Same
+    // asymmetry `ctx::resolve` grants `read` (§2.0).
+    let spill = host_owned.join("spill");
+    let spill_named = base_dir.starts_with(&spill);
     'outer: for entry in WalkBuilder::new(&base_dir).hidden(true).build().flatten() {
         let path = entry.path();
         if !path.is_file() {
             continue;
         }
-        if path == host_owned || path.starts_with(&host_owned) {
+        if path.starts_with(&host_owned) && !(spill_named && path.starts_with(&spill)) {
             continue;
         }
         if let Some(f) = &inc {
@@ -1069,6 +1077,48 @@ mod tests {
         assert!(listed.ok);
         assert!(!listed.output.contains(".sqwai"), "{}", listed.output);
         assert!(listed.output.contains("visible.txt"), "{}", listed.output);
+    }
+
+    /// The spill dir stays out of every sweep, but the one file a truncated
+    /// result named is searchable — the note telling the model to `grep` it
+    /// was a promise the tool could not keep.
+    #[test]
+    fn the_file_a_spill_note_named_is_the_one_grep_may_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let spill = dir.path().join(".sqwai").join("spill");
+        std::fs::create_dir_all(&spill).unwrap();
+        std::fs::write(spill.join("read-big.txt"), "spilled_marker_xyz\n").unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+
+        let sweep = grep(&mut ctx, "spilled_marker_xyz", None, None, 0);
+        assert!(
+            sweep.output.contains("no matches"),
+            "a project-wide sweep must still not see the spill dir: {}",
+            sweep.output
+        );
+
+        let named = grep(
+            &mut ctx,
+            "spilled_marker_xyz",
+            Some(".sqwai/spill/read-big.txt"),
+            None,
+            0,
+        );
+        assert!(
+            named.output.contains(":1: spilled_marker_xyz"),
+            "the file the host pointed at must be greppable: {}",
+            named.output
+        );
+
+        // and naming one file does not turn the spill dir into a listing
+        let other = grep(
+            &mut ctx,
+            "spilled_marker_xyz",
+            Some(".sqwai/spill"),
+            None,
+            0,
+        );
+        assert!(!other.ok, "the spill dir itself stays closed");
     }
 
     #[test]
