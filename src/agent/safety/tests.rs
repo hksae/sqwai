@@ -695,3 +695,29 @@ fn a_lookalike_name_does_not_hide_the_protected_segment() {
         );
     }
 }
+
+/// Audit H2 residual: after a transparent wrapper the classifier skipped every
+/// flag and every number, so the *value* of a flag became the command it was
+/// judging — `sudo -u root rm /etc/shadow` was read as a call to `root`.
+#[test]
+fn a_wrappers_flag_value_is_not_the_command() {
+    let head = |cmd: &str| {
+        let words: Vec<&str> = cmd.split_whitespace().collect();
+        words[effective_command_index(&words)].to_string()
+    };
+
+    assert_eq!(head("sudo -u root rm /etc/shadow"), "rm");
+    assert_eq!(head("sudo --user=root rm x"), "rm");
+    assert_eq!(head("strace -o log cp a b"), "cp");
+    assert_eq!(head("nice -n 10 cp a b"), "cp");
+    assert_eq!(head("timeout -k 5 30 kill x"), "kill");
+    assert_eq!(head("env -u PATH bash -c x"), "bash");
+    assert_eq!(head("xargs -I {} rm x"), "rm");
+    // stacked short flags carry their value inside the token: `-n10` is one word
+    assert_eq!(head("nice -n10 cp a b"), "cp");
+    // the shapes that worked before still do
+    assert_eq!(head("sudo rm x"), "rm");
+    assert_eq!(head("nohup mv a b"), "mv");
+    assert_eq!(head("timeout 30 rm x"), "rm");
+    assert_eq!(head("rm x"), "rm");
+}

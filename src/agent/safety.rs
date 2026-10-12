@@ -719,6 +719,81 @@ pub(crate) const ELEVATION_PREFIXES: &[&str] = &[
     "sudo", "doas", "env", "nice", "nohup", "xargs", "time", "timeout", "strace",
 ];
 
+/// Flags that consume the word after them, per wrapper.
+///
+/// `effective_command_index` skipped every flag and every numeric token
+/// generically, so the *value* of a flag became the command: `sudo -u root rm
+/// /etc/shadow` reported its binary as `root`, `strace -o log cp a b` as `log`
+/// (audit H2 residual). The scope gate in `tools/policy.rs` reads the same
+/// index, so both were looking at the wrong word.
+///
+/// Deliberately a list of the flags that take a value, not a full grammar: a
+/// flag that is not listed behaves as before (skip the flag, stop at its
+/// value), which is the shape that over-estimates risk rather than
+/// under-estimating it.
+const WRAPPER_VALUE_FLAGS: &[(&str, &[&str])] = &[
+    (
+        "sudo",
+        &[
+            "-u",
+            "-g",
+            "-h",
+            "-p",
+            "-r",
+            "-t",
+            "-C",
+            "-D",
+            "-R",
+            "-b",
+            "--user",
+            "--group",
+            "--prompt",
+            "--chroot",
+            "--other-user",
+        ],
+    ),
+    ("doas", &["-u", "-l"]),
+    ("env", &["-u", "-C", "-P", "-S", "-v", "--unset", "--chdir"]),
+    ("nice", &["-n", "-a"]),
+    ("strace", &["-o", "-s", "-p", "-P", "-e", "-a", "-S", "-U"]),
+    (
+        "xargs",
+        &[
+            "-n",
+            "-I",
+            "-d",
+            "-E",
+            "-P",
+            "-s",
+            "-L",
+            "-N",
+            "--max-args",
+            "--replace",
+        ],
+    ),
+    ("timeout", &["-k", "-s", "--kill-after", "--signal"]),
+    ("time", &["-f", "-o"]),
+    ("nohup", &[]),
+];
+
+/// True when `flag` is a known value-consuming option of `wrapper`.
+fn flag_takes_value(wrapper: Option<&str>, flag: &str) -> bool {
+    let Some(known) = wrapper else {
+        return false;
+    };
+    // `-x5` and `--flag=value` carry their value inside the token
+    if flag.len() > 2 && !flag.starts_with("--") {
+        return false;
+    }
+    if flag.contains('=') {
+        return false;
+    }
+    WRAPPER_VALUE_FLAGS
+        .iter()
+        .find(|(name, _)| *name == known)
+        .is_some_and(|(_, flags)| flags.contains(&flag))
+}
+
 /// Index of the operative command word after transparent wrappers, `VAR=`
 /// assignments and the wrapper's own flags/numeric args (`nice -n 10`,
 /// `timeout 30`). Shared by the AST walk and the scope gate so both see the
@@ -726,11 +801,11 @@ pub(crate) const ELEVATION_PREFIXES: &[&str] = &[
 /// present.
 pub(crate) fn effective_command_index(words: &[&str]) -> usize {
     let mut i = 0;
-    let mut saw_wrapper = false;
+    let mut wrapper: Option<&str> = None;
     while i < words.len() {
         let w = words[i];
         if ELEVATION_PREFIXES.contains(&w) {
-            saw_wrapper = true;
+            wrapper = Some(w);
             i += 1;
             continue;
         }
@@ -738,9 +813,14 @@ pub(crate) fn effective_command_index(words: &[&str]) -> usize {
             i += 1;
             continue;
         }
-        if saw_wrapper
-            && (w.starts_with('-') || (!w.is_empty() && w.chars().all(|c| c.is_ascii_digit())))
-        {
+        if wrapper.is_some() && w.starts_with('-') {
+            i += 1;
+            if flag_takes_value(wrapper, w) && i < words.len() {
+                i += 1;
+            }
+            continue;
+        }
+        if wrapper.is_some() && !w.is_empty() && w.chars().all(|c| c.is_ascii_digit()) {
             i += 1;
             continue;
         }
