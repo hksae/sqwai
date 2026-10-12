@@ -3923,18 +3923,33 @@ fn fmt_k(n: u64) -> String {
     }
 }
 
+/// Clip `s` to `n` terminal COLUMNS. Counting chars was the old measure, and a
+/// CJK or emoji title is one to two columns per char, so `truncate_chars(t, 30)`
+/// handed back a 60-column row — the invariant every caller here exists to keep.
 fn truncate_chars(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else if n == 0 {
-        String::new()
-    } else {
-        // reserve one slot for the ellipsis so the result is never wider than
-        // `n` — otherwise a "…" pushed the boxed tool output one column past its
-        // border and wrap_tagged split the overflow char (and the right │) onto
-        // a new row, breaking the frame on every long line of a large file.
-        format!("{}…", s.chars().take(n - 1).collect::<String>())
+    use unicode_width::UnicodeWidthChar;
+    if unicode_width::UnicodeWidthStr::width(s) <= n {
+        return s.to_string();
     }
+    if n == 0 {
+        return String::new();
+    }
+    // reserve one slot for the ellipsis so the result is never wider than
+    // `n` — otherwise a "…" pushed the boxed tool output one column past its
+    // border and wrap_tagged split the overflow char (and the right │) onto
+    // a new row, breaking the frame on every long line of a large file.
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > n - 1 {
+            break;
+        }
+        used += w;
+        out.push(ch);
+    }
+    out.push('…');
+    out
 }
 
 fn short_id(s: &Session) -> String {

@@ -1826,3 +1826,30 @@ fn session_recovery_with_deleted_or_broken_plan_id() {
         Some("another_corrupt_or_deleted_plan_88888")
     );
 }
+
+/// #176: the clip measured characters, the frame measures columns. A CJK title
+/// is ~2 columns per character, so `truncate_chars(t, 30)` produced a 60-column
+/// row inside a box that was 30 wide.
+#[test]
+fn truncate_chars_clips_to_columns_not_characters() {
+    use unicode_width::UnicodeWidthStr;
+    let cjk = "仕事プロジェクト".repeat(6); // 48 chars, and twice as many columns
+    assert_eq!(UnicodeWidthStr::width(cjk.as_str()), 96);
+    assert_eq!(cjk.chars().count(), 48);
+
+    let clipped = truncate_chars(&cjk, 24);
+    assert!(
+        UnicodeWidthStr::width(clipped.as_str()) <= 24,
+        "must fit the budget: {:?} is {} columns",
+        clipped,
+        UnicodeWidthStr::width(clipped.as_str())
+    );
+    assert!(clipped.ends_with('…'));
+
+    // the ASCII shapes the old code already got right stay identical
+    assert_eq!(truncate_chars("abcdef", 4), "abc…");
+    assert_eq!(truncate_chars("abc", 4), "abc");
+    assert_eq!(truncate_chars("abc", 0), "");
+    // Cyrillic is one column per char, so it keeps seven of them plus the mark
+    assert_eq!(truncate_chars("Проекты-агента", 8), "Проекты…");
+}
