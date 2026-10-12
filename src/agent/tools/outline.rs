@@ -198,7 +198,11 @@ fn is_transparent_container(kind: &str, lang: Lang) -> bool {
         && kind == "export_statement")
         || (lang == Lang::Python && kind == "decorated_definition")
         || (matches!(lang, Lang::C | Lang::Cpp) && kind == "template_declaration")
-        || (lang == Lang::Go && kind == "type_declaration")
+        // Go declarations are grouped: `var (...)` and `const (...)` carry no
+        // name of their own, the specs inside them do. Walking past the group
+        // is what lets each `var_spec` / `const_spec` be listed on its own line,
+        // the way `type_spec` already is (#222).
+        || (lang == Lang::Go && matches!(kind, "type_declaration" | "var_declaration" | "const_declaration"))
 }
 
 fn is_declaration_node(node: Node, lang: Lang) -> bool {
@@ -223,15 +227,32 @@ fn is_declaration_node(node: Node, lang: Lang) -> bool {
             kind,
             "function_declaration"
                 | "class_declaration"
+                // `abstract class X` is its own node kind in this grammar, not a
+                // class_declaration with a modifier — without it the whole class
+                // was absent from the map, not just its members.
+                | "abstract_class_declaration"
                 | "interface_declaration"
                 | "type_alias_declaration"
                 | "enum_declaration"
                 | "method_definition"
+                // interface and abstract-class members carry no body, so they are
+                // a different node kind from `method_definition`: the part of an
+                // interface worth skimming was invisible (#222).
+                | "method_signature"
+                | "abstract_method_signature"
+                | "property_signature"
                 | "enum_assignment"
         ),
         Lang::Go => matches!(
             kind,
-            "function_declaration" | "method_declaration" | "type_spec"
+            "function_declaration"
+                | "method_declaration"
+                | "type_spec"
+                // The grouped `var (...)` / `const (...)` forms have no name of
+                // their own; each spec inside them does, and that is the line the
+                // reader wants — the way `enum_variant` is for a Rust enum.
+                | "var_spec"
+                | "const_spec"
         ),
         Lang::Bash => matches!(kind, "function_definition"),
         Lang::C | Lang::Cpp => {

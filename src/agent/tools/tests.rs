@@ -3198,3 +3198,43 @@ fn step_diff_tool_flow() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+/// #222: `outline` reported the interface and the Go declaration block, but
+/// never what was inside them. The tool exists so the model does not have to
+/// page the file — and for a file whose content *is* an interface or a set of
+/// constants, that is exactly the case where it had nothing to say.
+#[test]
+fn outline_names_interface_members_and_go_package_declarations() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("reader.ts"),
+        "export interface Reader {\n    read(p: string): Promise<string>;\n    close(): void;\n    readonly limit: number;\n}\n\nexport abstract class Base {\n    abstract run(): void;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("limits.go"),
+        "package main\n\nvar (\n    ErrTimeout = 1\n    Version = \"1\"\n)\n\nconst MaxConns = 8\n\nconst (\n    Lo = 1\n    Hi = 2\n)\n",
+    )
+    .unwrap();
+    let mut ctx = ToolCtx::new(dir.path());
+
+    let ts = execute(&mut ctx, "outline", &json!({"path": "reader.ts"}));
+    assert!(ts.ok, "{}", ts.output);
+    for member in ["read(", "close(", "limit", "run("] {
+        assert!(
+            ts.output.contains(member),
+            "member {member} never reached the outline:\n{}",
+            ts.output
+        );
+    }
+
+    let go = execute(&mut ctx, "outline", &json!({"path": "limits.go"}));
+    assert!(go.ok, "{}", go.output);
+    for name in ["ErrTimeout", "Version", "MaxConns", "Lo", "Hi"] {
+        assert!(
+            go.output.contains(name),
+            "Go declaration {name} never reached the outline:\n{}",
+            go.output
+        );
+    }
+}
