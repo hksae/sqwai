@@ -1501,15 +1501,27 @@ async fn run_agent(
                     ctx.journal.push((sha, "bash (cancelled)".to_string()));
                 }
 
+                // #185: which files to re-lint is taken from what the call
+                // reported touching, not from a list of tool names. Every
+                // file-mutating tool hands back a `FileDiff` — `write`, `edit`,
+                // `multi_edit`, and `patch` for one or many files — so a tool
+                // added later cannot be forgotten here the way `patch` was.
+                // `bash`, `git_commit`, `git_stage` and `plan` have no per-call
+                // path (their effects are attributed through the shadow head, or
+                // they touch no source file); the specs test makes that split an
+                // explicit, reviewable decision.
                 if outcome.ok
-                    && matches!(call.name.as_str(), "write" | "edit" | "multi_edit")
+                    && crate::agent::tools::is_mutating_call(&call.name, &call.args)
                     && let Some(manager) = lsp_manager.as_mut()
-                    && let Some(path) = call.args.get("file_path").and_then(|v| v.as_str())
                 {
-                    let path = root.join(path);
-                    if let Ok(text) = tokio::fs::read_to_string(&path).await {
-                        let _ = manager.did_change(&path, &text).await;
-                        let _ = manager.did_save(&path).await;
+                    let touched = lint_targets(&outcome, &root);
+                    if !touched.is_empty() {
+                        for path in &touched {
+                            if let Ok(text) = tokio::fs::read_to_string(path).await {
+                                let _ = manager.did_change(path, &text).await;
+                                let _ = manager.did_save(path).await;
+                            }
+                        }
                         tokio::task::yield_now().await;
                         let diagnostics = manager.collect_diagnostics().await.unwrap_or_default();
                         let diagnostic_count = diagnostics
@@ -1536,12 +1548,20 @@ async fn run_agent(
                         // to closing a verify step unreachable: the branch existed
                         // on the read side only.
                         if let Some(writer) = journal.as_mut() {
+                            let rel = |p: &std::path::Path| {
+                                p.strip_prefix(&root)
+                                    .unwrap_or(p)
+                                    .to_string_lossy()
+                                    .replace('\\', "/")
+                            };
                             let _ = writer.append_evidence(
                                 "diagnostics",
                                 serde_json::json!({
-                                    "path": path.strip_prefix(&root).unwrap_or(&path)
-                                        .to_string_lossy()
-                                        .replace('\\', "/"),
+                                    // `path` stays the first linted file for the
+                                    // readers that were written against one file
+                                    // per record; `paths` carries all of them.
+                                    "path": rel(&touched[0]),
+                                    "paths": touched.iter().map(|p| rel(p)).collect::<Vec<_>>(),
                                     "errors": errors,
                                     "warnings": warnings,
                                     "server": diagnostics
@@ -1837,6 +1857,32 @@ async fn run_agent(
     if let Some(manager) = lsp_manager {
         let _ = manager.shutdown().await;
     }
+}
+
+/// The files a finished call reports having touched: `file_diff` for the
+/// single-file tools, `file_diffs` for a multi-file `patch`. Deduplicated, in
+/// the order the call reported them.
+///
+/// An empty list means the tool declares no per-call path — for `bash` that is
+/// the H4 attribution gap, not a claim that nothing changed. Callers must not
+/// read it as "the worktree is untouched".
+pub(crate) fn lint_targets(
+    outcome: &crate::agent::tools::Outcome,
+    root: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
+    let mut reported: Vec<&str> = Vec::new();
+    if let Some(d) = &outcome.file_diff {
+        reported.push(&d.path);
+    }
+    reported.extend(outcome.file_diffs.iter().map(|d| d.path.as_str()));
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for rel in reported {
+        let p = root.join(rel.replace('\\', "/"));
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
 }
 
 #[cfg(test)]

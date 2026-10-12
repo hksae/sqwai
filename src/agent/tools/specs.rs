@@ -969,3 +969,39 @@ fn tool_specs_wire_weight() {
         "tool surface grew past budget: {bytes} bytes"
     );
 }
+
+/// #185: the diagnostics loop reads its targets from what a call reported
+/// touching, so the registry of mutating tools has to stay classified: either a
+/// tool reports a per-call path (the loop can lint it), or it is listed here as
+/// having none. A new mutating tool that lands in neither bucket fails this
+/// test on purpose — the bug being fixed was `patch` changing files while the
+/// gate knew only three names.
+#[test]
+fn every_mutating_tool_is_classified_for_diagnostics() {
+    const REPORTS_A_PATH: &[&str] = &["write", "edit", "multi_edit", "patch"];
+    const NO_PER_CALL_PATH: &[&str] = &[
+        "bash",       // targets unknown in advance; attributed via the shadow head (H4)
+        "git_commit", // records the tree, does not edit it
+        "git_stage",  // touches the index, not file bytes
+        "plan",       // host state under .sqwai/, not a source file
+    ];
+
+    let mut classified = 0usize;
+    for name in tool_names() {
+        if !is_mutating(&name) {
+            continue;
+        }
+        classified += 1;
+        assert!(
+            REPORTS_A_PATH.contains(&name.as_str()) || NO_PER_CALL_PATH.contains(&name.as_str()),
+            "{name} mutates but is not classified for diagnostics: report a FileDiff from it, \
+             or add it to NO_PER_CALL_PATH with the reason it has no lintable path"
+        );
+    }
+    assert_eq!(
+        classified,
+        REPORTS_A_PATH.len() + NO_PER_CALL_PATH.len(),
+        "the classified lists and the tool registry drifted: a mutating tool was added to one \
+         place and not the other"
+    );
+}

@@ -377,3 +377,50 @@ async fn an_approved_egress_kind_does_not_ask_again() {
     assert!(!asked_again, "the same egress kind must not ask twice");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// #185: which files get re-linted comes from the call's own diff report, not
+/// from a list of tool names. A multi-file `patch` reaches the LSP with every
+/// file it touched, a single-file tool with its one, and a tool that reports no
+/// path (`bash`) reports none — which is not the same as "nothing changed".
+#[test]
+fn lint_targets_come_from_the_calls_diff_report() {
+    use crate::agent::tools::{FileDiff, Outcome};
+    let root = std::path::Path::new(if cfg!(windows) { r"C:\proj" } else { "/proj" });
+    let diff = |path: &str| FileDiff {
+        path: path.into(),
+        added: 1,
+        removed: 0,
+        hash_before: None,
+        hash_after: "h".into(),
+        mode: "file".into(),
+        checkpoint: None,
+        blob_before: None,
+        blob_after: None,
+    };
+
+    let mut single = Outcome::ok("written");
+    single.file_diff = Some(diff("src/a.rs"));
+    assert_eq!(
+        super::lint_targets(&single, root),
+        vec![root.join("src/a.rs")]
+    );
+
+    let mut multi = Outcome::ok("patch applied");
+    multi.file_diff = Some(diff("src/a.rs"));
+    multi.file_diffs = vec![diff("src/a.rs"), diff(r"src\b.rs"), diff("c.txt")];
+    assert_eq!(
+        super::lint_targets(&multi, root),
+        vec![
+            root.join("src/a.rs"),
+            root.join("src/b.rs"),
+            root.join("c.txt"),
+        ],
+        "every reported file, in order, without duplicates"
+    );
+
+    let bash = Outcome::ok("no output");
+    assert!(
+        super::lint_targets(&bash, root).is_empty(),
+        "a tool with no per-call path reports none"
+    );
+}
