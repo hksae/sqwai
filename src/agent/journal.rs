@@ -925,7 +925,7 @@ impl Journal {
     /// Per-session timestamp check as **warn** (not `invalid_evidence`).
     ///
     /// If evidence predates the earliest `plan op start` for this step, it is
-    /// still accepted (see `step_started_at`), but the host notes it: the
+    /// still accepted, but the host notes it: the
     /// evidence was recorded before the step existed in any session, so it
     /// may be stale or from a reused `seq`. One line per stale ref, capped.
     pub fn stale_evidence_warnings(
