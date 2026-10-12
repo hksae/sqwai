@@ -1715,9 +1715,17 @@ fn sanitize_line(line: Line<'static>) -> Line<'static> {
     let mut col = 0usize;
     for span in line.spans {
         let text = span.content.as_ref();
-        // carriage return overwrites the row: anything before the last one
-        // was never visible. `\r` is one byte, so `i + 1` is a boundary.
-        let text = match text.rfind('\r') {
+        // A carriage return overwrites the row: anything before the last one
+        // was never visible (progress bars). But a `\r` that only *terminates*
+        // a line — `\r\n`, which every Windows-native command emits — is not an
+        // overwrite. Cutting at it left only the bytes after the final CRLF, so
+        // a whole tool-output line rendered as nothing. `\r` is one byte, so
+        // `i + 1` is a char boundary either way; a surviving `\r` is dropped by
+        // the control loop below.
+        let overwrite = text
+            .rfind('\r')
+            .filter(|&i| text.as_bytes().get(i + 1) != Some(&b'\n'));
+        let text = match overwrite {
             Some(i) => &text[i + 1..],
             None => text,
         };

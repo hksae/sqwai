@@ -1056,3 +1056,31 @@ fn display_math_block_renders_arrow() {
         .collect();
     assert!(all.contains('→'), "rendered: {all:?}");
 }
+
+/// Issue #175: a `\r` was treated as an overwrite wherever it appeared — including
+/// the CR of a `\r\n`. A tool-output line ending in CRLF therefore cut to the
+/// bytes after the last CR, which is nothing, so whole rows disappeared for
+/// every Windows-native command.
+#[test]
+fn crlf_is_a_line_end_not_an_overwrite() {
+    let kept: String = sanitize_line(Line::from(Span::raw("first line\r\nsecond line\r\n")))
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(kept.contains("first line"), "line lost: {kept:?}");
+    assert!(kept.contains("second line"), "line lost: {kept:?}");
+    assert!(!kept.contains('\r'), "the CR itself is dropped: {kept:?}");
+}
+
+/// The behaviour the cut exists for: a progress bar redrawing its own row
+/// leaves only what came after the last carriage return.
+#[test]
+fn a_true_carriage_return_still_overwrites() {
+    let kept: String = sanitize_line(Line::from(Span::raw("downloading 10%\rdownloading 90%")))
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert_eq!(kept, "downloading 90%");
+}
