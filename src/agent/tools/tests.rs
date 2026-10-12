@@ -3238,3 +3238,112 @@ fn outline_names_interface_members_and_go_package_declarations() {
         );
     }
 }
+
+/// #214 L26: a leading UTF-8 BOM is the file's encoding marker, not content.
+/// Shown as part of line 1 it put a stray U+FEFF in context, and the anchor the
+/// model copied from that line could then never match the file it came from.
+#[test]
+fn a_utf8_bom_is_hidden_from_the_model_and_kept_on_disk() {
+    let (mut ctx, dir) = proj();
+    let bom = "\u{feff}";
+    fs::write(
+        dir.join("script.ps1"),
+        format!("{bom}Write-Host hi\nsecond\n"),
+    )
+    .unwrap();
+
+    let r = execute(&mut ctx, "read", &json!({"file_path": "script.ps1"}));
+    assert!(r.ok, "{}", r.output);
+    assert!(
+        !r.output.contains('\u{feff}'),
+        "the marker must not reach the model:\n{}",
+        r.output
+    );
+    assert!(r.output.contains("Write-Host hi"), "{}", r.output);
+
+    // the edit anchored on the line the model was shown really lands
+    let e = execute(
+        &mut ctx,
+        "edit",
+        &json!({
+            "file_path": "script.ps1",
+            "old_string": "Write-Host hi",
+            "new_string": "Write-Host yo",
+        }),
+    );
+    assert!(e.ok, "{}", e.output);
+    let on_disk = fs::read_to_string(dir.join("script.ps1")).unwrap();
+    assert!(
+        on_disk.starts_with(bom),
+        "an edit must not silently change the file's encoding: {on_disk:?}"
+    );
+    assert!(on_disk.contains("Write-Host yo"), "{on_disk:?}");
+    // and the diff speaks the view the model was given: one changed line, not a
+    // phantom rewrite of line 1 caused by the marker
+    let diff = e.diff.unwrap_or_default();
+    assert_eq!(
+        diff.lines()
+            .filter(|l| l.starts_with('-') && !l.starts_with("---"))
+            .count(),
+        1,
+        "{diff}"
+    );
+
+    // a whole-file rewrite keeps the marker too
+    let w = execute(
+        &mut ctx,
+        "write",
+        &json!({"file_path": "script.ps1", "content": "fresh\nfile\n"}),
+    );
+    assert!(w.ok, "{}", w.output);
+    assert!(
+        fs::read_to_string(dir.join("script.ps1"))
+            .unwrap()
+            .starts_with(bom),
+        "write dropped the encoding marker"
+    );
+
+    // and so does multi_edit
+    fs::write(dir.join("three.ps1"), format!("{bom}a\nb\nc\n")).unwrap();
+    let m = execute(
+        &mut ctx,
+        "multi_edit",
+        &json!({
+            "file_path": "three.ps1",
+            "edits": [
+                {"old_string": "a", "new_string": "x"},
+                {"old_string": "c", "new_string": "z"},
+            ],
+        }),
+    );
+    assert!(m.ok, "{}", m.output);
+    let on_disk = fs::read_to_string(dir.join("three.ps1")).unwrap();
+    assert!(on_disk.starts_with(bom), "{on_disk:?}");
+    assert!(
+        on_disk.contains('x') && on_disk.contains('z'),
+        "{on_disk:?}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// A file without a BOM must not gain one from any of this.
+#[test]
+fn an_edit_to_a_plain_file_does_not_add_a_bom() {
+    let (mut ctx, dir) = proj();
+    fs::write(dir.join("plain.rs"), "fn a() {}\n").unwrap();
+    let e = execute(
+        &mut ctx,
+        "edit",
+        &json!({
+            "file_path": "plain.rs",
+            "old_string": "fn a() {}",
+            "new_string": "fn b() {}",
+        }),
+    );
+    assert!(e.ok, "{}", e.output);
+    let bytes = fs::read(dir.join("plain.rs")).unwrap();
+    assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "{bytes:?}");
+    assert_eq!(&bytes, b"fn b() {}\n");
+    fs::remove_dir_all(&dir).ok();
+}

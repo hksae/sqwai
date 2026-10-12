@@ -196,7 +196,11 @@ pub(super) fn read(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Ou
     if is_binary(&bytes) {
         return Outcome::err("binary file — cannot display");
     }
-    let text = String::from_utf8_lossy(&bytes);
+    // The BOM is an encoding marker, not content: what the model is shown here
+    // is what it will anchor `edit` on (#214 L26). The freshness hash below
+    // stays over the raw bytes, so the guard still sees the file as it is.
+    let decoded = String::from_utf8_lossy(&bytes);
+    let (text, _had_bom) = split_bom(&decoded);
     let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
     let limit =
         (args["limit"].as_u64().unwrap_or(READ_MAX_LINES as u64) as usize).min(READ_MAX_LINES);
@@ -239,7 +243,7 @@ pub(super) fn read(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Ou
     if total_lines == 0 {
         out.push_str("(empty file)\n");
     } else if truncated {
-        match spill_output(ctx, "read", &text) {
+        match spill_output(ctx, "read", text) {
             Some(rel) => out.push_str(&format!(
                 "\n…(showing lines {first_no}–{last_no} of {total_lines} total — full output saved to {rel}: use grep to search it or read with offset/limit for specific sections, do not re-read the whole file)"
             )),
@@ -304,6 +308,32 @@ fn structure_hint(ctx: &mut ToolCtx, raw: &str) -> Option<String> {
     ))
 }
 
+/// A UTF-8 BOM is an encoding marker, not content. Read with it, line 1 shows
+/// the model a stray U+FEFF and an `edit` anchored at the start of the file
+/// cannot match what the host just displayed (#214 L26). File text therefore
+/// crosses the model boundary without the marker, and the marker is written
+/// back when the file had one — a read-edit-write cycle leaves the file
+/// byte-for-byte what the encoding asked for.
+const BOM: &str = "\u{feff}";
+
+/// Split a leading BOM off text that came off disk.
+fn split_bom(text: &str) -> (&str, bool) {
+    match text.strip_prefix(BOM) {
+        Some(rest) => (rest, true),
+        None => (text, false),
+    }
+}
+
+/// The bytes to write: `edited` as the model saw it, plus the marker it never
+/// saw when the file carried one.
+fn restore_bom(edited: String, had_bom: bool) -> String {
+    if had_bom {
+        format!("{BOM}{edited}")
+    } else {
+        edited
+    }
+}
+
 pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome {
     let exists = {
         // probe without failing when missing
@@ -313,6 +343,10 @@ pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome
     };
     // previous contents, kept for the post-facto diff
     let mut prev: Option<String> = None;
+    // the encoding marker the file carried: a whole-file rewrite must not
+    // silently drop it, because the model never sees the BOM and so can have no
+    // opinion about it (#214 L26)
+    let mut had_bom = false;
     if exists {
         let p = match existing_writable(ctx, raw) {
             Ok(p) => p,
@@ -322,6 +356,9 @@ pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome
             return Outcome::err(e);
         }
         prev = fs::read_to_string(&p).ok();
+        if let Some(text) = prev.as_deref() {
+            had_bom = split_bom(text).1;
+        }
     }
     let p = match ctx.resolve_writable(raw) {
         Ok(p) => p,
@@ -332,15 +369,18 @@ pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome
     {
         return Outcome::err(format!("mkdir failed: {e}"));
     }
+    let body = restore_bom(content.to_string(), had_bom && !content.starts_with(BOM));
     // checkpoint before mutation
     checkpoint(ctx, &p, "write");
-    if let Err(e) = fs::write(&p, content) {
+    if let Err(e) = fs::write(&p, &body) {
         return Outcome::err(format!("write failed: {e}"));
     }
     ctx.mark_read(&p);
     let label = rel_label(&ctx.root, &p);
     let diff = match prev.as_deref() {
-        Some(before) => make_diff(before, content),
+        // compared without the marker on either side, or every write to a BOM'd
+        // file would report line 1 as changed
+        Some(before) => make_diff(split_bom(before).0, content),
         // a created file is all-added: the TUI expanded row and the
         // write-path lints (AF) see the same diff shape as an edit
         None => make_diff("", content),
@@ -350,7 +390,7 @@ pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome
         &p,
         &ctx.root,
         prev.as_deref().map(str::as_bytes),
-        content.as_bytes(),
+        body.as_bytes(),
         "write",
         checkpoint,
         &diff,
@@ -497,26 +537,34 @@ pub(super) fn edit(
     } else if let Err(e) = require_fresh(ctx, &p) {
         return Outcome::err(e);
     }
-    let content = match fs::read_to_string(&p) {
+    let original = match fs::read_to_string(&p) {
         Ok(c) => c,
         Err(e) => return Outcome::err(format!("read failed: {e}")),
     };
-    let updated = match apply_one(&content, old, new, replace_all) {
+    // #214 L26: the marker is matched and diffed away from, so an anchor taken
+    // from line 1 of what `read` showed really lands, and put back on the bytes
+    // handed to the filesystem, so the file keeps the encoding it had.
+    let (content, had_bom) = split_bom(&original);
+    let edited = match apply_one(content, old, new, replace_all) {
         Ok(u) => u,
         Err(e) => return Outcome::err(e),
     };
+    let updated = restore_bom(edited, had_bom);
     checkpoint(ctx, &p, "edit");
     let checkpoint_id = ctx.journal.last().map(|(sha, _)| sha.clone());
     if let Err(e) = fs::write(&p, &updated) {
         return Outcome::err(format!("write failed: {e}"));
     }
     ctx.mark_read(&p);
-    let diff = make_diff(&content, &updated);
+    let (shown, _) = split_bom(&updated);
+    let diff = make_diff(content, shown);
     let (add, rem) = diff_counts(&diff);
     let metadata = file_diff(
         &p,
         &ctx.root,
-        Some(content.as_bytes()),
+        // the pre- and post-images are the file's bytes, marker and all: this
+        // is what the blob store and `/undo` restore, not the model's view
+        Some(raw.as_bytes()),
         updated.as_bytes(),
         "edit",
         checkpoint_id,
@@ -525,7 +573,7 @@ pub(super) fn edit(
     let out_msg = format!(
         "edited {} (+{add}/-{rem}) {}",
         rel_label(&ctx.root, &p),
-        edit_landing(&content, &updated)
+        edit_landing(content, shown)
     );
     Outcome::ok(out_msg)
         .with_diff(diff)
@@ -548,12 +596,16 @@ pub(super) fn multi_edit(
     } else if let Err(e) = require_fresh(ctx, &p) {
         return Outcome::err(e);
     }
-    let mut content = match fs::read_to_string(&p) {
+    let original = match fs::read_to_string(&p) {
         Ok(c) => c,
         Err(e) => return Outcome::err(format!("read failed: {e}")),
     };
+    // #214 L26: the replacements are validated, diffed and spanned on the text
+    // without the encoding marker — the text the model was actually shown —
+    // while the bytes written and hashed keep it.
+    let (body, had_bom) = split_bom(&original);
     // validate all replacements against the evolving text before touching disk
-    let mut staged = content.clone();
+    let mut staged = body.to_string();
     for (i, (old, new, all)) in edits.iter().enumerate() {
         if let Err(e) = apply_one(&staged, old, new, *all) {
             return Outcome::err(format!("edit #{} failed: {e}", i + 1));
@@ -562,19 +614,19 @@ pub(super) fn multi_edit(
     }
     checkpoint(ctx, &p, "multi_edit");
     let checkpoint_id = ctx.journal.last().map(|(sha, _)| sha.clone());
-    let before = content;
-    content = staged;
-    if let Err(e) = fs::write(&p, &content) {
+    let updated = restore_bom(staged, had_bom);
+    if let Err(e) = fs::write(&p, &updated) {
         return Outcome::err(format!("write failed: {e}"));
     }
     ctx.mark_read(&p);
-    let diff = make_diff(&before, &content);
+    let (shown, _) = split_bom(&updated);
+    let diff = make_diff(body, shown);
     let (add, rem) = diff_counts(&diff);
     let metadata = file_diff(
         &p,
         &ctx.root,
-        Some(before.as_bytes()),
-        content.as_bytes(),
+        Some(original.as_bytes()),
+        updated.as_bytes(),
         "multi_edit",
         checkpoint_id,
         &diff,
@@ -582,7 +634,7 @@ pub(super) fn multi_edit(
     // Several hunks can sit anywhere in the file, so the honest report is the
     // outer span — naming one of their lines as if it were the change would be
     // a guess.
-    let span = match changed_span(&before, &content) {
+    let span = match changed_span(body, shown) {
         Some((from, to)) => format!("→ across lines {from}–{to}"),
         None => "→ lines removed".to_string(),
     };
