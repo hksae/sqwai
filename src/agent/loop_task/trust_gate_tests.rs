@@ -1,4 +1,4 @@
-use super::loop_ask::bash_call;
+use super::loop_ask::{Grant, bash_call};
 use super::*;
 
 fn tainted_project(name: &str) -> (std::path::PathBuf, String) {
@@ -422,5 +422,35 @@ fn lint_targets_come_from_the_calls_diff_report() {
     assert!(
         super::lint_targets(&bash, root).is_empty(),
         "a tool with no per-call path reports none"
+    );
+}
+
+/// #191: "always allow" grants the shape the user saw, not the exact bytes of
+/// one command. Same head, same reason, no new flag ⇒ pass. A flag that was
+/// never in front of them ⇒ ask again.
+#[test]
+fn a_grant_follows_the_shape_of_the_risk() {
+    let granted = Grant::from_command("git commit -m first", "git history rewrite");
+    assert!(
+        granted.covers("git commit -m second", "git history rewrite"),
+        "a new message is the same shape the user approved"
+    );
+    assert!(!granted.covers("git push origin main", "git history rewrite"));
+    assert!(
+        !granted.covers("git commit --no-verify -m second", "git history rewrite"),
+        "a flag the user never saw is not granted"
+    );
+    assert!(!granted.covers("git commit -m second", "force push"));
+
+    let wide = Grant::from_command("git commit -m x --amend", "r");
+    assert!(
+        wide.covers("git commit -m y", "r"),
+        "dropping an approved flag cannot add risk"
+    );
+
+    let rm = Grant::from_command("rm notes.txt", "recursive delete");
+    assert!(
+        !rm.covers("rm -rf build", "recursive delete"),
+        "the classic widening stays behind a dialog"
     );
 }

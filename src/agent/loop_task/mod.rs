@@ -822,7 +822,7 @@ async fn run_agent(
                 .collect()
         })
         .unwrap_or_default();
-    let mut always_allow: Vec<String> = Vec::new();
+    let mut always_allow: Vec<loop_ask::Grant> = Vec::new();
     let mut memory_writes_this_turn: u8;
     let mut next_id: u64 = 0;
     // prompt size of the last request, as reported by the provider

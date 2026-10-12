@@ -201,13 +201,65 @@ fn ask_rejection(questions: &[AskQuestion]) -> Option<String> {
     })
 }
 
+/// What one "always allow" answer grants for the rest of the session. The old
+/// rule compared whole command strings, so approving `git commit -m "a"` never
+/// covered `git commit -m "b"`, although the user clearly approved that shape
+/// (#191). Matching the prefix alone would be too generous: it would let
+/// `git commit --no-verify -m "b"` ride on a grant given to a command that had
+/// no such flag.
+///
+/// A grant therefore covers a later call with the same two-word head, the same
+/// classifier reason, and no flag the user has not already seen. Argument
+/// values are free to differ; the shape of the risk is not.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Grant {
+    head: String,
+    reason: String,
+    flags: std::collections::BTreeSet<String>,
+}
+
+impl Grant {
+    pub(crate) fn from_command(command: &str, reason: &str) -> Self {
+        Self {
+            head: command_head(command),
+            reason: reason.to_string(),
+            flags: command_flags(command),
+        }
+    }
+
+    /// True when running `command` for `reason` is inside what was approved.
+    /// The call's flags must be a subset of the granted ones: dropping an
+    /// approved flag cannot add risk, adding one the user never saw always does.
+    pub(crate) fn covers(&self, command: &str, reason: &str) -> bool {
+        self.head == command_head(command)
+            && self.reason == reason
+            && command_flags(command).is_subset(&self.flags)
+    }
+}
+
+fn command_head(command: &str) -> String {
+    command
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn command_flags(command: &str) -> std::collections::BTreeSet<String> {
+    command
+        .split_whitespace()
+        .filter(|token| token.len() > 1 && token.starts_with('-'))
+        .map(|token| token.to_string())
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn bash_call(
     call: &ToolCallReq,
     ctx: &mut ToolCtx,
     tx: &mpsc::Sender<AgentEvent>,
     ctl: &mut mpsc::Receiver<ControlMsg>,
-    always_allow: &mut Vec<String>,
+    always_allow: &mut Vec<Grant>,
     blocked: &[(String, regex::Regex)],
     next_id: &mut u64,
     subagent_depth: u8,
@@ -286,7 +338,10 @@ pub(crate) async fn bash_call(
     }
 
     if let Some(reason) = &needs_approval {
-        if !always_allow.contains(&command) {
+        if !always_allow
+            .iter()
+            .any(|grant| grant.covers(&command, reason))
+        {
             if subagent_depth > 0 {
                 return tools::Outcome::err(format!(
                     "dangerous command requires user approval, but subagents cannot prompt for approval ({reason})"
@@ -324,7 +379,7 @@ pub(crate) async fn bash_call(
                     if let (Some(kind), Some(writer)) = (taint_kind, journal.as_mut()) {
                         crate::agent::trust::ack_egress(writer, kind);
                     }
-                    always_allow.push(command.clone());
+                    always_allow.push(Grant::from_command(&command, reason));
                 }
                 ApprovalDecision::RunOnce => {
                     if let (Some(kind), Some(writer)) = (taint_kind, journal.as_mut()) {
