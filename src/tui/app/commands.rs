@@ -180,6 +180,7 @@ impl App {
             }
             "/compact" => self.start_compaction(),
             "/context" => self.open_menu(Menu::Context),
+            "/effort" => self.open_menu(Menu::Effort { model: None }),
             "/undo" => {
                 if self.streaming {
                     self.show_busy_status();

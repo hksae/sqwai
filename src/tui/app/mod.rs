@@ -324,6 +324,11 @@ pub struct App {
     asm_lens: Vec<usize>,
     last_chat: Rect,
     last_input: Rect,
+    /// The effort picker is in surface form on this screen (wide and tall
+    /// enough for it). It is the tail of the history, so vertical scrolling
+    /// belongs to the transcript: the wheel and PageUp/PageDown move the view,
+    /// and the surface scrolls away with the end of the history.
+    effort_surf: bool,
     /// per-segment render cache keyed by segment id (not position):
     /// appends and stream updates never invalidate other segments' rows.
     /// Entry holds (revision, width, content key, wrapped rows).
@@ -657,6 +662,7 @@ impl App {
             asm_lens: Vec::new(),
             last_chat: Rect::default(),
             last_input: Rect::default(),
+            effort_surf: false,
             seg_cache: std::collections::HashMap::new(),
             live_md: crate::tui::markdown::LiveRender::new(),
             seg_meta: Vec::new(),

@@ -467,8 +467,16 @@ impl App {
                         }
                         KeyCode::Up if !self.menu_stack.is_empty() => self.menu_nav(-1),
                         KeyCode::Down if !self.menu_stack.is_empty() => self.menu_nav(1),
-                        KeyCode::PageUp if !self.menu_stack.is_empty() => self.menu_nav(-2),
-                        KeyCode::PageDown if !self.menu_stack.is_empty() => self.menu_nav(2),
+                        KeyCode::PageUp
+                            if !self.menu_stack.is_empty() && !self.effort_surf =>
+                        {
+                            self.menu_nav(-2)
+                        }
+                        KeyCode::PageDown
+                            if !self.menu_stack.is_empty() && !self.effort_surf =>
+                        {
+                            self.menu_nav(2)
+                        }
                         KeyCode::Left | KeyCode::Right if !self.menu_stack.is_empty() => {
                             if matches!(self.cur_menu(), Some(Menu::Effort { .. })) {
                                 self.menu_nav(if k.code == KeyCode::Left { -1 } else { 1 })
@@ -739,8 +747,12 @@ impl App {
                             self.dirty = true;
                         }
                         KeyCode::Char('j') if ctrl => self.input.insert_newline(),
-                        KeyCode::PageUp if self.menu_stack.is_empty() => self.page(-1),
-                        KeyCode::PageDown if self.menu_stack.is_empty() => self.page(1),
+                        KeyCode::PageUp if self.menu_stack.is_empty() || self.effort_surf => {
+                            self.page(-1)
+                        }
+                        KeyCode::PageDown if self.menu_stack.is_empty() || self.effort_surf => {
+                            self.page(1)
+                        }
                         KeyCode::Up if ctrl => self.scroll(4),
                         KeyCode::Down if ctrl => self.scroll(-4),
                         // move between lines of a multi-line message without arrows
@@ -792,11 +804,18 @@ impl App {
                         // wheel moves the menu selection (the view follows it);
                         // scrolling the bare offset instead would fight hover:
                         // the draw clamp snaps the view back to the hovered row
-                        // and the wheel looks dead at both ends (forms inert)
-                        MouseEventKind::ScrollUp if !self.menu_stack.is_empty() => {
+                        // and the wheel looks dead at both ends (forms inert).
+                        // The effort surface is not a list: it is the tail of the
+                        // history, so the wheel scrolls the transcript and the
+                        // surface scrolls away with it.
+                        MouseEventKind::ScrollUp
+                            if !self.menu_stack.is_empty() && !self.effort_surf =>
+                        {
                             self.menu_wheel(-3);
                         }
-                        MouseEventKind::ScrollDown if !self.menu_stack.is_empty() => {
+                        MouseEventKind::ScrollDown
+                            if !self.menu_stack.is_empty() && !self.effort_surf =>
+                        {
                             self.menu_wheel(3);
                         }
                         MouseEventKind::ScrollUp => {
@@ -809,6 +828,9 @@ impl App {
                             {
                                 self.input
                                     .scroll(tui_textarea::Scrolling::Delta { rows: -1, cols: 0 });
+                                self.dirty = true;
+                            } else if self.effort_surf {
+                                self.scroll(3);
                                 self.dirty = true;
                             } else if self.popup_visible() {
                                 let moved = self.popup_scroll_by(-3);

@@ -2227,6 +2227,10 @@ impl App {
     /// and presented by a dedicated presenter thread. `draw` stays as a thin
     /// wrapper for tests.
     pub(super) fn render_into(&mut self, buf: &mut Buffer, area: Rect) {
+        // cleared every frame: only a path that actually paints the surface
+        // sets it back, so the subagent view and a too-small screen cannot
+        // leave a stale one behind for the scroll routing
+        self.effort_surf = false;
         // cleared every frame: only a deferred width rebuild sets it below,
         // and the loop keeps `dirty` while it stays set
         self.defer_rebuild = false;
@@ -2244,37 +2248,60 @@ impl App {
         // The effort picker is a surface, not a popup: while it is open it owns
         // the composer's slot, and the transcript above is never dimmed or
         // cleared for it. Its height is therefore the layout's business.
-        let effort_surface =
-            matches!(self.cur_menu(), Some(Menu::Effort { .. })) && area.width >= 56;
-        const EFFORT_SURFACE_H: u16 = 6;
+        let effort_surface = matches!(self.cur_menu(), Some(Menu::Effort { .. }))
+            && area.width >= 56
+            && area.height >= 12;
+        const EFFORT_SURFACE_H: u16 = 7;
         // One slot sits above the composer. A notice owns it; when there is
         // nothing to say, the queue moves down into it instead of leaving the
         // row empty under its own line. The queue keeps a row of its own only
         // while a notice holds the slot — the two never both go unused.
         let notice = self.notice_line(area.width);
         let queued = !self.pending_queue.is_empty();
-        let mut constraints = vec![
-            Constraint::Min(3),
-            Constraint::Length(u16::from(notice.is_some() && queued)),
-            // the row directly above the composer: the slot when something owns
-            // it, plain air otherwise
-            Constraint::Length(1),
-        ];
-        let live_r = (notice.is_some() || queued).then_some(constraints.len() - 1);
-        constraints.push(Constraint::Length(if effort_surface {
+        // The bottom band is the tail of the history, not furniture hung over
+        // it: at the end of the transcript it paints in its own slots, scrolled
+        // up those same slots belong to the history and nothing floats below it.
+        let scrolled_up = !self.follow;
+        // the routing flag is the picker's *form*, not whether it is on screen:
+        // scrolled up the surface has left with the tail of the history, but the
+        // wheel must keep scrolling the transcript instead of grabbing the
+        // picker selection again.
+        self.effort_surf = effort_surface;
+        let queue_h = u16::from(!effort_surface && notice.is_some() && queued);
+        // the row directly above the composer: the slot when something owns
+        // it, plain air otherwise. The surface claims the whole bottom of
+        // the screen for itself — no notice, no queue, no air above it.
+        let air_h = u16::from(!effort_surface);
+        let slot_h = if effort_surface {
             EFFORT_SURFACE_H
         } else {
             input_h
-        }));
+        };
+        // the status line hides with the surface too: the rule across the top
+        // of the surface is the only separator it needs
+        let status_h = u16::from(!effort_surface);
+        let band_h = queue_h + air_h + slot_h + status_h;
+        let mut constraints = vec![
+            Constraint::Min(3),
+            Constraint::Length(queue_h),
+            Constraint::Length(air_h),
+        ];
+        let live_r = (!effort_surface && !scrolled_up && (notice.is_some() || queued))
+            .then_some(constraints.len() - 1);
+        constraints.push(Constraint::Length(slot_h));
         let input_r = constraints.len() - 1;
-        constraints.push(Constraint::Length(1));
+        constraints.push(Constraint::Length(status_h));
         let status_r = constraints.len() - 1;
         let layout = Layout::vertical(constraints).split(area);
         let chat = Rect {
             x: area.x + 1,
             y: layout[0].y,
             width: area.width.saturating_sub(2),
-            height: layout[0].height,
+            height: layout[0].height.saturating_add(if scrolled_up {
+                band_h
+            } else {
+                0
+            }),
         };
 
         // The transcript is rendered inside `chat`, not the outer frame. Use
@@ -2422,7 +2449,7 @@ impl App {
         // a notice holds that row, the slot itself when nothing is waiting to
         // say anything. The composer stays a filled band; there are no
         // separator lines.
-        if queued && let Some(r) = if notice.is_some() { Some(1) } else { live_r } {
+        if !scrolled_up && queued && let Some(r) = if notice.is_some() { Some(1) } else { live_r } {
             Paragraph::new(self.queue_line(area.width)).render(layout[r], buf);
         }
         // one status row above the input, for transient notices only. The
@@ -2433,54 +2460,76 @@ impl App {
         {
             Paragraph::new(line).render(layout[r], buf);
         }
-        self.input.set_block(Self::input_block());
-        // the cursor is rendered by tui-textarea; the input has no frame.
-        // `› ` marks the top input row (like the user strip); the textarea
-        // is shifted right so text aligns under it on every row.
-        let marker_w = self.input_marker_w();
-        let input_rect = Rect {
-            x: layout[input_r].x + marker_w,
-            y: layout[input_r].y,
-            width: layout[input_r].width.saturating_sub(marker_w),
-            height: layout[input_r].height,
-        };
-        if marker_w > 0 {
-            Paragraph::new(Line::from(Span::styled(
-                "› ",
-                Style::new().add_modifier(Modifier::BOLD | Modifier::DIM),
-            )))
-            .render(
-                Rect {
-                    x: layout[input_r].x,
-                    y: layout[input_r].y,
-                    width: marker_w,
-                    height: 1,
-                },
-                buf,
-            );
-        }
-        self.input.render(input_rect, buf);
-        // composer band fill: gutter, marker and short rows share the
-        // input background (the textarea paints its own rect already).
-        // Both None and explicit Reset count as unpainted; real fills
-        // (block cursor, text selection) must survive.
-        for y in layout[input_r].y..layout[input_r].bottom() {
-            for x in layout[input_r].x..layout[input_r].right() {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    let mut style = cell.style();
-                    if matches!(style.bg, None | Some(ratatui::style::Color::Reset)) {
-                        style.bg = Some(Theme::INPUT_BG());
-                        cell.set_style(style);
+        // The effort surface owns this slot while open: no composer, no
+        // band fill and no caret — a block cursor left in the slot would
+        // sit on the surface title, and the gray band is exactly what the
+        // redesign removes.
+        if !effort_surface && !scrolled_up {
+            self.input.set_block(Self::input_block());
+            // the cursor is rendered by tui-textarea; the input has no frame.
+            // `› ` marks the top input row (like the user strip); the textarea
+            // is shifted right so text aligns under it on every row.
+            let marker_w = self.input_marker_w();
+            let input_rect = Rect {
+                x: layout[input_r].x + marker_w,
+                y: layout[input_r].y,
+                width: layout[input_r].width.saturating_sub(marker_w),
+                height: layout[input_r].height,
+            };
+            if marker_w > 0 {
+                Paragraph::new(Line::from(Span::styled(
+                    "› ",
+                    Style::new().add_modifier(Modifier::BOLD | Modifier::DIM),
+                )))
+                .render(
+                    Rect {
+                        x: layout[input_r].x,
+                        y: layout[input_r].y,
+                        width: marker_w,
+                        height: 1,
+                    },
+                    buf,
+                );
+            }
+            self.input.render(input_rect, buf);
+            // composer band fill: gutter, marker and short rows share the
+            // input background (the textarea paints its own rect already).
+            // Both None and explicit Reset count as unpainted; real fills
+            // (block cursor, text selection) must survive.
+            for y in layout[input_r].y..layout[input_r].bottom() {
+                for x in layout[input_r].x..layout[input_r].right() {
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        let mut style = cell.style();
+                        if matches!(style.bg, None | Some(ratatui::style::Color::Reset)) {
+                            style.bg = Some(Theme::INPUT_BG());
+                            cell.set_style(style);
+                        }
                     }
                 }
             }
         }
-        self.status_y = layout[status_r].y;
-        let sb = self.status_bar(area.width);
-        sb.render(layout[status_r], buf);
+        // the chips are only clickable while the bar is on screen: scrolled up,
+        // that row shows history and no chip lives there
+        self.status_y = if scrolled_up {
+            u16::MAX
+        } else {
+            layout[status_r].y
+        };
+        if !effort_surface && !scrolled_up {
+            let sb = self.status_bar(area.width);
+            sb.render(layout[status_r], buf);
+        }
 
         if effort_surface {
-            self.draw_effort_slider(buf, layout[input_r]);
+            // scrolled up, the surface has left with the end of the history:
+            // its column hit map must go with it, or hover keeps aiming at
+            // rows that are no longer on screen.
+            if scrolled_up {
+                self.effort_hits.clear();
+                self.menu_rect = Rect::default();
+            } else {
+                self.draw_effort_slider(buf, layout[input_r]);
+            }
         } else {
             self.draw_popup(buf, layout[input_r]);
         }
@@ -2768,9 +2817,10 @@ impl App {
 
         // The wide effort picker is drawn into the composer slot by the layout
         // (a surface, not a popup); here it only keeps the narrow-terminal
-        // fallback to the generic row list.
-        if matches!(menu, Some(Menu::Effort { .. })) && area.width >= 56 {
-            self.effort_hits.clear();
+        // fallback to the generic row list. The surface's own hit map must
+        // survive this frame — clearing it here would drop hover and clicks
+        // onto the generic row math and move the selection by row.
+        if matches!(menu, Some(Menu::Effort { .. })) && area.width >= 56 && area.height >= 12 {
             return;
         }
         self.effort_hits.clear();
@@ -3267,23 +3317,28 @@ impl App {
         let rect = area;
         self.menu_rect = rect;
         self.effort_hits.clear();
-        for y in rect.y..rect.bottom() {
-            for x in rect.x..rect.right() {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_style(Style::new().bg(Theme::INPUT_BG()));
-                }
-            }
-        }
-        if rect.height < 6 || rect.width < inner_w + 4 {
+        if rect.height < 7 || rect.width < inner_w + 4 {
             return;
         }
+        // rule across the top in the brand's own ink: the surface has no
+        // border and no background, so this is what says "the input area is
+        // something else now" without painting over the transcript
+        buf.set_line(
+            rect.x,
+            rect.y,
+            &Line::from(Span::styled(
+                "─".repeat(rect.width as usize),
+                Theme::brand_ink(),
+            )),
+            rect.width,
+        );
         // title row: the surface's name left; right, the level Enter would
         // commit plus the command that opens this — the same fact the status
         // bar carries, readable without looking away from the slider
         let committed = self.effort_committed();
         buf.set_line(
             rect.x,
-            rect.y,
+            rect.y + 1,
             &Line::from(Span::styled(
                 format!(" {}", self.menu_title()),
                 crate::tui::art::h2_style(),
@@ -3300,14 +3355,14 @@ impl App {
         .render(
             Rect {
                 x: rect.x,
-                y: rect.y,
+                y: rect.y + 1,
                 width: rect.width.saturating_sub(1),
                 height: 1,
             },
             buf,
         );
-        let labels_y = rect.y + 2;
-        let track_y = rect.y + 3;
+        let labels_y = rect.y + 3;
+        let track_y = rect.y + 4;
         let base_x = rect.x + ((rect.width.saturating_sub(inner_w)) / 2).max(1);
         // one dim hint line at the very bottom, where their pickers keep theirs
         buf.set_line(

@@ -958,7 +958,7 @@ fn effort_slider_opens_on_current_level_with_hits() {
     assert_eq!(app.menu_sel, want);
     // render the surface into the composer slot: 6 click targets, one per level
     let area = Rect::new(0, 0, 100, 30);
-    let surface = Rect::new(0, 24, 100, 6);
+    let surface = Rect::new(0, 23, 100, 7);
     let mut buf = Buffer::empty(area);
     app.draw_effort_slider(&mut buf, surface);
     assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
@@ -972,7 +972,7 @@ fn effort_slider_opens_on_current_level_with_hits() {
     // the surface owns the bottom slot: title left, the committed level and
     // the command that opens it right, one dim hint line at the very bottom
     let title: String = (0..100)
-        .map(|x| buf[(x, surface.y)].symbol().to_string())
+        .map(|x| buf[(x, surface.y + 1)].symbol().to_string())
         .collect();
     assert!(
         title.trim_start().starts_with("Effort"),
@@ -990,7 +990,7 @@ fn effort_slider_opens_on_current_level_with_hits() {
         "one hint line at the bottom: {hint:?}"
     );
     let air: String = (0..100)
-        .map(|x| buf[(x, surface.y + 1)].symbol().to_string())
+        .map(|x| buf[(x, surface.y + 2)].symbol().to_string())
         .collect();
     assert!(air.trim().is_empty(), "air row under title: {air:?}");
     assert!(
@@ -1325,7 +1325,7 @@ fn effort_scoped_menu_via_form_click() {
         .unwrap();
     assert_eq!(app.menu_sel, want, "cursor after form click");
     // wide draw keeps the cursor on the target level
-    app.draw_effort_slider(&mut buf, Rect::new(0, 24, 100, 6));
+    app.draw_effort_slider(&mut buf, Rect::new(0, 23, 100, 7));
     assert_eq!(app.menu_sel, want, "cursor after wide draw");
     assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
     // narrow draw stars the target level
@@ -1394,7 +1394,7 @@ fn effort_menu_reopens_without_a_stale_sweep() {
     use ratatui::layout::Rect;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let area = Rect::new(0, 0, 100, 30);
-    let surface = Rect::new(0, 24, 100, 6);
+    let surface = Rect::new(0, 23, 100, 7);
     let mut buf = Buffer::empty(area);
     app.model_cfg.effort = EffortLevel::High;
     app.open_menu(Menu::Effort { model: None });
@@ -1431,7 +1431,7 @@ fn effort_surface_leaves_the_transcript_untouched() {
     let mut buf = Buffer::empty(area);
     // a painted transcript cell well above the surface slot
     buf[(0, 0)].set_style(Style::new().bg(Color::Indexed(235)));
-    app.draw_effort_slider(&mut buf, Rect::new(0, 24, 100, 6));
+    app.draw_effort_slider(&mut buf, Rect::new(0, 23, 100, 7));
     assert_eq!(
         buf[(0, 0)].style().bg,
         Some(Color::Indexed(235)),

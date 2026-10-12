@@ -21,6 +21,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "/constraints",
     "/context",
     "/debug",
+    "/effort",
     "/exit",
     "/export",
     "/goal",
@@ -562,6 +563,9 @@ impl App {
             _ => None,
         };
         if let Some(model) = effort_scoped {
+            // the surface is the tail of the history: it only exists at the
+            // end of it, so opening one has to bring the view back down
+            self.follow = true;
             let want = model
                 .as_ref()
                 .and_then(|k| self.cfg.models.get(k))
