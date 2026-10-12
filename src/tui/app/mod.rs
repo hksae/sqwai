@@ -2558,9 +2558,12 @@ impl App {
                 }
                 AgentEvent::RequestBreakdown(b) => {
                     self.session.last_breakdown = Some(b);
+                    // #209 L14: the same split the panel shows, in the request
+                    // log — what no compaction can return versus what can.
+                    let fixed = b.system_tokens + b.memory_tokens + b.skills_tokens + b.host_tokens;
                     crate::providers::log_http(&format!(
                         "request breakdown: system={}B memory={}B skills={}B history={}B \
-                         tool_output={}B host={}B reasoning={}B total={}B",
+                         tool_output={}B host={}B reasoning={}B total={}B fixed={}t",
                         b.system_bytes,
                         b.memory_bytes,
                         b.skills_bytes,
@@ -2569,6 +2572,7 @@ impl App {
                         b.host_bytes,
                         b.reasoning_bytes,
                         b.total_bytes,
+                        fixed,
                     ));
                 }
                 AgentEvent::SubagentStart { id, task } => {
