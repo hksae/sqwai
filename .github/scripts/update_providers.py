@@ -606,8 +606,13 @@ def main():
         write_sync_files("none", md)
         return
 
-    with open(target, "w", encoding="utf-8") as f:
+    # Write through a temp file and rename. A plain truncate-then-write left an
+    # empty or half-written builtin_providers.toml behind when a runner was
+    # interrupted mid-write, and the job committed whatever survived (L30).
+    tmp = f"{target}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         f.write(content)
+    os.replace(tmp, target)
     print(f"Updated {target} with {len(PROVIDERS_CONFIG)} providers and {total} models (serial {serial}).")
     write_sync_files(kind, md)
 

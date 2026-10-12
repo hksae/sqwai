@@ -19,8 +19,16 @@ $bin = if ($env:SQWAI_INSTALL_DIR) {
     Join-Path $env:USERPROFILE ".cargo\bin"
 }
 
-Write-Host "building sqwai (release)..."
-cargo build --release
+# Fail with a sentence, not with "cargo is not recognized" from the middle of a
+# build. `--locked` matches CI: an install that resolves a different dependency
+# set than the one that passed the suite is a silent divergence.
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    Write-Error "cargo not found - install a Rust toolchain (https://rustup.rs) and rerun"
+    exit 1
+}
+
+Write-Host "building sqwai (release, locked dependencies)..."
+cargo build --release --locked
 if ($LASTEXITCODE -ne 0) {
     Write-Error "build failed"
     exit 1
