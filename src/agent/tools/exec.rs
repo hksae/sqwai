@@ -463,14 +463,22 @@ fn run_background(ctx: &ToolCtx, command: &str) -> Outcome {
         cmd.creation_flags(DETACHED_PROCESS | BELOW_NORMAL_PRIORITY_CLASS);
     }
     cmd.stdin(Stdio::null());
+    // One handle, duplicated for the child's two streams (#179). The old setup
+    // moved the created file into stdout and then *opened the same path again*
+    // for stderr: a second descriptor with its own position. The child wrote
+    // stderr to the end of the file and stdout from offset 0 on top of it, so
+    // a job printing to both could erase either stream — and a failed second
+    // open silently dropped stderr to null while stdout kept working.
     if let Ok(f) = std::fs::File::create(&log) {
-        cmd.stdout(Stdio::from(f));
-        if let Ok(af) = std::fs::OpenOptions::new().append(true).open(&log)
-            && let Ok(copy) = af.try_clone()
-        {
-            cmd.stderr(Stdio::from(copy));
-        } else {
-            cmd.stderr(Stdio::null());
+        match f.try_clone() {
+            Ok(err) => {
+                cmd.stdout(Stdio::from(f));
+                cmd.stderr(Stdio::from(err));
+            }
+            Err(_) => {
+                cmd.stdout(Stdio::from(f));
+                cmd.stderr(Stdio::null());
+            }
         }
     } else {
         cmd.stdout(Stdio::null());

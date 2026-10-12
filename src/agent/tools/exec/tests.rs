@@ -672,3 +672,43 @@ fn sleep_is_cancelled_promptly() {
         "a cancelled sleep must not run the clock"
     );
 }
+
+/// A command that writes one marker to each stream, stderr first. With two
+/// independent handles on the same log — the shape #179 removed — the stdout
+/// write starts at offset 0 and lands on top of the bytes stderr appended.
+#[cfg(unix)]
+fn both_streams_command() -> String {
+    "{ echo STDERR-MARKER-AAAAAAAAAAAAAA >&2; echo STDOUT-MARKER-BBBBBBBBBBBBBB; }".to_string()
+}
+
+#[cfg(windows)]
+fn both_streams_command() -> String {
+    if ShellKind::detect() == ShellKind::Cmd {
+        "echo STDERR-MARKER-AAAAAAAAAAAAAA 1>&2 & echo STDOUT-MARKER-BBBBBBBBBBBBBB".to_string()
+    } else {
+        "{ echo STDERR-MARKER-AAAAAAAAAAAAAA >&2; echo STDOUT-MARKER-BBBBBBBBBBBBBB; }".to_string()
+    }
+}
+
+/// #179: a background job's log has to hold both streams, not one over the
+/// other. Same file, one handle duplicated for the child.
+#[test]
+fn a_background_job_logs_stdout_and_stderr_in_one_file() {
+    let _bg = BG_SERIAL.lock().unwrap();
+    let mut c = ctx();
+    let (id, log) = spawn_bg_with_log(&mut c, &both_streams_command());
+
+    let mut text = String::new();
+    for _ in 0..100 {
+        text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text.contains("STDOUT-MARKER") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        text.contains("STDERR-MARKER") && text.contains("STDOUT-MARKER"),
+        "both streams must survive in the log, got: {text:?}"
+    );
+    let _ = bash_kill(&c, &serde_json::json!({"id": id}));
+}
