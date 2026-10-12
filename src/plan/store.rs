@@ -777,8 +777,23 @@ pub fn open_active_for_session(root: &Path, session_id: Option<&str>) -> Result<
         // work into this session's identity and attribution.
         return Ok(None);
     }
-    // Deterministic fallback: pick the most recent active plan by created timestamp
-    active_plans.sort_by(|a, b| b.created.cmp(&a.created));
+    // Deterministic fallback: pick the most recent active plan by created
+    // timestamp. Compared as text (#182) the order only holds while every stamp
+    // carries the same UTC offset — across a DST change `01:00+02:00` sorts
+    // after `02:00+03:00` although it is an hour later, so the "newest" plan
+    // can be the older one. Compare instants; an unparseable stamp loses to
+    // any real one, which keeps the comparator a total order.
+    let instant = |p: &Plan| {
+        chrono::DateTime::parse_from_rfc3339(&p.created)
+            .map(|t| t.with_timezone(&chrono::Utc))
+            .ok()
+    };
+    active_plans.sort_by(|a, b| match (instant(a), instant(b)) {
+        (Some(x), Some(y)) => y.cmp(&x),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => b.created.cmp(&a.created),
+    });
     Ok(active_plans.into_iter().next())
 }
 

@@ -1273,3 +1273,31 @@ fn split_rejects_done_in_progress_blocked_or_evidenced_steps() {
     .unwrap_err();
     assert_eq!(err.code, "step_has_evidence");
 }
+
+/// #182: the fallback picked the "newest" active plan by comparing RFC3339
+/// text, which only orders correctly while every stamp shares one UTC offset.
+/// Across a DST change the lexicographic winner is an hour older.
+#[test]
+fn open_active_for_session_falls_back_to_the_later_instant() {
+    let dir = std::env::temp_dir().join(format!("sqwai-plan-order-{}", new_id()));
+
+    // Later as text (02:00 > 01:30), earlier as an instant: 23:00Z vs 23:30Z.
+    let mut older = new_plan();
+    older.created = "2026-10-25T02:00:00+03:00".into();
+    older.sessions = vec!["older".into()];
+    store(&dir, &older).unwrap();
+
+    let mut newer = new_plan();
+    newer.created = "2026-10-25T01:30:00+02:00".into();
+    newer.sessions = vec!["newer".into()];
+    store(&dir, &newer).unwrap();
+
+    let picked = open_active_for_session(&dir, None).unwrap();
+    assert_eq!(
+        picked.as_ref().map(|p| p.id.as_str()),
+        Some(newer.id.as_str()),
+        "the fallback must rank by instant, not by string"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
