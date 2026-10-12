@@ -156,6 +156,28 @@ fn critical_windows_writes_are_caught() {
         classify_for(ShellKind::Cmd, "echo data > C:\\Windows\\System32\\x.dll"),
         Verdict::NeedsApproval(_)
     ));
+    // #174: no shell requires a space between the redirect operator and its
+    // target, and the space-sensitive forms `"> "` / `">> "` let exactly the
+    // unspaced spellings run without ever reaching the approval menu.
+    for cmd in [
+        "echo evil>C:\\Windows\\System32\\x.dll",
+        "\"payload\">>C:\\Windows\\System32\\drivers\\etc\\hosts",
+        "123>>C:\\boot\\bcd",
+        "dir /s>C:/windows/x.txt",
+    ] {
+        assert!(
+            matches!(
+                classify_for(ShellKind::PowerShell, cmd),
+                Verdict::NeedsApproval(_)
+            ),
+            "unspaced redirect must need approval: {cmd}"
+        );
+    }
+    // a redirect that touches nothing critical stays usable
+    assert_eq!(
+        classify_for(ShellKind::PowerShell, "Get-ChildItem>out.txt"),
+        Verdict::Safe
+    );
 }
 
 #[test]
@@ -620,6 +642,56 @@ fn powershell_recursive_delete_is_flagged_without_force() {
             classify_for(ShellKind::PowerShell, cmd),
             Verdict::Safe,
             "expected Safe for non-recursive cmd: {cmd}"
+        );
+    }
+}
+
+/// #180: `.sqwai` is host state as a path SEGMENT. The old rule looked at the
+/// characters before the spelling and never at what came after, so a scratch
+/// or backup directory that merely starts with it — `.sqwaitmp`,
+/// `.sqwai-backup` — was blocked as if it were the journal. A hard block on
+/// innocent paths is what trains a model to route around the gate. Names
+/// ending in the spelling are pinned from the other side of the same rule.
+#[test]
+fn names_that_merely_contain_the_protected_spelling_are_not_host_state() {
+    for cmd in [
+        "ls .sqwaitmp/plans/x.json",
+        "rm .sqwai-backup/x",
+        "cat notes.sqwai",
+        "echo x > report.sqwai",
+        "tar czf sqwai.tgz .sqwaitmp/",
+        "ls ./.sqwaitmp",
+        "cp one.sqwai-two.bak out/",
+    ] {
+        for shell in [
+            ShellKind::Bash,
+            ShellKind::Sh,
+            ShellKind::Cmd,
+            ShellKind::PowerShell,
+        ] {
+            assert_eq!(
+                classify_for(shell, cmd),
+                Verdict::Safe,
+                "false block for shell {shell:?}: {cmd}"
+            );
+        }
+    }
+}
+
+/// The other half of the same rule: every occurrence in a token is examined,
+/// so a lookalike name cannot shield the protected segment that follows it.
+#[test]
+fn a_lookalike_name_does_not_hide_the_protected_segment() {
+    for cmd in [
+        "rm -rf .sqwaitmp/../.sqwai/plans",
+        "cat /tmp/x.sqwai-notes .sqwai/journal/live.jsonl",
+        "del notes.sqwai .sqwai\\plans\\1.json",
+        "ls .sqwai-backup && rm .sqwai/config.toml.bak",
+    ] {
+        assert_eq!(
+            classify_for(ShellKind::Bash, cmd),
+            Verdict::Blocked("protected_path"),
+            "lookalike must not hide host state: {cmd}"
         );
     }
 }

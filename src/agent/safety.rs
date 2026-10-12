@@ -279,16 +279,28 @@ fn scan_protected_tokens(lower: &str) -> Verdict {
         let token = raw_token.trim_matches(|c: char| {
             c == '"' || c == '\'' || c == '`' || c == '(' || c == ')' || c == '[' || c == ']'
         });
-        if let Some(idx) = token.find(".sqwai") {
-            // Check if .sqwai is a path segment (start of token, or preceded by / or \ or .)
-            if idx > 0 {
-                let prev = token.as_bytes()[idx - 1];
-                if prev != b'/' && prev != b'\\' && prev != b'.' && prev != b':' && prev != b'=' {
-                    continue;
-                }
+        // Every occurrence is examined: stopping at the first would let a
+        // lookalike name hide the real segment behind it.
+        for (idx, _) in token.match_indices(".sqwai") {
+            // `.sqwai` is host state as a path SEGMENT. The old rule looked
+            // only at what preceded the match, so any token that merely
+            // STARTED with the spelling was blocked as if it were the
+            // protected directory: `.sqwaitmp/plans/1.json`, `.sqwai-backup`
+            // (#180).
+            let prev_is_boundary = match idx.checked_sub(1).map(|i| token.as_bytes()[i]) {
+                None => true,
+                Some(b'/') | Some(b'\\') | Some(b':') => true,
+                // the doubled-dot spelling the old list admitted stays blocked
+                // only in segment-leading position
+                Some(b'.') => idx == 1 || matches!(token.as_bytes()[idx - 2], b'/' | b'\\'),
+                Some(_) => false,
+            };
+            let rest = &token[idx + ".sqwai".len()..];
+            let ends_segment = rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\');
+            if !prev_is_boundary || !ends_segment {
+                continue;
             }
 
-            let rest = &token[idx + ".sqwai".len()..];
             let rest_norm = rest.replace('\\', "/");
 
             // Allowed exceptions:
@@ -546,11 +558,26 @@ fn powershell_recursive_delete(lower: &str) -> bool {
 }
 
 fn powershell_critical_write(lower: &str) -> bool {
-    let writes = ["set-content", "add-content", "out-file", "> ", ">> "];
-    writes.iter().any(|write| lower.contains(write))
-        && ["c:\\windows", "c:/windows", "\\system32", "/etc/", "/boot/"]
-            .iter()
-            .any(|path| lower.contains(path))
+    // Redirection needs no space before its target (`echo evil>C:\Windows\x`),
+    // so the space-sensitive forms `"> "` / `">> "` let exactly the writes this
+    // gate exists for slip through (#174). Same shape as
+    // `cmd_critical_redirect`: any redirect operator plus a critical path.
+    // `c:\\boot` is listed as the cmd gate lists it: the PowerShell spelling
+    // was missing it, so redirecting to the boot configuration asked nothing.
+    (["set-content", "add-content", "out-file"]
+        .iter()
+        .any(|write| lower.contains(write))
+        || lower.contains('>'))
+        && [
+            "c:\\windows",
+            "c:/windows",
+            "\\system32",
+            "c:\\boot",
+            "/etc/",
+            "/boot/",
+        ]
+        .iter()
+        .any(|path| lower.contains(path))
 }
 
 fn cmd_critical_redirect(lower: &str) -> bool {
