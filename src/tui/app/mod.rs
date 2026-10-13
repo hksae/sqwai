@@ -452,7 +452,14 @@ pub struct App {
     // command popup
     hover: Option<String>,
     popup_dismiss: bool,
-    popup_scroll: usize,
+    /// The list cursor, as a position on an endless walk over the commands: one
+    /// step per arrow press, never a wrap-around jump, so the list rotates. The
+    /// item under it is `walk.rem_euclid(len)`. `None` until something moves it,
+    /// so plain Enter keeps submitting the draft as typed.
+    popup_walk: Option<i64>,
+    /// Absolute index of the first command inside the list window. The window
+    /// follows the cursor by exactly one row per step, in both directions.
+    popup_top: i64,
     popup_rows: Vec<(u16, String)>,
 
     // providers/models menu (Ctrl+P)
@@ -723,7 +730,8 @@ impl App {
             subagent_meta: std::collections::BTreeMap::new(),
             hover: None,
             popup_dismiss: false,
-            popup_scroll: 0,
+            popup_walk: None,
+            popup_top: 0,
             popup_rows: Vec::new(),
             menu_stack: Vec::new(),
             menu_sel: 0,
@@ -1565,29 +1573,36 @@ impl App {
         self.cfg.ui.experimental_test
     }
 
-    pub(super) fn popup_scroll_by(&mut self, delta: i32) -> bool {
+    /// Step the command-list cursor. The walk is unbounded and the window
+    /// follows it one row at a time, so running off the last command continues
+    /// into the first from below — and the other way round — with no snap.
+    pub(super) fn popup_move(&mut self, dir: i32) {
         let items = self.popup_items();
-        let shown = items
-            .len()
-            .min(menus::POPUP_MAX_ROWS)
-            .min((self.last_input.y as usize).saturating_sub(2).max(3));
-        let max_scroll = items.len().saturating_sub(shown);
-        let next = if delta < 0 {
-            self.popup_scroll
-                .saturating_sub(delta.unsigned_abs() as usize)
-        } else {
-            self.popup_scroll.saturating_add(delta as usize)
-        };
-        let next = next.min(max_scroll);
-        // True when the viewport actually moved: scrolling into a clamped
-        // edge must not schedule an empty present. Callers repaint separately
-        // when they clear a hover highlight.
-        if next != self.popup_scroll {
-            self.popup_scroll = next;
-            true
-        } else {
-            false
+        let n = items.len() as i64;
+        if n == 0 {
+            return;
         }
+        let step = if dir < 0 { -1 } else { 1 };
+        // The first press lands where the arrow points: Down on the first
+        // command, Up on the last one.
+        let next = match self.popup_walk {
+            Some(w) => w + step,
+            None => if dir < 0 { n - 1 } else { 0 },
+        };
+        self.popup_walk = Some(next);
+        self.hover = Some(items[next.rem_euclid(n) as usize].clone());
+        self.dirty = true;
+    }
+
+    /// The item under the cursor: Enter accepts it instead of submitting the
+    /// draft, the same action as clicking it.
+    pub(super) fn popup_accepted(&self) -> Option<String> {
+        let walk = self.popup_walk?;
+        let items = self.popup_items();
+        let n = items.len() as i64;
+        self.popup_visible()
+            .then(|| items.get(walk.rem_euclid(n).max(0) as usize).cloned())
+            .flatten()
     }
 
     /// Rebuild the provider client from the current config so changes made

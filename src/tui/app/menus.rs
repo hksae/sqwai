@@ -66,7 +66,7 @@ pub(super) fn subcommands_of(cmd: &str) -> Option<&'static [&'static str]> {
         .map(|(_, subs)| *subs)
 }
 
-pub(super) const POPUP_MAX_ROWS: usize = 14;
+pub(super) const POPUP_MAX_ROWS: usize = 8;
 
 /// Human-readable context size for menu rows: 1048576 -> "1m", 262144 -> "256k".
 pub(super) fn fmt_ctx(n: u64) -> String {

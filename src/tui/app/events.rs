@@ -431,10 +431,22 @@ impl App {
                             }
                         }
                         KeyCode::Enter if !ctrl && !shift && self.menu_stack.is_empty() => {
-                            // an open inline question owns plain Enter
-                            // (confirm); the composer still submits via the
-                            // gate only once the question is answered
-                            if self.active_ask_seg().is_some() {
+                            // a command list with the cursor on a row owns
+                            // plain Enter: accept the row, which is exactly what
+                            // clicking it does. With no cursor set, Enter stays
+                            // submit.
+                            if let Some(item) = self.popup_accepted() {
+                                if let Some(cmd) = self.popup_level2_cmd()
+                                    && let Some(sub) = item.strip_prefix(&format!("{cmd} "))
+                                {
+                                    self.apply_subcommand_insert(cmd, sub);
+                                } else {
+                                    self.apply_command_insert(&item);
+                                }
+                            } else if self.active_ask_seg().is_some() {
+                                // an open inline question owns plain Enter
+                                // (confirm); the composer still submits via the
+                                // gate only once the question is answered
                                 self.inline_ask_confirm();
                             } else if self.enter_gate.on_enter(now) == EnterDecision::Newline {
                                 self.input.insert_newline();
@@ -460,6 +472,23 @@ impl App {
                         }
                         KeyCode::Up if !self.menu_stack.is_empty() => self.menu_nav(-1),
                         KeyCode::Down if !self.menu_stack.is_empty() => self.menu_nav(1),
+                        // The command list takes the arrows while it is open and
+                        // the draft is one line; a multi-line draft keeps the
+                        // arrows as caret keys.
+                        KeyCode::Up
+                            if self.menu_stack.is_empty()
+                                && self.popup_visible()
+                                && self.input.lines().len() == 1 =>
+                        {
+                            self.popup_move(-1);
+                        }
+                        KeyCode::Down
+                            if self.menu_stack.is_empty()
+                                && self.popup_visible()
+                                && self.input.lines().len() == 1 =>
+                        {
+                            self.popup_move(1);
+                        }
                         KeyCode::PageUp if !self.menu_stack.is_empty() && !self.surface_open => {
                             self.menu_nav(-2)
                         }
@@ -779,7 +808,10 @@ impl App {
                     ) && !ctrl
                     {
                         self.popup_dismiss = false;
-                        self.popup_scroll = 0;
+                        // the draft changed, so the filtered list is a different
+                        // list: the cursor and its window start over
+                        self.popup_walk = None;
+                        self.popup_top = 0;
                         self.hover = None;
                     }
                     if !shift {
@@ -819,15 +851,12 @@ impl App {
                                     .scroll(tui_textarea::Scrolling::Delta { rows: -1, cols: 0 });
                                 self.dirty = true;
                             } else if self.surface_open {
+                                // a block at the end of the history — picker,
+                                // card or command list — never owns the wheel:
+                                // the wheel scrolls the transcript, and the
+                                // block goes off with it
                                 self.scroll(3);
                                 self.dirty = true;
-                            } else if self.popup_visible() {
-                                let moved = self.popup_scroll_by(-3);
-                                let unhovered = self.hover.is_some();
-                                self.hover = None;
-                                if moved || unhovered {
-                                    self.dirty = true;
-                                }
                             } else {
                                 // 3 lines per notch (was 4): smaller steps read as
                                 // smoother motion now that each notch draws its own
@@ -846,13 +875,10 @@ impl App {
                                 self.input
                                     .scroll(tui_textarea::Scrolling::Delta { rows: 1, cols: 0 });
                                 self.dirty = true;
-                            } else if self.popup_visible() {
-                                let moved = self.popup_scroll_by(3);
-                                let unhovered = self.hover.is_some();
-                                self.hover = None;
-                                if moved || unhovered {
-                                    self.dirty = true;
-                                }
+                            } else if self.surface_open {
+                                // the block never owns the wheel: see ScrollUp
+                                self.scroll(-3);
+                                self.dirty = true;
                             } else {
                                 self.scroll(-3);
                             }

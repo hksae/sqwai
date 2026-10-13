@@ -676,13 +676,26 @@ impl App {
 
     pub(super) fn mouse_move(&mut self, row: u16) {
         if self.popup_visible() {
-            let hov = self
+            // the mouse moves the same cursor the arrows do: one selection, two
+            // hands, and Enter/click mean the same thing. The command lands on
+            // the copy of itself that is inside the current window, so hovering
+            // never drags the window to another rotation.
+            let hit = self
                 .popup_rows
                 .iter()
-                .find(|(y, _)| *y == row)
-                .map(|(_, s)| s.clone());
-            if hov != self.hover {
-                self.hover = hov;
+                .position(|(y, _)| *y == row)
+                .map(|p| self.popup_rows[p].1.clone());
+            let walk = hit.as_ref().and_then(|name| {
+                let items = self.popup_items();
+                let n = items.len() as i64;
+                items
+                    .iter()
+                    .position(|i| i == name)
+                    .map(|idx| self.popup_top + (idx as i64 - self.popup_top).rem_euclid(n.max(1)))
+            });
+            if walk != self.popup_walk {
+                self.popup_walk = walk;
+                self.hover = hit;
                 self.dirty = true;
             }
             return;
@@ -2260,14 +2273,33 @@ impl App {
         // Chosen once, before the layout: the height and the painter that fills
         // it must not disagree about which menu is open.
         let surf_menu = self.cur_menu().cloned();
+        // The `/` command list rides the same rail: it is a block at the end of
+        // the history, not a box over it, and the arrows are the only thing
+        // that moves inside it. One row of the block is the blank separator
+        // above the first command.
+        let list_rows = if !matches!(surf_menu, Some(Menu::Effort { .. }) | Some(Menu::Context))
+            && self.menu_stack.is_empty()
+            && self.popup_visible()
+        {
+            self.popup_items().len().min(POPUP_MAX_ROWS) as u16 + 1
+        } else {
+            0
+        };
+        let list_block = list_rows > 0;
         let surf_full = match surf_menu {
             Some(Menu::Effort { .. }) => EFFORT_SURFACE_H,
             // rule + title + card rows + air + the close hint
             Some(Menu::Context) => self.menu_rows.len() as u16 + 4,
-            _ => 0,
+            _ => list_rows,
         };
-        let surface = surf_full > 0;
+        let surface = matches!(
+            surf_menu,
+            Some(Menu::Effort { .. }) | Some(Menu::Context)
+        );
+        // the block joins the document either way; only a menu surface also
+        // claims the composer's own rows
         self.surf_rows = surf_full as usize;
+        self.surface_open = surface || list_block;
         // the slot the surface would claim in the layout; the painter uses the
         // scrolled position instead, so this only keeps the sums honest
         let surf_h = surf_full.min(area.height);
@@ -2281,16 +2313,16 @@ impl App {
         // it: at the end of the transcript it paints in its own slots, scrolled
         // up those same slots belong to the history and nothing floats below it.
         let scrolled_up = !self.follow;
-        // the routing flag is the menu's *form*, not whether it is on screen:
-        // scrolled up the surface has left with the tail of the history, but the
-        // wheel must keep scrolling the transcript instead of grabbing the
-        // picker selection again.
-        self.surface_open = surface;
-        let queue_h = u16::from(!surface && notice.is_some() && queued);
+        // The notice row and the air above the composer step aside for the
+        // command list too: the list is the block that owns that space, so it
+        // also drops one row into it.
+        let band_hidden = surface || list_block;
+        let queue_h = u16::from(!band_hidden && notice.is_some() && queued);
         // the row directly above the composer: the slot when something owns
-        // it, plain air otherwise. The surface claims the whole bottom of
-        // the screen for itself — no notice, no queue, no air above it.
-        let air_h = u16::from(!surface);
+        // it, plain air otherwise. A surface and the command list claim the
+        // whole bottom of the screen for themselves — no notice, no queue, no
+        // air above them.
+        let air_h = u16::from(!band_hidden);
         let slot_h = if surface { surf_h } else { input_h };
         // the status line hides with the surface too: the rule across the top
         // of the surface is the only separator it needs
@@ -2301,7 +2333,7 @@ impl App {
             Constraint::Length(queue_h),
             Constraint::Length(air_h),
         ];
-        let live_r = (!surface && !scrolled_up && (notice.is_some() || queued))
+        let live_r = (!band_hidden && !scrolled_up && (notice.is_some() || queued))
             .then_some(constraints.len() - 1);
         constraints.push(Constraint::Length(slot_h));
         let input_r = constraints.len() - 1;
@@ -2347,17 +2379,19 @@ impl App {
         self.last_chat = chat;
         self.last_input = layout[input_r];
         self.apply_pending_anchor(None);
-        // Where the surface sits this frame: the document is the history rows
-        // plus its own, so at the end of it the surface is pinned to the bottom
-        // of the screen, scrolling up carries it down and off, and a surface
-        // taller than the screen is scrolled through rather than cut short.
-        let surf_geom = surface.then(|| {
+        // Where the block sits this frame: the document is the history rows plus
+        // its own, so at the end of it the block is pinned to the bottom of the
+        // transcript window, scrolling up carries it down and off, and a block
+        // taller than the window is scrolled through rather than cut short. For
+        // a menu surface that window is the whole screen (it claims the
+        // composer's rows too); for the command list it stops above them.
+        let block_geom = (surface || list_block).then(|| {
             let top = self.chat_top(chat.height) as isize;
-            let start = (self.cache_lines.len() as isize - top)
-                .max(chat.height as isize - surf_full as isize);
-            let skip = (-start).max(0) as u16;
-            let y = chat.y + start.max(0) as u16;
-            let height = (surf_full - skip).min(chat.bottom().saturating_sub(y));
+            let start = (chat.y as isize + self.cache_lines.len() as isize - top)
+                .max(chat.bottom() as isize - surf_full as isize);
+            let skip = (chat.y as isize - start).max(0) as u16;
+            let y = start.max(chat.y as isize) as u16;
+            let height = (surf_full - skip).min(area.bottom().saturating_sub(y));
             (
                 Rect {
                     x: area.x,
@@ -2489,6 +2523,7 @@ impl App {
         // say anything. The composer stays a filled band; there are no
         // separator lines.
         if !scrolled_up
+            && !band_hidden
             && queued
             && let Some(r) = if notice.is_some() { Some(1) } else { live_r }
         {
@@ -2562,22 +2597,23 @@ impl App {
             sb.render(layout[status_r], buf);
         }
 
-        if let Some((rect, skip)) = surf_geom {
+        match block_geom {
             // off screen means not painted, never cut short
-            if rect.height > 0 {
-                match surf_menu {
-                    Some(Menu::Effort { .. }) => {
-                        self.draw_effort_slider(buf, rect, skip, surf_full)
-                    }
-                    Some(Menu::Context) => self.draw_context_surface(buf, rect, skip, surf_full),
-                    _ => {}
+            Some((rect, skip)) if rect.height > 0 => {
+                if !surface {
+                    self.draw_popup(buf, rect, skip, surf_full);
+                } else if matches!(surf_menu, Some(Menu::Context)) {
+                    self.draw_context_surface(buf, rect, skip, surf_full);
+                } else {
+                    self.draw_effort_slider(buf, rect, skip, surf_full);
                 }
-            } else {
+            }
+            Some(_) => {
                 self.effort_hits.clear();
                 self.menu_rect = Rect::default();
+                self.popup_rows.clear();
             }
-        } else {
-            self.draw_popup(buf, layout[input_r]);
+            None => self.popup_rows.clear(),
         }
         self.draw_menu(buf, area);
     }
@@ -3536,11 +3572,6 @@ impl App {
         );
     }
 
-    /// `/context` as a bottom surface: the brand rule, then the card centered
-    /// in the slot at its old width, then the close hint where the effort
-    /// surface keeps its own. The content is untouched — header, scale and
-    /// legend are the rows the menu already builds; only the frame around them
-    /// is gone: no border, no dim, no floating box.
     /// `/context` as a block of history: the brand rule, the title, the card
     /// centered at its old width, and the close hint at its last row. The
     /// content is untouched — header, scale and legend are the rows the menu
@@ -3635,89 +3666,74 @@ impl App {
         }
     }
 
-    pub(super) fn draw_popup(&mut self, buf: &mut Buffer, input_area: Rect) {
+    /// The `/` command list: a block at the end of the history, on the same rail
+    /// as every surface. No `Clear`, no background fill, no border, no
+    /// scrollbar, and the wheel never touches it — the arrows move the cursor,
+    /// the window follows the cursor, and scrolling the transcript carries the
+    /// whole list off with the end of the history. A row is a cursor marker plus
+    /// the command; Enter accepts the cursor row exactly as a click does.
+    /// `area` is the part of the block on screen, `off` its rows above it and
+    /// `full_h` its whole height.
+    pub(super) fn draw_popup(&mut self, buf: &mut Buffer, area: Rect, off: u16, full_h: u16) {
+        self.popup_rows.clear();
         if !self.popup_visible() {
-            self.popup_rows.clear();
             return;
         }
         let items = self.popup_items();
+        let n = items.len() as i64;
         if items.is_empty() {
-            self.popup_rows.clear();
             return;
         }
-        let shown = items
-            .len()
-            .min(POPUP_MAX_ROWS)
-            .min((input_area.y as usize).saturating_sub(2).max(3));
-        let max_scroll = items.len().saturating_sub(shown);
-        let skip = self.popup_scroll.min(max_scroll);
-        let h = shown as u16; // flat panel, no border rows
-        let w = 64.min(input_area.width.saturating_sub(2)).max(24);
-        let y = input_area.y.saturating_sub(h);
-        let rect = Rect {
-            x: input_area.x,
-            y,
-            width: w,
-            height: h,
-        };
-
-        // This is an inline command completion list, not a modal popup:
-        // it must not dim or otherwise alter the underlying chat.
+        // Block rows: 0 is the blank separator that keeps the list off the last
+        // history line, rows 1.. carry the commands.
+        let body = (full_h as i64 - 1).max(1);
+        // The window follows the cursor by one row per step in either direction.
+        // It never jumps, and running past the last command brings the first
+        // ones in from below: the list reads as endless.
+        if let Some(w) = self.popup_walk {
+            if w < self.popup_top {
+                self.popup_top = w;
+            } else if w >= self.popup_top + body {
+                self.popup_top = w - body + 1;
+            }
+        }
+        let cursor_row = self.popup_walk.map(|w| w - self.popup_top + 1);
         let mut rows: Vec<Line> = Vec::new();
-        self.popup_rows.clear();
-        for (n, item) in items.iter().skip(skip).take(shown).enumerate() {
-            let hovered = self.hover.as_deref() == Some(item.as_str());
-            let pad = 1usize;
-            if hovered {
-                let mut out = Line::from(vec![Span::styled(
-                    format!(" {item}{}", " ".repeat(pad)),
-                    Theme::selection(),
-                )]);
-                let fill = (rect.width as usize).saturating_sub(cols(&line_text(&out)));
-                if fill > 0 {
-                    out.spans.push(Span::styled(
-                        " ".repeat(fill),
-                        Style::new().bg(Theme::SELECTION_BG()),
-                    ));
-                }
-                rows.push(out);
-            } else {
-                rows.push(Line::from(vec![Span::styled(
-                    format!(" {item}{}", " ".repeat(pad)),
-                    Theme::base(),
-                )]));
+        for r in 0..area.height {
+            let k = off + r;
+            if k >= full_h {
+                break;
             }
-            self.popup_rows.push((rect.y + n as u16, item.clone()));
-        }
-
-        Clear.render(rect, buf);
-        for y in rect.y..rect.bottom() {
-            for x in rect.x..rect.right() {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    let mut style = cell.style();
-                    style.bg = Some(Theme::MENU_BG());
-                    cell.set_style(style);
-                }
+            if k == 0 {
+                rows.push(Line::default());
+                continue;
             }
+            let idx = (self.popup_top + (k - 1) as i64).rem_euclid(n) as usize;
+            let Some(item) = items.get(idx) else {
+                break;
+            };
+            let cur = cursor_row == Some(k as i64);
+            rows.push(Line::from(vec![
+                Span::styled(
+                    if cur { "› " } else { "  " },
+                    if cur {
+                        Theme::brand_ink()
+                    } else {
+                        Style::new().add_modifier(Modifier::DIM)
+                    },
+                ),
+                Span::styled(
+                    item.clone(),
+                    if cur {
+                        Style::new().fg(Theme::FG()).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::new().fg(Theme::FG())
+                    },
+                ),
+            ]));
+            self.popup_rows.push((area.y + r, item.clone()));
         }
-        Paragraph::new(rows).style(Theme::base()).render(rect, buf);
-        // mini scrollbar on the last content column when the list overflows
-        if max_scroll > 0 {
-            let track = shown;
-            let thumb = 1.max(track * shown / items.len());
-            let pos = skip * (track - thumb) / max_scroll.max(1);
-            let bx = rect.right().saturating_sub(1);
-            for i in 0..track {
-                if let Some(cell) =
-                    buf.cell_mut(ratatui::layout::Position::new(bx, rect.y + i as u16))
-                    && i >= pos
-                    && i < pos + thumb
-                {
-                    cell.set_symbol("▐")
-                        .set_style(Style::new().fg(Theme::rule_color()));
-                }
-            }
-        }
+        Paragraph::new(rows).render(area, buf);
     }
 
     /// queued follow-ups preview in their own row above the notice row:
