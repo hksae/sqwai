@@ -2134,7 +2134,9 @@ impl App {
 
     pub(super) fn chat_top(&self, height: u16) -> usize {
         let h = height.max(1) as usize;
-        let max = self.cache_lines.len().saturating_sub(h);
+        // the scrolling card is part of the document, so the view can reach
+        // past the last history row into its rows
+        let max = (self.cache_lines.len() + self.surf_rows).saturating_sub(h);
         if self.follow {
             max
         } else {
@@ -2228,7 +2230,8 @@ impl App {
         // cleared every frame: only a path that actually paints the surface
         // sets it back, so the subagent view and a too-small screen cannot
         // leave a stale one behind for the scroll routing
-        self.effort_surf = false;
+        self.surface_open = false;
+        self.surf_rows = 0;
         // cleared every frame: only a deferred width rebuild sets it below,
         // and the loop keeps `dirty` while it stays set
         self.defer_rebuild = false;
@@ -2243,14 +2246,31 @@ impl App {
         // The borderless composer takes exactly its content height: one row
         // until the user enters a newline, then it grows up to six rows.
         let input_h = input_rows;
-        // The effort picker is a surface, not a popup: it owns the composer's
-        // slot at any terminal size, so there is one form to learn and the
-        // transcript above is never dimmed or cleared for it.
-        let effort_surface = matches!(self.cur_menu(), Some(Menu::Effort { .. }));
+        // A surface, not a popup: it owns the composer's slot at any terminal
+        // size, so there is one form to learn and the transcript above is never
+        // dimmed or cleared for it. Effort is the fixed seven-row picker;
+        // /context is its card — the rule plus the rows the menu already builds.
+        // One system for every surface (effort today, /context, and whatever
+        // moves here next): it is a block at the end of the history, not
+        // furniture over it. It joins the document, sits pinned to the bottom
+        // of the screen at the end of it, and scrolls off from there — through
+        // its own rows when it is taller than the terminal — so nothing is ever
+        // cut short and the transcript above is never dimmed or cleared.
         const EFFORT_SURFACE_H: u16 = 7;
-        // rule, title, air, labels, track, air, hint. A short screen loses the
-        // air and the hint before it starves the transcript below `Min(3)`.
-        let surf_h = EFFORT_SURFACE_H.min(area.height.saturating_sub(3).max(4));
+        // Chosen once, before the layout: the height and the painter that fills
+        // it must not disagree about which menu is open.
+        let surf_menu = self.cur_menu().cloned();
+        let surf_full = match surf_menu {
+            Some(Menu::Effort { .. }) => EFFORT_SURFACE_H,
+            // rule + title + card rows + air + the close hint
+            Some(Menu::Context) => self.menu_rows.len() as u16 + 4,
+            _ => 0,
+        };
+        let surface = surf_full > 0;
+        self.surf_rows = surf_full as usize;
+        // the slot the surface would claim in the layout; the painter uses the
+        // scrolled position instead, so this only keeps the sums honest
+        let surf_h = surf_full.min(area.height);
         // One slot sits above the composer. A notice owns it; when there is
         // nothing to say, the queue moves down into it instead of leaving the
         // row empty under its own line. The queue keeps a row of its own only
@@ -2261,31 +2281,27 @@ impl App {
         // it: at the end of the transcript it paints in its own slots, scrolled
         // up those same slots belong to the history and nothing floats below it.
         let scrolled_up = !self.follow;
-        // the routing flag is the picker's *form*, not whether it is on screen:
+        // the routing flag is the menu's *form*, not whether it is on screen:
         // scrolled up the surface has left with the tail of the history, but the
         // wheel must keep scrolling the transcript instead of grabbing the
         // picker selection again.
-        self.effort_surf = effort_surface;
-        let queue_h = u16::from(!effort_surface && notice.is_some() && queued);
+        self.surface_open = surface;
+        let queue_h = u16::from(!surface && notice.is_some() && queued);
         // the row directly above the composer: the slot when something owns
         // it, plain air otherwise. The surface claims the whole bottom of
         // the screen for itself — no notice, no queue, no air above it.
-        let air_h = u16::from(!effort_surface);
-        let slot_h = if effort_surface {
-            surf_h
-        } else {
-            input_h
-        };
+        let air_h = u16::from(!surface);
+        let slot_h = if surface { surf_h } else { input_h };
         // the status line hides with the surface too: the rule across the top
         // of the surface is the only separator it needs
-        let status_h = u16::from(!effort_surface);
+        let status_h = u16::from(!surface);
         let band_h = queue_h + air_h + slot_h + status_h;
         let mut constraints = vec![
             Constraint::Min(3),
             Constraint::Length(queue_h),
             Constraint::Length(air_h),
         ];
-        let live_r = (!effort_surface && !scrolled_up && (notice.is_some() || queued))
+        let live_r = (!surface && !scrolled_up && (notice.is_some() || queued))
             .then_some(constraints.len() - 1);
         constraints.push(Constraint::Length(slot_h));
         let input_r = constraints.len() - 1;
@@ -2296,11 +2312,14 @@ impl App {
             x: area.x + 1,
             y: layout[0].y,
             width: area.width.saturating_sub(2),
-            height: layout[0].height.saturating_add(if scrolled_up {
-                band_h
+            height: if surface {
+                // the surface is inside the document, so the window is the screen
+                area.height
             } else {
-                0
-            }),
+                layout[0]
+                    .height
+                    .saturating_add(if scrolled_up { band_h } else { 0 })
+            },
         };
 
         // The transcript is rendered inside `chat`, not the outer frame. Use
@@ -2328,6 +2347,27 @@ impl App {
         self.last_chat = chat;
         self.last_input = layout[input_r];
         self.apply_pending_anchor(None);
+        // Where the surface sits this frame: the document is the history rows
+        // plus its own, so at the end of it the surface is pinned to the bottom
+        // of the screen, scrolling up carries it down and off, and a surface
+        // taller than the screen is scrolled through rather than cut short.
+        let surf_geom = surface.then(|| {
+            let top = self.chat_top(chat.height) as isize;
+            let start = (self.cache_lines.len() as isize - top)
+                .max(chat.height as isize - surf_full as isize);
+            let skip = (-start).max(0) as u16;
+            let y = chat.y + start.max(0) as u16;
+            let height = (surf_full - skip).min(chat.bottom().saturating_sub(y));
+            (
+                Rect {
+                    x: area.x,
+                    y,
+                    width: area.width,
+                    height,
+                },
+                skip,
+            )
+        });
 
         Block::new().style(Theme::base()).render(area, buf);
 
@@ -2448,7 +2488,10 @@ impl App {
         // a notice holds that row, the slot itself when nothing is waiting to
         // say anything. The composer stays a filled band; there are no
         // separator lines.
-        if !scrolled_up && queued && let Some(r) = if notice.is_some() { Some(1) } else { live_r } {
+        if !scrolled_up
+            && queued
+            && let Some(r) = if notice.is_some() { Some(1) } else { live_r }
+        {
             Paragraph::new(self.queue_line(area.width)).render(layout[r], buf);
         }
         // one status row above the input, for transient notices only. The
@@ -2463,7 +2506,7 @@ impl App {
         // band fill and no caret — a block cursor left in the slot would
         // sit on the surface title, and the gray band is exactly what the
         // redesign removes.
-        if !effort_surface && !scrolled_up {
+        if !surface && !scrolled_up {
             self.input.set_block(Self::input_block());
             // the cursor is rendered by tui-textarea; the input has no frame.
             // `› ` marks the top input row (like the user strip); the textarea
@@ -2514,20 +2557,24 @@ impl App {
         } else {
             layout[status_r].y
         };
-        if !effort_surface && !scrolled_up {
+        if !surface && !scrolled_up {
             let sb = self.status_bar(area.width);
             sb.render(layout[status_r], buf);
         }
 
-        if effort_surface {
-            // scrolled up, the surface has left with the end of the history:
-            // its column hit map must go with it, or hover keeps aiming at
-            // rows that are no longer on screen.
-            if scrolled_up {
+        if let Some((rect, skip)) = surf_geom {
+            // off screen means not painted, never cut short
+            if rect.height > 0 {
+                match surf_menu {
+                    Some(Menu::Effort { .. }) => {
+                        self.draw_effort_slider(buf, rect, skip, surf_full)
+                    }
+                    Some(Menu::Context) => self.draw_context_surface(buf, rect, skip, surf_full),
+                    _ => {}
+                }
+            } else {
                 self.effort_hits.clear();
                 self.menu_rect = Rect::default();
-            } else {
-                self.draw_effort_slider(buf, layout[input_r]);
             }
         } else {
             self.draw_popup(buf, layout[input_r]);
@@ -2799,6 +2846,13 @@ impl App {
         if menu.is_none() || area.height < 8 || area.width < 20 {
             return;
         }
+        // Surfaces are drawn into the composer's slot by the layout and refresh
+        // their own rows. Rebuilding here would size the /context scale from a
+        // `menu_rect` the surface never painted: scrolled up, that rect is empty
+        // and the bar clamped to its 20-cell floor on a wide terminal.
+        if matches!(menu, Some(Menu::Effort { .. }) | Some(Menu::Context)) {
+            return;
+        }
         let is_form = self.is_form_menu();
         // Event handlers rebuild rows when the menu actually changes. A full
         // rebuild here would run on every frame — for /plan that means
@@ -2814,14 +2868,6 @@ impl App {
             self.menu_built_at = Some(now);
         }
 
-        // The wide effort picker is drawn into the composer slot by the layout
-        // (a surface, not a popup); here it only keeps the narrow-terminal
-        // fallback to the generic row list. The surface's own hit map must
-        // survive this frame — clearing it here would drop hover and clicks
-        // onto the generic row math and move the selection by row.
-        if matches!(menu, Some(Menu::Effort { .. })) {
-            return;
-        }
         self.effort_hits.clear();
         self.menu_footer_text = None;
         // Popup actions do not show transient green notices at the bottom.
@@ -3262,7 +3308,19 @@ impl App {
     /// track below (off/gray on the left, max/magenta on the right). The
     /// filled part of the track takes the selected level's color; the rest
     /// stays dim. Arrows preview, click previews, Enter commits.
-    pub(super) fn draw_effort_slider(&mut self, buf: &mut Buffer, area: Rect) {
+    ///
+    /// Like every surface it is a block of the history: `area` is the part of
+    /// it on screen, `skip` its rows above that part, `full_h` its whole
+    /// height. Rows are addressed by index — 0 rule, 1 title, 3 the names, 4
+    /// the track, 6 the hint — so a shorter terminal scrolls through the card
+    /// instead of cutting it.
+    pub(super) fn draw_effort_slider(
+        &mut self,
+        buf: &mut Buffer,
+        area: Rect,
+        skip: u16,
+        full_h: u16,
+    ) {
         use crate::config::EffortLevel;
         const COL_W: u16 = 8;
         let n = EffortLevel::SELECTABLE.len();
@@ -3309,46 +3367,43 @@ impl App {
         };
         let ink = Style::new().fg(ink);
 
-        // Surface form: the composer's slot, full width, no border and no
-        // modal dim — the transcript above stays exactly as it was, which is
-        // the whole difference from the old floating card.
         let rect = area;
         self.menu_rect = rect;
         self.effort_hits.clear();
-        if rect.height < 3 {
-            return;
-        }
+        let row_y = |k: u16| {
+            let y = k.checked_sub(skip).map(|r| rect.y + r)?;
+            (y < rect.bottom()).then_some(y)
+        };
         // One-cell gutter on each side, and columns that pack to fit: the
         // slider is the same widget at any width, and its row can never reach
         // past the buffer — `base_x + inner_w <= rect.right() - 1` by here.
         let avail = rect.width.saturating_sub(2);
         let col_w = (avail / n.max(1) as u16).clamp(4, COL_W);
         let inner_w = (col_w * n as u16).min(avail);
-        // decoration goes before the slider: a short slot keeps rule + labels +
-        // track and gives up the hint, then the title
-        let hint = rect.height >= 7;
-        let title = rect.height >= 5;
+        let base_x = rect.x + 1 + (avail.saturating_sub(inner_w)) / 2;
         // rule across the top in the brand's own ink: the surface has no
         // border and no background, so this is what says "the input area is
         // something else now" without painting over the transcript
-        buf.set_line(
-            rect.x,
-            rect.y,
-            &Line::from(Span::styled(
-                "─".repeat(rect.width as usize),
-                Theme::brand_ink(),
-            )),
-            rect.width,
-        );
+        if let Some(y) = row_y(0) {
+            buf.set_line(
+                rect.x,
+                y,
+                &Line::from(Span::styled(
+                    "─".repeat(rect.width as usize),
+                    Theme::brand_ink(),
+                )),
+                rect.width,
+            );
+        }
         // title row: the surface's name left; right, the level Enter would
         // commit plus the key that opens this — the same fact the status
         // bar carries, readable without looking away from the slider. Too
         // narrow for both and the slider wins: the right label steps out.
         let committed = self.effort_committed();
-        if title {
+        if let Some(y) = row_y(1) {
             buf.set_line(
                 rect.x,
-                rect.y + 1,
+                y,
                 &Line::from(Span::styled(
                     format!(" {}", self.menu_title()),
                     crate::tui::art::h2_style(),
@@ -3366,7 +3421,7 @@ impl App {
                 .render(
                     Rect {
                         x: rect.x,
-                        y: rect.y + 1,
+                        y,
                         width: rect.width.saturating_sub(1),
                         height: 1,
                     },
@@ -3374,12 +3429,14 @@ impl App {
                 );
             }
         }
-        let labels_y = rect.y + if hint { 3 } else if title { 2 } else { 1 };
-        let track_y = labels_y + 1;
-        let base_x = rect.x + 1 + (avail.saturating_sub(inner_w)) / 2;
-        // one dim hint line at the very bottom, where their pickers keep theirs
-        // the hint sits at the right of the last row, under the level readout
-        if hint {
+        let Some(labels_y) = row_y(3) else {
+            return;
+        };
+        let Some(track_y) = row_y(4) else {
+            return;
+        };
+        // one dim hint line at the right of the last row
+        if let Some(y) = row_y(full_h.saturating_sub(1)) {
             Paragraph::new(
                 Line::from(Span::styled(
                     "←/→ move · enter confirm · esc cancel",
@@ -3390,7 +3447,7 @@ impl App {
             .render(
                 Rect {
                     x: rect.x,
-                    y: rect.bottom() - 1,
+                    y,
                     width: rect.width.saturating_sub(1),
                     height: 1,
                 },
@@ -3477,6 +3534,105 @@ impl App {
             },
             buf,
         );
+    }
+
+    /// `/context` as a bottom surface: the brand rule, then the card centered
+    /// in the slot at its old width, then the close hint where the effort
+    /// surface keeps its own. The content is untouched — header, scale and
+    /// legend are the rows the menu already builds; only the frame around them
+    /// is gone: no border, no dim, no floating box.
+    /// `/context` as a block of history: the brand rule, the title, the card
+    /// centered at its old width, and the close hint at its last row. The
+    /// content is untouched — header, scale and legend are the rows the menu
+    /// already builds; only the frame around them is gone: no border, no dim,
+    /// no floating box. `area` is the part of it on screen and `skip` how many
+    /// of its rows have scrolled off the top, so a card taller than the
+    /// terminal is read by scrolling, never cut short.
+    pub(super) fn draw_context_surface(
+        &mut self,
+        buf: &mut Buffer,
+        area: Rect,
+        skip: u16,
+        full_h: u16,
+    ) {
+        self.effort_hits.clear();
+        self.menu_rect = area;
+        // The scale is a scale, not the screen: the card keeps the width the
+        // popup had and sits centered in the slot.
+        const CARD_W: u16 = 78;
+        let card_w = area.width.saturating_sub(2).min(CARD_W);
+        let card_x = area.x + area.width.saturating_sub(card_w) / 2;
+        // The scale sizes its bands from the card width, and the numbers ride
+        // the session: rebuild on a width the rows were not built for, or once
+        // the popup's own refresh interval has passed.
+        let stale = self
+            .menu_built_at
+            .is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(500));
+        if self.ctx_built_w != card_w || stale {
+            self.build_menu_rows();
+            self.ctx_built_w = card_w;
+            self.menu_built_at = Some(std::time::Instant::now());
+        }
+        // The card's rows: 0 rule, 1 title, 2.. the card itself, then air and
+        // the hint on the last row.
+        let row_y = |k: u16| {
+            let y = k.checked_sub(skip).map(|r| area.y + r)?;
+            (y < area.bottom()).then_some(y)
+        };
+        if let Some(y) = row_y(0) {
+            buf.set_line(
+                area.x,
+                y,
+                &Line::from(Span::styled(
+                    "─".repeat(area.width as usize),
+                    Theme::brand_ink(),
+                )),
+                area.width,
+            );
+        }
+        if let Some(y) = row_y(1) {
+            buf.set_line(
+                area.x,
+                y,
+                &Line::from(Span::styled(
+                    format!(" {}", self.menu_title()),
+                    crate::tui::art::h2_style(),
+                )),
+                area.width,
+            );
+        }
+        let first = (skip.saturating_sub(2) as usize).min(self.menu_rows.len());
+        if let Some(y) = row_y(2 + first as u16) {
+            let lines: Vec<Line> = self
+                .menu_rows
+                .iter()
+                .skip(first)
+                .take((area.bottom() - y) as usize)
+                .map(|(l, _)| l.clone())
+                .collect();
+            Paragraph::new(lines).render(
+                Rect {
+                    x: card_x,
+                    y,
+                    width: card_w,
+                    height: area.bottom() - y,
+                },
+                buf,
+            );
+        }
+        // one dim hint line, where the effort picker keeps its own
+        if let Some(y) = row_y(full_h.saturating_sub(1)) {
+            Paragraph::new(Line::from(Span::styled("esc: close", Theme::dim())).right_aligned())
+                .render(
+                    Rect {
+                        x: area.x,
+                        y,
+                        width: area.width.saturating_sub(1),
+                        height: 1,
+                    },
+                    buf,
+                );
+        }
     }
 
     pub(super) fn draw_popup(&mut self, buf: &mut Buffer, input_area: Rect) {

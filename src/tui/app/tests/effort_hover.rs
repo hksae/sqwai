@@ -99,7 +99,7 @@ fn effort_keyboard_open_no_prior_mouse_keeps_selection() {
     let area = Rect::new(0, 0, 100, 30);
     let surface = Rect::new(0, 23, 100, 7);
     let mut buf = Buffer::empty(area);
-    app.draw_effort_slider(&mut buf, surface);
+    app.draw_effort_slider(&mut buf, surface, 0, 7);
     assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
     let (off_col, off_idx) = app.effort_hits[0];
     assert_eq!(off_idx, 0, "the first column is Off");
@@ -112,8 +112,7 @@ fn effort_keyboard_open_no_prior_mouse_keeps_selection() {
         app.menu_sel, want,
         "first Moved with no prior position must not yank the cursor to Off"
     );
-    tx.send(me(MouseEventKind::Moved, row + 1, col))
-        .unwrap();
+    tx.send(me(MouseEventKind::Moved, row + 1, col)).unwrap();
     app.poll_input(&rx).unwrap();
     assert_eq!(
         app.menu_sel, want,
@@ -131,7 +130,10 @@ fn effort_keyboard_open_no_prior_mouse_keeps_selection() {
     tx.send(me(MouseEventKind::Up(MouseButton::Left), row, col))
         .unwrap();
     app.poll_input(&rx).unwrap();
-    assert_eq!(app.menu_sel, 0, "the click previews the column it landed on");
+    assert_eq!(
+        app.menu_sel, 0,
+        "the click previews the column it landed on"
+    );
     assert!(
         matches!(app.cur_menu(), Some(Menu::Effort { .. })),
         "a click inside the surface keeps it open"
@@ -153,7 +155,7 @@ fn effort_keyboard_open_no_prior_mouse_keeps_selection() {
     );
     assert_eq!(app.menu_sel, 0, "reopened picker opens on Off");
     let mut buf2 = Buffer::empty(area);
-    app.draw_effort_slider(&mut buf2, surface);
+    app.draw_effort_slider(&mut buf2, surface, 0, 7);
     tx.send(Event::Key(KeyEvent::new(
         KeyCode::Down,
         KeyModifiers::empty(),

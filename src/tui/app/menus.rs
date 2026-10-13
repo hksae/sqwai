@@ -557,15 +557,20 @@ impl App {
         if matches!(self.cur_menu(), Some(Menu::ConfirmDelete { .. })) && self.menu_sel == 0 {
             self.menu_sel = 1;
         }
+        // A surface is the tail of the history: it only exists at the end of
+        // it, so opening one brings the view back down to it.
+        if matches!(
+            self.cur_menu(),
+            Some(Menu::Effort { .. }) | Some(Menu::Context)
+        ) {
+            self.follow = true;
+        }
         // effort slider opens on the target level, not on `off`
         let effort_scoped: Option<Option<String>> = match self.cur_menu() {
             Some(Menu::Effort { model }) => Some(model.clone()),
             _ => None,
         };
         if let Some(model) = effort_scoped {
-            // the surface is the tail of the history: it only exists at the
-            // end of it, so opening one has to bring the view back down
-            self.follow = true;
             let want = model
                 .as_ref()
                 .and_then(|k| self.cfg.models.get(k))

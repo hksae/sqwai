@@ -355,11 +355,16 @@ pub struct App {
     asm_lens: Vec<usize>,
     last_chat: Rect,
     last_input: Rect,
-    /// The effort picker is in surface form on this screen (wide and tall
-    /// enough for it). It is the tail of the history, so vertical scrolling
-    /// belongs to the transcript: the wheel and PageUp/PageDown move the view,
-    /// and the surface scrolls away with the end of the history.
-    effort_surf: bool,
+    /// The open menu is a bottom surface (effort, /context) rather than a
+    /// popup. It is the tail of the history, so vertical scrolling belongs to
+    /// the transcript: the wheel and PageUp/PageDown move the view, a press
+    /// outside the surface selects history instead of dismissing it, and the
+    /// surface scrolls away with the end of the history.
+    surface_open: bool,
+    /// Rows the scrolling surface (the /context card) contributes to the
+    /// document, so the view can scroll through them. Zero for a pinned picker
+    /// and for no surface at all.
+    surf_rows: usize,
     /// per-segment render cache keyed by segment id (not position):
     /// appends and stream updates never invalidate other segments' rows.
     /// Entry holds (revision, width, content key, wrapped rows).
@@ -693,7 +698,8 @@ impl App {
             asm_lens: Vec::new(),
             last_chat: Rect::default(),
             last_input: Rect::default(),
-            effort_surf: false,
+            surface_open: false,
+            surf_rows: 0,
             seg_cache: std::collections::HashMap::new(),
             live_md: crate::tui::markdown::LiveRender::new(),
             seg_meta: Vec::new(),
@@ -3899,7 +3905,7 @@ impl App {
         let had_sel = self.sel.is_some();
         self.sel = None;
         let h = self.last_chat.height.max(1) as usize;
-        let max = self.cache_lines.len().saturating_sub(h);
+        let max = (self.cache_lines.len() + self.surf_rows).saturating_sub(h);
         // while following, the viewport sits at the bottom; every tick moves the
         // absolute top by exactly delta lines, so scrolling past the edges can
         // never build up "dead" distance to unwind later

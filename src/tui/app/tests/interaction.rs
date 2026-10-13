@@ -960,14 +960,14 @@ fn effort_slider_opens_on_current_level_with_hits() {
     let area = Rect::new(0, 0, 100, 30);
     let surface = Rect::new(0, 23, 100, 7);
     let mut buf = Buffer::empty(area);
-    app.draw_effort_slider(&mut buf, surface);
+    app.draw_effort_slider(&mut buf, surface, 0, 7);
     assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
     // first draw only tracks, never sweeps from nothing
     assert_eq!(app.effort_blend_sel, Some(want));
     assert!(app.effort_blend.is_none(), "no sweep on open");
     // moving the selection arms the color sweep for the new level
     app.menu_sel = 0;
-    app.draw_effort_slider(&mut buf, surface);
+    app.draw_effort_slider(&mut buf, surface, 0, 7);
     assert_eq!(app.effort_blend_sel, Some(0));
     // the surface owns the bottom slot: title left, the committed level and
     // the key that opens it right, one dim hint line at the very bottom
@@ -999,14 +999,14 @@ fn effort_slider_opens_on_current_level_with_hits() {
     );
     // restore High for the dots/hover checks below (they assume it selected)
     app.menu_sel = want;
-    app.draw_effort_slider(&mut buf, surface);
+    app.draw_effort_slider(&mut buf, surface, 0, 7);
     // expired sweep settles back to the palette color: the selected dot reads
     // the theme color, not a stale blend frame
     app.effort_blend = Some((
         (0, 0, 0),
         std::time::Instant::now() - std::time::Duration::from_secs(5),
     ));
-    app.draw_effort_slider(&mut buf, surface);
+    app.draw_effort_slider(&mut buf, surface, 0, 7);
     let (hit, _) = app.effort_hits[want];
     let dot = buf[(hit.x + 4, hit.y + 1)].style().fg;
     assert_eq!(
@@ -1043,7 +1043,7 @@ fn effort_narrow_is_the_same_surface() {
     // narrow gets the same picker: the columns pack, there is no list form
     let mut buf = Buffer::empty(Rect::new(0, 0, 40, 30));
     let surface = Rect::new(0, 23, 40, 7);
-    app.draw_effort_slider(&mut buf, surface);
+    app.draw_effort_slider(&mut buf, surface, 0, 7);
     assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
     assert!(
         app.effort_hits
@@ -1178,9 +1178,12 @@ fn keyboard_open_effort_ignores_resting_mouse_jitter() {
         .iter()
         .position(|l| *l == EffortLevel::High)
         .unwrap();
-    assert_eq!(app.menu_sel, want, "fresh picker opens on the session level");
+    assert_eq!(
+        app.menu_sel, want,
+        "fresh picker opens on the session level"
+    );
     let mut buf = Buffer::empty(area);
-    app.draw_effort_slider(&mut buf, surface);
+    app.draw_effort_slider(&mut buf, surface, 0, 7);
     assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
     let (off_col, _) = app.effort_hits[0];
     let (max_col, max_idx) = app.effort_hits.last().copied().expect("hit map");
@@ -1207,9 +1210,8 @@ fn keyboard_open_effort_ignores_resting_mouse_jitter() {
         "reopened picker opens on the session level"
     );
     let mut buf2 = Buffer::empty(area);
-    app.draw_effort_slider(&mut buf2, surface);
-    tx.send(me(MouseEventKind::Moved, row + 1, col))
-        .unwrap();
+    app.draw_effort_slider(&mut buf2, surface, 0, 7);
+    tx.send(me(MouseEventKind::Moved, row + 1, col)).unwrap();
     app.poll_input(&rx).unwrap();
     assert_eq!(
         app.menu_sel, want,
@@ -1357,12 +1359,12 @@ fn effort_scoped_menu_via_form_click() {
         .unwrap();
     assert_eq!(app.menu_sel, want, "cursor after form click");
     // wide draw keeps the cursor on the target level
-    app.draw_effort_slider(&mut buf, Rect::new(0, 23, 100, 7));
+    app.draw_effort_slider(&mut buf, Rect::new(0, 23, 100, 7), 0, 7);
     assert_eq!(app.menu_sel, want, "cursor after wide draw");
     assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
     // narrow is the same surface: the columns pack, the cursor stays put
     let mut nbuf = Buffer::empty(Rect::new(0, 0, 40, 30));
-    app.draw_effort_slider(&mut nbuf, Rect::new(0, 23, 40, 7));
+    app.draw_effort_slider(&mut nbuf, Rect::new(0, 23, 40, 7), 0, 7);
     assert_eq!(app.menu_sel, want, "cursor after a narrow draw");
     assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
 }
@@ -1426,9 +1428,9 @@ fn effort_menu_reopens_without_a_stale_sweep() {
     let mut buf = Buffer::empty(area);
     app.model_cfg.effort = EffortLevel::High;
     app.open_menu(Menu::Effort { model: None });
-    app.draw_effort_slider(&mut buf, surface);
+    app.draw_effort_slider(&mut buf, surface, 0, 7);
     app.menu_sel = EffortLevel::SELECTABLE.len() - 1;
-    app.draw_effort_slider(&mut buf, surface);
+    app.draw_effort_slider(&mut buf, surface, 0, 7);
     assert!(app.effort_blend.is_some(), "a level change sweeps");
     app.menu_home();
     app.model_cfg.effort = EffortLevel::Low;
@@ -1437,7 +1439,7 @@ fn effort_menu_reopens_without_a_stale_sweep() {
         app.effort_blend.is_none() && app.effort_blend_sel.is_none(),
         "opening must clear the old surface's blend state"
     );
-    app.draw_effort_slider(&mut buf, surface);
+    app.draw_effort_slider(&mut buf, surface, 0, 7);
     assert!(app.effort_blend.is_none(), "first frame must not sweep");
 }
 
@@ -1459,7 +1461,7 @@ fn effort_surface_leaves_the_transcript_untouched() {
     let mut buf = Buffer::empty(area);
     // a painted transcript cell well above the surface slot
     buf[(0, 0)].set_style(Style::new().bg(Color::Indexed(235)));
-    app.draw_effort_slider(&mut buf, Rect::new(0, 23, 100, 7));
+    app.draw_effort_slider(&mut buf, Rect::new(0, 23, 100, 7), 0, 7);
     assert_eq!(
         buf[(0, 0)].style().bg,
         Some(Color::Indexed(235)),

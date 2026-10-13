@@ -460,14 +460,10 @@ impl App {
                         }
                         KeyCode::Up if !self.menu_stack.is_empty() => self.menu_nav(-1),
                         KeyCode::Down if !self.menu_stack.is_empty() => self.menu_nav(1),
-                        KeyCode::PageUp
-                            if !self.menu_stack.is_empty() && !self.effort_surf =>
-                        {
+                        KeyCode::PageUp if !self.menu_stack.is_empty() && !self.surface_open => {
                             self.menu_nav(-2)
                         }
-                        KeyCode::PageDown
-                            if !self.menu_stack.is_empty() && !self.effort_surf =>
-                        {
+                        KeyCode::PageDown if !self.menu_stack.is_empty() && !self.surface_open => {
                             self.menu_nav(2)
                         }
                         KeyCode::Left | KeyCode::Right if !self.menu_stack.is_empty() => {
@@ -740,10 +736,10 @@ impl App {
                             self.dirty = true;
                         }
                         KeyCode::Char('j') if ctrl => self.input.insert_newline(),
-                        KeyCode::PageUp if self.menu_stack.is_empty() || self.effort_surf => {
+                        KeyCode::PageUp if self.menu_stack.is_empty() || self.surface_open => {
                             self.page(-1)
                         }
-                        KeyCode::PageDown if self.menu_stack.is_empty() || self.effort_surf => {
+                        KeyCode::PageDown if self.menu_stack.is_empty() || self.surface_open => {
                             self.page(1)
                         }
                         KeyCode::Up if ctrl => self.scroll(4),
@@ -802,12 +798,12 @@ impl App {
                         // history, so the wheel scrolls the transcript and the
                         // surface scrolls away with it.
                         MouseEventKind::ScrollUp
-                            if !self.menu_stack.is_empty() && !self.effort_surf =>
+                            if !self.menu_stack.is_empty() && !self.surface_open =>
                         {
                             self.menu_wheel(-3);
                         }
                         MouseEventKind::ScrollDown
-                            if !self.menu_stack.is_empty() && !self.effort_surf =>
+                            if !self.menu_stack.is_empty() && !self.surface_open =>
                         {
                             self.menu_wheel(3);
                         }
@@ -822,7 +818,7 @@ impl App {
                                 self.input
                                     .scroll(tui_textarea::Scrolling::Delta { rows: -1, cols: 0 });
                                 self.dirty = true;
-                            } else if self.effort_surf {
+                            } else if self.surface_open {
                                 self.scroll(3);
                                 self.dirty = true;
                             } else if self.popup_visible() {
@@ -864,7 +860,7 @@ impl App {
                         MouseEventKind::Down(MouseButton::Left) if !self.menu_stack.is_empty() => {
                             // the surface is the tail of the history: a press above
                             // it is a transcript gesture, not a dismissal
-                            if self.effort_surf && !self.in_menu_rect(m.row, m.column) {
+                            if self.surface_open && !self.in_menu_rect(m.row, m.column) {
                                 self.press_menu_depth = None;
                                 self.mouse_down(m.row, m.column);
                                 continue;
@@ -883,7 +879,7 @@ impl App {
                             }
                         }
                         MouseEventKind::Drag(MouseButton::Left) if !self.menu_stack.is_empty() => {
-                            if self.effort_surf && self.press.is_some() {
+                            if self.surface_open && self.press.is_some() {
                                 self.mouse_drag(m.row, m.column);
                                 continue;
                             }
@@ -929,7 +925,7 @@ impl App {
                                     } else {
                                         self.menu_click(m.row);
                                     }
-                                } else if self.effort_surf {
+                                } else if self.surface_open {
                                     // outside the surface is the history it sits at
                                     // the end of: finish the transcript gesture
                                     // (select, copy, open a target) and leave the
