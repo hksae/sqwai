@@ -2291,13 +2291,13 @@ impl App {
             // rule + title + air + card rows + the close hint under them
             Some(Menu::Context) => self.menu_rows.len() as u16 + 4,
             // rule + title + air + the leading rows + the window + the "+N"
-            // caption when there is one + the hint lines under them: the base
-            // hint and one row per verb the surface binds
+            // caption when there is one + the hint row under them; the hint
+            // column rides rows the list already has
             Some(Menu::Providers) => {
                 let (head, win, _, hints) = self.list_shape();
                 let body = self.menu_rows.len().saturating_sub(head);
                 let shown = body.min(win).max(1);
-                (3 + head + shown + usize::from(body > shown) + hints.len()) as u16
+                (3 + head + shown + usize::from(body > shown) + 1) as u16
             }
             _ => list_rows,
         };
@@ -3686,10 +3686,10 @@ impl App {
 
     /// Shape of a list surface: how many leading rows never scroll (for
     /// providers the search row), how many body rows fit, the word the "+N"
-    /// caption counts, and the hints — a column of right-aligned rows standing
-    /// under the list, one key or action per row, so a narrow terminal costs
-    /// columns and never swallows a binding. The height math and the painter
-    /// both read this, so they cannot disagree.
+    /// caption counts, and the hints — one per row, right-aligned on the last
+    /// rows the block already has, so the column costs no height and a name
+    /// stops short of it. The height math and the painter both read this, so
+    /// they cannot disagree.
     fn list_shape(&self) -> (usize, usize, &'static str, &'static [&'static str]) {
         match self.cur_menu() {
             // the search row, then a provider window of eight
@@ -3704,9 +3704,10 @@ impl App {
     }
 
     /// Rows of a list surface: rule, title, air, the leading rows, a window
-    /// over the body, the dim `… +N` caption for what the window hides, air and
-    /// the hint. No border, no fill, no band, no modal dim — the block is part
-    /// of the document and scrolls with the history.
+    /// over the body and the dim `… +N` caption for what the window hides, with
+    /// the hint column standing on the right of the block's last rows. No
+    /// border, no fill, no band, no modal dim — the block is part of the
+    /// document and scrolls with the history.
     pub(super) fn draw_list_surface(
         &mut self,
         buf: &mut Buffer,
@@ -3715,6 +3716,14 @@ impl App {
         full_h: u16,
     ) {
         let (head, win, more, hints) = self.list_shape();
+        // The hint column stands on the right of the rows the block already
+        // has, so the list stops short of it: a name never runs under a key.
+        let rail = hints
+            .iter()
+            .map(|h| h.chars().count())
+            .max()
+            .unwrap_or(0)
+            .saturating_add(2) as u16;
         self.menu_rect = area;
         self.effort_hits.clear();
         self.surf_hits.clear();
@@ -3769,18 +3778,18 @@ impl App {
         /// The search row's content: `⌕` and a placeholder are its chrome, and
         /// the caret lives there only while the field holds the focus — until
         /// Enter or a click takes it, the row reads as a label.
-        fn paint_field(slf: &mut App, buf: &mut Buffer, area: Rect, y: u16) {
+        fn paint_field(slf: &mut App, buf: &mut Buffer, area: Rect, y: u16, rail: u16) {
             let q = slf.prov_search.lines().join("");
             buf.set_line(
                 area.x + 2,
                 y,
                 &Line::from(Span::styled("⌕ ", Theme::dim())),
-                area.width.saturating_sub(2),
+                area.width.saturating_sub(2 + rail),
             );
             let field = Rect {
                 x: area.x + 4,
                 y,
-                width: area.width.saturating_sub(6),
+                width: area.width.saturating_sub(6 + rail),
                 height: 1,
             };
             if !slf.prov_focus {
@@ -3800,7 +3809,7 @@ impl App {
                     field.x,
                     y,
                     &Line::from(Span::styled("Search", Theme::dim())),
-                    area.width.saturating_sub(4),
+                    area.width.saturating_sub(4 + rail),
                 );
             }
             slf.prov_search.render(field, buf);
@@ -3836,7 +3845,7 @@ impl App {
                 area.width,
             );
             if matches!(action, MenuAction::FocusSearch) {
-                paint_field(slf, buf, area, y);
+                paint_field(slf, buf, area, y, rail);
             } else {
                 let mut spans: Vec<Span> = Vec::new();
                 for mut sp in line.spans {
@@ -3849,7 +3858,7 @@ impl App {
                     Rect {
                         x: area.x + 2,
                         y,
-                        width: area.width.saturating_sub(2),
+                        width: area.width.saturating_sub(2 + rail),
                         height: 1,
                     },
                     buf,
@@ -3879,13 +3888,12 @@ impl App {
                 area.x + 2,
                 y,
                 &Line::from(Span::styled(format!("… +{below} {more}"), Theme::dim())),
-                area.width.saturating_sub(2),
+                area.width.saturating_sub(2 + rail),
             );
         }
-        // The hints stand as a column on the right: one row per line, the last
-        // one on the block's bottom row. Each line is short, so a narrow
-        // terminal costs the column its tail to the transcript and never
-        // half-spells a binding.
+        // One hint per row, bottom-up, on the rows the block already has: the
+        // list's right side is empty, and a key that shares a row with a name
+        // reads as part of the surface instead of a caption glued under it.
         let n = hints.len() as u16;
         for (i, text) in hints.iter().enumerate() {
             if let Some(y) = row_y(full_h.saturating_sub(n - i as u16)) {

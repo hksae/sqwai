@@ -1006,30 +1006,52 @@ fn providers_verbs_live_on_ctrl_chords() {
 
 #[test]
 fn providers_hints_stand_as_a_right_column() {
+    use crate::config::{ProviderConfig, WireFormat};
     use ratatui::{Terminal, backend::TestBackend};
     let mut app = test_app("http://127.0.0.1:9/v1".into());
+    for i in 0..12 {
+        app.cfg.providers.insert(
+            format!("prov-{i:02}"),
+            ProviderConfig {
+                format: WireFormat::Openai,
+                base_url: "https://api.example.com/v1".into(),
+                api_key: None,
+                api_key_env: None,
+                continuation: false,
+            },
+        );
+    }
     app.open_menu(Menu::Providers);
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
     let buf = terminal.backend().buffer().clone();
     let bottom = buf.area.bottom() - 1;
-    let lines: Vec<String> = (0..4)
-        .map(|i| {
-            (0..buf.area.width)
-                .map(|x| buf[(x, bottom - i)].symbol().to_string())
-                .collect()
+    let row = |y: u16| {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect::<String>()
+    };
+    // the column shares the block's last rows with the list rather than
+    // standing on rows of its own
+    let want = ["esc back", "enter open", "ctrl+u update", "ctrl+n add"];
+    let edges: Vec<usize> = want
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            let line = row(bottom - i as u16);
+            let t = line.trim_end();
+            assert!(t.ends_with(w), "{w:?} rides the right edge: {t:?}");
+            t.chars().count()
         })
         .collect();
-    let trimmed: Vec<&str> = lines.iter().map(|l| l.trim()).collect();
-    assert_eq!(
-        trimmed,
-        vec!["esc back", "enter open", "ctrl+u update", "ctrl+n add"],
-        "one hint per row, the key that leaves last at the bottom"
-    );
-    let edges: Vec<usize> = lines.iter().map(|l| l.trim_end().chars().count()).collect();
     assert!(
-        edges.windows(2).all(|w| w[0] == w[1]),
-        "the column hangs off one edge: {edges:?}"
+        edges.windows(2).all(|e| e[0] == e[1]),
+        "one edge for the whole column: {edges:?}"
+    );
+    let shared = row(bottom - 3);
+    assert!(
+        shared.contains("prov-"),
+        "the column stands beside the names, not under them: {shared:?}"
     );
 }
 
