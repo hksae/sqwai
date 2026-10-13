@@ -53,7 +53,7 @@ pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
     ),
     ("/undo", &["step"]),
     ("/test", &["anim", "art", "churn", "colors", "md"]),
-    ("/providers", &["update"]),
+    ("/providers", &["add", "update"]),
     ("/constraints", &["add", "remove"]),
     ("/mode", &["plan", "act"]),
 ];
@@ -231,7 +231,9 @@ pub(super) enum MenuAction {
     OpenSkills,
     OpenDebug,
     OpenExperimental,
-    AddProvider,
+    /// The search row of a surface: activating it (Enter or a click) hands the
+    /// caret to the field. The row is reachable by the arrows like any other.
+    FocusSearch,
     EditProvider(String),
     DeleteProvider(String),
     /// check that the provider answers with the configured credentials
@@ -257,7 +259,6 @@ pub(super) enum MenuAction {
     OpenSessions,
     Confirm(Box<MenuAction>),
     DeletePlan,
-    UpdateBuiltins,
     SetEffort(EffortLevel),
     /// ask_user: select one option (q, idx)
     AskSelect {
@@ -561,7 +562,7 @@ impl App {
         // it, so opening one brings the view back down to it.
         if matches!(
             self.cur_menu(),
-            Some(Menu::Effort { .. }) | Some(Menu::Context)
+            Some(Menu::Effort { .. }) | Some(Menu::Context) | Some(Menu::Providers)
         ) {
             self.follow = true;
         }
@@ -595,6 +596,12 @@ impl App {
         if matches!(self.cur_menu(), Some(Menu::Sessions)) {
             self.sessions_filter.clear();
         }
+        if matches!(self.cur_menu(), Some(Menu::Providers)) {
+            // every visit starts clean: a stale query would hide providers the
+            // user came to look at, and the caret waits for a click
+            self.prov_search = Self::fresh_input(String::new());
+            self.prov_focus = false;
+        }
         self.prefill_form();
         // rows are ready immediately, not on the next frame
         self.build_menu_rows();
@@ -604,6 +611,7 @@ impl App {
         // a fresh menu opens at the top: the skip above may have pulled the
         // view after the selection for a window that does not exist yet
         self.menu_scroll = 0;
+        self.surf_top = 0;
         if matches!(self.cur_menu(), Some(Menu::Approval { .. })) {
             // deny is preselected, and the clock starts for the Enter guard
             self.menu_sel = self
@@ -795,6 +803,9 @@ impl App {
                 self.menu_follow_sel();
             }
         }
+        // the arrows walk the list, so the search field gives the caret back as
+        // soon as the cursor moves
+        self.prov_focus = false;
         self.dirty = true;
     }
 
@@ -834,6 +845,24 @@ impl App {
         // like every other menu.
         if matches!(self.cur_menu(), Some(Menu::Effort { .. })) && !self.effort_hits.is_empty() {
             return Some(self.menu_sel);
+        }
+        // A list painted as a surface answers hover from its hit map: the block
+        // scrolls with the history, so its rows no longer line up with the
+        // popup's fixed title + air offset. Like the rest of this function, the
+        // hit moves the selection — callers read the side effect, not the value.
+        if self.surface_open {
+            let hit = self
+                .surf_hits
+                .iter()
+                .find(|(y, _)| *y == row)
+                .map(|(_, i)| *i);
+            if let Some(i) = hit
+                && i != self.menu_sel
+            {
+                self.menu_sel = i;
+                self.dirty = true;
+            }
+            return hit;
         }
         // model edit form only: hover lights the row, focus (typing)
         // moves on click only. Other forms keep the old behavior.
@@ -947,6 +976,22 @@ impl App {
         }
     }
 
+    /// Edit the providers search field and re-filter the list. The selection
+    /// stays on the field's own row — typing there must not throw the selector
+    /// onto another row — while the window under it starts over. Erasing the
+    /// last character gives the caret back to the list: an empty field with a
+    /// cursor standing in it is a claim that someone is about to type.
+    pub(super) fn prov_search_key(&mut self, k: crossterm::event::KeyEvent) {
+        self.prov_search.input(k);
+        if self.prov_search.lines().join("").is_empty() {
+            self.prov_focus = false;
+        }
+        self.menu_scroll = 0;
+        self.surf_top = 0;
+        self.build_menu_rows();
+        self.dirty = true;
+    }
+
     /// id of the session row currently highlighted in the sessions menu
     pub(super) fn selected_session_id(&self) -> Option<String> {
         match &self.menu_row_at(self.menu_sel)?.1 {
@@ -981,6 +1026,10 @@ impl App {
             }
             return;
         }
+        // the click commits the row it landed on, not the row the cursor
+        // happened to rest on: a press without a preceding hover event must
+        // still open what was clicked
+        self.menu_sel = sel;
         self.menu_activate();
     }
 
@@ -1243,7 +1292,10 @@ impl App {
             }
             MenuAction::EditScalar(setting) => self.open_menu(Menu::EditScalar(setting)),
             MenuAction::OpenModels(p) => self.open_menu(Menu::Models { provider: p }),
-            MenuAction::AddProvider => self.open_menu(Menu::EditProvider { name: None }),
+            MenuAction::FocusSearch => {
+                self.prov_focus = true;
+                self.dirty = true;
+            }
             MenuAction::EditProvider(name) => {
                 self.open_menu(Menu::EditProvider { name: Some(name) })
             }
@@ -1607,9 +1659,6 @@ impl App {
             }
             MenuAction::DeletePlan => {
                 self.run_action(MenuAction::Confirm(Box::new(MenuAction::DeletePlan)));
-            }
-            MenuAction::UpdateBuiltins => {
-                self.start_builtin_update(true);
             }
             MenuAction::SetEffort(level) => {
                 let target = self.effort_target_key();
@@ -2518,68 +2567,37 @@ impl App {
                 ));
             }
             Menu::Providers => {
-                let budget = table_budget(self.menu_rect.width);
-                self.table_built_w = budget as u16;
-                // lead 1 + 2 gaps of 2; name flexes to fill the card,
-                // counts and key stay fixed on the right
-                const COUNT_W: usize = 9;
-                const KEY_W: usize = 12;
-                let name_w = budget.saturating_sub(1 + 4 + COUNT_W + KEY_W).max(12);
-                self.menu_table_header = Some(table_header(
-                    vec![
-                        tcell("PROVIDER", name_w, false, Theme::dim()),
-                        tcell("MODELS", COUNT_W, true, Theme::dim()),
-                        tcell("KEY", KEY_W, true, Theme::dim()),
-                    ],
-                    budget,
+                // A surface row list, not a table: the search field, then the
+                // provider names alone. Model counts and key state left with
+                // the columns — a provider that needs saying something says it
+                // itself.
+                // the search field is a row of this list: the arrows reach it,
+                // Enter or a click gives it the caret. The painter draws the
+                // glyph, the query and the cursor there, not this line.
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled("Search", Theme::dim())]),
+                    MenuAction::FocusSearch,
                 ));
-                for (name, pc) in &self.cfg.providers {
-                    let models = self
-                        .cfg
-                        .models
-                        .values()
-                        .filter(|m| &m.provider == name)
-                        .count();
-                    let (key_state, key_style) =
-                        if pc.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
-                            ("key".to_string(), Theme::effort(EffortLevel::Low))
-                        } else if let Some(env) = pc.key_env_name(name) {
-                            (format!("key ${env}"), Theme::dim())
-                        } else {
-                            ("—".to_string(), Theme::dim())
-                        };
+                // the provider the session's model comes from wears the brand
+                // ink: one row in the list says "this is what you are on"
+                let applied = self.model_cfg.provider.clone();
+                // the search field filters by name, case-insensitively; an
+                // empty field lists everything
+                let q = self.prov_search.lines().join("").to_lowercase();
+                for (name, _pc) in &self.cfg.providers {
+                    if !q.is_empty() && !name.to_lowercase().contains(&q) {
+                        continue;
+                    }
+                    let style = if *name == applied {
+                        Theme::brand_ink()
+                    } else {
+                        Style::new().fg(Theme::FG())
+                    };
                     self.menu_rows.push(row(
-                        fit_line_width(
-                            table_line(vec![
-                                tcell(name, name_w, false, Theme::FG()),
-                                tcell(&models.to_string(), COUNT_W, true, Theme::meta()),
-                                tcell(&key_state, KEY_W, true, key_style),
-                            ]),
-                            budget,
-                        ),
+                        Line::from(vec![Span::styled(name.clone(), style)]),
                         MenuAction::OpenModels(name.clone()),
                     ));
                 }
-                // actions live in the sticky footer: always visible,
-                // navigable, never scrolled with the provider rows
-                self.menu_sticky_footer.push(row(
-                    Line::from(vec![Span::styled("  add provider", Theme::FG())]),
-                    MenuAction::AddProvider,
-                ));
-                self.menu_sticky_footer.push(row(
-                    Line::from(vec![Span::styled(
-                        "  update built-in providers",
-                        Theme::FG(),
-                    )]),
-                    MenuAction::UpdateBuiltins,
-                ));
-                self.menu_sticky_footer.push(row(
-                    Line::from(vec![Span::styled(
-                        format!(" {}", crate::config::catalog_status_line()),
-                        Theme::dim(),
-                    )]),
-                    MenuAction::None,
-                ));
             }
             Menu::Models { provider } => {
                 let is_builtin = self.cfg.is_builtin_provider(&provider);

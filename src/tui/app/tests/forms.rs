@@ -526,7 +526,13 @@ fn plan_subcommand_popup_filters_and_inserts() {
     app.input = App::fresh_input("/constraints a".into());
     assert_eq!(app.popup_items(), vec!["/constraints add".to_string()]);
     app.input = App::fresh_input("/providers ".into());
-    assert_eq!(app.popup_items(), vec!["/providers update".to_string()]);
+    assert_eq!(
+        app.popup_items(),
+        vec![
+            "/providers add".to_string(),
+            "/providers update".to_string()
+        ]
+    );
     // commands without subcommands keep level-1-only behavior
     app.input = App::fresh_input("/goal ".into());
     assert!(!app.popup_visible());
@@ -786,21 +792,12 @@ fn settings_hub_rows_have_no_hint_subtitles() {
 }
 
 #[test]
-fn providers_table_has_frozen_header() {
+fn providers_surface_is_a_plain_row_list() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::Providers);
-    let header = app
-        .menu_table_header
-        .as_ref()
-        .expect("providers table header");
-    let text: String = header
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect();
     assert!(
-        text.contains("PROVIDER") && text.contains("MODELS"),
-        "header must label the grid: {text:?}"
+        app.menu_table_header.is_none(),
+        "the surface lists names, it has no grid to label"
     );
     let texts: Vec<String> = app
         .menu_rows
@@ -816,46 +813,53 @@ fn providers_table_has_frozen_header() {
         !texts.iter().any(|t| t.contains("default effort")),
         "dead preference must be gone: {texts:?}"
     );
+    // no per-row columns either: a provider is its name, nothing else
+    assert!(
+        !texts
+            .iter()
+            .any(|t| t.contains("key") || t.contains("MODELS")),
+        "counts and key state left with the table: {texts:?}"
+    );
+}
+
+#[test]
+fn provider_actions_live_in_commands_not_in_the_list() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    // `/providers add` opens the blank form the old row used to open
+    app.command("providers add");
+    assert!(
+        matches!(app.cur_menu(), Some(Menu::EditProvider { name: None })),
+        "add is a command now"
+    );
+    // `/providers` alone is still the list
+    app.menu_back();
+    app.command("providers");
+    assert!(matches!(app.cur_menu(), Some(Menu::Providers)));
 }
 
 #[test]
 fn info_rows_take_no_selection() {
-    use crate::config::{ProviderConfig, WireFormat};
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    for i in 0..3 {
-        app.cfg.providers.insert(
-            format!("prov-{i:02}"),
-            ProviderConfig {
-                format: WireFormat::Openai,
-                base_url: "https://api.example.com/v1".into(),
-                api_key: None,
-                api_key_env: None,
-                continuation: false,
-            },
-        );
-    }
-    app.open_menu(Menu::Providers);
-    // the catalog status line is the last row and carries no action
-    let last = app.menu_len() - 1;
-    assert!(
-        matches!(
-            app.menu_row_at(last).map(|(_, a)| a),
-            Some(MenuAction::None)
-        ),
-        "catalog line is info"
-    );
+    // Skills carries section headers and empty-list notes as info rows between
+    // its actions
+    app.open_menu(Menu::Skills);
+    let info = app
+        .menu_rows
+        .iter()
+        .position(|(_, a)| matches!(a, MenuAction::None))
+        .expect("the menu still has info rows");
     // arrows step over it in both directions
     for _ in 0..app.menu_len() + 2 {
         app.menu_nav(1);
-        assert_ne!(app.menu_sel, last, "forward must skip the info row");
+        assert_ne!(app.menu_sel, info, "forward must skip the info row");
     }
     for _ in 0..app.menu_len() + 2 {
         app.menu_nav(-1);
-        assert_ne!(app.menu_sel, last, "backward must skip the info row");
+        assert_ne!(app.menu_sel, info, "backward must skip the info row");
     }
     // End lands on the last actionable row, never the info line
     app.menu_jump(true);
-    assert_ne!(app.menu_sel, last);
+    assert_ne!(app.menu_sel, info);
     assert!(
         !matches!(
             app.menu_row_at(app.menu_sel).map(|(_, a)| a),
@@ -875,7 +879,7 @@ fn info_rows_take_no_selection() {
 }
 
 #[test]
-fn providers_footer_stays_pinned_while_body_scrolls() {
+fn providers_surface_leads_with_its_search_row() {
     use crate::config::{ProviderConfig, WireFormat};
     use ratatui::{Terminal, backend::TestBackend};
     let mut app = test_app("http://127.0.0.1:9/v1".into());
@@ -892,19 +896,19 @@ fn providers_footer_stays_pinned_while_body_scrolls() {
         );
     }
     app.open_menu(Menu::Providers);
-    let body = app.menu_rows.len();
-    assert!(body > 6, "need overflow for the scroll check");
-    // actions live outside the scrollable body now
-    assert_eq!(app.menu_sticky_footer.len(), 3);
+    // one list: the search row leads it and the providers follow, with no
+    // separate pinned panel and no divider rows between them
+    assert!(app.menu_sticky_footer.is_empty(), "no footer concept");
+    assert_eq!(app.menu_len(), app.menu_rows.len());
     assert!(matches!(
-        app.menu_row_at(body).map(|(_, a)| a),
-        Some(MenuAction::AddProvider)
+        app.menu_row_at(0).map(|(_, a)| a),
+        Some(MenuAction::FocusSearch)
     ));
-    assert_eq!(app.menu_len(), body + 3);
-    // scroll the body to the bottom: first provider rows leave the
-    // window, the footer stays painted
-    app.menu_wheel(10000);
-    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    assert!(matches!(
+        app.menu_row_at(1).map(|(_, a)| a),
+        Some(MenuAction::OpenModels(_))
+    ));
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
     let text: String = terminal
         .backend()
@@ -913,13 +917,27 @@ fn providers_footer_stays_pinned_while_body_scrolls() {
         .iter()
         .map(|c| c.symbol())
         .collect();
-    assert!(text.contains("add provider"), "footer must stay");
-    assert!(!text.contains("+ add"), "no marker prefix: {text}");
+    assert!(text.contains("Search"), "the field leads the list");
     assert!(
-        text.contains("update built-in providers"),
-        "footer must stay"
+        !text.contains("add provider"),
+        "the two action rows are gone: {text}"
     );
-    assert!(!text.contains("prov-00"), "scrolled body rows must leave");
+    assert!(
+        !text.contains("update built-in"),
+        "the two action rows are gone: {text}"
+    );
+    let painted = (0..12)
+        .filter(|i| text.contains(&format!("prov-{i:02}")))
+        .count();
+    assert!(
+        painted > 0 && painted < 12,
+        "a capped window paints a slice, not the whole list: {painted} of 12"
+    );
+    assert!(text.contains("… +"), "the hidden tail is captioned");
+    assert!(
+        !text.contains("PROVIDER"),
+        "no frozen header on a surface: {text}"
+    );
 }
 
 #[test]

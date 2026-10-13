@@ -679,6 +679,24 @@ impl App {
                                 self.run_action(MenuAction::DeleteSession(id));
                             }
                         }
+                        // the providers surface owns a real search field: keys
+                        // edit it there, and it filters the list as it types
+                        // the providers search field owns the keyboard only
+                        // after it was clicked: no caret, no typing
+                        KeyCode::Char(_)
+                            if matches!(self.cur_menu(), Some(Menu::Providers))
+                                && self.prov_focus
+                                && !ctrl
+                                && !alt =>
+                        {
+                            self.prov_search_key(k);
+                        }
+                        KeyCode::Backspace | KeyCode::Delete
+                            if matches!(self.cur_menu(), Some(Menu::Providers))
+                                && self.prov_focus =>
+                        {
+                            self.prov_search_key(k);
+                        }
                         // type-to-filter in the sessions menu
                         KeyCode::Char(c) if matches!(self.cur_menu(), Some(Menu::Sessions)) => {
                             self.sessions_filter.push(c);

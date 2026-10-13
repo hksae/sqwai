@@ -460,6 +460,14 @@ pub struct App {
     /// Absolute index of the first command inside the list window. The window
     /// follows the cursor by exactly one row per step, in both directions.
     popup_top: i64,
+    /// Screen row → menu row index, for a list that paints as a surface. The
+    /// block scrolls with the history, so hover and click can no longer be
+    /// computed from `menu_rect.y + 2` the way a fixed popup could.
+    surf_hits: Vec<(u16, usize)>,
+    /// First body row inside a surface's window. Its own counter, not
+    /// `menu_scroll`: the popup's follow-the-selection drags that over the
+    /// pinned leading rows too, which would scroll a list the cursor is not on.
+    surf_top: usize,
     popup_rows: Vec<(u16, String)>,
 
     // providers/models menu (Ctrl+P)
@@ -513,6 +521,13 @@ pub struct App {
     sessions: Vec<SessionHeader>,
     /// live filter typed inside the sessions menu
     sessions_filter: String,
+    /// The providers surface's search field: a real input with its own caret,
+    /// focused while that surface is open, filtering the list as it is typed.
+    prov_search: TextArea<'static>,
+    /// Whether that field holds the caret. It is a click away, not a default:
+    /// a standing block cursor in a field nobody chose is the loudest thing on
+    /// the surface.
+    prov_focus: bool,
     ef_click: Option<(u16, u16)>,
     /// Click range of the context readout in the status bar: opens the same
     /// menu `/context` opens.
@@ -732,6 +747,8 @@ impl App {
             popup_dismiss: false,
             popup_walk: None,
             popup_top: 0,
+            surf_hits: Vec::new(),
+            surf_top: 0,
             popup_rows: Vec::new(),
             menu_stack: Vec::new(),
             menu_sel: 0,
@@ -755,6 +772,8 @@ impl App {
             form_draft: Vec::new(),
             sessions: Vec::new(),
             sessions_filter: String::new(),
+            prov_search: Self::fresh_input(String::new()),
+            prov_focus: false,
             ef_click: None,
             ctx_click: None,
             md_click: None,
@@ -821,15 +840,9 @@ impl App {
         input.set_block(Self::input_block());
         input.set_style(Theme::base());
         input.set_cursor_line_style(Style::new());
-        // Classic block cursor on a manually colored background (the styles.md
-        // exception for black & white), but the highlight itself is the house
-        // band: the ANSI cyan default was the one place in the UI where a
-        // selection meant something other than "this row is picked".
-        input.set_cursor_style(
-            Style::new()
-                .bg(ratatui::style::Color::White)
-                .fg(ratatui::style::Color::Black),
-        );
+        // The selection is the house band, not tui-textarea's ANSI cyan: a
+        // selection must never mean anything other than "this row is picked".
+        input.set_cursor_style(Theme::cursor());
         input.set_selection_style(Theme::selection());
         input
     }
@@ -1587,7 +1600,13 @@ impl App {
         // command, Up on the last one.
         let next = match self.popup_walk {
             Some(w) => w + step,
-            None => if dir < 0 { n - 1 } else { 0 },
+            None => {
+                if dir < 0 {
+                    n - 1
+                } else {
+                    0
+                }
+            }
         };
         self.popup_walk = Some(next);
         self.hover = Some(items[next.rem_euclid(n) as usize].clone());

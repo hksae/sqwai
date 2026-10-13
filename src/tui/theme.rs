@@ -59,6 +59,15 @@ impl Theme {
     pub const fn META() -> Color {
         Color::Gray
     }
+    /// The text cursor everywhere: a block in muted white rather than the
+    /// full-brightness ANSI white. A solid #fff square on this background was
+    /// the loudest thing on the screen and pulled the eye to the caret instead
+    /// of the text. One definition, so the composer, the form fields and the
+    /// surface search field cannot drift apart.
+    #[allow(non_snake_case)]
+    pub fn cursor() -> Style {
+        Style::new().bg(Self::META()).fg(Color::Black)
+    }
     /// House accent: xterm 168 (`#d75f87`), the cube color nearest the brand
     /// ramp's loud end (`#de2f66`) and the same index the art falls back to
     /// without truecolor. Blue vibrated on black terminals and fought the

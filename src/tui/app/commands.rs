@@ -164,6 +164,8 @@ impl App {
                 let arg = rest.split_whitespace().nth(1);
                 if arg == Some("update") {
                     self.start_builtin_update(true);
+                } else if arg == Some("add") {
+                    self.open_menu(Menu::EditProvider { name: None });
                 } else {
                     self.open_menu(Menu::Providers);
                 }

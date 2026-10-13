@@ -519,6 +519,9 @@ pub fn builtin_meta_path() -> Result<PathBuf> {
 /// One-line catalog provenance for the providers menu: serial, stamp and
 /// last check. Never empty — even the embedded fallback reports itself,
 /// so "no info" itself tells the user updates never landed.
+/// Kept while the providers surface runs without it: the owner cut the
+/// status line for now and may bring it back.
+#[allow(dead_code)]
 pub fn catalog_status_line() -> String {
     let catalog = BuiltinCatalog::current();
     let date = catalog

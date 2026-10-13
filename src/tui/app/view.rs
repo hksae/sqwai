@@ -2288,13 +2288,23 @@ impl App {
         let list_block = list_rows > 0;
         let surf_full = match surf_menu {
             Some(Menu::Effort { .. }) => EFFORT_SURFACE_H,
-            // rule + title + card rows + air + the close hint
+            // rule + title + air + card rows + the close hint under them
             Some(Menu::Context) => self.menu_rows.len() as u16 + 4,
+            // rule + title + air + the leading rows + the window + the "+N"
+            // caption when there is one + the hint, which sits under it
+            // rule + title + air + the leading rows + the window + the "+N"
+            // caption when there is one + the hint under them
+            Some(Menu::Providers) => {
+                let (head, win, _, _) = self.list_shape();
+                let body = self.menu_rows.len().saturating_sub(head);
+                let shown = body.min(win).max(1);
+                (3 + head + shown + usize::from(body > shown) + 1) as u16
+            }
             _ => list_rows,
         };
         let surface = matches!(
             surf_menu,
-            Some(Menu::Effort { .. }) | Some(Menu::Context)
+            Some(Menu::Effort { .. }) | Some(Menu::Context) | Some(Menu::Providers)
         );
         // the block joins the document either way; only a menu surface also
         // claims the composer's own rows
@@ -2602,14 +2612,19 @@ impl App {
             Some((rect, skip)) if rect.height > 0 => {
                 if !surface {
                     self.draw_popup(buf, rect, skip, surf_full);
-                } else if matches!(surf_menu, Some(Menu::Context)) {
-                    self.draw_context_surface(buf, rect, skip, surf_full);
                 } else {
-                    self.draw_effort_slider(buf, rect, skip, surf_full);
+                    match surf_menu {
+                        Some(Menu::Context) => {
+                            self.draw_context_surface(buf, rect, skip, surf_full)
+                        }
+                        Some(Menu::Providers) => self.draw_list_surface(buf, rect, skip, surf_full),
+                        _ => self.draw_effort_slider(buf, rect, skip, surf_full),
+                    }
                 }
             }
             Some(_) => {
                 self.effort_hits.clear();
+                self.surf_hits.clear();
                 self.menu_rect = Rect::default();
                 self.popup_rows.clear();
             }
@@ -2886,7 +2901,10 @@ impl App {
         // their own rows. Rebuilding here would size the /context scale from a
         // `menu_rect` the surface never painted: scrolled up, that rect is empty
         // and the bar clamped to its 20-cell floor on a wide terminal.
-        if matches!(menu, Some(Menu::Effort { .. }) | Some(Menu::Context)) {
+        if matches!(
+            menu,
+            Some(Menu::Effort { .. }) | Some(Menu::Context) | Some(Menu::Providers)
+        ) {
             return;
         }
         let is_form = self.is_form_menu();
@@ -3604,12 +3622,13 @@ impl App {
             self.ctx_built_w = card_w;
             self.menu_built_at = Some(std::time::Instant::now());
         }
-        // The card's rows: 0 rule, 1 title, 2.. the card itself, then air and
-        // the hint on the last row.
+        // The card's rows: 0 rule, 1 title, 2 air, 3.. the card itself, then
+        // air and the hint on the last row.
         let row_y = |k: u16| {
             let y = k.checked_sub(skip).map(|r| area.y + r)?;
             (y < area.bottom()).then_some(y)
         };
+        const CARD0: u16 = 3;
         if let Some(y) = row_y(0) {
             buf.set_line(
                 area.x,
@@ -3632,8 +3651,8 @@ impl App {
                 area.width,
             );
         }
-        let first = (skip.saturating_sub(2) as usize).min(self.menu_rows.len());
-        if let Some(y) = row_y(2 + first as u16) {
+        let first = (skip.saturating_sub(CARD0) as usize).min(self.menu_rows.len());
+        if let Some(y) = row_y(CARD0 + first as u16) {
             let lines: Vec<Line> = self
                 .menu_rows
                 .iter()
@@ -3663,6 +3682,213 @@ impl App {
                     },
                     buf,
                 );
+        }
+    }
+
+    /// Shape of a list surface: how many leading rows never scroll (the
+    /// actions, and for providers the search row among them), how many body
+    /// rows fit, the word the "+N" caption counts, and the hint line. The
+    /// height math and the painter both read this, so they cannot disagree.
+    fn list_shape(&self) -> (usize, usize, &'static str, &'static str) {
+        match self.cur_menu() {
+            // the search row, then a provider window of eight
+            Some(Menu::Providers) => (1, 8, "providers", "enter open · esc back"),
+            _ => (0, 12, "", ""),
+        }
+    }
+
+    /// Rows of a list surface: rule, title, air, the leading rows, a window
+    /// over the body, the dim `… +N` caption for what the window hides, air and
+    /// the hint. No border, no fill, no band, no modal dim — the block is part
+    /// of the document and scrolls with the history.
+    pub(super) fn draw_list_surface(
+        &mut self,
+        buf: &mut Buffer,
+        area: Rect,
+        off: u16,
+        full_h: u16,
+    ) {
+        let (head, win, more, hint) = self.list_shape();
+        self.menu_rect = area;
+        self.effort_hits.clear();
+        self.surf_hits.clear();
+        self.popup_rows.clear();
+        // block rows: 0 rule, 1 title, 2 air, the leading rows, the search
+        // field under them, then the window, the caption and the hint. `off`
+        // rows are above the visible slice.
+        const LIST0: u16 = 3;
+        // the leading rows (actions, then the search row) are pinned; the
+        // provider window follows them
+        let body0 = LIST0 + head as u16;
+        let row_y = |k: u16| {
+            let y = k.checked_sub(off).map(|r| area.y + r)?;
+            (y < area.bottom()).then_some(y)
+        };
+        if let Some(y) = row_y(0) {
+            buf.set_line(
+                area.x,
+                y,
+                &Line::from(Span::styled(
+                    "─".repeat(area.width as usize),
+                    Theme::brand_ink(),
+                )),
+                area.width,
+            );
+        }
+        if let Some(y) = row_y(1) {
+            buf.set_line(
+                area.x,
+                y,
+                &Line::from(Span::styled(
+                    format!(" {}", self.menu_title()),
+                    crate::tui::art::h2_style(),
+                )),
+                area.width,
+            );
+        }
+        let body = self.menu_rows.len().saturating_sub(head);
+        let shown = body.min(win).max(1);
+        // the window follows the cursor through the body only; while the cursor
+        // is on the pinned leading rows, the list under it does not move
+        let mut top = self.surf_top.min(body.saturating_sub(shown));
+        if self.menu_sel >= head {
+            let i = self.menu_sel - head;
+            if i < top {
+                top = i;
+            } else if i >= top + shown {
+                top = i + 1 - shown;
+            }
+        }
+        self.surf_top = top;
+        /// The search row's content: `⌕` and a placeholder are its chrome, and
+        /// the caret lives there only while the field holds the focus — until
+        /// Enter or a click takes it, the row reads as a label.
+        fn paint_field(slf: &mut App, buf: &mut Buffer, area: Rect, y: u16) {
+            let q = slf.prov_search.lines().join("");
+            buf.set_line(
+                area.x + 2,
+                y,
+                &Line::from(Span::styled("⌕ ", Theme::dim())),
+                area.width.saturating_sub(2),
+            );
+            let field = Rect {
+                x: area.x + 4,
+                y,
+                width: area.width.saturating_sub(6),
+                height: 1,
+            };
+            if !slf.prov_focus {
+                Paragraph::new(Line::from(Span::styled(
+                    if q.is_empty() {
+                        "Search".to_string()
+                    } else {
+                        q
+                    },
+                    Theme::dim(),
+                )))
+                .render(field, buf);
+                return;
+            }
+            if q.is_empty() {
+                buf.set_line(
+                    field.x,
+                    y,
+                    &Line::from(Span::styled("Search", Theme::dim())),
+                    area.width.saturating_sub(4),
+                );
+            }
+            slf.prov_search.render(field, buf);
+            // a terminal cursor lets the glyph through the block; the textarea
+            // paints a space there, so the placeholder's first letter goes back
+            // on top of it, under the cursor style
+            if q.is_empty()
+                && let Some(cell) = buf.cell_mut((field.x, field.y))
+            {
+                cell.set_symbol("S");
+            }
+        }
+        let paint = |i: usize, k: u16, slf: &mut Self, buf: &mut Buffer| {
+            let Some(y) = row_y(k) else {
+                return;
+            };
+            let Some((line, action)) = slf.menu_rows.get(i).cloned() else {
+                return;
+            };
+            let info = matches!(action, MenuAction::None);
+            let cur = !info && slf.menu_sel == i;
+            buf.set_line(
+                area.x,
+                y,
+                &Line::from(Span::styled(
+                    if cur { "› " } else { "  " },
+                    if cur {
+                        Theme::brand_ink()
+                    } else {
+                        Style::new().add_modifier(Modifier::DIM)
+                    },
+                )),
+                area.width,
+            );
+            if matches!(action, MenuAction::FocusSearch) {
+                paint_field(slf, buf, area, y);
+            } else {
+                let mut spans: Vec<Span> = Vec::new();
+                for mut sp in line.spans {
+                    if cur {
+                        sp.style = sp.style.add_modifier(Modifier::BOLD);
+                    }
+                    spans.push(sp);
+                }
+                Paragraph::new(Line::from(spans)).render(
+                    Rect {
+                        x: area.x + 2,
+                        y,
+                        width: area.width.saturating_sub(2),
+                        height: 1,
+                    },
+                    buf,
+                );
+            }
+            if !info {
+                slf.surf_hits.push((y, i));
+            }
+        };
+        for i in 0..head.min(self.menu_rows.len()) {
+            paint(i, LIST0 + i as u16, self, buf);
+        }
+        for j in 0..shown {
+            let i = head + top + j;
+            if i >= self.menu_rows.len() {
+                break;
+            }
+            paint(i, body0 + j as u16, self, buf);
+        }
+        // what the window still hides, in the same gray the transcripts use
+        let below = body.saturating_sub(top + shown);
+        if below > 0
+            && !more.is_empty()
+            && let Some(y) = row_y(body0 + shown as u16)
+        {
+            buf.set_line(
+                area.x + 2,
+                y,
+                &Line::from(Span::styled(format!("… +{below} {more}"), Theme::dim())),
+                area.width.saturating_sub(2),
+            );
+        }
+        if let Some(y) = row_y(full_h.saturating_sub(1)) {
+            Paragraph::new(
+                Line::from(Span::styled(hint.to_string(), Theme::dim())).right_aligned(),
+            )
+            .render(
+                Rect {
+                    x: area.x,
+                    y,
+                    width: area.width.saturating_sub(1),
+                    height: 1,
+                },
+                buf,
+            );
         }
     }
 
