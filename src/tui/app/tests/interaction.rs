@@ -1886,18 +1886,11 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
     assert!(t.contains("used 8k"), "the header keeps only used: {t}");
     assert!(t.contains("unaccounted"), "the gap is its own row: {t}");
     assert!(t.contains("free"), "free space is a legend row: {t}");
-    // #209 L14: the budget measures history only, so the panel has to say which
-    // part of the window no compaction can ever take back
+    // #209 L14 stays out of this panel: the fixed, uncompactable share is the
+    // host's own accounting, and the owner asked for the user's content only
     assert!(
-        t.contains("fixed by the host"),
-        "the uncompactable share must be stated: {t}"
-    );
-    assert!(
-        !t.lines()
-            .find(|l| l.contains("fixed by the host"))
-            .unwrap_or_default()
-            .starts_with(['●', '○', '◌']),
-        "it is a footnote, not another slice of the partition: {t}"
+        !t.contains("fixed by the host"),
+        "the panel carries no host-side footnote: {t}"
     );
     // the legend is a partition of the window: every row carries a percent and
     // together they may not claim more than the window has

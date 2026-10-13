@@ -2925,23 +2925,8 @@ impl App {
                 // #209 L14: the compaction budget measures history alone, on
                 // purpose — gating on the fixed prefix fires a useless
                 // compaction every turn (`after == before`, loop_compact.rs:17-21).
-                // Right for the gate, invisible to the reader: this says how much
-                // of the window no trim can ever return, so a nearly-full session
-                // stops looking like an empty one.
-                if let Some(x) = b {
-                    let fixed = x.system_tokens + x.memory_tokens + x.skills_tokens + x.host_tokens;
-                    self.menu_rows.push(row(
-                        Line::from(Span::styled(
-                            format!(
-                                "fixed by the host {} ({:.0}%) — not compactable",
-                                fmt_k(fixed),
-                                fixed as f64 / limit as f64 * 100.0
-                            ),
-                            Theme::dim(),
-                        )),
-                        MenuAction::None,
-                    ));
-                }
+                // The fixed share is deliberately not printed here: the owner
+                // asked for the panel to stay about the user's own content.
             }
             Menu::TestAnim => {
                 // One row per frame set: the live frame in the brand's loud end,
