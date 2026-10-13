@@ -270,10 +270,7 @@ impl App {
                     // some Windows terminal/keymap combinations interpret it as
                     // an accept/submit action after the clipboard text is inserted.
                     if ctrl && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V')) {
-                        let Ok(mut cb) = arboard::Clipboard::new() else {
-                            continue;
-                        };
-                        let Ok(txt) = cb.get_text() else {
+                        let Ok(txt) = super::clip_get() else {
                             continue;
                         };
                         let txt = normalize_paste(&txt);
@@ -300,10 +297,8 @@ impl App {
                                     && ta.is_selecting()
                                 {
                                     let text = Self::copy_textarea(ta);
-                                    if !text.is_empty()
-                                        && let Ok(mut clipboard) = arboard::Clipboard::new()
-                                    {
-                                        let _ = clipboard.set_text(text);
+                                    if !text.is_empty() {
+                                        let _ = super::clip_set(&text);
                                     }
                                     self.dirty = true;
                                 }
@@ -311,10 +306,8 @@ impl App {
                             }
                             if self.input.is_selecting() {
                                 let text = Self::copy_textarea(&mut self.input);
-                                if !text.is_empty()
-                                    && let Ok(mut clipboard) = arboard::Clipboard::new()
-                                {
-                                    let _ = clipboard.set_text(text);
+                                if !text.is_empty() {
+                                    let _ = super::clip_set(&text);
                                 }
                                 self.dirty = true;
                                 continue;
@@ -869,6 +862,13 @@ impl App {
                             }
                         }
                         MouseEventKind::Down(MouseButton::Left) if !self.menu_stack.is_empty() => {
+                            // the surface is the tail of the history: a press above
+                            // it is a transcript gesture, not a dismissal
+                            if self.effort_surf && !self.in_menu_rect(m.row, m.column) {
+                                self.press_menu_depth = None;
+                                self.mouse_down(m.row, m.column);
+                                continue;
+                            }
                             self.press_menu_depth = Some(self.menu_stack.len());
                             if self.is_form_menu() {
                                 if self.in_menu_rect(m.row, m.column) {
@@ -883,6 +883,10 @@ impl App {
                             }
                         }
                         MouseEventKind::Drag(MouseButton::Left) if !self.menu_stack.is_empty() => {
+                            if self.effort_surf && self.press.is_some() {
+                                self.mouse_drag(m.row, m.column);
+                                continue;
+                            }
                             if self.is_form_menu() && self.form_is_selecting() {
                                 self.form_mouse_drag(m.row, m.column);
                             }
@@ -908,7 +912,8 @@ impl App {
                                     self.form_mouse_up();
                                 }
                             } else {
-                                // inside: pick a row; outside: act like esc
+                                // inside: pick a row; outside: a surface keeps the
+                                // picker open, any other menu acts like esc
                                 if self.in_menu_rect(m.row, m.column) {
                                     if matches!(self.cur_menu(), Some(Menu::Effort { .. }))
                                         && !self.effort_hits.is_empty()
@@ -924,6 +929,12 @@ impl App {
                                     } else {
                                         self.menu_click(m.row);
                                     }
+                                } else if self.effort_surf {
+                                    // outside the surface is the history it sits at
+                                    // the end of: finish the transcript gesture
+                                    // (select, copy, open a target) and leave the
+                                    // picker alone — only enter/esc decide it
+                                    self.mouse_up(m.row, m.column);
                                 } else {
                                     self.sel = None;
                                     self.menu_back();
@@ -1104,10 +1115,8 @@ impl App {
             // Release copies, it does not deselect: the highlight is the only
             // proof the user has that the right span went to the clipboard.
             let text = Self::copy_textarea(&mut self.input);
-            if !text.is_empty()
-                && let Ok(mut clipboard) = arboard::Clipboard::new()
-            {
-                let _ = clipboard.set_text(text);
+            if !text.is_empty() {
+                let _ = super::clip_set(&text);
             }
         } else {
             self.input.cancel_selection();
@@ -1118,10 +1127,7 @@ impl App {
 
     #[allow(dead_code)]
     pub(super) fn paste_clipboard(&mut self) {
-        let Ok(mut cb) = arboard::Clipboard::new() else {
-            return;
-        };
-        let Ok(txt) = cb.get_text() else {
+        let Ok(txt) = super::clip_get() else {
             return;
         };
         let txt = normalize_paste(&txt);

@@ -95,42 +95,55 @@ fn effort_keyboard_open_no_prior_mouse_keeps_selection() {
         app.menu_open_mouse.is_none(),
         "no prior mouse: open snapshots None"
     );
-    // narrow paint: slider hits stay empty, plain row list owns geometry
-    let area = Rect::new(0, 0, 40, 20);
+    // the surface paint owns the geometry: one hit column per level
+    let area = Rect::new(0, 0, 100, 30);
+    let surface = Rect::new(0, 23, 100, 7);
     let mut buf = Buffer::empty(area);
-    app.draw_menu(&mut buf, area);
-    assert!(app.effort_hits.is_empty());
-    let off_row = app.menu_rect.y + 2;
-    let col = app.menu_rect.x + 5;
+    app.draw_effort_slider(&mut buf, surface);
+    assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
+    let (off_col, off_idx) = app.effort_hits[0];
+    assert_eq!(off_idx, 0, "the first column is Off");
+    let row = off_col.y;
+    let col = off_col.x + 1;
     // ambient jitter on the resting mouse: cursor must not move
-    tx.send(me(MouseEventKind::Moved, off_row, col)).unwrap();
+    tx.send(me(MouseEventKind::Moved, row, col)).unwrap();
     app.poll_input(&rx).unwrap();
     assert_eq!(
         app.menu_sel, want,
         "first Moved with no prior position must not yank the cursor to Off"
     );
-    tx.send(me(MouseEventKind::Moved, off_row + 1, col))
+    tx.send(me(MouseEventKind::Moved, row + 1, col))
         .unwrap();
     app.poll_input(&rx).unwrap();
     assert_eq!(
         app.menu_sel, want,
         "±1 jitter inside the deadzone must not move the cursor"
     );
-    // full click gesture on the Off row still commits (clicks work)
-    tx.send(me(MouseEventKind::Down(MouseButton::Left), off_row, col))
+    // a deliberate click on the Off column previews it and keeps the picker
+    // open — the surface commits on Enter, never on click
+    tx.send(me(MouseEventKind::Down(MouseButton::Left), row, col))
         .unwrap();
     app.poll_input(&rx).unwrap();
     assert!(
         matches!(app.cur_menu(), Some(Menu::Effort { .. })),
         "Down must not leave the Effort menu"
     );
-    tx.send(me(MouseEventKind::Moved, off_row, col)).unwrap();
-    app.poll_input(&rx).unwrap();
-    tx.send(me(MouseEventKind::Up(MouseButton::Left), off_row, col))
+    tx.send(me(MouseEventKind::Up(MouseButton::Left), row, col))
         .unwrap();
     app.poll_input(&rx).unwrap();
+    assert_eq!(app.menu_sel, 0, "the click previews the column it landed on");
+    assert!(
+        matches!(app.cur_menu(), Some(Menu::Effort { .. })),
+        "a click inside the surface keeps it open"
+    );
+    tx.send(Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::empty(),
+    )))
+    .unwrap();
+    app.poll_input(&rx).unwrap();
     assert_eq!(app.model_cfg.effort, EffortLevel::Off);
-    assert!(app.cur_menu().is_none(), "click commits and closes");
+    assert!(app.cur_menu().is_none(), "Enter commits and closes");
     // arrows + Enter still work: reopen (now on Off), step down, commit
     tx.send(ctrl_e).unwrap();
     app.poll_input(&rx).unwrap();
@@ -138,9 +151,9 @@ fn effort_keyboard_open_no_prior_mouse_keeps_selection() {
         matches!(app.cur_menu(), Some(Menu::Effort { .. })),
         "Ctrl+E must reopen the Effort menu"
     );
-    assert_eq!(app.menu_sel, 0, "reopened card opens on Off");
+    assert_eq!(app.menu_sel, 0, "reopened picker opens on Off");
     let mut buf2 = Buffer::empty(area);
-    app.draw_menu(&mut buf2, area);
+    app.draw_effort_slider(&mut buf2, surface);
     tx.send(Event::Key(KeyEvent::new(
         KeyCode::Down,
         KeyModifiers::empty(),

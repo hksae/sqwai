@@ -970,7 +970,7 @@ fn effort_slider_opens_on_current_level_with_hits() {
     app.draw_effort_slider(&mut buf, surface);
     assert_eq!(app.effort_blend_sel, Some(0));
     // the surface owns the bottom slot: title left, the committed level and
-    // the command that opens it right, one dim hint line at the very bottom
+    // the key that opens it right, one dim hint line at the very bottom
     let title: String = (0..100)
         .map(|x| buf[(x, surface.y + 1)].symbol().to_string())
         .collect();
@@ -979,8 +979,8 @@ fn effort_slider_opens_on_current_level_with_hits() {
         "title sits at the left of the surface: {title:?}"
     );
     assert!(
-        title.contains("high") && title.contains("/effort"),
-        "the committed level and the command ride the title row: {title:?}"
+        title.contains("high") && title.contains("ctrl+e"),
+        "the committed level and the key ride the title row: {title:?}"
     );
     let hint: String = (0..100)
         .map(|x| buf[(x, surface.bottom() - 1)].symbol().to_string())
@@ -1034,32 +1034,33 @@ fn effort_slider_opens_on_current_level_with_hits() {
 }
 
 #[test]
-fn effort_narrow_fallback_list_hovers_and_clicks_by_row() {
+fn effort_narrow_is_the_same_surface() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.model_cfg.effort = EffortLevel::Low;
     app.open_menu(crate::tui::app::menus::Menu::Effort { model: None });
-    // narrow terminal: slider card stays off, plain row list instead
-    let area = Rect::new(0, 0, 40, 20);
-    let mut buf = Buffer::empty(area);
-    app.draw_menu(&mut buf, area);
-    assert!(app.effort_hits.is_empty(), "slider must not render narrow");
-    // hover the first row moves the selection (unlike the slider card):
-    // title + air row precede the items, no header on the Effort list
-    let first_row = app.menu_rect.y + 2;
-    assert_eq!(app.menu_hover(first_row), Some(0));
-    assert_eq!(app.menu_sel, 0);
-    // click commits the row's level and closes the menu
-    app.menu_click(first_row);
-    assert_eq!(app.model_cfg.effort, EffortLevel::Off);
-    assert!(app.menu_stack.is_empty(), "menu must close on commit");
+    // narrow gets the same picker: the columns pack, there is no list form
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 30));
+    let surface = Rect::new(0, 23, 40, 7);
+    app.draw_effort_slider(&mut buf, surface);
+    assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
+    assert!(
+        app.effort_hits
+            .iter()
+            .all(|(r, _)| r.right() <= surface.right()),
+        "packed columns must stay inside the surface"
+    );
+    // and the first column is still the level it names
+    let (first, idx) = app.effort_hits[0];
+    assert_eq!(idx, 0);
+    assert_eq!(app.effort_index_at(first.y, first.x + 1), Some(0));
 }
 
 /// A press that opens a submenu owns the whole gesture: a 1px jitter
 /// between Down and Up must not hover-yank the fresh card's cursor off
 /// the selected level — and it must work even before the first paint
-/// built the slider hit map (the narrow list path).
+/// built the slider hit map (no surface drawn yet, so the hit map is empty).
 #[test]
 fn submenu_open_jitter_does_not_move_effort_cursor() {
     use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -1137,12 +1138,14 @@ fn submenu_open_jitter_does_not_move_effort_cursor() {
     assert_eq!(app.menu_sel, want, "cursor still on the target level");
 }
 
-/// Keyboard-opened popups never had a press: a resting mouse's ambient
-/// jitter must not yank the fresh card's cursor, but a deliberate move
-/// outside the 1-cell deadzone still hovers normally.
+/// Keyboard-opened pickers never had a press: a resting mouse's ambient
+/// jitter must not yank the cursor off the session level. The surface hovers
+/// nothing at all — only a click moves the preview, Enter commits.
 #[test]
 fn keyboard_open_effort_ignores_resting_mouse_jitter() {
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
@@ -1159,7 +1162,9 @@ fn keyboard_open_effort_ignores_resting_mouse_jitter() {
     };
     let ctrl_e = Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
     let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
-    // phase 1 — geometry discovery: open, paint narrow, record the off row
+    let area = Rect::new(0, 0, 100, 30);
+    let surface = Rect::new(0, 23, 100, 7);
+    // phase 1 — geometry discovery: open, paint the surface, take a column
     tx.send(ctrl_e.clone()).unwrap();
     app.poll_input(&rx).unwrap();
     assert!(
@@ -1173,20 +1178,21 @@ fn keyboard_open_effort_ignores_resting_mouse_jitter() {
         .iter()
         .position(|l| *l == EffortLevel::High)
         .unwrap();
-    assert_eq!(app.menu_sel, want, "fresh card opens on the session level");
-    let area = Rect::new(0, 0, 40, 20);
+    assert_eq!(app.menu_sel, want, "fresh picker opens on the session level");
     let mut buf = Buffer::empty(area);
-    app.draw_menu(&mut buf, area);
-    assert!(app.effort_hits.is_empty());
-    let off_row = app.menu_rect.y + 2;
-    let col = app.menu_rect.x + 5;
-    // close, park the mouse exactly on the off row (no menu: chat hover)
+    app.draw_effort_slider(&mut buf, surface);
+    assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
+    let (off_col, _) = app.effort_hits[0];
+    let (max_col, max_idx) = app.effort_hits.last().copied().expect("hit map");
+    let row = off_col.y;
+    let col = off_col.x + 1;
+    // close, park the mouse exactly on the Off column (no menu: chat hover)
     tx.send(esc).unwrap();
     app.poll_input(&rx).unwrap();
     assert!(app.cur_menu().is_none());
-    tx.send(me(MouseEventKind::Moved, off_row, col)).unwrap();
+    tx.send(me(MouseEventKind::Moved, row, col)).unwrap();
     app.poll_input(&rx).unwrap();
-    // phase 2 — reopen under the resting mouse, paint, jitter ±1 cell
+    // phase 2 — reopen under the resting mouse, paint, jitter ±1 row
     tx.send(ctrl_e).unwrap();
     app.poll_input(&rx).unwrap();
     assert!(
@@ -1198,22 +1204,48 @@ fn keyboard_open_effort_ignores_resting_mouse_jitter() {
     );
     assert_eq!(
         app.menu_sel, want,
-        "reopened card opens on the session level"
+        "reopened picker opens on the session level"
     );
     let mut buf2 = Buffer::empty(area);
-    app.draw_menu(&mut buf2, area);
-    tx.send(me(MouseEventKind::Moved, off_row + 1, col))
+    app.draw_effort_slider(&mut buf2, surface);
+    tx.send(me(MouseEventKind::Moved, row + 1, col))
         .unwrap();
     app.poll_input(&rx).unwrap();
     assert_eq!(
         app.menu_sel, want,
         "resting-mouse jitter must not move the cursor"
     );
-    // a deliberate move far away hovers normally
-    let max_row = app.menu_rect.y + 2 + 5;
-    tx.send(me(MouseEventKind::Moved, max_row, col)).unwrap();
+    // hovering the far column previews nothing either
+    tx.send(me(MouseEventKind::Moved, max_col.y, max_col.x + 1))
+        .unwrap();
     app.poll_input(&rx).unwrap();
-    assert_eq!(app.menu_sel, 5, "deliberate moves still hover");
+    assert_eq!(app.menu_sel, want, "hover must not preview a level");
+    // a click on it does, and keeps the picker open for Enter
+    tx.send(me(
+        MouseEventKind::Down(MouseButton::Left),
+        max_col.y,
+        max_col.x + 1,
+    ))
+    .unwrap();
+    app.poll_input(&rx).unwrap();
+    tx.send(me(
+        MouseEventKind::Up(MouseButton::Left),
+        max_col.y,
+        max_col.x + 1,
+    ))
+    .unwrap();
+    app.poll_input(&rx).unwrap();
+    assert_eq!(
+        app.menu_sel, max_idx,
+        "a click previews the column it landed on"
+    );
+    assert!(
+        matches!(
+            app.cur_menu(),
+            Some(crate::tui::app::menus::Menu::Effort { .. })
+        ),
+        "a click must not close the picker"
+    );
 }
 
 /// Scoped Effort menu follows the target model, never the session one:
@@ -1328,15 +1360,11 @@ fn effort_scoped_menu_via_form_click() {
     app.draw_effort_slider(&mut buf, Rect::new(0, 23, 100, 7));
     assert_eq!(app.menu_sel, want, "cursor after wide draw");
     assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
-    // narrow draw stars the target level
-    let mut nbuf = Buffer::empty(Rect::new(0, 0, 40, 20));
-    app.draw_menu(&mut nbuf, Rect::new(0, 0, 40, 20));
-    let star = app.menu_rows.iter().position(|(line, _)| {
-        line.spans
-            .first()
-            .is_some_and(|s| s.content.as_ref() == "*")
-    });
-    assert_eq!(star, Some(want), "narrow list star after form click");
+    // narrow is the same surface: the columns pack, the cursor stays put
+    let mut nbuf = Buffer::empty(Rect::new(0, 0, 40, 30));
+    app.draw_effort_slider(&mut nbuf, Rect::new(0, 23, 40, 7));
+    assert_eq!(app.menu_sel, want, "cursor after a narrow draw");
+    assert_eq!(app.effort_hits.len(), EffortLevel::SELECTABLE.len());
 }
 
 #[test]

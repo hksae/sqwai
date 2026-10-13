@@ -91,6 +91,37 @@ use view::{ActivityGroup, AskRow, AskState, CellPos, SegMeta, Segment, Selection
 
 use menus::COMMANDS;
 
+/// The clipboard seam. Every copy and paste in the app goes through here
+/// rather than through `arboard` directly, because the unit tests exercise
+/// those paths (drag-select + Ctrl+C, unfolding an error copies its text)
+/// and a real clipboard write is permanent, visible state: Windows parks
+/// every value ever set in the Win+V history, so a test run rewrites the
+/// developer's clipboard. Under `cfg(test)` both directions land in a
+/// process-local string instead.
+#[cfg(not(test))]
+fn clip_set(text: &str) -> Result<(), arboard::Error> {
+    arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text))
+}
+
+#[cfg(not(test))]
+fn clip_get() -> Result<String, arboard::Error> {
+    arboard::Clipboard::new().and_then(|mut cb| cb.get_text())
+}
+
+#[cfg(test)]
+static CLIP_TEST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+#[cfg(test)]
+fn clip_set(text: &str) -> Result<(), arboard::Error> {
+    *CLIP_TEST.lock().unwrap() = text.to_string();
+    Ok(())
+}
+
+#[cfg(test)]
+fn clip_get() -> Result<String, arboard::Error> {
+    Ok(CLIP_TEST.lock().unwrap().clone())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum StatusKind {
     Info,

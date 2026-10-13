@@ -520,10 +520,8 @@ impl App {
             && ta.is_selecting()
         {
             let text = Self::copy_textarea(ta);
-            if !text.is_empty()
-                && let Ok(mut clipboard) = arboard::Clipboard::new()
-            {
-                let _ = clipboard.set_text(text);
+            if !text.is_empty() {
+                let _ = super::clip_set(&text);
             }
         }
         self.dirty = true;

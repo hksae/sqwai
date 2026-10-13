@@ -895,9 +895,7 @@ impl App {
                     }) = self.segments.get(idx)
                     {
                         let text = text.clone();
-                        if let Ok(mut cb) = arboard::Clipboard::new()
-                            && cb.set_text(text).is_ok()
-                        {
+                        if super::clip_set(&text).is_ok() {
                             self.status("error copied to clipboard", StatusKind::Info);
                         }
                     }
@@ -932,7 +930,7 @@ impl App {
                 // block was pinned at press time; if the source changed since
                 // (or the block is gone) the click is ignored, never retargeted
                 if let Some(text) = code_blocks(text).into_iter().nth(block) {
-                    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+                    match super::clip_set(&text) {
                         Ok(()) => self.status("code copied to clipboard", StatusKind::Info),
                         Err(e) => self.status(&format!("copy failed: {e}"), StatusKind::Err),
                     }
@@ -1105,7 +1103,7 @@ impl App {
             }
             out.push_str(&line);
         }
-        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(out)) {
+        match super::clip_set(&out) {
             Ok(()) => {}
             Err(e) => self.status(&format!("copy failed: {e}"), StatusKind::Err),
         }
@@ -2245,13 +2243,14 @@ impl App {
         // The borderless composer takes exactly its content height: one row
         // until the user enters a newline, then it grows up to six rows.
         let input_h = input_rows;
-        // The effort picker is a surface, not a popup: while it is open it owns
-        // the composer's slot, and the transcript above is never dimmed or
-        // cleared for it. Its height is therefore the layout's business.
-        let effort_surface = matches!(self.cur_menu(), Some(Menu::Effort { .. }))
-            && area.width >= 56
-            && area.height >= 12;
+        // The effort picker is a surface, not a popup: it owns the composer's
+        // slot at any terminal size, so there is one form to learn and the
+        // transcript above is never dimmed or cleared for it.
+        let effort_surface = matches!(self.cur_menu(), Some(Menu::Effort { .. }));
         const EFFORT_SURFACE_H: u16 = 7;
+        // rule, title, air, labels, track, air, hint. A short screen loses the
+        // air and the hint before it starves the transcript below `Min(3)`.
+        let surf_h = EFFORT_SURFACE_H.min(area.height.saturating_sub(3).max(4));
         // One slot sits above the composer. A notice owns it; when there is
         // nothing to say, the queue moves down into it instead of leaving the
         // row empty under its own line. The queue keeps a row of its own only
@@ -2273,7 +2272,7 @@ impl App {
         // the screen for itself — no notice, no queue, no air above it.
         let air_h = u16::from(!effort_surface);
         let slot_h = if effort_surface {
-            EFFORT_SURFACE_H
+            surf_h
         } else {
             input_h
         };
@@ -2820,7 +2819,7 @@ impl App {
         // fallback to the generic row list. The surface's own hit map must
         // survive this frame — clearing it here would drop hover and clicks
         // onto the generic row math and move the selection by row.
-        if matches!(menu, Some(Menu::Effort { .. })) && area.width >= 56 && area.height >= 12 {
+        if matches!(menu, Some(Menu::Effort { .. })) {
             return;
         }
         self.effort_hits.clear();
@@ -3313,13 +3312,22 @@ impl App {
         // Surface form: the composer's slot, full width, no border and no
         // modal dim — the transcript above stays exactly as it was, which is
         // the whole difference from the old floating card.
-        let inner_w = COL_W * n as u16;
         let rect = area;
         self.menu_rect = rect;
         self.effort_hits.clear();
-        if rect.height < 7 || rect.width < inner_w + 4 {
+        if rect.height < 3 {
             return;
         }
+        // One-cell gutter on each side, and columns that pack to fit: the
+        // slider is the same widget at any width, and its row can never reach
+        // past the buffer — `base_x + inner_w <= rect.right() - 1` by here.
+        let avail = rect.width.saturating_sub(2);
+        let col_w = (avail / n.max(1) as u16).clamp(4, COL_W);
+        let inner_w = (col_w * n as u16).min(avail);
+        // decoration goes before the slider: a short slot keeps rule + labels +
+        // track and gives up the hint, then the title
+        let hint = rect.height >= 7;
+        let title = rect.height >= 5;
         // rule across the top in the brand's own ink: the surface has no
         // border and no background, so this is what says "the input area is
         // something else now" without painting over the transcript
@@ -3333,54 +3341,69 @@ impl App {
             rect.width,
         );
         // title row: the surface's name left; right, the level Enter would
-        // commit plus the command that opens this — the same fact the status
-        // bar carries, readable without looking away from the slider
+        // commit plus the key that opens this — the same fact the status
+        // bar carries, readable without looking away from the slider. Too
+        // narrow for both and the slider wins: the right label steps out.
         let committed = self.effort_committed();
-        buf.set_line(
-            rect.x,
-            rect.y + 1,
-            &Line::from(Span::styled(
-                format!(" {}", self.menu_title()),
-                crate::tui::art::h2_style(),
-            )),
-            rect.width,
-        );
-        Paragraph::new(
-            Line::from(Span::styled(
-                format!("{} · /effort", committed.as_str()),
-                Theme::dim(),
-            ))
-            .right_aligned(),
-        )
-        .render(
-            Rect {
-                x: rect.x,
-                y: rect.y + 1,
-                width: rect.width.saturating_sub(1),
-                height: 1,
-            },
-            buf,
-        );
-        let labels_y = rect.y + 3;
-        let track_y = rect.y + 4;
-        let base_x = rect.x + ((rect.width.saturating_sub(inner_w)) / 2).max(1);
+        if title {
+            buf.set_line(
+                rect.x,
+                rect.y + 1,
+                &Line::from(Span::styled(
+                    format!(" {}", self.menu_title()),
+                    crate::tui::art::h2_style(),
+                )),
+                rect.width,
+            );
+            if rect.width >= 40 {
+                Paragraph::new(
+                    Line::from(Span::styled(
+                        format!("{} · ctrl+e", committed.as_str()),
+                        Theme::dim(),
+                    ))
+                    .right_aligned(),
+                )
+                .render(
+                    Rect {
+                        x: rect.x,
+                        y: rect.y + 1,
+                        width: rect.width.saturating_sub(1),
+                        height: 1,
+                    },
+                    buf,
+                );
+            }
+        }
+        let labels_y = rect.y + if hint { 3 } else if title { 2 } else { 1 };
+        let track_y = labels_y + 1;
+        let base_x = rect.x + 1 + (avail.saturating_sub(inner_w)) / 2;
         // one dim hint line at the very bottom, where their pickers keep theirs
-        buf.set_line(
-            rect.x + 1,
-            rect.bottom() - 1,
-            &Line::from(Span::styled(
-                "←/→ move · enter confirm · esc cancel",
-                Theme::dim(),
-            )),
-            rect.width.saturating_sub(2),
-        );
+        // the hint sits at the right of the last row, under the level readout
+        if hint {
+            Paragraph::new(
+                Line::from(Span::styled(
+                    "←/→ move · enter confirm · esc cancel",
+                    Theme::dim(),
+                ))
+                .right_aligned(),
+            )
+            .render(
+                Rect {
+                    x: rect.x,
+                    y: rect.bottom() - 1,
+                    width: rect.width.saturating_sub(1),
+                    height: 1,
+                },
+                buf,
+            );
+        }
 
         // labels row + hit rects (label cell and dot cell share one target)
         for (i, lvl) in EffortLevel::SELECTABLE.iter().enumerate() {
             let name = lvl.as_str();
-            let col_x = base_x + COL_W * i as u16;
+            let col_x = base_x + col_w * i as u16;
             let name_w = name.len() as u16;
-            let pad = COL_W.saturating_sub(name_w) / 2;
+            let pad = col_w.saturating_sub(name_w) / 2;
             let style = if i == sel { ink } else { Theme::dim() };
             Paragraph::new(Line::from(vec![
                 Span::styled(" ".repeat(pad as usize), Theme::base()),
@@ -3390,7 +3413,7 @@ impl App {
                 Rect {
                     x: col_x,
                     y: labels_y,
-                    width: COL_W,
+                    width: col_w,
                     height: 1,
                 },
                 buf,
@@ -3399,7 +3422,7 @@ impl App {
                 Rect {
                     x: col_x,
                     y: labels_y,
-                    width: COL_W,
+                    width: col_w,
                     height: 2,
                 },
                 i,
@@ -3409,13 +3432,13 @@ impl App {
         // track row: dots at column centers, connectors between them.
         // Built cell by cell, then compressed into style runs, so wide
         // glyphs or multibyte dashes can never misalign the dots.
-        let total = COL_W as usize * n;
-        let dot_off = (COL_W / 2) as usize;
+        let total = col_w as usize * n;
+        let dot_off = (col_w / 2) as usize;
         let dim = Theme::dim();
         // each cell: (glyph, style)
         let mut cells: Vec<(&str, Style)> = vec![(" ", Theme::base()); total];
         for i in 0..n {
-            let dx = i * COL_W as usize + dot_off;
+            let dx = i * col_w as usize + dot_off;
             // progress dots: every level up to the selection is filled with one
             // ink, the rest are hollow — the fill boundary is the selection
             let (dot, dot_style) = if i <= sel { ("●", ink) } else { ("○", dim) };
@@ -3425,7 +3448,7 @@ impl App {
                 let cstyle = if i < sel { ink } else { dim };
                 for c in cells
                     .iter_mut()
-                    .take((i + 1) * COL_W as usize + dot_off)
+                    .take((i + 1) * col_w as usize + dot_off)
                     .skip(dx + 1)
                 {
                     *c = ("─", cstyle);
