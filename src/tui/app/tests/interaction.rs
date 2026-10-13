@@ -969,8 +969,8 @@ fn effort_slider_opens_on_current_level_with_hits() {
     app.menu_sel = 0;
     app.draw_effort_slider(&mut buf, surface, 0, 7);
     assert_eq!(app.effort_blend_sel, Some(0));
-    // the surface owns the bottom slot: title left, the committed level and
-    // the key that opens it right, one dim hint line at the very bottom
+    // the surface owns the bottom slot: title left, the committed level
+    // right, one dim hint line at the very bottom
     let title: String = (0..100)
         .map(|x| buf[(x, surface.y + 1)].symbol().to_string())
         .collect();
@@ -979,8 +979,12 @@ fn effort_slider_opens_on_current_level_with_hits() {
         "title sits at the left of the surface: {title:?}"
     );
     assert!(
-        title.contains("high") && title.contains("ctrl+e"),
-        "the committed level and the key ride the title row: {title:?}"
+        title.contains("high"),
+        "the committed level rides the title row: {title:?}"
+    );
+    assert!(
+        !title.contains("ctrl+e"),
+        "the surface says nothing about the key that opened it: {title:?}"
     );
     let hint: String = (0..100)
         .map(|x| buf[(x, surface.bottom() - 1)].symbol().to_string())

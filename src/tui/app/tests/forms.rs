@@ -919,8 +919,8 @@ fn providers_surface_leads_with_its_search_row() {
         .collect();
     assert!(text.contains("Search"), "the field leads the list");
     assert!(
-        text.contains("ctrl+p"),
-        "the header carries the key that opens it, as effort's does"
+        !text.contains("ctrl+p"),
+        "the header says nothing about the key that opened it"
     );
     assert!(
         !text.contains("add provider"),
