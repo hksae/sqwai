@@ -2295,7 +2295,7 @@ impl App {
             // rule + title + air + the leading rows + the window + the "+N"
             // caption when there is one + the hint under them
             Some(Menu::Providers) => {
-                let (head, win, _, _) = self.list_shape();
+                let (head, win, _, _, _) = self.list_shape();
                 let body = self.menu_rows.len().saturating_sub(head);
                 let shown = body.min(win).max(1);
                 (3 + head + shown + usize::from(body > shown) + 1) as u16
@@ -3687,13 +3687,20 @@ impl App {
 
     /// Shape of a list surface: how many leading rows never scroll (for
     /// providers the search row), how many body rows fit, the word the "+N"
-    /// caption counts, and the hint line. The height math and the painter both
-    /// read this, so they cannot disagree.
-    fn list_shape(&self) -> (usize, usize, &'static str, &'static str) {
+    /// caption counts, the hint line that always fits, and the verbs this
+    /// surface binds — spelled out in the hint while there is room for them.
+    /// The height math and the painter both read this, so they cannot disagree.
+    fn list_shape(&self) -> (usize, usize, &'static str, &'static str, &'static str) {
         match self.cur_menu() {
             // the search row, then a provider window of eight
-            Some(Menu::Providers) => (1, 8, "providers", "enter open · esc back"),
-            _ => (0, 12, "", ""),
+            Some(Menu::Providers) => (
+                1,
+                8,
+                "providers",
+                "enter open · esc back",
+                "ctrl+n add · ctrl+u update",
+            ),
+            _ => (0, 12, "", "", ""),
         }
     }
 
@@ -3708,7 +3715,19 @@ impl App {
         off: u16,
         full_h: u16,
     ) {
-        let (head, win, more, hint) = self.list_shape();
+        let (head, win, more, hint, verbs) = self.list_shape();
+        // the verbs ride the same line as the base hint; when the terminal is
+        // too narrow for both the base wins, because a clipped hint reads as a
+        // lie about what the surface does
+        let hint = if verbs.is_empty() || (area.width as usize) >= verbs.len() + hint.len() + 3 {
+            if verbs.is_empty() {
+                hint.to_string()
+            } else {
+                format!("{verbs} · {hint}")
+            }
+        } else {
+            hint.to_string()
+        };
         self.menu_rect = area;
         self.effort_hits.clear();
         self.surf_hits.clear();

@@ -679,6 +679,20 @@ impl App {
                                 self.run_action(MenuAction::DeleteSession(id));
                             }
                         }
+                        // the providers surface keeps its verbs on Ctrl for the
+                        // same reason: plain letters are the search field's, so
+                        // a chord is the only room left. Both were list rows
+                        // until the surface became names-only.
+                        KeyCode::Char('n')
+                            if ctrl && matches!(self.cur_menu(), Some(Menu::Providers)) =>
+                        {
+                            self.open_menu(Menu::EditProvider { name: None });
+                        }
+                        KeyCode::Char('u')
+                            if ctrl && matches!(self.cur_menu(), Some(Menu::Providers)) =>
+                        {
+                            self.start_builtin_update(true);
+                        }
                         // the providers surface owns a real search field: keys
                         // edit it there, and it filters the list as it types
                         // the providers search field owns the keyboard only

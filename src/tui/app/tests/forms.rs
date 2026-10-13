@@ -972,6 +972,61 @@ fn ctrl_shortcuts_open_providers_plan_settings() {
 }
 
 #[test]
+fn providers_verbs_live_on_ctrl_chords() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let press = |tx: &std::sync::mpsc::Sender<Event>, c: char| {
+        tx.send(Event::Key(KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::CONTROL,
+        )))
+        .unwrap();
+    };
+    app.open_menu(Menu::Providers);
+    press(&tx, 'n');
+    app.poll_input(&rx).unwrap();
+    assert!(
+        matches!(app.cur_menu(), Some(Menu::EditProvider { name: None })),
+        "ctrl+n opens the blank provider form from inside the surface"
+    );
+    app.menu_back();
+    assert!(
+        matches!(app.cur_menu(), Some(Menu::Providers)),
+        "the form sits over the list, not instead of it"
+    );
+    app.builtin_update_rx = None;
+    press(&tx, 'u');
+    app.poll_input(&rx).unwrap();
+    assert!(
+        app.builtin_update_rx.is_some(),
+        "ctrl+u starts the built-in catalog check"
+    );
+}
+
+#[test]
+fn providers_hint_drops_the_verbs_before_it_lies() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.open_menu(Menu::Providers);
+    // wide: the chords are spelled out; narrow: the base hint stands alone,
+    // because a hint clipped mid-word names a key that never fires
+    for (w, verbs) in [(100u16, true), (44, false)] {
+        let mut terminal = Terminal::new(TestBackend::new(w, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("esc back"), "esc reads at {w} columns");
+        assert_eq!(text.contains("ctrl+n add"), verbs, "verbs at {w} columns");
+    }
+}
+
+#[test]
 fn settings_hub_lists_agent_safety_undo_sections() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::Settings);
