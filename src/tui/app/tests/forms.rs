@@ -1005,25 +1005,32 @@ fn providers_verbs_live_on_ctrl_chords() {
 }
 
 #[test]
-fn providers_hint_drops_the_verbs_before_it_lies() {
+fn providers_hints_stand_as_a_right_column() {
     use ratatui::{Terminal, backend::TestBackend};
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::Providers);
-    // wide: the chords are spelled out; narrow: the base hint stands alone,
-    // because a hint clipped mid-word names a key that never fires
-    for (w, verbs) in [(100u16, true), (44, false)] {
-        let mut terminal = Terminal::new(TestBackend::new(w, 30)).unwrap();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect();
-        assert!(text.contains("esc back"), "esc reads at {w} columns");
-        assert_eq!(text.contains("ctrl+n add"), verbs, "verbs at {w} columns");
-    }
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let buf = terminal.backend().buffer().clone();
+    let bottom = buf.area.bottom() - 1;
+    let lines: Vec<String> = (0..4)
+        .map(|i| {
+            (0..buf.area.width)
+                .map(|x| buf[(x, bottom - i)].symbol().to_string())
+                .collect()
+        })
+        .collect();
+    let trimmed: Vec<&str> = lines.iter().map(|l| l.trim()).collect();
+    assert_eq!(
+        trimmed,
+        vec!["esc back", "enter open", "ctrl+u update", "ctrl+n add"],
+        "one hint per row, the key that leaves last at the bottom"
+    );
+    let edges: Vec<usize> = lines.iter().map(|l| l.trim_end().chars().count()).collect();
+    assert!(
+        edges.windows(2).all(|w| w[0] == w[1]),
+        "the column hangs off one edge: {edges:?}"
+    );
 }
 
 #[test]

@@ -2291,14 +2291,13 @@ impl App {
             // rule + title + air + card rows + the close hint under them
             Some(Menu::Context) => self.menu_rows.len() as u16 + 4,
             // rule + title + air + the leading rows + the window + the "+N"
-            // caption when there is one + the hint, which sits under it
-            // rule + title + air + the leading rows + the window + the "+N"
-            // caption when there is one + the hint under them
+            // caption when there is one + the hint lines under them: the base
+            // hint and one row per verb the surface binds
             Some(Menu::Providers) => {
-                let (head, win, _, _, _) = self.list_shape();
+                let (head, win, _, hints) = self.list_shape();
                 let body = self.menu_rows.len().saturating_sub(head);
                 let shown = body.min(win).max(1);
-                (3 + head + shown + usize::from(body > shown) + 1) as u16
+                (3 + head + shown + usize::from(body > shown) + hints.len()) as u16
             }
             _ => list_rows,
         };
@@ -3687,20 +3686,20 @@ impl App {
 
     /// Shape of a list surface: how many leading rows never scroll (for
     /// providers the search row), how many body rows fit, the word the "+N"
-    /// caption counts, the hint line that always fits, and the verbs this
-    /// surface binds — spelled out in the hint while there is room for them.
-    /// The height math and the painter both read this, so they cannot disagree.
-    fn list_shape(&self) -> (usize, usize, &'static str, &'static str, &'static str) {
+    /// caption counts, and the hints — a column of right-aligned rows standing
+    /// under the list, one key or action per row, so a narrow terminal costs
+    /// columns and never swallows a binding. The height math and the painter
+    /// both read this, so they cannot disagree.
+    fn list_shape(&self) -> (usize, usize, &'static str, &'static [&'static str]) {
         match self.cur_menu() {
             // the search row, then a provider window of eight
             Some(Menu::Providers) => (
                 1,
                 8,
                 "providers",
-                "enter open · esc back",
-                "ctrl+n add · ctrl+u update",
+                &["ctrl+n add", "ctrl+u update", "enter open", "esc back"],
             ),
-            _ => (0, 12, "", "", ""),
+            _ => (0, 12, "", &[]),
         }
     }
 
@@ -3715,19 +3714,7 @@ impl App {
         off: u16,
         full_h: u16,
     ) {
-        let (head, win, more, hint, verbs) = self.list_shape();
-        // the verbs ride the same line as the base hint; when the terminal is
-        // too narrow for both the base wins, because a clipped hint reads as a
-        // lie about what the surface does
-        let hint = if verbs.is_empty() || (area.width as usize) >= verbs.len() + hint.len() + 3 {
-            if verbs.is_empty() {
-                hint.to_string()
-            } else {
-                format!("{verbs} · {hint}")
-            }
-        } else {
-            hint.to_string()
-        };
+        let (head, win, more, hints) = self.list_shape();
         self.menu_rect = area;
         self.effort_hits.clear();
         self.surf_hits.clear();
@@ -3895,19 +3882,26 @@ impl App {
                 area.width.saturating_sub(2),
             );
         }
-        if let Some(y) = row_y(full_h.saturating_sub(1)) {
-            Paragraph::new(
-                Line::from(Span::styled(hint.to_string(), Theme::dim())).right_aligned(),
-            )
-            .render(
-                Rect {
-                    x: area.x,
-                    y,
-                    width: area.width.saturating_sub(1),
-                    height: 1,
-                },
-                buf,
-            );
+        // The hints stand as a column on the right: one row per line, the last
+        // one on the block's bottom row. Each line is short, so a narrow
+        // terminal costs the column its tail to the transcript and never
+        // half-spells a binding.
+        let n = hints.len() as u16;
+        for (i, text) in hints.iter().enumerate() {
+            if let Some(y) = row_y(full_h.saturating_sub(n - i as u16)) {
+                Paragraph::new(
+                    Line::from(Span::styled((*text).to_string(), Theme::dim())).right_aligned(),
+                )
+                .render(
+                    Rect {
+                        x: area.x,
+                        y,
+                        width: area.width.saturating_sub(1),
+                        height: 1,
+                    },
+                    buf,
+                );
+            }
         }
     }
 
