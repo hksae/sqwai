@@ -919,6 +919,10 @@ fn providers_surface_leads_with_its_search_row() {
         .collect();
     assert!(text.contains("Search"), "the field leads the list");
     assert!(
+        text.contains("ctrl+p"),
+        "the header carries the key that opens it, as effort's does"
+    );
+    assert!(
         !text.contains("add provider"),
         "the two action rows are gone: {text}"
     );
