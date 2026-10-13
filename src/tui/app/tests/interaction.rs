@@ -990,7 +990,7 @@ fn effort_slider_opens_on_current_level_with_hits() {
         .map(|x| buf[(x, surface.bottom() - 1)].symbol().to_string())
         .collect();
     assert!(
-        hint.contains("enter confirm") && hint.contains("esc cancel"),
+        hint.contains("enter: confirm") && hint.contains("esc: cancel"),
         "one hint line at the bottom: {hint:?}"
     );
     let air: String = (0..100)

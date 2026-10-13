@@ -2294,7 +2294,7 @@ impl App {
             // caption when there is one + the hint row under them; the hint
             // column rides rows the list already has
             Some(Menu::Providers) => {
-                let (head, win, _, hints) = self.list_shape();
+                let (head, win, _, _) = self.list_shape();
                 let body = self.menu_rows.len().saturating_sub(head);
                 let shown = body.min(win).max(1);
                 (3 + head + shown + usize::from(body > shown) + 1) as u16
@@ -3488,14 +3488,12 @@ impl App {
         let Some(track_y) = row_y(4) else {
             return;
         };
-        // one dim hint line at the right of the last row
+        // one hint line at the right of the last row, in the app's own
+        // `key: what` shape
         if let Some(y) = row_y(full_h.saturating_sub(1)) {
             Paragraph::new(
-                Line::from(Span::styled(
-                    "←/→ move · enter confirm · esc cancel",
-                    Theme::dim(),
-                ))
-                .right_aligned(),
+                Theme::hints(&[("←/→", "move"), ("enter", "confirm"), ("esc", "cancel")])
+                    .right_aligned(),
             )
             .render(
                 Rect {
@@ -3669,18 +3667,17 @@ impl App {
                 buf,
             );
         }
-        // one dim hint line, where the effort picker keeps its own
+        // one hint line, where the effort picker keeps its own
         if let Some(y) = row_y(full_h.saturating_sub(1)) {
-            Paragraph::new(Line::from(Span::styled("esc: close", Theme::dim())).right_aligned())
-                .render(
-                    Rect {
-                        x: area.x,
-                        y,
-                        width: area.width.saturating_sub(1),
-                        height: 1,
-                    },
-                    buf,
-                );
+            Paragraph::new(Theme::hints(&[("esc", "close")]).right_aligned()).render(
+                Rect {
+                    x: area.x,
+                    y,
+                    width: area.width.saturating_sub(1),
+                    height: 1,
+                },
+                buf,
+            );
         }
     }
 
@@ -3690,14 +3687,26 @@ impl App {
     /// rows the block already has, so the column costs no height and a name
     /// stops short of it. The height math and the painter both read this, so
     /// they cannot disagree.
-    fn list_shape(&self) -> (usize, usize, &'static str, &'static [&'static str]) {
+    fn list_shape(
+        &self,
+    ) -> (
+        usize,
+        usize,
+        &'static str,
+        &'static [(&'static str, &'static str)],
+    ) {
         match self.cur_menu() {
             // the search row, then a provider window of eight
             Some(Menu::Providers) => (
                 1,
                 8,
                 "providers",
-                &["ctrl+n add", "ctrl+u update", "enter open", "esc back"],
+                &[
+                    ("ctrl+n", "add"),
+                    ("ctrl+u", "update"),
+                    ("enter", "open"),
+                    ("esc", "back"),
+                ],
             ),
             _ => (0, 12, "", &[]),
         }
@@ -3718,12 +3727,13 @@ impl App {
         let (head, win, more, hints) = self.list_shape();
         // The hint column stands on the right of the rows the block already
         // has, so the list stops short of it: a name never runs under a key.
+        // `Theme::hints` pads each pair with a space on either side and puts
+        // `: ` between the two.
         let rail = hints
             .iter()
-            .map(|h| h.chars().count())
+            .map(|(key, what)| key.chars().count() + what.chars().count() + 5)
             .max()
-            .unwrap_or(0)
-            .saturating_add(2) as u16;
+            .unwrap_or(0) as u16;
         self.menu_rect = area;
         self.effort_hits.clear();
         self.surf_hits.clear();
@@ -3895,12 +3905,9 @@ impl App {
         // list's right side is empty, and a key that shares a row with a name
         // reads as part of the surface instead of a caption glued under it.
         let n = hints.len() as u16;
-        for (i, text) in hints.iter().enumerate() {
+        for (i, (key, what)) in hints.iter().enumerate() {
             if let Some(y) = row_y(full_h.saturating_sub(n - i as u16)) {
-                Paragraph::new(
-                    Line::from(Span::styled((*text).to_string(), Theme::dim())).right_aligned(),
-                )
-                .render(
+                Paragraph::new(Theme::hints(&[(*key, *what)]).right_aligned()).render(
                     Rect {
                         x: area.x,
                         y,
